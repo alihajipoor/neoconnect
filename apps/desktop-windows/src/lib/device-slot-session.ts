@@ -17,8 +17,10 @@ import {
   type SlotGrant,
 } from "./device-slots";
 import type { AttemptReport } from "./attempts";
+import { isTunnelUp } from "./connection-evidence";
 import type { SlotNotice } from "./device-slot-notice";
 import type { SubscriptionStatus } from "./subscription-state";
+import type { ConnectionState } from "../components/ConnectOrb";
 
 /** This device's slot, from Connect to Disconnect.
  *
@@ -98,15 +100,19 @@ export type StandingCheck =
   /** The slot is this device's (or there was room and it is now): the
    * degraded tunnel is the network's doing. Run the ladder. */
   | { kind: "clear" }
-  /** The API could not be asked. Say so honestly, then run the ladder. */
-  | { kind: "unanswered" }
+  /** No verdict on the slot. Say so honestly, then run the ladder.
+   * `noAnswer`: nothing came back at all, so Neoxify may be said to have
+   * been out of reach. Otherwise it answered -- a 5xx, a 404, a 429, a
+   * 200 this app cannot read -- and only did not confirm this device's
+   * slot; "could not reach" would be untrue then. */
+  | { kind: "unanswered"; noAnswer: boolean }
   | Exclude<SlotEvent, { kind: "keep" }>;
 
 /** What a claim's answer comes to. `unanswered` is kept apart from `keep`
  * only for `checkStanding`, which has to say which it was. */
 type ClaimSettled =
   | { kind: "keep" }
-  | { kind: "unanswered" }
+  | { kind: "unanswered"; noAnswer: boolean }
   | Exclude<SlotEvent, { kind: "keep" } | { kind: "displaced" }>;
 
 export interface DeviceSlotDeps {
@@ -150,18 +156,24 @@ export interface DeviceSlotSession {
   reset(): void;
 }
 
-/** Whether an answer that settled after a release may have left this
- * device holding a slot on the server: a grant that was counted, or a
- * request that got no answer in time and may have arrived all the same. */
-function mayHoldSlot(answer: ClaimOutcome | RenewOutcome): boolean {
+/** The grant an answer that settled after a release may have left this
+ * device holding on the server, by handle.
+ *
+ * A counted grant names its own. A request that got no answer in time
+ * may have arrived all the same; what it left is unknowable, so the
+ * best that can be named is the last grant this device was told of --
+ * `known` -- which frees the slot if that grant is still the one it is
+ * under, and nothing if not. Null: nothing to give back, or nothing that
+ * can be named. */
+function heldBy(answer: ClaimOutcome | RenewOutcome, known: string | null): string | null {
   switch (answer.kind) {
     case "granted":
     case "held":
-      return answer.grant.enforced;
+      return answer.grant.enforced ? answer.grant.handle : null;
     case "unanswered":
-      return answer.retryable;
+      return answer.retryable ? known : null;
     default:
-      return false;
+      return null;
   }
 }
 
@@ -198,8 +210,12 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
    * again in favour of the very device the customer chose to replace --
    * and every press of the button would end the same way. */
   let pendingTakeover: string[] = [];
-  /** Whether an unanswered claim is worth repeating. A 404 from a backend
-   * that has no slots is not. */
+  /** Whether an unanswered claim is worth repeating as a claim. A 404
+   * from a backend that has no slots is not, nor a 400, a 403 or a 409
+   * without a code. The question is still asked on the renewal clock --
+   * as a renewal, which is what the contract asks for after any claim
+   * answer that is not a verdict (obligation 11) -- it is only the claim
+   * itself that is not sent again. */
   let retryClaim = true;
   /** Bumped by anything that starts over -- a new connect, a release, a
    * reset -- so an answer still in flight from before cannot land on
@@ -212,6 +228,29 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
   const inFlight = new Set<Promise<ClaimOutcome | RenewOutcome>>();
   /** The release on the wire, if one is. See `beforeDial`. */
   let releasing: Promise<void> | null = null;
+  /** The handle of the latest counted grant the server gave this device,
+   * and the subscription it is on. What a release names.
+   *
+   * Every claim -- even one made while holding the slot -- answers with
+   * a new handle, and so does a renewal that gives a lapsed slot back;
+   * the server frees a slot on release only when the handle named is
+   * the one it is held under now. So a release that lands after the next
+   * Connect's claim frees nothing, as it must.
+   *
+   * Kept across a Disconnect and a new connect, until sign-out: if the
+   * release never arrived and the next claim goes unanswered, this grant
+   * may still be the one the slot is under, and naming it is the only
+   * way to give it back. Naming a grant that has since been replaced
+   * frees nothing, so keeping it costs nothing. */
+  let lastGrant: { subscriptionId: string; handle: string } | null = null;
+
+  /** The handle a release of `target` names, or null when no grant of
+   * this device's on it is known -- and then no release is sent: one
+   * naming no grant frees whatever is held, a newer connect's slot
+   * included. */
+  function knownHandle(target: string): string | null {
+    return lastGrant !== null && lastGrant.subscriptionId === target ? lastGrant.handle : null;
+  }
 
   function due(): boolean {
     return now() - lastAskedAt + RENEW_SLACK_MS >= renewEveryMs;
@@ -231,12 +270,17 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     return request;
   }
 
-  function sendRelease(target: string): Promise<void> {
-    const sent: Promise<void> = release(target)
-      .catch(() => undefined)
-      .finally(() => {
-        if (releasing === sent) releasing = null;
-      });
+  /** Releases each grant named, one after another. Several only when
+   * answers that settled after a Disconnect named more than one; each
+   * frees the slot only if it is still held under that grant. */
+  function sendRelease(target: string, handles: string[]): Promise<void> {
+    const sent: Promise<void> = (async () => {
+      for (const handle of handles) {
+        await release({ subscriptionId: target, handle }).catch(() => undefined);
+      }
+    })().finally(() => {
+      if (releasing === sent) releasing = null;
+    });
     releasing = sent;
     return sent;
   }
@@ -246,6 +290,9 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     const at = now();
     lastAskedAt = at;
     lastConfirmedAt = at;
+    if (grant.enforced && grant.handle !== null && subscriptionId !== null) {
+      lastGrant = { subscriptionId, handle: grant.handle };
+    }
     // Unlimited is the one case nothing will ever count. A limit with
     // nothing counted is a server that may start counting -- see
     // `uncounted`.
@@ -273,7 +320,7 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
         // takeover if it named one.
         if (standing !== "held" && standing !== "unenforced" && standing !== "uncounted") standing = "unclaimed";
         retryClaim = outcome.retryable;
-        return { kind: "unanswered" };
+        return { kind: "unanswered", noAnswer: outcome.noAnswer };
       case "refused":
         standing = "none";
         pendingTakeover = [];
@@ -314,7 +361,7 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     return settled.kind === "unanswered" ? { kind: "keep" } : settled;
   }
 
-  async function renewNow(budgetMs: number): Promise<SlotEvent | { kind: "unanswered" }> {
+  async function renewNow(budgetMs: number): Promise<SlotEvent | { kind: "unanswered"; noAnswer: boolean }> {
     if (subscriptionId === null) return { kind: "keep" };
     const startedIn = epoch;
     const outcome = await track(renew(subscriptionId, budgetMs));
@@ -340,9 +387,11 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       case "unanswered":
         // "A renewal that cannot reach the API changes nothing -- keep
         // the tunnel." Asked again on the next due poll, not sooner --
-        // and not counted as a confirmation of anything.
+        // and not counted as a confirmation of anything. Whether anything
+        // came back at all is kept for `checkStanding`, which words its
+        // note by it.
         lastAskedAt = now();
-        return { kind: "unanswered" };
+        return { kind: "unanswered", noAnswer: outcome.noAnswer };
     }
   }
 
@@ -356,9 +405,10 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       const sameSlot = target !== null && target === subscriptionId;
 
       // Already holding it, and confirmed within a renewal -- a reconnect
-      // from the health poll. Claiming again would be idempotent, and
-      // would also be a request through a tunnel that has just been
-      // judged not to carry traffic, which is three seconds of nothing.
+      // from the health poll. Claiming again would only keep the slot
+      // under a new handle, and would be a request through a tunnel
+      // that has just been judged not to carry traffic, which is three
+      // seconds of nothing.
       // The next renewal says if it was lost.
       //
       // Only while it is fresh: confirmed by the server, not merely
@@ -415,18 +465,24 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     async afterConnected(request) {
       const protocolUserId = request.protocolUserId ?? dialledProtocolUserId;
       dialledProtocolUserId = protocolUserId;
-      if (standing === "unclaimed" && retryClaim) {
+      if (standing === "unclaimed") {
         // The claim before dialling went unanswered. With the tunnel up,
         // it may get through now -- and on a filtered network the tunnel
         // is the likeliest way to reach the API at all. It carries the
         // customer's takeover, if they chose one.
+        //
+        // Once even after an answer no repeat was expected to change (a
+        // 404, a 409 with no code): the contract asks for this claim
+        // whatever the first one got (obligation 2), and through the
+        // tunnel it may reach the API by another way. After that, see
+        // `onPoll`: the renewal clock goes on either way.
         return whileConnected(await claimNow(protocolUserId, LATE_CLAIM_BUDGET_MS));
       }
       if (standing === "held" && protocolUserId !== null && protocolUserId !== claimedProtocolUserId) {
         // The ladder landed on a different credential from the one the
-        // claim named. Claiming again is idempotent (same slot, same
-        // handle) and moves the attribution, so a shared credential's
-        // traffic counts as this device's.
+        // claim named. Claiming again keeps the slot (under a new handle,
+        // which the grant records) and moves the attribution, so a shared
+        // credential's traffic counts as this device's.
         return whileConnected(await claimNow(protocolUserId, LATE_CLAIM_BUDGET_MS));
       }
       return { kind: "keep" };
@@ -440,10 +496,24 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
           const event = await renewNow(RENEW_BUDGET_MS);
           return event.kind === "unanswered" ? { kind: "keep" } : event;
         }
-        if ((standing === "unclaimed" || standing === "uncounted") && retryClaim) {
-          // Claimed rather than renewed: the claim names the device and
-          // the credential, and carries a takeover still owed.
-          return whileConnected(await claimNow(dialledProtocolUserId, LATE_CLAIM_BUDGET_MS));
+        if (standing === "unclaimed" || standing === "uncounted") {
+          if (retryClaim || pendingTakeover.length > 0) {
+            // Claimed rather than renewed: the claim names the device and
+            // the credential, and carries a takeover still owed -- which a
+            // renewal cannot, and without which the server would only
+            // name the device the customer chose to replace.
+            return whileConnected(await claimNow(dialledProtocolUserId, LATE_CLAIM_BUDGET_MS));
+          }
+          // The claim was answered with something no repeat of it is
+          // expected to change: a 400, a 403, a 404, a 409 without a
+          // code. That is no verdict either, and the contract's answer
+          // to one is to keep the tunnel and renew at the next interval
+          // (obligation 11) -- not to stop asking for the rest of the
+          // session. A renewal from a device holding no slot is granted
+          // one if there is room, and answered `displaced` if not; any
+          // other answer to it changes nothing, as for every renewal.
+          const event = await renewNow(RENEW_BUDGET_MS);
+          return event.kind === "unanswered" ? { kind: "keep" } : event;
         }
         // `unenforced` is renewed by nobody: harmless and pointless, per
         // the contract, and every request counts on a censored link.
@@ -521,6 +591,9 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
 
     async release() {
       const target = subscriptionId;
+      // `unclaimed` too: the claim may have arrived even though its answer
+      // did not. Nothing for `unenforced` or `uncounted` (nothing was
+      // recorded) or `displaced` (the slot is already someone else's).
       const held = standing === "held" || standing === "unclaimed";
       epoch += 1;
       const releasedIn = epoch;
@@ -540,26 +613,37 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       // count a device that is off, and the customer's phone would be
       // told "in use on Windows PC" for the ninety seconds that takes to
       // go stale. So once whatever was out has settled, the slot is
-      // released again: when its answer was a counted grant, or when no
-      // answer came and it may have arrived anyway. Never when anything
-      // has started since -- that slot is a new connect's.
+      // released again, naming the grant the answer left: a counted
+      // grant's own handle, or, when no answer came and the request may
+      // have arrived anyway, the last one known. Never when anything has
+      // started since -- that slot is a new connect's.
       const outstanding = [...inFlight];
       if (outstanding.length > 0) {
         void Promise.all(outstanding).then(
           (answers) => {
-            if (epoch === releasedIn && answers.some(mayHoldSlot)) void sendRelease(target);
+            if (epoch !== releasedIn) return;
+            const known = knownHandle(target);
+            const handles = [
+              ...new Set(answers.map((a) => heldBy(a, known)).filter((h): h is string => h !== null)),
+            ];
+            if (handles.length > 0) void sendRelease(target, handles);
           },
           () => undefined,
         );
       }
-      // `unclaimed` too: the claim may have arrived even though its answer
-      // did not. Nothing for `unenforced` or `uncounted` (nothing was
-      // recorded) or `displaced` (the slot is already someone else's).
-      if (held) await sendRelease(target);
+      // By the latest grant's handle, and only by it. With none known --
+      // a claim that was sent and never answered -- nothing is sent: if
+      // that claim arrived, its slot goes stale ninety seconds after the
+      // tunnel stops carrying traffic, which "Use on this device instead"
+      // covers on the other device; a release naming no grant could free
+      // the slot of a Connect pressed in the meantime instead.
+      const handle = knownHandle(target);
+      if (held && handle !== null) await sendRelease(target, [handle]);
     },
 
     reset() {
       epoch += 1;
+      lastGrant = null;
       standing = "none";
       subscriptionId = null;
       claimedProtocolUserId = null;
@@ -619,6 +703,148 @@ export function createSlotNoticeStore(): SlotNoticeStore {
 
 export const slotNoticeStore: SlotNoticeStore = createSlotNoticeStore();
 
+/** Where the teardown the device limit asked for stands. */
+export type SlotTeardownState =
+  /** Nothing owed: no slot stop, or its tunnel has been confirmed down. */
+  | "none"
+  /** The device limit ended the session and the first attempt to take
+   * the tunnel down is running. */
+  | "tearingDown"
+  /** An attempt ended without the tunnel confirmed down. Still owed, and
+   * tried again on the poll until it is. */
+  | "stuck";
+
+export type SlotTeardownResult = "down" | "stuck";
+
+/** The teardown a slot stop owes, from the stop until the tunnel is
+ * confirmed down.
+ *
+ * Obligation 11: never leave the tunnel up over a refusal, and never
+ * show the refusal's card over a tunnel still carrying traffic. The card
+ * waits for "down" by design (`slotNoticeShown`), so a teardown that did
+ * not finish used to leave the screen showing a working tunnel, no card,
+ * no error -- and nothing tried again. While one is owed the dashboards
+ * show it as not finished (`slotTeardownShown`, and the stuck line), and
+ * ask again on their poll: once per poll at most, never two at once, each
+ * attempt bounded by the teardown's own deadline, until one confirms the
+ * tunnel down. The card shows then.
+ *
+ * Kept beside the slot rather than in a screen, for the same reason the
+ * card is: the dashboard unmounts while Settings is open, and the tunnel
+ * it is taking down does not wait for it. Forgotten on sign-out, whose own
+ * teardown takes the tunnel down, and on the customer's own connect,
+ * which is theirs to start once nothing is left up. */
+export interface SlotTeardown {
+  state(): SlotTeardownState;
+  /** True from a slot stop until the tunnel is confirmed down. */
+  owed(): boolean;
+  /** The attempt running now, if one is. */
+  running(): Promise<SlotTeardownResult> | null;
+  /** The device limit just ended the session: the teardown is owed from
+   * now on, and tried at once -- or the attempt already running is
+   * joined. `tearDown` resolves true only on the platform's or the
+   * service's own word that the tunnel is down. */
+  begin(tearDown: () => Promise<boolean>): Promise<SlotTeardownResult>;
+  /** On the poll, or a press: tries again when one is owed, joining an
+   * attempt already running rather than starting a second. Null when
+   * nothing is owed. */
+  retry(tearDown: () => Promise<boolean>): Promise<SlotTeardownResult | null>;
+  /** The service or the platform said the tunnel is down, outside an
+   * attempt -- a remount reading the service, a recheck the customer
+   * pressed, the health poll. That is the same word an attempt waits
+   * for, so nothing is owed any more. Without it a teardown confirmed
+   * between retries stayed "stuck", and the line saying the tunnel had
+   * not been confirmed closed stood beside "You're not protected" for
+   * as long as nothing else asked. Does nothing when nothing is owed. */
+  confirmDown(): void;
+  /** Nothing is owed any more: a sign-out, or the customer's own connect
+   * after the tunnel came down. An attempt still running is forgotten. */
+  clear(): void;
+  /** For `useSyncExternalStore`. Returns the unsubscribe. */
+  subscribe(listener: () => void): () => void;
+}
+
+export function createSlotTeardown(): SlotTeardown {
+  let state: SlotTeardownState = "none";
+  let running: Promise<SlotTeardownResult> | null = null;
+  /** Bumped by `clear`, so an attempt that settles afterwards cannot put
+   * back a teardown nobody owes any more. */
+  let epoch = 0;
+  const listeners = new Set<() => void>();
+
+  const move = (next: SlotTeardownState) => {
+    if (next === state) return;
+    state = next;
+    for (const listener of [...listeners]) listener();
+  };
+
+  function attempt(tearDown: () => Promise<boolean>): Promise<SlotTeardownResult> {
+    if (running) return running;
+    const startedIn = epoch;
+    const sent: Promise<SlotTeardownResult> = (async () => {
+      let down = false;
+      try {
+        down = await tearDown();
+      } catch {
+        // Not answered is not down.
+        down = false;
+      }
+      const result: SlotTeardownResult = down ? "down" : "stuck";
+      if (startedIn === epoch) move(down ? "none" : "stuck");
+      return result;
+    })().finally(() => {
+      if (running === sent) running = null;
+    });
+    running = sent;
+    return sent;
+  }
+
+  return {
+    state: () => state,
+    owed: () => state !== "none",
+    running: () => running,
+    begin(tearDown) {
+      if (state === "none") move("tearingDown");
+      return attempt(tearDown);
+    },
+    retry(tearDown) {
+      return state === "none" ? Promise.resolve(null) : attempt(tearDown);
+    },
+    confirmDown() {
+      // Not an epoch bump: an attempt still running reads the same
+      // service, and if it comes back with the tunnel up after this, that
+      // is the newer word.
+      move("none");
+    },
+    clear() {
+      epoch += 1;
+      running = null;
+      move("none");
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+export const slotTeardown: SlotTeardown = createSlotTeardown();
+
+/** What the screen shows of an observed tunnel state while a slot stop's
+ * teardown is owed.
+ *
+ * A tunnel still up then is one this device has been told to give up:
+ * "You're protected" over it would be a working tunnel after a refusal,
+ * and "Not carrying traffic" a claim about the server nobody measured.
+ * What is true is that it is still being disconnected, and that is what
+ * is shown. Anything that is not a tunnel up -- down, or not known --
+ * is shown as it is. */
+export function slotTeardownShown(owed: boolean, observed: ConnectionState): ConnectionState {
+  return owed && isTunnelUp(observed) ? "disconnecting" : observed;
+}
+
 /** Anything the slot can say that stops this device: a connect refused
  * before dialling, or a session ended while connected. */
 export type SlotStopReason =
@@ -632,11 +858,15 @@ export interface SlotStop {
   /** The card to show, or null (a sign-out: the app is already on its
    * way to the sign-in screen, and there is nothing to add). */
   notice: SlotNotice | null;
-  /** The attempt report, when a connect was stopped -- REJECTED with no
-   * ladder, so it records no dial, marks no route as failing and teaches
-   * nothing about this network's best route. Null for a session ended
-   * while connected, whose connect was already reported as it happened.
-   * A late refusal is reported: it is the answer the connect never got. */
+  /** The attempt report, when a connect was stopped before it dialled --
+   * REJECTED with no ladder, so it records no dial, marks no route as
+   * failing and teaches nothing about this network's best route.
+   *
+   * Null for anything that ends a session while connected: a takeover,
+   * the plan ending, and a claim refused after connecting (obligation
+   * 11). That connect was reported when it happened, as what it was -- a
+   * dial that worked -- and the plan's refusal of the device is not a
+   * second attempt, nor anything about the network. */
   report: AttemptReport | null;
   /** A status to show the plan-ended state for, when the subscription
    * has stopped. Null when the server named none this app knows. */
@@ -649,21 +879,29 @@ const STATUSES: readonly SubscriptionStatus[] = ["ACTIVE", "SUSPENDED", "EXPIRED
 
 export function slotStop(reason: SlotStopReason, when: "beforeDial" | "whileConnected"): SlotStop {
   const none = { notice: null, report: null, subscriptionStatus: null, inactive: false };
+  const beforeDial = when === "beforeDial";
   switch (reason.kind) {
     case "refused":
-      return { ...none, notice: { kind: "refused", refusal: reason.refusal }, report: refusalReport("DEVICE_LIMIT") };
+      // After connecting, handled like a takeover: the same card as before
+      // dialling, over a tunnel the dashboard takes down, with no ladder
+      // and nothing recorded.
+      return {
+        ...none,
+        notice: { kind: "refused", refusal: reason.refusal },
+        report: beforeDial ? refusalReport("DEVICE_LIMIT") : null,
+      };
     case "takeoverLimited":
       return {
         ...none,
         notice: { kind: "takeoverLimited", retryAfterSec: reason.retryAfterSec },
-        report: refusalReport("TAKEOVER_LIMIT"),
+        report: beforeDial ? refusalReport("TAKEOVER_LIMIT") : null,
       };
     case "displaced":
       return { ...none, notice: { kind: "displaced", by: reason.by, at: reason.at } };
     case "inactive":
       return {
         ...none,
-        report: when === "beforeDial" ? refusalReport("SUBSCRIPTION_INACTIVE") : null,
+        report: beforeDial ? refusalReport("SUBSCRIPTION_INACTIVE") : null,
         subscriptionStatus: STATUSES.find((s) => s === reason.subscriptionStatus && s !== "ACTIVE") ?? null,
         inactive: true,
       };

@@ -1,5 +1,6 @@
 import type { Language, TranslationKey } from "./i18n";
 import type { DeviceLimitRefusal, SlotDevice } from "./device-slots";
+import { parseDevicePlatform, specificDeviceLabel, type DevicePlatform } from "./device-identity";
 
 /** What the screen says about the plan's device limit, in the app's
  * language.
@@ -18,10 +19,15 @@ export type SlotNotice =
   | { kind: "displaced"; by: SlotDevice | null; at: string | null }
   /** 429: too many takeovers on this subscription in the last hour. */
   | { kind: "takeoverLimited"; retryAfterSec: number | null }
-  /** A degraded tunnel on a device whose slot was never confirmed, and
-   * the API could not be asked whether the limit is the reason. Said
-   * before the ladder runs, not instead of it (obligation 9). */
-  | { kind: "unchecked"; limit: number };
+  /** A degraded tunnel on a device whose slot was never confirmed, and no
+   * verdict on whether the limit is the reason. Said before the ladder
+   * runs, not instead of it (obligation 9).
+   *
+   * `noAnswer`: nothing came back from Neoxify, so it may be said that
+   * it could not be reached. Otherwise it answered without confirming --
+   * a 5xx, a 404, a 429, a 200 this app cannot read -- and the note says
+   * only that, never "couldn't reach". */
+  | { kind: "unchecked"; limit: number; noAnswer: boolean };
 
 export interface SlotNoticeCopy {
   /** The sentences, in order. */
@@ -52,32 +58,40 @@ export interface NoticeContext {
   locale?: string;
 }
 
-/** The generic labels the apps and the backend use, in the app's
- * language. A label the customer chose, or a phone model, is kept as it
- * is; only the generic part is translated. */
-const GENERIC_LABELS: Record<string, TranslationKey> = {
-  "Windows PC": "slots.labelWindows",
-  Mac: "slots.labelMac",
-  "Linux PC": "slots.labelLinux",
-  "Android phone": "slots.labelAndroid",
-  iPhone: "slots.labelIphone",
-  iPad: "slots.labelIpad",
+/** A device's kind, in the app's language, for a device the server names
+ * by its platform alone. */
+const PLATFORM_NAMES: Record<DevicePlatform, TranslationKey> = {
+  windows: "slots.platformWindows",
+  macos: "slots.platformMac",
+  linux: "slots.platformLinux",
+  android: "slots.platformAndroid",
+  ios: "slots.platformIos",
 };
 
 /** Keeps a left-to-right name intact inside a right-to-left sentence.
- * Without the isolate, "Android phone (Pixel 7)" in Persian comes out
- * with its parenthesis on the wrong side. */
+ * Without the isolate, "Galaxy S24 (work)" in Persian comes out with its
+ * parenthesis on the wrong side. */
 function isolate(name: string, language: Language): string {
   return language === "fa" && /[A-Za-z0-9]/.test(name) ? `⁨${name}⁩` : name;
 }
 
-export function deviceName(label: string | null, ctx: Pick<NoticeContext, "t" | "language">): string {
-  if (label === null) return ctx.t("slots.anotherDevice");
-  for (const [generic, key] of Object.entries(GENERIC_LABELS)) {
-    if (label === generic) return ctx.t(key);
-    if (label.startsWith(`${generic} (`)) return `${ctx.t(key)} ${isolate(label.slice(generic.length + 1), ctx.language)}`;
-  }
-  return isolate(label, ctx.language);
+/** How a device is named on this screen (docs/device-slots.md, "Naming a
+ * device on screen").
+ *
+ * Its `label` when it has one -- a model or the user's own words, shown
+ * as sent. Otherwise its kind, from `platform`, in the app's language:
+ * the server sends no kind as a label any more, because the device that
+ * named itself may not read the language this one does. With neither,
+ * "another device". A label that is only a kind, from a server before
+ * that, is read the same way: the kind is named here. */
+export function deviceName(
+  device: Pick<SlotDevice, "label" | "platform"> | null,
+  ctx: Pick<NoticeContext, "t" | "language">,
+): string {
+  const label = specificDeviceLabel(device?.label);
+  if (label !== null) return isolate(label, ctx.language);
+  const platform = parseDevicePlatform(device?.platform);
+  return ctx.t(platform ? PLATFORM_NAMES[platform] : "slots.anotherDevice");
 }
 
 /** A time in the device's locale and time zone: the time alone if it
@@ -125,13 +139,13 @@ function refusalLines(refusal: DeviceLimitRefusal, ctx: NoticeContext): string[]
   if (holders.length === 0) {
     lines.push(ctx.t("slots.inUseOnNoTime", { device: ctx.t("slots.anotherDevice") }));
   } else if (holders.length === 1) {
-    const device = deviceName(holders[0].label, ctx);
+    const device = deviceName(holders[0], ctx);
     const time = formatSlotTime(holders[0].since, ctx);
     lines.push(time ? ctx.t("slots.inUseOn", { device, time }) : ctx.t("slots.inUseOnNoTime", { device }));
   } else {
     const devices = holders
       .map((h) => {
-        const device = deviceName(h.label, ctx);
+        const device = deviceName(h, ctx);
         const time = formatSlotTime(h.since, ctx);
         return time ? ctx.t("slots.deviceSince", { device, time }) : device;
       })
@@ -139,6 +153,25 @@ function refusalLines(refusal: DeviceLimitRefusal, ctx: NoticeContext): string[]
     lines.push(ctx.t("slots.inUseOnMany", { devices }));
   }
   return lines;
+}
+
+/** Whether a notice may be on screen yet.
+ *
+ * A refusal waits for the tunnel to be confirmed down. One that arrives
+ * after connecting -- the claim through the tunnel, answered seconds
+ * after the dial -- lands while the tunnel is still up and coming down,
+ * and the contract is plain that the card is never shown over a tunnel
+ * still carrying traffic (obligation 11): "Neoxify is in use on a
+ * Windows PC" with "Use on this device instead", over a VPN that is
+ * working, says something untrue about this device. Every other notice
+ * words itself for the tunnel's state (`tunnelDown`) and may show at
+ * once.
+ *
+ * A teardown that does not finish does not leave the card waiting on
+ * nothing: it stays owed, the screen says it is still disconnecting,
+ * and it is tried again until the tunnel is down (`slotTeardown`). */
+export function slotNoticeShown(notice: SlotNotice, tunnelDown: boolean): boolean {
+  return notice.kind !== "refused" || tunnelDown;
 }
 
 export function describeSlotNotice(notice: SlotNotice, ctx: NoticeContext): SlotNoticeCopy {
@@ -150,7 +183,7 @@ export function describeSlotNotice(notice: SlotNotice, ctx: NoticeContext): Slot
         dismiss: ctx.t("slots.cancel"),
       };
     case "displaced": {
-      const device = deviceName(notice.by?.label ?? null, ctx);
+      const device = deviceName(notice.by, ctx);
       const handle = notice.by?.handle ?? null;
       return {
         lines: [ctx.t(ctx.tunnelDown ? "slots.displaced" : "slots.nowInUseOn", { device })],
@@ -171,6 +204,12 @@ export function describeSlotNotice(notice: SlotNotice, ctx: NoticeContext): Slot
       };
     }
     case "unchecked":
-      return { lines: [ctx.t("slots.unchecked", { limit: count(notice.limit, ctx) })], useHere: null, dismiss: null };
+      return {
+        lines: [
+          ctx.t(notice.noAnswer ? "slots.unchecked" : "slots.unconfirmed", { limit: count(notice.limit, ctx) }),
+        ],
+        useHere: null,
+        dismiss: null,
+      };
   }
 }

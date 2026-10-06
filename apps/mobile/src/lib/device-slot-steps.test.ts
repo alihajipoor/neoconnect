@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /** The phone's half of the plan's device limit, through the shared slot
@@ -39,10 +40,12 @@ vi.mock("@shared/lib/api", () => ({
   publicRequest: () => Promise.resolve({ ok: false, error: "not used in these tests" }),
 }));
 
-const { createDeviceSlotSession, slotStop } = await import("@shared/lib/device-slot-session");
-const { claimWhileRefreshing, renewInForeground, tearDownForSlot, whenForegrounded } = await import(
-  "./device-slot-steps"
+const { createDeviceSlotSession, createSlotTeardown, slotStop, slotTeardownShown } = await import(
+  "@shared/lib/device-slot-session"
 );
+const { slotNoticeShown } = await import("@shared/lib/device-slot-notice");
+const { claimWhileRefreshing, renewInForeground, slotTeardownAttempt, tearDownForSlot, whenForegrounded } =
+  await import("./device-slot-steps");
 
 const SUB = "6f1c2b9e-0000-4000-8000-000000000001";
 const CRED = "a2b4c6d8-0000-4000-8000-000000000002";
@@ -188,17 +191,38 @@ describe("before dialling", () => {
     }
   });
 
-  it("dials against a backend without slots, and does not keep asking it", async () => {
-    answer = () => ({ ok: false, error: "Cannot POST /customer/vpn/claim", status: 404 });
+  /** Dial, claim once more through the tunnel (obligation 2: the API may
+   * be reached another way there), and then renew at the interval
+   * (obligation 11: anything but a verdict keeps the tunnel and renews)
+   * -- never more often, and never at the tunnel's expense. */
+  it("dials against a backend without slots, claims once through the tunnel, then renews at the interval", async () => {
+    answer = (path) => ({ ok: false, error: `Cannot POST ${path}`, status: 404 });
     const { slot, advance } = session();
 
     const { stop } = await claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, slot);
     expect(stop).toBeNull();
 
     await slot.afterConnected({ protocolUserId: CRED });
+    expect(calls).toHaveLength(2);
     advance(10 * 60_000);
-    await renewInForeground(slot, () => true);
-    expect(calls).toHaveLength(1);
+    expect(await renewInForeground(slot, () => true)).toEqual({ kind: "keep" });
+    expect(await renewInForeground(slot, () => true)).toEqual({ kind: "keep" });
+    expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/claim", "/customer/vpn/claim", "/customer/vpn/renew"]);
+    advance(60_000);
+    expect(await renewInForeground(slot, () => true)).toEqual({ kind: "keep" });
+    expect(calls).toHaveLength(4);
+    expect(calls[3].path).toBe("/customer/vpn/renew");
+  });
+
+  it.each([
+    ["a 409 with no code", { ok: false as const, error: "Conflict", status: 409 }],
+    ["a 429 from the request limit", { ok: false as const, error: "Too Many Requests", status: 429 }],
+    ["a 502", { ok: false as const, error: "Bad Gateway", status: 502 }],
+  ])("dials on %s -- only the three coded answers stop a dial", async (_name, reply) => {
+    answer = () => reply;
+    const { slot } = session();
+    const { stop } = await claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, slot);
+    expect(stop).toBeNull();
   });
 
   it("does not ask at all on a plan the subscription says is unlimited", async () => {
@@ -296,11 +320,14 @@ describe("before dialling", () => {
     });
   });
 
+  /** The platform always; a label only with a model in it, never the
+   * phone's kind -- the reader names that, in its own language. */
   it.each([
-    ["an Android phone", "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/UQ1A; wv) AppleWebKit/537.36", 5, "android", "Android phone"],
-    ["an iPhone", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15", 5, "ios", "iPhone"],
+    ["an Android phone", "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/UQ1A; wv) AppleWebKit/537.36", 5, "android", "Pixel 7"],
+    ["an Android phone with a reduced user agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36", 5, "android", null],
+    ["an iPhone", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15", 5, "ios", null],
     ["an iPad", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15", 5, "ios", "iPad"],
-  ])("names %s generically on the claim, never by its model", async (_name, userAgent, touch, platform, label) => {
+  ])("names %s on the claim by its platform, and by its model only when it has one", async (_name, userAgent, touch, platform, label) => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     vi.stubGlobal("navigator", { userAgent, maxTouchPoints: touch });
     answer = () => ({ ok: true, data: GRANT });
@@ -310,7 +337,7 @@ describe("before dialling", () => {
 
     expect(calls[0].headers).toEqual({
       "X-Neoxify-Device-Platform": platform,
-      "X-Neoxify-Device-Label": label,
+      ...(label !== null ? { "X-Neoxify-Device-Label": label } : {}),
     });
   });
 });
@@ -485,6 +512,63 @@ describe("the teardown after the slot ends the session", () => {
     expect(verdict).toBe("down");
   });
 
+  /** Obligation 11: never leave the tunnel up over a refusal. A stuck
+   * teardown used to be said once and then left: nothing tried again. */
+  it("is tried again until the platform says the tunnel is down, and owed until then", async () => {
+    const store = createSlotTeardown();
+    const gone = [false, false, true];
+    const disconnect = vi.fn(() => Promise.resolve());
+    const attempt = slotTeardownAttempt({ disconnect, waitForTeardown: () => Promise.resolve(gone.shift() ?? false) });
+
+    expect(await store.begin(attempt)).toBe("stuck");
+    expect(store.state()).toBe("stuck");
+    expect(await store.retry(attempt)).toBe("stuck");
+    expect(store.owed()).toBe(true);
+    expect(await store.retry(attempt)).toBe("down");
+    expect(store.owed()).toBe(false);
+    expect(disconnect).toHaveBeenCalledTimes(3);
+
+    // Nothing owed: the poll asks nothing more.
+    expect(await store.retry(attempt)).toBeNull();
+    expect(disconnect).toHaveBeenCalledTimes(3);
+  });
+
+  /** The whole path: a claim through the tunnel refused, a teardown that
+   * does not finish, the card held back meanwhile, and shown once a
+   * retry has the platform's word that the tunnel is down. */
+  it("holds a late refusal's card until a retry takes the tunnel down", async () => {
+    answer = () => "hang";
+    const { slot, advance } = session();
+    vi.useFakeTimers();
+    const pending = claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, slot);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await pending;
+    vi.useRealTimers();
+
+    answer = () => ({ ok: false, error: REFUSAL.message, status: 409, code: "DEVICE_LIMIT", body: REFUSAL });
+    advance(60_000);
+    const event = await renewInForeground(slot, () => true);
+    if (event.kind !== "refused") throw new Error(`expected a refusal, got ${event.kind}`);
+    const notice = slotStop(event, "whileConnected").notice;
+    if (!notice) throw new Error("expected a card");
+
+    const store = createSlotTeardown();
+    const gone = [false, true];
+    const attempt = slotTeardownAttempt({
+      disconnect: () => Promise.resolve(),
+      waitForTeardown: () => Promise.resolve(gone.shift() ?? false),
+    });
+
+    expect(await store.begin(attempt)).toBe("stuck");
+    // Still up: no card, and the screen shows it as still disconnecting.
+    expect(slotNoticeShown(notice, false)).toBe(false);
+    expect(slotTeardownShown(store.owed(), "connected")).toBe("disconnecting");
+
+    expect(await store.retry(attempt)).toBe("down");
+    expect(slotNoticeShown(notice, true)).toBe(true);
+    expect(store.owed()).toBe(false);
+  });
+
   it("is stuck when the platform cannot be asked", async () => {
     expect(
       await tearDownForSlot({
@@ -492,6 +576,57 @@ describe("the teardown after the slot ends the session", () => {
         waitForTeardown: () => Promise.reject(new Error("no answer")),
       }),
     ).toBe("stuck");
+  });
+
+  /** Neither plugin call has a deadline of its own. One that never
+   * settled left the owed teardown "tearingDown" for good: the retry runs
+   * only on "stuck", so nothing tried again and no stuck line appeared. */
+  it("comes back stuck when the platform never answers, and is tried again", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = createSlotTeardown();
+      const waits: (() => Promise<boolean>)[] = [() => new Promise<boolean>(() => undefined), () => Promise.resolve(true)];
+      const attempt = slotTeardownAttempt({
+        disconnect: () => Promise.resolve(),
+        waitForTeardown: () => (waits.shift() ?? (() => Promise.resolve(false)))(),
+      });
+
+      void store.begin(attempt);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(store.state()).toBe("stuck");
+      expect(store.running()).toBeNull();
+
+      expect(await store.retry(attempt)).toBe("down");
+      expect(store.owed()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** A disconnect call that never answers may still have stopped the
+   * engine: the platform is asked once it has had its time. */
+  it("asks the platform anyway when the disconnect call never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      const waitForTeardown = vi.fn(() => Promise.resolve(true));
+      let verdict: string | null = null;
+      void tearDownForSlot({ disconnect: () => new Promise(() => undefined), waitForTeardown }).then((v) => {
+        verdict = v;
+      });
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(waitForTeardown).toHaveBeenCalledTimes(1);
+      expect(verdict).toBe("down");
+
+      const store = createSlotTeardown();
+      void store.begin(
+        slotTeardownAttempt({ disconnect: () => new Promise(() => undefined), waitForTeardown: () => Promise.resolve(false) }),
+      );
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(store.state()).toBe("stuck");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -509,7 +644,59 @@ describe("Disconnect", () => {
     await vi.advanceTimersByTimeAsync(1_500);
     expect(done).toBe(true);
     expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/claim", "/customer/vpn/release"]);
-    expect(calls[1].body).toEqual({ subscriptionId: SUB });
+    // Naming the grant it gives back, so a release that lands after the
+    // next Connect's claim frees nothing.
+    expect(calls[1].body).toEqual({ subscriptionId: SUB, handle: GRANT.handle });
     expect(slot.standing()).toBe("none");
+  });
+
+  /** The phone's commonest path in Iran: no answer before dialling, and
+   * none through the tunnel either. No grant is known, and a release
+   * naming none would free whatever this phone holds -- the slot of a
+   * Connect pressed meanwhile included -- so nothing is sent. */
+  it("sends no release when no grant was ever answered", async () => {
+    answer = () => "hang";
+    const { slot } = session();
+    vi.useFakeTimers();
+    const claimed = claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, slot);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await claimed;
+    expect(slot.standing()).toBe("unclaimed");
+
+    await slot.release();
+    expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/claim"]);
+  });
+});
+
+/** Source assertions, for the reason the Windows client's
+ * `connect-intent.test.ts` gives: the dashboard needs a phone, a tunnel
+ * and a network, so nothing here can watch what it shows. */
+describe("the wiring the pure functions cannot check", () => {
+  const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+  const start = dashboard.indexOf("async function handleConnectToggle()");
+  const end = dashboard.indexOf("/** Says why the device limit stopped this phone", start);
+  const presses = dashboard.slice(start, end);
+
+  it("finds the press handlers", () => {
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    expect(presses).toContain("async function connectNow(");
+  });
+
+  /** The customer's own Disconnect, a stop pressed mid-connect and a
+   * connect clearing a tunnel first all showed "degraded" when the
+   * teardown did not finish -- "the server isn't responding", which
+   * nothing had measured. */
+  it("never shows a teardown that did not finish as degraded", () => {
+    expect(presses).not.toContain('setConnectionState("degraded")');
+  });
+
+  it("keeps the customer's own teardown owed, retried and said until the platform confirms it", () => {
+    expect(presses).toContain("customerTeardown.begin(teardownOnce)");
+    expect(presses).toContain("customerTeardown.retry(teardownOnce)");
+    expect(dashboard).toMatch(/customerTeardownState === "stuck" \? \([^)]*\{t\("err\.teardownStuck"\)\}/);
+    expect(dashboard).toMatch(
+      /if \(customerTeardownState !== "stuck"\) return;\s*const id = setInterval\(\(\) => void retryCustomerTeardown\(\)/,
+    );
   });
 });

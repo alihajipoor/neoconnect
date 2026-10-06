@@ -1,6 +1,6 @@
 import { clearGamingProfileCache } from "./customer";
 import { clearSnapshot } from "./credential-cache";
-import { deviceSlot, slotNoticeStore } from "./device-slot-session";
+import { deviceSlot, slotNoticeStore, slotTeardown } from "./device-slot-session";
 import { clearTokens } from "./session";
 import { tearDownForSignOut, type TeardownVerdict } from "./tunnel-teardown";
 
@@ -99,6 +99,9 @@ export async function endCustomerSession(): Promise<SessionEnd> {
   // Its card too: it names the old account's devices, and the next
   // account to sign in on this machine must not open onto it.
   slotNoticeStore.set(null);
+  // And any teardown it still owed: the sign-out's own, below, takes the
+  // tunnel down, and its retries must not run on into the next account.
+  slotTeardown.clear();
   let tunnel: TeardownVerdict;
   try {
     tunnel = await tunnelTeardown();

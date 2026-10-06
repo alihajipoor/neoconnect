@@ -12,11 +12,13 @@ import { deviceHeaders } from "./device-identity";
  *
  * Every answer is turned into one of a few outcomes here, so no screen
  * reads a status code. The rule they all serve: **the control plane is
- * never a precondition for connecting.** Only a definite refusal (a 409
- * or a 429 that says why) stops a dial. Anything else -- no answer in
- * time, a network error, a 5xx, an endpoint an old backend does not have
- * -- is `unanswered`, and the app dials anyway. Somebody in Iran who
- * cannot reach the API must never lose the VPN over this.
+ * never a precondition for connecting.** Exactly three answers stop a
+ * dial: 409 `DEVICE_LIMIT`, 409 `SUBSCRIPTION_INACTIVE` and 429
+ * `TAKEOVER_LIMIT`. Anything else -- no answer in time, a network error,
+ * a 5xx, a 409 or 429 without one of those codes, an endpoint an old
+ * backend does not have -- is `unanswered`, and the app dials anyway; a
+ * renewal that is not a 200 keeps the tunnel. Somebody in Iran who cannot
+ * reach the API must never lose the VPN over this.
  *
  * Shared with the mobile client through its `@shared` alias.
  */
@@ -77,6 +79,24 @@ export interface SlotGrant {
   staleAfterSec: number;
 }
 
+/** No verdict. Dial anyway, or keep the tunnel.
+ *
+ * `retryable` says whether asking again could produce one: a timeout or
+ * a 5xx could, a 400 or a 404 will not.
+ *
+ * `noAnswer` says whether anything came back at all. True only when
+ * nothing did -- no answer within the budget, or the request failed in
+ * transport everywhere it was sent -- and only then may the screen say
+ * Neoxify could not be reached. A 5xx, a 404, a 429, a 200 this app
+ * cannot read: each is an answer, and what is true then is that Neoxify
+ * did not confirm anything, not that it was out of reach. */
+export interface NoVerdict {
+  kind: "unanswered";
+  reason: string;
+  retryable: boolean;
+  noAnswer: boolean;
+}
+
 export type ClaimOutcome =
   | { kind: "granted"; grant: SlotGrant }
   | { kind: "refused"; refusal: DeviceLimitRefusal }
@@ -86,9 +106,7 @@ export type ClaimOutcome =
   | { kind: "takeoverLimited"; retryAfterSec: number | null }
   /** The session has ended; `apiRequest` has already told the app. */
   | { kind: "signedOut" }
-  /** No verdict. Dial anyway. `retryable` says whether asking again could
-   * produce one: a timeout or a 5xx could, a 400 or a 404 will not. */
-  | { kind: "unanswered"; reason: string; retryable: boolean };
+  | NoVerdict;
 
 export type RenewOutcome =
   | { kind: "held"; grant: SlotGrant }
@@ -97,7 +115,7 @@ export type RenewOutcome =
   | { kind: "displaced"; by: SlotDevice | null; at: string | null }
   | { kind: "inactive"; subscriptionStatus: string | null }
   | { kind: "signedOut" }
-  | { kind: "unanswered"; reason: string; retryable: boolean };
+  | NoVerdict;
 
 type Fields = Record<string, unknown>;
 
@@ -169,25 +187,48 @@ export function refusalFrom(body: unknown): DeviceLimitRefusal {
   return { limit: positiveInt(f?.limit), holders };
 }
 
-/** What a failed claim or renewal means. Shared by both, because the
- * refusals that are not about slots read the same on either. */
-function classifyFailure(failure: RequestFailure):
-  | { kind: "signedOut" }
-  | { kind: "inactive"; subscriptionStatus: string | null }
-  | { kind: "unanswered"; reason: string; retryable: boolean }
-  | null {
+/** A failed claim or renewal that is no verdict, and whether asking
+ * again could produce one: a timeout, a 5xx or a 429 could; a 400 or a
+ * 404 will not. */
+function unanswered(failure: RequestFailure): NoVerdict {
+  // Never arrived, or arrived somewhere that could not answer: the next
+  // attempt may well get through. A 429 without the slot code is the
+  // request limit or a CDN, not a verdict on this device.
+  const { status } = failure;
+  const retryable = status === undefined || status >= 500 || status === 429 || status === 408;
+  // Only a transport failure everywhere is known to have gone
+  // unanswered. A failure with no status is not enough: a 401 whose
+  // refresh could not complete has none, and was answered.
+  return { kind: "unanswered", reason: failure.error, retryable, noAnswer: failure.noResponse === true };
+}
+
+/** A request that ran out of its budget: nothing came back in time. */
+function timedOut(error: string): NoVerdict {
+  return { kind: "unanswered", reason: error, retryable: true, noAnswer: true };
+}
+
+/** What a failed claim means.
+ *
+ * Exactly three answers are a verdict (docs/device-slots.md, obligation
+ * 2): 409 `DEVICE_LIMIT`, 409 `SUBSCRIPTION_INACTIVE` and 429
+ * `TAKEOVER_LIMIT`. A sign-out is the session ending, as on any call.
+ * Everything else -- a 409 or a 429 without one of those codes, a 404,
+ * a 5xx, no answer -- is no verdict, and the app dials anyway. */
+function claimFailure(failure: RequestFailure): Exclude<ClaimOutcome, { kind: "granted" }> {
   if (failure.sessionExpired) return { kind: "signedOut" };
   const { status, code } = failure;
+  if (status === 409 && code === "DEVICE_LIMIT") return { kind: "refused", refusal: refusalFrom(failure.body) };
   if (status === 409 && code === "SUBSCRIPTION_INACTIVE") {
     return { kind: "inactive", subscriptionStatus: text(fieldsOf(failure.body)?.subscriptionStatus) };
   }
-  if (status === 409 && code === "DEVICE_LIMIT") return null;
-  if (status === 429 && code === "TAKEOVER_LIMIT") return null;
-  // Never arrived, or arrived somewhere that could not answer: the next
-  // attempt may well get through. A 429 without the slot code is a
-  // throttle or a CDN, not a verdict on this device.
-  const retryable = status === undefined || status >= 500 || status === 429 || status === 408;
-  return { kind: "unanswered", reason: failure.error, retryable };
+  if (status === 429 && code === "TAKEOVER_LIMIT") {
+    const retryAfter = fieldsOf(failure.body)?.retryAfterSec;
+    return {
+      kind: "takeoverLimited",
+      retryAfterSec: typeof retryAfter === "number" && retryAfter > 0 ? Math.ceil(retryAfter) : null,
+    };
+  }
+  return unanswered(failure);
 }
 
 /** Runs one request with a deadline of its own.
@@ -256,21 +297,12 @@ export async function claimSlot(request: ClaimRequest, budgetMs = CLAIM_BUDGET_M
   if (result.ok) {
     const f = fieldsOf(result.data);
     if (!f || f.granted !== true) {
-      return { kind: "unanswered", reason: "the claim's answer was not a grant", retryable: false };
+      return { kind: "unanswered", reason: "the claim's answer was not a grant", retryable: false, noAnswer: false };
     }
     return { kind: "granted", grant: grantFrom(f) };
   }
-  if ("timedOut" in result) return { kind: "unanswered", reason: result.error, retryable: true };
-
-  const classified = classifyFailure(result);
-  if (classified) return classified;
-  if (result.code === "DEVICE_LIMIT") return { kind: "refused", refusal: refusalFrom(result.body) };
-  // TAKEOVER_LIMIT, the only other code classifyFailure leaves.
-  const retryAfter = fieldsOf(result.body)?.retryAfterSec;
-  return {
-    kind: "takeoverLimited",
-    retryAfterSec: typeof retryAfter === "number" && retryAfter > 0 ? Math.ceil(retryAfter) : null,
-  };
+  if ("timedOut" in result) return timedOut(result.error);
+  return claimFailure(result);
 }
 
 /** Keeps the slot, every `renewEverySec` while connected. Never rejects. */
@@ -293,30 +325,52 @@ export async function renewSlot(subscriptionId: string, budgetMs = RENEW_BUDGET_
       case "inactive":
         return { kind: "inactive", subscriptionStatus: text(f.subscriptionStatus) };
       default:
-        return { kind: "unanswered", reason: "the renewal's answer had no status this app knows", retryable: false };
+        return {
+          kind: "unanswered",
+          reason: "the renewal's answer had no status this app knows",
+          retryable: false,
+          noAnswer: false,
+        };
     }
   }
-  if ("timedOut" in result) return { kind: "unanswered", reason: result.error, retryable: true };
+  if ("timedOut" in result) return timedOut(result.error);
 
-  // A renewal is always 200 for the slot itself; a 409 or a 429 here is
-  // nothing the contract defines, so it is no verdict either.
-  return classifyFailure(result) ?? { kind: "unanswered", reason: result.error, retryable: false };
+  // A renewal's verdicts come in a 200's `status`, never as a refusal.
+  // Anything else -- a 5xx, a 429, a 404, even a 409 naming a code --
+  // changes nothing (obligation 6): keep the tunnel and ask again at the
+  // next interval. Only a sign-out ends the session, as on any call.
+  if (result.sessionExpired) return { kind: "signedOut" };
+  return unanswered(result);
 }
 
-/** Gives the slot back, on one subscription or (none named) on every one
- * this device holds.
+export interface ReleaseRequest {
+  subscriptionId: string;
+  /** The `handle` of the grant being given back: the latest claim's, or
+   * the renewal's that re-granted the slot.
+   *
+   * Required, and that is the point of it. A release is fire and forget,
+   * and the request can still be walking the API's mirrors seconds after
+   * the customer pressed Connect again; the claim that Connect made gave
+   * the slot a new handle, so a late release naming the old one frees
+   * nothing. One naming no handle frees whatever this device holds --
+   * the new connect's slot included -- so this app never sends one. */
+  handle: string;
+}
+
+/** Gives one grant back.
  *
  * Fire and forget: resolves within `budgetMs` whatever happens and never
  * rejects, and nothing should wait for it before tearing down. A release
  * that does not arrive costs the slot staying taken until it goes stale
  * (90 s), which "Use on this device instead" covers on the other device.
  */
-export async function releaseSlot(subscriptionId?: string | null, budgetMs = RELEASE_BUDGET_MS): Promise<void> {
+export async function releaseSlot(request: ReleaseRequest, budgetMs = RELEASE_BUDGET_MS): Promise<void> {
   try {
     await withinBudget(budgetMs, (signal) =>
       apiRequest<void>("/customer/vpn/release", {
         method: "POST",
-        body: JSON.stringify(subscriptionId ? { subscriptionId } : {}),
+        // Only the fields the contract names: the API rejects unknown ones.
+        body: JSON.stringify({ subscriptionId: request.subscriptionId, handle: request.handle }),
         signal,
       }),
     );

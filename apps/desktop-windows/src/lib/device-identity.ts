@@ -1,17 +1,21 @@
 /** What this device calls itself to the customer's *other* devices.
  *
- * Device slots name where Neoxify is in use -- "Neoxify is in use on
- * Windows PC since 14:02" -- and the name comes from two headers the
- * apps send on sign-in, refresh and claim (docs/device-slots.md,
- * "Headers the app sends"):
+ * Device slots name where Neoxify is in use -- "Neoxify is in use on a
+ * Windows PC since 14:02" -- from two headers the apps send on sign-in,
+ * refresh and claim (docs/device-slots.md, "Headers the app sends"):
  *
  *   X-Neoxify-Device-Platform: windows | macos | linux | android | ios
- *   X-Neoxify-Device-Label:    a generic name, percent-encoded if not ASCII
+ *   X-Neoxify-Device-Label:    only what the platform does not say -- a
+ *                              model -- percent-encoded if not ASCII
  *
- * The label is generic on purpose and never a hostname, a computer name
- * or an account name. It is shown on other devices, and a machine name
- * is personal -- often the owner's own name. The backend drops anything
- * hostname-shaped as a backstop; not sending one is this file's job.
+ * The platform is always sent. The label is sent only when there is a
+ * model to send, and is never the device's kind: "Windows PC" is English,
+ * and the device that shows it may be in Persian, so the kind is named
+ * by the reader, from the platform, in its own language. Nor is it ever a
+ * hostname, a computer name or an account name. It is shown on other
+ * devices, and a machine name is personal -- often the owner's own name.
+ * The backend drops both as a backstop; not sending them is this file's
+ * job.
  *
  * Shared: the Android and iOS client compile this directory through
  * their `@shared` alias, and so does the web portal. The portal is not a
@@ -21,28 +25,45 @@
 
 export type DevicePlatform = "windows" | "macos" | "linux" | "android" | "ios";
 
+const DEVICE_PLATFORMS: readonly DevicePlatform[] = ["windows", "macos", "linux", "android", "ios"];
+
+/** A platform as the server sent it (`holders[].platform`, `by.platform`),
+ * or null for one this app does not know. Case-insensitive, as the
+ * header is. */
+export function parseDevicePlatform(value: string | null | undefined): DevicePlatform | null {
+  const platform = value?.trim().toLowerCase() ?? "";
+  return DEVICE_PLATFORMS.find((p) => p === platform) ?? null;
+}
+
+/** English names of device kinds -- what the apps were first built to
+ * send as a label, and what the backend now drops (device-info.ts keeps
+ * the same list). A kind is never a label: it says only what `platform`
+ * says, in one language, and the device that reads it may be in another. */
+const DEVICE_KINDS = new Set(
+  ["Windows PC", "PC", "Mac", "Linux PC", "Android phone", "Android", "iPhone", "Phone", "Computer"].map((k) =>
+    k.toLowerCase(),
+  ),
+);
+
+/** The part of a label worth showing as it is: a model or the user's own
+ * words. Null for a kind ("Windows PC"); the model out of "Android phone
+ * (Pixel 7)". The backend's own reading, applied here too so a label from
+ * before it existed reads the same, and so this app never sends a kind. */
+export function specificDeviceLabel(label: string | null | undefined): string | null {
+  const text = label?.trim();
+  if (!text) return null;
+  if (DEVICE_KINDS.has(text.toLowerCase())) return null;
+  const qualified = /^(.+?)\s*\((.+)\)$/.exec(text);
+  if (qualified && DEVICE_KINDS.has(qualified[1].trim().toLowerCase())) return specificDeviceLabel(qualified[2]);
+  return text;
+}
+
 export const DEVICE_PLATFORM_HEADER = "X-Neoxify-Device-Platform";
 export const DEVICE_LABEL_HEADER = "X-Neoxify-Device-Label";
 
 /** The backend keeps this many characters of a label. Cut here as well,
  * so what is sent is what is shown. */
 export const MAX_DEVICE_LABEL_LENGTH = 48;
-
-/** The names the backend itself uses for a platform sent without a
- * label, so a device reads the same whichever side named it. iPad is the
- * one addition: "iPhone" would be wrong on one, and it is no more
- * personal than the platform. */
-const GENERIC_LABELS: Record<DevicePlatform, string> = {
-  windows: "Windows PC",
-  macos: "Mac",
-  linux: "Linux PC",
-  android: "Android phone",
-  ios: "iPhone",
-};
-
-export function genericDeviceLabel(platform: DevicePlatform): string {
-  return GENERIC_LABELS[platform];
-}
 
 export interface DeviceEnvironment {
   userAgent: string;
@@ -84,16 +105,48 @@ export function detectDevicePlatform(env: DeviceEnvironment = currentEnvironment
   return null;
 }
 
-/** The generic label for the platform this is. */
-export function detectDeviceLabel(
+/** The model, when this device genuinely says which, or null.
+ *
+ * An iPad is told from an iPhone, and is named "iPad" -- the contract's
+ * own example of a model. An Android WebView carries the model in its
+ * user agent (`Linux; Android 14; Pixel 7 Build/...`), which is the
+ * manufacturer's name for the hardware, the same on every one of them --
+ * nothing the owner chose. Nothing for a PC, a Mac or an iPhone: none
+ * says which, and a kind is not a model. Nothing either for an Android
+ * user agent reduced to `K`, or one this cannot read with confidence.
+ */
+export function detectDeviceModel(
   platform: DevicePlatform,
   env: DeviceEnvironment = currentEnvironment(),
-): string {
+): string | null {
   if (platform === "ios") {
     const ipad = /ipad/i.test(env.userAgent) || (/macintosh/i.test(env.userAgent) && env.maxTouchPoints > 1);
-    return ipad ? "iPad" : "iPhone";
+    return ipad ? "iPad" : null;
   }
-  return genericDeviceLabel(platform);
+  if (platform === "android") return androidModel(env.userAgent);
+  return null;
+}
+
+/** The model out of an Android user agent's first parenthesis: the part
+ * after `Android <version>`, past the WebView's `wv` and an old-style
+ * locale, without its `Build/...`. */
+function androidModel(userAgent: string): string | null {
+  const inside = /\(([^)]*)\)/.exec(userAgent)?.[1];
+  if (!inside) return null;
+  const parts = inside.split(";").map((part) => part.trim());
+  const android = parts.findIndex((part) => /^Android\b/i.test(part));
+  if (android < 0) return null;
+  for (const part of parts.slice(android + 1)) {
+    if (part.toLowerCase() === "wv" || /^[a-z]{2}(?:[-_][a-z]{2})?$/i.test(part)) continue;
+    const model = part.replace(/\s*Build\/.*$/i, "").trim();
+    // `K` is what a reduced user agent says in place of the model. A
+    // parenthesis means the first one closed inside the model's name
+    // ("moto g(7)"), and what is left of it is not the model.
+    if (model.length < 2 || /[()]/.test(model) || !/[a-z0-9]/i.test(model)) return null;
+    const clean = cleanDeviceLabel(model);
+    return clean === null ? null : specificDeviceLabel(clean);
+  }
+  return null;
 }
 
 /** A label fit to send, or null if this one must not be.
@@ -126,27 +179,31 @@ export function encodeDeviceLabel(label: string): string {
 }
 
 /** Set by an app that knows better than the user agent -- a phone that
- * can name its model ("Android phone (Pixel 7)"), or a customer's own
- * wording if an app ever lets them choose it. Unset means detected. */
+ * can name its model ("Galaxy S24"), or a customer's own wording if an
+ * app ever lets them choose it. Unset means detected. */
 let override: { platform?: DevicePlatform; label?: string } = {};
 
 export function configureDeviceIdentity(next: { platform?: DevicePlatform; label?: string }): void {
   override = { ...next };
 }
 
-/** The two headers, or none.
+/** The headers: the platform always, and a label only with a model (or
+ * the customer's own words) to put in it.
  *
- * None when the platform is unknown -- the web portal, or a webview this
- * does not recognise. Sending neither leaves the device's name as it
- * was, which is the right answer when there is nothing true to say.
+ * None at all when the platform is unknown -- the web portal, or a
+ * webview this does not recognise. Sending neither leaves the device's
+ * name as it was, which is the right answer when there is nothing true
+ * to say. The server likewise keeps a label it holds when a request
+ * names none; one an older app sent that was only a kind ("Windows PC")
+ * it reads back as no label at all.
  */
 export function deviceHeaders(env?: DeviceEnvironment): Record<string, string> {
   const platform = override.platform ?? detectDevicePlatform(env);
   if (!platform) return {};
-  const label =
-    (override.label !== undefined ? cleanDeviceLabel(override.label) : null) ?? detectDeviceLabel(platform, env);
+  const supplied = override.label !== undefined ? cleanDeviceLabel(override.label) : null;
+  const label = specificDeviceLabel(supplied) ?? detectDeviceModel(platform, env);
   return {
     [DEVICE_PLATFORM_HEADER]: platform,
-    [DEVICE_LABEL_HEADER]: encodeDeviceLabel(label),
+    ...(label !== null ? { [DEVICE_LABEL_HEADER]: encodeDeviceLabel(label) } : {}),
   };
 }

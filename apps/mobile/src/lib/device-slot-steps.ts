@@ -5,6 +5,7 @@ import {
   type SlotEvent,
   type SlotStop,
 } from "@shared/lib/device-slot-session";
+import { withTimeout } from "@shared/lib/service-call";
 
 /** The phone's half of the plan's device limit.
  *
@@ -21,7 +22,8 @@ import {
  *    seconds with neither a renewal nor traffic), and the first poll
  *    after the app comes back renews, or learns it was displaced.
  *  - When the slot ends the session, the tunnel comes down, and "down" is
- *    said only once the platform confirms it.
+ *    said only once the platform confirms it. Until it does, the teardown
+ *    stays owed and is tried again on the poll.
  *
  * There is no automatic ladder on the phone to hold back. Its health
  * poll reports and never redials, so a displaced phone disconnects and
@@ -112,23 +114,64 @@ export function whenForegrounded(
 
 export type SlotTeardown = "down" | "stuck";
 
-/** Takes the tunnel down after the device limit ended the session.
+/** How long the disconnect call may take before an attempt stops waiting
+ * for it and asks the platform anyway. The Windows client's budget for
+ * the same call (SERVICE_CALL_TIMEOUT_MS). */
+export const TEARDOWN_DISCONNECT_BUDGET_MS = 6_000;
+/** How long the wait for the platform's word may take in all. The
+ * dashboard's own wait gives up after eight seconds, but checks its
+ * deadline between questions, never during one: a question the platform
+ * never answers would hold it for ever. This is that wait with room. */
+export const TEARDOWN_WAIT_BUDGET_MS = 10_000;
+
+export interface TeardownCalls {
+  disconnect: () => Promise<unknown>;
+  waitForTeardown: () => Promise<boolean>;
+  /** For tests; the defaults above otherwise. */
+  disconnectBudgetMs?: number;
+  waitBudgetMs?: number;
+}
+
+/** Takes the tunnel down: after the device limit ended the session, and
+ * for the customer's own Disconnect.
  *
  * "down" only on the platform's own word that the device is out of the
  * tunnel; anything else is "stuck", and the dashboard says the
  * disconnect did not finish rather than "Disconnected:". The platform
- * is asked even when the disconnect call threw: a call that failed may
- * still have stopped the engine, and only that answer says. */
-export async function tearDownForSlot(deps: {
-  disconnect: () => Promise<unknown>;
-  waitForTeardown: () => Promise<boolean>;
-}): Promise<SlotTeardown> {
-  await deps.disconnect().catch(() => undefined);
+ * is asked even when the disconnect call threw or did not answer in
+ * time: a call that failed may still have stopped the engine, and only
+ * that answer says.
+ *
+ * Bounded, both halves, the way the Windows client bounds its service
+ * calls (`withTimeout`). Neither plugin call has a deadline of its own,
+ * and one that never settled left the teardown the device limit owes
+ * "tearingDown" for good: the retry runs only once an attempt has come
+ * back "stuck", so nothing tried again and the line saying the tunnel
+ * was not confirmed closed never appeared. A call that runs out of time
+ * is "stuck" like any other unconfirmed teardown, and is tried again. */
+export async function tearDownForSlot(deps: TeardownCalls): Promise<SlotTeardown> {
+  await withTimeout(
+    deps.disconnect(),
+    "vpn_disconnect",
+    deps.disconnectBudgetMs ?? TEARDOWN_DISCONNECT_BUDGET_MS,
+  ).catch(() => undefined);
   let gone = false;
   try {
-    gone = await deps.waitForTeardown();
+    gone = await withTimeout(deps.waitForTeardown(), "vpn_tunnel_gone", deps.waitBudgetMs ?? TEARDOWN_WAIT_BUDGET_MS);
   } catch {
     gone = false;
   }
   return gone ? "down" : "stuck";
+}
+
+/** One attempt at that teardown, in the shape the shared `slotTeardown`
+ * takes: true only on the platform's word that the device is out of the
+ * tunnel.
+ *
+ * The shared store is what keeps it owed when an attempt is "stuck", and
+ * the dashboard asks it again on its poll until one comes back "down" --
+ * a disconnect that did not finish is not left showing a working tunnel
+ * with nothing trying again (obligation 11). */
+export function slotTeardownAttempt(deps: TeardownCalls): () => Promise<boolean> {
+  return async () => (await tearDownForSlot(deps)) === "down";
 }

@@ -1,8 +1,10 @@
 # Device slots: the plan's device limit
 
-Status: backend implemented on `claude/per-device-credentials`. **No app
-implements the client side yet**, and nothing here has run against a real
-node, phone or censored network -- see *What is unverified* at the end.
+Status: backend implemented on `claude/per-device-credentials`; the
+Windows and mobile clients implement this revision on
+`claude/device-slots-mobile`. **Unit tests only**: no client has reached
+the real backend, and nothing here has run against a real node, phone or
+censored network -- see *What is unverified* at the end.
 
 This document is the contract. The desktop and mobile apps are built
 against it, not against the backend code; change the two together.
@@ -226,9 +228,16 @@ still means the device was signed out, as everywhere.)
 ```
 
 - `held`: carry on. A slot that had lapsed while the device was quiet is
-  given back here if there is room, with a new `handle`.
+  given back here if there is room, with a new `handle` -- and so is one
+  taken over by a device that has since left (disconnected, signed out,
+  or neither renewed nor carried traffic for `staleAfterSec`).
 - `displaced`: another device has the slot -- it took it over at `at`,
-  or got it after this device went quiet. `by` names it.
+  or got it after this device went quiet. `by` names it. Answered only
+  while it is true: a takeover is reported while the device that took
+  the slot still holds it and there is no room for this one, naming
+  that device; once it has left, `displaced` names whichever device
+  holds the slot now (`at` is when that one got it), and if none does
+  and there is room, the answer is `held` instead.
 - `inactive`: the subscription is no longer active.
 
 ### `POST /customer/vpn/release`
@@ -330,7 +339,10 @@ refusal of the device -- see obligation 2.
    check. If Neoxify is in use on another of your devices, your plan's
    limit of *{limit}* may be the reason.") and then run the ladder as
    usual. Never claim a server "couldn't be reached" if it was never
-   dialled.
+   dialled -- nor if it answered: a 5xx, a 404, a 429 or a 200 with a
+   status the app does not know is an answer without a verdict, and
+   the honest note then is that Neoxify could not confirm this device's
+   place right now, not that it could not be reached.
 10. **The label is a model or the user's own words** -- never the device's kind and never a hostname; *{device}* is named as *Naming a device on screen* says (see *Headers*).
 11. **A claim refused after connecting.** When the claim before dialling
     went unanswered (item 2), the device is already connected when its
@@ -434,8 +446,8 @@ slot logic over an in-memory store; an HTTP-level test of this contract
 on a real Nest server with the production validation pipe; the built
 backend boots and maps the three routes. **Unverified:**
 
-- No app claims, renews or releases yet. Nothing on this page has been
-  seen from a client.
+- The apps claim, renew and release in unit tests only. Nothing on this
+  page has been seen from a client against the real backend.
 - No Redis has held a slot. The migrations have been applied only to
   CI's empty Postgres (they apply, and match the schema), never to a
   database with real data.

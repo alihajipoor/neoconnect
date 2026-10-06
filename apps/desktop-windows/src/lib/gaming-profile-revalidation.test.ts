@@ -193,6 +193,7 @@ describe("gaming profile revalidation", () => {
     await expect(getGamingProfile()).resolves.toEqual({
       ok: false,
       error: "Could not reach Neoxify. Check your internet connection.",
+      noResponse: true,
     });
   });
 
@@ -208,6 +209,7 @@ describe("gaming profile revalidation", () => {
     await expect(getGamingProfile()).resolves.toEqual({
       ok: false,
       error: "Could not reach Neoxify. Check your internet connection.",
+      noResponse: true,
     });
   });
 

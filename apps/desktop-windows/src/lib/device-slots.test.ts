@@ -119,7 +119,8 @@ describe("claim", () => {
     // Nothing the API does not know: it rejects unknown fields with 400.
     expect(sent[0].body).toEqual({ subscriptionId: SUB, protocolUserId: CRED });
     expect(sent[0].headers["X-Neoxify-Device-Platform"]).toBe("windows");
-    expect(sent[0].headers["X-Neoxify-Device-Label"]).toBe("Windows PC");
+    // A PC has no model to give, and its kind is never a label.
+    expect(sent[0].headers).not.toHaveProperty("X-Neoxify-Device-Label");
     expect(sent[0].headers.Authorization).toBe("Bearer access");
   });
 
@@ -226,6 +227,27 @@ describe("claim", () => {
       expect(await claimSlot({ subscriptionId: SUB })).toMatchObject({ kind: "unanswered", retryable: false });
     });
 
+    /** Exactly three answers stop a dial (obligation 2). A refusal's code
+     * on the wrong status, or a status without its code, is none of them
+     * -- a proxy or a CDN can answer 409 or 429 too. */
+    it("dials anyway on a 409 or a 429 that does not carry one of the three codes", async () => {
+      replies["/customer/vpn/claim"] = [
+        { status: 409, body: { statusCode: 409, message: "Conflict" } },
+        { status: 409, body: { statusCode: 409, code: "SOMETHING_NEW", message: "x" } },
+        { status: 409, body: { statusCode: 409, code: "TAKEOVER_LIMIT", message: "x" } },
+        { status: 429, body: { statusCode: 429, code: "DEVICE_LIMIT", message: "x", holders: [] } },
+        { status: 429, body: { statusCode: 429, message: "ThrottlerException: Too Many Requests" } },
+      ];
+      for (let i = 0; i < 5; i++) {
+        expect(await claimSlot({ subscriptionId: SUB, takeover: ["h"] })).toMatchObject({ kind: "unanswered" });
+      }
+    });
+
+    it("dials anyway when a 200 is not a grant", async () => {
+      replies["/customer/vpn/claim"] = [{ status: 200, body: { granted: false } }];
+      expect(await claimSlot({ subscriptionId: SUB })).toMatchObject({ kind: "unanswered" });
+    });
+
     it("keeps to the budget even while the token is being refreshed", async () => {
       // An expired access token: the claim's 401 sends apiRequest off to
       // refresh, and that request does not carry the claim's signal.
@@ -258,7 +280,7 @@ describe("refresh names the device", () => {
 
     const refresh = sent.find((s) => s.url.endsWith("/customer-auth/refresh"));
     expect(refresh?.headers["X-Neoxify-Device-Platform"]).toBe("windows");
-    expect(refresh?.headers["X-Neoxify-Device-Label"]).toBe("Windows PC");
+    expect(refresh?.headers).not.toHaveProperty("X-Neoxify-Device-Label");
     expect(refresh?.body).toEqual({ refreshToken: "refresh" });
   });
 });
@@ -299,6 +321,69 @@ describe("renew", () => {
     expect(await renewSlot(SUB, 50)).toMatchObject({ kind: "unanswered" });
   });
 
+  /** A renewal's verdicts come in a 200's status. Anything else keeps
+   * the tunnel -- even a 409 naming a slot code, which the contract never
+   * sends to a renewal. */
+  it("changes nothing on any answer but a 200", async () => {
+    replies["/customer/vpn/renew"] = [
+      { status: 409, body: { statusCode: 409, code: "SUBSCRIPTION_INACTIVE", message: "x", subscriptionStatus: "EXPIRED" } },
+      { status: 409, body: DEVICE_LIMIT },
+      { status: 429, body: { statusCode: 429, message: "ThrottlerException: Too Many Requests" } },
+      { status: 429, body: { statusCode: 429, code: "TAKEOVER_LIMIT", message: "x", retryAfterSec: 60 } },
+      { status: 503 },
+      { status: 404, body: { message: "Cannot POST /customer/vpn/renew" } },
+      { status: 200, body: { status: "something new" } },
+    ];
+    for (let i = 0; i < 7; i++) {
+      expect(await renewSlot(SUB)).toMatchObject({ kind: "unanswered" });
+    }
+    expect(stored).not.toBeNull();
+    expect(announced).toBe(0);
+  });
+
+  /** What the "unchecked" note may say rests on this. "We couldn't reach
+   * Neoxify" is true of a request that got nothing back; of a 5xx, a 404,
+   * a throttle or a 200 this app cannot read, Neoxify was reached and
+   * only did not confirm. */
+  it("says nothing came back only when nothing did", async () => {
+    replies["/customer/vpn/renew"] = ["hang", "hang"];
+    expect(await renewSlot(SUB, 50)).toMatchObject({ kind: "unanswered", noAnswer: true });
+
+    replies["/customer/vpn/renew"] = ["unreachable", "unreachable"];
+    expect(await renewSlot(SUB)).toMatchObject({ kind: "unanswered", noAnswer: true });
+
+    replies["/customer/vpn/renew"] = [
+      { status: 503 },
+      { status: 404, body: { message: "Cannot POST /customer/vpn/renew" } },
+      { status: 429, body: { statusCode: 429, message: "ThrottlerException: Too Many Requests" } },
+      { status: 403, body: { message: "Forbidden" } },
+      { status: 200, body: { status: "something new" } },
+    ];
+    for (let i = 0; i < 5; i++) {
+      expect(await renewSlot(SUB)).toMatchObject({ kind: "unanswered", noAnswer: false });
+    }
+
+    // Answered 401, and the token refresh that follows could not be
+    // completed: no status survives, and the request was still answered.
+    replies["/customer/vpn/renew"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 503 }];
+    expect(await renewSlot(SUB)).toMatchObject({ kind: "unanswered", noAnswer: false });
+  });
+
+  it("says the same of a claim", async () => {
+    replies["/customer/vpn/claim"] = ["unreachable", "unreachable", { status: 502 }, { status: 200, body: { granted: false } }];
+    expect(await claimSlot({ subscriptionId: SUB })).toMatchObject({ kind: "unanswered", noAnswer: true });
+    expect(await claimSlot({ subscriptionId: SUB })).toMatchObject({ kind: "unanswered", noAnswer: false });
+    expect(await claimSlot({ subscriptionId: SUB })).toMatchObject({ kind: "unanswered", noAnswer: false });
+  });
+
+  it("still ends the session on a sign-out, as every call does", async () => {
+    replies["/customer/vpn/renew"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 401 }];
+    expect(await renewSlot(SUB)).toEqual({ kind: "signedOut" });
+    expect(announced).toBe(1);
+  });
+
   it("keeps the renewal interval within sense", async () => {
     replies["/customer/vpn/renew"] = [
       { status: 200, body: { status: "held", enforced: true, limit: 1, handle: "h", renewEverySec: 0 } },
@@ -323,17 +408,20 @@ describe("renew", () => {
 });
 
 describe("release", () => {
-  it("names the subscription, or nothing to release everywhere", async () => {
-    replies["/customer/vpn/release"] = [{ status: 204 }, { status: 204 }];
-    await releaseSlot(SUB);
-    await releaseSlot();
-    expect(sent.map((s) => s.body)).toEqual([{ subscriptionId: SUB }, {}]);
+  /** A release without a handle frees whatever the device holds -- a
+   * late one, the slot a Connect pressed since has just been granted. */
+  it("names the subscription and the grant it gives back, and nothing else", async () => {
+    replies["/customer/vpn/release"] = [{ status: 204 }];
+    await releaseSlot({ subscriptionId: SUB, handle: "Zm9vYmFyYmF6" });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].url).toBe("https://a.example/customer/vpn/release");
+    expect(sent[0].body).toEqual({ subscriptionId: SUB, handle: "Zm9vYmFyYmF6" });
   });
 
   it("is over within its budget when nothing answers, and never throws", async () => {
     replies["/customer/vpn/release"] = ["hang", "hang"];
     const started = Date.now();
-    await expect(releaseSlot(SUB, 50)).resolves.toBeUndefined();
+    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" }, 50)).resolves.toBeUndefined();
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 });
