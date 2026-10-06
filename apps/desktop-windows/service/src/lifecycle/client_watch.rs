@@ -277,8 +277,9 @@ fn process_image(pid: u32) -> Option<String> {
     (ok != 0).then(|| String::from_utf16_lossy(&buffer[..len as usize]))
 }
 
-/// Why a watch ended. Every variant means "do not keep this client's
-/// tunnel up"; they differ only in what gets written to the log.
+/// Why a watch ended. `Exited` and `Unknown` mean "do not keep this
+/// client's tunnel up". `WatchAbandoned` does not: it means the service
+/// is stopping, and the stop has its own teardown -- see [`tears_down`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitSignal {
     /// The normal case: the process is gone.
@@ -287,6 +288,22 @@ pub enum ExitSignal {
     Unknown { pid: u32 },
     /// The runtime is going away, so nobody is left to tear down for.
     WatchAbandoned { pid: u32 },
+}
+
+/// Whether a watch that just ended should run the app-went-away
+/// teardown.
+///
+/// Not while the service is stopping. The stop path (main.rs) cancels
+/// what is running, queues its own full teardown and waits for it; the
+/// watch, abandoned within a second of the stop beginning, used to read
+/// that as the app going away: it logged so, cancelled the *stop's*
+/// teardown -- the job running at that moment, whose route.exe, poke and
+/// `/uninstalltunnelservice` helpers then died mid-step -- and queued a
+/// replacement the process then exited without running. An app that
+/// genuinely exits at the same moment needs nothing more: the stop's
+/// teardown is a full disconnect and a gaming disarm.
+pub fn tears_down(signal: ExitSignal, service_stopping: bool) -> bool {
+    !service_stopping && !matches!(signal, ExitSignal::WatchAbandoned { .. })
 }
 
 impl ExitSignal {
@@ -318,6 +335,30 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         )
+    }
+
+    /// A service stop is not the app going away. The watch is abandoned
+    /// within a second of a stop beginning, and treating that as an exit
+    /// cancelled the stop's own teardown mid-step.
+    #[test]
+    fn a_service_stop_does_not_run_the_app_teardown() {
+        assert!(tears_down(ExitSignal::Exited { pid: 1 }, false));
+        assert!(tears_down(ExitSignal::Unknown { pid: 1 }, false));
+        assert!(!tears_down(ExitSignal::WatchAbandoned { pid: 1 }, false));
+        // An app that really exits while the service stops: the stop's
+        // teardown already covers it.
+        assert!(!tears_down(ExitSignal::Exited { pid: 1 }, true));
+
+        // And the pipe's watch task asks before it logs or cancels.
+        let pipe = include_str!("../pipe.rs");
+        let asked = pipe.find("client_watch::tears_down(").expect("the watch task asks");
+        let noted = asked + pipe[asked..].find("\"the app went away\"").unwrap();
+        let cancelled = noted + pipe[noted..].find("engines.cancel_running()").unwrap();
+        assert!(asked < noted && noted < cancelled);
+        assert!(
+            pipe[..asked].rfind("watch.exited().await").is_some(),
+            "the check is on the watch's own signal"
+        );
     }
 
     /// The property the whole design rests on: the watch names the

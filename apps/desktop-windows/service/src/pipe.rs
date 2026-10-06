@@ -153,6 +153,15 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
                 let engines = engines.clone();
                 tokio::spawn(async move {
                     let signal = watch.exited().await;
+                    // The service is stopping: its own teardown is
+                    // running, and cancelling it here would leave it half
+                    // done. See `client_watch::tears_down`.
+                    if !crate::lifecycle::client_watch::tears_down(
+                        signal,
+                        crate::lifecycle::client_watch::shutting_down(),
+                    ) {
+                        return;
+                    }
                     crate::cleanup_log::note("the app went away", &signal.reason());
 
                     // Whatever it was doing is no longer wanted by
