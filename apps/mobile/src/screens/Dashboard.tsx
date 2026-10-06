@@ -78,6 +78,21 @@ import {
   rungsFrom,
   type Dial,
 } from "@shared/lib/attempts";
+import {
+  deviceSlot,
+  slotStop,
+  type SlotStop,
+  type SlotStopReason,
+} from "@shared/lib/device-slot-session";
+import type { SlotNotice } from "@shared/lib/device-slot-notice";
+import { DeviceSlotCard } from "@shared/components/DeviceSlotCard";
+import {
+  claimWhileRefreshing,
+  renewInForeground,
+  tearDownForSlot,
+  whenForegrounded,
+  type SlotTeardown,
+} from "../lib/device-slot-steps";
 import { loadAllowedApps } from "../lib/per-app";
 import { protocolSupported } from "../lib/platform";
 import {
@@ -338,6 +353,16 @@ export function Dashboard({
    * from the outside, and telling them to check their internet when they
    * pressed Deny is how a product earns a one-star review. */
   const [permissionDenied, setPermissionDenied] = useState(false);
+  /** What the plan's device limit has to say, when it is why this phone
+   * is not connected: refused before dialling, or taken over by another
+   * device. See `deviceSlot`, shared with the Windows client. */
+  const [slotNotice, setSlotNotice] = useState<SlotNotice | null>(null);
+  /** The teardown the device limit started, while it runs. A connect
+   * pressed meanwhile -- "Use on this device instead" on the card that
+   * teardown put up -- waits for it rather than dialling over a tunnel
+   * that is still coming down. Also what stops a second slot event from
+   * starting a second teardown. */
+  const slotTeardownRef = useRef<Promise<SlotTeardown> | null>(null);
 
   useEffect(() => {
     // The remembered route is read first and handed straight to
@@ -469,6 +494,15 @@ export function Dashboard({
       setConnectionState("disconnected");
     }
 
+    // A tunnel this screen did not bring up -- the app reopened over a
+    // running VpnService, or the dashboard back from Settings -- still
+    // uses one of the plan's devices. Back from Settings, what was known
+    // about its slot stands; otherwise nothing is known, and the first
+    // foreground poll claims it.
+    if (adopted !== "disconnected") {
+      deviceSlot.adopt({ subscriptionId: sub?.id, deviceLimit: sub?.deviceLimit });
+    }
+
     if (adopted === "disconnected") {
       setBaselineIp(await captureBaselineIp());
       setExitIp(null);
@@ -485,7 +519,25 @@ export function Dashboard({
     if (connectionState !== "connected" && connectionState !== "degraded")
       return;
 
+    // The plan's device limit, renewed on this poll every
+    // `renewEverySec` (every fourth poll at the contract's sixty seconds;
+    // `onPoll` answers at once when nothing is due), in the foreground
+    // only -- see renewInForeground. Also as the app comes back to the
+    // front, so a phone taken over while it was in a pocket says so as
+    // it is opened rather than a poll later. If another device has the
+    // slot there is nothing left to check: this phone disconnects and
+    // says why. True when it did.
+    const checkSlot = async (): Promise<boolean> => {
+      const event = await renewInForeground();
+      if (event.kind === "keep") return false;
+      await endForSlot(event);
+      return true;
+    };
+    const stopWatching = whenForegrounded(() => void checkSlot());
+
     const id = setInterval(async () => {
+      if (await checkSlot()) return;
+
       let fromStatus: ConnectionState;
       try {
         fromStatus = stateFromStatus(await vpnStatus());
@@ -498,6 +550,11 @@ export function Dashboard({
         sessionTrackerRef.current.broken();
         setConnectionState("disconnected");
         setConnectedAt(null);
+        // The tunnel went on its own, and nothing renews a slot without
+        // one. Given back, rather than left to turn the customer's other
+        // device away as "in use on Android phone" for the ninety
+        // seconds it takes to go stale.
+        void deviceSlot.release();
         return;
       }
 
@@ -520,6 +577,7 @@ export function Dashboard({
 
     return () => {
       clearInterval(id);
+      stopWatching();
       // A change of state ends the stretch being timed, so a reconnect
       // to the same server does not inherit the last session's clock.
       sessionTrackerRef.current.broken();
@@ -536,6 +594,10 @@ export function Dashboard({
     // otherwise begin a second ladder on top of the running one.
     if (connectionState === "connecting" || connectionState === "verifying") {
       cancelRef.current = true;
+      // The pass may already hold a slot. Given back fire and forget,
+      // never in front of the teardown (docs/device-slots.md, 8).
+      void deviceSlot.release();
+      setSlotNotice(null);
       setConnectionState("disconnecting");
       try {
         await disconnect();
@@ -565,6 +627,13 @@ export function Dashboard({
     }
 
     if (connectionState === "connected" || connectionState === "degraded") {
+      // This phone stops using one of the plan's devices. Released fire
+      // and forget, within a second and a half, and never in front of
+      // the teardown: started while the tunnel is still up, the request
+      // goes through it, which on a filtered network is the likeliest
+      // way to reach the API at all.
+      void deviceSlot.release();
+      setSlotNotice(null);
       setConnectionState("disconnecting");
       try {
         await disconnect();
@@ -591,6 +660,26 @@ export function Dashboard({
       return;
     }
 
+    await connectNow();
+  }
+
+  /** A connect the customer asked for: the button, or "Use on this
+   * device instead" with the devices to take the slot over from. */
+  async function connectNow(takeover?: string[]) {
+    if (!protocolUser) return;
+
+    // A tunnel the device limit is still taking down comes down first.
+    // Dialling over it would hand the next engine a descriptor the last
+    // one has not let go of -- so if it did not come down, nothing is
+    // dialled, and the card stays up beside the error line that says the
+    // disconnect did not finish.
+    const pendingTeardown = slotTeardownRef.current;
+    if (pendingTeardown && (await pendingTeardown) === "stuck") return;
+
+    setConnectionError(null);
+    setPermissionDenied(false);
+    setSlotNotice(null);
+
     // Consent first, and before anything is torn down or started.
     // Android raises a system dialog the first time any app asks to
     // create a VpnService, and it cannot be pre-granted -- so this is a
@@ -605,7 +694,93 @@ export function Dashboard({
       return;
     }
 
-    await runLadder();
+    await runLadder({ takeover });
+  }
+
+  /** Says why the device limit stopped this phone -- see `slotStop` for
+   * what is shown and reported, which both clients share. A refusal is
+   * reported as a limit, never as a failed dial: no rungs, so no route
+   * is marked as failing for anybody, and nothing is remembered as this
+   * network's best or worst route. */
+  function showSlotStop(stop: SlotStop) {
+    if (stop.notice) setSlotNotice(stop.notice);
+    if (stop.report) void reportAttempt(stop.report);
+    if (stop.inactive) {
+      // The plan-ended card already says what to do about SUSPENDED and
+      // EXPIRED; anything else gets the error line.
+      const status = stop.subscriptionStatus;
+      if (status) {
+        setSubscription((current) => (current ? { ...current, status } : current));
+      }
+      if (status !== "SUSPENDED" && status !== "EXPIRED") {
+        setConnectionError({
+          kind: "subscriptionInactive",
+          messageKey: "err.subscriptionInactive",
+          detail: `subscription ${status ?? "not active"}`,
+        });
+      }
+    }
+  }
+
+  /** Ends a pass that dialled nothing -- refused by the device limit, or
+   * left with no protocol this build can use.
+   *
+   * The orb went to "connecting" on the press, and it goes back to what
+   * the platform says rather than to an assumed "disconnected": a press
+   * landing during an earlier teardown that did not finish would
+   * otherwise be told that a tunnel still up was down. Read the way
+   * `loadAll` adopts a tunnel, so the two agree. */
+  async function settleUndialled() {
+    let state: ConnectionState = "disconnected";
+    try {
+      state = stateFromStatus(await vpnStatus());
+    } catch {
+      // As in loadAll. This pass brought nothing up, so a platform that
+      // cannot answer has nothing of this pass's to report.
+    }
+    setConnectionState(state);
+  }
+
+  /** The device limit ended this phone's session while it was connected:
+   * another device took the slot over, a claim made through the tunnel
+   * was refused, or the subscription stopped.
+   *
+   * Disconnects and says why. Nothing redials afterwards -- this screen
+   * has no automatic ladder, and must not grow one that runs here: it
+   * would only take the slot back from the device the customer is now
+   * using (docs/device-slots.md, obligation 7). "Disconnected:" waits for
+   * the platform to confirm the tunnel is gone; see DeviceSlotCard. */
+  async function endForSlot(reason: SlotStopReason) {
+    // The session has ended and the app is already on its way to the
+    // sign-in screen, tunnel included; there is nothing to add.
+    if (reason.kind === "signedOut") return;
+    if (slotTeardownRef.current) return;
+    // A pass still walking its protocols stops between them rather than
+    // dialling the next one on a slot that is somebody else's.
+    cancelRef.current = true;
+    showSlotStop(slotStop(reason, "whileConnected"));
+    setFailedOverTo(null);
+    setConnectionState("disconnecting");
+    const teardown = tearDownForSlot({ disconnect, waitForTeardown });
+    slotTeardownRef.current = teardown;
+    try {
+      if ((await teardown) === "down") {
+        setConnectionState("disconnected");
+        setConnectedAt(null);
+        setExitIp(null);
+      } else {
+        // Still routed through a VPN. Saying "disconnected" here would be
+        // the lie the toggle's own teardown refuses to tell.
+        setConnectionError({
+          kind: "unknown",
+          messageKey: "err.teardownStuck",
+          detail: "still routed through a VPN after the device limit ended the session",
+        });
+        setConnectionState("degraded");
+      }
+    } finally {
+      slotTeardownRef.current = null;
+    }
   }
 
   /** Works down the credentials this subscription holds until one is
@@ -616,7 +791,12 @@ export function Dashboard({
    * the ladder is already doing real work, and the shape is the one the
    * other engines slot into unchanged.
    */
-  async function runLadder() {
+  async function runLadder(
+    options: {
+      /** Handles from a device-limit card: take the slot over from them. */
+      takeover?: string[];
+    } = {},
+  ) {
     setFailedOverTo(null);
     setUnsupportedChoice(null);
     cancelRef.current = false;
@@ -626,21 +806,55 @@ export function Dashboard({
     // may already have finished by the time a slow connect returns. See
     // the check after each connect below.
     const sessionAtStart = sessionGeneration();
+    // Busy from the press, not from after the questions below. They can
+    // take a few seconds on a filtered network, and an orb still showing
+    // "Connect" meanwhile took a second press as a second connect, which
+    // would claim a second time over the first. Pressed now, it stops
+    // the pass instead, like any other press during a connect.
+    setConnectionState("connecting");
 
-    // One small question before dialling: are these still the right
-    // servers? It cannot block the connect -- `refreshConnectionConfig`
-    // never throws, gives up on its own short budget, and hands back
-    // what is already held. A refresh that failed must never be the
-    // reason somebody on a censored network cannot connect.
-    const refreshed = await refreshConnectionConfig({
-      held: protocolUsers.length > 0 ? protocolUsers : [protocolUser!],
-    });
+    // Two small questions before dialling, asked together: are these
+    // still the right servers, and may this phone use the VPN now, or is
+    // the plan's device limit in use elsewhere? Neither can block the
+    // connect -- `refreshConnectionConfig` never throws, gives up on its
+    // own short budget and hands back what is already held, and the
+    // claim says "dial" when it gets no answer in three seconds. A
+    // control plane that could not be reached must never be the reason
+    // somebody on a censored network cannot connect.
+    //
+    // The credential named is the one on screen; once the ladder lands,
+    // the slot is moved to the one it landed on (`afterConnected`).
+    const { refreshed, stop } = await claimWhileRefreshing(
+      {
+        subscriptionId: subscription?.id ?? protocolUser!.subscriptionId,
+        protocolUserId: protocolUser!.id,
+        takeover: options.takeover,
+        deviceLimit: subscription?.deviceLimit,
+      },
+      () =>
+        refreshConnectionConfig({
+          held: protocolUsers.length > 0 ? protocolUsers : [protocolUser!],
+        }),
+    );
     if (refreshed.source === "network") {
       setProtocolUsers(refreshed.protocolUsers);
       setProtocolUser(
         (current) =>
           refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current,
       );
+    }
+    // Signed out, or stopped, while those were asked: whoever did it owns
+    // the state from here, and nothing has been dialled.
+    if (sessionGeneration() !== sessionAtStart) return;
+    if (cancelRef.current) return;
+
+    // Every one of the plan's devices is in use elsewhere, or the plan has
+    // stopped: nothing is dialled. Never a failed dial in the attempt
+    // history, never a "best route" learned, never the ladder.
+    if (stop) {
+      showSlotStop(stop);
+      await settleUndialled();
+      return;
     }
 
     const all =
@@ -675,10 +889,11 @@ export function Dashboard({
       // routes this build cannot use -- and that is invisible from the
       // panel unless somebody says so.
       void reportAttempt({ kind: "CONNECT", outcome: "OTHER", reason: detail });
+      // The claim may have been granted; nothing is going to use it.
+      void deviceSlot.release();
+      await settleUndialled();
       return;
     }
-
-    setConnectionState("connecting");
 
     // The same ladder order the Windows client uses, which this screen
     // did not: it walked "pin, then the fixed protocol list" with no
@@ -889,6 +1104,16 @@ export function Dashboard({
               [...dials, proven ? { routeId: candidate.routeId, carried: true } : null],
             ),
           });
+          // The slot, now that a tunnel is up: claimed through it if the
+          // claim before dialling went unanswered, or moved to the
+          // credential the ladder landed on. Not awaited -- the pass is
+          // over. A refusal that arrives this way is the limit enforced
+          // late, and ends the session the way a takeover does.
+          void deviceSlot.afterConnected({ protocolUserId: candidate.id }).then((event) => {
+            if (event.kind !== "keep" && sessionGeneration() === sessionAtStart) {
+              void endForSlot(event);
+            }
+          });
           return;
         }
 
@@ -926,6 +1151,11 @@ export function Dashboard({
     setExitIp(null);
     setConnectionError(lastError);
     setConnectionState("disconnected");
+    // Nothing came up, so this phone is not using one of the plan's
+    // devices. Kept, the slot would turn the customer's other device away
+    // for the next ninety seconds with "Neoxify is in use on Android
+    // phone" -- a claim about a phone that is not connected.
+    void deviceSlot.release();
     // The report that has been costing a screenshot and a conversation
     // every time a tablet could not connect: which protocols were tried,
     // in order, and what each one did.
@@ -1163,6 +1393,20 @@ export function Dashboard({
                         </p>
                       ) : null}
                     </div>
+
+                    {/* The plan's device limit, when it is why this phone
+                        is not connected: where Neoxify is in use, and the
+                        one press that moves it here. */}
+                    {slotNotice ? (
+                      <DeviceSlotCard
+                        notice={slotNotice}
+                        // "Disconnected:" is a claim about the tunnel, so
+                        // it waits for the platform to have said so.
+                        tunnelDown={connectionState === "disconnected"}
+                        onUseHere={(takeover) => void connectNow(takeover)}
+                        onDismiss={() => setSlotNotice(null)}
+                      />
+                    ) : null}
 
                     <div className="min-h-4 px-2 text-center">
                       {permissionDenied ? (
