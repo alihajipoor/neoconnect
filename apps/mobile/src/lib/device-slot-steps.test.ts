@@ -189,9 +189,11 @@ describe("before dialling", () => {
   });
 
   /** Dial, claim once more through the tunnel (obligation 2: the API may
-   * be reached another way there), and then leave it be. */
-  it("dials against a backend without slots, asks once through the tunnel, and does not keep asking it", async () => {
-    answer = () => ({ ok: false, error: "Cannot POST /customer/vpn/claim", status: 404 });
+   * be reached another way there), and then renew at the interval
+   * (obligation 11: anything but a verdict keeps the tunnel and renews)
+   * -- never more often, and never at the tunnel's expense. */
+  it("dials against a backend without slots, claims once through the tunnel, then renews at the interval", async () => {
+    answer = (path) => ({ ok: false, error: `Cannot POST ${path}`, status: 404 });
     const { slot, advance } = session();
 
     const { stop } = await claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, slot);
@@ -200,8 +202,13 @@ describe("before dialling", () => {
     await slot.afterConnected({ protocolUserId: CRED });
     expect(calls).toHaveLength(2);
     advance(10 * 60_000);
-    await renewInForeground(slot, () => true);
-    expect(calls).toHaveLength(2);
+    expect(await renewInForeground(slot, () => true)).toEqual({ kind: "keep" });
+    expect(await renewInForeground(slot, () => true)).toEqual({ kind: "keep" });
+    expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/claim", "/customer/vpn/claim", "/customer/vpn/renew"]);
+    advance(60_000);
+    expect(await renewInForeground(slot, () => true)).toEqual({ kind: "keep" });
+    expect(calls).toHaveLength(4);
+    expect(calls[3].path).toBe("/customer/vpn/renew");
   });
 
   it.each([

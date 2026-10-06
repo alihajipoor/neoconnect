@@ -208,8 +208,12 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
    * again in favour of the very device the customer chose to replace --
    * and every press of the button would end the same way. */
   let pendingTakeover: string[] = [];
-  /** Whether an unanswered claim is worth repeating. A 404 from a backend
-   * that has no slots is not. */
+  /** Whether an unanswered claim is worth repeating as a claim. A 404
+   * from a backend that has no slots is not, nor a 400, a 403 or a 409
+   * without a code. The question is still asked on the renewal clock --
+   * as a renewal, which is what the contract asks for after any claim
+   * answer that is not a verdict (obligation 11) -- it is only the claim
+   * itself that is not sent again. */
   let retryClaim = true;
   /** Bumped by anything that starts over -- a new connect, a release, a
    * reset -- so an answer still in flight from before cannot land on
@@ -468,8 +472,8 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
         // Once even after an answer no repeat was expected to change (a
         // 404, a 409 with no code): the contract asks for this claim
         // whatever the first one got (obligation 2), and through the
-        // tunnel it may reach the API by another way. Only repeats on the
-        // renewal clock wait for an answer that could change.
+        // tunnel it may reach the API by another way. After that, see
+        // `onPoll`: the renewal clock goes on either way.
         return whileConnected(await claimNow(protocolUserId, LATE_CLAIM_BUDGET_MS));
       }
       if (standing === "held" && protocolUserId !== null && protocolUserId !== claimedProtocolUserId) {
@@ -490,10 +494,24 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
           const event = await renewNow(RENEW_BUDGET_MS);
           return event.kind === "unanswered" ? { kind: "keep" } : event;
         }
-        if ((standing === "unclaimed" || standing === "uncounted") && retryClaim) {
-          // Claimed rather than renewed: the claim names the device and
-          // the credential, and carries a takeover still owed.
-          return whileConnected(await claimNow(dialledProtocolUserId, LATE_CLAIM_BUDGET_MS));
+        if (standing === "unclaimed" || standing === "uncounted") {
+          if (retryClaim || pendingTakeover.length > 0) {
+            // Claimed rather than renewed: the claim names the device and
+            // the credential, and carries a takeover still owed -- which a
+            // renewal cannot, and without which the server would only
+            // name the device the customer chose to replace.
+            return whileConnected(await claimNow(dialledProtocolUserId, LATE_CLAIM_BUDGET_MS));
+          }
+          // The claim was answered with something no repeat of it is
+          // expected to change: a 400, a 403, a 404, a 409 without a
+          // code. That is no verdict either, and the contract's answer
+          // to one is to keep the tunnel and renew at the next interval
+          // (obligation 11) -- not to stop asking for the rest of the
+          // session. A renewal from a device holding no slot is granted
+          // one if there is room, and answered `displaced` if not; any
+          // other answer to it changes nothing, as for every renewal.
+          const event = await renewNow(RENEW_BUDGET_MS);
+          return event.kind === "unanswered" ? { kind: "keep" } : event;
         }
         // `unenforced` is renewed by nobody: harmless and pointless, per
         // the contract, and every request counts on a censored link.

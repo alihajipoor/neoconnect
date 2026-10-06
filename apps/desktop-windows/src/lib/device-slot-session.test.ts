@@ -159,18 +159,19 @@ describe("once connected", () => {
   /** Obligation 2: any answer but the three verdicts means dial, and
    * claim again once the tunnel is up -- a 404 or a codeless 409
    * included, since through the tunnel the API may be reached another
-   * way. Past that one claim, a backend with no slots is not asked
-   * again. */
-  it("claims once through the tunnel after an answer that was no verdict, and not again", async () => {
+   * way. Past that one claim the claim is not repeated; obligation 11
+   * asks for a renewal at the next interval instead. */
+  it("claims once through the tunnel after an answer that was no verdict, then renews on the renewal clock", async () => {
     const notSlots: ClaimOutcome = { kind: "unanswered", reason: "404", retryable: false, noAnswer: false };
-    const h = harness([notSlots, notSlots]);
+    const h = harness([notSlots, notSlots], [{ kind: "unanswered", reason: "404", retryable: false, noAnswer: false }]);
     expect(await h.session.beforeDial({ subscriptionId: SUB })).toEqual({ kind: "dial" });
     expect(await h.session.afterConnected({})).toEqual({ kind: "keep" });
     expect(h.claim).toHaveBeenCalledTimes(2);
-    h.advance(120_000);
-    await h.session.onPoll();
+    h.advance(60_000);
+    expect(await h.session.onPoll()).toEqual({ kind: "keep" });
     expect(h.claim).toHaveBeenCalledTimes(2);
-    expect(h.renew).not.toHaveBeenCalled();
+    expect(h.renew).toHaveBeenCalledTimes(1);
+    expect(h.renew).toHaveBeenCalledWith(SUB, 5_000);
   });
 
   it("takes a grant from that claim through the tunnel like any other", async () => {
@@ -790,6 +791,79 @@ describe("a claim refused after connecting", () => {
     expect(h.session.standing()).toBe("unclaimed");
     h.advance(60_000);
     expect(await h.session.onPoll()).toEqual({ kind: "refused", refusal: REFUSAL });
+  });
+});
+
+/** Obligation 11, "anything else": keep the tunnel and renew at the next
+ * interval. A claim through the tunnel answered with something no repeat
+ * of the claim is expected to change -- a 400, a 403, a 404, a 409 with
+ * no code -- is one of those, and used to stop every further question
+ * for the rest of the session. */
+describe("a claim through the tunnel answered with something not worth claiming again", () => {
+  const notWorthRepeating = (status: number): ClaimOutcome => ({
+    kind: "unanswered",
+    reason: `Request failed (${status})`,
+    retryable: false,
+    noAnswer: false,
+  });
+
+  it.each([
+    ["a 400", notWorthRepeating(400)],
+    ["a 403", notWorthRepeating(403)],
+    ["a 404", notWorthRepeating(404)],
+    ["a 409 with no code", notWorthRepeating(409)],
+  ])("after %s, keeps the tunnel and renews at every interval, never sooner", async (_name, answer) => {
+    const renewAnswered: RenewOutcome = { kind: "unanswered", reason: "Request failed (503)", retryable: true, noAnswer: false };
+    const h = harness([UNANSWERED, answer], [renewAnswered, HELD]);
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" });
+    expect(await h.session.afterConnected({})).toEqual({ kind: "keep" });
+
+    h.advance(30_000);
+    expect(await h.session.onPoll()).toEqual({ kind: "keep" });
+    expect(h.renew).not.toHaveBeenCalled();
+
+    // Due: renewed, and an answer that is no verdict keeps the tunnel.
+    h.advance(30_000);
+    expect(await h.session.onPoll()).toEqual({ kind: "keep" });
+    expect(h.renew).toHaveBeenCalledTimes(1);
+    expect(h.session.standing()).toBe("unclaimed");
+
+    // And again an interval later -- granted this time, since there was
+    // room: a renewal from a device holding no slot gets one.
+    h.advance(15_000);
+    await h.session.onPoll();
+    expect(h.renew).toHaveBeenCalledTimes(1);
+    h.advance(45_000);
+    expect(await h.session.onPoll()).toEqual({ kind: "keep" });
+    expect(h.renew).toHaveBeenCalledTimes(2);
+    expect(h.session.standing()).toBe("held");
+    // The claim itself is not sent again.
+    expect(h.claim).toHaveBeenCalledTimes(2);
+  });
+
+  it("ends the session when the renewal finds the slot is another device's", async () => {
+    const by = { handle: "pc", label: null, platform: "windows" };
+    const h = harness([UNANSWERED, notWorthRepeating(403)], [{ kind: "displaced", by, at: null }]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    await h.session.afterConnected({});
+    h.advance(60_000);
+    expect(await h.session.onPoll()).toEqual({ kind: "displaced", by, at: null });
+    expect(h.session.standing()).toBe("displaced");
+  });
+
+  /** A renewal cannot carry the takeover, and would only name the device
+   * the customer chose to replace. While one is owed, the claim carrying
+   * it is what is asked on the clock. */
+  it("asks with the claim carrying the takeover while one is owed", async () => {
+    const h = harness([UNANSWERED, notWorthRepeating(400), GRANT]);
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] });
+    expect(await h.session.afterConnected({})).toEqual({ kind: "keep" });
+    h.advance(60_000);
+    expect(await h.session.onPoll()).toEqual({ kind: "keep" });
+    expect(h.claim).toHaveBeenCalledTimes(3);
+    expect(h.claim.mock.calls[2][0]).toEqual({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] });
+    expect(h.renew).not.toHaveBeenCalled();
+    expect(h.session.standing()).toBe("held");
   });
 });
 
