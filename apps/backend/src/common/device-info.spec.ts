@@ -11,13 +11,29 @@ describe("deviceInfoFrom", () => {
       ...(platform !== undefined ? { "x-neoxify-device-platform": platform } : {}),
     });
 
-  it("takes a generic label and a known platform as sent", () => {
-    expect(from("Android phone (Pixel 7)", "android")).toEqual({ label: "Android phone (Pixel 7)", platform: "android" });
+  it("takes a model or the user's own name, and a known platform, as sent", () => {
+    expect(from("Pixel 7", "android")).toEqual({ label: "Pixel 7", platform: "android" });
+    expect(from("iPad", "ios")).toEqual({ label: "iPad", platform: "ios" });
   });
 
-  it("names the device after its platform when it sends no label", () => {
-    expect(from(undefined, "Windows")).toEqual({ label: "Windows PC", platform: "windows" });
-    expect(from(undefined, "ios")).toEqual({ label: "iPhone", platform: "ios" });
+  /** The device's kind is named by whoever reads it, from `platform`, in
+   * their own language: "Windows PC" in the middle of a Persian sentence
+   * is what this prevents. */
+  it("gives a device that sends only its platform, or a generic English kind, no label", () => {
+    expect(from(undefined, "Windows")).toEqual({ label: null, platform: "windows" });
+    expect(from("Windows PC", "windows")).toEqual({ label: null, platform: "windows" });
+    expect(from("android phone", "android")).toEqual({ label: null, platform: "android" });
+    expect(from("iPhone", "ios")).toEqual({ label: null, platform: "ios" });
+  });
+
+  // What the apps were first built to send.
+  it("keeps the model out of a generic kind with a model in brackets", () => {
+    expect(from("Android phone (Pixel 7)", "android").label).toBe("Pixel 7");
+    expect(from("Android phone ()", "android").label).toBe("Android phone ()");
+  });
+
+  it("still records the platform of a device with no label, so it has something to say", () => {
+    expect(hasDeviceInfo(from(undefined, "android"))).toBe(true);
   });
 
   it("knows nothing about a device that sent nothing, and says so", () => {
@@ -36,7 +52,7 @@ describe("deviceInfoFrom", () => {
   });
 
   it("strips control and bidi-override characters and collapses whitespace", () => {
-    expect(from("Windows\u0000  PC‮\t", "windows").label).toBe("Windows PC");
+    expect(from("Ali's\u0000  laptop‮\t", "windows").label).toBe("Ali's laptop");
   });
 
   it("caps a label at 48 characters", () => {
@@ -44,9 +60,9 @@ describe("deviceInfoFrom", () => {
   });
 
   it.each(["ali-laptop.local", "host.example.com", "DESKTOP-7H3K2L9", "LAPTOP-AB12CD3"])(
-    "drops %j, which looks like a hostname, for the platform's generic label",
+    "drops %j, which looks like a hostname, leaving the platform to name the device",
     (hostname) => {
-      expect(from(hostname, "windows").label).toBe("Windows PC");
+      expect(from(hostname, "windows")).toEqual({ label: null, platform: "windows" });
     },
   );
 

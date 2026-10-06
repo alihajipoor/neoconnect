@@ -68,8 +68,8 @@ function build(opts: { limit?: number | null; status?: string; sessions?: Record
 }
 
 const as = (sessionId?: string) => ({ customerId: CUSTOMER, sessionId });
-const windows = { label: "Windows PC", platform: "windows" as const };
-const android = { label: "Android phone (Pixel 7)", platform: "android" as const };
+const windows = { label: null, platform: "windows" as const };
+const android = { label: "Pixel 7", platform: "android" as const };
 
 /** The 409 a refused claim throws, as the app receives it. */
 async function refusal(promise: Promise<unknown>) {
@@ -131,7 +131,7 @@ describe("DeviceSlotsService", () => {
       message: "Your plan allows 1 device at a time.",
       limit: 1,
       holders: [
-        { handle: expect.any(String), label: "Windows PC", platform: "windows", since: expect.any(String), lastSeen: expect.any(String) },
+        { handle: expect.any(String), label: null, platform: "windows", since: expect.any(String), lastSeen: expect.any(String) },
       ],
     });
   });
@@ -203,7 +203,7 @@ describe("DeviceSlotsService", () => {
       status: "displaced",
       subscriptionId: SUB,
       limit: 1,
-      by: { handle: granted.handle, label: "Android phone (Pixel 7)", platform: "android" },
+      by: { handle: granted.handle, label: "Pixel 7", platform: "android" },
       at: expect.any(String),
     });
   });
@@ -247,7 +247,7 @@ describe("DeviceSlotsService", () => {
     // The PC comes back to a slot that is taken: it is told by whom.
     await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({
       status: "displaced",
-      by: { label: "Android phone (Pixel 7)" },
+      by: { label: "Pixel 7" },
     });
   });
 
@@ -262,7 +262,7 @@ describe("DeviceSlotsService", () => {
     await jest.advanceTimersByTimeAsync(20_000);
 
     const body = await refusal(service.claim(as(PC), { subscriptionId: SUB }, windows));
-    expect(body.holders[0].label).toBe("Android phone (Pixel 7)");
+    expect(body.holders[0].label).toBe("Pixel 7");
   });
 
   // During the transition a device may connect with a shared credential;
@@ -425,13 +425,33 @@ describe("DeviceSlotsService", () => {
   });
 
   it("names the device from its headers, and keeps the name from sign-in when a claim sends none", async () => {
-    const { service, sessions } = build({ sessions: { [PC]: { label: "Windows PC", platform: "windows" }, [PHONE]: {} } });
+    const { service, sessions } = build({ sessions: { [PC]: { label: "Ali's laptop", platform: "windows" }, [PHONE]: {} } });
 
     await service.claim(as(PC), { subscriptionId: SUB });
     const body = await refusal(service.claim(as(PHONE), { subscriptionId: SUB }, android));
 
-    expect(body.holders[0]).toMatchObject({ label: "Windows PC", platform: "windows" });
-    expect(sessions[PHONE]).toMatchObject({ label: "Android phone (Pixel 7)", platform: "android" });
+    expect(body.holders[0]).toMatchObject({ label: "Ali's laptop", platform: "windows" });
+    expect(sessions[PHONE]).toMatchObject({ label: "Pixel 7", platform: "android" });
+  });
+
+  /** "Windows PC" is English; the phone reading it may be in Persian. The
+   * kind of device is named from `platform` by the device that shows it.
+   * A generic name stored before this rule -- or sent by an app built to
+   * the old contract -- is not passed on. */
+  it("never hands another device a generic English kind as a label", async () => {
+    const { service } = build({
+      sessions: { [PC]: { label: "Windows PC", platform: "windows" }, [PHONE]: { label: "Android phone", platform: "android" } },
+    });
+
+    await service.claim(as(PC), { subscriptionId: SUB }, { label: "Windows PC", platform: "windows" });
+    const refused = await refusal(service.claim(as(PHONE), { subscriptionId: SUB }, { label: "Android phone (Pixel 7)", platform: "android" }));
+    expect(refused.holders[0]).toMatchObject({ label: null, platform: "windows" });
+
+    await service.claim(as(PHONE), { subscriptionId: SUB, takeover: [refused.holders[0].handle] });
+    await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({
+      status: "displaced",
+      by: { label: "Pixel 7", platform: "android" },
+    });
   });
 
   /** Two people sharing one slot by tapping back and forth is within the

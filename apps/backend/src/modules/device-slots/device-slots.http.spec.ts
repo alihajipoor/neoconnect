@@ -111,9 +111,9 @@ describe("device slots over HTTP", () => {
     expect(phone.status).toBe(409);
     const refused = (await phone.json()) as { code: string; limit: number; holders: { handle: string; label: string }[] };
     expect(refused).toMatchObject({ statusCode: 409, code: "DEVICE_LIMIT", limit: 1 });
-    expect(refused.holders).toEqual([
-      expect.objectContaining({ handle: granted.handle, label: "Windows PC", platform: "windows" }),
-    ]);
+    // "Windows PC" is a kind, not a name: the phone names it from
+    // `platform`, in its own language.
+    expect(refused.holders).toEqual([expect.objectContaining({ handle: granted.handle, label: null, platform: "windows" })]);
 
     // "Use on this device instead".
     const takeover = await post("/customer/vpn/claim", "session-phone", { subscriptionId: SUB, takeover: [granted.handle] });

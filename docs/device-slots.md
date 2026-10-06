@@ -72,24 +72,32 @@ use on Windows PC since 14:02".
 
 | Header | Value |
 |---|---|
-| `X-Neoxify-Device-Platform` | `windows`, `macos`, `linux`, `android` or `ios` (case-insensitive). Anything else is ignored. |
-| `X-Neoxify-Device-Label` | A **generic** name: `Windows PC`, `Mac`, `Android phone (Pixel 7)`, `iPhone`. ASCII, or UTF-8 **percent-encoded** (`encodeURIComponent`) for anything else -- HTTP header values are Latin-1. |
+| `X-Neoxify-Device-Platform` | `windows`, `macos`, `linux`, `android` or `ios` (case-insensitive). Anything else is ignored. Always send it. |
+| `X-Neoxify-Device-Label` | Only what the platform does not say: a **model** (`Pixel 7`, `Galaxy S24`, `iPad`) or the user's own name for the device. Omit it when there is neither. ASCII, or UTF-8 **percent-encoded** (`encodeURIComponent`) for anything else -- HTTP header values are Latin-1. |
 
 Rules for the label:
 
+- **Never the device's kind.** `Windows PC` or `Android phone` is English,
+  and the device that shows it may be in Persian: the kind is named by
+  the reader, from `platform`, in its own language. The backend drops a
+  generic kind (`Windows PC`, `Mac`, `Linux PC`, `Android phone`,
+  `iPhone`, ...) to `null`, and keeps only the model out of `Android
+  phone (Pixel 7)` -- the form the apps were first built to send.
 - **Never a hostname, computer name or account name.** It is shown on
   other devices and a machine name is personal -- often the owner's own
   name. The backend also drops anything that looks like one
-  (`ali-laptop.local`, `DESKTOP-7H3K2L9`) in favour of the platform's
-  generic label, but that is a backstop, not permission.
-- A phone model is fine (`Android phone (Galaxy S24)`); the user's own
-  wording is fine if the app ever lets them set it.
+  (`ali-laptop.local`, `DESKTOP-7H3K2L9`), but that is a backstop, not
+  permission.
 - Control characters are stripped, whitespace collapsed, and the label is
   cut to 48 characters.
-- Platform without label: the backend names the device `Windows PC`,
-  `Mac`, `Linux PC`, `Android phone` or `iPhone`.
-- Sending neither leaves the name as it was. A device never named shows
-  as `label: null`; the app should then say "another device".
+- Sending neither header leaves the name as it was.
+
+**Naming a device on screen** (`holders[]`, `by`): in the app's own
+language, `label` when it is not `null` -- a model or the user's words,
+shown as sent -- and otherwise the platform's name (`windows` → "Windows
+PC" in English, `android` → "Android phone", `ios` → "iPhone", `macos`
+→ "Mac", `linux` → "Linux PC", each in the app's language); with
+neither, "another device".
 
 The browser sign-in flow (Google/Facebook through the system browser)
 cannot send headers when the session is created; the device is named by
@@ -154,7 +162,7 @@ Request:
   "holders": [
     {
       "handle": "Zm9vYmFyYmF6",
-      "label": "Windows PC",
+      "label": null,
       "platform": "windows",
       "since": "2026-10-06T10:32:04.120Z",
       "lastSeen": "2026-10-06T10:55:41.004Z"
@@ -165,8 +173,8 @@ Request:
 
 - `holders` are the devices using the slots: `since` is when each got its
   slot, `lastSeen` when it last renewed or carried traffic. Format times
-  in the device's locale and time zone. `label` may be `null` ("another
-  device").
+  in the device's locale and time zone. `label` is often `null`: name
+  the device from `platform` (see *Naming a device on screen*).
 - `message` is an English fallback. Word the card from `limit` and
   `holders` in the app's language.
 - **Never a 401.** The apps end the session on 401; a refusal is not a
@@ -209,7 +217,7 @@ still means the device was signed out, as everywhere.)
 
 ```json
 { "status": "displaced", "subscriptionId": "6f1c...", "limit": 1,
-  "by": { "handle": "YmF6cXV4", "label": "Android phone (Pixel 7)", "platform": "android" },
+  "by": { "handle": "YmF6cXV4", "label": "Pixel 7", "platform": "android" },
   "at": "2026-10-06T11:02:13.551Z" }
 ```
 
@@ -289,7 +297,7 @@ refusal of the device -- see obligation 2.
    be refused too, over a working tunnel: see item 11.
 3. **On 409 `DEVICE_LIMIT`**, do not dial. Show, in the app's language:
    "Your plan allows *{limit}* device(s) at a time. Neoxify is in use on
-   *{label}* since *{since}*." with **Use on this device instead** and
+   *{device}* since *{since}*." with **Use on this device instead** and
    **Cancel**. *Use here* claims again with `takeover` = the handles shown
    (the server frees one slot, from the device least recently seen), then
    dials. On a plan of more than one the app may let the customer pick
@@ -307,7 +315,7 @@ refusal of the device -- see obligation 2.
    A renewal that is not answered 200 -- unreachable, 5xx, 429, anything
    but a 401 -- changes nothing: keep the tunnel.
 7. **On `displaced`**: disconnect, show "Disconnected: Neoxify is now in
-   use on *{by.label}*." with **Use on this device instead**, and **do
+   use on *{device}*." with **Use on this device instead**, and **do
    not run the failover ladder** (it would only take the slot back or
    fail). On `inactive`: disconnect and show the plan-ended state.
 8. **On Disconnect, release** -- fire and forget, at most 1.5 s, never
@@ -323,7 +331,7 @@ refusal of the device -- see obligation 2.
    limit of *{limit}* may be the reason.") and then run the ladder as
    usual. Never claim a server "couldn't be reached" if it was never
    dialled.
-10. **The label is generic** -- never a hostname (see *Headers*).
+10. **The label is a model or the user's own words** -- never the device's kind and never a hostname; *{device}* is named as *Naming a device on screen* says (see *Headers*).
 11. **A claim refused after connecting.** When the claim before dialling
     went unanswered (item 2), the device is already connected when its
     claim through the tunnel is answered -- and in Iran that will be the

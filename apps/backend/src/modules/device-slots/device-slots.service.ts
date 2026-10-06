@@ -10,7 +10,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { PrismaService } from "../../prisma/prisma.service";
 import { KeyedLock } from "../protocol-users/keyed-lock";
-import { hasDeviceInfo, type DeviceInfo } from "../../common/device-info";
+import { hasDeviceInfo, specificLabel, type DeviceInfo } from "../../common/device-info";
 import { DeviceStateStore } from "./device-state.store";
 import { DevicePresence, deviceKeyOf, resolveDevices, type DeviceKey } from "./device-presence";
 import { deviceSlotsMode } from "./modes";
@@ -223,7 +223,7 @@ export class DeviceSlotsService {
       return this.unenforced(subscription.id, limit);
     }
 
-    const label = (device?.label ?? null) || session.label;
+    const label = specificLabel(device?.label) ?? specificLabel(session.label);
     const platform = (device?.platform ?? null) || session.platform;
     const named = request.protocolUserId
       ? await this.sharedCredentialOf(subscription.id, request.protocolUserId)
@@ -354,7 +354,7 @@ export class DeviceSlotsService {
           status: "displaced" as const,
           subscriptionId: subscription.id,
           limit,
-          by: displaced.by,
+          by: { ...displaced.by, label: specificLabel(displaced.by.label) },
           at: new Date(displaced.at).toISOString(),
         };
       }
@@ -376,7 +376,7 @@ export class DeviceSlotsService {
           handle,
           since: now,
           lastRenew: now,
-          label: session.label,
+          label: specificLabel(session.label),
           platform: session.platform,
           protocolUserId: null,
           tookOverAt: null,
@@ -389,7 +389,7 @@ export class DeviceSlotsService {
         status: "displaced" as const,
         subscriptionId: subscription.id,
         limit,
-        by: { handle: current.handle, label: current.label, platform: current.platform },
+        by: { handle: current.handle, label: specificLabel(current.label), platform: current.platform },
         at: new Date(current.since).toISOString(),
       };
     });
@@ -520,11 +520,12 @@ export class DeviceSlotsService {
   }
 
   private async nameSession(sessionId: string, device: DeviceInfo) {
+    const label = specificLabel(device.label);
     await this.prisma.customerSession
       .updateMany({
         where: { id: sessionId },
         data: {
-          ...(device.label !== null ? { label: device.label } : {}),
+          ...(label !== null ? { label } : {}),
           ...(device.platform !== null ? { platform: device.platform } : {}),
         },
       })
@@ -679,7 +680,7 @@ function positive(limit: number | null): number | null {
 function view(h: Holder, lastSeen: number): HolderView {
   return {
     handle: h.handle,
-    label: h.label,
+    label: specificLabel(h.label),
     platform: h.platform,
     since: new Date(h.since).toISOString(),
     lastSeen: new Date(lastSeen).toISOString(),
