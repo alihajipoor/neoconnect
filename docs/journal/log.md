@@ -1705,7 +1705,7 @@ reported it as working; it does not hold. The node mirrors are the real
 Iranian path, and the bundle's ordering has to keep them prominent.
 
 **germany-1's mirror is dead from Iran at the IP layer.** Handshake to
-`38.60.249.229:2053` never completes from ir1 regardless of SNI --
+`<germany-1>:2053` never completes from ir1 regardless of SNI --
 including `www.google.com` -- while the same test against finland
 succeeds immediately. TCP opens on 22/80/443 too. Not a name block. Kept
 in the bundle since it is fine everywhere else, but it is dead weight for
@@ -1823,7 +1823,7 @@ from ir1, and ir1's network filters differently from the consumer ISPs
 customers actually use. Measured again from six Iranian ISP vantage
 points via check-host:
 
-**germany is not blocked from Iran.** `http://38.60.249.229/` returns 200
+**germany is not blocked from Iran.** `http://<germany-1>/` returns 200
 from ir1..ir8 in ~0.15s, and the mirror
 `https://{node-mirror}/api/health` returns 200 from four
 Iranian nodes. What is true is narrower and much less interesting: ir1
