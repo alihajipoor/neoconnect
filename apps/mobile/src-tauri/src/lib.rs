@@ -62,7 +62,9 @@ pub fn run() {
             // only existed there, so on the phones it always rejected.
             latency::probe_tcp,
             build_platform,
-            control_plane_probe::probe_control_plane
+            control_plane_probe::probe_control_plane,
+            // And its stop, for when a connect starts while it runs.
+            control_plane_probe::cancel_control_plane_probe
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

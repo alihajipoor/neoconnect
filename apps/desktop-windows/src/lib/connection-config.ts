@@ -1,5 +1,5 @@
 import { reportAttempt, type AttemptReport } from "./attempts";
-import { probeAddendum } from "./control-plane-probe";
+import { connectStarting, probeAddendum } from "./control-plane-probe";
 import { newTrace, renderTrace } from "./endpoint-trace";
 import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
 import { getProtocolUsers } from "./customer";
@@ -253,6 +253,11 @@ const TRIGGER_LABEL: Record<RefreshTrigger, string> = {
   online: "online",
 };
 
+/** Screen states in which a connect or a disconnect is moving the path
+ * the control plane is reached over. A probe begun in one would measure
+ * the move. Matched as strings: `appState` is whatever the screen held. */
+const PATH_CHANGING: ReadonlySet<string> = new Set(["connecting", "verifying", "disconnecting"]);
+
 /** Fetches the credentials again, unless what is held is still fresh.
  *
  * Never throws and never rejects. Every failure path ends in "connect
@@ -261,6 +266,12 @@ const TRIGGER_LABEL: Record<RefreshTrigger, string> = {
  */
 export async function refreshConnectionConfig(options: RefreshOptions): Promise<ConfigRefresh> {
   const { held, budgetMs = REFRESH_BUDGET_MS, force = false, trigger = "connect", appState, now = Date.now() } = options;
+
+  // First, ahead of the freshness check: the connect starts whether or
+  // not this asks anything, and a probe after an earlier failure -- a
+  // resume refresh's, typically, since resume is when people press
+  // Connect -- must not run across it.
+  if (trigger === "connect") connectStarting();
 
   const savedAt =
     options.heldSavedAt !== undefined ? options.heldSavedAt : ((await loadSnapshot())?.savedAt ?? null);
@@ -361,9 +372,14 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   // still holding with it. The stage each address failed at, from a
   // socket-level probe, follows as an addendum -- but not before a
   // connect, which starts the moment this returns and would change the
-  // path under the probe. See control-plane-probe.ts.
+  // path under the probe -- nor while the screen said one, or a
+  // disconnect, was under way. See control-plane-probe.ts.
   if (trigger === "connect") void reportAttempt(report);
-  else void reportAttempt(report, probeAddendum(trace.entries));
+  else
+    void reportAttempt(
+      report,
+      probeAddendum(trace.entries, { pathChanging: appState !== undefined && PATH_CHANGING.has(appState) }),
+    );
   // Also on the console, where a beta tester reading their own log can
   // see it without a round trip through the panel.
   console.warn(

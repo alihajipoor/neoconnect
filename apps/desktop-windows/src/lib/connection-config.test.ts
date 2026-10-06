@@ -46,8 +46,13 @@ vi.mock("./attempts", () => ({ reportAttempt: (r: unknown, addendum?: unknown) =
  * and how its answer joins the report is attempts.test.ts's. What
  * matters here is when the refresh asks for it. */
 type Addendum = { apiEndpoint?: string; reason?: string } | undefined;
-const probeAddendum = vi.fn<(entries: unknown[]) => Promise<Addendum>>();
-vi.mock("./control-plane-probe", () => ({ probeAddendum: (e: unknown[]) => probeAddendum(e) }));
+type ProbeOptions = { pathChanging?: boolean };
+const probeAddendum = vi.fn<(entries: unknown[], options?: ProbeOptions) => Promise<Addendum>>();
+const connectStarting = vi.fn();
+vi.mock("./control-plane-probe", () => ({
+  probeAddendum: (e: unknown[], o?: ProbeOptions) => probeAddendum(e, o),
+  connectStarting: () => connectStarting(),
+}));
 
 /** Reports are fire-and-forget, so a test waits for one rather than
  * reading it the moment the refresh returns. */
@@ -92,6 +97,7 @@ beforeEach(() => {
   reportAttempt.mockReset();
   probeAddendum.mockReset();
   probeAddendum.mockResolvedValue(undefined);
+  connectStarting.mockReset();
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 
@@ -371,6 +377,54 @@ describe("refreshConnectionConfig", () => {
     expect(probeAddendum).not.toHaveBeenCalled();
     expect((await firstReport<{ apiEndpoint: string }>()).apiEndpoint).toBe("req: api.example.net=timeout@8000");
     expect(reportAttempt.mock.calls[0][1]).toBeUndefined();
+  });
+
+  /** The pre-connect refresh is the first step of every connect pass in
+   * both apps. It tells the probe a connect is starting -- so a resume
+   * probe still running stops -- whether or not it asks anything. */
+  it("tells the probe a connect is starting, even when it asks nothing", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now());
+
+    const result = await refreshConnectionConfig({ held });
+
+    expect(result.source).toBe("fresh");
+    expect(fetchUsers).not.toHaveBeenCalled();
+    expect(connectStarting).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call a resume refresh a connect starting", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: true, data: held });
+
+    await refreshConnectionConfig({ held, force: true, trigger: "resume" });
+
+    expect(connectStarting).not.toHaveBeenCalled();
+  });
+
+  /** Resume is when people press Connect. A refresh that began while the
+   * screen showed a connect or disconnect under way has the probe skip,
+   * since the path it would measure is moving. */
+  it.each([
+    ["connecting", true],
+    ["verifying", true],
+    ["disconnecting", true],
+    ["connected", false],
+    ["disconnected", false],
+    [undefined, false],
+  ])("with the screen showing %s, has the probe skip: %s", async (appState, pathChanging) => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockImplementation(async (trace) => {
+      settleAttempt(beginAttempt(trace, "https://api.example.net/api", 0), "timeout", 8_000);
+      return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+    });
+
+    await refreshConnectionConfig({ held, force: true, trigger: "resume", appState });
+
+    expect(probeAddendum).toHaveBeenCalledTimes(1);
+    expect(probeAddendum.mock.calls[0][1]).toEqual({ pathChanging });
   });
 
   /** Never a list of addresses that were not dialled. */

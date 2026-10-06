@@ -9,7 +9,8 @@ import type { TraceEntry } from "./endpoint-trace";
 const invoke = vi.fn<(cmd: string, args?: unknown) => Promise<unknown>>();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 
-const { probeAddendum, probeControlPlane, probeTargets, resetProbeForTests } = await import("./control-plane-probe");
+const { CONNECT_QUIET_MS, connectStarting, probeAddendum, probeControlPlane, probeTargets, resetProbeForTests } =
+  await import("./control-plane-probe");
 
 const entry = (base: string, outcome: TraceEntry["outcome"]): TraceEntry => ({
   phase: "req",
@@ -163,6 +164,79 @@ describe("probeAddendum", () => {
         apiEndpoint: SECTION,
         reason: "app was in the background during the probe",
       });
+    } finally {
+      Object.assign(globalThis, { document: undefined });
+    }
+  });
+});
+
+/** A connect changes the path a probe measures, and resume -- when a
+ * failed resume refresh probes -- is exactly when people press Connect. */
+describe("a probe and a connect", () => {
+  const failed = [entry("https://a.example.net/api", "timeout")];
+  const answer = [{ outcome: "dns", ms: 40 }];
+  const SECTION = "probe: a.example.net=dns@40";
+
+  it("is not begun while the screen shows the path changing, and says so", async () => {
+    expect(await probeControlPlane(failed, 0, { pathChanging: true })).toBe("probe: skipped=connect");
+    expect(invoke).not.toHaveBeenCalled();
+    // Nothing was learned, so the interval is not spent.
+    invoke.mockResolvedValue(answer);
+    expect(await probeControlPlane(failed, 1)).toBe(SECTION);
+  });
+
+  /** The mobile app shows "connecting" only once its pre-connect refresh
+   * is over; this covers the seconds before. */
+  it("is not begun within a minute of a connect starting", async () => {
+    connectStarting(0);
+    expect(await probeControlPlane(failed, CONNECT_QUIET_MS - 1)).toBe("probe: skipped=connect");
+    expect(invoke).not.toHaveBeenCalled();
+    invoke.mockResolvedValue(answer);
+    expect(await probeControlPlane(failed, CONNECT_QUIET_MS)).toBe(SECTION);
+  });
+
+  it("is abandoned, and told to stop, when a connect starts while it runs", async () => {
+    invoke.mockImplementation((cmd) => (cmd === "probe_control_plane" ? new Promise(() => undefined) : Promise.resolve()));
+    const pending = probeControlPlane(failed, 0);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("probe_control_plane", expect.anything()));
+
+    connectStarting();
+
+    expect(await pending).toMatch(/^probe: abandoned=connect@\d+$/);
+    expect(invoke).toHaveBeenCalledWith("cancel_control_plane_probe", undefined);
+    // Abandoned, it taught nothing: once the connect is past, the next
+    // failure may probe without waiting out the interval.
+    invoke.mockReset();
+    invoke.mockResolvedValue(answer);
+    expect(await probeControlPlane(failed, Date.now() + CONNECT_QUIET_MS)).toBe(SECTION);
+  });
+
+  it("is left alone by a connect that starts after it answered", async () => {
+    invoke.mockResolvedValue(answer);
+    expect(await probeControlPlane(failed, 0)).toBe(SECTION);
+    connectStarting();
+    expect(invoke).not.toHaveBeenCalledWith("cancel_control_plane_probe", undefined);
+  });
+
+  /** No note for a probe that would not have run anyway. */
+  it("says nothing when there was nothing to probe", async () => {
+    connectStarting(0);
+    expect(await probeControlPlane([entry("https://a.example.net/api", "h200")], 1)).toBeUndefined();
+    expect(await probeControlPlane(failed, 1, { pathChanging: false })).toBe("probe: skipped=connect");
+    invoke.mockResolvedValue(answer);
+    expect(await probeControlPlane(failed, CONNECT_QUIET_MS)).toBe(SECTION);
+    // Within the interval now: nothing would run, so nothing is said.
+    connectStarting(CONNECT_QUIET_MS + 1);
+    expect(await probeControlPlane(failed, CONNECT_QUIET_MS + 2)).toBeUndefined();
+  });
+
+  /** A skipped or abandoned probe measured nothing, so nothing of it can
+   * have been distorted by a suspension. */
+  it("as an addendum, carries the note and no background flag", async () => {
+    const doc = Object.assign(new EventTarget(), { visibilityState: "hidden" });
+    Object.assign(globalThis, { document: doc });
+    try {
+      expect(await probeAddendum(failed, { pathChanging: true })).toEqual({ apiEndpoint: "probe: skipped=connect" });
     } finally {
       Object.assign(globalThis, { document: undefined });
     }

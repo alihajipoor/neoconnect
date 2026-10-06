@@ -162,7 +162,9 @@ pub fn run() {
             build_platform,
             // After a control-plane request fails: which stage each
             // address failed at. See control_plane_probe.rs.
-            control_plane_probe::probe_control_plane
+            control_plane_probe::probe_control_plane,
+            // And its stop, for when a connect starts while it runs.
+            control_plane_probe::cancel_control_plane_probe
         ])
         // Closing the window is an instruction, and it has to be acted
         // on rather than inferred.

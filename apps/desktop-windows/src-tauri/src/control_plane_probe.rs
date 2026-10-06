@@ -15,7 +15,9 @@
 //! name. No HTTP request, nothing a censor did not see a moment earlier.
 //! What it returns is a class and a duration per address. Never the
 //! resolved addresses, never an error string: the one fact taken from an
-//! answer is whether it points into Iran's DNS block page.
+//! answer is whether it points into Iran's DNS block page. And none of it
+//! once a connect has started: the app cancels the probe then, and it
+//! begins no further step (`cancel_control_plane_probe`).
 //!
 //! One file, compiled into both the Windows and the mobile app (the
 //! mobile crate includes it by path, as its UI includes the Windows
@@ -24,6 +26,7 @@
 
 use std::io;
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -42,6 +45,8 @@ pub struct ProbeResult {
     /// "tcp-timeout", "tls", "tls-timeout", "cert". The first stage that
     /// failed, or "ok" if a TLS handshake completed. "error" if the probe
     /// itself crashed -- a fault here, saying nothing about the network.
+    /// "cancelled" if a connect started first (`cancel_control_plane_probe`),
+    /// which says nothing about the network either.
     pub outcome: &'static str,
     /// From the start of the lookup to the verdict.
     pub ms: u32,
@@ -70,18 +75,47 @@ const LIMITS: Limits = Limits {
 /// sockets one failed refresh can open.
 pub const MAX_TARGETS: usize = 16;
 
+/// Whether a probe should stop. Asked before each step that would send
+/// something new.
+pub type Cancelled = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Bumped by `cancel_control_plane_probe`. A probe remembers the value it
+/// started under and stops once it has moved.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Cancelled by any `cancel_control_plane_probe` after this call.
+fn cancelled_from_now() -> Cancelled {
+    let started = GENERATION.load(Ordering::SeqCst);
+    Arc::new(move || GENERATION.load(Ordering::SeqCst) != started)
+}
+
 #[tauri::command]
 pub async fn probe_control_plane(targets: Vec<ProbeTarget>) -> Vec<ProbeResult> {
+    let cancelled = cancelled_from_now();
     // Blocking sockets on blocking threads, as the latency probes do:
     // neither app has an async runtime of its own to spare, and a stage
     // that hangs to its limit must not hold Tauri's.
-    tauri::async_runtime::spawn_blocking(move || probe_all(targets, LIMITS))
+    tauri::async_runtime::spawn_blocking(move || probe_all(targets, LIMITS, cancelled))
         .await
         .unwrap_or_default()
 }
 
+/// A connect is starting (`connectStarting` in control-plane-probe.ts):
+/// every probe running stops before its next step.
+///
+/// The app has stopped waiting for the answer by then -- a path a connect
+/// is replacing is not the network's -- so this is about traffic: the
+/// probe begins no new lookup, TCP handshake or ClientHello alongside the
+/// connect's. A step already under way runs to its end (a lookup in
+/// the system resolver, a SYN the OS is still retrying, a ClientHello
+/// already sent and waiting for an answer); none is started.
+#[tauri::command]
+pub fn cancel_control_plane_probe() {
+    GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
 /// Probes every target at once, and answers in the order asked.
-pub fn probe_all(targets: Vec<ProbeTarget>, limits: Limits) -> Vec<ProbeResult> {
+pub fn probe_all(targets: Vec<ProbeTarget>, limits: Limits, cancelled: Cancelled) -> Vec<ProbeResult> {
     // Built once per process: it copies every root certificate.
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     let config = CONFIG.get_or_init(|| Arc::new(tls_config()));
@@ -90,7 +124,8 @@ pub fn probe_all(targets: Vec<ProbeTarget>, limits: Limits) -> Vec<ProbeResult> 
         .take(MAX_TARGETS)
         .map(|target| {
             let config = Arc::clone(config);
-            std::thread::spawn(move || probe_one(&target.host, target.port, &config, limits))
+            let cancelled = Arc::clone(&cancelled);
+            std::thread::spawn(move || probe_one(&target.host, target.port, &config, limits, &*cancelled))
         })
         .collect();
     handles
@@ -118,13 +153,22 @@ fn tls_config() -> ClientConfig {
         .with_no_client_auth()
 }
 
-pub fn probe_one(host: &str, port: u16, config: &Arc<ClientConfig>, limits: Limits) -> ProbeResult {
+pub fn probe_one(
+    host: &str,
+    port: u16,
+    config: &Arc<ClientConfig>,
+    limits: Limits,
+    cancelled: &dyn Fn() -> bool,
+) -> ProbeResult {
     let started = Instant::now();
     let verdict = |outcome: &'static str| ProbeResult {
         outcome,
         ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
     };
 
+    if cancelled() {
+        return verdict("cancelled");
+    }
     let addrs = match resolve(host, port, limits.dns) {
         Resolved::Addrs(addrs) => addrs,
         Resolved::Failed => return verdict("dns"),
@@ -136,12 +180,21 @@ pub fn probe_one(host: &str, port: u16, config: &Arc<ClientConfig>, limits: Limi
         return verdict("blockpage");
     }
 
-    let stream = match connect(&addrs, limits.tcp) {
+    if cancelled() {
+        return verdict("cancelled");
+    }
+    let stream = match connect(&addrs, limits.tcp, cancelled) {
         Ok(stream) => stream,
+        // First: a connect that stopped early stopped for this.
+        Err(_) if cancelled() => return verdict("cancelled"),
         Err(err) if is_timeout(&err) => return verdict("tcp-timeout"),
         Err(_) => return verdict("tcp"),
     };
 
+    // Dropping the stream closes it; no ClientHello goes out.
+    if cancelled() {
+        return verdict("cancelled");
+    }
     match handshake(stream, host, config, limits.tls) {
         Ok(()) => verdict("ok"),
         Err(outcome) => verdict(outcome),
@@ -193,14 +246,15 @@ pub fn is_block_page(ip: IpAddr) -> bool {
 /// trying it first would report a reachable server as "tcp". The verdict
 /// on failure is the first address's: that is the one the request would
 /// have used.
-fn connect(addrs: &[SocketAddr], limit: Duration) -> io::Result<TcpStream> {
+fn connect(addrs: &[SocketAddr], limit: Duration, cancelled: &dyn Fn() -> bool) -> io::Result<TcpStream> {
     let mut ordered: Vec<&SocketAddr> = addrs.iter().filter(|a| a.is_ipv4()).collect();
     ordered.extend(addrs.iter().filter(|a| a.is_ipv6()));
     let deadline = Instant::now() + limit;
     let mut first_error: Option<io::Error> = None;
     for addr in ordered {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        // Each further address is a new handshake.
+        if remaining.is_zero() || cancelled() {
             break;
         }
         match TcpStream::connect_timeout(addr, remaining) {
@@ -292,14 +346,14 @@ mod tests {
     /// the check in place without needing the block page to answer.
     #[test]
     fn an_answer_in_the_block_page_is_reported_as_such_without_connecting() {
-        let result = probe_one("10.10.34.34", 443, &config(), FAST);
+        let result = probe_one("10.10.34.34", 443, &config(), FAST, &|| false);
         assert_eq!(result.outcome, "blockpage");
     }
 
     /// RFC 6761 reserves .invalid: it never resolves.
     #[test]
     fn a_name_that_does_not_resolve_fails_at_dns() {
-        let result = probe_one("neoxify-probe-test.invalid", 443, &config(), FAST);
+        let result = probe_one("neoxify-probe-test.invalid", 443, &config(), FAST, &|| false);
         assert!(result.outcome.starts_with("dns"), "{result:?}");
     }
 
@@ -312,7 +366,7 @@ mod tests {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
             listener.local_addr().unwrap().port()
         };
-        let result = probe_one("127.0.0.1", port, &config(), FAST);
+        let result = probe_one("127.0.0.1", port, &config(), FAST, &|| false);
         assert!(result.outcome.starts_with("tcp"), "{result:?}");
     }
 
@@ -326,7 +380,7 @@ mod tests {
             let (stream, _) = listener.accept().unwrap();
             drop(stream);
         });
-        let result = probe_one("localhost", port, &config(), FAST);
+        let result = probe_one("localhost", port, &config(), FAST, &|| false);
         server.join().unwrap();
         assert_eq!(result.outcome, "tls", "{result:?}");
     }
@@ -342,7 +396,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1_500));
             drop(stream);
         });
-        let result = probe_one("localhost", port, &config(), FAST);
+        let result = probe_one("localhost", port, &config(), FAST, &|| false);
         server.join().unwrap();
         assert_eq!(result.outcome, "tls-timeout", "{result:?}");
         assert!(result.ms >= 300, "{result:?}");
@@ -390,7 +444,7 @@ mod tests {
             })
             .collect();
         assert!(!targets.is_empty(), "set NEOXIFY_PROBE_LIVE=host:port,...");
-        for (target, result) in targets.iter().zip(probe_all(targets.clone(), LIMITS)) {
+        for (target, result) in targets.iter().zip(probe_all(targets.clone(), LIMITS, Arc::new(|| false))) {
             println!("{}:{} -> {} in {}ms", target.host, target.port, result.outcome, result.ms);
         }
     }
@@ -405,7 +459,7 @@ mod tests {
                 port: 443,
             })
             .collect();
-        let results = probe_all(targets, FAST);
+        let results = probe_all(targets, FAST, Arc::new(|| false));
         assert_eq!(results.len(), MAX_TARGETS);
         for (i, result) in results.iter().enumerate() {
             if i % 2 == 0 {
@@ -414,5 +468,79 @@ mod tests {
                 assert!(result.outcome.starts_with("dns"), "{result:?}");
             }
         }
+    }
+
+    /// The app's cancel reaches a probe begun before it, and not one
+    /// begun after.
+    #[test]
+    fn a_cancel_stops_the_probes_already_running_and_no_later_one() {
+        let before = cancelled_from_now();
+        assert!(!before());
+        cancel_control_plane_probe();
+        assert!(before());
+        assert!(!cancelled_from_now()());
+    }
+
+    /// Cancelled before it starts: no lookup, no connection, for any
+    /// target.
+    #[test]
+    fn a_probe_cancelled_before_it_starts_opens_nothing() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let targets = vec![
+            ProbeTarget {
+                host: "127.0.0.1".into(),
+                port,
+            },
+            ProbeTarget {
+                host: "neoxify-probe-test.invalid".into(),
+                port: 443,
+            },
+        ];
+        let results = probe_all(targets, FAST, Arc::new(|| true));
+        assert_eq!(results.iter().map(|r| r.outcome).collect::<Vec<_>>(), ["cancelled", "cancelled"]);
+        assert_eq!(listener.accept().map(|_| ()).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    /// A connect that starts once the probe's TCP handshake is up stops it
+    /// before the ClientHello: the server receives nothing.
+    #[test]
+    fn a_cancel_after_tcp_sends_no_client_hello() {
+        use std::io::Read;
+        use std::sync::Mutex;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted: Mutex<Option<TcpStream>> = Mutex::new(None);
+        // Cancelled from the moment the probe's connection has arrived.
+        // Waits a little for it at each check, so the answer does not
+        // depend on how fast the loopback handshake lands.
+        let cancelled = || {
+            let mut slot = accepted.lock().unwrap();
+            if slot.is_some() {
+                return true;
+            }
+            let until = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < until {
+                if let Ok((stream, _)) = listener.accept() {
+                    *slot = Some(stream);
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        };
+
+        let result = probe_one("127.0.0.1", port, &config(), FAST, &cancelled);
+        assert_eq!(result.outcome, "cancelled", "{result:?}");
+
+        let mut stream = accepted.lock().unwrap().take().expect("the TCP handshake completed");
+        stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        let mut buf = [0u8; 512];
+        let read = stream.read(&mut buf);
+        assert!(!matches!(read, Ok(n) if n > 0), "the probe sent data after it was cancelled: {read:?}");
     }
 }
