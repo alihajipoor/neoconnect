@@ -275,7 +275,8 @@ refusal of the device -- see obligation 2.
    (only after a takeover). A 401 ends the session, as everywhere.
    Anything else -- no answer within 3 s, a network error, a 5xx, a 429
    or 409 without one of those codes, a 404 -- means dial anyway, and
-   claim again once the tunnel is up (through it).
+   claim again once the tunnel is up (through it). That later claim can
+   be refused too, over a working tunnel: see item 11.
 3. **On 409 `DEVICE_LIMIT`**, do not dial. Show, in the app's language:
    "Your plan allows *{limit}* device(s) at a time. Neoxify is in use on
    *{label}* since *{since}*." with **Use on this device instead** and
@@ -306,10 +307,30 @@ refusal of the device -- see obligation 2.
    displaced**, do not run the ladder blindly: tear down, call `renew`
    with a 4 s budget, and if it answers `displaced`, show that. If it
    cannot be reached, say so honestly ("We couldn't reach Neoxify to
-   check. If Neoxify is on on another of your devices, your plan's limit
-   of 1 may be the reason.") and then run the ladder as usual. Never claim
-   a server "couldn't be reached" if it was never dialled.
+   check. If Neoxify is in use on another of your devices, your plan's
+   limit of *{limit}* may be the reason.") and then run the ladder as
+   usual. Never claim a server "couldn't be reached" if it was never
+   dialled.
 10. **The label is generic** -- never a hostname (see *Headers*).
+11. **A claim refused after connecting.** When the claim before dialling
+    went unanswered (item 2), the device is already connected when its
+    claim through the tunnel is answered -- and in Iran that will be the
+    common path. The answer is final, as it would have been before
+    dialling:
+    - **409 `DEVICE_LIMIT`**: handled like `displaced` (item 7). Tear
+      the tunnel down, **do not run the failover ladder**, record **no
+      attempt and no best route** (item 5 -- the dial worked; the plan
+      refused the device), and show the refusal card of item 3 with
+      **Use on this device instead** and **Cancel**. *Use here* claims
+      with `takeover`, then dials again. Never leave the tunnel up over
+      a refusal, and never show the card over a tunnel still carrying
+      traffic.
+    - **409 `SUBSCRIPTION_INACTIVE`**: tear down the same way, no ladder,
+      and show the plan-ended state.
+    - Anything else (no answer, 5xx, a codeless 429): keep the tunnel
+      and renew at the next interval. A `renew` from a device holding no
+      slot grants one if there is room, and answers `displaced` (item 7)
+      if there is not.
 
 Where this lands in the apps (from the design review; line numbers drift):
 desktop `runLadder` in `apps/desktop-windows/src/screens/Dashboard.tsx`
