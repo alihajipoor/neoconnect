@@ -2892,6 +2892,34 @@ presence-from-usage-deltas is reasoned from the agent and client code,
 not measured; Xray connections open when a hold starts may survive it;
 iPhone, Android in the background and an Iranian network untested.
 
+**Second review, of the slots and the backstop (later 2026-10-06), all
+twelve findings fixed on this branch:** the slot endpoints count 60
+requests a minute per access token instead of the global 100 per
+address (mirror and tunnel egress addresses are shared by many
+customers), and the contract names exactly what stops a dial (409
+`DEVICE_LIMIT`/`SUBSCRIPTION_INACTIVE`, 429 `TAKEOVER_LIMIT`); a slot
+does not expire under a device that carries traffic without renewing;
+new obligation 11 says what a connected device does with a refused
+post-connect claim; Xray's session counts (60 s tail) no longer make a
+device active; a grant lifts any hold on that device and re-asserts it
+at once, a holder is never held, and a displaced device that keeps
+going is held even while its taker is quiet; holding the shared
+credentials spares the one a holder named; `release` names its grant's
+`handle` (a re-claim gets a new one) so a late release frees nothing;
+admin set-password and the hourly sweep free slots, and signed-out
+holders are never counted; the re-assert never puts back a credential
+switched off while it ran; `label` is a model or the user's words only
+(the kind is named from `platform` in the reader's language); the
+rollback note is corrected (delete unconfirmed device rows first);
+IKEv2 stays on shared credentials (its per-user reload made device rows
+a queue risk) and a node more than a re-assert cycle behind is named in
+the log. **Contract changes the apps must follow:** send `handle` with
+release; render a null `label` from `platform`; stop sending generic
+English labels; obligation 11. Backend 86 suites / 1026 tests,
+typecheck and lint clean; the new guards each fail a test when removed.
+Unit and in-process HTTP tests only -- nothing above has run against a
+node, a client or Redis.
+
 **Next:** desktop 0.9.44 and mobile 0.2.23 implement the client side of
 `docs/device-slots.md` (claim before dialling with a 3 s budget, never
 blocking; the refusal card; renew; release; `concurrentLimit` class;
