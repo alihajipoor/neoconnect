@@ -54,10 +54,14 @@ export class ProvisioningBackfillService implements OnModuleInit {
   }
 
   async run() {
-    // SUSPENDED is included deliberately: a subscription over its data
-    // cap still exists and will come back on renewal, and provisioning
-    // does not grant access on its own -- the credentials stay disabled
-    // until renewSubscription re-enables them.
+    const switchedOff = await this.switchOffUnpaidCredentials();
+
+    // SUSPENDED is included for the revoking half only. provisionAll adds
+    // nothing to a subscription that is not ACTIVE (it used to: a missing
+    // route became a fresh, ENABLED credential, which is the opposite of
+    // what this comment once claimed), but a route the plan no longer
+    // allows is still taken off a suspended subscription now rather than
+    // surviving until its renewal.
     let considered = 0;
     let added = 0;
     let revoked = 0;
@@ -120,6 +124,71 @@ export class ProvisioningBackfillService implements OnModuleInit {
         this.logger.log(summary);
       }
     }
-    return { added, revoked, failed, considered };
+    return { added, revoked, failed, considered, switchedOff };
+  }
+
+  /** Takes away the working credentials of subscriptions nobody is paying
+   * for.
+   *
+   * Until provisionAll learned to refuse, a plan's route edit, a plan
+   * change or this very backfill handed an ENABLED credential to every
+   * PENDING, CANCELLED, EXPIRED or SUSPENDED subscription short of a
+   * route, and nothing ever switched one off: quota and expiry act on
+   * ACTIVE subscriptions only, and the re-assert kept them on their nodes.
+   * Stopping new ones is not enough -- the ones already out there are
+   * live access somebody did not pay for.
+   *
+   * An unpaid attempt's credentials (PENDING, CANCELLED) are removed
+   * outright: DELETE_USER, and the WireGuard address goes back to the
+   * pool. If the attempt is paid after all, renewSubscription provisions
+   * it from scratch. A lapsed subscription's (EXPIRED, SUSPENDED) are only
+   * switched off, exactly as expiry and suspension do, so renewal turns
+   * the same credentials back on.
+   *
+   * Every row is handled on its own and a failure is logged, not thrown:
+   * one node that cannot be told must not keep the rest switched on.
+   * Steady state is no rows and no output. */
+  async switchOffUnpaidCredentials() {
+    let removed = 0;
+    let disabled = 0;
+    let failed = 0;
+
+    await forEachBatch({
+      label: "unpaidCredentialSweep",
+      read: (afterId, take) =>
+        this.prisma.protocolUser.findMany({
+          where: { status: "ACTIVE", subscription: { status: { not: "ACTIVE" } }, ...after(afterId) },
+          select: { id: true, subscription: { select: { status: true } } },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      handle: async (batch) => {
+        for (const user of batch) {
+          const unpaid = user.subscription.status === "PENDING" || user.subscription.status === "CANCELLED";
+          try {
+            if (unpaid) {
+              await this.protocolUsersService.remove(user.id);
+              removed += 1;
+            } else {
+              await this.protocolUsersService.setEnabled(user.id, false);
+              disabled += 1;
+            }
+          } catch (err) {
+            failed += 1;
+            const reason = err instanceof Error ? err.message : String(err);
+            this.logger.warn(`Could not switch off credential ${user.id} of a ${user.subscription.status} subscription: ${reason}`);
+          }
+        }
+      },
+    });
+
+    if (removed > 0 || disabled > 0 || failed > 0) {
+      this.logger.warn(
+        `Switched off credentials of subscriptions that are not ACTIVE: removed ${removed} ` +
+          `(PENDING/CANCELLED), disabled ${disabled} (EXPIRED/SUSPENDED)` +
+          (failed > 0 ? `, ${failed} could not be (see above)` : ""),
+      );
+    }
+    return { removed, disabled, failed };
   }
 }

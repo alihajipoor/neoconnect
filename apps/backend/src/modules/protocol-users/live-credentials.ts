@@ -18,10 +18,18 @@ import type { Prisma } from "@prisma/client";
  *   this skips it. When the hold lapses, the next re-assert restores the
  *   credential as it is then -- never a list captured at the cut.
  *
+ * * A credential of a subscription that is not ACTIVE is not live,
+ *   whatever its own status says. Suspension and expiry switch every
+ *   credential off as they happen, so this changes nothing for them; it
+ *   is for the rows provisionAll used to mint ACTIVE on PENDING,
+ *   CANCELLED, EXPIRED and SUSPENDED subscriptions, which this re-assert
+ *   then kept putting back every minute.
+ *
  * Shared credentials (no session) are always included unless held. */
 export function liveCredentialWhere(now = new Date()): Prisma.ProtocolUserWhereInput {
   return {
     status: "ACTIVE",
+    subscription: { status: "ACTIVE" },
     AND: [
       { OR: [{ sessionId: null }, { session: { is: { revokedAt: null } } }] },
       { OR: [{ heldUntil: null }, { heldUntil: { lte: now } }] },

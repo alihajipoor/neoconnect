@@ -146,3 +146,44 @@ describe("SubscriptionsService.createOrReusePending", () => {
     expect(where.createdAt.lt.getTime()).toBeLessThan(Date.now());
   });
 });
+
+/** provisionAll adds nothing to a subscription that is not ACTIVE, so
+ * reactivating one is the moment it catches up on the routes added while
+ * it was off -- as a renewal does. */
+describe("SubscriptionsService.setStatus", () => {
+  function build(provisionAll = jest.fn().mockResolvedValue({ created: [], revoked: [], failed: [] })) {
+    const prisma = {
+      subscription: {
+        findUnique: jest.fn().mockResolvedValue({ id: "sub-1", status: SubscriptionStatus.SUSPENDED }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      protocolUser: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const protocolUsers = { setEnabled: jest.fn(), remove: jest.fn(), provisionAll } as unknown as ProtocolUsersService;
+    return { prisma, provisionAll, service: new SubscriptionsService(prisma as unknown as PrismaService, protocolUsers) };
+  }
+
+  it("provisions the missing routes when a subscription is made ACTIVE", async () => {
+    const { service, provisionAll } = build();
+
+    await service.setStatus("sub-1", SubscriptionStatus.ACTIVE);
+
+    expect(provisionAll).toHaveBeenCalledWith("sub-1");
+  });
+
+  it("provisions nothing when a subscription is switched off", async () => {
+    const { service, provisionAll } = build();
+
+    await service.setStatus("sub-1", SubscriptionStatus.SUSPENDED);
+
+    expect(provisionAll).not.toHaveBeenCalled();
+  });
+
+  it("still reactivates when provisioning throws", async () => {
+    const { service, prisma } = build(jest.fn().mockRejectedValue(new Error("all routes down")));
+    jest.spyOn(service["logger"], "error").mockImplementation(() => undefined);
+
+    await expect(service.setStatus("sub-1", SubscriptionStatus.ACTIVE)).resolves.toBeDefined();
+    expect(prisma.subscription.update).toHaveBeenCalledWith({ where: { id: "sub-1" }, data: { status: "ACTIVE" } });
+  });
+});

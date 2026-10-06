@@ -1,5 +1,5 @@
 import { SubscriptionStatus, type Subscription } from "@prisma/client";
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
@@ -7,6 +7,8 @@ import { CreateSubscriptionDto } from "./dto/create-subscription.dto";
 
 @Injectable()
 export class SubscriptionsService {
+  private readonly logger = new Logger(SubscriptionsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly protocolUsers: ProtocolUsersService,
@@ -89,6 +91,18 @@ export class SubscriptionsService {
 
     await this.prisma.subscription.update({ where: { id }, data: { status } });
     await this.applyEnabled(id, enabled);
+    // Reactivated: the routes added while it was off. provisionAll gives
+    // nothing to a subscription that is not ACTIVE, so this is the moment
+    // they arrive, the same as a renewal. Caught, like renewal: the status
+    // has changed and the existing credentials are back on, and a plan
+    // whose routes are all down throwing here must not undo that.
+    if (enabled) {
+      await this.protocolUsers.provisionAll(id).catch((err: unknown) => {
+        this.logger.error(
+          `Subscription ${id} reactivated but could not be provisioned: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }
     return this.get(id);
   }
 

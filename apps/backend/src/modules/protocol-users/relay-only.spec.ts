@@ -21,6 +21,7 @@ describe("the plan's route selection", () => {
       subscription: {
         findUnique: jest.fn().mockResolvedValue({
           id: "sub-1",
+          status: "ACTIVE",
           plan: {
             name: "Pro",
             relayOnly: false,
@@ -125,6 +126,7 @@ describe("provisionAll: revoking what the plan no longer allows", () => {
       subscription: {
         findUnique: jest.fn().mockResolvedValue({
           id: "sub-1",
+          status: "ACTIVE",
           plan: {
             name: "Pro",
             protocolsAllowed: ["WIREGUARD"],

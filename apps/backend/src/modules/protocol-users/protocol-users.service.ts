@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, UnauthorizedException } from "@nestjs/common";
-import { Prisma, Protocol } from "@prisma/client";
+import { Prisma, Protocol, SubscriptionStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
 import { after, forEachBatch } from "../../common/batching";
@@ -82,6 +82,15 @@ const DEVICE_SET_WINDOW_MS = 60 * 60 * 1000;
  * IKEv2 itself is untouched; it is the per-device split that waits for
  * the agent change (docs/per-device-credentials.md, "Known, deferred"). */
 const SHARED_CREDENTIAL_ONLY: ReadonlySet<Protocol> = new Set<Protocol>(["IKEV2"]);
+
+/** Subscriptions that were never paid for (an abandoned checkout, PENDING,
+ * or the same attempt after the stale sweep CANCELLED it), or were
+ * cancelled outright. Their credentials are never handed to the customer:
+ * none should exist, and a row that does -- one provisionAll minted
+ * before it learned to refuse -- must not reach a client that dials
+ * whatever it is given. SUSPENDED and EXPIRED rows still go out, switched
+ * off on the nodes, as they always have. */
+const UNPAID_SUBSCRIPTION_STATUSES: SubscriptionStatus[] = ["PENDING", "CANCELLED"];
 
 /** Every column of ProtocolUser, named.
  *
@@ -205,7 +214,7 @@ export class ProtocolUsersService {
     // signed-in device each, and handing every device's set to a caller
     // that named no device would undo the point of having them.
     const users = await this.prisma.protocolUser.findMany({
-      where: { subscription: { customerId }, sessionId: null },
+      where: { subscription: { customerId, status: { notIn: UNPAID_SUBSCRIPTION_STATUSES } }, sessionId: null },
       orderBy: { createdAt: "desc" },
       include: { node: true, protocolConfig: true },
     });
@@ -470,7 +479,10 @@ export class ProtocolUsersService {
    * there is nothing that works to keep. */
   private async deviceView(customerId: string, sessionId: string) {
     const users = await this.prisma.protocolUser.findMany({
-      where: { subscription: { customerId }, OR: [{ sessionId }, { sessionId: null }] },
+      where: {
+        subscription: { customerId, status: { notIn: UNPAID_SUBSCRIPTION_STATUSES } },
+        OR: [{ sessionId }, { sessionId: null }],
+      },
       orderBy: { createdAt: "desc" },
       include: { node: true, protocolConfig: true },
     });
@@ -720,11 +732,16 @@ export class ProtocolUsersService {
     if (!subscription) throw new BadRequestException("Subscription not found");
     if (!route) throw new BadRequestException("Route not found");
     if (!route.isEnabled) throw new BadRequestException("Route is not enabled");
-    // A device credential is only ever made for a live subscription. The
-    // caller checked, but a suspension, an expiry or an account deletion
-    // can land in between, and an enabled credential minted after it
-    // would undo it.
-    if (sessionId && subscription.status !== "ACTIVE") {
+    // A credential, device or shared, is only ever made for a live
+    // subscription. Every row is created ACTIVE and its CREATE_USER goes
+    // out at once, so one minted for a PENDING checkout, a CANCELLED
+    // attempt, or an EXPIRED or SUSPENDED subscription is working access
+    // nobody paid for -- and nothing switched it off again: expiry and
+    // quota only act on ACTIVE subscriptions, and the re-assert kept
+    // putting it back. This used to be checked for device credentials
+    // only, which left provisionAll (a plan's route edit, the boot
+    // backfill) and the admin endpoint free to do exactly that.
+    if (subscription.status !== "ACTIVE") {
       throw new BadRequestException("Subscription is not active");
     }
 
@@ -930,6 +947,22 @@ export class ProtocolUsersService {
         `provisionAll(${subscriptionId}): revoked ${revoked.length} credential(s) on routes the ` +
           `${subscription.plan.name} plan does not allow`,
       );
+    }
+
+    // Revoking only takes access away, so it applies whatever the status.
+    // Adding gives it, so it is for a live subscription only. Every caller
+    // that means to grant access -- a confirmed payment, a renewal, assign,
+    // a trial, a voucher, a referral -- has made the subscription ACTIVE
+    // before it gets here. The ones that reach other statuses are a plan's
+    // route edit (every subscription ever made on the plan, abandoned
+    // checkouts included), changePlan and the boot backfill, and from
+    // those a missing route on a PENDING, CANCELLED, EXPIRED or SUSPENDED
+    // subscription used to become a working credential: free, uncapped
+    // and never switched off. Such a subscription gains its routes when it
+    // is next made ACTIVE -- renewSubscription and setStatus both run this
+    // again then.
+    if (subscription.status !== "ACTIVE") {
+      return { created: [], revoked, failed: [] };
     }
 
     // Rebuilt from the rows that survived, not from the pre-revocation
