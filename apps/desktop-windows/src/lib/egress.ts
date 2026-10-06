@@ -67,8 +67,21 @@ async function publicIp(onBody?: (body: Record<string, unknown>) => void): Promi
   // are protected. Pinned to one address, a blocked control plane would
   // report a perfectly working tunnel as carrying nothing -- turning a
   // reachability problem into a false accusation against the VPN.
-  return readFrom(await apiEndpoints(), EGRESS_TIMEOUT_MS, onBody);
+  return (await readFrom(await apiEndpoints(), EGRESS_TIMEOUT_MS, onBody)).reading;
 }
+
+/** What asking the list produced: a reading, and -- whether or not there
+ * was one -- whether anything answered at all.
+ *
+ * The second half is the difference between "our API is having a bad
+ * day" and "nothing gets through this tunnel", and the two used to be
+ * the same `null`. Every base is https, so an HTTP status of any kind --
+ * the 502 every mirror and the CDN return while the backend container is
+ * being rebuilt, say -- can only have come from our own CDN, mirror or
+ * panel, after a TLS handshake with one of our names. A censor cannot
+ * forge one, and packets that made that round trip were not black-holed.
+ */
+type ReadResult = { reading: IpReading | null; answered: boolean };
 
 /** The first answer from `bases`, tried in order.
  *
@@ -80,26 +93,32 @@ async function readFrom(
   bases: string[],
   timeoutMs: number,
   onBody?: (body: Record<string, unknown>) => void,
-): Promise<IpReading | null> {
+): Promise<ReadResult> {
+  let answered = false;
   for (const base of bases) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${base}/health/ip`, { signal: controller.signal });
+      // Set before the status is looked at: an error page is still an
+      // answer, and it is the only thing that tells an outage of ours
+      // apart from a tunnel carrying nothing.
+      answered = true;
       if (!res.ok) continue;
       const body = (await res.json()) as { ip?: string };
       if (body.ip) {
         onBody?.(body);
-        return { ip: body.ip, from: base };
+        return { reading: { ip: body.ip, from: base }, answered };
       }
     } catch {
-      // Try the next one. Exhausting the list returns null, which the
-      // caller already treats as "no evidence" rather than as failure.
+      // Try the next one. Exhausting the list returns no reading, which
+      // the caller already treats as "no evidence" rather than as
+      // failure.
     } finally {
       clearTimeout(timer);
     }
   }
-  return null;
+  return { reading: null, answered };
 }
 
 /** The address the world saw before connecting, and who reported it.
@@ -129,11 +148,12 @@ export type EgressVerdict =
   /** Nothing answered. Either the tunnel is black-holing traffic or the
    * connection is genuinely down; both mean the customer is not working. */
   | { state: "unreachable" }
-  /** No comparison was possible: either there is no baseline at all, or
-   * the two readings did not come from the same endpoint and so are not
-   * measuring the same thing. Reported rather than guessed, so the UI
-   * can withhold a verdict instead of inventing one in either
-   * direction. */
+  /** No comparison was possible: either there is no baseline at all, the
+   * two readings did not come from the same endpoint and so are not
+   * measuring the same thing, or our API answered but with no address
+   * to compare (an outage of ours, not of the tunnel). Reported rather
+   * than guessed, so the UI can withhold a verdict instead of inventing
+   * one in either direction. */
   | { state: "indeterminate"; exitIp: string | null };
 
 export type VerifyOptions = {
@@ -197,8 +217,18 @@ export async function verifyEgress(
   const { attemptMs = EGRESS_TIMEOUT_MS, sameEndpointOnly = false } = options;
   const bases =
     sameEndpointOnly && baseline !== null ? [baseline.from] : await apiEndpoints();
-  const reading = await readFrom(bases, attemptMs);
+  const { reading, answered } = await readFrom(bases, attemptMs);
 
+  // Our API answered -- with a 502 while the backend is being redeployed,
+  // a 503 from a mirror whose upstream is gone -- and said nothing about
+  // addresses. That is an outage of ours, and the round trip itself
+  // shows packets are getting through. Calling it `unreachable` turned
+  // it into "degraded" on every connected customer at once, and two of
+  // those in a row ran the automatic ladder: a working tunnel torn down,
+  // every protocol then rejected against the same 502, the customer left
+  // disconnected and failing open. The tunnel's health is not ours to
+  // borrow from the control plane's.
+  if (reading === null && answered) return { state: "indeterminate", exitIp: null };
   if (reading === null) return { state: "unreachable" };
   if (baseline === null) return { state: "indeterminate", exitIp: reading.ip };
   if (reading.from !== baseline.from) return { state: "indeterminate", exitIp: reading.ip };

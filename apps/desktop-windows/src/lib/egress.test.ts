@@ -7,7 +7,7 @@ const endpoints = vi.fn<() => Promise<string[]>>();
  * A base missing from the map is treated as unreachable. `hang` never
  * answers and ends only when the caller aborts -- what a request made in
  * a new adapter's first seconds was measured doing. */
-type Answer = { ip: string } | "unreachable" | "hang";
+type Answer = { ip: string } | { status: number } | "unreachable" | "hang";
 const answers = new Map<string, Answer>();
 /** Answers given one per request, in order, before `answers` applies --
  * for an endpoint whose behaviour changes while a tunnel comes up. */
@@ -30,7 +30,16 @@ vi.mock("@tauri-apps/plugin-http", () => ({
     if (answer === undefined || answer === "unreachable") {
       return Promise.reject(new Error(`no route to ${base}`));
     }
-    return Promise.resolve({ ok: true, json: () => Promise.resolve(answer) });
+    // An HTTP answer with no address in it: an error page from a mirror
+    // or the CDN while the backend behind them is down.
+    if ("status" in answer) {
+      return Promise.resolve({
+        ok: answer.status >= 200 && answer.status < 300,
+        status: answer.status,
+        json: () => Promise.reject(new Error("not JSON")),
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(answer) });
   },
 }));
 
@@ -153,6 +162,38 @@ describe("comparing the address the world sees", () => {
     endpoints.mockResolvedValue([CDN, FI_MIRROR]);
     const baseline = { ip: CLIENT, from: CDN };
     await expect(verifyEgress(baseline)).resolves.toEqual({ state: "unreachable" });
+  });
+
+  it("does not call our own API's error pages a dead tunnel", async () => {
+    // The control-plane outage, as it looks from a working tunnel: the
+    // backend container is being rebuilt, and every mirror proxies to it,
+    // so every endpoint answers 502 straight away. Those answers came
+    // back through the tunnel; nothing about the tunnel is in question.
+    //
+    // This used to be `unreachable`, which `combineEvidence` turns into
+    // "degraded" -- and two of those ran the automatic ladder, which tore
+    // the working tunnel down and then rejected every protocol against
+    // the same 502s.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, { status: 502 });
+    answers.set(FI_MIRROR, { status: 502 });
+    const baseline = { ip: CLIENT, from: CDN };
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+    await expect(verifyEgress(baseline, { sameEndpointOnly: true })).resolves.toEqual({
+      state: "indeterminate",
+      exitIp: null,
+    });
+    // And with no baseline at all, the same: nothing to compare and
+    // nothing refuted.
+    await expect(verifyEgress(null)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+  });
+
+  it("still takes an address from a later endpoint after an error page", async () => {
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, { status: 503 });
+    answers.set(FI_MIRROR, { ip: NODE });
+    await expect(captureBaselineIp()).resolves.toEqual({ ip: NODE, from: FI_MIRROR });
   });
 
   it("records which endpoint answered, so the pair can be checked at all", async () => {
