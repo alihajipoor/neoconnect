@@ -16,8 +16,10 @@
 package ikev2
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,27 +38,39 @@ type Provisioner struct {
 	// anchors is the difference between correct and nearly correct.
 	secretsPath string
 	swanctl     string
+	// runSwanctl runs swanctl. A field so a test can stand in for
+	// strongSwan, which nothing off a node can run: the output it parses
+	// and the arguments it sends are exactly the parts that went wrong.
+	runSwanctl swanctlRunner
 
 	// Guards both the in-memory set and the file, because the dispatcher
 	// may apply several commands concurrently and a lost update here is
 	// a customer who cannot connect.
 	mu    sync.Mutex
 	users map[string]string // username -> password
-	// Per-SA byte totals from the previous poll, so a delta can be taken
-	// without a rekey looking like a customer using nothing.
+	// Per-CHILD_SA byte totals from the previous poll, so a delta can be
+	// taken without a rekey looking like a customer using nothing.
 	lastBytes map[string]saBytes
 }
+
+// swanctlRunner runs swanctl with the given arguments and returns what it
+// wrote to stdout and to stderr separately: only stdout is ever parsed,
+// so nothing strongSwan logs on the way (its plugin loader is chatty) can
+// land in the middle of the output being read.
+type swanctlRunner func(ctx context.Context, args ...string) (stdout, stderr string, err error)
 
 func New(secretsPath, swanctlPath string) *Provisioner {
 	if swanctlPath == "" {
 		swanctlPath = "swanctl"
 	}
-	return &Provisioner{
+	p := &Provisioner{
 		secretsPath: secretsPath,
 		swanctl:     swanctlPath,
 		users:       map[string]string{},
 		lastBytes:   map[string]saBytes{},
 	}
+	p.runSwanctl = p.execSwanctl
+	return p
 }
 
 // CreateUser adds an EAP identity and makes strongSwan aware of it.
@@ -177,16 +191,18 @@ func (p *Provisioner) swanctlAvailable() bool {
 
 // StatsSince reports traffic since the last call, per user.
 //
-// strongSwan reports totals per SA, and an SA is replaced on every rekey
-// and every reconnect -- so the totals restart from zero under a live
-// customer. Subtracting the previous reading per *user* would then go
-// negative and, clamped at zero, quietly lose everything since the last
-// poll.
+// strongSwan reports totals per CHILD_SA, and a CHILD_SA is replaced on
+// every rekey and every reconnect -- so the totals restart from zero
+// under a live customer. Subtracting the previous reading per *user*
+// would then go negative and, clamped at zero, quietly lose everything
+// since the last poll.
 //
-// So the counters are tracked per SA and only summed per user after the
-// delta is taken. An SA that disappears between polls contributes its
-// last observed growth and is then forgotten; a new one starts from
+// So the counters are tracked per CHILD_SA and only summed per user after
+// the delta is taken. A child that disappears between polls contributes
+// its last observed growth and is then forgotten; a new one starts from
 // zero, which is correct because it genuinely has carried nothing yet.
+// Per CHILD_SA and not per IKE SA, because an IKE rekey moves the
+// existing children, counters and all, to a new IKE SA.
 func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, error) {
 	if p.notServingIkev2() {
 		return nil, nil
@@ -205,32 +221,30 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 		if sa.user == "" {
 			continue
 		}
-		seen[sa.id] = true
-		prev := p.lastBytes[sa.id]
-		// A counter that went backwards means this SA was replaced under
-		// the same id, so the new one's totals are the delta.
-		up, down := sa.bytesUp, sa.bytesDown
-		if up >= prev.up {
-			up -= prev.up
-		}
-		if down >= prev.down {
-			down -= prev.down
-		}
-		p.lastBytes[sa.id] = saBytes{up: sa.bytesUp, down: sa.bytesDown}
+		for _, child := range sa.children {
+			key := child.key(sa.id)
+			seen[key] = true
+			prev := p.lastBytes[key]
+			p.lastBytes[key] = saBytes{in: child.bytesIn, out: child.bytesOut}
 
-		d := perUser[sa.user]
-		if d == nil {
-			d = &common.UsageDelta{ExternalUserID: sa.user}
-			perUser[sa.user] = d
+			d := perUser[sa.user]
+			if d == nil {
+				d = &common.UsageDelta{ExternalUserID: sa.user}
+				perUser[sa.user] = d
+			}
+			// Into the node is the customer's upload, out of it their
+			// download -- the convention the WireGuard and OpenVPN
+			// provisioners use, where the server's rx is the user's
+			// uplink.
+			d.BytesUp += counterDelta(prev.in, child.bytesIn)
+			d.BytesDown += counterDelta(prev.out, child.bytesOut)
 		}
-		d.BytesUp += up
-		d.BytesDown += down
 	}
-	// Forget SAs that are gone, or this map grows for the life of the
-	// process on a busy node.
-	for id := range p.lastBytes {
-		if !seen[id] {
-			delete(p.lastBytes, id)
+	// Forget children that are gone, or this map grows for the life of
+	// the process on a busy node.
+	for key := range p.lastBytes {
+		if !seen[key] {
+			delete(p.lastBytes, key)
 		}
 	}
 
@@ -242,6 +256,16 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 		deltas = append(deltas, *d)
 	}
 	return deltas, nil
+}
+
+// counterDelta is the growth of a cumulative counter since the last
+// reading. One that went backwards belongs to an SA replaced under the
+// same key, so all of its value is new.
+func counterDelta(prev, cur uint64) uint64 {
+	if cur >= prev {
+		return cur - prev
+	}
+	return cur
 }
 
 // SessionCounts reports how many distinct places each user is connected
@@ -284,29 +308,32 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 	return counts, nil
 }
 
-// saInfo is the part of one security association this cares about.
-type saInfo struct {
-	id         string
-	user       string
-	remoteHost string
-	bytesUp    uint64
-	bytesDown  uint64
-}
-
-type saBytes struct{ up, down uint64 }
+type saBytes struct{ in, out uint64 }
 
 // listSAs reads the live SAs out of swanctl.
 //
 // `--raw` rather than the human-formatted default: the pretty output is
 // laid out for reading and its shape is not a promise, while the raw
-// form is the VICI message itself and is what the tooling around
-// strongSwan parses.
+// form is the VICI message itself. parse.go shows what it looks like.
+//
+// Loud when swanctl listed SAs and none of them could be read. That is
+// the failure that went unnoticed: a parser that matches nothing returns
+// an empty list, indistinguishable from nobody being connected, and
+// IKEv2 becomes an unmetered path around every data cap with nothing in
+// any log.
 func (p *Provisioner) listSAs(ctx context.Context) ([]saInfo, error) {
-	out, err := p.run(ctx, "--list-sas", "--raw")
+	stdout, stderr, err := p.runSwanctl(ctx, "--list-sas", "--raw")
 	if err != nil {
-		return nil, fmt.Errorf("ikev2: could not list security associations: %w (%s)", err, out)
+		return nil, fmt.Errorf("ikev2: could not list security associations: %w (%s)", err, joinOutput(stdout, stderr))
 	}
-	return parseSAs(out), nil
+	sas, events := parseSAs(stdout)
+	if events > 0 && len(sas) == 0 {
+		return nil, fmt.Errorf("ikev2: swanctl listed %d security association(s) and none could be read -- its --raw output is not what parse.go expects, and IKEv2 usage is going uncounted", events)
+	}
+	if len(sas) < events {
+		log.Printf("ikev2: %d of %d security associations in swanctl's output could not be read", events-len(sas), events)
+	}
+	return sas, nil
 }
 
 // flushLocked rewrites the secrets file and reloads it.
@@ -360,8 +387,8 @@ func (p *Provisioner) flushLocked(ctx context.Context) error {
 	// keeps authenticating, which is the whole failure this call exists
 	// to prevent. Established SAs are unaffected: EAP is consulted at
 	// authentication and not again.
-	if out, err := p.run(ctx, "--load-creds", "--clear"); err != nil {
-		return fmt.Errorf("ikev2: strongSwan refused the credentials: %w (%s)", err, out)
+	if stdout, stderr, err := p.runSwanctl(ctx, "--load-creds", "--clear"); err != nil {
+		return fmt.Errorf("ikev2: strongSwan refused the credentials: %w (%s)", err, joinOutput(stdout, stderr))
 	}
 	return nil
 }
@@ -369,7 +396,7 @@ func (p *Provisioner) flushLocked(ctx context.Context) error {
 // terminate closes any SA belonging to an identity. Best effort: a user
 // with no live session is the normal case, not a failure.
 func (p *Provisioner) terminate(ctx context.Context, username string) error {
-	if _, err := p.run(ctx, "--terminate", "--ike", "neoxify-ikev2", "--eap-id", username); err != nil {
+	if _, _, err := p.runSwanctl(ctx, "--terminate", "--ike", "neoxify-ikev2", "--eap-id", username); err != nil {
 		// Not returned as an error. The secret is already gone, so the
 		// customer cannot re-authenticate either way, and failing the
 		// whole command here would have the outbox retry a removal that
@@ -379,10 +406,19 @@ func (p *Provisioner) terminate(ctx context.Context, username string) error {
 	return nil
 }
 
-func (p *Provisioner) run(ctx context.Context, args ...string) (string, error) {
+// execSwanctl is the real runSwanctl.
+func (p *Provisioner) execSwanctl(ctx context.Context, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, p.swanctl, args...)
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
+// joinOutput is both of swanctl's streams, for an error message.
+func joinOutput(stdout, stderr string) string {
+	return strings.TrimSpace(strings.TrimSpace(stdout) + "\n" + strings.TrimSpace(stderr))
 }
 
 // credentials pulls the two fields the control plane generates for this

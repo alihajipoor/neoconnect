@@ -96,10 +96,22 @@ chain, so the initiator has no ISRG root and reports `no trusted RSA
 public key found`, which reads exactly like an identity mismatch. Real
 clients carry a full trust store and do not hit it. Use a phone.
 
-## What is deliberately missing
+## Usage and session counts
 
-`StatsSince` in the agent provisioner returns nothing, so IKEv2 traffic
-is not counted against a customer's quota. strongSwan exposes per-SA
-byte counts, but a delta needs a per-user key stable across rekeys and
-reconnects; getting it wrong bills somebody for traffic they never used.
-Uncounted is visible and safe. Worth closing if IKEv2 becomes popular.
+This section used to say `StatsSince` returns nothing. It did, though
+not on purpose: the provisioner had grown a parser for
+`swanctl --list-sas --raw`, but the parser looked for a shape strongSwan
+never prints, so until the 2026-10-06 review it matched nothing and
+IKEv2 traffic counted against no quota and no device limit, silently.
+
+The parser now reads swanctl's real `--raw` output -- one
+`list-sa event {...}` line per IKE SA, captured from a live node and
+kept as `agent/internal/protocols/ikev2/testdata/swanctl-list-sas-raw.txt`.
+Counters are tracked per CHILD_SA, which is the key that stays stable
+across an IKE rekey (strongSwan moves the children, counters and all, to
+the new IKE SA); `bytes-in` is the customer's upload. When swanctl lists
+SAs and none can be read, the poll errors instead of reporting nobody.
+
+**Unverified:** that a usage row appears in the panel after a real
+IKEv2 dial on a node running the fixed agent, and the IKE-rekey case
+(reasoned from how strongSwan rekeys, not observed on a node).

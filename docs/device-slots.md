@@ -454,8 +454,10 @@ backend boots and maps the three routes. **Unverified:**
 - The backstop has never seen a real node's report. Whether presence
   from usage deltas is as clean as reasoned (keepalives every 25 s,
   pings every 10 s) is inferred from the agent and client code, not
-  measured. IKEv2 session counts may be empty until its parser is
-  verified.
+  measured. IKEv2 session counts were always empty before the
+  2026-10-06 parser fix (it matched nothing swanctl prints); the fixed
+  parser reads output captured from a node, but a count reaching the
+  backend from a real dial has not been seen.
 - Xray connections already open when a hold starts may keep working
   (Xray cannot close a user's connections). Unmeasured.
 - An iPhone, an Android phone with the screen off, and an Iranian
