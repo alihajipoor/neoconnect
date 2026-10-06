@@ -89,6 +89,34 @@ export const UPLINK_ACK_PREFIX = "reassert-uplink:";
  * costs no database write per user per minute. */
 export const CONFIRM_ACK_PREFIX = "reassert-confirm:";
 
+/** Commands that switch a credential off on its node. */
+const OFF_COMMANDS: ReadonlySet<AgentCommandType> = new Set<AgentCommandType>(["DELETE_USER", "DISABLE_USER"]);
+/** And on. */
+const ON_COMMANDS: ReadonlySet<AgentCommandType> = new Set<AgentCommandType>(["CREATE_USER", "ENABLE_USER", "UPDATE_USER"]);
+
+/** How long before a re-assert's read a credential switched off still
+ * counts as switched off "while the re-assert ran". Covers the gap in
+ * every off path between sending the command and changing the row --
+ * ProtocolUsersService.remove sends DELETE_USER and then deletes the
+ * row, setEnabled sends DISABLE_USER and then updates it -- which is
+ * milliseconds, and far shorter than any hold lease (HOLD_LEASE_MS), so
+ * a hold that lapsed is never mistaken for one just placed. */
+const OFF_RACE_MARGIN_MS = 30_000;
+
+/** How long the last command per credential is remembered. Housekeeping:
+ * only commands from the last OFF_RACE_MARGIN_MS, or sent while a batch
+ * was being written, are ever consulted. */
+const LAST_COMMAND_MEMORY_MS = 10 * 60_000;
+
+interface LastUserCommand {
+  /** Order among recorded commands; strictly increasing. */
+  seq: number;
+  at: number;
+  off: boolean;
+  type: AgentCommandType;
+  payload: object;
+}
+
 @Injectable()
 export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AgentGatewayService.name);
@@ -96,6 +124,13 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private sweepHandle?: NodeJS.Timeout;
   private reassertHandle?: NodeJS.Timeout;
   private routeReassertHandle?: NodeJS.Timeout;
+
+  /** The last user command sent for each credential on each node -- what
+   * keeps a re-assert from putting back a credential switched off while it
+   * ran (see guardedReassert). In memory: the single-instance assumption
+   * the rest of the backend makes, and it only has to outlive one batch. */
+  private readonly lastUserCommand = new Map<string, LastUserCommand>();
+  private userCommandSeq = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -255,6 +290,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * thousands of rows a day on a busy node, all recording that nothing
    * changed. */
   private async reassertAllConnectedNodes() {
+    this.forgetOldUserCommands();
     for (const nodeId of this.registry.connectedNodeIds()) {
       await this.reassertProvisionedUsers(nodeId, { persist: false });
       // Routes are deliberately NOT re-asserted here. They have their own
@@ -613,10 +649,14 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * just come back. */
   private async reassertProvisionedUsers(nodeId: string, opts: { persist: boolean } = { persist: true }) {
     let asserted = 0;
+    // When the batch being handled was read: a credential switched off
+    // after that (or just before -- OFF_RACE_MARGIN_MS) is not put back.
+    let readAt = Date.now();
     await forEachBatch({
       label: `reassertProvisionedUsers(${nodeId})`,
-      read: (afterId, take) =>
-        this.prisma.protocolUser.findMany({
+      read: (afterId, take) => {
+        readAt = Date.now();
+        return this.prisma.protocolUser.findMany({
           // Not every ACTIVE row: not a signed-out device's on its way off
           // the node -- see liveCredentialWhere.
           where: { nodeId, ...liveCredentialWhere(), ...after(afterId) },
@@ -638,16 +678,14 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
           include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
           orderBy: { id: "asc" },
           take,
-        }),
+        });
+      },
       handle: async (users) => {
         for (const user of users) {
-          const payload = reassertPayload(user);
-          if (opts.persist) {
-            await this.enqueueCommand(nodeId, "CREATE_USER", payload);
-          } else {
-            this.writeReassert(user, payload);
-          }
-          asserted += 1;
+          const sent = await this.guardedReassert(user, readAt, (payload) =>
+            opts.persist ? this.enqueueCommand(nodeId, "CREATE_USER", payload) : this.writeReassert(user, payload),
+          );
+          if (sent) asserted += 1;
         }
       },
     });
@@ -666,14 +704,80 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   async reassertCredentials(ids: string[]): Promise<void> {
     if (ids.length === 0) return;
     try {
+      const readAt = Date.now();
       const users = await this.prisma.protocolUser.findMany({
         where: { id: { in: ids }, ...liveCredentialWhere() },
         include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
       });
-      for (const user of users) this.writeReassert(user, reassertPayload(user));
+      for (const user of users) {
+        // Put back on purpose: the hold's own DISABLE_USER, seconds ago,
+        // is not a switch-off this must respect. One that lands from now
+        // on still is.
+        this.noteUserCommand(user.nodeId, "ENABLE_USER", { protocol: user.protocol, externalUserId: user.externalUserId });
+        await this.guardedReassert(user, readAt, (payload) => this.writeReassert(user, payload));
+      }
     } catch (err) {
       this.logger.warn(`Could not re-assert ${ids.length} credential(s) now: ${(err as Error).message}`);
     }
+  }
+
+  /** Re-asserts one credential read at `readAt`, unless it was switched
+   * off since -- and switches it off again if that happens while the
+   * CREATE_USER is being sent.
+   *
+   * A re-assert reads a batch of live rows and then sends CREATE_USER
+   * for each; on reconnect it awaits a stored command per row, so the
+   * window is the whole batch. A sign-out, an eviction, an account
+   * deletion or a suspension landing in it sent its DELETE_USER or
+   * DISABLE_USER and changed the row, and then the loop sent CREATE_USER
+   * for the same credential: the node ran the delete and then the
+   * create, and the credential stayed live there with no row behind it
+   * -- for good, since nothing reconciles a node against the database.
+   * Per-device sign-out makes such deletes routine. Returns whether the
+   * CREATE_USER was sent. */
+  private async guardedReassert(
+    user: { nodeId: string; protocol: string; externalUserId: string; credentialsJson: string; protocolConfig: { transport: string | null; inboundTag: string | null } },
+    readAt: number,
+    send: (payload: object) => unknown,
+  ): Promise<boolean> {
+    const key = userCommandKey(user.nodeId, user.protocol, user.externalUserId);
+    const before = this.lastUserCommand.get(key);
+    if (before?.off && before.at >= readAt - OFF_RACE_MARGIN_MS) return false;
+
+    const sentAfter = this.userCommandSeq;
+    await send(reassertPayload(user));
+
+    const after = this.lastUserCommand.get(key);
+    if (after?.off && after.seq > sentAfter) {
+      // Switched off while this was being sent: the node now has the off
+      // and then this create. Send the off again, after it.
+      await this.enqueueCommand(user.nodeId, after.type, after.payload).catch((err: unknown) =>
+        this.logger.error(`Could not repeat ${after.type} for ${user.externalUserId} after a re-assert: ${String(err)}`),
+      );
+    }
+    return true;
+  }
+
+  /** Remembers the last user command for a credential, before it is sent
+   * (see guardedReassert). */
+  private noteUserCommand(nodeId: string, type: AgentCommandType, payload: object) {
+    const off = OFF_COMMANDS.has(type);
+    if (!off && !ON_COMMANDS.has(type)) return;
+    const { protocol, externalUserId } = payload as { protocol?: unknown; externalUserId?: unknown };
+    if (typeof protocol !== "string" || typeof externalUserId !== "string") return;
+    this.userCommandSeq += 1;
+    this.lastUserCommand.set(userCommandKey(nodeId, protocol, externalUserId), {
+      seq: this.userCommandSeq,
+      at: Date.now(),
+      off,
+      type,
+      payload,
+    });
+  }
+
+  private forgetOldUserCommands() {
+    const cutoff = Date.now() - LAST_COMMAND_MEMORY_MS;
+    for (const [key, last] of this.lastUserCommand) if (last.at < cutoff) this.lastUserCommand.delete(key);
   }
 
   /** One re-assert, written straight onto the node's stream. Synthetic id:
@@ -814,6 +918,9 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * first -- so a command issued while the node is offline isn't lost,
    * just delayed until reconnect. */
   async enqueueCommand(nodeId: string, type: AgentCommandType, payload: object) {
+    // Before anything else, so a re-assert that checks after writing its
+    // own create always sees an off that was on its way.
+    this.noteUserCommand(nodeId, type, payload);
     const command = await this.prisma.agentCommand.create({
       data: { nodeId, type, payloadJson: payload, status: "QUEUED" },
     });
@@ -824,6 +931,10 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     }
     return command;
   }
+}
+
+function userCommandKey(nodeId: string, protocol: string, externalUserId: string): string {
+  return `${nodeId}\u0000${protocol}\u0000${externalUserId}`;
 }
 
 /** The CREATE_USER a re-assert sends for one credential: its protocol,

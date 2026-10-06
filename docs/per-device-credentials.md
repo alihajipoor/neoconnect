@@ -313,6 +313,14 @@ All on this branch, each with tests:
   counts.
 - Plaintext credentials were kept in `agent_commands` forever. They are
   removed from a command's payload once it is acked or failed.
+- A re-assert read a batch of live rows and then sent CREATE_USER for
+  each, so a sign-out, eviction, deletion or suspension landing in
+  between was undone on the node: delete, then create, and a live
+  credential with no row behind it for good. The gateway now remembers
+  the last user command per credential; a re-assert skips a credential
+  switched off since its read (or just before it), and repeats the
+  switch-off if one lands while its create is being sent. In memory, one
+  backend instance, as elsewhere.
 
 ## Known, deferred
 
