@@ -2787,25 +2787,86 @@ masquerade_client_subnet() {
     iptables -t nat -A POSTROUTING -s "$subnet" -o "$iface" -j MASQUERADE
 }
 
+# The panel's Protocol Config of this kind on this node, as one line of
+# JSON, or nothing if there is none. Fails if the panel cannot be asked,
+# which callers must not read as "none": what a re-run does next depends
+# on it, and the panel's copy is what every customer's config was built
+# from.
+registered_protocol_config() {
+  local protocol="$1" token configs
+  token="$(get_admin_bearer_token)" || return 1
+  configs="$(curl -fsSL "$panel_url/protocol-configs" -H "Authorization: Bearer $token")" || return 1
+  echo "$configs" | jq -c --arg node "$node_id" --arg protocol "$protocol" \
+    '[.[]? | select(.nodeId == $node and .protocol == $protocol)][0] // empty'
+}
+
 install_wireguard() {
   echo "Installing WireGuard..."
   apt-get install -y -qq wireguard wireguard-tools
 
+  # The server key is generated once and kept. This function is offered as
+  # "Install/reconfigure" on nodes that are serving customers, and it used
+  # to mint a new key every run: every customer's config carries the old
+  # public key, so every handshake failed, silently, and the panel kept
+  # advertising the old key -- the old private key was gone, so it could
+  # not even be put back. Xray got the same guard in August.
   install -d -m 700 /etc/wireguard
-  ( umask 077 && wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key )
+  if [[ -s /etc/wireguard/server_private.key ]]; then
+    echo "  Keeping this node's WireGuard key: every customer's config is built on it."
+  else
+    ( umask 077 && wg genkey > /etc/wireguard/server_private.key )
+  fi
+  ( umask 077 && wg pubkey < /etc/wireguard/server_private.key > /etc/wireguard/server_public.key )
   local private_key public_key
   private_key="$(cat /etc/wireguard/server_private.key)"
   public_key="$(cat /etc/wireguard/server_public.key)"
 
+  # What the panel already advertises for WireGuard on this node. A
+  # re-run keeps to it: the port it gives clients cannot change from
+  # here, and registering a second config would leave the first one
+  # advertising a port nothing serves.
+  local registered registered_port="" registered_key=""
+  if ! registered="$(registered_protocol_config WIREGUARD)"; then
+    echo "ERROR: could not read this node's Protocol Configs from the panel; not touching WireGuard." >&2
+    return 1
+  fi
+  if [[ -n "$registered" ]]; then
+    registered_port="$(echo "$registered" | jq -r '.listenPort')"
+    registered_key="$(echo "$registered" | jq -r '.publicParamsJson.serverPublicKey // empty')"
+    echo "  WireGuard is already registered in the panel for this node, on port $registered_port."
+    if [[ -n "$registered_key" && "$registered_key" != "$public_key" ]]; then
+      echo "  WARNING: the panel advertises server key $registered_key," >&2
+      echo "  but this node's key is $public_key. Every WireGuard customer of this node" >&2
+      echo "  fails to handshake until the two match: set serverPublicKey in this config's" >&2
+      echo "  parameters in the panel." >&2
+    fi
+  fi
+
+  # The interface's own values, when there is one, as the defaults.
+  local existing_port="" existing_address="" existing_subnet=""
+  if [[ -f /etc/wireguard/wg0.conf ]]; then
+    existing_port="$(sed -n 's/^ListenPort *= *//p' /etc/wireguard/wg0.conf | head -n1)"
+    existing_address="$(sed -n 's/^Address *= *//p' /etc/wireguard/wg0.conf | head -n1)"
+    [[ -n "$existing_address" ]] && existing_subnet="${existing_address%.*}.0/24"
+  fi
+
   local suggested_port
-  suggested_port="$(suggest_free_port)"
-  echo "  A random high port is suggested rather than 51820, which identifies"
-  echo "  WireGuard to anyone scanning. Any port works; the clients read it"
-  echo "  from the panel rather than assuming."
+  suggested_port="${registered_port:-${existing_port:-$(suggest_free_port)}}"
+  if [[ -z "$registered_port" && -z "$existing_port" ]]; then
+    echo "  A random high port is suggested rather than 51820, which identifies"
+    echo "  WireGuard to anyone scanning. Any port works; the clients read it"
+    echo "  from the panel rather than assuming."
+  fi
   read -r -p "Listen port for WireGuard [$suggested_port]: " listen_port
   listen_port="${listen_port:-$suggested_port}"
-  read -r -p "Client subnet, /24 only (e.g. 10.66.0.0/24) [10.66.0.0/24]: " subnet
-  subnet="${subnet:-10.66.0.0/24}"
+  if [[ -n "$registered_port" && "$listen_port" != "$registered_port" ]]; then
+    echo "ERROR: the panel gives this node's WireGuard customers port $registered_port." >&2
+    echo "  Moving it here would leave them dialling a port nothing serves. Change the" >&2
+    echo "  port in the panel's Protocol Config first, or keep $registered_port." >&2
+    return 1
+  fi
+  read -r -p "Client subnet, /24 only (e.g. 10.66.0.0/24) [${existing_subnet:-10.66.0.0/24}]: " subnet
+  subnet="${subnet:-${existing_subnet:-10.66.0.0/24}}"
   local subnet_base="${subnet%.0/24}"
   local server_ip="${subnet_base}.1"
   read -r -p "DNS to hand out to clients [1.1.1.1]: " dns
@@ -2838,17 +2899,42 @@ install_wireguard() {
 PostDown = iptables -t nat -D POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE 2>/dev/null || true"
   fi
 
-  cat > /etc/wireguard/wg0.conf <<EOF
+  local wg_conf_new
+  wg_conf_new="$(mktemp)"
+  cat > "$wg_conf_new" <<EOF
 [Interface]
 Address = ${server_ip}/24
 ListenPort = ${listen_port}
 PrivateKey = ${private_key}
 ${wg_nat_hooks}
 EOF
-  chmod 600 /etc/wireguard/wg0.conf
 
-  systemctl enable --now wg-quick@wg0
-  systemctl restart wg-quick@wg0
+  # Restarted only when something changed. A restart drops every peer the
+  # agent added at runtime -- they are not in wg0.conf -- and they come
+  # back only with the control plane's next re-assert, up to a minute
+  # later: a minute of outage for every WireGuard customer, for a re-run
+  # that changed nothing.
+  if [[ -f /etc/wireguard/wg0.conf ]] && cmp -s "$wg_conf_new" /etc/wireguard/wg0.conf &&
+     systemctl is-active --quiet wg-quick@wg0; then
+    rm -f "$wg_conf_new"
+    echo "  wg0 is unchanged and running; not restarting it."
+  else
+    if [[ -f /etc/wireguard/wg0.conf ]]; then
+      cp -a /etc/wireguard/wg0.conf "/etc/wireguard/wg0.conf.bak-$(date +%Y%m%d-%H%M%S)"
+      echo "  Restarting wg0. The peers on it come back with the control plane's next"
+      echo "  re-assert, within about a minute."
+    fi
+    install -m 600 "$wg_conf_new" /etc/wireguard/wg0.conf
+    rm -f "$wg_conf_new"
+    systemctl enable --now wg-quick@wg0
+    systemctl restart wg-quick@wg0
+  fi
+
+  if [[ -n "$registered" ]]; then
+    echo "WireGuard is already registered in the panel -- left untouched there."
+    echo "WireGuard is running on port $listen_port."
+    return 0
+  fi
 
   echo "Registering WireGuard in the panel..."
   local config_id params
@@ -3558,6 +3644,41 @@ install_openvpn() {
     echo "ERROR: this node is not enrolled yet -- /etc/neoxify/agent.json has no panelUrl/nodeId." >&2
     echo "       Enrol first; OpenVPN's CA is minted by the panel, not locally." >&2
     return 1
+  fi
+
+  # Not over a live OpenVPN unless the operator says so in so many words.
+  #
+  # This function registers a NEW Protocol Config, which is what mints a
+  # certificate authority, and then writes that CA, a new port and a new
+  # tls-crypt key over server.conf. Offered as "Install/reconfigure" on
+  # live nodes, with a random free port as the default answer -- which by
+  # construction is not the port in use, so the panel accepted it as a
+  # second config -- pressing Enter cut off every existing OpenVPN
+  # customer: their certificates were signed by a CA the server no longer
+  # trusts, and their configs name a port nothing listens on.
+  # restore-openvpn-from-panel.sh is the tool for putting OpenVPN back as
+  # the panel knows it.
+  local registered_ovpn
+  if ! registered_ovpn="$(registered_protocol_config OPENVPN)"; then
+    echo "ERROR: could not read this node's Protocol Configs from the panel; not touching OpenVPN." >&2
+    return 1
+  fi
+  if [[ -n "$registered_ovpn" || -f /etc/openvpn/server/server.conf ]]; then
+    echo
+    if [[ -n "$registered_ovpn" ]]; then
+      echo "  OpenVPN is already registered in the panel for this node, on port $(echo "$registered_ovpn" | jq -r '.listenPort')."
+    fi
+    [[ -f /etc/openvpn/server/server.conf ]] && echo "  This node already has /etc/openvpn/server/server.conf."
+    echo "  Installing again mints a NEW certificate authority and writes it over this"
+    echo "  server: every existing OpenVPN customer stops working, and their configs"
+    echo "  point at a port nothing listens on. To rebuild OpenVPN as the panel already"
+    echo "  knows it, use installer/maintenance/restore-openvpn-from-panel.sh instead."
+    local replace_confirm
+    read -r -p "Type REPLACE to cut off every existing OpenVPN customer and continue, anything else to stop: " replace_confirm
+    if [[ "$replace_confirm" != "REPLACE" ]]; then
+      echo "  OpenVPN left as it is."
+      return 0
+    fi
   fi
 
   apt-get install -y -qq openvpn
