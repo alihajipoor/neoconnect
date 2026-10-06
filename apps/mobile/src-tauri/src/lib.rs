@@ -1,5 +1,19 @@
 mod latency;
 
+/// The OS this binary was compiled for: "android" or "ios" here, as the
+/// platform on attempt reports.
+///
+/// Up to 0.2.21 the shared attempts.ts guessed from the user agent and
+/// said "windows" for anything that was not Android, so every iOS report
+/// was filed as a Windows one. 0.2.22 improved the guess; this replaces
+/// it. An iPad is "ios" whatever its webview claims to be, and nothing a
+/// build script or a WebView update does can change the answer. The
+/// Windows client registers the same command.
+#[tauri::command]
+fn build_platform() -> &'static str {
+    std::env::consts::OS
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -37,7 +51,8 @@ pub fn run() {
             // The connect ladder's pre-dial reachability probe, shared
             // with the Windows client. Same story as the line above: it
             // only existed there, so on the phones it always rejected.
-            latency::probe_tcp
+            latency::probe_tcp,
+            build_platform
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

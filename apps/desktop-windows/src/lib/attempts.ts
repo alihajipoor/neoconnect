@@ -1,5 +1,6 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { getVersion } from "@tauri-apps/api/app";
+import { invoke } from "@tauri-apps/api/core";
 import { publicRequest } from "./api";
 import { getTokens } from "./session";
 import { currentAttestation } from "./network-identity";
@@ -102,31 +103,54 @@ interface QueuedReport extends AttemptReport {
   network?: string;
 }
 
-/** Which build this is.
+/** Which platform the user agent suggests -- the fallback only.
  *
- * Detected rather than hardcoded because this file is shared: the
- * Android client aliases this whole directory, so a literal "windows"
- * here would label every tablet report as a desktop one -- and telling
- * the two apart is most of the value of having the field.
+ * This was the only source until the binary was asked instead (see
+ * `reportedPlatform`), and what it got wrong is why. It used to stop at
+ * android-or-windows, and this file is compiled into the mobile app as
+ * well, so every iOS report from mobile 0.2.18 to 0.2.21 was filed as a
+ * Windows one: all 182 "windows" CONTROL_PLANE_UNREACHABLE rows in the
+ * table on 2026-10-06 carry a 0.2.x version, while the real Windows
+ * client had recorded none. It read as "Windows cannot reach the API"
+ * and was written up that way.
  *
- * The user agent rather than a platform plugin, which is not a
- * dependency of either app. Both run in a system webview, and the one
- * on Android says so. A wrong guess costs a mislabelled row, so it is
- * not worth a new dependency in two apps to improve on.
+ * The iOS test is the same one `apps/mobile/src/lib/platform.ts` uses:
+ * iPadOS reports itself as a Mac and only a touchscreen gives it away.
+ * And anything it does not recognise is "unknown", never a particular
+ * platform -- the defect was a guess defaulting to a real answer.
  */
 export function detectPlatform(
   userAgent: string = typeof navigator === "undefined" ? "" : navigator.userAgent,
   maxTouchPoints: number = typeof navigator === "undefined" ? 0 : navigator.maxTouchPoints ?? 0,
 ): string {
   if (/android/i.test(userAgent)) return "android";
-  // This used to stop at android-or-windows, so every iPhone and Mac
-  // report was filed as a Windows one -- which would have folded three
-  // platforms' failures into one row of the per-ISP data. The iOS test
-  // is the same one `apps/mobile/src/lib/platform.ts` uses: iPadOS
-  // reports itself as a Mac and only a touchscreen gives it away.
   if (/iphone|ipad|ipod/i.test(userAgent)) return "ios";
   if (/macintosh/i.test(userAgent)) return maxTouchPoints > 1 ? "ios" : "macos";
-  return "windows";
+  if (/windows/i.test(userAgent)) return "windows";
+  return "unknown";
+}
+
+/** The platform names a binary can report. Anything else coming back
+ * from the command is treated as no answer. */
+const KNOWN_PLATFORMS = new Set(["windows", "android", "ios", "macos", "linux"]);
+
+/** Which build this is: the OS the binary was compiled for.
+ *
+ * Asked of Rust (`build_platform`, registered by the Windows and mobile
+ * apps) because the compile target cannot be mislabelled the way a user
+ * agent can -- an iPad is "ios" whatever its webview calls itself, and an
+ * Android tablet in desktop mode is still "android". The user agent is
+ * only the fallback, for a shell that does not register the command.
+ *
+ * Cached for the process, like the version: it cannot change while the
+ * app runs, and one IPC call is enough. */
+let platformPromise: Promise<string> | null = null;
+export function reportedPlatform(): Promise<string> {
+  platformPromise ??= invoke<unknown>("build_platform").then(
+    (os) => (typeof os === "string" && KNOWN_PLATFORMS.has(os) ? os : detectPlatform()),
+    () => detectPlatform(),
+  );
+  return platformPromise;
 }
 
 /** How many unsent reports are kept.
@@ -249,7 +273,7 @@ export async function reportAttempt(report: AttemptReport): Promise<void> {
     if (shaped === null) return;
     const queued: QueuedReport = {
       ...shaped,
-      platform: detectPlatform(),
+      platform: await reportedPlatform(),
       appVersion: await appVersion(),
       // Stamped now, even for the report that goes out immediately. The
       // server keeps its own arrival time regardless; this is what makes

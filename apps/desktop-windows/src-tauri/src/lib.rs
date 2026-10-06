@@ -30,6 +30,19 @@ fn get_launch_deep_link(state: tauri::State<LaunchDeepLink>) -> Option<String> {
     state.0.clone()
 }
 
+/// The OS this binary was compiled for, as the platform on attempt
+/// reports.
+///
+/// The webview's user agent was the source, shared with the mobile app,
+/// and its fallback was "windows": the iOS builds reported as Windows for
+/// a month and turned an iOS problem into an apparent Windows one. The
+/// compile target cannot be wrong that way. The mobile app registers the
+/// same command; see `reportedPlatform` in attempts.ts.
+#[tauri::command]
+fn build_platform() -> &'static str {
+    std::env::consts::OS
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let launch_url = std::env::args().find(|a| a.starts_with("neoconnect://"));
@@ -144,7 +157,8 @@ pub fn run() {
             vpn::measure_latency,
             vpn::probe_tcp,
             vpn::network_fingerprint,
-            get_launch_deep_link
+            get_launch_deep_link,
+            build_platform
         ])
         // Closing the window is an instruction, and it has to be acted
         // on rather than inferred.
