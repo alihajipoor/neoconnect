@@ -104,12 +104,23 @@ function getStore(): Promise<Store> {
 }
 
 /** Records what the server just said. Best-effort: a cache that cannot be
- * written must never fail the fetch that succeeded. */
+ * written must never fail the fetch that succeeded.
+ *
+ * `stillCurrent`, when given, is asked at the last moment before the
+ * write: whether the customer whose answer this is is still the one
+ * signed in. A load that was in flight when they signed out used to
+ * write their credentials -- WireGuard keys, passwords -- back to disk
+ * after the sign-out had cleared them, for the next person on the
+ * machine to be shown or to connect with. A predicate rather than an
+ * import of the session's generation, because session-end already
+ * imports this file. */
 export async function saveSnapshot(
   snapshot: Omit<ConnectionSnapshot, "version" | "savedAt">,
+  stillCurrent?: () => boolean,
 ): Promise<void> {
   try {
     const store = await getStore();
+    if (stillCurrent && !stillCurrent()) return;
     await store.set(KEY, { ...snapshot, version: VERSION, savedAt: Date.now() });
     await store.save();
   } catch {

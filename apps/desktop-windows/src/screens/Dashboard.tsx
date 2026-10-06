@@ -1034,6 +1034,9 @@ export function Dashboard({
   }
 
   async function loadAll(preferRouteId?: string) {
+    // Which customer session this load is for. See sessionGeneration: a
+    // sign-out bumps it before it clears anything.
+    const sessionAtStart = sessionGeneration();
     setLoading(true);
     setError(null);
     const [meResult, subsResult, usersResult] = await Promise.all([getMe(), getSubscriptions(), getProtocolUsers()]);
@@ -1130,13 +1133,24 @@ export function Dashboard({
       }
     }
 
+    // A sign-out landed while the route list was in flight -- the button
+    // is drawn as soon as the screen leaves loading, before that request
+    // returns. Everything below is for a session that has ended: the
+    // snapshot above all, which would write the signed-out customer's
+    // credentials back to disk after the sign-out cleared them.
+    if (sessionGeneration() !== sessionAtStart) return;
+
     // Written only after a wholly successful fetch, so a partial answer
-    // can never overwrite a good cache with a worse one.
-    void saveSnapshot({
-      subscription: sub,
-      protocolUsers: usersResult.data,
-      routes: currentRoutes,
-    });
+    // can never overwrite a good cache with a worse one. Asked again at
+    // the moment of writing, for a sign-out that lands in between.
+    void saveSnapshot(
+      {
+        subscription: sub,
+        protocolUsers: usersResult.data,
+        routes: currentRoutes,
+      },
+      () => sessionGeneration() === sessionAtStart,
+    );
 
     // Only when the service actually said so -- "unknown" is not a no,
     // and a baseline captured through a tunnel we simply could not ask
