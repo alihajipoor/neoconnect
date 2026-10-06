@@ -104,18 +104,18 @@ impl Active {
         })
     }
 
-    /// Whether this engine has ended, asked directly.
+    /// Whether this engine has ended, asked directly. `None` when the
+    /// question could not be asked -- RAS answering with an error it gives
+    /// no meaning to.
     ///
     /// The check a teardown makes before acting on a watch's report, so
     /// that nothing is taken down on the strength of a wait that merely
-    /// failed. Only a definite answer counts: IKEv2's "RAS could not be
-    /// asked" is not an ending, and neither is a tunnel service that is
-    /// still stopping.
-    fn has_ended(&mut self) -> bool {
+    /// failed. A tunnel service that is still stopping is not an ending.
+    fn has_ended(&mut self) -> Option<bool> {
         match self {
-            Active::Child { child, .. } => !matches!(child.try_wait(), Ok(None)),
-            Active::Ikev2(live) => live.is_connected() == Some(false),
-            Active::WireguardTunnel => !wireguard::tunnel_is_running(),
+            Active::Child { child, .. } => Some(!matches!(child.try_wait(), Ok(None))),
+            Active::Ikev2(live) => live.is_connected().map(|up| !up),
+            Active::WireguardTunnel => Some(!wireguard::tunnel_is_running()),
         }
     }
 }
@@ -309,7 +309,7 @@ enum Noticed {
 /// The app now asks for status every second while a tunnel is up, to
 /// stop claiming protection within a second of the tunnel going. Each
 /// handshake reading spawns `wg.exe`, which was fine at one poll every
-/// fifteen seconds and is not at fifteen a quarter-minute. Five seconds
+/// fifteen seconds and is not at one a second. Five seconds
 /// is far inside the 180-second window that separates alive from stale,
 /// so nothing it reports can change meaning by being this old.
 const HANDSHAKE_REUSE_FOR: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1113,17 +1113,27 @@ impl Engines {
     ///
     /// Only releases things. Fail open is a product decision: nothing
     /// here blocks traffic or brings a tunnel back. What changes is that
-    /// the machine is put back about a second after the engine dies
+    /// the machine is put back within a second of the engine dying
     /// instead of up to fifteen, and that in that gap the session's
     /// filters no longer hold plain DNS and IPv6 hostage to a tunnel that
     /// is gone. See [`Self::tear_down_dead_session`].
     pub fn end_dead_session(&mut self, generation: u64) -> bool {
+        // What the watch put on record, if anything: a definite ending
+        // from the kernel or RAS, as opposed to a wait that failed.
+        let on_record = self
+            .ledger
+            .ended_without_successor()
+            .is_some_and(|ended| ended.generation == generation);
         match self.active.peek_mut() {
-            Some(session) if session.generation == generation => {
-                if !session.engine.has_ended() {
-                    return false;
-                }
-            }
+            Some(session) if session.generation == generation => match session.engine.has_ended() {
+                Some(true) => {}
+                Some(false) => return false,
+                // RAS cannot say right now. Its own notification already
+                // did, and that is what a record means; without one there
+                // is nothing to act on.
+                None if on_record => {}
+                None => return false,
+            },
             _ => return false,
         }
         self.tear_down_dead_session(Noticed::ByWatch);
@@ -1208,10 +1218,16 @@ impl Engines {
         let dns = dns::clear_registry_only();
         self.forget_dns_state();
 
+        // What the number is depends on who gave it.
+        let code_is = match protocol {
+            "IKEV2" => "RAS error",
+            "WIREGUARD" => "service exit code",
+            _ => "exit code",
+        };
         let mut detail = format!(
             "{protocol}{}, noticed by {}",
             match ended.as_ref().and_then(|e| e.detail) {
-                Some(code) => format!(", exit code {code}"),
+                Some(code) => format!(", {code_is} {code}"),
                 None => String::new(),
             },
             match noticed {
@@ -2575,7 +2591,7 @@ mod helper_tests {
         let generation = engines.begin_test_session("XRAY_VLESS_REALITY", engine_stand_in());
         kill_engine_behind_its_back(&mut engines);
         assert!(wait_for(Duration::from_secs(5), || {
-            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended()), Some(true))
+            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended()), Some(Some(true)))
         }));
 
         assert_eq!(engines.status(), (false, None, TunnelHealth::Down));
