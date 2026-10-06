@@ -207,6 +207,10 @@ model AdminUser {
   // they've ever confirmed the app on their phone actually works.
   mfaSecret    String?
   mfaEnabled   Boolean   @default(false)
+  /// The last TOTP time-step (unix seconds / 30) a code was accepted for,
+  /// so a code cannot be used twice inside its ~90 s window (RFC 6238
+  /// 5.2). Null until the first code after this column existed.
+  mfaLastStep  Int?
   tokenVersion Int       @default(0)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt

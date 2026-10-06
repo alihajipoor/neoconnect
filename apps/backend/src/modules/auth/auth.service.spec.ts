@@ -29,7 +29,9 @@ function buildAdmin(overrides: Partial<Record<string, unknown>> = {}) {
 
 describe("AuthService", () => {
   let service: AuthService;
-  let prisma: { adminUser: { findUnique: jest.Mock; update: jest.Mock; findUniqueOrThrow: jest.Mock } };
+  let prisma: {
+    adminUser: { findUnique: jest.Mock; update: jest.Mock; findUniqueOrThrow: jest.Mock; updateMany: jest.Mock };
+  };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let config: { get: jest.Mock };
 
@@ -43,6 +45,8 @@ describe("AuthService", () => {
         findUnique: jest.fn(),
         findUniqueOrThrow: jest.fn(),
         update: jest.fn(),
+        // How a TOTP step is used up: conditionally, once.
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     };
     jwt = { signAsync: jest.fn(), verifyAsync: jest.fn() };
@@ -141,6 +145,85 @@ describe("AuthService", () => {
 
       expect(result).toEqual({ accessToken: "access-token", refreshToken: "refresh-token" });
     });
+
+    /** RFC 6238 5.2: a code is accepted once. Nothing recorded the step a
+     * code was used for, so one seen over a shoulder worked again for the
+     * rest of its ~90 s window with the attacker's own mfaToken. */
+    it("accepts a code's time-step only once, in one conditional write", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", purpose: "mfa" });
+      prisma.adminUser.findUnique.mockResolvedValue(buildAdmin({ mfaEnabled: true, mfaSecret: secret }));
+      jwt.signAsync.mockResolvedValue("token");
+      const code = authenticator.generate(secret);
+
+      await service.verifyMfaAndLogin("token", code);
+      const { where, data } = prisma.adminUser.updateMany.mock.calls[0][0];
+      expect(where).toEqual({
+        id: "admin-1",
+        OR: [{ mfaLastStep: null }, { mfaLastStep: { lt: data.mfaLastStep } }],
+      });
+      // This step (or the one before, should the clock have ticked over).
+      expect(Math.floor(Date.now() / 30_000) - data.mfaLastStep).toBeLessThanOrEqual(1);
+
+      // The same code again: the step is no longer newer than the last one.
+      prisma.adminUser.updateMany.mockResolvedValue({ count: 0 });
+      await expect(service.verifyMfaAndLogin("token", code)).rejects.toThrow("Invalid MFA code");
+    });
+
+    describe("per-admin limit", () => {
+      beforeEach(() => {
+        jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", purpose: "mfa" });
+        prisma.adminUser.findUnique.mockResolvedValue(buildAdmin({ mfaEnabled: true, mfaSecret: secret }));
+        jwt.signAsync.mockResolvedValue("token");
+        jest.spyOn(service["logger"], "warn").mockImplementation(() => undefined);
+      });
+
+      /** Only the per-IP throttle stood here: two hundred addresses made a
+       * thousand guesses a minute, and a correct password (which the
+       * attacker at this step has) hands out a fresh mfaToken each time. */
+      it("refuses everything after five wrong codes, the right one included", async () => {
+        for (let i = 0; i < 5; i += 1) {
+          await expect(service.verifyMfaAndLogin("token", "000000")).rejects.toThrow("Invalid MFA code");
+        }
+
+        await expect(service.verifyMfaAndLogin("token", authenticator.generate(secret))).rejects.toThrow(
+          /Too many wrong codes/,
+        );
+        expect(jwt.signAsync).not.toHaveBeenCalled();
+      });
+
+      it("compares no more than five of a parallel burst", async () => {
+        prisma.adminUser.findUnique.mockImplementation(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return buildAdmin({ mfaEnabled: true, mfaSecret: secret });
+        });
+
+        await Promise.all(
+          Array.from({ length: 40 }, () => service.verifyMfaAndLogin("token", "000000").catch(() => undefined)),
+        );
+
+        expect(prisma.adminUser.findUnique).toHaveBeenCalledTimes(5);
+      });
+
+      it("is not reset by a new password sign-in", async () => {
+        for (let i = 0; i < 5; i += 1) await service.verifyMfaAndLogin("token", "000000").catch(() => undefined);
+        prisma.adminUser.findUnique.mockResolvedValue(buildAdmin({ mfaEnabled: true, mfaSecret: secret }));
+        jwt.signAsync.mockResolvedValue("fresh-mfa-token");
+        await service.login("admin@example.com", PASSWORD);
+
+        await expect(service.verifyMfaAndLogin("fresh-mfa-token", authenticator.generate(secret))).rejects.toThrow(
+          /Too many wrong codes/,
+        );
+      });
+
+      it("starts over after a right code", async () => {
+        for (let i = 0; i < 4; i += 1) await service.verifyMfaAndLogin("token", "000000").catch(() => undefined);
+        await service.verifyMfaAndLogin("token", authenticator.generate(secret));
+
+        for (let i = 0; i < 4; i += 1) {
+          await expect(service.verifyMfaAndLogin("token", "000000")).rejects.toThrow("Invalid MFA code");
+        }
+      });
+    });
   });
 
   describe("refresh", () => {
@@ -177,7 +260,7 @@ describe("AuthService", () => {
       expect(result.qrCodeDataUrl).toMatch(/^data:image\/png;base64,/);
       expect(prisma.adminUser.update).toHaveBeenCalledWith({
         where: { id: "admin-1" },
-        data: { mfaSecret: result.secret, mfaEnabled: false },
+        data: { mfaSecret: result.secret, mfaEnabled: false, mfaLastStep: null },
       });
     });
 
@@ -200,6 +283,17 @@ describe("AuthService", () => {
       const secret = authenticator.generateSecret();
       prisma.adminUser.findUniqueOrThrow.mockResolvedValue(buildAdmin({ mfaSecret: secret }));
       await expect(service.enableMfa("admin-1", "000000")).rejects.toThrow(UnauthorizedException);
+    });
+
+    it("enableMfa uses up the code's time-step, so it cannot sign in a second time", async () => {
+      const secret = authenticator.generateSecret();
+      prisma.adminUser.findUniqueOrThrow.mockResolvedValue(buildAdmin({ mfaSecret: secret }));
+
+      await service.enableMfa("admin-1", authenticator.generate(secret));
+
+      expect(prisma.adminUser.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { mfaLastStep: expect.any(Number) } }),
+      );
     });
 
     it("enableMfa flips mfaEnabled to true for a correct code", async () => {
@@ -227,7 +321,7 @@ describe("AuthService", () => {
 
       expect(prisma.adminUser.update).toHaveBeenCalledWith({
         where: { id: "admin-1" },
-        data: { mfaSecret: null, mfaEnabled: false },
+        data: { mfaSecret: null, mfaEnabled: false, mfaLastStep: null },
       });
     });
   });

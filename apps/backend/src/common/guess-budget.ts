@@ -1,6 +1,7 @@
-/** How many guesses one account's emailed codes may take, in total, over
- * a fixed window -- however many codes are issued in it and however many
- * addresses the guesses come from.
+/** How many guesses one account's codes may take, in total, over a fixed
+ * window -- however many codes are issued in it and however many
+ * addresses the guesses come from. Used for the customer's emailed codes
+ * (reset and verification) and for the admin TOTP step.
  *
  * Six digits is a million values, and the per-IP throttle in front of the
  * code routes is exactly the limit a distributed attacker walks around.

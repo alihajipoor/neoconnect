@@ -17,7 +17,7 @@ import { SESSION_IDLE_LIFETIME_MS } from "./session-lifetime";
 import { hasDeviceInfo, type DeviceInfo } from "../../common/device-info";
 import { DeviceSlotsService } from "../device-slots/device-slots.service";
 import { KeyedLock } from "../protocol-users/keyed-lock";
-import { GuessBudget, guessKey } from "./guess-budget";
+import { GuessBudget, guessKey } from "../../common/guess-budget";
 import {
   CustomerAccessTokenPayload,
   CustomerRefreshTokenPayload,
