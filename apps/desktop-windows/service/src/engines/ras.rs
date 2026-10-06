@@ -189,6 +189,55 @@ mod tests {
         assert_ne!(answer, Some(true), "a handle RAS never issued was reported connected");
     }
 
+    /// Watching a handle RAS never issued must neither crash nor put a
+    /// drop on record. Asked of the real API, the way the test above
+    /// asks for status.
+    ///
+    /// The generation is closed first, as every teardown of ours closes
+    /// it before hanging up -- so whatever RAS answers about a handle it
+    /// does not know (this PC says `ERROR_INVALID_HANDLE`, which reads as
+    /// gone; a CI runner may say something else, which reads as unknown),
+    /// the ledger must refuse it.
+    #[test]
+    fn a_watch_on_a_handle_ras_never_issued_is_harmless() {
+        use crate::lifecycle::engine_watch::{watch, Gone, Ledger};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let ledger = Arc::new(Ledger::new());
+        let generation = ledger.begin("IKEV2");
+        ledger.close(generation);
+
+        let liveness = liveness_of(0x5EED_usize as *mut c_void).expect("an event can always be made");
+        let recorded = Arc::new(AtomicBool::new(false));
+        let (flag, ledger_for_watch) = (Arc::clone(&recorded), Arc::clone(&ledger));
+        let guard = watch(
+            generation,
+            "test-ras",
+            Box::new(liveness),
+            Arc::new(move |g: Gone| {
+                if ledger_for_watch.record(g.generation, g.detail, g.at) {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }),
+        )
+        .expect("starting a watch");
+
+        // Past one slice, so the status call has been made at least once.
+        std::thread::sleep(Duration::from_millis(1_300));
+        assert!(!recorded.load(Ordering::SeqCst), "a handle RAS never issued was recorded as a drop");
+        assert!(ledger.ended_without_successor().is_none());
+
+        let finished = guard.finished();
+        drop(guard);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !finished.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(finished.load(Ordering::Acquire), "the watch outlived its guard");
+    }
+
     #[test]
     fn params_report_their_own_size() {
         assert_eq!(
@@ -254,6 +303,25 @@ impl Connection {
         connect_status(self.0)
     }
 
+    /// A watch on this connection ending, for the engine watch.
+    ///
+    /// RAS is asked to set an event of ours when the connection goes
+    /// (`RasConnectionNotificationW` with `RASCN_Disconnection`), and the
+    /// handle's own status is asked once a slice besides. The second is
+    /// not redundant: nothing has yet observed the notification fire for
+    /// a real IKEv2 drop on a real machine, and if it does not, the poll
+    /// still notices within a second. A notification that could not be
+    /// registered is the same case, so it is not an error here.
+    ///
+    /// The raw handle is copied into the watch, not shared: the session
+    /// keeps the `Connection` and hangs it up. A watch that asks about it
+    /// after that gets `ERROR_INVALID_HANDLE`, which reads as gone -- and
+    /// is refused by the ledger, because the session closed its
+    /// generation before hanging up.
+    pub fn liveness(&self) -> std::io::Result<RasLiveness> {
+        liveness_of(self.0)
+    }
+
     /// Hangs up now, consuming the handle.
     ///
     /// Only needed where the result matters; otherwise let it drop.
@@ -270,6 +338,12 @@ impl Connection {
 /// can ask about a handle RAS has never issued without that test owning
 /// -- and on drop hanging up -- a handle it made up.
 fn connect_status(handle: *mut c_void) -> Option<bool> {
+    connect_state(handle).map(|(connected, _)| connected)
+}
+
+/// The same, with the error RAS gives for the connection's state -- the
+/// reason a dropped connection dropped, when it has one.
+fn connect_state(handle: *mut c_void) -> Option<(bool, u32)> {
     use windows_sys::Win32::NetworkManagement::Rras::{
         RasGetConnectStatusW, RASCONNSTATUSW, RASCS_Connected,
     };
@@ -282,9 +356,60 @@ fn connect_status(handle: *mut c_void) -> Option<bool> {
     // SAFETY: `status` is a correctly sized, writable RASCONNSTATUSW.
     let rc = unsafe { RasGetConnectStatusW(handle as _, &mut status) };
     match rc {
-        0 => Some(status.rasconnstate == RASCS_Connected),
-        ERROR_INVALID_HANDLE => Some(false),
+        0 => Some((status.rasconnstate == RASCS_Connected, status.dwError)),
+        ERROR_INVALID_HANDLE => Some((false, ERROR_INVALID_HANDLE)),
         _ => None,
+    }
+}
+
+/// [`Connection::liveness`], for a raw handle -- free of `Connection` for
+/// the same reason [`connect_status`] is.
+fn liveness_of(handle: *mut c_void) -> std::io::Result<RasLiveness> {
+    use windows_sys::Win32::NetworkManagement::Rras::{RasConnectionNotificationW, RASCN_Disconnection};
+    let event = crate::lifecycle::engine_watch::new_event()?;
+    // SAFETY: an open event of ours, and a handle RAS validates itself --
+    // one it never issued is answered with an error, not dereferenced
+    // (see `a_watch_on_a_handle_ras_never_issued_is_harmless`). RAS
+    // takes its own reference to the event for the notification.
+    let registered = unsafe { RasConnectionNotificationW(handle as _, event.raw(), RASCN_Disconnection) };
+    if registered != 0 {
+        // Not fatal: the watch still asks RAS once a slice. Logged so a
+        // drop noticed a second late can be told apart from one the
+        // notification missed.
+        crate::cleanup_log::note(
+            "ask RAS to report the IKEv2 tunnel dropping",
+            &format!(
+                "{}; the watch will ask once a second instead",
+                error_text(registered).unwrap_or_else(|| format!("RAS error {registered}"))
+            ),
+        );
+    }
+    Ok(RasLiveness { event, connection: handle as usize })
+}
+
+/// An IKEv2 connection as a [`Liveness`]. See [`Connection::liveness`].
+///
+/// [`Liveness`]: crate::lifecycle::engine_watch::Liveness
+pub struct RasLiveness {
+    event: crate::lifecycle::engine_watch::OwnedHandle,
+    /// The HRASCONN, as an integer so the watch can be sent to its
+    /// thread. Only ever passed back to RAS, never dereferenced.
+    connection: usize,
+}
+
+impl crate::lifecycle::engine_watch::Liveness for RasLiveness {
+    fn look(&mut self) -> crate::lifecycle::engine_watch::Look {
+        use crate::lifecycle::engine_watch::Look;
+        let state = connect_state(self.connection as *mut c_void);
+        let reason = |state: Option<(bool, u32)>| state.map(|(_, e)| i64::from(e)).filter(|e| *e != 0);
+        if self.event.is_signalled() {
+            return Look::Gone(reason(state));
+        }
+        match state {
+            Some((false, _)) => Look::Gone(reason(state)),
+            // Connected, or RAS could not be asked: neither is an ending.
+            _ => Look::WaitOn(self.event.raw()),
+        }
     }
 }
 

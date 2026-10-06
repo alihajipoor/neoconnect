@@ -247,12 +247,15 @@ pub type OnGone = Arc<dyn Fn(Gone) + Send + Sync>;
 /// stops its own watch without anybody having to remember to.
 pub struct WatchGuard {
     stop: OwnedHandle,
+    /// Read only by tests; set by the thread either way.
+    #[cfg_attr(not(test), allow(dead_code))]
     finished: Arc<AtomicBool>,
 }
 
 impl WatchGuard {
     /// Set when the watch thread has returned, for the tests that prove
     /// no thread outlives its session.
+    #[cfg(test)]
     pub fn finished(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.finished)
     }
@@ -458,6 +461,15 @@ impl Ledger {
 
     pub fn is_live(&self, generation: u64) -> bool {
         generation != 0 && self.state().live == generation
+    }
+
+    /// Whether `generation` is the most recent session to have begun --
+    /// live or not. The thorough pass after a drop runs only while it is:
+    /// once a new session has begun, its own connect already cleared the
+    /// decks, and a janitor pass now would take *its* engine for an
+    /// orphan.
+    pub fn is_latest(&self, generation: u64) -> bool {
+        generation != 0 && self.state().latest == generation
     }
 
     /// The last session ended on its own and nothing has begun since.

@@ -32,10 +32,13 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::Arc;
+use std::time::Instant;
 
 use neoconnect_ipc::{ConnectProfile, ExitProfile, SplitTunnelConfig, TunnelHealth};
 
 use crate::adapters;
+use crate::lifecycle::engine_watch::{self, Ledger, WatchGuard};
 use crate::split_tunnel::SplitTunnel;
 
 /// Suppresses the console window a child process would otherwise flash
@@ -75,6 +78,48 @@ enum Active {
     },
 }
 
+impl Active {
+    /// The protocol this engine carries, as the status poll names it.
+    fn protocol(&self) -> &'static str {
+        match self {
+            Active::WireguardTunnel => "WIREGUARD",
+            Active::Ikev2(_) => "IKEV2",
+            Active::Child { protocol, .. } => protocol,
+        }
+    }
+
+    /// How the engine watch is to know this engine has ended.
+    ///
+    /// Something the kernel signals in every case, never a timer: the
+    /// child's own process handle for Xray and OpenVPN, the tunnel
+    /// service's process for WireGuard, and an event RAS sets for IKEv2.
+    fn liveness(&self) -> io::Result<Box<dyn engine_watch::Liveness>> {
+        use std::os::windows::io::AsRawHandle;
+        Ok(match self {
+            Active::Child { child, .. } => {
+                Box::new(engine_watch::ProcessLiveness::of_handle(child.as_raw_handle() as _)?)
+            }
+            Active::Ikev2(live) => Box::new(live.liveness()?),
+            Active::WireguardTunnel => Box::new(wireguard::ServiceLiveness::of_tunnel_service()),
+        })
+    }
+
+    /// Whether this engine has ended, asked directly.
+    ///
+    /// The check a teardown makes before acting on a watch's report, so
+    /// that nothing is taken down on the strength of a wait that merely
+    /// failed. Only a definite answer counts: IKEv2's "RAS could not be
+    /// asked" is not an ending, and neither is a tunnel service that is
+    /// still stopping.
+    fn has_ended(&mut self) -> bool {
+        match self {
+            Active::Child { child, .. } => !matches!(child.try_wait(), Ok(None)),
+            Active::Ikev2(live) => live.is_connected() == Some(false),
+            Active::WireguardTunnel => !wireguard::tunnel_is_running(),
+        }
+    }
+}
+
 /// The live engine, in a box that cannot be emptied quietly.
 ///
 /// This exists because of a field report on 2026-08-23, and it is the
@@ -102,20 +147,41 @@ enum Active {
 /// `&mut` and stops it. Ending a session and stopping interception are
 /// one operation because they cannot be allowed to be two.
 mod session {
-    use super::{Session, SplitTunnel};
+    use std::sync::Arc;
 
-    pub(super) struct Slot(Option<Session>);
+    use super::{Ledger, Session, SplitTunnel};
+
+    /// The slot, and the ledger its generations are kept in.
+    ///
+    /// The ledger lives here rather than beside it for the same reason
+    /// the split tunnel is an argument to [`Slot::end`]: closing a
+    /// session's generation has to happen on every route out of the
+    /// slot, before the engine is handed back to be killed, or the
+    /// service's own kill would be reported to the customer as their
+    /// connection dropping. One place, so it cannot be forgotten.
+    pub(super) struct Slot {
+        session: Option<Session>,
+        ledger: Arc<Ledger>,
+    }
 
     impl Slot {
+        /// A slot with a ledger of its own, for the tests that only need
+        /// a slot.
+        #[cfg(test)]
         pub(super) fn empty() -> Self {
-            Self(None)
+            Self::with_ledger(Arc::new(Ledger::new()))
+        }
+
+        pub(super) fn with_ledger(ledger: Arc<Ledger>) -> Self {
+            Self { session: None, ledger }
         }
 
         pub(super) fn is_empty(&self) -> bool {
-            self.0.is_none()
+            self.session.is_none()
         }
 
-        /// Installs the session a connect has just built.
+        /// Installs the session a connect has just built, and returns the
+        /// generation it was given.
         ///
         /// Every caller reaches this having just torn the previous
         /// session down -- `connect_inner` opens with `disconnect()` --
@@ -123,18 +189,21 @@ mod session {
         /// than a merely untidy state. Asserted rather than handled,
         /// because there is no sensible handling: the `Child` is already
         /// gone from our hands by the time we could look at it.
-        pub(super) fn fill(&mut self, session: Session) {
-            debug_assert!(self.0.is_none(), "a session was installed over a live one");
-            self.0 = Some(session);
+        pub(super) fn fill(&mut self, mut session: Session) -> u64 {
+            debug_assert!(self.session.is_none(), "a session was installed over a live one");
+            session.generation = self.ledger.begin(session.engine.protocol());
+            let generation = session.generation;
+            self.session = Some(session);
+            generation
         }
 
         /// Looks at the session without being able to remove it.
         pub(super) fn peek_mut(&mut self) -> Option<&mut Session> {
-            self.0.as_mut()
+            self.session.as_mut()
         }
 
         pub(super) fn peek(&self) -> Option<&Session> {
-            self.0.as_ref()
+            self.session.as_ref()
         }
 
         /// Ends the session: stops interception, then hands back
@@ -151,7 +220,17 @@ mod session {
         /// precisely the state the field bug left behind -- no engine
         /// tracked, a redirect loop still running -- and it is the state
         /// a Disconnect arriving after the fact has to be able to fix.
+        ///
+        /// The generation is closed first of all. From that moment the
+        /// engine watch's report of this engine ending is refused as the
+        /// service's own hand -- which it is, on every caller: an
+        /// explicit Disconnect, a connect clearing the decks, a Custom
+        /// mode rebuild, and the teardown of an engine that has already
+        /// ended (where the drop was recorded before this ran).
         pub(super) fn end(&mut self, split_tunnel: &mut SplitTunnel) -> Option<Session> {
+            if let Some(session) = &self.session {
+                self.ledger.close(session.generation);
+            }
             split_tunnel.stop();
             // The concurrent exits go with the engine, in the same
             // operation and for the same reason interception does.
@@ -163,7 +242,7 @@ mod session {
             // game's binaries losing their exit one at a time. Cleared
             // here, they lose it together.
             split_tunnel.clear_exits();
-            self.0.take()
+            self.session.take()
         }
     }
 }
@@ -191,13 +270,49 @@ struct Session {
     /// changing the mode means building it again, from this.
     profile: ConnectProfile,
     filters: SessionFilters,
+    /// Which session this is, in the ledger. Given by [`Slot::fill`];
+    /// zero only for a session that has not been installed.
+    generation: u64,
+    /// The engine watch, ended when the session is -- see
+    /// `lifecycle::engine_watch`. `None` when the watch could not be
+    /// started, in which case an engine that dies is still found by the
+    /// status poll, as it always was.
+    watch: Option<WatchGuard>,
 }
 
 impl Session {
     fn new(engine: Active, profile: &ConnectProfile) -> Self {
-        Self { engine, profile: profile.clone(), filters: SessionFilters::default() }
+        Self {
+            engine,
+            profile: profile.clone(),
+            filters: SessionFilters::default(),
+            generation: 0,
+            watch: None,
+        }
     }
 }
+
+/// Called with a session's generation when its engine has ended on its
+/// own. The pipe installs one that queues the teardown on the owning
+/// thread; see [`Engines::when_an_engine_ends`].
+pub type EngineGone = Arc<dyn Fn(u64) + Send + Sync>;
+
+/// Who found a dead engine, for the log line that says so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Noticed {
+    ByWatch,
+    ByStatus,
+}
+
+/// How long a WireGuard handshake reading is reused.
+///
+/// The app now asks for status every second while a tunnel is up, to
+/// stop claiming protection within a second of the tunnel going. Each
+/// handshake reading spawns `wg.exe`, which was fine at one poll every
+/// fifteen seconds and is not at fifteen a quarter-minute. Five seconds
+/// is far inside the 180-second window that separates alive from stale,
+/// so nothing it reports can change meaning by being this old.
+const HANDSHAKE_REUSE_FOR: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The WFP filters a session installed, released when this is dropped.
 #[derive(Default)]
@@ -266,18 +381,54 @@ pub struct Engines {
     /// records, which is that a tunnel comes up even when this fails and
     /// the customer is told.
     dns_state: dns::TunnelDns,
+    /// Which session is live and whether the last one ended on its own.
+    /// Shared with the pipe, which reads it without the owning thread --
+    /// see `lifecycle::engine_watch::Ledger`.
+    ledger: Arc<Ledger>,
+    /// Where a watch reports an engine that ended on its own. `None`
+    /// until the pipe installs one, and in tests that drive `Engines`
+    /// directly; the ledger is written either way.
+    engine_gone: Option<EngineGone>,
+    /// The last WireGuard handshake reading and when it was taken. See
+    /// [`HANDSHAKE_REUSE_FOR`].
+    handshake_reading: Option<(Instant, wireguard::HandshakeHealth)>,
+    /// How many sessions have been ended, by any route. For the tests
+    /// that prove a dead engine racing a Disconnect is torn down once.
+    #[cfg(test)]
+    sessions_ended: u32,
 }
 
 impl Engines {
     pub fn new(exe_dir: PathBuf, config_dir: PathBuf) -> Self {
+        let ledger = Arc::new(Ledger::new());
         Self {
             exe_dir,
             config_dir,
-            active: Slot::empty(),
+            active: Slot::with_ledger(Arc::clone(&ledger)),
             split_tunnel: SplitTunnel::new(),
             ending_filters: None,
             dns_state: dns::TunnelDns::NotRequested,
+            ledger,
+            engine_gone: None,
+            handshake_reading: None,
+            #[cfg(test)]
+            sessions_ended: 0,
         }
+    }
+
+    /// The ledger, for the pipe to answer a status from while the owning
+    /// thread is busy.
+    pub fn ledger(&self) -> Arc<Ledger> {
+        Arc::clone(&self.ledger)
+    }
+
+    /// Where to report an engine that has ended on its own.
+    ///
+    /// Called on the watch thread, so it must only hand the work on --
+    /// the pipe's queues a teardown on the owning thread. Applies to
+    /// sessions begun after this is set.
+    pub fn when_an_engine_ends(&mut self, sink: EngineGone) {
+        self.engine_gone = Some(sink);
     }
 
     /// Replaces the customer's Custom-mode selection, and makes it true
@@ -403,6 +554,30 @@ impl Engines {
         self.dns_state = dns::TunnelDns::NotRequested;
     }
 
+    /// Installs a session around a process the test started, exactly as a
+    /// connect would -- watch included -- without touching the network.
+    /// Returns its generation.
+    #[cfg(test)]
+    pub(crate) fn begin_test_session(&mut self, protocol: &'static str, child: Child) -> u64 {
+        let profile = ConnectProfile::Ikev2(neoconnect_ipc::Ikev2Profile {
+            server: "node.example.com".into(),
+            username: String::new(),
+            password: String::new(),
+        });
+        self.begin_session(Active::Child { protocol, child, routes: InstalledRoutes::none() }, &profile);
+        self.active.peek().map_or(0, |s| s.generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_session(&self) -> bool {
+        !self.active.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sessions_ended(&self) -> u32 {
+        self.sessions_ended
+    }
+
     /// Puts a session into a given DNS state without connecting.
     ///
     /// The pipe test needs a session that reports a complaint, and the
@@ -523,6 +698,12 @@ impl Engines {
     ) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
 
+        // A drop recorded from an earlier session stops being the answer
+        // the moment a new connect begins. Left standing, a status
+        // answered from the ledger while this connect holds the owning
+        // thread would report the old tunnel's death over the new one.
+        self.ledger.forget();
+
         // Asked before the teardown, not only after it.
         //
         // The `disconnect` below is the clear-the-decks pass every
@@ -559,7 +740,7 @@ impl Engines {
         match profile {
             ConnectProfile::Wireguard(p) => {
                 wireguard::connect(self, p, passive, limits)?;
-                self.active.fill(Session::new(Active::WireguardTunnel, profile));
+                self.begin_session(Active::WireguardTunnel, profile);
             }
             // Nothing is spawned: Windows brings the interface up and
             // routes it. Custom mode works here too now -- the entry is
@@ -568,7 +749,7 @@ impl Engines {
             // interface like it pins to any other adapter.
             ConnectProfile::Ikev2(p) => {
                 let live = ikev2::connect(p, passive)?;
-                self.active.fill(Session::new(Active::Ikev2(live), profile));
+                self.begin_session(Active::Ikev2(live), profile);
             }
             // Both Xray protocols take the same path: one engine, one
             // adapter, one set of routes -- only the outbound differs.
@@ -652,12 +833,12 @@ impl Engines {
                         return Err(e);
                     }
                 };
-                self.active.fill(Session::new(Active::Child { protocol, child, routes }, profile));
+                self.begin_session(Active::Child { protocol, child, routes }, profile);
             }
             ConnectProfile::Openvpn(p) => {
                 let child = openvpn::connect(self, p, passive, limits)?;
                 let engine = Active::Child { protocol: "OPENVPN", child, routes: InstalledRoutes::none() };
-                self.active.fill(Session::new(engine, profile));
+                self.begin_session(engine, profile);
             }
         }
 
@@ -865,6 +1046,191 @@ impl Engines {
         Ok(())
     }
 
+    /// Installs a session and starts watching its engine.
+    ///
+    /// The one way into the slot, so that no engine can be running
+    /// unwatched: every connect path comes through here.
+    ///
+    /// A watch that cannot be started is logged and not fatal. The
+    /// tunnel is up and carrying traffic; refusing it over the watch
+    /// would leave the customer with less, and a dead engine is still
+    /// found by the status poll exactly as before this existed.
+    fn begin_session(&mut self, engine: Active, profile: &ConnectProfile) {
+        let label = engine.protocol();
+        let liveness = engine.liveness();
+        let generation = self.active.fill(Session::new(engine, profile));
+
+        let started = liveness.and_then(|liveness| {
+            engine_watch::watch(generation, label, liveness, self.report_to())
+        });
+        match started {
+            Ok(guard) => {
+                if let Some(session) = self.active.peek_mut() {
+                    session.watch = Some(guard);
+                }
+            }
+            Err(e) => crate::cleanup_log::note(
+                "watch the tunnel engine",
+                &format!("{label}: {e}; a drop will only be noticed by the status poll"),
+            ),
+        }
+    }
+
+    /// What a watch does when it sees its engine end: put it on record,
+    /// then hand the teardown to whoever is listening.
+    ///
+    /// Runs on the watch thread. The ledger decides whether it is news:
+    /// a generation the service has already closed is its own teardown,
+    /// and nothing is reported. A wait that failed is not recorded --
+    /// nothing is known -- but is still handed on while the session is
+    /// live, because the teardown checks the engine itself before it
+    /// acts.
+    fn report_to(&self) -> engine_watch::OnGone {
+        let ledger = Arc::clone(&self.ledger);
+        let sink = self.engine_gone.clone();
+        Arc::new(move |gone: engine_watch::Gone| {
+            let news = if gone.definitive {
+                ledger.record(gone.generation, gone.detail, gone.at)
+            } else {
+                ledger.is_live(gone.generation)
+            };
+            if news {
+                if let Some(sink) = &sink {
+                    sink(gone.generation);
+                }
+            }
+        })
+    }
+
+    /// Phase one after an engine has ended on its own: take down what the
+    /// session left behind, now, rather than on the next status poll.
+    ///
+    /// Returns whether it did anything. It does nothing -- and that is
+    /// the common, correct outcome of a race -- when the session is no
+    /// longer the one the watch was started for (a Disconnect, a connect
+    /// or a status poll got there first) or when the engine, asked
+    /// directly, turns out not to have ended.
+    ///
+    /// Only releases things. Fail open is a product decision: nothing
+    /// here blocks traffic or brings a tunnel back. What changes is that
+    /// the machine is put back about a second after the engine dies
+    /// instead of up to fifteen, and that in that gap the session's
+    /// filters no longer hold plain DNS and IPv6 hostage to a tunnel that
+    /// is gone. See [`Self::tear_down_dead_session`].
+    pub fn end_dead_session(&mut self, generation: u64) -> bool {
+        match self.active.peek_mut() {
+            Some(session) if session.generation == generation => {
+                if !session.engine.has_ended() {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        self.tear_down_dead_session(Noticed::ByWatch);
+        true
+    }
+
+    /// Phase two after an engine ended on its own: the thorough pass.
+    ///
+    /// The same `disconnect()` that runs behind a customer's Disconnect,
+    /// on what is by now an empty slot -- the WireGuard tunnel service a
+    /// dead tunnel leaves registered (and `StartAutomatic`), the IKEv2
+    /// phonebook entry, orphaned engines, the generated configs with
+    /// their credentials. Queued behind phase one rather than run in it,
+    /// because some of it is slow and nobody is waiting on it.
+    ///
+    /// Only while nothing has begun since. A connect that started in
+    /// between has already run this pass for itself, and running the
+    /// janitor now would take that connect's own engine for an orphan.
+    pub fn finish_dead_session(&mut self, generation: u64) {
+        if !self.active.is_empty() || !self.ledger.is_latest(generation) {
+            return;
+        }
+        if let Err(message) = self.disconnect() {
+            crate::cleanup_log::note("thorough teardown after the tunnel engine ended", &message);
+        }
+    }
+
+    /// Takes down a session whose engine has already ended.
+    ///
+    /// One body for both witnesses -- the engine watch and the status
+    /// poll -- because two copies of a teardown are how one of them comes
+    /// to forget a step; the history of this file is mostly that.
+    ///
+    /// Phase-one rules (docs/windows-service-rewrite.md): no PowerShell,
+    /// no waiting for anything to disappear. At most three `route.exe`
+    /// for Xray's own routes or two for OpenVPN's pushed ones, the same
+    /// allowance the hard stop has, and for the same reason -- the record
+    /// of which routes were installed ends with the session.
+    ///
+    /// The order is the order of harm. Custom mode first (inside
+    /// `end_session`), because its redirect is pinned to an adapter that
+    /// no longer exists and would otherwise go on swallowing the selected
+    /// applications' traffic. Then the routes, then the WFP filters --
+    /// whose DNS confinement permits port 53 only through the dead
+    /// adapter, so until they go no plain DNS lookup on the machine
+    /// succeeds -- then the NRPT rule, by registry.
+    fn tear_down_dead_session(&mut self, noticed: Noticed) {
+        let Some(generation) = self.active.peek().map(|s| s.generation) else {
+            return;
+        };
+        // On record before the generation closes, so a death the status
+        // poll found first is a drop like one the watch found. Keeps the
+        // first witness's time if the watch already recorded it.
+        self.ledger.record(generation, None, Instant::now());
+        let ended = self.ledger.ended_without_successor().filter(|e| e.generation == generation);
+
+        let engine = self.end_session();
+        let protocol = engine.as_ref().map_or("unknown", Active::protocol);
+        match engine {
+            Some(Active::Child { protocol, mut child, mut routes }) => {
+                routes.remove();
+                // OpenVPN's pushed half-defaults sit on an adapter that is
+                // kept between sessions, so they do not go with the
+                // process. By destination, as the hard stop does.
+                if protocol == "OPENVPN" {
+                    if let Ok(Some(adapter)) = adapters::find_by_name(openvpn::ADAPTER_NAME) {
+                        routing::purge_pushed_half_defaults(adapter.index);
+                    }
+                }
+                // Already exited, so this is one look; it collects the
+                // process so nothing of it lingers in the kernel.
+                reap(&mut child);
+            }
+            // RAS has already dropped it. Hanging up the handle releases
+            // it -- one API call, and harmless on a dead connection.
+            Some(Active::Ikev2(live)) => {
+                let _ = live.hang_up();
+            }
+            Some(Active::WireguardTunnel) | None => {}
+        }
+        self.unblock_ipv6();
+        let dns = dns::clear_registry_only();
+        self.forget_dns_state();
+
+        let mut detail = format!(
+            "{protocol}{}, noticed by {}",
+            match ended.as_ref().and_then(|e| e.detail) {
+                Some(code) => format!(", exit code {code}"),
+                None => String::new(),
+            },
+            match noticed {
+                Noticed::ByWatch => "the engine watch",
+                Noticed::ByStatus => "a status poll",
+            }
+        );
+        if let Some(e) = &ended {
+            let _ = std::fmt::Write::write_fmt(
+                &mut detail,
+                format_args!("; routes, filters and DNS rule released {}ms after it was seen", e.at.elapsed().as_millis()),
+            );
+        }
+        if let Some(why) = dns.unverified {
+            let _ = std::fmt::Write::write_fmt(&mut detail, format_args!("; the DNS rule was not verifiably removed: {why}"));
+        }
+        crate::cleanup_log::note("the tunnel engine ended on its own", &detail);
+    }
+
     /// Ends the session and hands back the engine that was running.
     ///
     /// The single funnel every teardown goes through -- an explicit
@@ -874,7 +1240,18 @@ impl Engines {
     /// each of those call sites where one of them can be forgotten. It
     /// was, and the customer's whole machine lost DNS for it.
     fn end_session(&mut self) -> Option<Active> {
-        let session = self.active.end(&mut self.split_tunnel)?;
+        let mut session = self.active.end(&mut self.split_tunnel)?;
+        // The watch goes first, before the engine is handed back to be
+        // killed. `Slot::end` has already closed the generation, so the
+        // ledger would refuse the kill as a drop anyway; ending the
+        // watch here means its thread is not left waiting on a process
+        // nobody cares about any more.
+        drop(session.watch.take());
+        self.handshake_reading = None;
+        #[cfg(test)]
+        {
+            self.sessions_ended += 1;
+        }
         // The DNS state is a claim about this session's rule, so it ends
         // with it -- on every path, including a status poll finding the
         // engine dead, which used to leave the last session's complaint
@@ -1122,7 +1499,7 @@ impl Engines {
                     // bug left behind, and a redirect loop may well be
                     // running underneath it. Stopping one that is not
                     // there costs nothing.
-                    Verdict::Dead
+                    Verdict::NothingTracked
                 }
             }
             Some(Active::Ikev2(live)) => {
@@ -1158,22 +1535,15 @@ impl Engines {
                     Verdict::Dead
                 }
             }
-            Some(Active::Child {
-                protocol,
-                child,
-                routes,
-            }) => match child.try_wait() {
+            Some(Active::Child { protocol, child, .. }) => match child.try_wait() {
                 // `Ok(Some(_))` means it has already exited.
-                Ok(Some(_)) | Err(_) => {
-                    // An engine that died on its own leaves its routes
-                    // behind pointing at an adapter that no longer
-                    // exists, which black-holes traffic. Clean up as soon
-                    // as we notice, not only on an explicit disconnect.
-                    // Done inside the arm because it needs the routes
-                    // out of the slot, which is what this borrow is for.
-                    routes.remove();
-                    Verdict::Dead
-                }
+                //
+                // Its routes are left behind pointing at an adapter that
+                // no longer exists. They used to be removed here, inside
+                // the borrow; `tear_down_dead_session` removes them now,
+                // from the engine `end_session` hands back, so the watch
+                // and this poll take the same steps in the same order.
+                Ok(Some(_)) | Err(_) => Verdict::Dead,
                 // Xray and OpenVPN have no equivalent of WireGuard's
                 // handshake timestamp available this cheaply, so this
                 // reports Unknown rather than implying evidence that was
@@ -1187,7 +1557,17 @@ impl Engines {
         match verdict {
             Verdict::Reported(up, protocol, health) => (up, protocol, health),
             Verdict::WireguardUp => {
-                let health = match wireguard::handshake_health(self) {
+                // Reused for a few seconds rather than read per poll; see
+                // HANDSHAKE_REUSE_FOR. Cleared with the session.
+                let reading = match self.handshake_reading {
+                    Some((taken, reading)) if taken.elapsed() < HANDSHAKE_REUSE_FOR => reading,
+                    _ => {
+                        let reading = wireguard::handshake_health(self);
+                        self.handshake_reading = Some((Instant::now(), reading));
+                        reading
+                    }
+                };
+                let health = match reading {
                     wireguard::HandshakeHealth::Alive { age_secs } => {
                         TunnelHealth::Alive { age_secs }
                     }
@@ -1207,7 +1587,28 @@ impl Engines {
             // Fail open, deliberately. A customer with no tunnel gets
             // ordinary networking back, not a machine still held by a
             // redirect that has nowhere to send anything.
+            //
+            // Usually the engine watch has already done this within a
+            // second of the engine ending, and the slot is empty by the
+            // time a poll looks. This arm is for the session whose watch
+            // could not be started, or whose report is still queued
+            // behind other work on this thread: the same teardown, then
+            // the same thorough pass the watch queues as phase two --
+            // run inline here, as this arm always has. It reaches the
+            // phonebook entry, the janitor, the DNS sweep and the
+            // generated configs, which it used to do piecemeal and,
+            // for the configs, not at all.
             Verdict::Dead => {
+                self.tear_down_dead_session(Noticed::ByStatus);
+                if let Err(message) = self.disconnect() {
+                    crate::cleanup_log::note("thorough teardown after the tunnel engine ended", &message);
+                }
+                (false, None, TunnelHealth::Down)
+            }
+            // Nothing was tracked and nothing is running. Unchanged from
+            // before the engine watch: this is the idle answer, and the
+            // steps below are the ones it has always taken.
+            Verdict::NothingTracked => {
                 if let Some(Active::Ikev2(_)) = self.end_session() {
                     // The phonebook entry outlives the tunnel, and
                     // somebody who is no longer connected must not be
@@ -1259,6 +1660,8 @@ enum Verdict {
     WireguardUp,
     /// Whatever this session was built on is no longer running.
     Dead,
+    /// No session, and nothing of ours visible on the machine.
+    NothingTracked,
 }
 
 /// What the operating system says is tunnelling right now, asked
@@ -2056,5 +2459,261 @@ mod helper_tests {
         )
         .expect("cmd should run");
         assert!(out.contains("neoxify"), "captured nothing usable: {out:?}");
+    }
+
+    // ---- An engine that ends on its own ------------------------------
+    //
+    // Measured on 2026-10-06: xray.exe killed, traffic direct in 0.2s,
+    // "You're protected" for 17.0s, nothing in cleanup.log. These pin the
+    // service's half of the fix -- noticing without being asked, and
+    // tearing down once -- with a real process standing in for the
+    // engine. What they cannot pin is what the packets do; that is the
+    // VM's job, and is not claimed here.
+
+    /// A real process that stays up for about half a minute.
+    fn engine_stand_in() -> Child {
+        use std::os::windows::process::CommandExt;
+        Command::new(r"C:\Windows\System32\ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawning ping")
+    }
+
+    /// Kills the session's engine without ending the session -- what a
+    /// crash, or `Stop-Process -Force`, does to it.
+    fn kill_engine_behind_its_back(engines: &mut Engines) -> Instant {
+        let Some(Session { engine: Active::Child { child, .. }, .. }) = engines.active.peek_mut() else {
+            panic!("no child engine to kill");
+        };
+        let at = Instant::now();
+        child.kill().expect("killing the stand-in");
+        at
+    }
+
+    fn reports_into(engines: &mut Engines) -> Arc<std::sync::Mutex<Vec<(u64, Instant)>>> {
+        let seen: Arc<std::sync::Mutex<Vec<(u64, Instant)>>> = Arc::default();
+        let into = Arc::clone(&seen);
+        engines.when_an_engine_ends(Arc::new(move |generation| {
+            into.lock().unwrap().push((generation, Instant::now()));
+        }));
+        seen
+    }
+
+    fn wait_for(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        done()
+    }
+
+    fn engines_for_test() -> Engines {
+        let dir = std::env::temp_dir().join("neoconnect-test-no-engines");
+        Engines::new(dir.clone(), dir)
+    }
+
+    /// Every process engine, by the label it is reported under: the four
+    /// Xray protocols share one engine, and OpenVPN is the other child.
+    /// Each must be noticed promptly with nobody asking, and torn down
+    /// exactly once.
+    #[test]
+    fn every_process_engine_that_dies_is_noticed_and_torn_down_once() {
+        for protocol in ["XRAY_VLESS_REALITY", "XRAY_VLESS_TLS", "XRAY_TROJAN", "SHADOWSOCKS", "OPENVPN"] {
+            let mut engines = engines_for_test();
+            let seen = reports_into(&mut engines);
+            let generation = engines.begin_test_session(protocol, engine_stand_in());
+            assert_ne!(generation, 0);
+            assert_eq!(
+                engines.status(),
+                (true, Some(protocol.to_string()), TunnelHealth::Unknown),
+                "{protocol}: a live engine must read as up"
+            );
+
+            let killed_at = kill_engine_behind_its_back(&mut engines);
+            assert!(
+                wait_for(Duration::from_secs(5), || !seen.lock().unwrap().is_empty()),
+                "{protocol}: nobody was told the engine died"
+            );
+            let (reported, at) = seen.lock().unwrap()[0];
+            assert_eq!(reported, generation, "{protocol}: reported for the wrong session");
+            assert!(
+                at.duration_since(killed_at) < Duration::from_secs(2),
+                "{protocol}: noticed {:?} after it died",
+                at.duration_since(killed_at)
+            );
+            let ended = engines.ledger().ended_without_successor().expect("the drop is on record");
+            assert_eq!(ended.protocol, protocol);
+            assert_eq!(ended.generation, generation);
+
+            assert!(engines.end_dead_session(generation), "{protocol}: phase one did nothing");
+            assert!(!engines.has_session(), "{protocol}: the dead session is still in the slot");
+            assert_eq!(engines.split_tunnel.stop_calls(), 1, "{protocol}: Custom mode was not stopped");
+            assert!(engines.ending_filters.is_none(), "{protocol}: the session's filters were not released");
+            assert!(!engines.tunnel_dns_unprotected());
+            assert_eq!(engines.sessions_ended(), 1);
+
+            // Once. A second report, or the watch and a poll both
+            // arriving, must find nothing left to do.
+            assert!(!engines.end_dead_session(generation), "{protocol}: torn down twice");
+            assert_eq!(engines.sessions_ended(), 1);
+            assert_eq!(seen.lock().unwrap().len(), 1, "{protocol}: reported more than once");
+        }
+    }
+
+    /// The status poll finding a dead engine first is the same drop,
+    /// taken down by the same steps.
+    #[test]
+    fn a_status_poll_that_finds_the_engine_dead_records_the_drop() {
+        let mut engines = engines_for_test();
+        let generation = engines.begin_test_session("XRAY_VLESS_REALITY", engine_stand_in());
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || {
+            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended()), Some(true))
+        }));
+
+        assert_eq!(engines.status(), (false, None, TunnelHealth::Down));
+        assert!(!engines.has_session());
+        let ended = engines.ledger().ended_without_successor().expect("the drop is on record");
+        assert_eq!(ended.generation, generation);
+        // And the watch's own report, arriving behind it, finds nothing.
+        assert!(!engines.end_dead_session(generation));
+        assert_eq!(engines.sessions_ended(), 1);
+    }
+
+    /// A report about an older session must never take down a newer one.
+    #[test]
+    fn a_death_reported_for_an_older_session_leaves_the_newer_one_alone() {
+        let mut engines = engines_for_test();
+        let seen = reports_into(&mut engines);
+        let old = engines.begin_test_session("XRAY_TROJAN", engine_stand_in());
+        // Ended by the service, as a Disconnect or a reconnect would.
+        if let Some(Active::Child { mut child, .. }) = engines.end_session() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        engines.unblock_ipv6();
+        let new = engines.begin_test_session("XRAY_TROJAN", engine_stand_in());
+        assert_ne!(old, new);
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(seen.lock().unwrap().is_empty(), "the service's own kill was reported as a drop");
+        assert!(!engines.end_dead_session(old), "a stale report took down the live session");
+        assert!(engines.has_session());
+        assert_eq!(engines.status().0, true, "the newer engine is untouched");
+        assert!(engines.ledger().ended_without_successor().is_none());
+
+        if let Some(Active::Child { mut child, .. }) = engines.end_session() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        engines.unblock_ipv6();
+    }
+
+    /// An engine that dies at the moment the customer presses
+    /// Disconnect: the watch's teardown and the Disconnect's hard stop
+    /// race on the owning thread, in either order. The session must be
+    /// ended exactly once, and nothing may be left in the slot.
+    ///
+    /// Thirty-two at once, because that is where the relay teardown was
+    /// caught failing when one at a time passed every run
+    /// (docs/split-tunnel-rewrite.md).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_dead_engine_racing_a_disconnect_is_torn_down_once() {
+        use crate::lifecycle::supervisor::Supervisor;
+        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+        const AT_ONCE: usize = 32;
+        let mut racers = Vec::new();
+        for i in 0..AT_ONCE {
+            let sup = Supervisor::spawn(engines_for_test(), "test-race");
+            let teardown = sup.clone();
+            let pid = sup
+                .run(move |engines: &mut Engines, _| {
+                    // What the pipe installs: queue phase one on the owning
+                    // thread. Phase two is left out -- it is the thorough
+                    // pass, the same one a Disconnect queues, and running
+                    // sixty-four of them proves nothing more about the race.
+                    engines.when_an_engine_ends(Arc::new(move |generation| {
+                        let _ = teardown.run_detached(move |engines: &mut Engines, _| {
+                            engines.end_dead_session(generation);
+                        });
+                    }));
+                    let child = engine_stand_in();
+                    let pid = child.id();
+                    engines.begin_test_session("XRAY_VLESS_REALITY", child);
+                    pid
+                })
+                .await
+                .unwrap();
+            racers.push((i, sup, pid));
+        }
+
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let mut threads = Vec::new();
+        for (i, sup, pid) in &racers {
+            let (i, sup, pid, start) = (*i, sup.clone(), *pid, Arc::clone(&start));
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                let kill = || {
+                    // SAFETY: plain calls; the handle is closed below.
+                    unsafe {
+                        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                        if !h.is_null() {
+                            TerminateProcess(h, 1);
+                            windows_sys::Win32::Foundation::CloseHandle(h);
+                        }
+                    }
+                };
+                let disconnect = || {
+                    let _ = sup.run_detached(|engines: &mut Engines, token| {
+                        adopt_token(token);
+                        let _ = crate::lifecycle::teardown::hard_stop(engines);
+                    });
+                };
+                // Both orders, so neither side always wins.
+                if i % 2 == 0 {
+                    kill();
+                    disconnect();
+                } else {
+                    disconnect();
+                    kill();
+                }
+            }));
+        }
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        for (i, sup, _) in racers {
+            let mut settled = None;
+            for _ in 0..100 {
+                let empty = !sup.run(|engines: &mut Engines, _| engines.has_session()).await.unwrap();
+                if empty {
+                    // Long enough for a report still in flight to land
+                    // and be run, and so be counted if it did anything.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    settled = Some(
+                        sup.run(|engines: &mut Engines, _| (engines.has_session(), engines.sessions_ended()))
+                            .await
+                            .unwrap(),
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let (still_there, ended) = settled.unwrap_or_else(|| panic!("racer {i}: the session was never ended"));
+            assert!(!still_there, "racer {i}: a session was left in the slot");
+            assert_eq!(ended, 1, "racer {i}: the session was ended {ended} times");
+            // Drop the sink, which holds a handle to this supervisor, so
+            // its thread can end with the test.
+            let _ = sup.run(|engines: &mut Engines, _| engines.engine_gone = None).await;
+        }
     }
 }
