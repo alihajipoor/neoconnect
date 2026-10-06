@@ -690,11 +690,15 @@ export interface SlotStop {
   /** The card to show, or null (a sign-out: the app is already on its
    * way to the sign-in screen, and there is nothing to add). */
   notice: SlotNotice | null;
-  /** The attempt report, when a connect was stopped -- REJECTED with no
-   * ladder, so it records no dial, marks no route as failing and teaches
-   * nothing about this network's best route. Null for a session ended
-   * while connected, whose connect was already reported as it happened.
-   * A late refusal is reported: it is the answer the connect never got. */
+  /** The attempt report, when a connect was stopped before it dialled --
+   * REJECTED with no ladder, so it records no dial, marks no route as
+   * failing and teaches nothing about this network's best route.
+   *
+   * Null for anything that ends a session while connected: a takeover,
+   * the plan ending, and a claim refused after connecting (obligation
+   * 11). That connect was reported when it happened, as what it was -- a
+   * dial that worked -- and the plan's refusal of the device is not a
+   * second attempt, nor anything about the network. */
   report: AttemptReport | null;
   /** A status to show the plan-ended state for, when the subscription
    * has stopped. Null when the server named none this app knows. */
@@ -707,21 +711,29 @@ const STATUSES: readonly SubscriptionStatus[] = ["ACTIVE", "SUSPENDED", "EXPIRED
 
 export function slotStop(reason: SlotStopReason, when: "beforeDial" | "whileConnected"): SlotStop {
   const none = { notice: null, report: null, subscriptionStatus: null, inactive: false };
+  const beforeDial = when === "beforeDial";
   switch (reason.kind) {
     case "refused":
-      return { ...none, notice: { kind: "refused", refusal: reason.refusal }, report: refusalReport("DEVICE_LIMIT") };
+      // After connecting, handled like a takeover: the same card as before
+      // dialling, over a tunnel the dashboard takes down, with no ladder
+      // and nothing recorded.
+      return {
+        ...none,
+        notice: { kind: "refused", refusal: reason.refusal },
+        report: beforeDial ? refusalReport("DEVICE_LIMIT") : null,
+      };
     case "takeoverLimited":
       return {
         ...none,
         notice: { kind: "takeoverLimited", retryAfterSec: reason.retryAfterSec },
-        report: refusalReport("TAKEOVER_LIMIT"),
+        report: beforeDial ? refusalReport("TAKEOVER_LIMIT") : null,
       };
     case "displaced":
       return { ...none, notice: { kind: "displaced", by: reason.by, at: reason.at } };
     case "inactive":
       return {
         ...none,
-        report: when === "beforeDial" ? refusalReport("SUBSCRIPTION_INACTIVE") : null,
+        report: beforeDial ? refusalReport("SUBSCRIPTION_INACTIVE") : null,
         subscriptionStatus: STATUSES.find((s) => s === reason.subscriptionStatus && s !== "ACTIVE") ?? null,
         inactive: true,
       };

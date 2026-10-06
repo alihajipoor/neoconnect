@@ -150,6 +150,21 @@ function refusalLines(refusal: DeviceLimitRefusal, ctx: NoticeContext): string[]
   return lines;
 }
 
+/** Whether a notice may be on screen yet.
+ *
+ * A refusal waits for the tunnel to be confirmed down. One that arrives
+ * after connecting -- the claim through the tunnel, answered seconds
+ * after the dial -- lands while the tunnel is still up and coming down,
+ * and the contract is plain that the card is never shown over a tunnel
+ * still carrying traffic (obligation 11): "Neoxify is in use on a
+ * Windows PC" with "Use on this device instead", over a VPN that is
+ * working, says something untrue about this device. Every other notice
+ * words itself for the tunnel's state (`tunnelDown`) and may show at
+ * once. */
+export function slotNoticeShown(notice: SlotNotice, tunnelDown: boolean): boolean {
+  return notice.kind !== "refused" || tunnelDown;
+}
+
 export function describeSlotNotice(notice: SlotNotice, ctx: NoticeContext): SlotNoticeCopy {
   switch (notice.kind) {
     case "refused":

@@ -1,6 +1,6 @@
 import { Button, Card } from "./ui";
 import { useI18n } from "../lib/i18n";
-import { describeSlotNotice, type SlotNotice } from "../lib/device-slot-notice";
+import { describeSlotNotice, slotNoticeShown, type SlotNotice } from "../lib/device-slot-notice";
 
 /** Where Neoxify is in use, when the plan's device limit is the reason
  * this device is not connected.
@@ -11,7 +11,9 @@ import { describeSlotNotice, type SlotNotice } from "../lib/device-slot-notice";
  * `describeSlotNotice`, shared with the mobile client.
  *
  * Says nothing about the tunnel itself beyond what `tunnelDown` -- the
- * service's own answer -- allows: "Disconnected:" only once it is.
+ * service's own answer -- allows: "Disconnected:" only once it is, and a
+ * refusal, with its "Use on this device instead", not until then at all
+ * (`slotNoticeShown`).
  */
 export function DeviceSlotCard({
   notice,
@@ -25,6 +27,7 @@ export function DeviceSlotCard({
   onDismiss: () => void;
 }) {
   const { t, language } = useI18n();
+  if (!slotNoticeShown(notice, tunnelDown)) return null;
   const copy = describeSlotNotice(notice, { t, language, tunnelDown });
 
   // A note rather than a choice: one line, in the error line's place.

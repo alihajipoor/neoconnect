@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DICTIONARIES, type Language, type TranslationKey } from "./i18n";
-import { describeSlotNotice, deviceName, formatSlotTime, type NoticeContext } from "./device-slot-notice";
+import { describeSlotNotice, deviceName, formatSlotTime, slotNoticeShown, type NoticeContext } from "./device-slot-notice";
 
 /** The card's words, in both languages, from the limit and the holders.
  *
@@ -110,6 +110,24 @@ describe("the displaced card", () => {
   it("keeps a phone model intact inside a Persian sentence", () => {
     const line = describeSlotNotice({ kind: "displaced", by, at: null }, ctx("fa")).lines[0];
     expect(line).toContain("روی ⁨Pixel 7⁩ ");
+  });
+});
+
+/** Obligation 11: never the refusal card over a tunnel still carrying
+ * traffic. A refusal that arrives after connecting waits for the
+ * teardown to be confirmed; the others word themselves for either. */
+describe("when a notice may show", () => {
+  const refused = { kind: "refused" as const, refusal: { limit: 1, holders: [PC] } };
+
+  it("holds a refusal back until the tunnel is confirmed down", () => {
+    expect(slotNoticeShown(refused, false)).toBe(false);
+    expect(slotNoticeShown(refused, true)).toBe(true);
+  });
+
+  it("shows the others at once", () => {
+    expect(slotNoticeShown({ kind: "displaced", by: null, at: null }, false)).toBe(true);
+    expect(slotNoticeShown({ kind: "takeoverLimited", retryAfterSec: 60 }, false)).toBe(true);
+    expect(slotNoticeShown({ kind: "unchecked", limit: 1 }, false)).toBe(true);
   });
 });
 

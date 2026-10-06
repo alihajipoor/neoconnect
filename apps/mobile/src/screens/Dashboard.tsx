@@ -786,8 +786,11 @@ export function Dashboard({
    * Disconnects and says why. Nothing redials afterwards -- this screen
    * has no automatic ladder, and must not grow one that runs here: it
    * would only take the slot back from the device the customer is now
-   * using (docs/device-slots.md, obligation 7). "Disconnected:" waits for
-   * the platform to confirm the tunnel is gone; see DeviceSlotCard. */
+   * using (docs/device-slots.md, obligations 7 and 11). Nothing is
+   * recorded either: the dial worked and was reported as it happened;
+   * the plan refused the device. "Disconnected:" waits for the platform
+   * to confirm the tunnel is gone, and a refusal's card waits for that
+   * altogether; see DeviceSlotCard. */
   async function endForSlot(reason: SlotStopReason) {
     // The session has ended and the app is already on its way to the
     // sign-in screen, tunnel included; there is nothing to add.

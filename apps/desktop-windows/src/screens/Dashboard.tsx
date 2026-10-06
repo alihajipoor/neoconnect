@@ -1423,10 +1423,13 @@ export function Dashboard({
    * the tunnel was refused, or the subscription stopped.
    *
    * Disconnects and says why, and does NOT run the failover ladder
-   * (docs/device-slots.md, obligation 7): it would only take the slot
-   * back from the device the customer is now using, or fail on every
-   * protocol and blame servers that are fine. "Disconnected:" waits for
-   * the service to confirm it -- see DeviceSlotCard. */
+   * (docs/device-slots.md, obligations 7 and 11): it would only take the
+   * slot back from the device the customer is now using, or fail on every
+   * protocol and blame servers that are fine. Records nothing either --
+   * no attempt, no route marked failing, no best route moved: the dial
+   * worked and was reported as it happened; the plan refused the device.
+   * "Disconnected:" waits for the service to confirm it, and a refusal's
+   * card waits for that altogether -- see DeviceSlotCard. */
   async function endForSlot(event: SlotStopReason) {
     // The session has ended and the app is already on its way to the
     // sign-in screen, tunnel included; there is nothing to add.

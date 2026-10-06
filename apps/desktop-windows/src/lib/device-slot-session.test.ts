@@ -714,6 +714,67 @@ describe("a request still out at Disconnect", () => {
   });
 });
 
+/** Obligation 11, the commonest path in Iran: no answer before dialling,
+ * so the device connects, and its claim through the tunnel is answered
+ * with a verdict. The answer is final, as it would have been before
+ * dialling. */
+describe("a claim refused after connecting", () => {
+  it("ends the session with the refusal, holds nothing, and asks nothing more", async () => {
+    const h = harness([UNANSWERED, { kind: "refused", refusal: REFUSAL }]);
+    expect(await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" })).toEqual({ kind: "dial" });
+
+    const event = await h.session.afterConnected({ protocolUserId: "cred-a" });
+
+    expect(event).toEqual({ kind: "refused", refusal: REFUSAL });
+    expect(h.session.standing()).toBe("none");
+    // Not a failed dial and not a held slot: no ladder question, no
+    // renewal, no claim on the poll, and nothing to release.
+    expect(h.session.needsStandingCheck()).toBe(false);
+    h.advance(10 * 60_000);
+    expect(await h.session.onPoll()).toEqual({ kind: "keep" });
+    await h.session.release();
+    expect(h.claim).toHaveBeenCalledTimes(2);
+    expect(h.renew).not.toHaveBeenCalled();
+    expect(h.release).not.toHaveBeenCalled();
+  });
+
+  it("is taken over from by the card's button, which claims with the handles before dialling", async () => {
+    const h = harness([UNANSWERED, { kind: "refused", refusal: REFUSAL }, GRANT]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    await h.session.afterConnected({});
+
+    const takeover = REFUSAL.holders.map((holder) => holder.handle);
+    expect(await h.session.beforeDial({ subscriptionId: SUB, takeover })).toEqual({ kind: "dial" });
+    expect(h.claim.mock.calls[2][0]).toEqual({ subscriptionId: SUB, protocolUserId: null, takeover: ["pc"] });
+    expect(h.session.standing()).toBe("held");
+  });
+
+  it("ends the session to the plan-ended state when the subscription has stopped", async () => {
+    const h = harness([UNANSWERED, { kind: "inactive", subscriptionStatus: "SUSPENDED" }]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    const event = await h.session.afterConnected({});
+    expect(event).toEqual({ kind: "inactive", subscriptionStatus: "SUSPENDED" });
+    expect(h.session.standing()).toBe("none");
+    expect(slotStop({ kind: "inactive", subscriptionStatus: "SUSPENDED" }, "whileConnected")).toEqual({
+      notice: null,
+      report: null,
+      subscriptionStatus: "SUSPENDED",
+      inactive: true,
+    });
+  });
+
+  /** Anything else keeps the tunnel, and the claim is made again on the
+   * renewal clock; a refusal arriving on that clock ends it then. */
+  it("keeps the tunnel on anything but a verdict, and acts on one that comes on the renewal clock", async () => {
+    const h = harness([UNANSWERED, UNANSWERED, { kind: "refused", refusal: REFUSAL }]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    expect(await h.session.afterConnected({})).toEqual({ kind: "keep" });
+    expect(h.session.standing()).toBe("unclaimed");
+    h.advance(60_000);
+    expect(await h.session.onPoll()).toEqual({ kind: "refused", refusal: REFUSAL });
+  });
+});
+
 /** A plan with a limit whose grant was not counted: slots switched off on
  * the server, or a token from before sessions. Either can change while
  * connected, and a device that never asks again would never take a slot
@@ -836,6 +897,18 @@ describe("what a dashboard does when the slot stops it", () => {
     expect(stop.report).toEqual({ kind: "CONNECT", outcome: "REJECTED", reason: "DEVICE_LIMIT" });
     expect(stop.report?.attempts).toBeUndefined();
     expect(stop.inactive).toBe(false);
+  });
+
+  /** Obligation 11: a claim answered through the tunnel, refused. The
+   * dial worked and was reported as what it was; the plan's refusal is
+   * not a second attempt, so nothing is reported -- but the card is the
+   * refusal's, with "Use on this device instead". */
+  it("shows a refusal after connecting with the refusal's card, and reports nothing", () => {
+    const stop = slotStop({ kind: "refused", refusal: REFUSAL }, "whileConnected");
+    expect(stop.notice).toEqual({ kind: "refused", refusal: REFUSAL });
+    expect(stop.report).toBeNull();
+    expect(stop.inactive).toBe(false);
+    expect(slotStop({ kind: "takeoverLimited", retryAfterSec: 60 }, "whileConnected").report).toBeNull();
   });
 
   it("says who took the slot over, and reports nothing -- the connect was reported when it happened", () => {
