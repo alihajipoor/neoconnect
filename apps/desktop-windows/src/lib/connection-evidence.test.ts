@@ -11,6 +11,7 @@ import {
   LIVENESS_POLL_MS,
   noTunnelVerified,
   rungJudgedByHandshake,
+  showsIpv6Escape,
   stateFromStatus,
   type VpnStatus,
 } from "./connection-evidence";
@@ -258,6 +259,30 @@ describe("an outage of ours, seen from a working tunnel", () => {
     expect(dashboard).toContain("baselineTaken: baselineIpRef.current !== null");
     // The shape that rejected every earlier rung without a comparison.
     expect(dashboard).not.toMatch(/: isLast\s*\n\s*\? combineEvidence\(await confirmReachable\(\), egress\)/);
+  });
+});
+
+describe("the IPv6 escape alarm", () => {
+  it("is raised for a full tunnel whose IPv6 is getting out", () => {
+    expect(showsIpv6Escape("connected", { customMode: false, escaping: true })).toBe(true);
+    expect(showsIpv6Escape("unverified", { customMode: false, escaping: true })).toBe(true);
+    expect(showsIpv6Escape("connected", { customMode: false, escaping: false })).toBe(false);
+    expect(showsIpv6Escape("disconnected", { customMode: false, escaping: true })).toBe(false);
+  });
+
+  it("is never raised in Custom mode, where the probe sees only this app's direct traffic", () => {
+    // On any network with working IPv6 the app's own probe gets out
+    // directly in Custom mode, by design, and the red line used to fire
+    // on every connect -- telling the customer to reconnect over a
+    // tunnel carrying their chosen apps.
+    expect(showsIpv6Escape("connected", { customMode: true, escaping: true })).toBe(false);
+    expect(showsIpv6Escape("unverified", { customMode: true, escaping: true })).toBe(false);
+  });
+
+  it("is what the screen asks", () => {
+    const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+    expect(dashboard).toContain("showsIpv6Escape(connectionState, { customMode: splitTunnelActive, escaping: ipv6Escaping })");
+    expect(dashboard).not.toContain("isTunnelUp(connectionState) && ipv6Escaping ?");
   });
 });
 

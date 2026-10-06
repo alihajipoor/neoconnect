@@ -321,6 +321,26 @@ export function isTunnelUp(state: ConnectionState): boolean {
   return state === "connected" || state === "degraded" || state === "unverified";
 }
 
+/** Whether to say "Some of your traffic is leaving over IPv6, outside the
+ * VPN" -- the red line under the headline.
+ *
+ * Never in Custom mode. The probe behind it runs in this app's own
+ * process, and in Custom mode this app is deliberately not one of the
+ * selected apps: its IPv6 handshake leaves directly, as Custom mode
+ * intends for everything unselected, so on any network with working
+ * IPv6 the alarm fired on every connect -- next to the line saying the
+ * chosen apps' IPv6 is blocked, and advising a reconnect that cannot
+ * clear it. What it saw says nothing about the selected apps. Checking
+ * those would need a probe on the selected-app path, which the service
+ * does not have.
+ */
+export function showsIpv6Escape(
+  state: ConnectionState,
+  { customMode, escaping }: { customMode: boolean; escaping: boolean },
+): boolean {
+  return isTunnelUp(state) && !customMode && escaping;
+}
+
 /** How often a live tunnel is asked whether its engine is still there.
  *
  * Measured on 2026-10-06 in the test VM: `xray.exe` killed, traffic out

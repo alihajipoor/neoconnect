@@ -29,6 +29,7 @@ import {
   LIVENESS_POLL_MS,
   noTunnelVerified,
   rungJudgedByHandshake,
+  showsIpv6Escape,
   stateFromStatus,
   type HeadlineTone,
   type VpnStatus,
@@ -2897,8 +2898,11 @@ export function Dashboard({
                           styling and no hedging -- their IPv4 may be
                           perfectly tunnelled and their IPv6 is going out
                           in the clear, which is the exact combination
-                          that made this leak invisible for so long. */}
-                      {isTunnelUp(connectionState) && ipv6Escaping ? (
+                          that made this leak invisible for so long.
+                          Not in Custom mode, where the probe measures
+                          only this app's own, deliberately direct,
+                          traffic -- see `showsIpv6Escape`. */}
+                      {showsIpv6Escape(connectionState, { customMode: splitTunnelActive, escaping: ipv6Escaping }) ? (
                         <p className="mt-1 text-xs text-destructive">{t("dash.ipv6Escaping")}</p>
                       ) : null}
 
