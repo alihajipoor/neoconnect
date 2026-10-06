@@ -2950,3 +2950,47 @@ has not been seen inside the 400x640 dashboard; nothing on a censored
 network. The PC-then-phone, takeover and displaced scenarios are rig
 work, as is checking that a displaced device really does not run its
 ladder.
+
+## 2026-10-06 — device slots, mobile client (branch `claude/device-slots-mobile`)
+
+Built on `claude/device-slots-desktop` (`f32c47e`), using its shared
+`@shared/lib` slot files unchanged. Not merged, not released; like the
+desktop branch it needs the slots backend deployed first, and before
+that every claim is a 404 the app dials past.
+
+**Where things are.** `apps/mobile/src/lib/device-slot-steps.ts` holds
+what a phone adds: the claim asked alongside the config refresh,
+renewal in the foreground only (`document.visibilityState`), a check as
+the app returns to the front, and a teardown that says "down" only when
+`tunnelGone` confirms it. `apps/mobile/src/screens/Dashboard.tsx` wires
+it into `runLadder`, the toggle and the health poll. Android and iOS run
+the same JS.
+
+**Decisions taken here:**
+- No background work for slots. A backgrounded phone keeps its slot
+  through its tunnel's traffic; the first foreground poll after it
+  returns renews, or learns it was displaced.
+- The phone has no automatic ladder, so "do not run the failover ladder
+  when displaced" holds by construction; `checkStanding` (obligation 9)
+  is not wired, because nothing on mobile reconnects by itself.
+- The orb goes busy on the press, before the claim and refresh, so a
+  second press stops the pass rather than starting a second claim that
+  would make the first one's refusal be ignored. A pass that dials
+  nothing reads the tunnel state back from `vpn_status`.
+- "Use on this device instead" waits for a teardown the slot started;
+  if that teardown did not finish, nothing is dialled over it.
+- The label is the generic one from `device-identity.ts` ("Android
+  phone", "iPhone", "iPad"); the phone model is not added.
+
+**PROVEN (unit tests and typecheck only):** mobile JS 5 files / 59 tests
+(34 before), `tsc` clean, the bundle builds; desktop JS 37 / 526 and
+typecheck unchanged. The card was rendered in a throwaway browser
+harness at 360x740 in both languages, outside the app.
+**UNVERIFIED:** everything else. The dashboard wiring has not run on a
+phone or emulator; whether Android's WebView really reports `hidden`
+when backgrounded (and so whether renewal truly stops) is not checked;
+nothing has reached a real backend; nothing on a censored network. An
+IKEv2 profile set as always-on could be redialled by Android after a
+displaced phone disconnects, without a claim -- unexamined. PC-then-
+phone, takeover, a displaced phone, and a phone in the background with
+the screen off are rig work.
