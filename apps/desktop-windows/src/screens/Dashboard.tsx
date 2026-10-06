@@ -795,8 +795,13 @@ export function Dashboard({
   //
   // `force` because the hook has already done the staleness check; it
   // does not call this at all inside the horizon.
-  useRefreshOnResume(async () => {
-    const refreshed = await refreshConnectionConfig({ held: protocolUsers, force: true });
+  useRefreshOnResume(async (trigger) => {
+    const refreshed = await refreshConnectionConfig({
+      held: protocolUsers,
+      force: true,
+      trigger,
+      appState: connectionState,
+    });
     if (refreshed.source !== "network") return;
     setProtocolUsers(refreshed.protocolUsers);
     setProtocolUser(
@@ -1371,7 +1376,14 @@ export function Dashboard({
       // throws, gives up after its own short budget, and falls back to
       // the credentials already in hand; see the note there about why a
       // failed refresh must never cost somebody in Iran their VPN.
-      const refreshed = await refreshConnectionConfig({ held: protocolUsers });
+      // `appState` is the state this pass started from: "disconnected"
+      // from the button, or whatever the health poll saw when it began
+      // a failover -- in which case the refresh went through that tunnel.
+      const refreshed = await refreshConnectionConfig({
+        held: protocolUsers,
+        trigger: "connect",
+        appState: connectionState,
+      });
       if (refreshed.source === "network") setProtocolUsers(refreshed.protocolUsers);
       const dialable = refreshed.protocolUsers.length > 0 ? refreshed.protocolUsers : [protocolUser];
 

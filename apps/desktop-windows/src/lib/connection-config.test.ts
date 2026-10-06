@@ -231,6 +231,57 @@ describe("refreshConnectionConfig", () => {
     expect(report.apiEndpoint).toMatch(/^req: api\.example\.net=budget@\d+$/);
   });
 
+  /** A foreground or a returning network runs the same refresh with
+   * nothing connecting afterwards. Its report said "connecting on cached
+   * credentials" all the same, so on the phones -- where it fires on
+   * every foreground past the horizon -- most "connect" rows were not
+   * connects at all. */
+  it.each([
+    ["resume", "resume config refresh failed"],
+    ["online", "online config refresh failed"],
+  ] as const)("does not describe a %s refresh as a connect", async (trigger, prefix) => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: false, error: "Could not reach Neoxify. Check your internet connection." });
+
+    await refreshConnectionConfig({ held, force: true, trigger });
+
+    const reason = (reportAttempt.mock.calls[0][0] as { reason: string }).reason;
+    expect(reason.startsWith(prefix)).toBe(true);
+    expect(reason).not.toContain("connecting");
+    expect(reason).toContain("nothing is being dialled");
+  });
+
+  /** The connect keeps the wording every earlier build used, so old and
+   * new rows still split on the same prefix. */
+  it("keeps the connect's own wording for a connect", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: false, error: "Could not reach Neoxify. Check your internet connection." });
+
+    await refreshConnectionConfig({ held });
+
+    const reason = (reportAttempt.mock.calls[0][0] as { reason: string }).reason;
+    expect(reason.startsWith("pre-connect config refresh failed (Could not reach Neoxify.")).toBe(true);
+    expect(reason).toContain("connecting on cached credentials");
+  });
+
+  /** With a tunnel up the refresh went through it, which is a different
+   * failure from one on the bare network. Labelled as what the screen
+   * showed, because that is all it is. And how long it waited, which is
+   * the other half of "no answer". */
+  it("says what the app showed and how long it waited", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockReturnValue(new Promise(() => undefined));
+
+    await refreshConnectionConfig({ held, budgetMs: 30, trigger: "resume", appState: "connected" });
+
+    const reason = (reportAttempt.mock.calls[0][0] as { reason: string }).reason;
+    expect(reason).toMatch(/^resume config refresh failed \(no answer within 30ms\) after \d+ms; /);
+    expect(reason.endsWith("; app showed connected")).toBe(true);
+  });
+
   /** Never a list of addresses that were not dialled. */
   it("says so when nothing was dialled", async () => {
     const held = [reality("cloudflare.com")];

@@ -2,6 +2,7 @@ import { reportAttempt } from "./attempts";
 import { newTrace, renderTrace } from "./endpoint-trace";
 import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
 import { getProtocolUsers } from "./customer";
+import type { ResumeTrigger } from "./resume";
 import type { ProtocolUser } from "./types";
 
 /** Fetching the credentials again immediately before dialling.
@@ -207,6 +208,17 @@ function withBudget<T>(work: Promise<T>, budgetMs: number): Promise<T | typeof T
   });
 }
 
+/** Why a refresh is running.
+ *
+ * Only `connect` is about to dial anything. `resume` (the app came back
+ * to the foreground) and `online` (the device got a network back) run
+ * the same refresh from `useRefreshOnResume`, with nothing connecting
+ * afterwards -- and their failures used to be reported in the connect's
+ * words, "connecting on cached credentials", which no connect followed.
+ * On the phones, which fire `resume` on every foreground after ten
+ * minutes, those were most of the "connect" rows. */
+export type RefreshTrigger = "connect" | ResumeTrigger;
+
 export interface RefreshOptions {
   /** What the caller is holding and would otherwise dial. */
   held: ProtocolUser[];
@@ -218,8 +230,26 @@ export interface RefreshOptions {
   /** Skips the freshness check and always asks. Used by the manual
    * retry, where the customer has explicitly said "try again". */
   force?: boolean;
+  /** Why it is running; decides how a failure is described. Defaults to
+   * `connect`, the one call site that predates the others. */
+  trigger?: RefreshTrigger;
+  /** The connection state the screen held when the refresh began --
+   * "connected", "disconnected" and so on -- for the failure report
+   * only. With a tunnel up the refresh went through it, and a failure
+   * there is a different problem from one on the bare network. It is
+   * what the app believed, not a verified fact, and is labelled so. */
+  appState?: string;
   now?: number;
 }
+
+/** The opening words of a failure report, per trigger. Distinct
+ * prefixes, so rows can be split by what caused them; the connect's is
+ * the wording every earlier build used. */
+const FAILURE_PREFIX: Record<RefreshTrigger, string> = {
+  connect: "pre-connect config refresh failed",
+  resume: "resume config refresh failed",
+  online: "online config refresh failed",
+};
 
 /** Fetches the credentials again, unless what is held is still fresh.
  *
@@ -228,7 +258,7 @@ export interface RefreshOptions {
  * connecting.
  */
 export async function refreshConnectionConfig(options: RefreshOptions): Promise<ConfigRefresh> {
-  const { held, budgetMs = REFRESH_BUDGET_MS, force = false, now = Date.now() } = options;
+  const { held, budgetMs = REFRESH_BUDGET_MS, force = false, trigger = "connect", appState, now = Date.now() } = options;
 
   const savedAt =
     options.heldSavedAt !== undefined ? options.heldSavedAt : ((await loadSnapshot())?.savedAt ?? null);
@@ -242,7 +272,9 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   }
 
   const trace = newTrace();
+  const askedAt = Date.now();
   const outcome = await withBudget(getProtocolUsers(trace), budgetMs);
+  const elapsedMs = Date.now() - askedAt;
   // Read now, at the moment the wait ended, because the request carries
   // on after a budget expires: whatever is still in flight here is what
   // the budget ran out on, and renders as such.
@@ -263,7 +295,7 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
       void reportAttempt({
         kind: "CONNECT",
         outcome: "SUCCESS",
-        reason: `pre-connect refresh found changed server parameters: ${drift.join("; ")}`,
+        reason: `${trigger === "connect" ? "pre-connect" : trigger} refresh found changed server parameters: ${drift.join("; ")}`,
       });
     }
     return { protocolUsers: fresh, source: "network", ageMs: null, drift, sessionExpired: false };
@@ -290,6 +322,14 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     : answered.ok
       ? "unexpected"
       : answered.error;
+  const age = ageMs === null ? "of unknown age" : `${Math.round(ageMs / 60_000)} min old`;
+  const horizon = `(horizon ${Math.round(SNAPSHOT_TTL_MS / 60_000)} min)`;
+  // Only a connect is connecting. The other triggers dial nothing, and
+  // their reports must not say otherwise.
+  const consequence =
+    trigger === "connect"
+      ? `connecting on cached credentials ${age} ${horizon}`
+      : `nothing is being dialled; holding cached credentials ${age} ${horizon}`;
   void reportAttempt({
     kind: "CONNECT",
     outcome: "CONTROL_PLANE_UNREACHABLE",
@@ -302,13 +342,16 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     // addresses that were never tried.
     apiEndpoint: tried === "" ? "none dialled" : tried,
     reason:
-      `pre-connect config refresh failed (${detail}); connecting on cached credentials ` +
-      (ageMs === null ? "of unknown age" : `${Math.round(ageMs / 60_000)} min old`) +
-      ` (horizon ${Math.round(SNAPSHOT_TTL_MS / 60_000)} min)`,
+      `${FAILURE_PREFIX[trigger]} (${detail}) after ${elapsedMs}ms; ${consequence}` +
+      (appState ? `; app showed ${appState}` : ""),
   });
   // Also on the console, where a beta tester reading their own log can
   // see it without a round trip through the panel.
-  console.warn(`[connect] config refresh failed (${detail}); dialling cached credentials`);
+  console.warn(
+    trigger === "connect"
+      ? `[connect] config refresh failed (${detail}); dialling cached credentials`
+      : `[${trigger}] config refresh failed (${detail}); keeping cached credentials`,
+  );
 
   return { protocolUsers: held, source: "stale", ageMs, drift: [], sessionExpired: false };
 }
