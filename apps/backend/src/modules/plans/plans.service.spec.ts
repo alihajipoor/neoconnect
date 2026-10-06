@@ -1,5 +1,6 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { PlansService } from "./plans.service";
+import { encryptCredentials } from "../protocol-users/credentials-crypto";
 
 function buildPlan(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -164,16 +165,41 @@ describe("PlansService", () => {
       prisma.subscriptionPlan.findUnique.mockResolvedValue(existing);
       prisma.subscriptionPlan.update.mockResolvedValue({ ...existing, maxDownloadMbps: 50 });
       prisma.protocolUser.findMany.mockResolvedValue([
-        { nodeId: "node-1", protocol: "WIREGUARD", externalUserId: "wg-1" },
+        {
+          nodeId: "node-1",
+          protocol: "WIREGUARD",
+          externalUserId: "wg-1",
+          credentialsJson: encryptCredentials({ privateKey: "k", address: "10.66.0.2/32" }),
+          protocolConfig: { transport: "TCP", inboundTag: null },
+        },
       ]);
 
       await service.update("plan-1", { maxDownloadMbps: 50 } as any);
 
-      expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "UPDATE_USER", {
+      // CREATE_USER with the credentials: the agent shapes on create and
+      // enable only, so an UPDATE_USER never applied a cap to anyone.
+      expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "CREATE_USER", {
         protocol: "WIREGUARD",
+        transport: "TCP",
         externalUserId: "wg-1",
+        credentials: { privateKey: "k", address: "10.66.0.2/32" },
         downloadMbps: 50,
         uploadMbps: 20,
+      });
+      expect(agentGateway.enqueueCommand.mock.calls.some((c) => c[1] === "UPDATE_USER")).toBe(false);
+    });
+
+    // Asserted on the query, where the filtering happens.
+    it("reaches only live users whose cap can be enforced", async () => {
+      prisma.subscriptionPlan.findUnique.mockResolvedValue(existing);
+      prisma.subscriptionPlan.update.mockResolvedValue({ ...existing, maxDownloadMbps: 50 });
+
+      await service.update("plan-1", { maxDownloadMbps: 50 } as any);
+
+      expect(prisma.protocolUser.findMany.mock.calls[0][0].where).toEqual({
+        subscription: { planId: "plan-1", status: "ACTIVE" },
+        status: "ACTIVE",
+        protocol: { in: ["WIREGUARD", "OPENVPN"] },
       });
     });
 
@@ -187,19 +213,18 @@ describe("PlansService", () => {
       expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
     });
 
-    it("sends no limit to Xray users, who cannot be shaped per user", async () => {
+    // Xray's UpdateUser is remove-then-create, and without credentials the
+    // create failed -- every Xray customer on the plan was dropped until
+    // the next re-assert, for a cap Xray cannot enforce anyway.
+    it("sends Xray users nothing at all", async () => {
       prisma.subscriptionPlan.findUnique.mockResolvedValue(existing);
       prisma.subscriptionPlan.update.mockResolvedValue({ ...existing, maxDownloadMbps: 50 });
-      prisma.protocolUser.findMany.mockResolvedValue([
-        { nodeId: "node-1", protocol: "XRAY_VLESS_REALITY", externalUserId: "x-1" },
-      ]);
+      // What the database answers for that filter on a Xray-only plan.
+      prisma.protocolUser.findMany.mockResolvedValue([]);
 
       await service.update("plan-1", { maxDownloadMbps: 50 } as any);
 
-      expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "UPDATE_USER", {
-        protocol: "XRAY_VLESS_REALITY",
-        externalUserId: "x-1",
-      });
+      expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
     });
   });
 });

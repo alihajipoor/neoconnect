@@ -2,8 +2,13 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from "@nes
 import { Protocol } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
-import { rateLimitFor } from "../protocol-users/rate-limit";
+import { isShapeable, rateLimitFor } from "../protocol-users/rate-limit";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
+import { commandTarget } from "../protocol-users/command-target";
+import { decryptCredentials } from "../protocol-users/credentials-crypto";
+
+/** The protocols a plan's speed cap can reach -- see rate-limit.ts. */
+const SHAPEABLE_PROTOCOLS = Object.values(Protocol).filter(isShapeable);
 import { CreatePlanDto } from "./dto/create-plan.dto";
 import { UpdatePlanDto } from "./dto/update-plan.dto";
 
@@ -221,26 +226,56 @@ export class PlansService {
    * would get it, which is the opposite of what editing a plan looks like
    * it does.
    *
-   * Sent as UPDATE_USER per user, reusing the same per-user hot-update
-   * contract every other change goes through, so nothing is restarted and
-   * nobody else on the node is disturbed. Credentials are not included:
-   * the agent only needs to know who to re-shape, and re-sending secrets
-   * that have not changed would widen their exposure for no reason.
-   */
+   * Sent as CREATE_USER with the full credentials, to the users whose cap
+   * can actually be enforced (WireGuard and OpenVPN) and who are live.
+   * This was UPDATE_USER without credentials, which did worse than
+   * nothing:
+   *
+   * * The agent applies caps on CREATE_USER/ENABLE_USER only, never on
+   *   UPDATE_USER, so no cap ever reached anyone this way.
+   * * Xray's UpdateUser is remove-then-create, and the create failed on
+   *   the missing credentials ("credentials missing uuid") -- so every
+   *   Xray customer on the plan was dropped from their engine until the
+   *   next 60 s re-assert. Xray cannot be shaped per user at all
+   *   (rate-limit.ts), so it is no longer sent anything.
+   * * With no transport or inbound tag, what did land went to the
+   *   default inbound.
+   *
+   * CREATE_USER is idempotent on the agent (create-if-not-exists, then
+   * the shaper replaces the user's class), and the 60 s re-assert already
+   * sends these same credentials every minute, so including them widens
+   * nothing.
+   *
+   * Known, not fixed here: clearing a cap entirely cannot be expressed
+   * (the agent returns early on "no caps", leaving the old rule), and an
+   * OpenVPN client already connected keeps its old cap until it
+   * reconnects. */
   private async reapplyRateLimits(plan: {
     id: string;
     maxDownloadMbps: number | null;
     maxUploadMbps: number | null;
   }) {
     const users = await this.prisma.protocolUser.findMany({
-      where: { subscription: { planId: plan.id } },
-      select: { nodeId: true, protocol: true, externalUserId: true },
+      where: {
+        subscription: { planId: plan.id, status: "ACTIVE" },
+        status: "ACTIVE",
+        protocol: { in: SHAPEABLE_PROTOCOLS },
+      },
+      select: {
+        nodeId: true,
+        protocol: true,
+        externalUserId: true,
+        credentialsJson: true,
+        protocolConfig: { select: { transport: true, inboundTag: true } },
+      },
     });
 
     for (const user of users) {
-      await this.agentGateway.enqueueCommand(user.nodeId, "UPDATE_USER", {
+      await this.agentGateway.enqueueCommand(user.nodeId, "CREATE_USER", {
         protocol: user.protocol,
+        ...commandTarget(user.protocolConfig),
         externalUserId: user.externalUserId,
+        credentials: decryptCredentials(user.credentialsJson),
         ...rateLimitFor(plan, user.protocol),
       });
     }
