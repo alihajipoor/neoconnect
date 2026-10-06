@@ -180,11 +180,19 @@
     }
   ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct" }
+    { "protocol": "freedom", "tag": "direct" },
+    { "protocol": "blackhole", "tag": "block" }
   ],
   "routing": {
+    "//": "No customer may reach this node's own loopback or private addresses through their tunnel: 127.0.0.1:10085 is the Xray API (every customer's credentials, everyone's counters) and 127.0.0.1:7505 is OpenVPN's unauthenticated management port. Found by the 2026-10-06 review; live nodes are patched with installer/maintenance/block-private-egress.sh. IPIfNonMatch is part of the fix: an ip rule never sees a domain target, so without it any name resolving to 127.0.0.1 walks past the block. Rules that match by inbound tag (api-in, and the relay rules CONFIGURE_ROUTE adds) match before any resolving.",
+    "domainStrategy": "IPIfNonMatch",
     "rules": [
-      { "type": "field", "inboundTag": ["api-in"], "outboundTag": "api" }
+      { "type": "field", "inboundTag": ["api-in"], "outboundTag": "api" },
+      {
+        "type": "field",
+        "ip": ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"],
+        "outboundTag": "block"
+      }
     ]
   }
 }
