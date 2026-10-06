@@ -3554,3 +3554,87 @@ signed-in device of one account); anything on a phone (Android 0.2.23
 and the iOS build); a censored network. The VM froze twice under guest
 control (2026-10-05 and 2026-10-06, both as a WireGuard or IKEv2 test
 began) and needed a hard reset; cause unknown, no product effect seen.
+
+## 2026-10-06 — desktop review fixes (branch `claude/review-fixes-desktop`, off `main` `1cd85c6`)
+
+**Status:** pushed, not merged, not released. Fourteen confirmed
+findings from the full review of the desktop area; thirteen fixed, one
+partly. Commit messages carry the detail; this records what is proven
+and what is not.
+
+### Fixed
+
+- **Control-plane outage tore down working tunnels** (high). The egress
+  check now tells an HTTP answer of any status from our own endpoints
+  (`00e9ffe`) and, when nothing of ours answers at all, a TCP handshake
+  with 1.1.1.1 / 8.8.8.8:443 through the tunnel (`4189cc4`, new
+  `probe_ipv4_egress`) apart from a dead tunnel: both are now
+  `indeterminate`, so the poll falls back to the handshake, counts no
+  strike and runs no ladder. With no baseline, every rung is judged on
+  its handshake rather than rejected, and the wait for proof that cannot
+  come ends at once (`4f2123a`).
+- **"You're protected" on a dual-stack machine while IPv4 bypassed**
+  (medium). `/health/ip` is asked over IPv4 only on Windows (new
+  `health_ip_v4` command, reqwest bound to `0.0.0.0`, installed from
+  `main.tsx`), and two readings of different families are never
+  compared (`9ad2458`). The mobile app keeps the plugin's fetch and gets
+  only the family guard.
+- Remount over a live tunnel showed "not protected" (high) and a pass
+  outliving the screen (medium): `44dfcd5` (`lib/ladder-pass`, sync
+  before loading ends). Unbounded egress walks (medium): `e226923`.
+  Snapshot written after sign-out (low, both clients): `90393c7`.
+  IPv6 alarm in Custom mode (medium): `25d148c`. Mirror 502 winning the
+  race (medium, shared with mobile): `b2167a7`. Verify-email deep link
+  (low): `33135db`. Repair survey order (low): `8fafe35`, which also
+  raises `REPAIR_WORST_CASE` 735s → 885s and the app's deadline to 900s
+  (ten idle-arm spawns were never itemised), and fixes the JS repair
+  wrapper, left at 205s when the Rust deadline went to 750s. Stop vs
+  app watch (low): `07754b1`. Disconnect vs a queued Connect (low):
+  `e14de8b`. Pipe: ArmGaming refused, running-app list limited to the
+  caller's session (low): `a738dc8`.
+
+### Partly fixed
+
+- **Capability scope fixed at build time** (medium), `d82b640`: a domain
+  the seed uses for two or more hosts now gets a wildcard, so a node
+  added later on an existing mirror domain is in scope for builds from
+  now on; `bundle.mjs sign --previous <last signed bundle>` warns about
+  hosts installed clients will refuse. **Not done:** extending the scope
+  at runtime from a signature-verified bundle in Rust. A new domain or a
+  bare IP still needs a client release, and every build up to desktop
+  0.9.44 / mobile 0.2.23 still scopes exact hosts only.
+
+### Proven, on this PC
+
+Desktop `pnpm test` 770 passed in 50 files (725 in 44 before), `pnpm
+typecheck` clean; mobile vitest 72 passed, `tsc --noEmit` clean;
+`cargo test --workspace` Tauri 35 passed (2 ignored), ipc 58, service
+477 (6 ignored); `cargo check --workspace --all-targets` with no new
+warnings. Every fix has a test shown to fail on the old code, except
+the pure-source orderings, which assert the wiring. Two are
+measurements rather than models: `health_ip.rs` shows on this machine's
+loopback that the pinned request makes no IPv6 connection where an
+unpinned client answers over `[::1]`; and the queued-Connect test
+drives the real pipe and fails without the fix (the connect ran and
+reported the missing wireguard.exe). `apply-capability-scope.mjs` and
+`bundle.mjs sign --previous` were run end to end on a synthetic,
+documentation-names-only seed.
+
+### Unverified
+
+- Everything about real traffic: no VM run of this branch. The outage
+  case (backend down under a live tunnel), the remount/adopt flow, the
+  repair CLI on a machine with residue, and a service stop with the app
+  open all need the rig.
+- Dual-stack behaviour against the real CDN: this PC has no IPv6. Also
+  whether the CDN treats `health_ip_v4`'s requests as it treats the
+  plugin's (same User-Agent string on purpose; not observed).
+- Whether 1.1.1.1 / 8.8.8.8:443 answer through every protocol from a
+  censored network.
+
+### Deploy order
+
+None of it needs the backend, an agent release or a node change. The
+app and the service ship in one installer and must: `REPAIR_WORST_CASE`
+is compiled into both. The operator should start passing `--previous`
+when signing the next endpoint bundle.
