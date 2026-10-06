@@ -261,6 +261,30 @@ describe("an outage of ours, seen from a working tunnel", () => {
   });
 });
 
+describe("measurements that cannot outlive what they serve", () => {
+  // The walk of the endpoint list used to be unbounded wherever it ran:
+  // a dozen endpoints at six seconds each. Source assertions, for the
+  // reason given in "the wiring the pure functions cannot check".
+  const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+
+  it("caps the health poll's egress walk and runs one measurement at a time", () => {
+    expect(dashboard).toContain("verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS })");
+    expect(dashboard).toContain("if (healthCheckInFlightRef.current) return;");
+  });
+
+  it("settles each candidate on an endpoint already known to answer, within a ceiling", () => {
+    expect(dashboard).toContain("settleAndCaptureBaseline(settleBudget, knownBaseline)");
+    expect(dashboard).toContain("captureBaselineIp({ only: known.from, deadline })");
+    expect(dashboard).toContain("captureBaselineIp({ deadline: walkDeadline })");
+    // The shape that checked its budget only between whole walks.
+    expect(dashboard).not.toMatch(/for \(;;\) \{\s*const ip = await captureBaselineIp\(\);/);
+  });
+
+  it("stops a pass whose guard expired once a newer pass has started", () => {
+    expect(dashboard).toContain("if (ladderGenerationRef.current !== generation) break;");
+  });
+});
+
 describe("which states mean an engine is up", () => {
   it("counts the unverified one, which is the whole hazard of adding it", () => {
     // Every call site that asked "is there a tunnel here" was written as
@@ -473,7 +497,7 @@ describe("the liveness wiring the pure functions cannot check", () => {
   const start = dashboard.indexOf("const look = async () => {");
   const end = dashboard.indexOf("const id = setInterval(() => void look(), LIVENESS_POLL_MS);", start);
   const look = dashboard.slice(start, end);
-  const checkStart = dashboard.indexOf("const check = async () => {");
+  const checkStart = dashboard.indexOf("const measure = async (): Promise<boolean> => {");
   const check = dashboard.slice(
     checkStart,
     dashboard.indexOf("const id = setInterval(() => void check(), HEALTH_POLL_MS);", checkStart),
@@ -534,7 +558,7 @@ describe("the liveness wiring the pure functions cannot check", () => {
     // probe. If the tunnel was found gone meanwhile, nothing it measured
     // may reach the screen or the per-ISP tags.
     const measured = check.indexOf("verdict = fullTunnelPollState(fromStatus, egress);");
-    const guard = check.indexOf("if (!isCurrent(intentRef.current, generation)) return;", measured);
+    const guard = check.indexOf("if (!isCurrent(intentRef.current, generation)) return false;", measured);
     const tags = check.indexOf("sessionTrackerRef.current.healthy(");
     expect(measured).toBeGreaterThan(0);
     expect(guard).toBeGreaterThan(measured);

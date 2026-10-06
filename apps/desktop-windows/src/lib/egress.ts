@@ -71,14 +71,30 @@ export const EGRESS_TIMEOUT_MS = 6000;
  */
 type IpReading = { ip: string; from: string };
 
-async function publicIp(onBody?: (body: Record<string, unknown>) => void): Promise<IpReading | null> {
+async function publicIp(
+  onBody: (body: Record<string, unknown>) => void,
+  { only, deadline }: BaselineOptions,
+): Promise<IpReading | null> {
   // The same endpoint list the rest of the app uses, and for a sharper
   // reason here: this check decides whether the customer is told they
   // are protected. Pinned to one address, a blocked control plane would
   // report a perfectly working tunnel as carrying nothing -- turning a
   // reachability problem into a false accusation against the VPN.
-  return (await readFrom(await apiEndpoints(), EGRESS_TIMEOUT_MS, onBody)).reading;
+  const bases = only !== undefined ? [only] : await apiEndpoints();
+  return (await readFrom(bases, EGRESS_TIMEOUT_MS, { onBody, deadline })).reading;
 }
+
+/** How a baseline is taken, when the caller has reason to narrow it. */
+export type BaselineOptions = {
+  /** Ask this one endpoint and no other -- one that already answered on
+   * this network, so the per-candidate settle does not walk the whole
+   * list again for every protocol. */
+  only?: string;
+  /** Absolute time (epoch ms) after which no further endpoint is asked,
+   * and no request outlives. Without one, each endpoint gets its own
+   * full timeout and the list can take many of them. */
+  deadline?: number;
+};
 
 /** What asking the list produced: a reading, and -- whether or not there
  * was one -- whether anything answered at all.
@@ -148,12 +164,28 @@ function plainAddress(ip: string): string {
 async function readFrom(
   bases: string[],
   timeoutMs: number,
-  onBody?: (body: Record<string, unknown>) => void,
+  {
+    onBody,
+    deadline,
+  }: {
+    onBody?: (body: Record<string, unknown>) => void;
+    /** Epoch ms. The walk stops there, and the request in flight is
+     * given only what is left -- the list holds a dozen endpoints, and
+     * through a tunnel that black-holes everything, a walk at six
+     * seconds each was a minute before the health poll could say so. */
+    deadline?: number;
+  } = {},
 ): Promise<ReadResult> {
   let answered = false;
   for (const base of bases) {
+    let budget = timeoutMs;
+    if (deadline !== undefined) {
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      budget = Math.min(budget, left);
+    }
     try {
-      const res = await transport(base, timeoutMs);
+      const res = await transport(base, budget);
       // Set before the status is looked at: an error page is still an
       // answer, and it is the only thing that tells an outage of ours
       // apart from a tunnel carrying nothing.
@@ -192,7 +224,8 @@ export type BaselineIp = IpReading;
  * own. See network-identity.ts. A baseline that could not be taken at
  * all leaves the held network alone -- no answer is not evidence of a
  * different network. */
-export const captureBaselineIp = (): Promise<IpReading | null> => publicIp((body) => rememberNetwork(body));
+export const captureBaselineIp = (options: BaselineOptions = {}): Promise<IpReading | null> =>
+  publicIp((body) => rememberNetwork(body), options);
 
 export type EgressVerdict =
   /** The exit address changed: traffic is provably leaving via the VPN. */
@@ -225,6 +258,11 @@ export type VerifyOptions = {
    * health poll) the fallback stays.
    */
   sameEndpointOnly?: boolean;
+  /** A ceiling on the whole walk, not just on each endpoint. The health
+   * poll sets one: through a dead tunnel every endpoint times out, and
+   * without it the first sign of that came a minute after the tunnel
+   * died. */
+  totalMs?: number;
 };
 
 /** Compares the address the world sees now against the one it saw before
@@ -269,10 +307,11 @@ export async function verifyEgress(
   baseline: BaselineIp | null,
   options: VerifyOptions = {},
 ): Promise<EgressVerdict> {
-  const { attemptMs = EGRESS_TIMEOUT_MS, sameEndpointOnly = false } = options;
+  const { attemptMs = EGRESS_TIMEOUT_MS, sameEndpointOnly = false, totalMs } = options;
+  const deadline = totalMs === undefined ? undefined : Date.now() + totalMs;
   const bases =
     sameEndpointOnly && baseline !== null ? [baseline.from] : await apiEndpoints();
-  const { reading, answered } = await readFrom(bases, attemptMs);
+  const { reading, answered } = await readFrom(bases, attemptMs, { deadline });
 
   // Our API answered -- with a 502 while the backend is being redeployed,
   // a 503 from a mirror whose upstream is gone -- and said nothing about

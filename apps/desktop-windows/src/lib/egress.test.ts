@@ -384,6 +384,41 @@ describe("the check made while a tunnel is coming up", () => {
     ).resolves.toEqual({ state: "bypassingTunnel", exitIp: CLIENT });
   });
 
+  it("puts a ceiling on the whole walk when asked to", async () => {
+    // The health poll through a tunnel that black-holes everything:
+    // every endpoint hangs, and at a full timeout each the list was a
+    // minute before the first strike. With a ceiling the whole walk is
+    // over when it says.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR, FR_MIRROR]);
+    answers.set(CDN, "hang");
+    answers.set(FI_MIRROR, "hang");
+    answers.set(FR_MIRROR, "hang");
+    internet.mockResolvedValue(false);
+
+    const started = Date.now();
+    await expect(verifyEgress({ ip: CLIENT, from: CDN }, { totalMs: 120 })).resolves.toEqual({
+      state: "unreachable",
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("can take a baseline from one known endpoint, within a deadline", async () => {
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, { ip: CLIENT });
+    answers.set(FI_MIRROR, { ip: NODE });
+    await expect(captureBaselineIp({ only: FI_MIRROR })).resolves.toEqual({ ip: NODE, from: FI_MIRROR });
+    expect(asked).toEqual([FI_MIRROR]);
+
+    asked.length = 0;
+    answers.set(CDN, "hang");
+    const started = Date.now();
+    await expect(captureBaselineIp({ deadline: Date.now() + 100 })).resolves.toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // The deadline went to the first endpoint; nothing was left to ask
+    // the second.
+    expect(asked).toEqual([CDN]);
+  });
+
   it("does not wait out the budget for proof that cannot come", async () => {
     // No baseline: our API could not be reached before connecting. Every
     // answer from here on can only be "no comparison", so the first one

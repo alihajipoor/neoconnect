@@ -12,6 +12,7 @@ import {
   captureBaselineIp,
   captureIpv6Baseline,
   checkIpv6,
+  EGRESS_TIMEOUT_MS,
   verifyEgress,
   confirmEgressWithin,
   type BaselineIp,
@@ -154,6 +155,13 @@ const HEALTH_POLL_MS = 15_000;
  * cannot be throttled is paid by exactly the people least able to pay
  * it. */
 const MIN_CHECK_GAP_MS = 5_000;
+
+/** The most one health poll's egress check may spend walking the
+ * endpoint list. Two endpoints' worth: a first endpoint that hangs still
+ * leaves the next its full timeout, and a tunnel that black-holes
+ * everything is called out in about twelve seconds plus the internet
+ * probe, not after every endpoint in the list has timed out in turn. */
+const HEALTH_EGRESS_TOTAL_MS = 2 * EGRESS_TIMEOUT_MS;
 
 /** Consecutive bad polls before the app moves a live connection itself.
  *
@@ -374,13 +382,46 @@ const FAILOVER_SETTLE_TIMEOUT_MS = 2_500;
  * not a reason to refuse to connect -- their network may be fine and
  * ours may not be -- so the caller proceeds without a baseline and falls
  * back to handshake evidence.
+ *
+ * **Bounded, which it was not.** The budget used to be checked only
+ * between whole walks of the endpoint list, and one walk is a dozen
+ * endpoints at six seconds each when the bare network filters them. So
+ * a 2.5-second settle could cost a minute, once per candidate, and a
+ * pass ran far past `LADDER_MAX_MS` -- whose guard then expired under a
+ * pass still dialling, and a press started a second ladder beside it.
+ *
+ * Now `known`, an endpoint that already answered on this network (the
+ * pass's previous baseline, or the one taken when the screen loaded), is
+ * asked alone first, within the budget: it is the one that is going to
+ * answer, and it is the one the `sameEndpointOnly` check will ask. Only
+ * if it does not is the whole list walked, in its fixed order -- the
+ * order is what keeps a mirror reporting its own node's address from
+ * supplying a baseline the CDN would have -- and that walk has a
+ * ceiling of its own: one endpoint timeout past the budget, or two for a
+ * pass with nothing known yet, so a first endpoint that is blocked on
+ * the bare network still leaves the next one time to answer.
  */
-async function settleAndCaptureBaseline(budgetMs = SETTLE_TIMEOUT_MS): Promise<BaselineIp | null> {
+async function settleAndCaptureBaseline(
+  budgetMs = SETTLE_TIMEOUT_MS,
+  known: BaselineIp | null = null,
+): Promise<BaselineIp | null> {
   const deadline = Date.now() + budgetMs;
+  if (known !== null) {
+    for (;;) {
+      const ip = await captureBaselineIp({ only: known.from, deadline });
+      if (ip !== null) return ip;
+      if (Date.now() >= deadline) break;
+      await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
+    }
+  }
+  const walkDeadline = Math.max(
+    deadline,
+    Date.now() + (known === null ? 2 * EGRESS_TIMEOUT_MS : EGRESS_TIMEOUT_MS),
+  );
   for (;;) {
-    const ip = await captureBaselineIp();
+    const ip = await captureBaselineIp({ deadline: walkDeadline });
     if (ip !== null) return ip;
-    if (Date.now() >= deadline) return null;
+    if (Date.now() >= walkDeadline) return null;
     await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
   }
 }
@@ -536,6 +577,8 @@ export function Dashboard({
   const [tunnelDropped, setTunnelDropped] = useState(false);
   /** Single-flight for the one-second liveness poll. */
   const livenessInFlightRef = useRef(false);
+  /** Single-flight for the fifteen-second health poll's measurement. */
+  const healthCheckInFlightRef = useRef(false);
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
   /** What the plan's device limit has to say, when it is why this device
    * is not connected: refused before dialling, taken over by another
@@ -1107,10 +1150,13 @@ export function Dashboard({
   useEffect(() => {
     if (!isTunnelUp(connectionState)) return;
 
-    const check = async () => {
+    // One measurement: what the poll found, and whether it calls for the
+    // automatic ladder. The ladder itself runs outside the single-flight
+    // below, which only covers the measuring.
+    const measure = async (): Promise<boolean> => {
       // A ladder already running will decide the state itself; polling
       // underneath it would fight over the same fields.
-      if (ladderInFlight()) return;
+      if (ladderInFlight()) return false;
       lastCheckAtRef.current = Date.now();
 
       // Stamped before the first question, not after the last answer.
@@ -1152,7 +1198,7 @@ export function Dashboard({
         status = await serviceStatus();
       } catch {
         miss();
-        return;
+        return false;
       }
 
       // A "no tunnel" the service could not verify -- its fallback's
@@ -1166,7 +1212,7 @@ export function Dashboard({
       const disturbed = statusDisturbances.since(mark);
       if (!status.connected && (disturbed || !noTunnelVerified(status))) {
         miss();
-        return;
+        return false;
       }
       statusMissesRef.current = 0;
 
@@ -1180,7 +1226,7 @@ export function Dashboard({
       const slotEvent = await deviceSlot.onPoll();
       if (slotEvent.kind !== "keep") {
         await endForSlot(slotEvent);
-        return;
+        return false;
       }
 
       // Read from the status this check just took, not from the
@@ -1208,9 +1254,9 @@ export function Dashboard({
         // goes through the same rule and is worded the same way.
         if (droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) {
           publishDrop(generation);
-          return;
+          return false;
         }
-        if (publishObserved(generation, "disconnected") === null) return;
+        if (publishObserved(generation, "disconnected") === null) return false;
         // The tunnel went on its own, and nothing renews a slot without
         // one. Given back, rather than left to turn the customer's other
         // device away as "in use" for the ninety seconds it takes to go
@@ -1218,7 +1264,7 @@ export function Dashboard({
         void deviceSlot.release();
         setConnectedAt(null);
         strikesRef.current = 0;
-        return;
+        return false;
       }
 
       // Proof rather than inference: did a packet just make the round
@@ -1260,8 +1306,11 @@ export function Dashboard({
           .finally(probed);
         verdict = customModePollState(fromStatus, carried);
       } else {
-        const egress = await verifyEgress(baselineIpRef.current);
-        if (!isCurrent(intentRef.current, generation)) return;
+        // A ceiling on the whole walk: through a tunnel that black-holes
+        // everything, every endpoint times out, and at six seconds each
+        // the first strike used to land a minute after the tunnel died.
+        const egress = await verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS });
+        if (!isCurrent(intentRef.current, generation)) return false;
         if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
         verdict = fullTunnelPollState(fromStatus, egress);
       }
@@ -1271,7 +1320,7 @@ export function Dashboard({
       // follows is about a tunnel the screen no longer describes, and a
       // reading taken through a tunnel that has since ended must not
       // count towards the per-ISP tags.
-      if (!isCurrent(intentRef.current, generation)) return;
+      if (!isCurrent(intentRef.current, generation)) return false;
 
       // "It kept working", for the per-ISP tags: a proven check advances
       // the session clock, a failed one restarts it. `unverified` does
@@ -1288,21 +1337,21 @@ export function Dashboard({
         // teardown would hand every Xray session in Custom mode to the
         // failover ladder on a timer.
         if (publishObserved(generation, verdict) !== null) strikesRef.current = 0;
-        return;
+        return false;
       }
 
       // Dropped rather than counted when it has been overtaken: a strike
       // is evidence about the tunnel the customer is on, and this
       // verdict is about one they have already asked to leave.
-      if (publishObserved(generation, verdict) === null) return;
+      if (publishObserved(generation, verdict) === null) return false;
       strikesRef.current += 1;
 
       // Below the threshold, or too soon after a full pass already
       // failed, this only reports -- it does not act.
-      if (strikesRef.current < MID_SESSION_STRIKES) return;
-      if (Date.now() < cooldownUntilRef.current) return;
+      if (strikesRef.current < MID_SESSION_STRIKES) return false;
+      if (Date.now() < cooldownUntilRef.current) return false;
       // Never after the device limit ended this session. See slotLostRef.
-      if (slotLostRef.current) return;
+      if (slotLostRef.current) return false;
 
       // A tunnel that is up and carrying nothing is the case a customer
       // cannot fix themselves and should not have to: the old behaviour
@@ -1311,7 +1360,23 @@ export function Dashboard({
       // moment to ask anything of them.
       strikesRef.current = 0;
       cooldownUntilRef.current = Date.now() + MID_SESSION_COOLDOWN_MS;
-      await runLadder({ automatic: true });
+      return true;
+    };
+
+    // Single-flight, like the liveness poll. A measurement through a dead
+    // tunnel waits out every endpoint's timeout, and the interval kept
+    // starting new ones on top of it every fifteen seconds -- each
+    // holding requests on a link that was already not answering.
+    const check = async () => {
+      if (healthCheckInFlightRef.current) return;
+      healthCheckInFlightRef.current = true;
+      let failover = false;
+      try {
+        failover = await measure();
+      } finally {
+        healthCheckInFlightRef.current = false;
+      }
+      if (failover) await runLadder({ automatic: true });
     };
 
     // Once straight away, then on the interval.
@@ -1940,9 +2005,19 @@ export function Dashboard({
       // nothing about the network. Feeds the per-ISP tags; see
       // `failedDial`.
       const dials: Dial[] = [];
+      // An endpoint known to answer `/health/ip` on this network without
+      // a tunnel: the baseline taken when the screen loaded or the last
+      // pass connected, then each candidate's own. Asked first when
+      // settling, so a candidate does not walk the whole list again. See
+      // settleAndCaptureBaseline.
+      let knownBaseline: BaselineIp | null = baselineIpRef.current;
 
       for (const [index, candidate] of candidates.entries()) {
         if (cancelRef.current || sessionGeneration() !== sessionAtStart) break;
+        // A pass whose guard expired and that a newer pass has replaced
+        // stops dialling here, rather than tearing that pass's engine
+        // down with its next connect.
+        if (ladderGenerationRef.current !== generation) break;
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
         if (candidate.routeId === shownRouteId) triedShownRoute = true;
@@ -1955,7 +2030,8 @@ export function Dashboard({
 
         // Fresh every attempt, and taken only once plain networking is
         // confirmed working. See settleAndCaptureBaseline.
-        baselineIpRef.current = await settleAndCaptureBaseline(settleBudget);
+        baselineIpRef.current = await settleAndCaptureBaseline(settleBudget, knownBaseline);
+        if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
         // Once per pass, not once per candidate: whether this machine
         // has public IPv6 is a fact about its network, not about which
         // protocol is being tried, and re-measuring it five times would
