@@ -16,6 +16,7 @@ import { ChangePasswordDto } from "./dto/change-password.dto";
 import { SESSION_IDLE_LIFETIME_MS } from "./session-lifetime";
 import { hasDeviceInfo, type DeviceInfo } from "../../common/device-info";
 import { DeviceSlotsService } from "../device-slots/device-slots.service";
+import { KeyedLock } from "../protocol-users/keyed-lock";
 import {
   CustomerAccessTokenPayload,
   CustomerRefreshTokenPayload,
@@ -80,6 +81,9 @@ export class CustomerAuthService {
    * be grown without bound by naming addresses that do not exist.
    */
   private readonly resetCodeAttempts = new Map<string, number>();
+
+  /** Serialises trial grants per customer; see grantFreeTrialIfEnabled. */
+  private readonly trialLock = new KeyedLock();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -217,11 +221,16 @@ export class CustomerAuthService {
     // account is what matters, not which route confirmed it, and saying
     // "expired" sent people off to request codes that would never help.
     if (customer?.emailVerifiedAt) {
-      // Retried here, because this is the path a customer whose grant
-      // failed comes back through. grantFreeTrialIfEnabled refuses if
-      // they already have a subscription, so an ordinary re-verification
-      // still gets nothing.
-      return { alreadyVerified: true, trial: await this.retryTrial(customer.id) };
+      // Nothing is granted here, and nothing is returned but the fact.
+      // This branch is reached before the code is compared -- it has to
+      // be, verifying clears the code -- so the caller has proven nothing:
+      // it is anyone at all who knows a verified address. It used to retry
+      // the trial grant, which let a stranger create a trial on somebody
+      // else's account (every Google or Apple sign-up has no subscription)
+      // and walk away with its decrypted credentials and node addresses.
+      // A failed grant is retried at sign-in now (login), behind the
+      // password.
+      return { alreadyVerified: true, trial: null };
     }
 
     if (
@@ -236,10 +245,14 @@ export class CustomerAuthService {
     return this.completeVerification(customer.id, customer.emailVerifiedAt);
   }
 
-  /** Best-effort second chance at a trial that failed its first. */
-  private async retryTrial(customerId: string) {
+  /** Best-effort second chance at a trial that failed its first.
+   * `quiet` drops the "no trial granted" warning, for sign-in: it runs on
+   * every sign-in of a customer with no subscription, and a warning each
+   * time trial mode is off would bury the one at verification that
+   * matters. */
+  private async retryTrial(customerId: string, quiet = false) {
     try {
-      return await this.grantFreeTrialIfEnabled(customerId);
+      return await this.grantFreeTrialIfEnabled(customerId, quiet);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.logger.error(`Trial retry failed for customer ${customerId}: ${reason}`);
@@ -260,7 +273,9 @@ export class CustomerAuthService {
     // the update above, so letting this throw returns an error to
     // someone whose email *is* verified -- and leaves them unable to
     // sign in while the trial they cannot see is the reason. The grant
-    // is retried on their next verify attempt or sign-in instead.
+    // is retried at their next password sign-in (login) instead, or by
+    // the emailed link, which proves the mailbox -- never by the code
+    // route's already-verified branch, which proves nothing.
     let trial = null;
     try {
       trial = await this.grantFreeTrialIfEnabled(customerId);
@@ -278,7 +293,15 @@ export class CustomerAuthService {
     return { alreadyVerified: false, trial };
   }
 
-  private async grantFreeTrialIfEnabled(customerId: string) {
+  /** One customer's grant at a time: the "no subscription yet" check and
+   * the create are two statements, and two requests racing between them
+   * (a double-tapped verify, a verify and a sign-in together) each made a
+   * trial. */
+  private grantFreeTrialIfEnabled(customerId: string, quiet = false) {
+    return this.trialLock.run(customerId, () => this.grantFreeTrialUnlocked(customerId, quiet));
+  }
+
+  private async grantFreeTrialUnlocked(customerId: string, quiet: boolean) {
     // Never twice, and safe to call again after a failure. Keyed on the
     // customer having no subscription at all rather than on a flag,
     // because that is the actual question -- a trial is what somebody
@@ -294,6 +317,10 @@ export class CustomerAuthService {
     const existing = await this.prisma.subscription.count({ where: { customerId } });
     if (existing > 0) return null;
 
+    // Never to an account an operator has switched off.
+    const owner = await this.prisma.customer.findUnique({ where: { id: customerId }, select: { status: true } });
+    if (owner?.status !== "ACTIVE") return null;
+
     const settings = await this.freeTrialSettingsService.get();
     // Say which condition stopped it, rather than returning null in
     // silence. A customer who verifies and receives nothing is
@@ -305,6 +332,7 @@ export class CustomerAuthService {
     // Reported at warn because a verified signup getting no trial is a
     // lost customer, not routine bookkeeping.
     if (!settings.enabled || !settings.trialPlanId || !settings.trialRouteId) {
+      if (quiet) return null;
       const missing = [
         settings.enabled ? null : "trial mode is off",
         settings.trialPlanId ? null : "no trial plan is set",
@@ -372,6 +400,12 @@ export class CustomerAuthService {
     if (!customer.emailVerifiedAt) {
       return { requiresVerification: true, email: customer.email };
     }
+    // The second chance at a trial whose grant failed at verification, or
+    // that was never offered because trial mode was off then. Here because
+    // this caller has proven the account is theirs; the app fetches the
+    // credentials itself once signed in, so nothing is returned. A
+    // customer who already has any subscription costs one count query.
+    await this.retryTrial(customer.id, true);
     return this.issueTokenPair(customer, undefined, device);
   }
 

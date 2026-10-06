@@ -86,7 +86,9 @@ describe("CustomerAuthService", () => {
       revokeSessionCredentials: jest.fn().mockResolvedValue({ revoked: 0, failed: 0 }),
       endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }),
     };
-    freeTrialSettingsService = { get: jest.fn() };
+    // Trial mode off unless a case says otherwise: sign-in retries a
+    // missing trial now, so every login reads these.
+    freeTrialSettingsService = { get: jest.fn().mockResolvedValue({ enabled: false, trialPlanId: null, trialRouteId: null }) };
     // Resolves to "no referrer" by default, which is what the existing
     // cases here describe. A test that cares supplies its own.
     referralsService = {
@@ -269,6 +271,26 @@ describe("CustomerAuthService", () => {
       expect(result.alreadyVerified).toBe(true);
       // No second trial for an account that already got one.
       expect(result.trial).toBeNull();
+    });
+
+    /** The already-verified branch runs before the code is compared, so
+     * its caller has proven nothing. It used to grant a trial there: with
+     * trial mode on, a stranger naming any verified address with no
+     * subscription (every Google or Apple sign-up) made a trial on that
+     * account and was handed its decrypted credentials. */
+    it("grants nothing to an already-verified account, whatever code is sent", async () => {
+      prisma.customer.findUnique.mockResolvedValue(
+        buildCustomer({ emailVerifiedAt: new Date(), emailVerificationCode: null }),
+      );
+      prisma.subscription.count.mockResolvedValue(0);
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: "route-1" });
+      subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
+
+      const result = await service.verifyEmailByCode("customer@example.com", "000000");
+
+      expect(result).toEqual({ alreadyVerified: true, trial: null });
+      expect(subscriptionsService.create).not.toHaveBeenCalled();
+      expect(protocolUsersService.provisionAll).not.toHaveBeenCalled();
     });
 
     it("marks the customer verified and grants a trial on a correct, unexpired code", async () => {
@@ -630,6 +652,79 @@ describe("CustomerAuthService", () => {
       const result = await service.login("customer@example.com", PASSWORD);
 
       expect(result).toEqual({ accessToken: "access-token", refreshToken: "refresh-token" });
+    });
+
+    /** Where a failed trial grant is retried now: behind the password,
+     * rather than on the unauthenticated code route. */
+    it("grants a verified customer's missing trial at sign-in and still returns only tokens", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      prisma.subscription.count.mockResolvedValue(0);
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: "route-1" });
+      subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
+      jwt.signAsync.mockResolvedValueOnce("access-token").mockResolvedValueOnce("refresh-token");
+
+      const result = await service.login("customer@example.com", PASSWORD);
+
+      expect(subscriptionsService.create).toHaveBeenCalledWith({ customerId: "customer-1", planId: "plan-1" });
+      expect(result).toEqual({ accessToken: "access-token", refreshToken: "refresh-token" });
+    });
+
+    it("does not warn on every sign-in that trial mode is off", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: false, trialPlanId: null, trialRouteId: null });
+      jwt.signAsync.mockResolvedValue("token");
+      const warn = jest.spyOn(service["logger"], "warn").mockImplementation(() => undefined);
+
+      await service.login("customer@example.com", PASSWORD);
+
+      expect(warn).not.toHaveBeenCalled();
+      expect(subscriptionsService.create).not.toHaveBeenCalled();
+    });
+
+    it("still signs in when the trial retry throws", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      freeTrialSettingsService.get.mockRejectedValue(new Error("settings table unreachable"));
+      jwt.signAsync.mockResolvedValue("token");
+      jest.spyOn(service["logger"], "error").mockImplementation(() => undefined);
+
+      await expect(service.login("customer@example.com", PASSWORD)).resolves.toEqual({
+        accessToken: "token",
+        refreshToken: "token",
+      });
+    });
+  });
+
+  describe("trial grant", () => {
+    it("makes one trial when two grants for one customer race", async () => {
+      // Count-then-create is two statements: both racers used to see zero.
+      let subscriptions = 0;
+      prisma.subscription.count.mockImplementation(() => Promise.resolve(subscriptions));
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: "route-1" });
+      subscriptionsService.create.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        subscriptions += 1;
+        return { id: `sub-${subscriptions}` };
+      });
+      jwt.signAsync.mockResolvedValue("token");
+
+      await Promise.all([
+        service.login("customer@example.com", PASSWORD),
+        service.login("customer@example.com", PASSWORD),
+      ]);
+
+      expect(subscriptionsService.create).toHaveBeenCalledTimes(1);
+    });
+
+    it("never grants a trial to a disabled account", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", purpose: "verify-email" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: null, status: "DISABLED" }));
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: "route-1" });
+
+      const result = await service.verifyEmail("token");
+
+      expect(result.trial).toBeNull();
+      expect(subscriptionsService.create).not.toHaveBeenCalled();
     });
   });
 
