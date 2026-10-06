@@ -208,10 +208,21 @@ export class CustomersService {
       );
     }
 
-    // Their device slots, while the subscriptions they are keyed on still
-    // exist to be found. Never throws.
-    await this.deviceSlots.releaseCustomer(id);
-
+    // DELETE_USER went to every node, and the device slots were wiped,
+    // before a transaction that then always failed on a foreign key for a
+    // customer with a support ticket, a voucher redemption or a referral
+    // row: the panel got a raw 500, the database still had the customer,
+    // and their devices were cut off until a re-assert put the
+    // credentials back. The transaction now removes those rows too, and
+    // the slots go only once it has committed.
+    //
+    // The DELETE_USERs still go first, deliberately (the same order as
+    // SubscriptionsService.remove): if the transaction fails for some
+    // other reason, the rows survive and the re-assert restores the
+    // credentials within a minute or two. The other way round, a command
+    // that failed after the commit would leave a working credential on a
+    // node with no row anywhere to say so.
+    //
     // Under the customer lock, so no device of this customer is minting
     // credentials of its own between the read below and the transaction
     // -- a row created in that window would be deleted without any
@@ -219,17 +230,19 @@ export class CustomersService {
     // fetch queued behind this finds its session gone (cascaded with the
     // customer) and is refused.
     await this.protocolUsers.withCustomerLock(id, async () => {
-      const protocolUsers = await this.prisma.protocolUser.findMany({
-        where: { subscription: { customerId: id } },
-        select: DELETION_SELECT,
-      });
+      const [protocolUsers, subscriptions] = await Promise.all([
+        this.prisma.protocolUser.findMany({
+          where: { subscription: { customerId: id } },
+          select: DELETION_SELECT,
+        }),
+        this.prisma.subscription.findMany({ where: { customerId: id }, select: { id: true } }),
+      ]);
 
-      // Tell each node to drop the user before the row disappears --
-      // otherwise the credential keeps working on the engine while the
-      // panel believes the customer is gone. Aimed at the user's own
-      // inbound (see command-target.ts): untargeted, a WebSocket or relay
-      // customer's delete landed on the default inbound and was acked
-      // while their credential went on working.
+      // Tell each node to drop the user before the row disappears.
+      // Aimed at the user's own inbound (see command-target.ts):
+      // untargeted, a WebSocket or relay customer's delete landed on the
+      // default inbound and was acked while their credential went on
+      // working.
       for (const user of protocolUsers) {
         await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
       }
@@ -248,10 +261,28 @@ export class CustomersService {
         // Before the transactions they reference.
         this.prisma.invoice.deleteMany({ where: { customerId: id } }),
         this.prisma.paymentTransaction.deleteMany({ where: { customerId: id } }),
+        // The rows that point at the customer with no ON DELETE, and so
+        // refused the delete. Each exists to serve this customer: their
+        // support conversations (messages cascade), the codes they
+        // redeemed (Voucher.redeemedCount is its own counter, so a code
+        // does not get a use back), the rewards they earned as a referrer,
+        // and the record of what their own payments credited whoever
+        // referred them.
+        this.prisma.supportTicket.deleteMany({ where: { customerId: id } }),
+        this.prisma.voucherRedemption.deleteMany({ where: { customerId: id } }),
+        this.prisma.referralReward.deleteMany({ where: { referrerId: id } }),
+        this.prisma.referralCredit.deleteMany({ where: { referredCustomerId: id } }),
         this.prisma.protocolUser.deleteMany({ where: { subscription: { customerId: id } } }),
         this.prisma.subscription.deleteMany({ where: { customerId: id } }),
         this.prisma.customer.delete({ where: { id } }),
       ]);
+
+      // Their device slots, once the delete has committed, by the
+      // subscription ids read above: the rows they would be found by are
+      // gone. Never throws.
+      for (const subscription of subscriptions) {
+        await this.deviceSlots.releaseSubscription(subscription.id);
+      }
     });
   }
 

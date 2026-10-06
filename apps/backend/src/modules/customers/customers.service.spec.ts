@@ -47,7 +47,11 @@ describe("CustomersService", () => {
     paymentTransaction: { count: jest.Mock; deleteMany: jest.Mock };
     invoice: { deleteMany: jest.Mock };
     protocolUser: { findMany: jest.Mock; deleteMany: jest.Mock };
-    subscription: { deleteMany: jest.Mock; updateMany: jest.Mock };
+    subscription: { deleteMany: jest.Mock; updateMany: jest.Mock; findMany: jest.Mock };
+    supportTicket: { deleteMany: jest.Mock };
+    voucherRedemption: { deleteMany: jest.Mock };
+    referralReward: { deleteMany: jest.Mock };
+    referralCredit: { deleteMany: jest.Mock };
     usageRecord: { deleteMany: jest.Mock };
     customerSession: { updateMany: jest.Mock };
     customerIdentity: { deleteMany: jest.Mock };
@@ -73,7 +77,13 @@ describe("CustomersService", () => {
       // updateMany as well as deleteMany: self-deletion cancels
       // subscriptions rather than removing them, because the surviving
       // invoices point at them.
-      subscription: { deleteMany: jest.fn(), updateMany: jest.fn() },
+      subscription: { deleteMany: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+      // What refused an admin delete on a foreign key: all four point at
+      // the customer with no ON DELETE.
+      supportTicket: { deleteMany: jest.fn() },
+      voucherRedemption: { deleteMany: jest.fn() },
+      referralReward: { deleteMany: jest.fn() },
+      referralCredit: { deleteMany: jest.fn() },
       usageRecord: { deleteMany: jest.fn() },
       customerSession: { updateMany: jest.fn() },
       customerIdentity: { deleteMany: jest.fn() },
@@ -284,6 +294,47 @@ describe("CustomersService", () => {
         { protocol: "XRAY_VLESS_TLS", transport: "WS", externalUserId: "uuid-ws" },
         { protocol: "XRAY_VLESS_REALITY", transport: "TCP", inboundTag: "vless-in-fr", externalUserId: "uuid-relay" },
       ]);
+    });
+
+    /** Each of these points at the customer with no ON DELETE, so any
+     * customer who had opened a ticket, redeemed a code or taken part in a
+     * referral could never be deleted: the transaction failed on a foreign
+     * key and the panel showed a raw 500. */
+    it("removes the support tickets, voucher redemptions and referral rows that refused the delete", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.supportTicket.deleteMany.mockReturnValue("tickets-op");
+      prisma.voucherRedemption.deleteMany.mockReturnValue("redemptions-op");
+      prisma.referralReward.deleteMany.mockReturnValue("rewards-op");
+      prisma.referralCredit.deleteMany.mockReturnValue("credits-op");
+      prisma.customer.delete.mockReturnValue("customer-op");
+
+      await service.remove("customer-1");
+
+      expect(prisma.supportTicket.deleteMany).toHaveBeenCalledWith({ where: { customerId: "customer-1" } });
+      expect(prisma.voucherRedemption.deleteMany).toHaveBeenCalledWith({ where: { customerId: "customer-1" } });
+      expect(prisma.referralReward.deleteMany).toHaveBeenCalledWith({ where: { referrerId: "customer-1" } });
+      expect(prisma.referralCredit.deleteMany).toHaveBeenCalledWith({ where: { referredCustomerId: "customer-1" } });
+      // In the one transaction, and before the customer row itself.
+      const ops = prisma.$transaction.mock.calls[0][0] as unknown[];
+      for (const op of ["tickets-op", "redemptions-op", "rewards-op", "credits-op"]) {
+        expect(ops.indexOf(op)).toBeGreaterThanOrEqual(0);
+        expect(ops.indexOf(op)).toBeLessThan(ops.indexOf("customer-op"));
+      }
+    });
+
+    /** The slots used to be wiped before a transaction that could fail,
+     * leaving a customer who still existed with every device's slot gone. */
+    it("frees the device slots only once the delete has committed", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.subscription.findMany.mockResolvedValue([{ id: "sub-1" }, { id: "sub-2" }]);
+      prisma.$transaction.mockRejectedValueOnce(new Error("database went away"));
+
+      await expect(service.remove("customer-1")).rejects.toThrow(/database went away/);
+      expect(deviceSlots.releaseSubscription).not.toHaveBeenCalled();
+      expect(deviceSlots.releaseCustomer).not.toHaveBeenCalled();
+
+      await service.remove("customer-1");
+      expect(deviceSlots.releaseSubscription.mock.calls.map((c) => c[0])).toEqual(["sub-1", "sub-2"]);
     });
 
     it("refuses to delete a customer who has completed payments", async () => {
