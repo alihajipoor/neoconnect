@@ -3,13 +3,14 @@ import { ConfigService } from "@nestjs/config";
 import { existsSync, readFileSync } from "node:fs";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
-import { AgentCommandType } from "@prisma/client";
+import { AgentCommandType, Prisma } from "@prisma/client";
 import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
 import { UsageService } from "../usage/usage.service";
 import { ConcurrencyService } from "../usage/concurrency.service";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
+import { liveCredentialWhere } from "../protocol-users/live-credentials";
 import { AgentConnectionRegistry } from "./agent-connection-registry";
 import { resolveProtoPath } from "./proto-path";
 import { verifyEd25519 } from "./ed25519";
@@ -80,6 +81,13 @@ const ROUTE_REASSERT_INTERVAL_MS = 60_000;
  * outcome back onto the Route. Exported for the spec that proves the
  * restart-then-reassert cycle restores the uplink. */
 export const UPLINK_ACK_PREFIX = "reassert-uplink:";
+
+/** Command-id prefix for re-asserting a credential no node has confirmed
+ * yet (ProtocolUser.provisionedAt is null). Its ack is what records the
+ * confirmation; a confirmed credential is re-asserted under the plain
+ * `reassert:` prefix, whose ack is ignored, so the confirmed majority
+ * costs no database write per user per minute. */
+export const CONFIRM_ACK_PREFIX = "reassert-confirm:";
 
 @Injectable()
 export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
@@ -373,10 +381,16 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               return;
             }
             await this.usageService.recordDeltas(nodeId, msg.statsBatch?.deltas ?? []);
-            // Concurrency rides along with usage: same poll, and only
-            // meaningful next to it. Absent for engines that can't
-            // measure it, which is treated as unknown rather than zero.
-            await this.concurrencyService.handleSessionCounts(nodeId, msg.statsBatch?.sessions ?? []);
+            // The device limit rides along with usage: same poll. Which
+            // devices are active comes from the usage deltas as much as
+            // from the session counts (see ConcurrencyService), and an
+            // engine that reports no counts is unknown rather than zero.
+            // handleReport never throws, so a counting problem cannot
+            // close this node's control stream.
+            await this.concurrencyService.handleReport(nodeId, {
+              sessions: msg.statsBatch?.sessions ?? [],
+              deltas: msg.statsBatch?.deltas ?? [],
+            });
           }
           // stateSnapshot: no handling yet -- full reconciliation is later work.
         } catch (err) {
@@ -603,7 +617,9 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       label: `reassertProvisionedUsers(${nodeId})`,
       read: (afterId, take) =>
         this.prisma.protocolUser.findMany({
-          where: { nodeId, status: "ACTIVE", ...after(afterId) },
+          // Not every ACTIVE row: not a signed-out device's on its way off
+          // the node -- see liveCredentialWhere.
+          where: { nodeId, ...liveCredentialWhere(), ...after(afterId) },
       // For the transport and the inbound tag. Without either, every
       // re-assert after an engine restart rebuilds customers on the
       // wrong inbound -- silently, and for everyone at once, since
@@ -641,8 +657,10 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
             // Synthetic id: this command has no AgentCommand row, so its
             // ack is expected to match nothing (see handleCommandAck).
             // Prefixed so an unmatched ack is recognisable rather than
-            // looking like data loss.
-            this.writeCommand(nodeId, `reassert:${user.id}`, "CREATE_USER", payload);
+            // looking like data loss -- and, for a credential no node has
+            // confirmed yet, so its ack can record the confirmation.
+            const prefix = user.provisionedAt ? "reassert:" : CONFIRM_ACK_PREFIX;
+            this.writeCommand(nodeId, `${prefix}${user.id}`, "CREATE_USER", payload);
           }
           asserted += 1;
         }
@@ -680,16 +698,64 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     // matched neither this branch nor an AgentCommand row and was
     // discarded in total silence. A relay whose outbound could not be
     // rebuilt looked exactly like one that had been rebuilt fine.
-    if (!ack.success && ack.commandId.startsWith("reassert")) {
-      this.logger.warn(`Re-assert of ${ack.commandId} failed on the node: ${ack.error}`);
+    if (ack.commandId.startsWith("reassert")) {
+      if (!ack.success) {
+        this.logger.warn(`Re-assert of ${ack.commandId} failed on the node: ${ack.error}`);
+      } else if (ack.commandId.startsWith(CONFIRM_ACK_PREFIX)) {
+        await this.markProvisioned({ id: ack.commandId.slice(CONFIRM_ACK_PREFIX.length) });
+      }
+      // Synthetic: there is no AgentCommand row to update, so nothing
+      // more to do. (This used to run the updateMany below anyway, one
+      // query per user per minute that could only ever match nothing.)
+      return;
     }
+
+    const command = await this.prisma.agentCommand.findUnique({
+      where: { id: ack.commandId },
+      select: { nodeId: true, type: true, payloadJson: true },
+    });
+
+    // A stored CREATE_USER or ENABLE_USER the node carried out means the
+    // credential it names now exists there.
+    const externalUserId = (command?.payloadJson as { externalUserId?: unknown } | null)?.externalUserId;
+    if (
+      ack.success &&
+      command &&
+      (command.type === "CREATE_USER" || command.type === "ENABLE_USER") &&
+      typeof externalUserId === "string"
+    ) {
+      await this.markProvisioned({ nodeId: command.nodeId, externalUserId });
+    }
+
+    // The secret goes once nothing needs it. A CREATE_USER payload carries
+    // the credential in the clear -- a WireGuard private key, an OpenVPN
+    // key, an IKEv2 password -- while protocol_users holds it encrypted,
+    // and agent_commands rows were only ever deleted with their node: any
+    // database read or dump (the pre-deploy pg_dump among them) had every
+    // credential ever provisioned. Replay reads QUEUED and SENT rows only,
+    // so an acked or failed command never needs its credentials again.
+    const stripped = withoutCredentials(command?.payloadJson);
     await this.prisma.agentCommand.updateMany({
       where: { id: ack.commandId },
       data: {
         status: ack.success ? "ACKED" : "FAILED",
         ackedAt: new Date(),
         error: ack.success ? null : ack.error,
+        ...(stripped ? { payloadJson: stripped } : {}),
       },
+    });
+  }
+
+  /** Records that a node has confirmed it holds a credential.
+   *
+   * What lets a device's own credential replace the shared one in what
+   * the device is handed (ProtocolUsersService.deviceView): until a node
+   * has acked it, the device keeps the shared credential that already
+   * works. Only the first confirmation is written. */
+  private async markProvisioned(where: { id: string } | { nodeId: string; externalUserId: string }) {
+    await this.prisma.protocolUser.updateMany({
+      where: { ...where, provisionedAt: null },
+      data: { provisionedAt: new Date() },
     });
   }
 
@@ -743,6 +809,15 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     }
     return command;
   }
+}
+
+/** A stored payload with its `credentials` removed, or null when it had
+ * none (nothing to rewrite). */
+function withoutCredentials(payload: unknown): Prisma.InputJsonObject | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || !("credentials" in payload)) return null;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- dropped on purpose
+  const { credentials, ...rest } = payload as Record<string, unknown>;
+  return rest as Prisma.InputJsonObject;
 }
 
 /** Which protocols this node serves from its Xray process. Not the same

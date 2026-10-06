@@ -13,6 +13,9 @@ import { ReferralsService } from "../referrals/referrals.service";
 import { RegisterCustomerDto } from "./dto/register-customer.dto";
 import { verificationEmail, passwordResetEmail, toLocale, type Locale } from "../email/templates";
 import { ChangePasswordDto } from "./dto/change-password.dto";
+import { SESSION_IDLE_LIFETIME_MS } from "./session-lifetime";
+import { hasDeviceInfo, type DeviceInfo } from "../../common/device-info";
+import { DeviceSlotsService } from "../device-slots/device-slots.service";
 import {
   CustomerAccessTokenPayload,
   CustomerRefreshTokenPayload,
@@ -51,13 +54,15 @@ const PASSWORD_RESET_CODE_TTL_MS = 30 * 60 * 1000;
  */
 const RESET_CODE_MAX_ATTEMPTS = 5;
 
-/** How long a session may go unrefreshed before its row is pruned.
- *
- * Longer than any refresh token lives (`CUSTOMER_JWT_REFRESH_TTL`,
- * default 7d), so a row this idle cannot belong to a token that still
- * works. Raise it if that TTL is ever set past it: pruning a live
- * session would sign that device out. */
-const SESSION_IDLE_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+/** The session columns a device's own description sets -- only those it
+ * actually sent, so a request without the headers never erases a name. */
+function deviceColumns(device: DeviceInfo | undefined): { label?: string; platform?: string } {
+  if (!device || !hasDeviceInfo(device)) return {};
+  return {
+    ...(device.label !== null ? { label: device.label } : {}),
+    ...(device.platform !== null ? { platform: device.platform } : {}),
+  };
+}
 
 @Injectable()
 export class CustomerAuthService {
@@ -86,6 +91,7 @@ export class CustomerAuthService {
     private readonly freeTrialSettingsService: FreeTrialSettingsService,
     private readonly referralsService: ReferralsService,
     private readonly emailService: EmailService,
+    private readonly deviceSlots: DeviceSlotsService,
   ) {}
 
   /** Creates the Customer via the same service/logic the admin-facing
@@ -357,24 +363,30 @@ export class CustomerAuthService {
    * side's `{mfaRequired: true, mfaToken}` pattern in AuthService.login().
    * A stale already-issued token from before this change still works
    * until it naturally expires; this only gates new logins. */
-  async login(email: string, password: string): Promise<CustomerTokenPair | CustomerRequiresVerification> {
+  async login(
+    email: string,
+    password: string,
+    device?: DeviceInfo,
+  ): Promise<CustomerTokenPair | CustomerRequiresVerification> {
     const customer = await this.validateCredentials(email, password);
     if (!customer.emailVerifiedAt) {
       return { requiresVerification: true, email: customer.email };
     }
-    return this.issueTokenPair(customer);
+    return this.issueTokenPair(customer, undefined, device);
   }
 
   /** Tokens for one signed-in device.
    *
    * `sessionId` continues an existing session (a refresh); without it a
-   * new one is opened -- a sign-in. See `CustomerSession` for why a
+   * new one is opened -- a sign-in -- named by `device` when the app said
+   * what it is (see device-info.ts). See `CustomerSession` for why a
    * device has a session of its own. */
   async issueTokenPair(
     customer: { id: string; email: string; tokenVersion: number },
     sessionId?: string,
+    device?: DeviceInfo,
   ): Promise<CustomerTokenPair> {
-    const sid = sessionId ?? (await this.openSession(customer.id));
+    const sid = sessionId ?? (await this.openSession(customer.id, device));
     const accessPayload: CustomerAccessTokenPayload = { sub: customer.id, email: customer.email, sid };
     const refreshPayload: CustomerRefreshTokenPayload = {
       sub: customer.id,
@@ -394,7 +406,7 @@ export class CustomerAuthService {
     return { accessToken, refreshToken };
   }
 
-  async refresh(refreshToken: string): Promise<CustomerTokenPair> {
+  async refresh(refreshToken: string, device?: DeviceInfo): Promise<CustomerTokenPair> {
     let payload: CustomerRefreshTokenPayload;
     try {
       payload = await this.jwt.verifyAsync<CustomerRefreshTokenPayload>(refreshToken, {
@@ -416,27 +428,42 @@ export class CustomerAuthService {
     if (typeof payload.sid === "string") {
       const live = await this.prisma.customerSession.updateMany({
         where: { id: payload.sid, customerId: customer.id, revokedAt: null },
-        data: { lastUsedAt: new Date() },
+        // The device's name rides along when the app sends it, so a
+        // session opened where no headers could be sent (the browser
+        // sign-in flow) is named by its first refresh. Never blanked by a
+        // request that sent none.
+        data: { lastUsedAt: new Date(), ...deviceColumns(device) },
       });
       if (live.count === 0) {
         throw new UnauthorizedException("Refresh token has been revoked");
       }
       return this.issueTokenPair(customer, payload.sid);
     }
-    return this.issueTokenPair(customer);
+    return this.issueTokenPair(customer, undefined, device);
   }
 
   /** Opens a session for a sign-in, and drops this customer's sessions
    * that can no longer be used -- signed out, or idle longer than a
    * refresh token lives -- so the table is bounded per customer without
-   * a job of its own. */
-  private async openSession(customerId: string): Promise<string> {
+   * a job of its own.
+   *
+   * Except those still holding device credentials. Those have to be
+   * taken off the nodes first, which is the device-credential sweep's
+   * job (ProtocolUsersService.sweepDeadSessionCredentials). Deleting the
+   * row here instead would turn its credentials into shared ones (the
+   * foreign key is SET NULL, for the sake of rollback) that sign-out
+   * could then never reach. */
+  private async openSession(customerId: string, device?: DeviceInfo): Promise<string> {
     const idleCutoff = new Date(Date.now() - SESSION_IDLE_LIFETIME_MS);
     await this.prisma.customerSession.deleteMany({
-      where: { customerId, OR: [{ revokedAt: { not: null } }, { lastUsedAt: { lt: idleCutoff } }] },
+      where: {
+        customerId,
+        OR: [{ revokedAt: { not: null } }, { lastUsedAt: { lt: idleCutoff } }],
+        protocolUsers: { none: {} },
+      },
     });
     const session = await this.prisma.customerSession.create({
-      data: { customerId },
+      data: { customerId, ...deviceColumns(device) },
       select: { id: true },
     });
     return session.id;
@@ -448,13 +475,45 @@ export class CustomerAuthService {
    * A token from before sessions existed names none, and then nothing is
    * revoked server-side -- the device discards its own tokens, and other
    * devices are left alone, which is the point. Signing out used to call
-   * `revokeAllSessions` here, ending every device the customer had. */
+   * `revokeAllSessions` here, ending every device the customer had.
+   *
+   * Then this device's own VPN credentials are taken off every node
+   * (docs/per-device-credentials.md), and only this device's: the other
+   * devices' credentials and the subscription's shared ones stay. The
+   * session is revoked first, so even if the node commands fail the
+   * session cannot mint a new set, and the hourly sweep retries them.
+   * Failures are logged, never thrown -- a sign-out must not fail
+   * because a node is down. */
   async revokeSession(customerId: string, sessionId: string | undefined): Promise<void> {
     if (!sessionId) return;
     await this.prisma.customerSession.updateMany({
       where: { id: sessionId, customerId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+    try {
+      await this.protocolUsersService.revokeSessionCredentials(customerId, sessionId);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Sign-out of session ${sessionId} could not revoke its credentials yet: ${reason}`);
+    }
+    // A signed-out device is not using the VPN: its slot goes to whoever
+    // claims next, without asking. Never throws.
+    await this.deviceSlots.releaseSession(customerId, sessionId);
+  }
+
+  /** Takes back the device credentials of sessions a password change has
+   * already revoked (in the same transaction as the password), never
+   * throwing: whatever this does not finish, the hourly sweep does,
+   * because the sessions are already marked revoked. */
+  private async endSessions(customerId: string, except?: string): Promise<void> {
+    try {
+      await this.protocolUsersService.endSessions(customerId, except);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Could not end sessions for customer ${customerId}: ${reason}`);
+    }
+    // And their device slots. Never throws.
+    await this.deviceSlots.releaseOtherSessions(customerId, except);
   }
 
   /** Invalidates all outstanding refresh tokens for this customer. */
@@ -592,15 +651,35 @@ export class CustomerAuthService {
    */
   private async applyNewPassword(customerId: string, newPassword: string): Promise<void> {
     const passwordHash = await argon2.hash(newPassword);
-    await this.prisma.customer.update({
-      where: { id: customerId },
-      data: {
-        passwordHash,
-        tokenVersion: { increment: 1 },
-        passwordResetCode: null,
-        passwordResetCodeExpiresAt: null,
-      },
-    });
+    // The sessions are revoked in the same transaction as the password,
+    // so the two succeed or fail together. They used to be revoked by the
+    // best-effort endSessions below, whose first statement is that
+    // revocation: a database error there was logged and swallowed, the
+    // reset went through, and the devices it was meant to lock out kept
+    // their sessions -- and, since the sweep only reclaims revoked or
+    // idle sessions, their credentials, for as long as they kept using
+    // them.
+    await this.prisma.$transaction([
+      this.prisma.customer.update({
+        where: { id: customerId },
+        data: {
+          passwordHash,
+          tokenVersion: { increment: 1 },
+          passwordResetCode: null,
+          passwordResetCodeExpiresAt: null,
+        },
+      }),
+      this.prisma.customerSession.updateMany({
+        where: { customerId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+    // tokenVersion stops the refresh tokens; this takes back the device
+    // credentials those sessions were issued. The subscription's shared
+    // credentials are NOT touched in phase 1: they stay valid on the
+    // nodes, and anyone holding a copy keeps a working tunnel through the
+    // reset. See docs/per-device-credentials.md, "Transition".
+    await this.endSessions(customerId);
   }
 
   /** Changes the password of an already-signed-in customer.
@@ -616,7 +695,7 @@ export class CustomerAuthService {
    * including the caller's own, so without new ones the app would
    * silently log itself out on the very next request.
    */
-  async changePassword(customerId: string, dto: ChangePasswordDto) {
+  async changePassword(customerId: string, dto: ChangePasswordDto, sessionId?: string) {
     const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) {
       throw new BadRequestException("Account not found");
@@ -637,11 +716,41 @@ export class CustomerAuthService {
     }
 
     const passwordHash = await argon2.hash(dto.newPassword);
-    const updated = await this.prisma.customer.update({
-      where: { id: customerId },
-      data: { passwordHash, tokenVersion: { increment: 1 } },
-    });
 
-    return this.issueTokenPair(updated);
+    // The caller keeps its session, and with it the VPN credentials its
+    // tunnel is running on; every other device is ended, credentials
+    // and all. Opening a new session here instead -- what this did before
+    // devices had credentials of their own -- would orphan the caller's
+    // set and drop its tunnel on the next fetch.
+    const keep =
+      sessionId &&
+      (
+        await this.prisma.customerSession.updateMany({
+          where: { id: sessionId, customerId, revokedAt: null },
+          data: { lastUsedAt: new Date() },
+        })
+      ).count > 0
+        ? sessionId
+        : undefined;
+
+    // The other sessions are revoked in the same transaction as the
+    // password -- see applyNewPassword for why a swallowed failure there
+    // was not good enough.
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.customer.update({
+        where: { id: customerId },
+        data: { passwordHash, tokenVersion: { increment: 1 } },
+      }),
+      this.prisma.customerSession.updateMany({
+        where: { customerId, revokedAt: null, ...(keep ? { id: { not: keep } } : {}) },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+
+    // Takes back the device credentials of the sessions just ended. As
+    // with a reset, the subscription's shared credentials stay valid in
+    // phase 1.
+    await this.endSessions(customerId, keep);
+    return this.issueTokenPair(updated, keep);
   }
 }

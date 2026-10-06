@@ -77,6 +77,24 @@ jobs:
         run: bash scripts/check-committed-capabilities.sh
 
       - run: pnpm --filter @neoxify/backend prisma:generate
+
+      # The one place a migration meets a real Postgres before production.
+      # Unit tests mock Prisma, so until this step a migration was first
+      # applied at container start on the live database. Here, against
+      # this job's own empty Postgres service:
+      #   1. every migration applies, in order, from nothing;
+      #   2. the result is exactly the schema Prisma expects -- a drift,
+      #      a foreign key's delete rule included, fails the step;
+      #   3. the previous backend's sign-in pruning still works against
+      #      the migrated schema (test/sql/rollback-check.sql), which is
+      #      what a rollback depends on.
+      - name: Migrations apply to an empty database and keep rollback safe
+        working-directory: apps/backend
+        run: |
+          pnpm exec prisma migrate deploy
+          pnpm exec prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
+          pnpm exec prisma db execute --url "$DATABASE_URL" --file test/sql/rollback-check.sql
+
       - run: pnpm turbo run lint typecheck build test
 
   agent:

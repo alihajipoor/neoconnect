@@ -16,10 +16,16 @@ import (
 // is the only place that information exists, which is why this reads it
 // rather than calling an API.
 //
-// Only Xray needs this. OpenVPN replaces an existing session when the
-// same certificate reconnects, and a WireGuard peer holds one endpoint at
-// a time, so neither gives a shared credential real concurrency. VLESS
-// does: the same UUID can be connected from any number of places at once.
+// VLESS needs this most: the same UUID can be connected from any number
+// of places at once. (OpenVPN and WireGuard limit devices that share one
+// certificate or key, but with per-device credentials devices no longer
+// share one.)
+//
+// Every Xray inbound on a node has its own counter over this same log,
+// and record() does not filter by inbound tag, so each user is reported
+// once per inbound. The backend takes the max per user rather than the
+// sum (ConcurrencyService). Counting once per Xray process instead is an
+// agent change that has not been made.
 
 // A line looks like:
 //

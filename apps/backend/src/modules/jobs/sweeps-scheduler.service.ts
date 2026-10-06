@@ -35,6 +35,10 @@ const CLIENT_ATTEMPT_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // party on behalf of the whole fleet. Slower would leave a filtered node
 // serving nobody for an afternoon before anyone heard about it.
 const REACHABILITY_INTERVAL_MS = 30 * 60 * 1000;
+// Hourly. Sign-out revokes a device's credentials immediately; this only
+// retries the ones a node could not be told about then, and reclaims
+// those of devices idle for 30 days -- neither is improved by minutes.
+const DEVICE_CREDENTIALS_INTERVAL_MS = 60 * 60 * 1000;
 
 /** Registers the two repeatable sweep jobs on startup. Adding a
  * repeatable job with the same jobId+repeat config is idempotent in
@@ -81,6 +85,11 @@ export class SweepsSchedulerService implements OnModuleInit {
       "reachability",
       {},
       { repeat: { every: REACHABILITY_INTERVAL_MS }, jobId: "reachability-sweep" },
+    );
+    await this.queue.add(
+      "device-credentials",
+      {},
+      { repeat: { every: DEVICE_CREDENTIALS_INTERVAL_MS }, jobId: "device-credentials-sweep" },
     );
   }
 }

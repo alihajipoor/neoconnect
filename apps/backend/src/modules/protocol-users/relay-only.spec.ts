@@ -1,5 +1,6 @@
 import { BadRequestException } from "@nestjs/common";
 import { ProtocolUsersService } from "./protocol-users.service";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
 /**
  * The per-plan route selection.
@@ -41,7 +42,7 @@ describe("the plan's route selection", () => {
       protocolUser: { create: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
     };
     const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
-    return { service: new ProtocolUsersService(prisma as never, agentGateway as never), prisma, findMany };
+    return { service: new ProtocolUsersService(prisma as never, agentGateway as never, deviceSlotsStub() as never), prisma, findMany };
   }
 
   it("an EMPTY selection serves nothing", async () => {
@@ -147,7 +148,7 @@ describe("provisionAll: revoking what the plan no longer allows", () => {
       },
       protocolUser: { findMany: jest.fn().mockResolvedValue(opts.existing) },
     };
-    const service = new ProtocolUsersService(prisma as never, {} as never);
+    const service = new ProtocolUsersService(prisma as never, {} as never, deviceSlotsStub() as never);
     jest.spyOn(service, "create").mockImplementation(({ routeId }) => Promise.resolve({ routeId } as never));
     const remove = jest.spyOn(service, "remove").mockResolvedValue(undefined as never);
     return { service, remove };

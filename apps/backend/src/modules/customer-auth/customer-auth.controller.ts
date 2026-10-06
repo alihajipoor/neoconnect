@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   Header,
+  Headers,
   HttpCode,
   HttpStatus,
   Ip,
@@ -37,6 +38,9 @@ import { verificationFailedPage, verifiedPage } from "./verify-landing-page";
 import { ResetPasswordDto } from "./dto/reset-password.dto";
 import { ResetPasswordCodeDto } from "./dto/reset-password-code.dto";
 import { ChangePasswordDto } from "./dto/change-password.dto";
+import { deviceInfoFrom } from "../../common/device-info";
+
+type HeaderBag = Record<string, string | string[] | undefined>;
 
 // This is the API a future native client (Windows/macOS/Android/iOS)
 // signs up and logs in through -- there is deliberately no web UI for
@@ -86,11 +90,11 @@ export class CustomerAuthController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post("social")
   @HttpCode(HttpStatus.OK)
-  async social(@Body() dto: SocialLoginDto) {
+  async social(@Body() dto: SocialLoginDto, @Headers() headers: HeaderBag) {
     const provider = dto.provider.toUpperCase() as "GOOGLE" | "APPLE" | "FACEBOOK";
     const identity = await this.socialAuth.verify(provider, dto.token);
     const customer = await this.socialAuth.resolveCustomer(provider, identity, dto.locale ?? "en");
-    return this.customerAuthService.issueTokenPair(customer);
+    return this.customerAuthService.issueTokenPair(customer, undefined, deviceInfoFrom(headers));
   }
 
   private browserProvider(raw: string): BrowserProvider {
@@ -207,10 +211,12 @@ export class CustomerAuthController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("login")
   @HttpCode(HttpStatus.OK)
-  async login(@Body() dto: LoginDto, @Ip() ip: string) {
+  async login(@Body() dto: LoginDto, @Ip() ip: string, @Headers() headers: HeaderBag) {
     this.loginGuard.enforce("customer", dto.challenge, dto.email, ip);
     try {
-      const result = await this.customerAuthService.login(dto.email, dto.password);
+      // The device's own name for itself (X-Neoxify-Device-Label/-Platform),
+      // shown to the customer's other devices by device slots.
+      const result = await this.customerAuthService.login(dto.email, dto.password, deviceInfoFrom(headers));
       this.loginGuard.recordSuccess("customer", dto.email);
       return result;
     } catch (err) {
@@ -221,8 +227,8 @@ export class CustomerAuthController {
 
   @Post("refresh")
   @HttpCode(HttpStatus.OK)
-  refresh(@Body() dto: RefreshDto) {
-    return this.customerAuthService.refresh(dto.refreshToken);
+  refresh(@Body() dto: RefreshDto, @Headers() headers: HeaderBag) {
+    return this.customerAuthService.refresh(dto.refreshToken, deviceInfoFrom(headers));
   }
 
   @Post("logout")
@@ -248,7 +254,7 @@ export class CustomerAuthController {
   @ApiBearerAuth()
   @UseGuards(CustomerJwtAuthGuard)
   changePassword(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: ChangePasswordDto) {
-    return this.customerAuthService.changePassword(customer.sub, dto);
+    return this.customerAuthService.changePassword(customer.sub, dto, customer.sid);
   }
 
   // No guard -- the token itself is the credential (mirrors admin MFA's

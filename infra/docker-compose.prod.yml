@@ -145,6 +145,25 @@ services:
       # that can solve one, which no released build can yet. See
       # modules/login-guard/login-guard.service.ts.
       LOGIN_CHALLENGE_GRACE_FAILURES: ${LOGIN_CHALLENGE_GRACE_FAILURES:-}
+      # Per-device VPN credentials and the plan's device limit
+      # (docs/per-device-credentials.md, docs/device-slots.md). All
+      # optional: empty means the default in the code, and a change takes
+      # effect when `docker compose up -d` recreates this container.
+      #
+      # Hidden safety cap on how many of one customer's signed-in devices
+      # hold VPN credentials of their own (default 10, at most 50). Not
+      # the plan's device limit. Each one is a WireGuard peer out of a /24.
+      CUSTOMER_DEVICE_CREDENTIAL_LIMIT: ${CUSTOMER_DEVICE_CREDENTIAL_LIMIT:-}
+      # The node-side backstop for the plan's device limit: "shadow"
+      # (default) works out which device it would hold and only logs it;
+      # "enforce" holds it. Leave it at shadow until a week of logs shows
+      # no "would hold" against a device holding a slot.
+      CONCURRENCY_CUT: ${CONCURRENCY_CUT:-}
+      # Device slots, the plan's device limit as the apps claim it before
+      # connecting: "enforce" (default) refuses a device past the plan's
+      # limit with 409 DEVICE_LIMIT; "off" grants every claim. Only apps
+      # that claim are affected (docs/device-slots.md).
+      DEVICE_SLOTS: ${DEVICE_SLOTS:-}
       # Swagger UI at /api/docs. Off here because NODE_ENV is production;
       # set to "true" only if you deliberately want the whole control
       # plane's routes and payload shapes published unauthenticated.

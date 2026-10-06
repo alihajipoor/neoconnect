@@ -41,6 +41,7 @@ import { GamingModule } from "./modules/gaming/gaming.module";
 import { EndpointsModule } from "./modules/endpoints/endpoints.module";
 import { NetworkIdentityModule } from "./modules/network-identity/network-identity.module";
 import { IspRecommendationsModule } from "./modules/isp-recommendations/isp-recommendations.module";
+import { DeviceSlotsModule } from "./modules/device-slots/device-slots.module";
 
 @Module({
   imports: [
@@ -94,6 +95,10 @@ import { IspRecommendationsModule } from "./modules/isp-recommendations/isp-reco
     EndpointsModule,
     NetworkIdentityModule,
     IspRecommendationsModule,
+    // The plan's device limit: POST /customer/vpn/{claim,renew,release}.
+    // Also imported by the modules that release slots; named here so the
+    // controller does not depend on one of them pulling it in.
+    DeviceSlotsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

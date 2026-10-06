@@ -2759,3 +2759,285 @@ here; iOS needs the Mac. Still open: a signed-out client's VPN
 credentials stay valid on the nodes until revoked server-side
 (per-device credentials would fix it); node SSH access; ir1 offline
 since 2026-09-12.
+
+## 2026-10-05 (late) — per-device VPN credentials, backend (branch `claude/per-device-credentials`)
+
+The gap the night entry left open: signing out revoked the device's
+refresh session but not its VPN credentials, which were per
+subscription and shared by every device. Design in
+`docs/per-device-credentials.md`.
+
+`ProtocolUser.sessionId` (nullable, FK to `customer_sessions`, RESTRICT;
+migration `20261007_per_device_credentials`, additive, no backfill).
+NULL is the shared credential every existing row already is. A device
+whose access token carries `sid` is given its own credential on each
+route of its ACTIVE subscriptions the first time it calls
+`GET /customer/protocol-users` (or switch-route), and is answered with
+those, any gap filled by the shared row. Sign-out revokes the session,
+then `DELETE_USER`s that session's rows on every node -- no other
+device's. Password reset/change and an admin-set password end the other
+sessions and their credentials; a change keeps the caller's session. An
+hourly `device-credentials` sweep retries failed revocations and
+reclaims sessions idle 30 days *and* without traffic for 30 days.
+Device cap 5 per customer (`CUSTOMER_DEVICE_CREDENTIAL_LIMIT`), LRU
+eviction. WireGuard allocation now serialised per config. Usage, caps,
+expiry, concurrency, re-assert and deletion all key off
+`subscriptionId` and needed no change. No agent change, no client
+change.
+
+Shared credentials stay valid and provisioned (phase 1). So sign-out
+does **not** yet cut off a copy of the shared credentials a device held
+before its first fetch after deploy. Revoking them is phase 2 and an
+owner decision; the doc has the preconditions.
+
+**Proven:** backend typecheck, lint, and unit tests -- 78 suites, 860
+tests (77/825 before), including mutation checks that the shared-only
+legacy list, the signed-out-session refusal and the WireGuard lock are
+each caught by a test when removed; `prisma migrate diff` from the
+previous schema produces exactly the committed SQL. **Unverified:**
+everything end to end. The migration has not run against a database, no
+node has received a per-device user, no client has connected with one,
+and no sign-out has been seen to remove one from a node. Also unproven:
+that Windows' built-in IKEv2 and iOS's NEVPNManager profile pick up new
+credentials on the next connect rather than reusing stored ones.
+
+Found, not fixed: deletion, quota/expiry suspension and the concurrency
+disconnect send user commands without `transport`/`inboundTag`, so on a
+multi-inbound node they can miss the real inbound; an admin disabling a
+customer touches no credentials.
+
+## 2026-10-06 — per-device credentials reviewed and fixed; the plan's device limit as device slots (same branch)
+
+**Status:** backend done on `claude/per-device-credentials`, not merged,
+not deployed. Clients not started.
+**Touches:** `apps/backend` (protocol-users, usage, customer-auth,
+customers, agent-gateway, plans, billing, subscriptions, new
+`device-slots`), `infra/docker-compose.prod.yml`, `infra/.env.example`,
+`.github/workflows/ci.yml` (migration step), agent comments only,
+`docs/device-slots.md` (new), `docs/per-device-credentials.md`.
+
+**Owner decisions taken (2026-10-06), so they are not re-litigated:**
+`maxConcurrentConnections` means devices *using* the VPN at the same
+time (Starter 1, Pro 2, Trial 2, Ultimate/Ultimate Max unlimited).
+Option A: the second device is refused before it connects, told where
+Neoxify is in use, and offered "Use on this device instead"; the device
+taken over is told why and does not run the ladder. Signed-in device cap
+is a hidden 10 (was 5). Shared credentials stay valid for now (phase 1);
+30-day idle reclaim confirmed; password change/reset revokes other
+devices' credentials. **Coordinator decisions:** the node-side cut runs
+in shadow mode by default (`CONCURRENCY_CUT=shadow|enforce`); device
+slots on by default (`DEVICE_SLOTS=enforce|off`, only clients that claim
+are affected); the control plane is never a precondition for connecting.
+
+**Review findings fixed** (35 confirmed, many duplicates; every high and
+medium, the cheap lows): cooldown replaying revoked credentials (gone --
+replaced by a lease the re-assert skips); device credentials served
+before a node had them (now gated on the ack, `provisionedAt`); Xray
+counted five times per node (max, not sum); untargeted
+delete/suspend/cut commands (one helper); plan speed-cap edit dropping
+Xray users (CREATE_USER with credentials, shapeable protocols only);
+migration FK breaking sign-in on rollback (SET NULL); WireGuard pool
+exhaustion aborting paying customers' provisioning (device reserve,
+per-route catch, invoice kept); deletion racing lazy provisioning
+(customer lock, sessions revoked); session churn (10 new device sets per
+hour); endSessions outside the lock; password revocation now
+transactional; re-assert skipping signed-out devices; eviction by
+liveness; WireGuard address on DELETE_USER; device cap settable in
+production; plaintext credentials stripped from acked commands; stale
+comments. Deferred ones, with reasons, are in
+`docs/per-device-credentials.md`, "Known, deferred".
+
+**Device slots** (`docs/device-slots.md` is the contract for the app
+agents): `POST /customer/vpn/claim|renew|release`, 409 `DEVICE_LIMIT`
+with holders (label, since, lastSeen) and never 401, renew answers
+`displaced`, 90 s staleness from renewals *or* traffic, takeovers logged
+past 10/h and refused past 30/h, released on sign-out, password change,
+eviction, suspension/expiry and account deletion. Sessions gain `label`
+and `platform` from `X-Neoxify-Device-Label/-Platform` (never a
+hostname; the backend drops anything hostname-shaped).
+`GET /customer/subscriptions` carries `deviceLimit`. The backstop judges
+per device (shared credentials one pseudo-device), never holds a slot
+holder, and in shadow mode only logs `[shadow] ... would hold device X`.
+
+**Migrations** (all additive; `prisma migrate diff` from main's schema
+produces exactly their union): `20261007_per_device_credentials` (edited
+in place -- never applied anywhere: FK now SET NULL, plus
+`provisionedAt`), `20261008_concurrency_holds` (`heldUntil`),
+`20261008_session_labels` (`label`, `platform`). New spec
+`src/migration-safety.spec.ts` fails if a pending migration drops,
+renames or tightens anything; move its `LAST_DEPLOYED` when a deploy
+lands.
+
+**PROVEN (tests and CI only):** backend 84 suites / 992 tests (78 / 860
+at the start of this session), typecheck and lint clean; mutation checks
+that the provisioned gate, the hold filter in the re-assert, the
+deletion lock, the endSessions lock, the slot-holder exclusion, the
+device-set rate limit, the WireGuard reserve and slot staleness are each
+caught by a test when removed; an HTTP-level spec of the slot contract
+on a real Nest server with the production validation pipe; the built
+backend booted locally against nothing far enough to resolve the whole
+module graph and map `/customer/vpn/{claim,renew,release}`. **New CI
+step** (`ci.yml`, TypeScript job): all 46 migrations applied in order to
+the job's empty Postgres 16, `migrate diff` against `schema.prisma`
+reported no difference, and `test/sql/rollback-check.sql` (the previous
+backend's sign-in prune, with a signed-out session owning a credential)
+succeeded with the credential kept as a shared one -- green on
+`a9163ab`, all four jobs, Go agent included (so the comment-only agent
+edits build). Desktop JS 32 files / 435 tests and typecheck, mobile JS 4
+files / 34 tests and typecheck -- unchanged code, run as a baseline.
+**UNVERIFIED:** everything against real nodes, devices, Redis or a
+database with real data. No node has acked a device credential; no app
+claims a slot; the backstop has never seen a real report;
+presence-from-usage-deltas is reasoned from the agent and client code,
+not measured; Xray connections open when a hold starts may survive it;
+iPhone, Android in the background and an Iranian network untested.
+
+**Next:** desktop 0.9.44 and mobile 0.2.23 implement the client side of
+`docs/device-slots.md` (claim before dialling with a 3 s budget, never
+blocking; the refusal card; renew; release; `concurrentLimit` class;
+keep status/code in `apiRequest`). Deploy the backend first. Leave
+`CONCURRENCY_CUT=shadow` for at least a week and read the `[shadow]`
+lines before enforcing; the rig tests in the design (false-positive soak
+per protocol, PC-then-phone, takeover with captures, censored path,
+non-claiming clients, long Xray download, IKEv2, restart during a hold,
+Android screen-off) gate it.
+
+## 2026-10-06 — device slots, Windows client (branch `claude/device-slots-desktop`)
+
+Built on `claude/per-device-credentials` (`f960994`). Not merged, not
+released. Needs that backend deployed first: against today's production
+backend every claim is a 404, which the client reads as "no answer, dial
+anyway, stop asking" -- so the branch is harmless before the deploy, and
+does nothing either.
+
+**Where things are.** All of the platform-neutral logic is in
+`apps/desktop-windows/src/lib`, for the mobile client to reuse through
+`@shared`: `device-identity.ts` (the two headers; nothing from the web
+portal), `device-slots.ts` (claim/renew/release, every answer turned into
+an outcome; only 409 `DEVICE_LIMIT` / `SUBSCRIPTION_INACTIVE` and 429
+`TAKEOVER_LIMIT` stop a dial), `device-slot-session.ts` (the state
+machine, a module-level `deviceSlot`, and `slotStop` -- what to show and
+report), `device-slot-notice.ts` (the card's words, en/fa),
+`components/DeviceSlotCard.tsx`. `Dashboard.tsx` only wires them.
+
+**Decisions taken here, not in the contract:**
+- The claim runs alongside the config refresh rather than after it, so a
+  blackholed API costs max(6 s, 3 s), not 9 s. It names the on-screen
+  credential; once the ladder lands, an idempotent re-claim moves the
+  slot to the one it landed on.
+- A held slot is not re-claimed by an automatic reconnect while its
+  renewal is current (the request would go into the tunnel just judged
+  dead), but is re-claimed by any connect once overdue.
+- The slot is also released after a failed or cancelled connect and when
+  the tunnel is observed gone on its own -- not only on Disconnect --
+  so the other device is never told "in use on Windows PC" about a PC
+  that is not connected.
+- A claim refused *after* dialling (the pre-dial one went unanswered)
+  disconnects and shows the refusal card, like a takeover.
+- `deviceLimit: null` skips the claim; an absent `deviceLimit` (older
+  backend) does not.
+
+**PROVEN (unit tests and typecheck only):** desktop JS 37 files / 526
+tests (32 / 435 at `f960994`), typecheck clean; mobile
+JS 4 / 34 and `tsc` clean against the changed shared files; web portal
+and macOS shells `tsc` clean; the frontend bundles. The card was
+rendered in a throwaway browser harness in both languages (no overflow,
+100-140 px) -- outside the app.
+**UNVERIFIED:** everything else. No claim, renewal or release has
+reached a real backend; the dashboard wiring has not run (it needs the
+Tauri runtime and two signed-in devices on a Starter account); the card
+has not been seen inside the 400x640 dashboard; nothing on a censored
+network. The PC-then-phone, takeover and displaced scenarios are rig
+work, as is checking that a displaced device really does not run its
+ladder.
+
+## 2026-10-06 — device slots, mobile client (branch `claude/device-slots-mobile`)
+
+Built on `claude/device-slots-desktop` (`f32c47e`), using its shared
+`@shared/lib` slot files unchanged. Not merged, not released; like the
+desktop branch it needs the slots backend deployed first, and before
+that every claim is a 404 the app dials past.
+
+**Where things are.** `apps/mobile/src/lib/device-slot-steps.ts` holds
+what a phone adds: the claim asked alongside the config refresh,
+renewal in the foreground only (`document.visibilityState`), a check as
+the app returns to the front, and a teardown that says "down" only when
+`tunnelGone` confirms it. `apps/mobile/src/screens/Dashboard.tsx` wires
+it into `runLadder`, the toggle and the health poll. Android and iOS run
+the same JS.
+
+**Decisions taken here:**
+- No background work for slots. A backgrounded phone keeps its slot
+  through its tunnel's traffic; the first foreground poll after it
+  returns renews, or learns it was displaced.
+- The phone has no automatic ladder, so "do not run the failover ladder
+  when displaced" holds by construction; `checkStanding` (obligation 9)
+  is not wired, because nothing on mobile reconnects by itself.
+- The orb goes busy on the press, before the claim and refresh, so a
+  second press stops the pass rather than starting a second claim that
+  would make the first one's refusal be ignored. A pass that dials
+  nothing reads the tunnel state back from `vpn_status`.
+- "Use on this device instead" waits for a teardown the slot started;
+  if that teardown did not finish, nothing is dialled over it.
+- The label is the generic one from `device-identity.ts` ("Android
+  phone", "iPhone", "iPad"); the phone model is not added.
+
+**PROVEN (unit tests and typecheck only):** mobile JS 5 files / 59 tests
+(34 before), `tsc` clean, the bundle builds; desktop JS 37 / 526 and
+typecheck unchanged. The card was rendered in a throwaway browser
+harness at 360x740 in both languages, outside the app.
+**UNVERIFIED:** everything else. The dashboard wiring has not run on a
+phone or emulator; whether Android's WebView really reports `hidden`
+when backgrounded (and so whether renewal truly stops) is not checked;
+nothing has reached a real backend; nothing on a censored network. An
+IKEv2 profile set as always-on could be redialled by Android after a
+displaced phone disconnects, without a claim -- unexamined. PC-then-
+phone, takeover, a displaced phone, and a phone in the background with
+the screen off are rig work.
+
+## 2026-10-06 — device slots, client review fixes (branch `claude/device-slots-mobile`)
+
+Five review findings against the shared slot session, all confirmed in
+the code before fixing. Both clients take them, since the session is
+shared.
+
+- **Takeover through the tunnel** (the serious one). Where the API
+  answers only through the tunnel, the claim before dialling never
+  arrives; the takeover the customer asked for was dropped with it, and
+  the claim sent through the tunnel was refused in favour of the very
+  device being replaced. "Use on this device instead" could never work
+  there, and each press ran a full ladder. The takeover is now kept
+  until a claim naming it is answered: the late claim, the poll's retry
+  and the check before an automatic reconnect all carry it, and a late
+  429 `TAKEOVER_LIMIT` stops the session rather than being ignored.
+- **Release racing a renewal.** A renewal still out when Disconnect is
+  pressed could be processed after the release and re-grant the slot
+  (renew gives a lapsed slot back when there is room), so the other
+  device was told "in use on Windows PC" about a PC that was off. The
+  session now releases again once that request settles, if its answer
+  was a counted grant or it got none -- never once a new connect has
+  started, because the server knows the device, not the connect. A
+  claim also waits for a release still on the wire (at most 1.5 s, only
+  straight after a Disconnect). This also covers stop pressed during the
+  claim before dialling.
+- **`enforced: false` on a plan with a limit** is a new standing,
+  `uncounted`, claimed again every renewal until a grant is counted and
+  checked before an automatic reconnect. Only a null limit is treated
+  as unlimited now.
+- **Fresh means confirmed.** An unanswered renewal used to count as
+  fresh. The session now keeps when the server last *confirmed* the
+  slot; a held slot unconfirmed for `staleAfterSec` (read from the grant
+  now, 90 s by default) is checked before an automatic reconnect.
+- **The card outlives the dashboard.** A late refusal landing while the
+  dashboard was in Settings tore the tunnel down and lost the card. It
+  now lives in a store beside the slot (`slotNoticeStore`), read with
+  `useSyncExternalStore`, and is cleared on sign-out.
+
+**PROVEN (unit tests and typecheck only):** desktop JS 37 files / 550
+tests (526 before), desktop `tsc` clean; mobile JS 5 / 60 (59 before),
+mobile `tsc` clean, its bundle builds. 16 of the 22 new session tests
+fail against the previous session code; the other six guard the new
+behaviour's limits. **UNVERIFIED:** everything else, as before. The
+dashboards' use of the store has not been rendered. Nothing has reached
+a real backend, a filtered network or a phone; the takeover through the
+tunnel is exactly the case that needs the rig and a censored path.

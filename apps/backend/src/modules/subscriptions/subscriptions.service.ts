@@ -227,12 +227,26 @@ export class SubscriptionsService {
   }
 
   /** Customer-facing: only this customer's own subscriptions -- used by
-   * CustomerController, never exposed via the admin-only routes above. */
-  listByCustomer(customerId: string) {
-    return this.prisma.subscription.findMany({
+   * CustomerController, never exposed via the admin-only routes above.
+   *
+   * Each carries `deviceLimit`: how many of the customer's devices may
+   * use the VPN at the same time on it (the plan's
+   * maxConcurrentConnections; null is unlimited). The apps need it to
+   * word "Your plan allows 1 device at a time" without a refusal in hand,
+   * and neither the subscription row nor any other customer response
+   * carried it. See docs/device-slots.md. */
+  async listByCustomer(customerId: string) {
+    const subscriptions = await this.prisma.subscription.findMany({
       where: { customerId },
       orderBy: { createdAt: "desc" },
+      include: { plan: { select: { maxConcurrentConnections: true } } },
     });
+    return subscriptions.map(({ plan, ...subscription }) => ({
+      ...subscription,
+      deviceLimit: plan.maxConcurrentConnections !== null && plan.maxConcurrentConnections > 0
+        ? plan.maxConcurrentConnections
+        : null,
+    }));
   }
 
   async get(id: string) {

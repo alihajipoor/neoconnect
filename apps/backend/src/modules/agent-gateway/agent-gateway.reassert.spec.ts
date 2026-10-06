@@ -1,6 +1,10 @@
 import { cursoredFindMany } from "../../../test/cursored";
 import { AgentGatewayService } from "./agent-gateway.service";
 import { encryptCredentials } from "../protocol-users/credentials-crypto";
+import { liveCredentialWhere } from "../protocol-users/live-credentials";
+
+/** liveCredentialWhere with its clock replaced by a matcher. */
+const liveCredentialWhereAt = (now: unknown) => liveCredentialWhere(now as Date);
 
 /** The reconnect path is the only thing standing between a node reboot
  * and every customer on that node silently losing service, so what it
@@ -124,8 +128,10 @@ describe("AgentGatewayService reconnect reconciliation", () => {
       { where: Record<string, unknown> },
     ];
     // No `id` key on the first read: the cursor is absent until there
-    // is a batch to continue from.
-    expect(args.where).toEqual({ nodeId: "node-1", status: "ACTIVE" });
+    // is a batch to continue from. The rest is which of the node's
+    // credentials are live (liveCredentialWhere), tested on its own.
+    expect(args.where).toEqual({ nodeId: "node-1", ...liveCredentialWhereAt(expect.any(Date)) });
+    expect(args.where).not.toHaveProperty("id");
   });
 
   it("sends nothing for a node with no provisioned users", async () => {
@@ -165,5 +171,36 @@ describe("AgentGatewayService reconnect reconciliation", () => {
 
     const where = prisma.protocolUser.findMany.mock.calls[0][0].where as { status: string };
     expect(where.status).toBe("ACTIVE");
+  });
+
+  /** A signed-out device's row is still ACTIVE between sign-out's
+   * DELETE_USER and the row going -- and for an hour if the delete
+   * failed. Re-asserting it put the credential straight back. Shared
+   * credentials have no session and are always re-asserted. */
+  it("skips a signed-out device's credentials, and only those", async () => {
+    const { service, prisma } = build([]);
+
+    await reassert(service, "node-1");
+
+    const where = prisma.protocolUser.findMany.mock.calls[0][0].where as Record<string, unknown>;
+    expect(where).toMatchObject({
+      nodeId: "node-1",
+      AND: expect.arrayContaining([{ OR: [{ sessionId: null }, { session: { is: { revokedAt: null } } }] }]),
+    });
+  });
+
+  /** The device-limit backstop's hold is only durable because this skips
+   * it: re-asserting every ACTIVE row undid each cut within a minute. A
+   * lapsed hold is included again, which is how the device comes back --
+   * from the row as it is then, never a list captured at the cut. */
+  it("skips a credential while the device-limit backstop holds it, and not after", async () => {
+    const { service, prisma } = build([]);
+
+    await reassert(service, "node-1");
+
+    const where = prisma.protocolUser.findMany.mock.calls[0][0].where as Record<string, unknown>;
+    expect(where).toMatchObject({
+      AND: expect.arrayContaining([{ OR: [{ heldUntil: null }, { heldUntil: { lte: expect.any(Date) } }] }]),
+    });
   });
 });

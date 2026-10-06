@@ -1,5 +1,6 @@
 import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints, rememberEndpoint } from "./api-endpoints";
+import { deviceHeaders } from "./device-identity";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
 import { clearTokens, getTokens, setTokens } from "./session";
 import { announceSessionRevoked } from "./session-revoked";
@@ -52,9 +53,19 @@ async function fetchOneEndpointAtATime(
   endpoints: string[],
 ): Promise<Response> {
   let lastError: unknown;
+  // A caller's own signal, when it brought one. Each endpoint still gets
+  // its own controller and timeout; the caller's only ever shortens that,
+  // and once it has fired no further endpoint is tried. Without this a
+  // request with a budget of its own -- the device-slot release, which
+  // must be over in a second and a half -- walked every mirror at eight
+  // seconds each regardless.
+  const outer = init.signal ?? null;
   for (const base of endpoints) {
+    if (outer?.aborted) break;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ENDPOINT_TIMEOUT_MS);
+    const onOuterAbort = () => controller.abort();
+    outer?.addEventListener("abort", onOuterAbort);
     try {
       const response = await fetch(`${base}${path}`, { ...init, signal: controller.signal });
       void rememberEndpoint(base);
@@ -64,14 +75,18 @@ async function fetchOneEndpointAtATime(
       lastError = err;
     } finally {
       clearTimeout(timer);
+      outer?.removeEventListener("abort", onOuterAbort);
     }
   }
-  throw lastError ?? new Error("no API endpoint answered");
+  throw lastError ?? new Error(outer?.aborted ? "the request ran out of time" : "no API endpoint answered");
 }
 
 async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Response> {
   const endpoints = await apiEndpoints();
   if (endpoints.length === 0) throw new Error("no API endpoint is configured");
+  // A caller whose deadline has already passed gets nothing sent on its
+  // behalf, by either path below.
+  if (init.signal?.aborted) throw new Error("the request ran out of time");
 
   // Raced, not walked, and the sequential version is why Windows
   // customers could not connect on networks where Android could.
@@ -124,6 +139,12 @@ async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Respon
 
   const controllers = endpoints.map(() => new AbortController());
   const timers = controllers.map((c) => setTimeout(() => c.abort(), ENDPOINT_TIMEOUT_MS));
+  // The caller's signal stops every runner at once. See
+  // fetchOneEndpointAtATime for why a caller may bring one.
+  const outer = init.signal ?? null;
+  const onOuterAbort = () => controllers.forEach((c) => c.abort());
+  if (outer?.aborted) onOuterAbort();
+  outer?.addEventListener("abort", onOuterAbort);
 
   const attempts = endpoints.map(async (base, i) => {
     const response = await fetch(`${base}${path}`, { ...init, signal: controllers[i].signal });
@@ -174,6 +195,9 @@ async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Respon
     // The losers are already aborted in the success path above, where
     // the winner is known and can be spared.
     timers.forEach(clearTimeout);
+    // Detached for the same reason: a caller's signal firing after the
+    // answer is in hand must not cancel a body still being read.
+    outer?.removeEventListener("abort", onOuterAbort);
   }
 }
 
@@ -190,6 +214,19 @@ export type RequestFailure = {
    * transport failure, which is the distinction the token refresh needs:
    * a refusal ends the session, a request that never arrived must not. */
   status?: number;
+  /** The server's machine-readable `code`, when its answer carried one
+   * (`DEVICE_LIMIT`, `TAKEOVER_LIMIT`, ...).
+   *
+   * Kept because the message alone cannot carry it: every failure used
+   * to be reduced to a sentence, and a device-limit refusal then read
+   * exactly like any other error -- or, worse, like a reason to sign the
+   * customer out. A 409 is neither. */
+  code?: string;
+  /** The parsed error body, present only alongside `code`, for the few
+   * callers whose refusal carries data the screen needs (who is holding
+   * the plan's devices, how long until a takeover is allowed again).
+   * Untrusted shape: read it defensively. */
+  body?: unknown;
 };
 
 export type ApiResult<T> = { ok: true; data: T } | RequestFailure;
@@ -204,11 +241,24 @@ const unreachable = (): RequestFailure => ({
   error: "Could not reach Neoxify. Check your internet connection.",
 });
 
-async function parseErrorMessage(res: Response): Promise<string> {
-  const body = await res.json().catch(() => null);
-  if (Array.isArray(body?.message)) return body.message.join(", ");
-  if (typeof body?.message === "string") return body.message;
-  return `Request failed (${res.status})`;
+/** A refusal, in full: the sentence, the status, and the code.
+ *
+ * The body is read once and every part of the answer is kept. Reading it
+ * only for its message is what made a 409 indistinguishable from any
+ * other failure to every caller. */
+async function failureFrom(res: Response): Promise<RequestFailure> {
+  const body: unknown = await res.json().catch(() => null);
+  const fields = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : null;
+  const message = fields?.message;
+  const error = Array.isArray(message)
+    ? message.join(", ")
+    : typeof message === "string"
+      ? message
+      : `Request failed (${res.status})`;
+  const code = typeof fields?.code === "string" ? fields.code : undefined;
+  // The body travels only with a coded refusal, which is the only kind
+  // whose fields anyone reads; a plain error is its sentence and status.
+  return { ok: false, error, status: res.status, ...(code !== undefined ? { code, body } : {}) };
 }
 
 /** Unauthenticated request -- login/register don't have a token yet. */
@@ -224,7 +274,7 @@ export async function publicRequest<T>(path: string, init?: RequestInit): Promis
   }
 
   if (!res.ok) {
-    return { ok: false, error: await parseErrorMessage(res), status: res.status };
+    return await failureFrom(res);
   }
   if (res.status === 204) return { ok: true, data: undefined as T };
   return { ok: true, data: (await res.json()) as T };
@@ -258,6 +308,11 @@ async function refreshTokens(): Promise<Refresh> {
   const result = await publicRequest<TokenPair>("/customer-auth/refresh", {
     method: "POST",
     body: JSON.stringify({ refreshToken: current.refreshToken }),
+    // What this device is called on the customer's other devices
+    // ("Neoxify is in use on Windows PC"). Sent on every refresh because
+    // a session started in the system browser could not send it, and its
+    // first refresh is what names that device. See device-identity.ts.
+    headers: deviceHeaders(),
   });
   if (!result.ok) {
     return result.status === REFRESH_REFUSED ? { kind: "refused" } : { kind: "unavailable" };
@@ -343,14 +398,18 @@ async function authenticatedAttempt(path: string, init?: RequestInit): Promise<A
 }
 
 /** Authenticated request. See `authenticatedAttempt` for the token and
- * refresh handling; this adds the body. */
+ * refresh handling; this adds the body.
+ *
+ * A refusal keeps its status and code. Only a 401 whose refresh the
+ * server refused is a sign-out (`sessionExpired`); a 409 is an answer,
+ * and the caller decides what it means. */
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
   const attempt = await authenticatedAttempt(path, init);
   if (!attempt.answered) return attempt.failure;
   const res = attempt.res;
 
   if (!res.ok) {
-    return { ok: false, error: await parseErrorMessage(res) };
+    return await failureFrom(res);
   }
   if (res.status === 204) return { ok: true, data: undefined as T };
   return { ok: true, data: (await res.json()) as T };
@@ -413,7 +472,7 @@ export async function apiRequestRevalidated<T>(path: string, etag: string | null
   }
 
   if (!res.ok) {
-    return { ok: false, error: await parseErrorMessage(res) };
+    return await failureFrom(res);
   }
   const next = readEtag(res);
   if (res.status === 204) return { ok: true, notModified: false, data: undefined as T, etag: next };

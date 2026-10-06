@@ -62,6 +62,7 @@ export class ProvisioningBackfillService implements OnModuleInit {
     let added = 0;
     let revoked = 0;
     let failed = 0;
+    let incomplete = 0;
 
     // Cursored rather than read in one go. This one is not self-draining
     // -- a subscription is still ACTIVE after it has been provisioned --
@@ -84,6 +85,10 @@ export class ProvisioningBackfillService implements OnModuleInit {
             const result = await this.protocolUsersService.provisionAll(subscription.id);
             added += result.created.length;
             revoked += result.revoked.length;
+            // A route that could not be provisioned no longer throws (see
+            // provisionAll); it still makes the subscription one that
+            // needs looking at.
+            if (result.failed?.length) incomplete += 1;
           } catch (err) {
             failed += 1;
             const reason = err instanceof Error ? err.message : String(err);
@@ -103,11 +108,12 @@ export class ProvisioningBackfillService implements OnModuleInit {
     // perform would be its quietest. Reported at warn rather than log
     // when anything was revoked, because a sweep that removed a
     // customer's access is not routine even when it is correct.
-    if (added > 0 || revoked > 0 || failed > 0) {
+    if (added > 0 || revoked > 0 || failed > 0 || incomplete > 0) {
       const summary =
         `Provisioning backfill: added ${added} credential(s), revoked ${revoked}, ` +
         `across ${considered} subscription(s)` +
-        (failed > 0 ? `, ${failed} skipped` : "");
+        (failed > 0 ? `, ${failed} skipped` : "") +
+        (incomplete > 0 ? `, ${incomplete} left short of a route (see the errors above)` : "");
       if (revoked > 0) {
         this.logger.warn(summary);
       } else {

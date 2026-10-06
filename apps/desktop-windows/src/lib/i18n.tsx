@@ -602,6 +602,40 @@ const en = {
   "err.unknown": "Couldn't connect.",
   "err.showDetail": "Technical details",
 
+  // Device slots: the plan's device limit is how many devices may use
+  // the VPN at the same time (docs/device-slots.md). Worded from the
+  // limit and the devices, never from the server's English `message`.
+  // Plain and factual: a refusal is the plan working as sold, not an
+  // error, and the customer has a one-press way through it.
+  "slots.limitOne": "Your plan allows 1 device at a time.",
+  "slots.limitMany": "Your plan allows {limit} devices at a time.",
+  "slots.inUseOn": "Neoxify is in use on {device} since {time}.",
+  "slots.inUseOnNoTime": "Neoxify is in use on {device}.",
+  "slots.inUseOnMany": "Neoxify is in use on {devices}.",
+  "slots.deviceSince": "{device} (since {time})",
+  "slots.anotherDevice": "another device",
+  "slots.useHere": "Use on this device instead",
+  "slots.cancel": "Cancel",
+  "slots.dismiss": "Dismiss",
+  // "Disconnected:" only once the service has confirmed the tunnel is
+  // down; until then the second form, which claims nothing about it.
+  "slots.displaced": "Disconnected: Neoxify is now in use on {device}.",
+  "slots.nowInUseOn": "Neoxify is now in use on {device}.",
+  "slots.takeoverLimit": "You've switched devices too many times in the last hour. Try again in {minutes} min.",
+  // A degraded tunnel on a device whose slot was never confirmed, when
+  // the API could not be asked. It names the limit as a possibility,
+  // never as the cause, and says the check itself did not happen.
+  "slots.unchecked":
+    "We couldn't reach Neoxify to check. If Neoxify is in use on another of your devices, your plan's limit of {limit} at a time may be the reason.",
+  // The generic names devices are given, translated where they appear
+  // on another device's screen. Never a computer's own name.
+  "slots.labelWindows": "Windows PC",
+  "slots.labelMac": "Mac",
+  "slots.labelLinux": "Linux PC",
+  "slots.labelAndroid": "Android phone",
+  "slots.labelIphone": "iPhone",
+  "slots.labelIpad": "iPad",
+
   // "Repair my network".
   //
   // Worded for somebody whose internet is already broken and who is
@@ -1208,6 +1242,28 @@ const fa: Record<TranslationKey, string> = {
   "err.connectBusy": "یک تلاش برای اتصال در حال انجام است. کمی صبر کنید و دوباره امتحان کنید.",
   "err.unknown": "اتصال برقرار نشد.",
   "err.showDetail": "جزئیات فنی",
+
+  "slots.limitOne": "پلن شما در هر زمان فقط روی یک دستگاه کار می‌کند.",
+  "slots.limitMany": "پلن شما در هر زمان روی {limit} دستگاه کار می‌کند.",
+  "slots.inUseOn": "نئوکسیفای از {time} روی {device} در حال استفاده است.",
+  "slots.inUseOnNoTime": "نئوکسیفای روی {device} در حال استفاده است.",
+  "slots.inUseOnMany": "نئوکسیفای روی این دستگاه‌ها در حال استفاده است: {devices}.",
+  "slots.deviceSince": "{device} (از {time})",
+  "slots.anotherDevice": "دستگاهی دیگر",
+  "slots.useHere": "استفاده روی همین دستگاه",
+  "slots.cancel": "انصراف",
+  "slots.dismiss": "بستن",
+  "slots.displaced": "اتصال قطع شد: نئوکسیفای اکنون روی {device} در حال استفاده است.",
+  "slots.nowInUseOn": "نئوکسیفای اکنون روی {device} در حال استفاده است.",
+  "slots.takeoverLimit": "در یک ساعت گذشته دفعات زیادی دستگاه را عوض کرده‌اید. {minutes} دقیقهٔ دیگر دوباره امتحان کنید.",
+  "slots.unchecked":
+    "نتوانستیم برای بررسی به نئوکسیفای دسترسی پیدا کنیم. اگر نئوکسیفای روی دستگاه دیگری از شما در حال استفاده است، ممکن است دلیلش سقف {limit} دستگاه هم‌زمان در پلن شما باشد.",
+  "slots.labelWindows": "رایانهٔ ویندوزی",
+  "slots.labelMac": "مک",
+  "slots.labelLinux": "رایانهٔ لینوکسی",
+  "slots.labelAndroid": "گوشی اندروید",
+  "slots.labelIphone": "آیفون",
+  "slots.labelIpad": "آیپد",
 
   "settings.repair": "ترمیم شبکه",
   "repair.title": "ترمیم شبکهٔ من",
