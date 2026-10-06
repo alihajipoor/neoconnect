@@ -1,4 +1,3 @@
-import { MonitorSmartphone } from "lucide-react";
 import { Button, Card } from "./ui";
 import { useI18n } from "../lib/i18n";
 import { describeSlotNotice, type SlotNotice } from "../lib/device-slot-notice";
@@ -34,24 +33,24 @@ export function DeviceSlotCard({
   }
 
   return (
-    <Card className="ring-brand animate-rise flex w-full flex-col gap-2 text-center">
-      <div className="mx-auto flex size-9 items-center justify-center rounded-full bg-primary/15 text-primary">
-        <MonitorSmartphone className="size-4" />
-      </div>
+    // Compact on purpose: it shares a fixed 400x640 window with the orb,
+    // the tiles and the usage card, and nothing on that screen scrolls.
+    // The buttons sit side by side for the same reason.
+    <Card className="ring-brand animate-rise flex w-full flex-col gap-1.5 text-center">
       {copy.lines.map((line, i) => (
         <p key={i} className={i === 0 ? "text-sm font-semibold text-pretty" : "text-xs text-pretty text-muted-foreground"}>
           {line}
         </p>
       ))}
-      <div className="mt-1 flex flex-col gap-2">
-        {copy.useHere ? (
-          <Button onClick={() => onUseHere(copy.useHere?.takeover ?? [])} className="w-full justify-center">
-            {copy.useHere.label}
+      <div className="mt-1.5 flex justify-center gap-2">
+        {copy.dismiss ? (
+          <Button variant="ghost" onClick={onDismiss} className="shrink-0 justify-center px-3">
+            {copy.dismiss}
           </Button>
         ) : null}
-        {copy.dismiss ? (
-          <Button variant="ghost" onClick={onDismiss} className="w-full justify-center">
-            {copy.dismiss}
+        {copy.useHere ? (
+          <Button onClick={() => onUseHere(copy.useHere?.takeover ?? [])} className="flex-1 justify-center px-3">
+            {copy.useHere.label}
           </Button>
         ) : null}
       </div>

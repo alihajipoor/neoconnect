@@ -110,10 +110,16 @@ export function formatSlotTime(
   }
 }
 
+/** A count in the sentence's own digits, so a Persian card does not mix
+ * "۰۳:۵۰" with "2". */
+function count(n: number, ctx: Pick<NoticeContext, "language">): string {
+  return ctx.language === "fa" ? n.toLocaleString("fa-IR") : String(n);
+}
+
 function refusalLines(refusal: DeviceLimitRefusal, ctx: NoticeContext): string[] {
   const lines: string[] = [];
   if (refusal.limit === 1) lines.push(ctx.t("slots.limitOne"));
-  else if (refusal.limit !== null) lines.push(ctx.t("slots.limitMany", { limit: refusal.limit }));
+  else if (refusal.limit !== null) lines.push(ctx.t("slots.limitMany", { limit: count(refusal.limit, ctx) }));
 
   const holders = refusal.holders;
   if (holders.length === 0) {
@@ -158,9 +164,13 @@ export function describeSlotNotice(notice: SlotNotice, ctx: NoticeContext): Slot
       // The window is an hour, so an hour is the honest upper bound when
       // the server did not say.
       const minutes = Math.max(1, Math.ceil((notice.retryAfterSec ?? 3600) / 60));
-      return { lines: [ctx.t("slots.takeoverLimit", { minutes })], useHere: null, dismiss: ctx.t("slots.dismiss") };
+      return {
+        lines: [ctx.t("slots.takeoverLimit", { minutes: count(minutes, ctx) })],
+        useHere: null,
+        dismiss: ctx.t("slots.dismiss"),
+      };
     }
     case "unchecked":
-      return { lines: [ctx.t("slots.unchecked", { limit: notice.limit })], useHere: null, dismiss: null };
+      return { lines: [ctx.t("slots.unchecked", { limit: count(notice.limit, ctx) })], useHere: null, dismiss: null };
   }
 }

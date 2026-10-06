@@ -108,6 +108,14 @@ describe("the other notices", () => {
     expect(copy.useHere).toBeNull();
   });
 
+  it("writes counts in Persian digits on a Persian card, as it does times", () => {
+    const copy = describeSlotNotice({ kind: "takeoverLimited", retryAfterSec: 1260 }, ctx("fa"));
+    expect(copy.lines[0]).toContain("۲۱");
+    expect(copy.lines[0]).not.toMatch(/[0-9]/);
+    const limit = describeSlotNotice({ kind: "refused", refusal: { limit: 2, holders: [] } }, ctx("fa"));
+    expect(limit.lines[0]).toContain("۲");
+  });
+
   it("names the limit as a possibility when the API could not be asked, and offers nothing to press", () => {
     const copy = describeSlotNotice({ kind: "unchecked", limit: 1 }, ctx("en"));
     expect(copy.lines[0]).toMatch(/^We couldn't reach Neoxify to check\./);
