@@ -79,9 +79,11 @@ export class ReportAttemptDto {
   @IsEnum(ClientAttemptOutcome)
   outcome!: ClientAttemptOutcome;
 
-  /** "windows" | "macos" | "android" | "ios". Not an enum: a new platform should show up
+  /** "windows" | "macos" | "android" | "ios", or "unknown" from a client
+   * that could not tell. Not an enum: a new platform should show up
    * in the panel as itself rather than be rejected by a server that has
-   * not been redeployed. */
+   * not been redeployed. Not stored verbatim either -- see
+   * `recordedPlatform` for the mobile builds that called iOS "windows". */
   @IsString()
   @MaxLength(32)
   platform!: string;

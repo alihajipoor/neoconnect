@@ -997,6 +997,18 @@ model ClientAttempt {
 
   /// "windows" | "macos" | "android" | "ios", and the app version, so a fault can be tied
   /// to a release rather than guessed at.
+  ///
+  /// Not equally trustworthy across versions. Mobile builds up to 0.2.21
+  /// guessed it from the user agent and said "windows" for anything that
+  /// was not Android -- in practice the iOS builds -- so those rows are
+  /// not Windows. The server now stores such a report as "ios-inferred"
+  /// (0.2.18-0.2.21, the versions that had iOS builds) or
+  /// "mobile-inferred" (earlier); see `recordedPlatform`. Rows written
+  /// before that deploy still say "windows", and a 0.2.x appVersion is
+  /// what gives them away: desktop was already 0.8.9 when reporting
+  /// began. Mobile 0.2.22 / desktop 0.9.43 fixed the guess; later builds
+  /// ask the binary, and their fallback says "unknown" where it used to
+  /// say "windows".
   platform   String
   appVersion String
 
