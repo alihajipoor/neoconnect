@@ -228,9 +228,16 @@ still means the device was signed out, as everywhere.)
 ```
 
 - `held`: carry on. A slot that had lapsed while the device was quiet is
-  given back here if there is room, with a new `handle`.
+  given back here if there is room, with a new `handle` -- and so is one
+  taken over by a device that has since left (disconnected, signed out,
+  or neither renewed nor carried traffic for `staleAfterSec`).
 - `displaced`: another device has the slot -- it took it over at `at`,
-  or got it after this device went quiet. `by` names it.
+  or got it after this device went quiet. `by` names it. Answered only
+  while it is true: a takeover is reported while the device that took
+  the slot still holds it and there is no room for this one, naming
+  that device; once it has left, `displaced` names whichever device
+  holds the slot now (`at` is when that one got it), and if none does
+  and there is room, the answer is `held` instead.
 - `inactive`: the subscription is no longer active.
 
 ### `POST /customer/vpn/release`

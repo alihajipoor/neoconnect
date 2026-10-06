@@ -77,10 +77,21 @@ interface Holder {
 
 interface Displacement {
   by: { handle: string; label: string | null; platform: string | null };
+  /** The session that took the slot over, so a renewal can tell whether
+   * it still holds it. Kept here and never sent: a session id is never
+   * handed to another device. Absent on records from before it existed,
+   * which are matched by `by.handle`. */
+  bySessionId?: string;
   at: number;
   /** The displaced device had itself taken over within
    * RECENT_TAKEOVER_MS: the backstop gives it no grace. */
   noGrace: boolean;
+}
+
+/** Whether `holder` is the device a displacement names. */
+function tookOver(displacement: Displacement, holder: Holder): boolean {
+  if (displacement.bySessionId) return holder.sessionId === displacement.bySessionId;
+  return holder.handle === displacement.by.handle || holder.previousHandle === displacement.by.handle;
 }
 
 /** Who is asking: the customer, and the signed-in device (session) their
@@ -303,6 +314,7 @@ export class DeviceSlotsService {
       for (const h of takenOver) {
         const displacement: Displacement = {
           by: { handle, label, platform },
+          bySessionId: session.id,
           at: now,
           noGrace: h.tookOverAt !== null && now - h.tookOverAt < RECENT_TAKEOVER_MS,
         };
@@ -326,8 +338,10 @@ export class DeviceSlotsService {
 
   /** Keeps a slot. Answers `held`, or `displaced` (with by whom) for a
    * device whose slot was taken over -- always 200, never 401 or 409 for
-   * that. A device whose slot lapsed while it was quiet gets it back if
-   * there is room, and is told it is displaced if there is not. */
+   * that -- while the device that took it still holds it and there is no
+   * room. A device whose slot lapsed while it was quiet, or whose taker
+   * has since left, gets it back if there is room, and is told it is
+   * displaced, by whoever holds the slot now, if there is not. */
   async renew(caller: SlotCaller, request: { subscriptionId: string }): Promise<RenewResult> {
     const { subscription, session } = await this.context(caller, request.subscriptionId);
     if (subscription.status !== "ACTIVE") {
@@ -348,24 +362,41 @@ export class DeviceSlotsService {
         return { status: "held" as const, ...withoutGranted(this.granted(subscription.id, limit, mine.handle)) };
       }
 
-      const displaced = await this.displacement(subscription.id, session.id);
-      if (displaced) {
-        return {
-          status: "displaced" as const,
-          subscriptionId: subscription.id,
-          limit,
-          by: { ...displaced.by, label: specificLabel(displaced.by.label) },
-          at: new Date(displaced.at).toISOString(),
-        };
-      }
-
-      // Lapsed while quiet (or forgotten, if Redis was lost): back in if
-      // there is room, as a claim without takeover would be.
       const [seen, gone] = await Promise.all([this.lastSeen(subscription.id, holders, now), this.signedOut(holders)]);
       const live = holders.filter(
         (h) => !gone.has(h.sessionId) && now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS,
       );
-      if (live.length < limit) {
+      const room = live.length < limit;
+
+      // Taken over: said only while it is still true -- the device that
+      // took the slot still holds it, and there is no room for this one.
+      // The record lasts an hour and used to be answered for all of it,
+      // so a renewal could disconnect this device after the one that took
+      // its place had disconnected, signed out or gone quiet, under a
+      // card naming a device no longer there, with the slot free.
+      const displaced = await this.displacement(subscription.id, session.id);
+      if (displaced) {
+        const by = room ? undefined : live.find((h) => tookOver(displaced, h));
+        if (by) {
+          return {
+            status: "displaced" as const,
+            subscriptionId: subscription.id,
+            limit,
+            by: { handle: by.handle, label: specificLabel(by.label), platform: by.platform },
+            at: new Date(displaced.at).toISOString(),
+          };
+        }
+        // With room, the record is over: forgotten, and the slot given
+        // back below. Without, it stays -- the backstop still needs to
+        // know this device was taken over -- and the answer below names
+        // whoever holds the slot now.
+        if (room) await this.store.hdel(displacedKey(subscription.id), session.id);
+      }
+
+      // Lapsed while quiet (or forgotten, if Redis was lost, or taken over
+      // by a device that has since left): back in if there is room, as a
+      // claim without takeover would be.
+      if (room) {
         const handle = newHandle();
         await this.store.hdel(
           slotsKey(subscription.id),
