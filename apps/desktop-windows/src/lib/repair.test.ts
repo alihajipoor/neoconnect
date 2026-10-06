@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   anythingFixed,
   diagnosticsToText,
   failedSteps,
   indeterminateSteps,
+  REPAIR_TIMEOUT_MS,
   unresolvedSteps,
   type Diagnostics,
   type RepairReport,
@@ -30,6 +32,20 @@ const EMPTY: Diagnostics = {
   wfpFilters: 0,
   cleanupLogTail: [],
 };
+
+describe("how long the app waits for a repair", () => {
+  /** Three numbers in a chain: what the service says its pass can cost
+   * (`REPAIR_WORST_CASE`), the Rust command's deadline (`REPAIR_TIMEOUT`,
+   * asserted against the first in vpn.rs), and this one. The middle one
+   * moved from 195s to 750s and this stayed at 205s, so the app gave up
+   * on a repair the service was still entitled to be running. */
+  it("outlasts the Rust side's own deadline", () => {
+    const vpn = readFileSync(new URL("../../src-tauri/src/vpn.rs", import.meta.url), "utf8");
+    const match = /const REPAIR_TIMEOUT: Duration = Duration::from_secs\((\d+)\);/.exec(vpn);
+    expect(match, "REPAIR_TIMEOUT is no longer declared where this looks").not.toBeNull();
+    expect(REPAIR_TIMEOUT_MS).toBeGreaterThan(Number(match![1]) * 1000);
+  });
+});
 
 describe("what counts as a repaired machine", () => {
   /** The product rule, on the app side of the wire.

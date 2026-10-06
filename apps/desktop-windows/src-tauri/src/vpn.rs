@@ -297,7 +297,7 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(45);
 /// The repair's own deadline, which has to be a different number.
 ///
 /// **Derived, not chosen**, and the derivation is
-/// [`neoconnect_ipc::REPAIR_WORST_CASE`] -- 735s, itemised there from
+/// [`neoconnect_ipc::REPAIR_WORST_CASE`] -- 885s, itemised there from
 /// the service's own budget constants and asserted against them by a
 /// test in `engines::repair`. The test below asserts this number covers
 /// it, so the two cannot drift apart again.
@@ -325,16 +325,21 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(45);
 /// a machine that actually has rules to clear still reaches the
 /// cmdlets. So the constant goes up despite the pass getting faster.
 ///
-/// 750s rather than 735s: the spare 15s is one helper budget of slack
+/// 900s rather than 885s: the spare 15s is one helper budget of slack
 /// for the work on this path that has no budget at all -- three full
 /// WFP filter enumerations, the ToolHelp process scans, the registry
 /// sweeps and the report assembly.
 ///
+/// 885 rather than the 735 this once said: the survey that opens the
+/// pass calls `status()`, whose idle arm clears the NRPT rule and runs
+/// the janitor -- ten more bounded spawns that were always on this path
+/// and had never been itemised.
+///
 /// It is a **backstop, not a target**. A clean machine's ten spawns
 /// measure 3-5s in total on a developer workstation and about 48s on a
-/// constrained guest; the 750s is what the code permits, and a customer
+/// constrained guest; the 900s is what the code permits, and a customer
 /// should never see it.
-const REPAIR_TIMEOUT: Duration = Duration::from_secs(750);
+const REPAIR_TIMEOUT: Duration = Duration::from_secs(900);
 
 async fn call_within(request: &Request, reply_timeout: Duration) -> Result<Response, String> {
     const ERROR_PIPE_BUSY: i32 = 231;
