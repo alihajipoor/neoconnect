@@ -31,7 +31,7 @@ describe("ProtocolUsersService.listByCustomer", () => {
         ]),
       },
     };
-    return new ProtocolUsersService(prisma as unknown as PrismaService, {} as AgentGatewayService);
+    return new ProtocolUsersService(prisma as unknown as PrismaService, {} as AgentGatewayService, {} as never);
   }
 
   it("never hands the OpenVPN CA private key to a customer", async () => {

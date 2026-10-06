@@ -248,12 +248,12 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 // from, which is what the account-wide connection limit is evaluated
 // against.
 //
-// IKEv2 needs this where WireGuard and OpenVPN do not. Those two are
-// self-limiting -- a WireGuard peer holds one endpoint at a time and
-// OpenVPN replaces a session when the same certificate reconnects -- but
 // strongSwan will happily run the same EAP identity from several places
-// at once. Without this, one account could be shared across any number
-// of devices over IKEv2 and nothing would notice.
+// at once; without this, one credential could be shared across any number
+// of devices over IKEv2 and nothing would notice. (WireGuard and OpenVPN
+// limit devices that share one key or certificate, but with per-device
+// credentials devices no longer share one; the backend judges the plan's
+// device limit per device.)
 //
 // Counted by distinct remote address rather than by SA: a phone moving
 // between wifi and mobile data, or simply rekeying, can briefly hold two

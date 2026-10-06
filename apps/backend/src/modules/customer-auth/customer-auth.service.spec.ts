@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import * as argon2 from "argon2";
 import { CustomerAuthService } from "./customer-auth.service";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
 // Password hashing is real argon2, not mocked -- same reasoning as
 // auth.service.spec.ts: this is the logic that decides whether a login
@@ -39,15 +40,24 @@ describe("CustomerAuthService", () => {
     subscription: { count: jest.Mock };
     // One row per signed-in device; see CustomerSession.
     customerSession: { create: jest.Mock; deleteMany: jest.Mock; updateMany: jest.Mock };
+    // Password changes write the password and the session revocation
+    // together.
+    $transaction: jest.Mock;
   };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let config: { get: jest.Mock };
   let customersService: { create: jest.Mock };
   let subscriptionsService: { create: jest.Mock };
-  let protocolUsersService: { create: jest.Mock; provisionAll: jest.Mock };
+  let protocolUsersService: {
+    create: jest.Mock;
+    provisionAll: jest.Mock;
+    revokeSessionCredentials: jest.Mock;
+    endSessions: jest.Mock;
+  };
   let freeTrialSettingsService: { get: jest.Mock };
   let referralsService: { resolveReferralCode: jest.Mock; notifyReferrerOfActivation: jest.Mock };
   let emailService: { sendMail: jest.Mock };
+  let deviceSlots: ReturnType<typeof deviceSlotsStub>;
 
   beforeAll(async () => {
     PASSWORD_HASH = await argon2.hash(PASSWORD);
@@ -62,12 +72,20 @@ describe("CustomerAuthService", () => {
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
+      // The array form: each operation is one of the mocks above, already
+      // called, so resolving them together is what the real one returns.
+      $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
     };
     jwt = { signAsync: jest.fn(), verifyAsync: jest.fn() };
     config = { get: jest.fn((key: string) => `config:${key}`) };
     customersService = { create: jest.fn() };
     subscriptionsService = { create: jest.fn() };
-    protocolUsersService = { create: jest.fn(), provisionAll: jest.fn().mockResolvedValue({ created: [], revoked: [] }) };
+    protocolUsersService = {
+      create: jest.fn(),
+      provisionAll: jest.fn().mockResolvedValue({ created: [], revoked: [] }),
+      revokeSessionCredentials: jest.fn().mockResolvedValue({ revoked: 0, failed: 0 }),
+      endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }),
+    };
     freeTrialSettingsService = { get: jest.fn() };
     // Resolves to "no referrer" by default, which is what the existing
     // cases here describe. A test that cares supplies its own.
@@ -76,6 +94,7 @@ describe("CustomerAuthService", () => {
       notifyReferrerOfActivation: jest.fn().mockResolvedValue(undefined),
     };
     emailService = { sendMail: jest.fn().mockResolvedValue(true) };
+    deviceSlots = deviceSlotsStub();
 
     service = new CustomerAuthService(
       prisma as any,
@@ -87,6 +106,7 @@ describe("CustomerAuthService", () => {
       freeTrialSettingsService as any,
       referralsService as any,
       emailService as any,
+      deviceSlots as any,
     );
   });
 
@@ -698,6 +718,185 @@ describe("CustomerAuthService", () => {
 
       expect(prisma.customerSession.updateMany).not.toHaveBeenCalled();
       expect(prisma.customer.update).not.toHaveBeenCalled();
+      expect(protocolUsersService.revokeSessionCredentials).not.toHaveBeenCalled();
+    });
+
+    // The point of per-device credentials: signing out takes this
+    // device's VPN credentials off the nodes, and only this device's.
+    it("takes this device's VPN credentials back on sign-out, after revoking the session", async () => {
+      const order: string[] = [];
+      prisma.customerSession.updateMany.mockImplementation(() => {
+        order.push("session");
+        return Promise.resolve({ count: 1 });
+      });
+      protocolUsersService.revokeSessionCredentials.mockImplementation(() => {
+        order.push("credentials");
+        return Promise.resolve({ revoked: 3, failed: 0 });
+      });
+
+      await service.revokeSession("customer-1", "session-7");
+
+      expect(protocolUsersService.revokeSessionCredentials).toHaveBeenCalledWith("customer-1", "session-7");
+      expect(protocolUsersService.endSessions).not.toHaveBeenCalled();
+      // Session first: if the node commands fail, the session already
+      // cannot mint a new set.
+      expect(order).toEqual(["session", "credentials"]);
+    });
+
+    it("still signs out when the credentials cannot be revoked yet", async () => {
+      protocolUsersService.revokeSessionCredentials.mockRejectedValue(new Error("database went away"));
+
+      await expect(service.revokeSession("customer-1", "session-7")).resolves.toBeUndefined();
+      expect(prisma.customerSession.updateMany).toHaveBeenCalled();
+    });
+
+    // What "Neoxify is in use on Windows PC" on the customer's other
+    // devices is read from.
+    it("names a new session after the device that signed in", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.login("customer@example.com", PASSWORD, { label: "Windows PC", platform: "windows" });
+
+      expect(prisma.customerSession.create).toHaveBeenCalledWith({
+        data: { customerId: "customer-1", label: "Windows PC", platform: "windows" },
+        select: { id: true },
+      });
+    });
+
+    // The browser sign-in flow opens its session where no headers can be
+    // sent; its first refresh names it. A refresh that sends nothing must
+    // not erase a name.
+    it("names a session on refresh when the app says what it is, and leaves the name alone when it does not", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", tokenVersion: 0, sid: "session-7" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ tokenVersion: 0 }));
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.refresh("token", { label: "Android phone", platform: "android" });
+      await service.refresh("token", { label: null, platform: null });
+
+      expect(prisma.customerSession.updateMany.mock.calls[0][0].data).toEqual({
+        lastUsedAt: expect.any(Date),
+        label: "Android phone",
+        platform: "android",
+      });
+      expect(prisma.customerSession.updateMany.mock.calls[1][0].data).toEqual({ lastUsedAt: expect.any(Date) });
+    });
+
+    // A signed-out device is not using the VPN; its plan slot is free.
+    it("gives a signed-out device's slot back", async () => {
+      await service.revokeSession("customer-1", "session-7");
+
+      expect(deviceSlots.releaseSession).toHaveBeenCalledWith("customer-1", "session-7");
+    });
+
+    it("gives the ended devices' slots back on a password change, keeping the caller's", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer({ tokenVersion: 1 }));
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.changePassword(
+        "customer-1",
+        { currentPassword: PASSWORD, newPassword: "a-brand-new-password" },
+        "session-7",
+      );
+
+      expect(deviceSlots.releaseOtherSessions).toHaveBeenCalledWith("customer-1", "session-7");
+    });
+
+    // A session still holding credentials has to give them back on the
+    // nodes first, which the sweep does. Deleting it here would be refused
+    // by the foreign key -- and fail the sign-in.
+    it("never prunes a session that still holds device credentials on sign-in", async () => {
+      jwt.signAsync.mockResolvedValue("signed");
+      await service.issueTokenPair({ id: "customer-1", email: "a@b.c", tokenVersion: 0 });
+
+      expect(prisma.customerSession.deleteMany.mock.calls[0][0].where).toMatchObject({
+        customerId: "customer-1",
+        protocolUsers: { none: {} },
+      });
+    });
+  });
+
+  describe("password changes end other devices' credentials", () => {
+    it("a reset ends every session, credentials included", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", purpose: "password-reset" });
+
+      await service.resetPassword("token", "a-brand-new-password");
+
+      expect(protocolUsersService.endSessions).toHaveBeenCalledWith("customer-1", undefined);
+    });
+
+    it("a change keeps the caller's session and its tunnel, and ends the others", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer({ tokenVersion: 1 }));
+      prisma.customerSession.updateMany.mockResolvedValue({ count: 1 });
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.changePassword(
+        "customer-1",
+        { currentPassword: PASSWORD, newPassword: "a-brand-new-password" },
+        "session-7",
+      );
+
+      expect(protocolUsersService.endSessions).toHaveBeenCalledWith("customer-1", "session-7");
+      // The caller's own session carries on rather than a new one opening,
+      // which would orphan the credentials its tunnel is running on.
+      expect(prisma.customerSession.create).not.toHaveBeenCalled();
+      expect(jwt.signAsync.mock.calls[0][0]).toMatchObject({ sid: "session-7" });
+    });
+
+    /** The revocation used to be the first statement of the best-effort
+     * endSessions: a database error there was logged and swallowed, the
+     * reset went through, and the devices it was meant to lock out kept
+     * their sessions -- and their credentials, for as long as they used
+     * them. */
+    it("a reset revokes every session in the same transaction as the password", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", purpose: "password-reset" });
+      protocolUsersService.endSessions.mockRejectedValue(new Error("database went away"));
+
+      await expect(service.resetPassword("token", "a-brand-new-password")).resolves.toBeUndefined();
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it("a change revokes every other session in the same transaction as the password", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer({ tokenVersion: 1 }));
+      prisma.customerSession.updateMany.mockResolvedValue({ count: 1 });
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.changePassword(
+        "customer-1",
+        { currentPassword: PASSWORD, newPassword: "a-brand-new-password" },
+        "session-7",
+      );
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", revokedAt: null, id: { not: "session-7" } },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it("a change from a signed-out or pre-session token opens a new session and ends all others", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer({ tokenVersion: 1 }));
+      prisma.customerSession.updateMany.mockResolvedValue({ count: 0 });
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.changePassword(
+        "customer-1",
+        { currentPassword: PASSWORD, newPassword: "a-brand-new-password" },
+        "session-7",
+      );
+
+      expect(protocolUsersService.endSessions).toHaveBeenCalledWith("customer-1", undefined);
+      expect(prisma.customerSession.create).toHaveBeenCalled();
     });
   });
 

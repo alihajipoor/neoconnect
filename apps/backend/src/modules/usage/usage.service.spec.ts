@@ -1,4 +1,5 @@
 import { UsageService } from "./usage.service";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
 /** How an agent-reported delta finds the row it belongs to.
  *
@@ -30,7 +31,7 @@ describe("UsageService.recordDeltas protocol-user lookup", () => {
         }),
       ),
     };
-    const service = new UsageService(prisma as never, {} as never, {} as never);
+    const service = new UsageService(prisma as never, {} as never, {} as never, deviceSlotsStub() as never);
     return { service, prisma };
   }
 
@@ -71,5 +72,45 @@ describe("UsageService.recordDeltas protocol-user lookup", () => {
     ]);
 
     expect(prisma.protocolUser.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+/** A quota or expiry suspension has to land on the inbound the credential
+ * lives on. Untargeted, a WebSocket or relay customer's DISABLE_USER went
+ * to the node's default inbound, Xray answered "not found" with success,
+ * the row was marked DISABLED -- and the credential kept working. */
+describe("UsageService suspension targets the credential's inbound", () => {
+  it("sends the transport and the inbound tag with every DISABLE_USER", async () => {
+    const rows = [
+      { id: "pu-ws", nodeId: "node-1", protocol: "XRAY_VLESS_TLS", externalUserId: "u-ws", protocolConfig: { transport: "WS", inboundTag: null } },
+      { id: "pu-relay", nodeId: "ir-1", protocol: "XRAY_VLESS_REALITY", externalUserId: "u-fr", protocolConfig: { transport: "TCP", inboundTag: "vless-in-fr" } },
+    ];
+    const prisma = {
+      subscription: {
+        findUnique: jest.fn().mockResolvedValue({ id: "sub-1", status: "ACTIVE" }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      protocolUser: {
+        findMany: jest.fn().mockResolvedValue(rows),
+        update: jest.fn().mockResolvedValue({}),
+      },
+    };
+    const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue({}) };
+    const slots = deviceSlotsStub();
+    const service = new UsageService(prisma as never, agentGateway as never, {} as never, slots as never);
+
+    await service.suspendForQuota("sub-1");
+
+    // Nobody is using a suspended subscription: its device slots are free
+    // for whichever device connects after a renewal.
+    expect(slots.releaseSubscription).toHaveBeenCalledWith("sub-1");
+
+    expect(prisma.protocolUser.findMany.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ include: { protocolConfig: { select: { transport: true, inboundTag: true } } } }),
+    );
+    expect(agentGateway.enqueueCommand.mock.calls.map((c) => [c[0], c[1], c[2]])).toEqual([
+      ["node-1", "DISABLE_USER", { protocol: "XRAY_VLESS_TLS", transport: "WS", externalUserId: "u-ws" }],
+      ["ir-1", "DISABLE_USER", { protocol: "XRAY_VLESS_REALITY", transport: "TCP", inboundTag: "vless-in-fr", externalUserId: "u-fr" }],
+    ]);
   });
 });

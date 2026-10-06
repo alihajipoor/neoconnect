@@ -130,7 +130,9 @@ export class CustomerController {
 
   @Get("protocol-users")
   protocolUsers(@CurrentCustomer() customer: AuthenticatedCustomer) {
-    return this.protocolUsersService.listByCustomer(customer.sub);
+    // This device's own credentials when the token names a session --
+    // see listForDevice and docs/per-device-credentials.md.
+    return this.protocolUsersService.listForDevice(customer.sub, customer.sid);
   }
 
   @Get("plans")
@@ -374,7 +376,7 @@ export class CustomerController {
     if (subscription.status !== "ACTIVE") {
       throw new BadRequestException("Subscription must be active to switch servers");
     }
-    return this.protocolUsersService.switchRoute(subscription.id, dto.routeId);
+    return this.protocolUsersService.switchRoute(subscription.id, dto.routeId, customer.sid);
   }
 
   @Get("invoices")

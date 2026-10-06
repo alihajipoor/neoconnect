@@ -1,12 +1,87 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
-import { Prisma } from "@prisma/client";
+import { BadRequestException, Injectable, Logger, NotFoundException, UnauthorizedException } from "@nestjs/common";
+import { Prisma, Protocol } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
+import { after, forEachBatch } from "../../common/batching";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
+import { SESSION_IDLE_LIFETIME_MS } from "../customer-auth/session-lifetime";
 import { decryptCredentials, encryptCredentials } from "./credentials-crypto";
 import { CreateProtocolUserDto } from "./dto/create-protocol-user.dto";
 import { rateLimitFor } from "./rate-limit";
 import { generateCredentials } from "./generate-credentials";
+import { KeyedLock } from "./keyed-lock";
+import { commandTarget, deleteUserPayload } from "./command-target";
+import { sharedWireGuardReserve, wireGuardPoolSize } from "./wireguard-subnet";
+import { DeviceSlotsService } from "../device-slots/device-slots.service";
+
+/** How many signed-in devices of one customer may hold credentials of
+ * their own at once. See `enforceDeviceLimit`.
+ *
+ * A hidden safety cap, not a customer-facing rule, and not the plan's
+ * device limit (maxConcurrentConnections, enforced by device slots --
+ * docs/device-slots.md). Ten by default (owner decision, 2026-10-06; it
+ * was five): comfortably above the phones, laptops, tablets and
+ * reinstalls of one household, so that in practice nobody in use is
+ * evicted. The ceiling it protects is the node's, not the customer's --
+ * a WireGuard config serves a /24, 253 peers, and every device
+ * credential is one of them (a quarter of which is kept back for shared
+ * credentials, see sharedWireGuardReserve).
+ *
+ * Read at call time so a test or an operator can change it without a
+ * rebuild; in production that means `docker compose up -d` recreating
+ * the container after infra/.env changes. Empty means the default (the
+ * compose file passes `${VAR:-}`); anything else that is not a whole
+ * number from 1 to DEVICE_CREDENTIAL_LIMIT_CEILING is ignored, with a
+ * warning, in favour of the default. */
+export function deviceCredentialLimit(): number {
+  const raw = (process.env.CUSTOMER_DEVICE_CREDENTIAL_LIMIT ?? "").trim();
+  if (raw === "") return DEFAULT_DEVICE_CREDENTIAL_LIMIT;
+  const parsed = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (Number.isInteger(parsed) && parsed >= 1 && parsed <= DEVICE_CREDENTIAL_LIMIT_CEILING) return parsed;
+  if (!warnedLimitValues.has(raw)) {
+    warnedLimitValues.add(raw);
+    new Logger("ProtocolUsersService").warn(
+      `CUSTOMER_DEVICE_CREDENTIAL_LIMIT=${JSON.stringify(raw)} is not a whole number from 1 to ` +
+        `${DEVICE_CREDENTIAL_LIMIT_CEILING}; using ${DEFAULT_DEVICE_CREDENTIAL_LIMIT}`,
+    );
+  }
+  return DEFAULT_DEVICE_CREDENTIAL_LIMIT;
+}
+
+const DEFAULT_DEVICE_CREDENTIAL_LIMIT = 10;
+/** No customer needs more, and a typo like "1e6" or "100000" must not
+ * quietly switch off the cap that protects the WireGuard pools. */
+const DEVICE_CREDENTIAL_LIMIT_CEILING = 50;
+/** Each rejected value is reported once, not on every fetch. */
+const warnedLimitValues = new Set<string>();
+
+/** How many devices of one customer may receive their first credential
+ * set within DEVICE_SET_WINDOW_MS. See allowNewDeviceSet. Ten an hour is
+ * far above anyone signing in on their own devices -- reinstalls
+ * included -- and far below a loop. */
+const NEW_DEVICE_SETS_PER_WINDOW = 10;
+const DEVICE_SET_WINDOW_MS = 60 * 60 * 1000;
+
+/** Protocols on which devices keep the subscription's shared credential
+ * rather than getting one of their own.
+ *
+ * IKEv2, until the agent stops reloading every secret for every user:
+ * each IKEv2 CREATE_USER rewrites the node's whole secrets file and runs
+ * `swanctl --load-creds --clear`, so a re-assert of N users costs N
+ * reloads of N secrets -- and every command for every protocol on that
+ * node runs in one loop behind it. Device credentials multiply the IKEv2
+ * rows by up to (1 + devices). Once a node's re-assert takes longer than
+ * its 60 s cycle the loop never catches up, and sign-out DELETE_USERs,
+ * quota DISABLE_USERs and the CREATE_USERs that confirm new device
+ * credentials queue behind it without bound -- delaying the very
+ * revocation per-device credentials exist for. Where that point is has
+ * not been measured.
+ *
+ * The cost of keeping it shared: signing one device out does not revoke
+ * its IKEv2 access -- as on every route before per-device credentials.
+ * IKEv2 itself is untouched; it is the per-device split that waits for
+ * the agent change (docs/per-device-credentials.md, "Known, deferred"). */
+const SHARED_CREDENTIAL_ONLY: ReadonlySet<Protocol> = new Set<Protocol>(["IKEV2"]);
 
 /** Every column of ProtocolUser, named.
  *
@@ -30,6 +105,12 @@ const PROTOCOL_USER_LIST_FIELDS = {
   status: true,
   createdAt: true,
   updatedAt: true,
+  // Which device a credential belongs to, or null for the shared one --
+  // the first thing an operator needs when a customer says "my other
+  // phone stopped working".
+  sessionId: true,
+  // Whether a node has confirmed holding it -- the second thing.
+  provisionedAt: true,
 } satisfies Prisma.ProtocolUserSelect;
 
 /** A listed ProtocolUser as a caller sees it: the encrypted column is
@@ -43,9 +124,24 @@ type DecryptedProtocolUser = Omit<
 export class ProtocolUsersService {
   private readonly logger = new Logger(ProtocolUsersService.name);
 
+  /** Device provisioning and revocation, one at a time per customer:
+   * keeps two fetches from one device from both creating a set, and a
+   * sign-out from interleaving with a fetch still creating one. */
+  private readonly customerLock = new KeyedLock();
+  /** WireGuard address allocation, one at a time per config. It reads
+   * the addresses in use and then inserts, so two concurrent creations
+   * could pick the same one -- and two peers on one address break the
+   * older. provisionAll avoided that by being sequential; lazy device
+   * provisioning makes concurrent creation an ordinary event. */
+  private readonly wireGuardLock = new KeyedLock();
+  /** When each customer recently started a device's first set -- see
+   * allowNewDeviceSet. */
+  private readonly newDeviceSets = new Map<string, number[]>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentGateway: AgentGatewayService,
+    private readonly deviceSlots: DeviceSlotsService,
   ) {}
 
   /** The operator's view of provisioned users -- bounded.
@@ -105,8 +201,11 @@ export class ProtocolUsersService {
    * find the server address -- this is the field a native client needs
    * to actually build a working local tunnel config. */
   async listByCustomer(customerId: string) {
+    // The shared credentials only. Device credentials belong to one
+    // signed-in device each, and handing every device's set to a caller
+    // that named no device would undo the point of having them.
     const users = await this.prisma.protocolUser.findMany({
-      where: { subscription: { customerId } },
+      where: { subscription: { customerId }, sessionId: null },
       orderBy: { createdAt: "desc" },
       include: { node: true, protocolConfig: true },
     });
@@ -114,6 +213,471 @@ export class ProtocolUsersService {
       ...withDecryptedCredentials(user),
       connection: connectionInfo(node, protocolConfig),
     }));
+  }
+
+  /** Customer-facing: the credentials for one signed-in device.
+   *
+   * What `GET /customer/protocol-users` answers. With no session -- an
+   * access token from before sessions existed -- it is `listByCustomer`,
+   * unchanged. With one, the device is first given credentials of its
+   * own on every route its ACTIVE subscriptions allow (see
+   * `ensureDeviceCredentials`), and the answer is those, with any gap
+   * filled by the shared credential for the same subscription and route.
+   *
+   * The gap-filling is what makes this safe to ship. A route where the
+   * device's own credential could not be created -- a WireGuard pool
+   * that is full, a config missing its parameters -- and a subscription
+   * that is not ACTIVE, for which none are created, both answer exactly
+   * what they answered before this existed. The response shape is the
+   * same either way, so clients need no change: they replace their
+   * cached list on every fetch and clear it on sign-out already.
+   *
+   * A session that is revoked, gone, or someone else's is refused with
+   * 401. Access tokens live fifteen minutes and are not checked against
+   * the session table, so without this a device that had just signed out
+   * could mint itself a fresh set with the token it still held.
+   */
+  async listForDevice(customerId: string, sessionId: string | undefined) {
+    if (!sessionId) return this.listByCustomer(customerId);
+
+    return this.customerLock.run(customerId, async () => {
+      await this.assertLiveSession(customerId, sessionId);
+      await this.ensureDeviceCredentials(customerId, sessionId);
+      return this.deviceView(customerId, sessionId);
+    });
+  }
+
+  private async assertLiveSession(customerId: string, sessionId: string) {
+    const session = await this.prisma.customerSession.findFirst({
+      where: { id: sessionId, customerId },
+      select: { revokedAt: true },
+    });
+    if (!session || session.revokedAt) {
+      throw new UnauthorizedException("This device has been signed out");
+    }
+  }
+
+  /** Gives one device a credential of its own on every route each of the
+   * customer's ACTIVE subscriptions can be provisioned on now -- the same
+   * set provisionAll gives the shared credential.
+   *
+   * Only ACTIVE subscriptions. A suspended or expired one has its
+   * credentials switched off on the nodes, and creating a fresh, enabled
+   * one for whoever asks would undo the suspension. The status is read
+   * again after creating, for the same reason: a subscription suspended
+   * while this ran gets the new rows switched off too.
+   *
+   * A failure on one route is logged and skipped, not thrown. The device
+   * then gets the shared credential for that route (see listForDevice),
+   * which is what it had yesterday -- far better than a customer with
+   * nothing to connect with because one node's config was incomplete.
+   *
+   * Runs under the customer lock; must not take it again.
+   */
+  private async ensureDeviceCredentials(customerId: string, sessionId: string) {
+    const subscriptions = await this.prisma.subscription.findMany({
+      // And only for an account that is itself ACTIVE: a disabled one
+      // must not be able to mint fresh credentials by fetching.
+      where: { customerId, status: "ACTIVE", customer: { status: "ACTIVE" } },
+      select: {
+        id: true,
+        plan: { select: { name: true, protocolsAllowed: true, allowedRoutes: { select: { id: true } } } },
+      },
+    });
+    if (subscriptions.length === 0) return;
+
+    const held = await this.prisma.protocolUser.findMany({
+      where: { sessionId },
+      select: { subscriptionId: true, routeId: true },
+    });
+    if (held.length === 0) {
+      // A device's first set. Rate-limited first, so a refused set
+      // evicts nobody; then make room before creating it.
+      if (!this.allowNewDeviceSet(customerId)) return;
+      await this.enforceDeviceLimit(customerId, sessionId);
+    }
+    const heldKeys = new Set(held.map((u) => `${u.subscriptionId}:${u.routeId}`));
+
+    for (const subscription of subscriptions) {
+      const { routes } = await this.routesFor({
+        ...subscription.plan,
+        protocolsAllowed: subscription.plan.protocolsAllowed.filter((p) => !SHARED_CREDENTIAL_ONLY.has(p)),
+      });
+      const created: string[] = [];
+      for (const route of routes) {
+        if (heldKeys.has(`${subscription.id}:${route.id}`)) continue;
+        try {
+          const user = await this.create({ subscriptionId: subscription.id, routeId: route.id }, sessionId);
+          created.push(user.id);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          this.logger.warn(
+            `Device credential not created (session ${sessionId}, subscription ${subscription.id}, ` +
+              `route ${route.id}); the device falls back to the shared credential: ${reason}`,
+          );
+        }
+      }
+      if (created.length === 0) continue;
+
+      const now = await this.prisma.subscription.findUnique({
+        where: { id: subscription.id },
+        select: { status: true },
+      });
+      if (now?.status !== "ACTIVE") {
+        // One at a time and each on its own: a row that has gone in the
+        // meantime must not leave the ones after it switched on.
+        for (const id of created) {
+          await this.setEnabled(id, false).catch((err: unknown) =>
+            this.logger.warn(
+              `Could not switch off device credential ${id} of a subscription no longer ACTIVE: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  /** Whether this customer may start another device's first credential
+   * set now, counting it if so.
+   *
+   * The device cap bounds how many sets exist at once, not how fast they
+   * are made and thrown away. Past the cap every new session's first
+   * fetch evicts the oldest device (DELETE_USER on every route) and
+   * creates a full set (CREATE_USER on every route) -- each an OpenVPN
+   * RSA keygen on this process's event loop, a ccd file that is never
+   * cleaned up, an IKEv2 secrets reload, an agent_commands row. A
+   * sign-in loop (login, social, or until about 2026-10-12 a replayed
+   * sid-less refresh token, which opens a new session on every call) had
+   * no ceiling on that rate.
+   *
+   * Refusing costs the device nothing it had before: with no set of its
+   * own it is handed the subscription's shared credentials, exactly what
+   * every device got before per-device credentials existed. In-process,
+   * like the customer lock, on the same one-instance assumption. */
+  private allowNewDeviceSet(customerId: string, now = Date.now()): boolean {
+    const recent = (this.newDeviceSets.get(customerId) ?? []).filter((at) => now - at < DEVICE_SET_WINDOW_MS);
+    if (recent.length >= NEW_DEVICE_SETS_PER_WINDOW) {
+      this.newDeviceSets.set(customerId, recent);
+      this.logger.warn(
+        `Customer ${customerId} has started ${recent.length} device credential sets within the hour; ` +
+          `this device gets the shared credentials instead`,
+      );
+      return false;
+    }
+    recent.push(now);
+    this.newDeviceSets.set(customerId, recent);
+    // Housekeeping, so the map holds customers active this hour rather
+    // than every customer since the process started.
+    if (this.newDeviceSets.size > 1000) {
+      for (const [key, times] of this.newDeviceSets) {
+        if (times.every((at) => now - at >= DEVICE_SET_WINDOW_MS)) this.newDeviceSets.delete(key);
+      }
+    }
+    return true;
+  }
+
+  /** Keeps the number of devices holding credentials of their own at or
+   * below `deviceCredentialLimit()`, by taking them back from the device
+   * that has been out of use longest.
+   *
+   * "Out of use" the way the sweep judges it: a signed-out session first,
+   * then by the later of its last refresh and the last traffic on any of
+   * its credentials. Ranking by refresh alone picked exactly the device
+   * the sweep was written to protect -- an always-on phone tunnel nobody
+   * opens the app on, which never refreshes and carries traffic every
+   * day -- and it has no reason to fetch again until someone opens the
+   * app, so it stayed cut off until then.
+   *
+   * Evicting rather than refusing, because the device being refused is
+   * the one the customer is holding right now, while the one evicted is
+   * most often a reinstall's abandoned session. An evicted device that is
+   * in fact still in use is handed its subscription's shared credentials
+   * and a fresh set of its own on its next fetch -- but until it fetches,
+   * what it holds no longer works. Past the limit in *active* devices
+   * that is an outage for one of them, which is why the limit (a hidden
+   * safety cap, not the plan's device limit) is set well above what
+   * anyone uses.
+   *
+   * The eviction happens before the new set is created, so a set that
+   * then fails to be created (a full WireGuard pool) has still cost the
+   * evicted device its own. That device falls back to the shared
+   * credentials on its next fetch, as everyone did before per-device
+   * credentials.
+   *
+   * The limit exists for the nodes. Each device credential is a peer, an
+   * EAP identity or a client in an engine, and a sign-in loop could
+   * otherwise create them without bound -- a WireGuard config has 253
+   * addresses. */
+  private async enforceDeviceLimit(customerId: string, sessionId: string) {
+    const holders = await this.prisma.customerSession.findMany({
+      where: { customerId, id: { not: sessionId }, protocolUsers: { some: {} } },
+      select: {
+        id: true,
+        lastUsedAt: true,
+        revokedAt: true,
+        protocolUsers: {
+          select: { usageRecords: { select: { reportedAt: true }, orderBy: { reportedAt: "desc" }, take: 1 } },
+        },
+      },
+    });
+    const excess = holders.length - (deviceCredentialLimit() - 1);
+    if (excess <= 0) return;
+
+    const lastInUse = (holder: (typeof holders)[number]) =>
+      holder.revokedAt
+        ? 0
+        : Math.max(
+            holder.lastUsedAt.getTime(),
+            ...holder.protocolUsers.flatMap((u) => u.usageRecords.map((r) => r.reportedAt.getTime())),
+          );
+    const ranked = [...holders].sort((a, b) => lastInUse(a) - lastInUse(b));
+
+    for (const holder of ranked.slice(0, excess)) {
+      this.logger.log(
+        `Customer ${customerId} is at the device limit; taking credentials back from session ${holder.id}`,
+      );
+      await this.removeSessionCredentials(holder.id);
+      // Its plan slot too, if it held one: it no longer has anything of
+      // its own to connect with. Never throws.
+      await this.deviceSlots.releaseSession(customerId, holder.id);
+    }
+  }
+
+  /** The device's own rows, with each gap filled by the shared row for the
+   * same subscription and route.
+   *
+   * A device row counts as the device's only once a node has confirmed
+   * it holds it (`provisionedAt`). Until then the device keeps the shared
+   * credential for that route, which already works. Creating the row and
+   * enqueueing its CREATE_USER is not the same as the node having it: a
+   * node whose control stream is down leaves the command QUEUED -- for
+   * days, on the nodes that have done this -- while still serving the
+   * users it already holds, and even a connected node runs commands one
+   * at a time behind the re-assert backlog. Handing the device its new
+   * credential at that point made it swap a working tunnel for one that
+   * could not connect, on every route of that node at once, and the
+   * client dials whatever it was handed straight away.
+   *
+   * Gated rather than offering both, the device's first: a client keys
+   * its credentials by route and would not necessarily try a second one
+   * for the same route, and a failed dial costs a timeout and a wrong
+   * entry in the per-ISP evidence. Gated, the response keeps its shape --
+   * one credential per route, and one that works.
+   *
+   * A device row with no shared row beside it is handed out unconfirmed:
+   * there is nothing that works to keep. */
+  private async deviceView(customerId: string, sessionId: string) {
+    const users = await this.prisma.protocolUser.findMany({
+      where: { subscription: { customerId }, OR: [{ sessionId }, { sessionId: null }] },
+      orderBy: { createdAt: "desc" },
+      include: { node: true, protocolConfig: true },
+    });
+    const keyOf = (u: { subscriptionId: string; routeId: string }) => `${u.subscriptionId}:${u.routeId}`;
+    // One shared row per (subscription, route): the oldest. There is
+    // normally exactly one, but a rollback to a backend that knew nothing
+    // of devices can leave more -- its session pruning sets a device row's
+    // sessionId to NULL (the foreign key's SET NULL) -- and a client
+    // handed two credentials for one route would have to guess.
+    const sharedFor = new Map<string, (typeof users)[number]>();
+    for (const u of users) {
+      if (u.sessionId !== null) continue;
+      const seen = sharedFor.get(keyOf(u));
+      if (!seen || u.createdAt < seen.createdAt) sharedFor.set(keyOf(u), u);
+    }
+    const own = new Set(
+      users
+        .filter((u) => u.sessionId === sessionId && (u.provisionedAt !== null || !sharedFor.has(keyOf(u))))
+        .map(keyOf),
+    );
+    // Filtered again here although the query already excludes them:
+    // another device's credential reaching this response would be the one
+    // failure this whole design exists to prevent.
+    return users
+      .filter((u) => {
+        if (u.sessionId === sessionId) return own.has(keyOf(u));
+        return u.sessionId === null && !own.has(keyOf(u)) && sharedFor.get(keyOf(u)) === u;
+      })
+      .map(({ node, protocolConfig, ...user }) => ({
+        ...withDecryptedCredentials(user),
+        connection: connectionInfo(node, protocolConfig),
+      }));
+  }
+
+  /** Takes back every credential one signed-in device holds, on every
+   * node: what signing out does, after the session itself is revoked.
+   * The customer's other devices, and the shared credentials, are not
+   * touched.
+   *
+   * `customerId` scopes it, so a caller can only ever revoke its own
+   * customer's devices.
+   *
+   * Never throws for a credential the node could not be told about: that
+   * row is left in place, logged, and counted in `failed`, and the hourly
+   * sweep tries again. A sign-out must not fail because a node is down.
+   */
+  async revokeSessionCredentials(customerId: string, sessionId: string) {
+    return this.customerLock.run(customerId, () => this.removeSessionCredentials(sessionId, customerId));
+  }
+
+  /** Runs work with no device provisioning or revocation for this
+   * customer in flight, and none starting until it is done.
+   *
+   * For deleting an account. Device credentials are created lazily, on a
+   * plain GET, so a fetch landing between deletion's read of the rows and
+   * its transaction either inserted a row that was then deleted without
+   * any DELETE_USER -- a live credential on the node with nothing in the
+   * database -- or, after the commit, minted ACTIVE credentials on a
+   * CANCELLED subscription for a session nothing had revoked. Under the
+   * lock a fetch either finishes first (and its rows are read and
+   * removed) or starts after, and finds the session revoked or gone.
+   *
+   * `work` must not call anything here that takes the lock itself
+   * (revokeSessionCredentials, endSessions, listForDevice): KeyedLock is
+   * not re-entrant. */
+  withCustomerLock<T>(customerId: string, work: () => Promise<T>): Promise<T> {
+    return this.customerLock.run(customerId, work);
+  }
+
+  /** Ends sessions in bulk and takes their device credentials back -- for
+   * a password reset or change, where every other device is meant to lose
+   * the device credentials it was issued. `except` keeps the caller's own
+   * session (a password change from a signed-in device should not drop
+   * that device's tunnel).
+   *
+   * The subscription's shared credentials (sessionId NULL) are NOT
+   * touched: in phase 1 they stay valid on the nodes, so anyone holding a
+   * copy of them keeps a working tunnel through a password reset. See
+   * docs/per-device-credentials.md, "Transition".
+   *
+   * Revoked first, credentials second, so a failure in between leaves the
+   * sessions unusable and the sweep to finish the job. (The password paths
+   * also write the revocation in the same transaction as the password, so
+   * it cannot be lost even if this never runs.)
+   *
+   * Which sessions hold credentials is read under the customer lock, after
+   * the revocation. A device in the middle of its first fetch holds that
+   * lock having passed its liveness check before the revocation; reading
+   * outside the lock saw it with no rows yet, skipped it, and its fresh set
+   * stayed live until the hourly sweep. The lock is FIFO, so the read runs
+   * after that fetch has committed, and any fetch queued after the read is
+   * refused as signed out. */
+  async endSessions(customerId: string, except?: string) {
+    const where: Prisma.CustomerSessionWhereInput = {
+      customerId,
+      revokedAt: null,
+      ...(except ? { id: { not: except } } : {}),
+    };
+    await this.prisma.customerSession.updateMany({ where, data: { revokedAt: new Date() } });
+
+    // removeSessionCredentials directly, not revokeSessionCredentials:
+    // this already holds the lock, and KeyedLock is not re-entrant.
+    return this.customerLock.run(customerId, async () => {
+      const holders = await this.prisma.customerSession.findMany({
+        where: { customerId, protocolUsers: { some: {} }, ...(except ? { id: { not: except } } : {}) },
+        select: { id: true },
+      });
+      let revoked = 0;
+      for (const holder of holders) {
+        revoked += (await this.removeSessionCredentials(holder.id, customerId)).revoked;
+      }
+      return { sessions: holders.length, revoked };
+    });
+  }
+
+  /** Runs under the customer lock (or from a path that already holds it). */
+  private async removeSessionCredentials(sessionId: string, customerId?: string) {
+    const users = await this.prisma.protocolUser.findMany({
+      where: { sessionId, ...(customerId ? { subscription: { customerId } } : {}) },
+      select: { id: true },
+    });
+    let revoked = 0;
+    let failed = 0;
+    for (const user of users) {
+      try {
+        await this.remove(user.id);
+        revoked += 1;
+      } catch (err) {
+        failed += 1;
+        const reason = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Could not revoke device credential ${user.id} (session ${sessionId}): ${reason}`);
+      }
+    }
+    return { revoked, failed };
+  }
+
+  /** Reclaims the credentials of devices that are gone, and then their
+   * session rows.
+   *
+   * A session's credentials are taken back when it was signed out (and
+   * the sign-out could not finish -- a node was unreachable, or the
+   * sessions were ended in bulk), or when it is idle: neither refreshed
+   * nor carrying any traffic for SESSION_IDLE_LIFETIME_MS.
+   *
+   * Traffic counts as use on purpose. A refresh token lives a week, and a
+   * device goes on connecting with the credentials it holds long after
+   * that -- an always-on phone tunnel nobody opens the app on, or a
+   * client whose control plane is filtered while the nodes are not.
+   * Judging by refreshes alone would cut those devices off a month in,
+   * and they are the ones the offline credential cache exists for.
+   *
+   * Cursored like every other sweep; candidates still in use stay
+   * behind the cursor rather than holding up the page.
+   */
+  async sweepDeadSessionCredentials(now = new Date()) {
+    const cutoff = new Date(now.getTime() - SESSION_IDLE_LIFETIME_MS);
+    let sessions = 0;
+    let revoked = 0;
+    let failed = 0;
+
+    await forEachBatch({
+      label: "sweepDeadSessionCredentials",
+      read: (afterId, take) =>
+        this.prisma.customerSession.findMany({
+          where: {
+            protocolUsers: { some: {} },
+            OR: [{ revokedAt: { not: null } }, { lastUsedAt: { lt: cutoff } }],
+            ...after(afterId),
+          },
+          select: { id: true, customerId: true, revokedAt: true },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      handle: async (batch) => {
+        for (const session of batch) {
+          if (!session.revokedAt) {
+            const recent = await this.prisma.usageRecord.findFirst({
+              where: { protocolUser: { is: { sessionId: session.id } }, reportedAt: { gte: cutoff } },
+              select: { id: true },
+            });
+            if (recent) continue;
+          }
+          const result = await this.revokeSessionCredentials(session.customerId, session.id);
+          // A device that is gone holds no slot either: it must not show
+          // as "in use" to the customer's next device. Never throws.
+          await this.deviceSlots.releaseSession(session.customerId, session.id);
+          revoked += result.revoked;
+          failed += result.failed;
+          sessions += 1;
+          if (result.failed === 0) {
+            // Gone from the nodes, so the row can go too -- the same pruning
+            // sign-in does for sessions that never held credentials.
+            await this.prisma.customerSession.deleteMany({
+              where: { id: session.id, protocolUsers: { none: {} } },
+            });
+          }
+        }
+      },
+    });
+
+    if (sessions > 0) {
+      this.logger.log(
+        `Device credential sweep: revoked ${revoked} credential(s) across ${sessions} dead session(s)` +
+          (failed > 0 ? `, ${failed} failed and will be retried` : ""),
+      );
+    }
+    return { sessions, revoked, failed };
   }
 
   /** Internal callers (setEnabled, remove) need the raw encrypted row,
@@ -124,7 +688,7 @@ export class ProtocolUsersService {
       // The config comes along so remove/setEnabled can name the same
       // listener create() used. Without it they send only the protocol,
       // which stopped identifying an inbound once one node could serve
-      // the same protocol on two of them -- see targetInbound below.
+      // the same protocol on two of them -- see command-target.ts.
       include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
     });
     if (!user) {
@@ -133,7 +697,9 @@ export class ProtocolUsersService {
     return user;
   }
 
-  async create(dto: CreateProtocolUserDto) {
+  /** `sessionId` makes it a device credential (see ProtocolUser.sessionId);
+   * omitted, it is the subscription's shared one, as it always was. */
+  async create(dto: CreateProtocolUserDto, sessionId?: string) {
     const [subscription, route] = await Promise.all([
       // The plan comes along for its bandwidth caps: the node needs them
       // at provisioning time, since a user created without a shaper would
@@ -154,6 +720,13 @@ export class ProtocolUsersService {
     if (!subscription) throw new BadRequestException("Subscription not found");
     if (!route) throw new BadRequestException("Route not found");
     if (!route.isEnabled) throw new BadRequestException("Route is not enabled");
+    // A device credential is only ever made for a live subscription. The
+    // caller checked, but a suspension, an expiry or an account deletion
+    // can land in between, and an enabled credential minted after it
+    // would undo it.
+    if (sessionId && subscription.status !== "ACTIVE") {
+      throw new BadRequestException("Subscription is not active");
+    }
 
     // The relay/direct split used to be a rule of its own here, driven
     // by plan.relayOnly. It is gone: a plan is now exactly the set of
@@ -187,22 +760,47 @@ export class ProtocolUsersService {
 
     const protocolConfig = route.entryProtocolConfig;
 
-    const usedAddresses =
-      protocolConfig.protocol === "WIREGUARD" ? await this.usedWireGuardAddresses(protocolConfig.id) : [];
+    // Allocation and insert together under the config's lock, so the
+    // address read as free is still free when the row claiming it lands.
+    const insert = async () => {
+      const usedAddresses =
+        protocolConfig.protocol === "WIREGUARD" ? await this.usedWireGuardAddresses(protocolConfig.id) : [];
 
-    const { externalUserId, credentials } = generateCredentials(protocolConfig.protocol, protocolConfig, usedAddresses);
+      // A device credential may not take the last addresses of a pool:
+      // those are kept for shared credentials, which have nothing to fall
+      // back to (see sharedWireGuardReserve). Refusing here sends the
+      // device back to its subscription's shared credential, the same as
+      // any other failure to create one.
+      if (sessionId && protocolConfig.protocol === "WIREGUARD") {
+        const cidr = (protocolConfig.publicParamsJson as { subnetCidr?: unknown } | null)?.subnetCidr;
+        const pool = typeof cidr === "string" ? wireGuardPoolSize(cidr) : null;
+        if (pool !== null && pool - usedAddresses.length <= sharedWireGuardReserve(pool)) {
+          throw new BadRequestException(
+            `WireGuard pool ${String(cidr)} is down to the addresses kept for subscription credentials`,
+          );
+        }
+      }
 
-    const protocolUser = await this.prisma.protocolUser.create({
-      data: {
-        subscriptionId: dto.subscriptionId,
-        routeId: dto.routeId,
-        nodeId: protocolConfig.nodeId,
-        protocolConfigId: protocolConfig.id,
-        protocol: protocolConfig.protocol,
-        externalUserId,
-        credentialsJson: encryptCredentials(credentials),
-      },
-    });
+      const generated = generateCredentials(protocolConfig.protocol, protocolConfig, usedAddresses);
+
+      const row = await this.prisma.protocolUser.create({
+        data: {
+          subscriptionId: dto.subscriptionId,
+          routeId: dto.routeId,
+          nodeId: protocolConfig.nodeId,
+          protocolConfigId: protocolConfig.id,
+          protocol: protocolConfig.protocol,
+          externalUserId: generated.externalUserId,
+          credentialsJson: encryptCredentials(generated.credentials),
+          ...(sessionId ? { sessionId } : {}),
+        },
+      });
+      return { ...generated, protocolUser: row };
+    };
+    const { externalUserId, credentials, protocolUser } =
+      protocolConfig.protocol === "WIREGUARD"
+        ? await this.wireGuardLock.run(protocolConfig.id, insert)
+        : await insert();
 
     // Whether this route is direct or relayed is transparent here --
     // the customer is always provisioned on the entry engine only. A
@@ -215,8 +813,7 @@ export class ProtocolUsersService {
       // once, on the same port and certificate. Without this the agent
       // would add every WS customer to the TCP inbound, handing them a
       // credential that looks correct and never connects.
-      transport: protocolConfig.transport,
-      ...targetInbound(protocolConfig),
+      ...commandTarget(protocolConfig),
       externalUserId,
       credentials,
       ...rateLimitFor(subscription.plan, protocolConfig.protocol),
@@ -274,34 +871,16 @@ export class ProtocolUsersService {
     // migration that backfilled every existing plan's effective routes
     // is what makes it safe to say.
     const selected = subscription.plan.allowedRoutes.map((r) => r.id);
-    const selectionFilter = { id: { in: selected } };
-    // Two queries rather than one broader one, so each answers exactly
-    // one of those questions and neither has to be read as also meaning
-    // the other.
-    const [routes, allowedByPolicy, existing] = await Promise.all([
-      // What can be provisioned now: policy AND currently reachable.
-      this.prisma.route.findMany({
-        where: {
-          isEnabled: true,
-          ...selectionFilter,
-          entryProtocolConfig: { protocol: { in: subscription.plan.protocolsAllowed }, isEnabled: true },
-        },
-        select: { id: true },
-        orderBy: { name: "asc" },
+    // Every row of the subscription, shared and per-device alike: what
+    // the plan no longer allows is revoked from every device, not only
+    // from the shared set.
+    const [{ routes, allowedRouteIds }, existing] = await Promise.all([
+      this.routesFor(subscription.plan),
+      this.prisma.protocolUser.findMany({
+        where: { subscriptionId },
+        select: { id: true, routeId: true, sessionId: true },
       }),
-      // What the plan allows at all, ignoring whether it happens to be
-      // up. Only revocation reads this.
-      this.prisma.route.findMany({
-        where: {
-          ...selectionFilter,
-          entryProtocolConfig: { protocol: { in: subscription.plan.protocolsAllowed } },
-        },
-        select: { id: true },
-      }),
-      this.prisma.protocolUser.findMany({ where: { subscriptionId }, select: { id: true, routeId: true } }),
     ]);
-
-    const allowedRouteIds = new Set(allowedByPolicy.map((r) => r.id));
 
     // Fail loudly rather than provisioning nothing. A plan that has
     // routes selected but none of them reachable means the nodes are
@@ -357,23 +936,77 @@ export class ProtocolUsersService {
     // read: a route that was just revoked must be eligible to be created
     // again if policy allows it, and would otherwise be skipped as
     // "already present" while no longer existing.
-    const already = new Set(existing.filter((u) => allowedRouteIds.has(u.routeId)).map((u) => u.routeId));
+    //
+    // The shared set only. A device's own credentials are added when that
+    // device next fetches (listForDevice), which it does before every
+    // connect once its list is ten minutes old -- so a new route reaches
+    // every device without this having to know which devices exist.
+    const already = new Set(
+      existing.filter((u) => !u.sessionId && allowedRouteIds.has(u.routeId)).map((u) => u.routeId),
+    );
     const created = [];
+    const failed: { routeId: string; reason: string }[] = [];
     for (const route of routes) {
       if (already.has(route.id)) continue;
       // Sequential, not Promise.all: WireGuard address allocation reads
       // the addresses already in use, so two routes on the same node
       // provisioned in parallel can pick the same one.
-      created.push(await this.create({ subscriptionId, routeId: route.id }));
+      //
+      // One route failing must not cost the customer the others. This
+      // runs on a confirmed payment, a renewal, a trial grant and a
+      // voucher, and a throw here -- a WireGuard pool with no free
+      // address left is the one in sight -- used to abort every route
+      // that sorted after the failing one, and with them the caller's
+      // own remaining work (the invoice after a renewal). Logged at
+      // error, because a paying customer short of a route is not routine.
+      try {
+        created.push(await this.create({ subscriptionId, routeId: route.id }));
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        failed.push({ routeId: route.id, reason });
+        this.logger.error(`provisionAll(${subscriptionId}): route ${route.id} could not be provisioned: ${reason}`);
+      }
     }
 
-    // Both halves, named. This used to return the created users alone,
+    // Every half, named. This used to return the created users alone,
     // which was the whole story when it could only add -- and once it
     // could also revoke, every caller was structurally unable to see
     // that half. The backfill in particular summarised a sweep as
     // "added N" while the same sweep deleted credentials from live
     // nodes. Returning one array again would rebuild that blind spot.
-    return { created, revoked };
+    return { created, revoked, failed };
+  }
+
+  /** The routes a plan can be provisioned on now (`routes`, enabled and
+   * reachable, ordered by name), and the ones it allows at all
+   * (`allowedRouteIds`, ignoring whether they are up -- only revocation
+   * reads it). Shared by provisionAll and device provisioning so the two
+   * can never disagree about what a plan includes.
+   *
+   * Two queries rather than one broader one, so each answers exactly one
+   * of those questions and neither has to be read as also meaning the
+   * other. */
+  private async routesFor(plan: { protocolsAllowed: Protocol[]; allowedRoutes: { id: string }[] }) {
+    const selectionFilter = { id: { in: plan.allowedRoutes.map((r) => r.id) } };
+    const [routes, allowedByPolicy] = await Promise.all([
+      this.prisma.route.findMany({
+        where: {
+          isEnabled: true,
+          ...selectionFilter,
+          entryProtocolConfig: { protocol: { in: plan.protocolsAllowed }, isEnabled: true },
+        },
+        select: { id: true },
+        orderBy: { name: "asc" },
+      }),
+      this.prisma.route.findMany({
+        where: {
+          ...selectionFilter,
+          entryProtocolConfig: { protocol: { in: plan.protocolsAllowed } },
+        },
+        select: { id: true },
+      }),
+    ]);
+    return { routes, allowedRouteIds: new Set(allowedByPolicy.map((r) => r.id)) };
   }
 
   /** Customer-facing: the location picker's "switch server" action.
@@ -389,7 +1022,7 @@ export class ProtocolUsersService {
    * it already holds; this endpoint only guarantees the chosen one
    * exists and hands it back.
    */
-  async switchRoute(subscriptionId: string, routeId: string) {
+  async switchRoute(subscriptionId: string, routeId: string, sessionId?: string) {
     const [subscription, route] = await Promise.all([
       this.prisma.subscription.findUnique({ where: { id: subscriptionId }, include: { plan: true } }),
       this.prisma.route.findUnique({ where: { id: routeId }, include: { entryProtocolConfig: true } }),
@@ -406,8 +1039,18 @@ export class ProtocolUsersService {
     // picker rather than staying permanently short of options.
     await this.provisionAll(subscriptionId);
 
+    // A signed-in device gets its own credential for the route, by the
+    // same path as its credential list -- including the fallback to the
+    // shared one if its own could not be made.
+    if (sessionId) {
+      const mine = (await this.listForDevice(subscription.customerId, sessionId)).find(
+        (u) => u.subscriptionId === subscriptionId && u.routeId === routeId,
+      );
+      if (mine) return mine;
+    }
+
     const existing = await this.prisma.protocolUser.findFirst({
-      where: { subscriptionId, routeId },
+      where: { subscriptionId, routeId, sessionId: null },
       include: { protocolConfig: { include: { node: true } } },
     });
     if (existing) {
@@ -422,12 +1065,7 @@ export class ProtocolUsersService {
   async remove(id: string) {
     const user = await this.getRaw(id);
 
-    await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", {
-      protocol: user.protocol,
-      transport: user.protocolConfig.transport,
-      ...targetInbound(user.protocolConfig),
-      externalUserId: user.externalUserId,
-    });
+    await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
 
     await this.prisma.protocolUser.delete({ where: { id } });
   }
@@ -441,16 +1079,14 @@ export class ProtocolUsersService {
       const credentials = decryptCredentials(user.credentialsJson);
       await this.agentGateway.enqueueCommand(user.nodeId, "ENABLE_USER", {
         protocol: user.protocol,
-        transport: user.protocolConfig.transport,
-        ...targetInbound(user.protocolConfig),
+        ...commandTarget(user.protocolConfig),
         externalUserId: user.externalUserId,
         credentials,
       });
     } else {
       await this.agentGateway.enqueueCommand(user.nodeId, "DISABLE_USER", {
         protocol: user.protocol,
-        transport: user.protocolConfig.transport,
-        ...targetInbound(user.protocolConfig),
+        ...commandTarget(user.protocolConfig),
         externalUserId: user.externalUserId,
       });
     }
@@ -497,25 +1133,6 @@ function withDecryptedCredentials<T extends { credentialsJson: string }>(
  * app then had a credential set with no server address and failed at the
  * point of connecting, well away from the cause. Keeping one builder
  * means a new customer-facing endpoint can't quietly reintroduce that. */
-/** Names the exact Xray inbound a command targets, when the config says
- * which one.
- *
- * Omitted entirely when null so the payload is byte-identical to what
- * every non-relay node has always received -- the agent reads an absent
- * tag as "the inbound you were started with", which is what every
- * existing config relies on.
- *
- * This matters most on the commands that are not create(). A relay runs
- * one inbound per exit, so removing or disabling a customer without
- * naming the inbound would act on the wrong listener: the credential
- * would keep working on the inbound it actually lives on, which for a
- * quota suspension or an account deletion means the customer is not
- * actually cut off.
- */
-function targetInbound(protocolConfig: { inboundTag: string | null }): { inboundTag?: string } {
-  return protocolConfig.inboundTag ? { inboundTag: protocolConfig.inboundTag } : {};
-}
-
 /** The publicParamsJson keys a client legitimately needs, per protocol.
  *
  * A whitelist rather than a blocklist, and deliberately so: this object

@@ -1,6 +1,30 @@
 import { ConflictException, NotFoundException } from "@nestjs/common";
 import * as argon2 from "argon2";
 import { CustomersService } from "./customers.service";
+import { encryptCredentials } from "../protocol-users/credentials-crypto";
+import { KeyedLock } from "../protocol-users/keyed-lock";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
+
+/** A credential row as account deletion reads it. */
+function credentialRow(id: string) {
+  return {
+    id,
+    nodeId: "node-1",
+    protocol: "XRAY_VLESS_REALITY",
+    externalUserId: `ext-${id}`,
+    credentialsJson: encryptCredentials({ uuid: `ext-${id}` }),
+    protocolConfig: { transport: "TCP", inboundTag: null },
+  };
+}
+
+/** A device's first fetch, as far as deletion can see it: it holds the
+ * customer lock while it creates its own rows. */
+function deviceFetchHolding(lock: KeyedLock, rows: unknown[], id: string) {
+  return lock.run("customer-1", async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    rows.push(credentialRow(id));
+  });
+}
 
 function buildCustomer(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -25,9 +49,13 @@ describe("CustomersService", () => {
     protocolUser: { findMany: jest.Mock; deleteMany: jest.Mock };
     subscription: { deleteMany: jest.Mock; updateMany: jest.Mock };
     usageRecord: { deleteMany: jest.Mock };
+    customerSession: { updateMany: jest.Mock };
     $transaction: jest.Mock;
   };
   let agentGateway: { enqueueCommand: jest.Mock };
+  let protocolUsers: { endSessions: jest.Mock; withCustomerLock: jest.Mock };
+  let lock: KeyedLock;
+  let deviceSlots: ReturnType<typeof deviceSlotsStub>;
 
   beforeEach(() => {
     prisma = {
@@ -46,13 +74,21 @@ describe("CustomersService", () => {
       // invoices point at them.
       subscription: { deleteMany: jest.fn(), updateMany: jest.fn() },
       usageRecord: { deleteMany: jest.fn() },
+      customerSession: { updateMany: jest.fn() },
       // The real $transaction takes an array of prepared operations; the
       // mocked members above are plain jest.fn()s, so simply resolving is
       // enough to assert which ones were queued.
       $transaction: jest.fn().mockResolvedValue([]),
     };
     agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
-    service = new CustomersService(prisma as any, agentGateway as any);
+    // The real lock, so a test can hold it the way a device fetch does.
+    lock = new KeyedLock();
+    deviceSlots = deviceSlotsStub();
+    protocolUsers = {
+      endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }),
+      withCustomerLock: jest.fn((id: string, work: () => Promise<unknown>) => lock.run(id, work)),
+    };
+    service = new CustomersService(prisma as any, agentGateway as any, protocolUsers as any, deviceSlots as any);
   });
 
   describe("get", () => {
@@ -114,6 +150,52 @@ describe("CustomersService", () => {
         expect.objectContaining({ where: { id: "customer-1" }, data: { status: "SUSPENDED" } }),
       );
       expect(result.status).toBe("SUSPENDED");
+      // Not a password change, so no device is signed out.
+      expect(protocolUsers.endSessions).not.toHaveBeenCalled();
+    });
+
+    // An admin setting a password is usually answering "someone else is in
+    // my account": the refresh tokens stop with tokenVersion, and the VPN
+    // credentials issued to those devices have to stop too.
+    it("ends every device session, credentials included, when it sets a password", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer());
+
+      await service.update("customer-1", { password: "a-new-password" } as any);
+
+      expect(protocolUsers.endSessions).toHaveBeenCalledWith("customer-1");
+    });
+
+    /** Without this a device the admin had just signed out went on showing
+     * as "in use" to the customer's next device -- a refusal naming a PC
+     * that could no longer connect. Every device's slot goes: the admin's
+     * request is none of them. */
+    it("frees every device's slot when it sets a password, and not otherwise", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer());
+
+      await service.update("customer-1", { status: "SUSPENDED" as any });
+      expect(deviceSlots.releaseOtherSessions).not.toHaveBeenCalled();
+
+      await service.update("customer-1", { password: "a-new-password" } as any);
+      expect(deviceSlots.releaseOtherSessions).toHaveBeenCalledWith("customer-1");
+    });
+
+    // Written with the password, so a failure taking the credentials back
+    // cannot leave the sessions live as well.
+    it("revokes the sessions in the same transaction as the password, and survives the credential step failing", async () => {
+      const saved = buildCustomer();
+      prisma.customer.findUnique.mockResolvedValue(saved);
+      prisma.$transaction.mockResolvedValue([saved, { count: 2 }]);
+      protocolUsers.endSessions.mockRejectedValue(new Error("database went away"));
+
+      await expect(service.update("customer-1", { password: "a-new-password" } as any)).resolves.toBe(saved);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
     });
   });
 
@@ -149,15 +231,57 @@ describe("CustomersService", () => {
       // working on the engine while the panel shows the customer gone.
       prisma.customer.findUnique.mockResolvedValue(buildCustomer());
       prisma.protocolUser.findMany.mockResolvedValue([
-        { id: "pu-1", nodeId: "node-1", protocol: "WIREGUARD", externalUserId: "peer-key" },
+        {
+          id: "pu-1",
+          nodeId: "node-1",
+          protocol: "WIREGUARD",
+          externalUserId: "peer-key",
+          credentialsJson: encryptCredentials({ privateKey: "secret", address: "10.66.0.9/32" }),
+          protocolConfig: { transport: "TCP", inboundTag: null },
+        },
       ]);
 
       await service.remove("customer-1");
 
+      // The address travels so the node can clear the peer's speed cap;
+      // the private key never does.
       expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "DELETE_USER", {
         protocol: "WIREGUARD",
+        transport: "TCP",
         externalUserId: "peer-key",
+        credentials: { address: "10.66.0.9/32" },
       });
+    });
+
+    // Untargeted, a delete for a WebSocket or relay customer landed on the
+    // node's default inbound, was acked, and left the credential working.
+    it("aims each delete at the customer's own inbound", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.protocolUser.findMany.mockResolvedValue([
+        {
+          id: "pu-ws",
+          nodeId: "node-1",
+          protocol: "XRAY_VLESS_TLS",
+          externalUserId: "uuid-ws",
+          credentialsJson: encryptCredentials({ uuid: "uuid-ws" }),
+          protocolConfig: { transport: "WS", inboundTag: null },
+        },
+        {
+          id: "pu-relay",
+          nodeId: "ir-1",
+          protocol: "XRAY_VLESS_REALITY",
+          externalUserId: "uuid-relay",
+          credentialsJson: encryptCredentials({ uuid: "uuid-relay" }),
+          protocolConfig: { transport: "TCP", inboundTag: "vless-in-fr" },
+        },
+      ]);
+
+      await service.remove("customer-1");
+
+      expect(agentGateway.enqueueCommand.mock.calls.map((c) => c[2])).toEqual([
+        { protocol: "XRAY_VLESS_TLS", transport: "WS", externalUserId: "uuid-ws" },
+        { protocol: "XRAY_VLESS_REALITY", transport: "TCP", inboundTag: "vless-in-fr", externalUserId: "uuid-relay" },
+      ]);
     });
 
     it("refuses to delete a customer who has completed payments", async () => {
@@ -194,16 +318,23 @@ describe("CustomersService", () => {
       // several spread across nodes -- and any this misses keeps working
       // indefinitely, with nothing to report it.
       prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      const target = { transport: "TCP", inboundTag: null };
       prisma.protocolUser.findMany.mockResolvedValue([
-        { nodeId: "node-a", protocol: "WIREGUARD", externalUserId: "wg-1" },
-        { nodeId: "node-b", protocol: "XRAY_VLESS_REALITY", externalUserId: "xr-1" },
-        { nodeId: "node-c", protocol: "IKEV2", externalUserId: "ike-1" },
+        { nodeId: "node-a", protocol: "WIREGUARD", externalUserId: "wg-1", credentialsJson: encryptCredentials({ address: "10.66.0.2/32" }), protocolConfig: target },
+        { nodeId: "node-b", protocol: "XRAY_VLESS_TLS", externalUserId: "xr-1", credentialsJson: encryptCredentials({ uuid: "xr-1" }), protocolConfig: { transport: "WS", inboundTag: null } },
+        { nodeId: "node-c", protocol: "IKEV2", externalUserId: "ike-1", credentialsJson: encryptCredentials({ username: "ike-1" }), protocolConfig: target },
       ]);
 
       const result = await service.deleteOwnAccount("customer-1");
 
       expect(agentGateway.enqueueCommand).toHaveBeenCalledTimes(3);
       expect(agentGateway.enqueueCommand.mock.calls.map((c) => c[0])).toEqual(["node-a", "node-b", "node-c"]);
+      // Each on the customer's own inbound: the WebSocket one included.
+      expect(agentGateway.enqueueCommand.mock.calls[1][2]).toEqual({
+        protocol: "XRAY_VLESS_TLS",
+        transport: "WS",
+        externalUserId: "xr-1",
+      });
       expect(result.credentialsRevoked).toBe(3);
     });
 
@@ -260,6 +391,63 @@ describe("CustomersService", () => {
       prisma.customer.findUnique.mockResolvedValue(null);
       await expect(service.deleteOwnAccount("missing")).rejects.toThrow(NotFoundException);
       expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    });
+
+    /** Device credentials are minted on a plain GET. One landing between
+     * deletion's read and its transaction used to be deleted from the
+     * database with no DELETE_USER -- live on its node, with no row. */
+    it("waits for a device fetch in flight, so the credential it mints is taken off the node too", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      const rows: unknown[] = [credentialRow("shared")];
+      prisma.protocolUser.findMany.mockImplementation(() => Promise.resolve([...rows]));
+
+      const fetch = deviceFetchHolding(lock, rows, "device");
+      const deletion = service.deleteOwnAccount("customer-1");
+      await Promise.all([fetch, deletion]);
+
+      expect(agentGateway.enqueueCommand.mock.calls.map((c) => (c[2] as { externalUserId: string }).externalUserId)).toEqual([
+        "ext-shared",
+        "ext-device",
+      ]);
+      await expect(deletion).resolves.toEqual({ deleted: true, credentialsRevoked: 2 });
+    });
+
+    it("frees every device slot of the deleted account", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.deleteOwnAccount("customer-1");
+
+      expect(deviceSlots.releaseCustomer).toHaveBeenCalledWith("customer-1");
+    });
+
+    // An access token lives fifteen minutes past tokenVersion; with the
+    // session revoked it can neither fetch nor mint anything.
+    it("revokes every signed-in device in the same transaction", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.deleteOwnAccount("customer-1");
+
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+  });
+
+  describe("remove, with devices fetching", () => {
+    it("waits for a device fetch in flight, so the credential it mints is taken off the node too", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      const rows: unknown[] = [credentialRow("shared")];
+      prisma.protocolUser.findMany.mockImplementation(() => Promise.resolve([...rows]));
+
+      const fetch = deviceFetchHolding(lock, rows, "device");
+      const removal = service.remove("customer-1");
+      await Promise.all([fetch, removal]);
+
+      expect(agentGateway.enqueueCommand.mock.calls.map((c) => (c[2] as { externalUserId: string }).externalUserId)).toEqual([
+        "ext-shared",
+        "ext-device",
+      ]);
     });
   });
 });

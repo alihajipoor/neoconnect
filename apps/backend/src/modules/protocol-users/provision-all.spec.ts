@@ -1,4 +1,5 @@
 import { ProtocolUsersService } from "./protocol-users.service";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
 /** Provisioning every route a plan allows, so the client can fail over
  * between protocols without reaching the control plane -- which, on a
@@ -19,7 +20,7 @@ describe("ProtocolUsersService.provisionAll", () => {
         findMany: jest.fn().mockResolvedValue(existingRouteIds.map((routeId) => ({ routeId }))),
       },
     };
-    const service = new ProtocolUsersService(prisma as never, {} as never);
+    const service = new ProtocolUsersService(prisma as never, {} as never, deviceSlotsStub() as never);
     // create() is exercised by its own tests; here what matters is which
     // routes it is asked for, and how many times.
     const create = jest
@@ -57,8 +58,27 @@ describe("ProtocolUsersService.provisionAll", () => {
   it("does nothing at all when every route is already provisioned", async () => {
     const { service, create } = build(["route-reality", "route-tls", "route-wg"]);
 
-    await expect(service.provisionAll("sub-1")).resolves.toEqual({ created: [], revoked: [] });
+    await expect(service.provisionAll("sub-1")).resolves.toEqual({ created: [], revoked: [], failed: [] });
     expect(create).not.toHaveBeenCalled();
+  });
+
+  /** Runs on a confirmed payment, a renewal, a trial and a voucher. A
+   * WireGuard pool with no address left used to throw out of here and
+   * take every later route -- and the caller's invoice -- with it. */
+  it("provisions every other route when one cannot be, and says which", async () => {
+    const { service, create } = build();
+    create.mockImplementation(({ routeId }) =>
+      routeId === "route-reality"
+        ? Promise.reject(new Error("No free addresses left in WireGuard subnet 10.66.0.0/24"))
+        : Promise.resolve({ routeId } as never),
+    );
+
+    const result = await service.provisionAll("sub-1");
+
+    expect(result.created.map((u) => (u as { routeId: string }).routeId).sort()).toEqual(["route-tls", "route-wg"]);
+    expect(result.failed).toEqual([
+      { routeId: "route-reality", reason: "No free addresses left in WireGuard subnet 10.66.0.0/24" },
+    ]);
   });
 
   /** Only routes whose protocol the plan sells, and only enabled ones --

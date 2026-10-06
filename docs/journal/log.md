@@ -2759,3 +2759,173 @@ here; iOS needs the Mac. Still open: a signed-out client's VPN
 credentials stay valid on the nodes until revoked server-side
 (per-device credentials would fix it); node SSH access; ir1 offline
 since 2026-09-12.
+
+## 2026-10-05 (late) — per-device VPN credentials, backend (branch `claude/per-device-credentials`)
+
+The gap the night entry left open: signing out revoked the device's
+refresh session but not its VPN credentials, which were per
+subscription and shared by every device. Design in
+`docs/per-device-credentials.md`.
+
+`ProtocolUser.sessionId` (nullable, FK to `customer_sessions`, RESTRICT;
+migration `20261007_per_device_credentials`, additive, no backfill).
+NULL is the shared credential every existing row already is. A device
+whose access token carries `sid` is given its own credential on each
+route of its ACTIVE subscriptions the first time it calls
+`GET /customer/protocol-users` (or switch-route), and is answered with
+those, any gap filled by the shared row. Sign-out revokes the session,
+then `DELETE_USER`s that session's rows on every node -- no other
+device's. Password reset/change and an admin-set password end the other
+sessions and their credentials; a change keeps the caller's session. An
+hourly `device-credentials` sweep retries failed revocations and
+reclaims sessions idle 30 days *and* without traffic for 30 days.
+Device cap 5 per customer (`CUSTOMER_DEVICE_CREDENTIAL_LIMIT`), LRU
+eviction. WireGuard allocation now serialised per config. Usage, caps,
+expiry, concurrency, re-assert and deletion all key off
+`subscriptionId` and needed no change. No agent change, no client
+change.
+
+Shared credentials stay valid and provisioned (phase 1). So sign-out
+does **not** yet cut off a copy of the shared credentials a device held
+before its first fetch after deploy. Revoking them is phase 2 and an
+owner decision; the doc has the preconditions.
+
+**Proven:** backend typecheck, lint, and unit tests -- 78 suites, 860
+tests (77/825 before), including mutation checks that the shared-only
+legacy list, the signed-out-session refusal and the WireGuard lock are
+each caught by a test when removed; `prisma migrate diff` from the
+previous schema produces exactly the committed SQL. **Unverified:**
+everything end to end. The migration has not run against a database, no
+node has received a per-device user, no client has connected with one,
+and no sign-out has been seen to remove one from a node. Also unproven:
+that Windows' built-in IKEv2 and iOS's NEVPNManager profile pick up new
+credentials on the next connect rather than reusing stored ones.
+
+Found, not fixed: deletion, quota/expiry suspension and the concurrency
+disconnect send user commands without `transport`/`inboundTag`, so on a
+multi-inbound node they can miss the real inbound; an admin disabling a
+customer touches no credentials.
+
+## 2026-10-06 — per-device credentials reviewed and fixed; the plan's device limit as device slots (same branch)
+
+**Status:** backend done on `claude/per-device-credentials`, not merged,
+not deployed. Clients not started.
+**Touches:** `apps/backend` (protocol-users, usage, customer-auth,
+customers, agent-gateway, plans, billing, subscriptions, new
+`device-slots`), `infra/docker-compose.prod.yml`, `infra/.env.example`,
+`.github/workflows/ci.yml` (migration step), agent comments only,
+`docs/device-slots.md` (new), `docs/per-device-credentials.md`.
+
+**Owner decisions taken (2026-10-06), so they are not re-litigated:**
+`maxConcurrentConnections` means devices *using* the VPN at the same
+time (Starter 1, Pro 2, Trial 2, Ultimate/Ultimate Max unlimited).
+Option A: the second device is refused before it connects, told where
+Neoxify is in use, and offered "Use on this device instead"; the device
+taken over is told why and does not run the ladder. Signed-in device cap
+is a hidden 10 (was 5). Shared credentials stay valid for now (phase 1);
+30-day idle reclaim confirmed; password change/reset revokes other
+devices' credentials. **Coordinator decisions:** the node-side cut runs
+in shadow mode by default (`CONCURRENCY_CUT=shadow|enforce`); device
+slots on by default (`DEVICE_SLOTS=enforce|off`, only clients that claim
+are affected); the control plane is never a precondition for connecting.
+
+**Review findings fixed** (35 confirmed, many duplicates; every high and
+medium, the cheap lows): cooldown replaying revoked credentials (gone --
+replaced by a lease the re-assert skips); device credentials served
+before a node had them (now gated on the ack, `provisionedAt`); Xray
+counted five times per node (max, not sum); untargeted
+delete/suspend/cut commands (one helper); plan speed-cap edit dropping
+Xray users (CREATE_USER with credentials, shapeable protocols only);
+migration FK breaking sign-in on rollback (SET NULL); WireGuard pool
+exhaustion aborting paying customers' provisioning (device reserve,
+per-route catch, invoice kept); deletion racing lazy provisioning
+(customer lock, sessions revoked); session churn (10 new device sets per
+hour); endSessions outside the lock; password revocation now
+transactional; re-assert skipping signed-out devices; eviction by
+liveness; WireGuard address on DELETE_USER; device cap settable in
+production; plaintext credentials stripped from acked commands; stale
+comments. Deferred ones, with reasons, are in
+`docs/per-device-credentials.md`, "Known, deferred".
+
+**Device slots** (`docs/device-slots.md` is the contract for the app
+agents): `POST /customer/vpn/claim|renew|release`, 409 `DEVICE_LIMIT`
+with holders (label, since, lastSeen) and never 401, renew answers
+`displaced`, 90 s staleness from renewals *or* traffic, takeovers logged
+past 10/h and refused past 30/h, released on sign-out, password change,
+eviction, suspension/expiry and account deletion. Sessions gain `label`
+and `platform` from `X-Neoxify-Device-Label/-Platform` (never a
+hostname; the backend drops anything hostname-shaped).
+`GET /customer/subscriptions` carries `deviceLimit`. The backstop judges
+per device (shared credentials one pseudo-device), never holds a slot
+holder, and in shadow mode only logs `[shadow] ... would hold device X`.
+
+**Migrations** (all additive; `prisma migrate diff` from main's schema
+produces exactly their union): `20261007_per_device_credentials` (edited
+in place -- never applied anywhere: FK now SET NULL, plus
+`provisionedAt`), `20261008_concurrency_holds` (`heldUntil`),
+`20261008_session_labels` (`label`, `platform`). New spec
+`src/migration-safety.spec.ts` fails if a pending migration drops,
+renames or tightens anything; move its `LAST_DEPLOYED` when a deploy
+lands.
+
+**PROVEN (tests and CI only):** backend 84 suites / 992 tests (78 / 860
+at the start of this session), typecheck and lint clean; mutation checks
+that the provisioned gate, the hold filter in the re-assert, the
+deletion lock, the endSessions lock, the slot-holder exclusion, the
+device-set rate limit, the WireGuard reserve and slot staleness are each
+caught by a test when removed; an HTTP-level spec of the slot contract
+on a real Nest server with the production validation pipe; the built
+backend booted locally against nothing far enough to resolve the whole
+module graph and map `/customer/vpn/{claim,renew,release}`. **New CI
+step** (`ci.yml`, TypeScript job): all 46 migrations applied in order to
+the job's empty Postgres 16, `migrate diff` against `schema.prisma`
+reported no difference, and `test/sql/rollback-check.sql` (the previous
+backend's sign-in prune, with a signed-out session owning a credential)
+succeeded with the credential kept as a shared one -- green on
+`a9163ab`, all four jobs, Go agent included (so the comment-only agent
+edits build). Desktop JS 32 files / 435 tests and typecheck, mobile JS 4
+files / 34 tests and typecheck -- unchanged code, run as a baseline.
+**UNVERIFIED:** everything against real nodes, devices, Redis or a
+database with real data. No node has acked a device credential; no app
+claims a slot; the backstop has never seen a real report;
+presence-from-usage-deltas is reasoned from the agent and client code,
+not measured; Xray connections open when a hold starts may survive it;
+iPhone, Android in the background and an Iranian network untested.
+
+**Second review, of the slots and the backstop (later 2026-10-06), all
+twelve findings fixed on this branch:** the slot endpoints count 60
+requests a minute per access token instead of the global 100 per
+address (mirror and tunnel egress addresses are shared by many
+customers), and the contract names exactly what stops a dial (409
+`DEVICE_LIMIT`/`SUBSCRIPTION_INACTIVE`, 429 `TAKEOVER_LIMIT`); a slot
+does not expire under a device that carries traffic without renewing;
+new obligation 11 says what a connected device does with a refused
+post-connect claim; Xray's session counts (60 s tail) no longer make a
+device active; a grant lifts any hold on that device and re-asserts it
+at once, a holder is never held, and a displaced device that keeps
+going is held even while its taker is quiet; holding the shared
+credentials spares the one a holder named; `release` names its grant's
+`handle` (a re-claim gets a new one) so a late release frees nothing;
+admin set-password and the hourly sweep free slots, and signed-out
+holders are never counted; the re-assert never puts back a credential
+switched off while it ran; `label` is a model or the user's words only
+(the kind is named from `platform` in the reader's language); the
+rollback note is corrected (delete unconfirmed device rows first);
+IKEv2 stays on shared credentials (its per-user reload made device rows
+a queue risk) and a node more than a re-assert cycle behind is named in
+the log. **Contract changes the apps must follow:** send `handle` with
+release; render a null `label` from `platform`; stop sending generic
+English labels; obligation 11. Backend 86 suites / 1026 tests,
+typecheck and lint clean; the new guards each fail a test when removed.
+Unit and in-process HTTP tests only -- nothing above has run against a
+node, a client or Redis.
+
+**Next:** desktop 0.9.44 and mobile 0.2.23 implement the client side of
+`docs/device-slots.md` (claim before dialling with a 3 s budget, never
+blocking; the refusal card; renew; release; `concurrentLimit` class;
+keep status/code in `apiRequest`). Deploy the backend first. Leave
+`CONCURRENCY_CUT=shadow` for at least a week and read the `[shadow]`
+lines before enforcing; the rig tests in the design (false-positive soak
+per protocol, PC-then-phone, takeover with captures, censored path,
+non-claiming clients, long Xray download, IKEv2, restart during a hold,
+Android screen-off) gate it.

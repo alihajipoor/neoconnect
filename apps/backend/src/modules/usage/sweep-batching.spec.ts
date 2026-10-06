@@ -1,6 +1,7 @@
 import { SWEEP_BATCH_SIZE } from "../../common/batching";
 import { cursoredFindMany, rowIds } from "../../../test/cursored";
 import { UsageService } from "./usage.service";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
 /** The property the sweeps must have, stated once: **every due row is
  * processed**, however many there are.
@@ -40,7 +41,7 @@ describe("UsageService sweeps process every due row, not the first batch of them
       protocolUser: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn() },
     };
     const emailService = { sendMail: jest.fn().mockResolvedValue(undefined) };
-    const service = new UsageService(prisma as never, {} as never, emailService as never);
+    const service = new UsageService(prisma as never, {} as never, emailService as never, deviceSlotsStub() as never);
     jest.spyOn(service["logger"], "log").mockImplementation(() => undefined);
     return { service, prisma, findMany, update, emailService };
   }

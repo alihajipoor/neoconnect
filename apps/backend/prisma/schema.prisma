@@ -401,6 +401,16 @@ model CustomerSession {
   /// refresh token lives can be recognised as dead and pruned.
   lastUsedAt DateTime  @default(now())
   revokedAt  DateTime?
+  /// What the device calls itself, for "Neoxify is in use on <label>"
+  /// (docs/device-slots.md): "Windows PC", "Android phone (Pixel 7)".
+  /// From the X-Neoxify-Device-Label header at sign-in or claim; never a
+  /// hostname. Null for sessions from before labels, and from apps that
+  /// send none.
+  label      String?
+  /// windows | macos | linux | android | ios, from X-Neoxify-Device-Platform.
+  platform   String?
+  /// This device's own VPN credentials -- see ProtocolUser.sessionId.
+  protocolUsers ProtocolUser[]
 
   @@index([customerId])
   @@map("customer_sessions")
@@ -755,7 +765,34 @@ model ProtocolUser {
   status           ProtocolUserStatus @default(ACTIVE)
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
+  /// The signed-in device this credential was issued to, or null for the
+  /// subscription's shared credential (every row from before 2026-10-07).
+  ///
+  /// A device credential is what lets signing out on one device cut that
+  /// device off without touching the customer's others: sign-out removes
+  /// the rows naming its session, from the node first. Everything keyed
+  /// by subscriptionId -- usage, caps, expiry, re-assert -- covers both
+  /// kinds unchanged. See docs/per-device-credentials.md.
+  ///
+  /// SetNull, and only ever reached by an older backend: this one never
+  /// deletes a session that still holds credentials (it takes them off
+  /// the nodes first, and every session delete is filtered on holding
+  /// none). Restrict made a rollback fail every sign-in that pruned such
+  /// a session; Cascade would drop the row without telling the node.
+  /// SetNull leaves it as an extra shared credential -- still metered,
+  /// still expiring -- see the migration and the doc's Rollback section.
+  sessionId        String?
+  /// When a node first acked a CREATE_USER/ENABLE_USER (or a re-assert)
+  /// for this credential. A device row replaces the shared row in what
+  /// a device is handed only once this is set -- see deviceView.
+  provisionedAt    DateTime?
+  /// Held off its node by the device-limit backstop until this time (see
+  /// ConcurrencyService; only ever written with CONCURRENCY_CUT=enforce).
+  /// The re-assert skips a credential while this is in the future, and
+  /// it lapses on its own when nothing extends it.
+  heldUntil        DateTime?
 
+  session        CustomerSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   subscription   Subscription   @relation(fields: [subscriptionId], references: [id])
   route          Route          @relation(fields: [routeId], references: [id])
   node           Node           @relation(fields: [nodeId], references: [id])
@@ -763,6 +800,10 @@ model ProtocolUser {
   usageRecords   UsageRecord[]
 
   @@unique([nodeId, protocol, externalUserId])
+  // One device credential per device per route. NULLs are distinct, so
+  // the shared rows (sessionId null) are not constrained by it.
+  @@unique([subscriptionId, routeId, sessionId])
+  @@index([sessionId])
   @@index([subscriptionId])
   @@index([routeId])
   // `GET /protocol-users` orders by `createdAt desc`. Its `nodeId` filter
