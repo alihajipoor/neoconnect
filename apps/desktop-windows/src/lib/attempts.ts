@@ -235,7 +235,7 @@ async function writeQueue(queue: QueuedReport[]): Promise<void> {
  * that address, which makes it likelier still. Kept instead; the flush
  * stops at the first one, and the next contact carries on.
  *
- * With one exception, for a server older than this client. Until the
+ * And one allowance for a server older than this client. Until the
  * limit was raised, the backend refused an `apiEndpoint` over 200
  * characters with a 400, and an endpoint trace is often longer. Against
  * such a server -- production, until it is redeployed -- the report is

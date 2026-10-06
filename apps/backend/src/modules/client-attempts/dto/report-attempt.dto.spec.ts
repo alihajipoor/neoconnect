@@ -84,8 +84,11 @@ describe("ReportAttemptDto apiEndpoint", () => {
   it("accepts a trace of sixteen addresses across three phases", async () => {
     const phase = (name: string, outcome: string) =>
       `${name}: ` + Array.from({ length: 16 }, (_, i) => `${mirror(i)}=${outcome}@8000`).join(" ");
-    const trace = [phase("req", "timeout"), phase("refresh", "net")].join("; ").slice(0, API_ENDPOINT_MAX_LENGTH);
+    const trace = [phase("req", "timeout"), phase("refresh", "net")].join("; ");
+    // Built to size, not cut to fit: a realistic worst case has to be
+    // inside the limit on its own.
     expect(trace.length).toBeGreaterThan(1000);
+    expect(trace.length).toBeLessThanOrEqual(API_ENDPOINT_MAX_LENGTH);
     expect(await errorsFor({ ...unreachable, apiEndpoint: trace })).toEqual([]);
   });
 

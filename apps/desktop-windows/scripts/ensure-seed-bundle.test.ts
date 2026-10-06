@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,6 +60,19 @@ describe("ensure-seed-bundle when the fetch fails", () => {
     writeFileSync(out, seed);
     const result = run({ NEOXIFY_REQUIRE_SEED: "1" });
     expect(result.status).toBe(0);
+    expect(readFileSync(out, "utf8")).toBe(seed);
+  });
+
+  /** A seed left by some earlier build -- the Mac that builds iOS
+   * releases keeps one for weeks -- must not quietly stand in for a
+   * required one. */
+  it("does not let an old seed satisfy a required build", () => {
+    writeFileSync(out, seed);
+    const weekAgo = new Date(Date.now() - 7 * 86_400_000);
+    utimesSync(out, weekAgo, weekAgo);
+    expect(run({ NEOXIFY_REQUIRE_SEED: "1" }).status).toBe(1);
+    // Without the requirement it is still better than the placeholder.
+    expect(run().status).toBe(0);
     expect(readFileSync(out, "utf8")).toBe(seed);
   });
 

@@ -39,6 +39,8 @@ const OUTCOMES = new Set([
   "tls",
   "tls-timeout",
   "cert",
+  // The probe itself crashed: a fault here, not a fact about the network.
+  "error",
 ]);
 
 /** At most one probe per this long, per process.

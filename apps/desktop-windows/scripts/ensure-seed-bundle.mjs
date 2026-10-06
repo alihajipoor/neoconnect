@@ -22,9 +22,10 @@
  * first one had just fetched -- and the build went on to ship with no
  * seed, which is the failure the required step exists to prevent,
  * reintroduced one step later. A failed refetch now keeps a valid seed
- * that is already on disk, and says so.
+ * that is already on disk -- only a recent one, when a seed is required
+ * -- and says so.
  */
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -50,11 +51,22 @@ const decodeSeed = (raw) => {
   }
 };
 
+/** How recent a seed on disk must be to stand in for a failed fetch when
+ * one is required. The workflows fetch it minutes before the build that
+ * refetches it; a seed older than this was left by some earlier build on
+ * this machine -- the Mac that builds iOS releases keeps one for weeks --
+ * and a release must not quietly ship that. */
+const REQUIRED_SEED_MAX_AGE_MS = 6 * 3_600_000;
+
 const fallback = (why) => {
   // A seed already on disk beats no seed. It was fetched by this build's
   // own required step, or by an earlier run on this machine; either way
-  // it is a real, signed list, and the placeholder is none at all.
-  const existing = existsSync(out) ? decodeSeed(readFileSync(out, "utf8")) : null;
+  // it is a real, signed list, and the placeholder is none at all. When
+  // one is required, only a recent one counts.
+  const required = process.env.NEOXIFY_REQUIRE_SEED === "1";
+  const usable =
+    existsSync(out) && (!required || Date.now() - statSync(out).mtimeMs < REQUIRED_SEED_MAX_AGE_MS);
+  const existing = usable ? decodeSeed(readFileSync(out, "utf8")) : null;
   if (existing) {
     console.log(
       `seed-bundle: kept existing v${existing.v}, ${existing.endpoints.length} endpoints (refetch failed: ${why})`,
@@ -64,7 +76,7 @@ const fallback = (why) => {
   // A release build that quietly falls back ships exactly the bug this
   // file exists to fix, and nothing about the installer would look wrong.
   // CI sets NEOXIFY_REQUIRE_SEED so that failure is loud instead.
-  if (process.env.NEOXIFY_REQUIRE_SEED === "1") {
+  if (required) {
     console.error(`seed-bundle: REQUIRED but unavailable (${why})`);
     process.exit(1);
   }

@@ -24,7 +24,7 @@
 
 use std::io;
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
@@ -40,7 +40,8 @@ pub struct ProbeTarget {
 pub struct ProbeResult {
     /// One of: "ok", "dns", "dns-timeout", "blockpage", "tcp",
     /// "tcp-timeout", "tls", "tls-timeout", "cert". The first stage that
-    /// failed, or "ok" if a TLS handshake completed.
+    /// failed, or "ok" if a TLS handshake completed. "error" if the probe
+    /// itself crashed -- a fault here, saying nothing about the network.
     pub outcome: &'static str,
     /// From the start of the lookup to the verdict.
     pub ms: u32,
@@ -81,12 +82,14 @@ pub async fn probe_control_plane(targets: Vec<ProbeTarget>) -> Vec<ProbeResult> 
 
 /// Probes every target at once, and answers in the order asked.
 pub fn probe_all(targets: Vec<ProbeTarget>, limits: Limits) -> Vec<ProbeResult> {
-    let config = Arc::new(tls_config());
+    // Built once per process: it copies every root certificate.
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    let config = CONFIG.get_or_init(|| Arc::new(tls_config()));
     let handles: Vec<_> = targets
         .into_iter()
         .take(MAX_TARGETS)
         .map(|target| {
-            let config = Arc::clone(&config);
+            let config = Arc::clone(config);
             std::thread::spawn(move || probe_one(&target.host, target.port, &config, limits))
         })
         .collect();
@@ -171,14 +174,18 @@ fn resolve(host: &str, port: u16, limit: Duration) -> Resolved {
 /// Iran's DNS block page, as `isKnownBlockPage` in
 /// endpoint-bundle-store.ts has it: the /24, because more than one
 /// address in it has been seen for different names on one network.
+/// Also as an IPv4-mapped IPv6 address, which some resolvers and
+/// NAT64 setups hand back for the same answer.
 pub fn is_block_page(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let [a, b, c, _] = v4.octets();
-            (a, b, c) == (10, 10, 34)
-        }
-        IpAddr::V6(_) => false,
-    }
+    let v4 = match ip {
+        IpAddr::V4(v4) => v4,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4,
+            None => return false,
+        },
+    };
+    let [a, b, c, _] = v4.octets();
+    (a, b, c) == (10, 10, 34)
 }
 
 /// IPv4 first, then IPv6, sharing one deadline. A device with IPv6
@@ -277,6 +284,8 @@ mod tests {
         assert!(is_block_page(IpAddr::V4(Ipv4Addr::new(10, 10, 34, 35))));
         assert!(!is_block_page(IpAddr::V4(Ipv4Addr::new(10, 10, 35, 34))));
         assert!(!is_block_page(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert!(is_block_page(IpAddr::V6(Ipv4Addr::new(10, 10, 34, 34).to_ipv6_mapped())));
+        assert!(!is_block_page(IpAddr::V6(Ipv4Addr::new(10, 10, 35, 34).to_ipv6_mapped())));
     }
 
     /// An address literal resolves without a lookup, so this exercises

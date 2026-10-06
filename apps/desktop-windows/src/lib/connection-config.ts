@@ -247,10 +247,10 @@ export interface RefreshOptions {
 /** The opening words of a failure report, per trigger. Distinct
  * prefixes, so rows can be split by what caused them; the connect's is
  * the wording every earlier build used. */
-const FAILURE_PREFIX: Record<RefreshTrigger, string> = {
-  connect: "pre-connect config refresh failed",
-  resume: "resume config refresh failed",
-  online: "online config refresh failed",
+const TRIGGER_LABEL: Record<RefreshTrigger, string> = {
+  connect: "pre-connect",
+  resume: "resume",
+  online: "online",
 };
 
 /** Fetches the credentials again, unless what is held is still fresh.
@@ -303,7 +303,7 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
       void reportAttempt({
         kind: "CONNECT",
         outcome: "SUCCESS",
-        reason: `${trigger === "connect" ? "pre-connect" : trigger} refresh found changed server parameters: ${drift.join("; ")}`,
+        reason: `${TRIGGER_LABEL[trigger]} refresh found changed server parameters: ${drift.join("; ")}`,
       });
     }
     return { protocolUsers: fresh, source: "network", ageMs: null, drift, sessionExpired: false };
@@ -351,7 +351,7 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
       // rather than naming addresses that were never tried.
       apiEndpoint: [tried === "" ? "none dialled" : tried, probe].filter(Boolean).join("; "),
       reason:
-        `${FAILURE_PREFIX[trigger]} (${detail}) after ${elapsedMs}ms; ${consequence}` +
+        `${TRIGGER_LABEL[trigger]} config refresh failed (${detail}) after ${elapsedMs}ms; ${consequence}` +
         (appState ? `; app showed ${appState}` : "") +
         // Read when the report is made, so it covers the probe too.
         (backgrounded() ? "; app was in the background during it" : ""),
