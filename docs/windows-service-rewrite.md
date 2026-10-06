@@ -404,6 +404,19 @@ failed sign-in or resume refresh, say which trigger and app state a
 refresh failed under and whether the app was backgrounded during it,
 keep throttled reports, and never ship without the endpoint seed.
 
+The probe never holds its report back: the report is sent or queued
+the moment the request fails, as before the probe existed, and the
+answer -- up to twenty seconds later -- is added to the queued entry,
+or sent as a follow-up row (outcome `OTHER`, the original's time) if
+the report has already gone. On iOS a suspended app can be killed
+inside those twenty seconds. Nor does it run across a connect, which
+moves the path it measures: it is not begun while the screen shows
+connecting, verifying or disconnecting, or within a minute of a
+connect starting (`probe: skipped=connect`), and one running when a
+connect starts is abandoned and told to stop -- it begins no new
+lookup, TCP handshake or ClientHello after that
+(`probe: abandoned=connect@<ms>`). Unit-tested only.
+
 **Still unexplained:** why the iOS cohort fails so much more than
 Android. They share the control-plane *code*, but not necessarily what
 was built into it, and that gives the leading candidate — unproven,

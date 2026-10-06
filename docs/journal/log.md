@@ -2839,3 +2839,21 @@ measurements. The probe's
 classes were checked against live TLS from this PC only (ok, cert,
 dns), never from a censored network; the Android/iOS builds of the
 new Rust were not compiled here. All of it waits on a real iPhone.
+
+**After review.** The probe had made a failed sign-in or resume
+refresh wait up to 20s before its report was even queued -- long
+enough, on iOS, for a suspended app to be killed with it. The report
+is made at once again, and the probe's answer follows: added to the
+queued entry, or sent as a follow-up row (`OTHER`, the original's
+time) if the report has already gone. And a resume probe could run
+across a connect, resume being exactly when people press Connect: it
+is now not begun while the screen shows connecting, verifying or
+disconnecting or within a minute of a connect starting, and one
+running when a connect starts is abandoned and cancelled on the Rust
+side (no new lookup, TCP handshake or ClientHello after that) --
+`probe: skipped=connect` / `probe: abandoned=connect@<ms>` say so in
+the report. A long trace is now cut from the middle and keeps the
+probe. All unit tests (vitest, `cargo test` on this PC). The mobile
+Dashboard's two refresh calls have no test of their own: the mobile
+app has no DOM test environment, and the shared refresh they call is
+tested in the desktop suite.
