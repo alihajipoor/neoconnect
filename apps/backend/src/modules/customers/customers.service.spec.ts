@@ -58,7 +58,12 @@ describe("CustomersService", () => {
     $transaction: jest.Mock;
   };
   let agentGateway: { enqueueCommand: jest.Mock };
-  let protocolUsers: { endSessions: jest.Mock; withCustomerLock: jest.Mock };
+  let protocolUsers: {
+    endSessions: jest.Mock;
+    withCustomerLock: jest.Mock;
+    switchOffCustomer: jest.Mock;
+    provisionAll: jest.Mock;
+  };
   let lock: KeyedLock;
   let deviceSlots: ReturnType<typeof deviceSlotsStub>;
 
@@ -99,6 +104,8 @@ describe("CustomersService", () => {
     protocolUsers = {
       endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }),
       withCustomerLock: jest.fn((id: string, work: () => Promise<unknown>) => lock.run(id, work)),
+      switchOffCustomer: jest.fn().mockResolvedValue({ switchedOff: 0, failed: 0 }),
+      provisionAll: jest.fn().mockResolvedValue({ created: [], revoked: [], failed: [] }),
     };
     service = new CustomersService(prisma as any, agentGateway as any, protocolUsers as any, deviceSlots as any);
   });
@@ -208,6 +215,80 @@ describe("CustomersService", () => {
         where: { customerId: "customer-1", revokedAt: null },
         data: { revokedAt: expect.any(Date) },
       });
+    });
+  });
+
+  /** DISABLED is what the panel's Status control sets and what remove()
+   * tells an operator to use to cut someone off. It used to write the
+   * column and nothing else: the app kept refreshing, kept its
+   * credentials, and every one stayed on its node until the subscription
+   * ran out. */
+  describe("update to DISABLED", () => {
+    it("revokes every session and bumps tokenVersion with the status, in one transaction", async () => {
+      const saved = buildCustomer({ status: "DISABLED" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.$transaction.mockResolvedValue([saved, { count: 2 }]);
+
+      await expect(service.update("customer-1", { status: "DISABLED" as any })).resolves.toBe(saved);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.customer.update.mock.calls[0][0].data).toEqual({
+        status: "DISABLED",
+        tokenVersion: { increment: 1 },
+      });
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it("takes the device credentials back, switches the rest off on their nodes, and frees the slots", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.update("customer-1", { status: "DISABLED" as any });
+
+      expect(protocolUsers.endSessions).toHaveBeenCalledWith("customer-1");
+      expect(protocolUsers.switchOffCustomer).toHaveBeenCalledWith("customer-1");
+      expect(deviceSlots.releaseCustomer).toHaveBeenCalledWith("customer-1");
+    });
+
+    it("still disables when the nodes cannot be told yet", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.$transaction.mockResolvedValue([buildCustomer({ status: "DISABLED" }), { count: 0 }]);
+      protocolUsers.endSessions.mockRejectedValue(new Error("database went away"));
+      protocolUsers.switchOffCustomer.mockRejectedValue(new Error("database went away"));
+      jest.spyOn(service["logger"], "error").mockImplementation(() => undefined);
+
+      await expect(service.update("customer-1", { status: "DISABLED" as any })).resolves.toMatchObject({
+        status: "DISABLED",
+      });
+      expect(deviceSlots.releaseCustomer).toHaveBeenCalled();
+    });
+
+    it("does nothing more for an account that is already disabled", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ status: "DISABLED" }));
+
+      await service.update("customer-1", { status: "DISABLED" as any });
+
+      expect(protocolUsers.switchOffCustomer).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    /** Its credentials come back with the re-assert; the routes added
+     * while it was off are provisioned now. */
+    it("provisions an account made ACTIVE again, and switches nothing off", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ status: "DISABLED" }));
+      prisma.customer.update.mockResolvedValue(buildCustomer());
+      prisma.subscription.findMany.mockResolvedValue([{ id: "sub-1" }]);
+
+      await service.update("customer-1", { status: "ACTIVE" as any });
+
+      expect(prisma.subscription.findMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", status: "ACTIVE" },
+        select: { id: true },
+      });
+      expect(protocolUsers.provisionAll).toHaveBeenCalledWith("sub-1");
+      expect(protocolUsers.switchOffCustomer).not.toHaveBeenCalled();
     });
   });
 

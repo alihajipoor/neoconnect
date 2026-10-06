@@ -881,6 +881,16 @@ describe("CustomerAuthService", () => {
   });
 
   describe("refresh", () => {
+    // A disabled account used to go on refreshing for as long as its app
+    // stayed open: nothing here read the status.
+    it("refuses a disabled account even with an unrevoked token", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", tokenVersion: 0, sid: "session-1" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ status: "DISABLED", tokenVersion: 0 }));
+
+      await expect(service.refresh("refresh-token")).rejects.toThrow(/disabled/);
+      expect(jwt.signAsync).not.toHaveBeenCalled();
+    });
+
     it("rejects an invalid refresh token", async () => {
       jwt.verifyAsync.mockRejectedValue(new Error("expired"));
       await expect(service.refresh("garbage")).rejects.toThrow(UnauthorizedException);

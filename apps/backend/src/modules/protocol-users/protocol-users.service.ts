@@ -92,6 +92,15 @@ const SHARED_CREDENTIAL_ONLY: ReadonlySet<Protocol> = new Set<Protocol>(["IKEV2"
  * off on the nodes, as they always have. */
 const UNPAID_SUBSCRIPTION_STATUSES: SubscriptionStatus[] = ["PENDING", "CANCELLED"];
 
+/** Which subscriptions' credentials a customer is handed: none from an
+ * unpaid attempt (above), and none at all once an operator has disabled
+ * the account -- its credentials are off the nodes, and handing them out
+ * would only invite a dial that cannot work. */
+const LISTABLE_SUBSCRIPTION = {
+  status: { notIn: UNPAID_SUBSCRIPTION_STATUSES },
+  customer: { status: "ACTIVE" },
+} satisfies Prisma.SubscriptionWhereInput;
+
 /** Every column of ProtocolUser, named.
  *
  * Unusually for a list projection this narrows nothing today -- the
@@ -214,7 +223,7 @@ export class ProtocolUsersService {
     // signed-in device each, and handing every device's set to a caller
     // that named no device would undo the point of having them.
     const users = await this.prisma.protocolUser.findMany({
-      where: { subscription: { customerId, status: { notIn: UNPAID_SUBSCRIPTION_STATUSES } }, sessionId: null },
+      where: { subscription: { customerId, ...LISTABLE_SUBSCRIPTION }, sessionId: null },
       orderBy: { createdAt: "desc" },
       include: { node: true, protocolConfig: true },
     });
@@ -480,7 +489,7 @@ export class ProtocolUsersService {
   private async deviceView(customerId: string, sessionId: string) {
     const users = await this.prisma.protocolUser.findMany({
       where: {
-        subscription: { customerId, status: { notIn: UNPAID_SUBSCRIPTION_STATUSES } },
+        subscription: { customerId, ...LISTABLE_SUBSCRIPTION },
         OR: [{ sessionId }, { sessionId: null }],
       },
       orderBy: { createdAt: "desc" },
@@ -595,6 +604,53 @@ export class ProtocolUsersService {
         revoked += (await this.removeSessionCredentials(holder.id, customerId)).revoked;
       }
       return { sessions: holders.length, revoked };
+    });
+  }
+
+  /** Takes every credential of a customer the operator has DISABLED off its
+   * node, without touching any row.
+   *
+   * The rows' own status is left exactly as it was, on purpose: that is
+   * what makes re-enabling the account need no code and restore nothing it
+   * should not. A disabled customer's rows drop out of liveCredentialWhere,
+   * so the re-assert stops putting them back; when the customer is ACTIVE
+   * again, the next re-assert (within a minute) puts back exactly the rows
+   * that are still ACTIVE -- and a credential an operator or the quota
+   * switched off on its own stays off. Rewriting the status here instead
+   * would have to guess, on the way back, which rows had been off before.
+   *
+   * Never throws for one row: the rest are still told, and the failure is
+   * logged. Device credentials are not here -- the caller ends the
+   * sessions first, which deletes them (endSessions). */
+  async switchOffCustomer(customerId: string) {
+    return this.customerLock.run(customerId, async () => {
+      const users = await this.prisma.protocolUser.findMany({
+        where: { subscription: { customerId }, status: "ACTIVE" },
+        select: {
+          id: true,
+          nodeId: true,
+          protocol: true,
+          externalUserId: true,
+          protocolConfig: { select: { transport: true, inboundTag: true } },
+        },
+      });
+      let switchedOff = 0;
+      let failed = 0;
+      for (const user of users) {
+        try {
+          await this.agentGateway.enqueueCommand(user.nodeId, "DISABLE_USER", {
+            protocol: user.protocol,
+            ...commandTarget(user.protocolConfig),
+            externalUserId: user.externalUserId,
+          });
+          switchedOff += 1;
+        } catch (err) {
+          failed += 1;
+          const reason = err instanceof Error ? err.message : String(err);
+          this.logger.error(`Could not switch off credential ${user.id} of disabled customer ${customerId}: ${reason}`);
+        }
+      }
+      return { switchedOff, failed };
     });
   }
 
@@ -718,7 +774,10 @@ export class ProtocolUsersService {
       // run uncapped until something happened to re-provision them.
       this.prisma.subscription.findUnique({
         where: { id: dto.subscriptionId },
-        include: { plan: { include: { allowedRoutes: { select: { id: true } } } } },
+        include: {
+          plan: { include: { allowedRoutes: { select: { id: true } } } },
+          customer: { select: { status: true } },
+        },
       }),
       this.prisma.route.findUnique({
         where: { id: dto.routeId },
@@ -743,6 +802,13 @@ export class ProtocolUsersService {
     // backfill) and the admin endpoint free to do exactly that.
     if (subscription.status !== "ACTIVE") {
       throw new BadRequestException("Subscription is not active");
+    }
+    // Nor for an account an operator has disabled (or that deleted
+    // itself): a payment confirmed late, a switch-route, a plan edit must
+    // not hand it a fresh credential that the re-assert would then skip
+    // but the node already holds.
+    if (subscription.customer.status !== "ACTIVE") {
+      throw new BadRequestException("This account is disabled");
     }
 
     // The relay/direct split used to be a rule of its own here, driven
@@ -859,7 +925,10 @@ export class ProtocolUsersService {
   async provisionAll(subscriptionId: string) {
     const subscription = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
-      include: { plan: { include: { allowedRoutes: { select: { id: true } } } } },
+      include: {
+        plan: { include: { allowedRoutes: { select: { id: true } } } },
+        customer: { select: { status: true } },
+      },
     });
     if (!subscription) throw new BadRequestException("Subscription not found");
 
@@ -960,8 +1029,9 @@ export class ProtocolUsersService {
     // subscription used to become a working credential: free, uncapped
     // and never switched off. Such a subscription gains its routes when it
     // is next made ACTIVE -- renewSubscription and setStatus both run this
-    // again then.
-    if (subscription.status !== "ACTIVE") {
+    // again then. The same for an account an operator has disabled: it
+    // catches up at its next renewal or reactivation.
+    if (subscription.status !== "ACTIVE" || subscription.customer.status !== "ACTIVE") {
       return { created: [], revoked, failed: [] };
     }
 
@@ -1057,10 +1127,15 @@ export class ProtocolUsersService {
    */
   async switchRoute(subscriptionId: string, routeId: string, sessionId?: string) {
     const [subscription, route] = await Promise.all([
-      this.prisma.subscription.findUnique({ where: { id: subscriptionId }, include: { plan: true } }),
+      this.prisma.subscription.findUnique({
+        where: { id: subscriptionId },
+        include: { plan: true, customer: { select: { status: true } } },
+      }),
       this.prisma.route.findUnique({ where: { id: routeId }, include: { entryProtocolConfig: true } }),
     ]);
     if (!subscription) throw new BadRequestException("Subscription not found");
+    // A disabled account is handed nothing here, existing or new.
+    if (subscription.customer.status !== "ACTIVE") throw new BadRequestException("This account is disabled");
     if (!route) throw new BadRequestException("Route not found");
     if (!route.isEnabled) throw new BadRequestException("Route is not enabled");
     if (!subscription.plan.protocolsAllowed.includes(route.entryProtocolConfig.protocol)) {

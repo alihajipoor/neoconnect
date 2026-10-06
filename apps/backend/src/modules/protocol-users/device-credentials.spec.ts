@@ -226,7 +226,8 @@ describe("ProtocolUsersService.listForDevice", () => {
     expect(prisma.protocolUser.findMany.mock.calls[0][0].where).toEqual({
       // Never an unpaid checkout's: none should exist, and one minted
       // before provisionAll learned to refuse must not reach a client.
-      subscription: { customerId: CUSTOMER, status: { notIn: ["PENDING", "CANCELLED"] } },
+      // Nor a disabled account's, whose credentials are off the nodes.
+      subscription: { customerId: CUSTOMER, status: { notIn: ["PENDING", "CANCELLED"] }, customer: { status: "ACTIVE" } },
       sessionId: null,
     });
     expect(create).not.toHaveBeenCalled();
@@ -742,6 +743,7 @@ describe("ProtocolUsersService.provisionAll with device credentials", () => {
         findUnique: jest.fn().mockResolvedValue({
           id: "sub-1",
           status: "ACTIVE",
+          customer: { status: "ACTIVE" },
           plan: { name: "Pro", protocolsAllowed: ["XRAY_VLESS_REALITY"], allowedRoutes: allowed.map((id) => ({ id })) },
         }),
       },
@@ -790,6 +792,7 @@ describe("ProtocolUsersService.create for a device", () => {
         findUnique: jest.fn().mockResolvedValue({
           id: "sub-1",
           status: subscriptionStatus,
+          customer: { status: "ACTIVE" },
           plan: { name: "Pro", allowedRoutes: [{ id: "route-wg" }], maxDownloadMbps: null, maxUploadMbps: null },
         }),
       },

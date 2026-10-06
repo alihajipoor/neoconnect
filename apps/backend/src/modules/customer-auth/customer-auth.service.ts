@@ -508,6 +508,12 @@ export class CustomerAuthService {
     if (!customer || customer.tokenVersion !== payload.tokenVersion) {
       throw new UnauthorizedException("Refresh token has been revoked");
     }
+    // Disabling bumps tokenVersion too; this is the backstop for an
+    // account disabled any other way. A disabled account kept refreshing
+    // for as long as its app stayed open.
+    if (customer.status !== "ACTIVE") {
+      throw new UnauthorizedException("This account is disabled");
+    }
 
     // This device's own session, which signing out on this device -- and
     // only this device -- revokes. A token from before sessions existed

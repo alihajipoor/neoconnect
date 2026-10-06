@@ -358,12 +358,17 @@ All on this branch, each with tests:
 
 Low-severity review findings not fixed here, and why:
 
-- **DISABLED accounts keep their credentials.** An admin setting a
-  customer to DISABLED touches no credentials, and `refresh` does not
-  check status. Fixing it means deciding what disabling does to a live
-  tunnel and what re-enabling restores (re-enabling every DISABLED row
-  would also undo per-row admin disables). An owner decision, not a
-  quiet change. Device provisioning already refuses DISABLED accounts.
+- ~~**DISABLED accounts keep their credentials.**~~ Fixed 2026-10-06
+  (claude/review-fixes-backend), in the shape remove()'s own message
+  already promised operators ("set their status to DISABLED instead to
+  revoke access"): disabling revokes every session with the status,
+  takes the device credentials back, sends DISABLE_USER for every shared
+  credential and frees the slots; `refresh` refuses a non-ACTIVE account;
+  switch-route, `create` and provisionAll refuse one. The credential rows
+  keep their own status, and a disabled customer's rows drop out of
+  `liveCredentialWhere` -- so re-enabling restores, at the next
+  re-assert, exactly the rows still ACTIVE, and a per-row admin or quota
+  disable is not undone. Unit-tested only: not yet seen on a node.
 - **OpenVPN revocation lives only in a ccd file.** A node whose ccd
   directory is lost (rebuild, restore) accepts every revoked certificate
   again, with no row behind it. The fix is a revocation table re-asserted

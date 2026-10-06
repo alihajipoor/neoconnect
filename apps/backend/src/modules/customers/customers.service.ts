@@ -122,7 +122,7 @@ export class CustomersService {
    * defeat the reset entirely. Same reason the self-serve reset bumps it.
    */
   async update(id: string, dto: UpdateCustomerDto) {
-    await this.get(id);
+    const current = await this.get(id);
 
     const { password, ...rest } = dto;
     const data: Prisma.CustomerUpdateInput = { ...rest };
@@ -131,8 +131,14 @@ export class CustomersService {
       data.tokenVersion = { increment: 1 };
     }
 
+    const disabling = rest.status === CustomerStatus.DISABLED && current.status !== CustomerStatus.DISABLED;
+    const enabling = rest.status === CustomerStatus.ACTIVE && current.status !== CustomerStatus.ACTIVE;
+    if (disabling) return this.disable(id, data);
+
     if (!password) {
-      return this.prisma.customer.update({ where: { id }, data, select: SAFE_SELECT });
+      const updated = await this.prisma.customer.update({ where: { id }, data, select: SAFE_SELECT });
+      if (enabling) await this.catchUpRoutes(id);
+      return updated;
     }
 
     // The sessions are revoked in the same transaction as the password,
@@ -166,7 +172,89 @@ export class CustomersService {
     // use" to the next device that connects. Every device here -- the
     // admin's request is none of them. Never throws.
     await this.deviceSlots.releaseOtherSessions(id);
+    if (enabling) await this.catchUpRoutes(id);
     return updated;
+  }
+
+  /** Setting a customer to DISABLED, which is what the panel's Status
+   * control and remove()'s refusal both tell an operator to do to cut
+   * someone off.
+   *
+   * It used to write the column and nothing else. The app kept
+   * refreshing its tokens, kept fetching its credentials, could still
+   * switch route and be given new ones, and every credential stayed on its
+   * node -- the 60 s re-assert kept them there -- until the subscription
+   * ran out. Only a new password or social sign-in was refused, so the
+   * panel showed an account as Disabled that still had a working tunnel.
+   *
+   * Now, as a password reset does, every session is revoked with the
+   * status in one transaction (refresh also refuses a non-ACTIVE account),
+   * the device credentials are taken back, every shared credential is
+   * switched off on its node, and the device slots go.
+   *
+   * The credential rows keep their status (see switchOffCustomer). A
+   * disabled customer's rows are not live (liveCredentialWhere), so
+   * setting the account ACTIVE again brings back exactly the ones still
+   * ACTIVE at the next re-assert, within a minute, and a credential the
+   * quota or an operator switched off on its own stays off. */
+  private async disable(id: string, data: Prisma.CustomerUpdateInput) {
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.customer.update({
+        where: { id },
+        data: { ...data, tokenVersion: { increment: 1 } },
+        select: SAFE_SELECT,
+      }),
+      this.prisma.customerSession.updateMany({
+        where: { customerId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+    // Best effort from here, each step on its own: the account is already
+    // disabled and signed out, and what the nodes are not told now the
+    // re-assert no longer puts back -- an engine restart drops it.
+    try {
+      await this.protocolUsers.endSessions(id);
+    } catch (err) {
+      this.logger.error(
+        `Customer ${id} disabled, but their device credentials could not be taken back yet: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    try {
+      const { failed } = await this.protocolUsers.switchOffCustomer(id);
+      if (failed > 0) {
+        this.logger.error(`Customer ${id} disabled, but ${failed} credential(s) could not be switched off yet`);
+      }
+    } catch (err) {
+      this.logger.error(
+        `Customer ${id} disabled, but their credentials could not be switched off: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    await this.deviceSlots.releaseCustomer(id);
+    return updated;
+  }
+
+  /** A customer made ACTIVE again picks up the routes added while it was
+   * disabled (provisionAll adds nothing to a disabled account). Its
+   * existing credentials need nothing: the re-assert restores them. Never
+   * throws -- the status is already written. */
+  private async catchUpRoutes(id: string) {
+    const subscriptions = await this.prisma.subscription.findMany({
+      where: { customerId: id, status: SubscriptionStatus.ACTIVE },
+      select: { id: true },
+    });
+    for (const subscription of subscriptions) {
+      await this.protocolUsers.provisionAll(subscription.id).catch((err: unknown) => {
+        this.logger.error(
+          `Customer ${id} re-enabled, but subscription ${subscription.id} could not be provisioned: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    }
   }
 
   /** Deletes a customer along with everything that exists solely to serve
@@ -204,7 +292,7 @@ export class CustomersService {
     if (settledCount > 0) {
       throw new BadRequestException(
         `Cannot delete this customer -- they have ${settledCount} completed payment(s), which are financial records and must be kept. ` +
-          "Set their status to DISABLED instead to revoke access.",
+          "Set their status to DISABLED instead: that signs them out everywhere and switches off their VPN access.",
       );
     }
 

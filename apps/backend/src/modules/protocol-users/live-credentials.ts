@@ -24,12 +24,17 @@ import type { Prisma } from "@prisma/client";
  *   is for the rows provisionAll used to mint ACTIVE on PENDING,
  *   CANCELLED, EXPIRED and SUSPENDED subscriptions, which this re-assert
  *   then kept putting back every minute.
+ * * Nor is a credential of a customer an operator has DISABLED. Disabling
+ *   takes them off the nodes without rewriting their status (see
+ *   ProtocolUsersService.switchOffCustomer); this is what keeps them off,
+ *   and what brings back exactly the ones still ACTIVE once the customer
+ *   is ACTIVE again.
  *
  * Shared credentials (no session) are always included unless held. */
 export function liveCredentialWhere(now = new Date()): Prisma.ProtocolUserWhereInput {
   return {
     status: "ACTIVE",
-    subscription: { status: "ACTIVE" },
+    subscription: { status: "ACTIVE", customer: { status: "ACTIVE" } },
     AND: [
       { OR: [{ sessionId: null }, { session: { is: { revokedAt: null } } }] },
       { OR: [{ heldUntil: null }, { heldUntil: { lte: now } }] },
