@@ -661,6 +661,15 @@ describe("ProtocolUsersService.sweepDeadSessionCredentials", () => {
     });
   });
 
+  // A device that is gone must not go on showing as "in use".
+  it("frees the device slots of a session it reclaims, and of no other", async () => {
+    const { service, slots } = sweepWorld([{ id: "gone", revokedAt: new Date() }, { id: "used", revokedAt: null }], ["used"]);
+
+    await service.sweepDeadSessionCredentials();
+
+    expect(slots.releaseSession.mock.calls).toEqual([[CUSTOMER, "gone"]]);
+  });
+
   // A refresh token dies after a week, but a device goes on connecting
   // with what it holds -- an always-on tunnel, or a filtered control
   // plane. Traffic is use.

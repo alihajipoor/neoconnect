@@ -361,9 +361,12 @@ poll).
   with a fallback to the backend's memory if Redis cannot answer -- one
   backend instance, as elsewhere.
 - A slot is freed by: release; sign-out of that device; a password
-  change or reset (every other device); the device cap evicting that
-  device; suspension or expiry of the subscription; deleting the
-  account; or 90 s of silence.
+  change or reset (every other device); an admin setting the password
+  (every device); the device cap evicting that device; the hourly sweep
+  of signed-out and long-idle sessions; suspension or expiry of the
+  subscription; deleting the account; or 90 s of silence. Whatever path
+  signed a device out, a holder whose session is revoked or gone is
+  never counted -- a refusal never names a device that cannot connect.
 - `DEVICE_SLOTS=enforce` (default) or `off` (every claim granted,
   nothing recorded). Empty means the default. Only apps that claim are
   affected, so the switch is safe to leave on before any app ships it.

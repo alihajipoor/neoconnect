@@ -41,6 +41,9 @@ function build(opts: { limit?: number | null; status?: string; sessions?: Record
         Object.assign(sessions[where.id], data);
         return { count: 1 };
       }),
+      findMany: jest.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
+        where.id.in.filter((id) => sessions[id]).map((id) => ({ id, revokedAt: sessions[id].revokedAt })),
+      ),
     },
     subscription: {
       findFirst: jest.fn(async ({ where }: { where: { id: string; customerId: string } }) =>
@@ -297,6 +300,20 @@ describe("DeviceSlotsService", () => {
     await release(service);
 
     await expect(service.claim(as(PHONE), { subscriptionId: SUB }, android)).resolves.toMatchObject({ granted: true });
+  });
+
+  /** A path that signs devices out without releasing their slots -- an
+   * admin setting the password, the hourly sweep, a release that failed
+   * -- must not leave the customer refused in favour of a device that
+   * can no longer connect at all. */
+  it("does not count a holder whose device has been signed out, and does not shield it from the backstop", async () => {
+    const { service, sessions } = build();
+    await service.claim(as(PC), { subscriptionId: SUB, protocolUserId: "shared-1" }, windows);
+    sessions[PC].revokedAt = new Date();
+
+    expect(await service.state(SUB)).toMatchObject({ holders: new Set(), live: new Set(), credit: new Map() });
+    await expect(service.claim(as(PHONE), { subscriptionId: SUB }, android)).resolves.toMatchObject({ granted: true });
+    expect([...(await service.state(SUB)).holders]).toEqual([`s:${PHONE}`]);
   });
 
   it("lets as many devices in as the plan allows, and refuses the next", async () => {

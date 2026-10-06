@@ -39,6 +39,9 @@ describe("device slots over HTTP", () => {
           Object.assign(sessions[where.id], data);
           return { count: 1 };
         }),
+        findMany: jest.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
+          where.id.in.filter((id) => sessions[id]).map((id) => ({ id, revokedAt: sessions[id].revokedAt })),
+        ),
       },
       subscription: {
         findFirst: jest.fn(async ({ where }: { where: { id: string } }) =>

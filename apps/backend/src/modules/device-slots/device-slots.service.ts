@@ -253,8 +253,10 @@ export class DeviceSlotsService {
         return this.granted(subscription.id, limit, handle);
       }
 
-      const seen = await this.lastSeen(subscription.id, holders, now);
-      const live = holders.filter((h) => now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS);
+      const [seen, gone] = await Promise.all([this.lastSeen(subscription.id, holders, now), this.signedOut(holders)]);
+      const live = holders.filter(
+        (h) => !gone.has(h.sessionId) && now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS,
+      );
       const stale = holders.filter((h) => !live.includes(h));
 
       // Only as many as it takes to make room, from those named: the
@@ -359,8 +361,10 @@ export class DeviceSlotsService {
 
       // Lapsed while quiet (or forgotten, if Redis was lost): back in if
       // there is room, as a claim without takeover would be.
-      const seen = await this.lastSeen(subscription.id, holders, now);
-      const live = holders.filter((h) => now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS);
+      const [seen, gone] = await Promise.all([this.lastSeen(subscription.id, holders, now), this.signedOut(holders)]);
+      const live = holders.filter(
+        (h) => !gone.has(h.sessionId) && now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS,
+      );
       if (live.length < limit) {
         const handle = newHandle();
         await this.store.hdel(
@@ -470,10 +474,14 @@ export class DeviceSlotsService {
     const empty: SlotState = { holders: new Set(), live: new Set(), displaced: new Map(), credit: new Map() };
     if (deviceSlotsMode() === "off") return empty;
     const now = Date.now();
-    const [holders, displacedRaw] = await Promise.all([
+    const [all, displacedRaw] = await Promise.all([
       this.holders(subscriptionId),
       this.store.hgetall(displacedKey(subscriptionId)),
     ]);
+    // A signed-out device protects nothing, and lends its credit to no
+    // shared credential.
+    const gone = await this.signedOut(all);
+    const holders = all.filter((h) => !gone.has(h.sessionId));
     for (const h of holders) {
       empty.holders.add(deviceKeyOf(h.sessionId));
       if (now - h.lastRenew <= STALE_MS) empty.live.add(deviceKeyOf(h.sessionId));
@@ -538,6 +546,22 @@ export class DeviceSlotsService {
     return Object.values(raw)
       .map((value) => parse<Holder>(value))
       .filter((h): h is Holder => h !== null && typeof h.sessionId === "string");
+  }
+
+  /** Which of these holders' devices are signed out: session revoked, or
+   * gone. Sign-out frees a device's slots itself, but not every path that
+   * ends sessions did (an admin setting a password, the hourly sweep),
+   * and a release that fails leaves the slot behind; a signed-out device
+   * must never be the one a refusal names. */
+  private async signedOut(holders: Holder[]): Promise<Set<string>> {
+    if (holders.length === 0) return new Set();
+    const ids = holders.map((h) => h.sessionId);
+    const rows = await this.prisma.customerSession.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, revokedAt: true },
+    });
+    const live = new Set(rows.filter((r) => r.revokedAt === null).map((r) => r.id));
+    return new Set(ids.filter((id) => !live.has(id)));
   }
 
   private async writeHolder(subscriptionId: string, holder: Holder) {

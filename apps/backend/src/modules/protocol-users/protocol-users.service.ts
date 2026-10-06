@@ -630,6 +630,9 @@ export class ProtocolUsersService {
             if (recent) continue;
           }
           const result = await this.revokeSessionCredentials(session.customerId, session.id);
+          // A device that is gone holds no slot either: it must not show
+          // as "in use" to the customer's next device. Never throws.
+          await this.deviceSlots.releaseSession(session.customerId, session.id);
           revoked += result.revoked;
           failed += result.failed;
           sessions += 1;

@@ -166,6 +166,21 @@ describe("CustomersService", () => {
       expect(protocolUsers.endSessions).toHaveBeenCalledWith("customer-1");
     });
 
+    /** Without this a device the admin had just signed out went on showing
+     * as "in use" to the customer's next device -- a refusal naming a PC
+     * that could no longer connect. Every device's slot goes: the admin's
+     * request is none of them. */
+    it("frees every device's slot when it sets a password, and not otherwise", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer());
+
+      await service.update("customer-1", { status: "SUSPENDED" as any });
+      expect(deviceSlots.releaseOtherSessions).not.toHaveBeenCalled();
+
+      await service.update("customer-1", { password: "a-new-password" } as any);
+      expect(deviceSlots.releaseOtherSessions).toHaveBeenCalledWith("customer-1");
+    });
+
     // Written with the password, so a failure taking the credentials back
     // cannot leave the sessions live as well.
     it("revokes the sessions in the same transaction as the password, and survives the credential step failing", async () => {
