@@ -812,10 +812,15 @@ ensure_fallback_site() {
       "        set \$neoxify_panel ${mirror_host};" \
       "        proxy_pass ${panel_scheme}://\$neoxify_panel\$request_uri;" \
       "        proxy_set_header Host \$neoxify_panel;" \
-      "        # The panel rate-limits per client address, so the real" \
-      "        # one has to survive the hop -- otherwise every customer" \
-      "        # arriving through this node looks like one very busy" \
-      "        # client and they throttle each other." \
+      "        # The client's address, passed along -- but the panel does" \
+      "        # not key its rate limits or its login guard on it. It" \
+      "        # trusts one proxy hop, its own nginx, so every customer" \
+      "        # arriving through this mirror counts as this node's" \
+      "        # address and they all share one sign-in budget, which one" \
+      "        # client can exhaust for everyone (2026-10-06 review)." \
+      "        # Honouring this header needs the hop authenticated first:" \
+      "        # any tunnel user leaves from this node's address too, and" \
+      "        # could forge it." \
       "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" \
       "        proxy_set_header X-Forwarded-Proto https;" \
       "        proxy_ssl_server_name on;" \
