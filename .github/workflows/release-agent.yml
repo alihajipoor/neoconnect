@@ -57,11 +57,20 @@ jobs:
         working-directory: agent/bin
         run: sha256sum agentd-linux-amd64 agentd-linux-arm64 > sha256sums.txt
 
+      # Published to the releases repository, where the installer's
+      # download URL points -- this repository is private, so its release
+      # assets 404 for a node fetching them without credentials. Same
+      # token as release-desktop-windows.yml. Generated notes are off
+      # because that repository holds no commits to generate them from
+      # (the API answers 403). Until 2026-10-06 agent releases were
+      # copied across by hand.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          repository: alihajipoor/neoxify-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
           files: |
             agent/bin/agentd-linux-amd64
             agent/bin/agentd-linux-arm64
             agent/bin/sha256sums.txt
-          generate_release_notes: true
+          generate_release_notes: false
