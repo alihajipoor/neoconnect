@@ -563,6 +563,14 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "state");
+        // No session and no drop on record, so this came from the
+        // fallback's looks at Windows. Whatever they found, they did not
+        // prove that nothing is running: `Down` is what the app reads as
+        // a tunnel that ended, and it must not be given here.
+        assert_ne!(parsed["health"]["state"], "down", "the fallback's guess was given as a verified answer: {parsed}");
+        if parsed["connected"] == false {
+            assert_eq!(parsed["health"]["state"], "unknown", "{parsed}");
+        }
     }
 
     #[tokio::test]
@@ -1048,6 +1056,13 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>, ledger: &Ledg
                     // A failed join is a question nobody answered, and is
                     // reported as one: never as "disconnected", which
                     // would be a tunnel state nothing verified.
+                    //
+                    // And a tunnel it cannot see comes back with health
+                    // `Unknown`, not `Down`: the fallback's looks are an
+                    // adapter's presence and, for IKEv2, PowerShell, and
+                    // both say "nothing" while a Custom-mode rebuild has
+                    // the adapter down or PowerShell fails. The app tells
+                    // a customer their connection was lost only on `Down`.
                     let Ok((connected, protocol, health)) =
                         tokio::task::spawn_blocking(crate::engines::os_visible_tunnel).await
                     else {

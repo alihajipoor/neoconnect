@@ -1742,18 +1742,27 @@ impl Engines {
             None => {
                 if wireguard::tunnel_is_running() {
                     Verdict::Reported(true, Some("WIREGUARD".to_string()), TunnelHealth::Unknown)
-                } else if ikev2::is_connected() {
-                    Verdict::Reported(true, Some("IKEV2".to_string()), TunnelHealth::Unknown)
                 } else {
-                    // Nothing tracked and nothing running. Not answered
-                    // here: `NothingTracked` below still takes the idle
-                    // steps -- Custom mode stopped, the IPv6 block
-                    // released, the NRPT rule cleared, the janitor run --
-                    // because an untracked slot is exactly the shape the
-                    // field bug left behind, and a redirect loop may well
-                    // be running underneath it. Stopping one that is not
-                    // there costs nothing.
-                    Verdict::NothingTracked
+                    match ikev2::connection_state() {
+                        Some(true) => Verdict::Reported(true, Some("IKEV2".to_string()), TunnelHealth::Unknown),
+                        // Nothing tracked and nothing running. Not answered
+                        // here: `NothingTracked` below still takes the idle
+                        // steps -- Custom mode stopped, the IPv6 block
+                        // released, the NRPT rule cleared, the janitor run --
+                        // because an untracked slot is exactly the shape the
+                        // field bug left behind, and a redirect loop may well
+                        // be running underneath it. Stopping one that is not
+                        // there costs nothing.
+                        //
+                        // `Down` only when Windows answered. A PowerShell
+                        // that failed says nothing about an IKEv2 tunnel this
+                        // service did not start -- one left up across a
+                        // service restart, which the app may be showing --
+                        // and `Down` is what the app reads as that tunnel
+                        // having ended. See `os_visible_tunnel`.
+                        Some(false) => Verdict::NothingTracked(TunnelHealth::Down),
+                        None => Verdict::NothingTracked(TunnelHealth::Unknown),
+                    }
                 }
             }
             Some(Active::Ikev2(live)) => {
@@ -1865,7 +1874,7 @@ impl Engines {
             // Nothing was tracked and nothing is running. Unchanged from
             // before the engine watch: this is the idle answer, and the
             // steps below are the ones it has always taken.
-            Verdict::NothingTracked => {
+            Verdict::NothingTracked(health) => {
                 if let Some(Active::Ikev2(_)) = self.end_session() {
                     // The phonebook entry outlives the tunnel, and
                     // somebody who is no longer connected must not be
@@ -1902,7 +1911,7 @@ impl Engines {
                 // every lookup off the tunnel adapter.
                 janitor::reconcile(&self.exe_dir);
 
-                (false, None, TunnelHealth::Down)
+                (false, None, health)
             }
         }
     }
@@ -1917,8 +1926,10 @@ enum Verdict {
     WireguardUp,
     /// Whatever this session was built on is no longer running.
     Dead,
-    /// No session, and nothing of ours visible on the machine.
-    NothingTracked,
+    /// No session, and nothing of ours visible on the machine. With the
+    /// health to report: `Down` when every question was answered,
+    /// `Unknown` when one was not.
+    NothingTracked(TunnelHealth),
 }
 
 /// What the operating system says is tunnelling right now, asked
@@ -1938,7 +1949,8 @@ enum Verdict {
 /// here: what it loses against the locked answer is the WireGuard
 /// handshake age and which of the Xray protocols an adapter belongs to,
 /// neither of which an adapter can be asked. Those are reported as
-/// unknown rather than guessed.
+/// unknown rather than guessed -- and so is the health of a tunnel it
+/// cannot see, for the reason given at the end.
 pub fn os_visible_tunnel() -> (bool, Option<String>, TunnelHealth) {
     // Cheapest first, and in the order that matters: the two that
     // outlive this process -- a WireGuard tunnel service and a RAS
@@ -1956,7 +1968,18 @@ pub fn os_visible_tunnel() -> (bool, Option<String>, TunnelHealth) {
     if ikev2::is_connected() {
         return (true, Some("IKEV2".to_string()), TunnelHealth::Unknown);
     }
-    (false, None, TunnelHealth::Down)
+    // Nothing visible is not the same as nothing running, so this says
+    // `Unknown`, not `Down` -- which the IPC defines as "nothing is
+    // running", and which `Engines::status` and the ledger give from the
+    // engine itself. None of the looks above is that. An Xray adapter is
+    // briefly absent while a Custom-mode rebuild holds the owning thread;
+    // `ikev2::is_connected` answers false when PowerShell fails or times
+    // out. The app reads `connected: false` with `Down` as the tunnel
+    // ended and with `Unknown` as a question nobody could answer, and only
+    // the first is grounds to tell a customer their connection was lost.
+    // Shipped apps read every `connected: false` the same way whatever the
+    // health says, so to them nothing changes.
+    (false, None, TunnelHealth::Unknown)
 }
 
 /// The network adapter a given protocol's engine creates.
