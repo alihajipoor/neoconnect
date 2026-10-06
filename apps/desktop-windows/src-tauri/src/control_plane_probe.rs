@@ -356,6 +356,36 @@ mod tests {
         assert_eq!(classify_tls_error(&io::Error::from(io::ErrorKind::WouldBlock)), "tls-timeout");
     }
 
+    /// Against real servers, by hand:
+    ///
+    /// ```text
+    /// NEOXIFY_PROBE_LIVE=host:port,host:port \
+    ///   cargo test -p neoconnect-desktop --lib live_probe -- --ignored --nocapture
+    /// ```
+    ///
+    /// Ignored because its answer depends on the network it runs on. The
+    /// names come from the environment so that none is committed
+    /// (docs/node-address-hygiene.md).
+    #[test]
+    #[ignore]
+    fn live_probe() {
+        let targets: Vec<ProbeTarget> = std::env::var("NEOXIFY_PROBE_LIVE")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|t| {
+                let (host, port) = t.trim().rsplit_once(':')?;
+                Some(ProbeTarget {
+                    host: host.to_owned(),
+                    port: port.parse().ok()?,
+                })
+            })
+            .collect();
+        assert!(!targets.is_empty(), "set NEOXIFY_PROBE_LIVE=host:port,...");
+        for (target, result) in targets.iter().zip(probe_all(targets.clone(), LIMITS)) {
+            println!("{}:{} -> {} in {}ms", target.host, target.port, result.outcome, result.ms);
+        }
+    }
+
     /// Answers line up with questions, and there is a ceiling on how many
     /// sockets one call can open.
     #[test]
