@@ -10,6 +10,7 @@ import { CreateProtocolUserDto } from "./dto/create-protocol-user.dto";
 import { rateLimitFor } from "./rate-limit";
 import { generateCredentials } from "./generate-credentials";
 import { KeyedLock } from "./keyed-lock";
+import { commandTarget, deleteUserPayload } from "./command-target";
 
 /** How many signed-in devices of one customer may hold credentials of
  * their own at once. See `enforceDeviceLimit`.
@@ -455,7 +456,7 @@ export class ProtocolUsersService {
       // The config comes along so remove/setEnabled can name the same
       // listener create() used. Without it they send only the protocol,
       // which stopped identifying an inbound once one node could serve
-      // the same protocol on two of them -- see targetInbound below.
+      // the same protocol on two of them -- see command-target.ts.
       include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
     });
     if (!user) {
@@ -558,8 +559,7 @@ export class ProtocolUsersService {
       // once, on the same port and certificate. Without this the agent
       // would add every WS customer to the TCP inbound, handing them a
       // credential that looks correct and never connects.
-      transport: protocolConfig.transport,
-      ...targetInbound(protocolConfig),
+      ...commandTarget(protocolConfig),
       externalUserId,
       credentials,
       ...rateLimitFor(subscription.plan, protocolConfig.protocol),
@@ -796,12 +796,7 @@ export class ProtocolUsersService {
   async remove(id: string) {
     const user = await this.getRaw(id);
 
-    await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", {
-      protocol: user.protocol,
-      transport: user.protocolConfig.transport,
-      ...targetInbound(user.protocolConfig),
-      externalUserId: user.externalUserId,
-    });
+    await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
 
     await this.prisma.protocolUser.delete({ where: { id } });
   }
@@ -815,16 +810,14 @@ export class ProtocolUsersService {
       const credentials = decryptCredentials(user.credentialsJson);
       await this.agentGateway.enqueueCommand(user.nodeId, "ENABLE_USER", {
         protocol: user.protocol,
-        transport: user.protocolConfig.transport,
-        ...targetInbound(user.protocolConfig),
+        ...commandTarget(user.protocolConfig),
         externalUserId: user.externalUserId,
         credentials,
       });
     } else {
       await this.agentGateway.enqueueCommand(user.nodeId, "DISABLE_USER", {
         protocol: user.protocol,
-        transport: user.protocolConfig.transport,
-        ...targetInbound(user.protocolConfig),
+        ...commandTarget(user.protocolConfig),
         externalUserId: user.externalUserId,
       });
     }
@@ -871,25 +864,6 @@ function withDecryptedCredentials<T extends { credentialsJson: string }>(
  * app then had a credential set with no server address and failed at the
  * point of connecting, well away from the cause. Keeping one builder
  * means a new customer-facing endpoint can't quietly reintroduce that. */
-/** Names the exact Xray inbound a command targets, when the config says
- * which one.
- *
- * Omitted entirely when null so the payload is byte-identical to what
- * every non-relay node has always received -- the agent reads an absent
- * tag as "the inbound you were started with", which is what every
- * existing config relies on.
- *
- * This matters most on the commands that are not create(). A relay runs
- * one inbound per exit, so removing or disabling a customer without
- * naming the inbound would act on the wrong listener: the credential
- * would keep working on the inbound it actually lives on, which for a
- * quota suspension or an account deletion means the customer is not
- * actually cut off.
- */
-function targetInbound(protocolConfig: { inboundTag: string | null }): { inboundTag?: string } {
-  return protocolConfig.inboundTag ? { inboundTag: protocolConfig.inboundTag } : {};
-}
-
 /** The publicParamsJson keys a client legitimately needs, per protocol.
  *
  * A whitelist rather than a blocklist, and deliberately so: this object

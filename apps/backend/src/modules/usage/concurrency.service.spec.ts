@@ -30,14 +30,25 @@ describe("ConcurrencyService", () => {
     const users = credentials(opts.protocols ?? ["XRAY_VLESS_REALITY"]).map((u) => ({
       ...u,
       status: opts.status ?? "ACTIVE",
+      protocolConfig: { transport: "TCP", inboundTag: null as string | null },
     }));
+    const subscription = { status: "ACTIVE" };
 
     const prisma = {
       protocolUser: {
         findFirst: jest.fn(({ where }: { where: { externalUserId: string } }) =>
           Promise.resolve(users.find((u) => u.externalUserId === where.externalUserId) ?? null),
         ),
-        findMany: jest.fn().mockResolvedValue(users.filter((u) => u.status === "ACTIVE")),
+        // The current rows, every time: the restore must re-read them, so a
+        // row deleted or switched off since the cut must not come back.
+        findMany: jest.fn(({ where }: { where: { id?: { in: string[] }; subscription?: { status: string } } }) =>
+          Promise.resolve(
+            users
+              .filter((u) => u.status === "ACTIVE")
+              .filter((u) => !where.id || where.id.in.includes(u.id))
+              .filter(() => !where.subscription || where.subscription.status === subscription.status),
+          ),
+        ),
       },
       subscription: {
         findUnique: jest
@@ -75,7 +86,7 @@ describe("ConcurrencyService", () => {
       agentGateway as unknown as AgentGatewayService,
       store as unknown as ConcurrencyStore,
     );
-    return { service, prisma, agentGateway, store };
+    return { service, prisma, agentGateway, store, users, subscription };
   }
 
   /** One polling cycle.
@@ -128,8 +139,63 @@ describe("ConcurrencyService", () => {
     await poll(service, "node-1", over(3));
     expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "DISABLE_USER", {
       protocol: "XRAY_VLESS_REALITY",
+      transport: "TCP",
       externalUserId: "ext-0",
     });
+  });
+
+  // Untargeted, the cut landed on the node's default inbound and missed
+  // every WebSocket and relay customer.
+  it("aims the cut and the restore at the credential's own inbound", async () => {
+    const { service, agentGateway, users } = build({ limit: 1 });
+    users[0].protocolConfig = { transport: "WS", inboundTag: "vless-ws-in-fr" };
+
+    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(4));
+    await jest.advanceTimersByTimeAsync(61_000);
+
+    const payloads = agentGateway.enqueueCommand.mock.calls.map((c) => [c[1], c[2]]);
+    expect(payloads).toContainEqual([
+      "DISABLE_USER",
+      { protocol: "XRAY_VLESS_REALITY", transport: "WS", inboundTag: "vless-ws-in-fr", externalUserId: "ext-0" },
+    ]);
+    expect(payloads).toContainEqual([
+      "ENABLE_USER",
+      expect.objectContaining({ transport: "WS", inboundTag: "vless-ws-in-fr", externalUserId: "ext-0" }),
+    ]);
+  });
+
+  /** The cut used to replay the list it captured. A phone signed out
+   * during the cooldown -- the natural thing to do after being cut off --
+   * had its rows deleted and DELETE_USER sent, and then the replayed
+   * ENABLE_USER put its credential back on every node with no row behind
+   * it: unmetered, outside the limit, and on OpenVPN valid forever. */
+  it("does not bring back a credential revoked during the cooldown", async () => {
+    const { service, agentGateway, users } = build({
+      limit: 1,
+      protocols: ["XRAY_VLESS_REALITY", "OPENVPN"],
+    });
+
+    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(4));
+    expect(disables(agentGateway.enqueueCommand)).toHaveLength(2);
+
+    // Signed out on the phone: its row is gone.
+    users.splice(1, 1);
+    await jest.advanceTimersByTimeAsync(61_000);
+
+    const restored = agentGateway.enqueueCommand.mock.calls
+      .filter((c) => c[1] === "ENABLE_USER")
+      .map((c) => (c[2] as { externalUserId: string }).externalUserId);
+    expect(restored).toEqual(["ext-0"]);
+  });
+
+  it("does not undo a suspension that landed during the cooldown", async () => {
+    const { service, agentGateway, subscription } = build({ limit: 1 });
+
+    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(4));
+    subscription.status = "SUSPENDED";
+    await jest.advanceTimersByTimeAsync(61_000);
+
+    expect(agentGateway.enqueueCommand.mock.calls.filter((c) => c[1] === "ENABLE_USER")).toHaveLength(0);
   });
 
   it("forgets earlier strikes once a user is back within the limit", async () => {

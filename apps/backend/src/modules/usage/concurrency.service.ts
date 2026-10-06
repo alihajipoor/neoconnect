@@ -3,6 +3,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { ConcurrencyStore } from "./concurrency-store";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
+import { commandTarget } from "../protocol-users/command-target";
 
 export interface SessionCountInput {
   externalUserId: string;
@@ -193,6 +194,10 @@ export class ConcurrencyService implements OnModuleDestroy {
     // protocol they already hold -- the same hole one step along.
     const users = await this.prisma.protocolUser.findMany({
       where: { subscriptionId, status: 'ACTIVE' },
+      // The inbound, so the cut lands where the credential lives: an
+      // untargeted DISABLE_USER missed every WebSocket and relay customer
+      // (see command-target.ts).
+      include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
     });
 
     this.logger.warn(
@@ -208,6 +213,7 @@ export class ConcurrencyService implements OnModuleDestroy {
     for (const user of users) {
       await this.agentGateway.enqueueCommand(user.nodeId, 'DISABLE_USER', {
         protocol: user.protocol,
+        ...commandTarget(user.protocolConfig),
         externalUserId: user.externalUserId,
       });
     }
@@ -220,22 +226,49 @@ export class ConcurrencyService implements OnModuleDestroy {
     // If this process restarts mid-cooldown the timer is lost, and the
     // periodic re-assert restores the users on its next pass instead.
     // Later than intended, but never permanent.
+    const ids = users.map((u) => u.id);
     const timer = setTimeout(() => {
       this.pendingReenables.delete(key);
-      for (const user of users) {
-        this.agentGateway
-          .enqueueCommand(user.nodeId, 'ENABLE_USER', {
-            protocol: user.protocol,
-            externalUserId: user.externalUserId,
-            credentials: decryptCredentials(user.credentialsJson),
-          })
-          .catch((err) => this.logger.error(`Failed to restore ${user.externalUserId}: ${err}`));
-      }
+      this.restoreAfterCooldown(subscriptionId, ids).catch((err) =>
+        this.logger.error(`Cooldown restore for subscription ${subscriptionId} failed: ${err}`),
+      );
     }, COOLDOWN_MS);
     // Unref'd so a pending re-enable can't keep the process alive during
     // a shutdown.
     timer.unref?.();
     this.pendingReenables.set(key, timer);
+  }
+
+  /** Puts back what the cut took, as it is NOW -- never the list taken
+   * at the cut.
+   *
+   * Replaying that list re-created credentials the customer had revoked
+   * in the meantime. Signing out on the phone that was just cut off is
+   * the obvious thing to do, and it deletes the phone's rows and sends
+   * DELETE_USER; a replayed ENABLE_USER then put the phone's credential
+   * back on every node with no row behind it -- unmetered, outside the
+   * limit, beyond expiry, and on OpenVPN valid indefinitely, since
+   * CreateUser removes the ccd disable file. The same for a password
+   * change, a device eviction, the sweep, a plan revoking a route, and a
+   * quota or expiry suspension landing inside the window.
+   *
+   * So: only rows that still exist, are still ACTIVE, and whose
+   * subscription is still ACTIVE. */
+  private async restoreAfterCooldown(subscriptionId: string, ids: string[]) {
+    const live = await this.prisma.protocolUser.findMany({
+      where: { id: { in: ids }, status: 'ACTIVE', subscription: { status: 'ACTIVE' } },
+      include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
+    });
+    for (const user of live) {
+      await this.agentGateway
+        .enqueueCommand(user.nodeId, 'ENABLE_USER', {
+          protocol: user.protocol,
+          ...commandTarget(user.protocolConfig),
+          externalUserId: user.externalUserId,
+          credentials: decryptCredentials(user.credentialsJson),
+        })
+        .catch((err) => this.logger.error(`Failed to restore ${user.externalUserId} (${subscriptionId}): ${err}`));
+    }
   }
 
   onModuleDestroy() {

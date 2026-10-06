@@ -6,6 +6,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
+import { deleteUserPayload } from "../protocol-users/command-target";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
 import { UpdateCustomerDto } from "./dto/update-customer.dto";
 
@@ -20,6 +21,18 @@ const SAFE_SELECT = {
   createdAt: true,
   updatedAt: true,
 } as const;
+
+/** What deleting an account needs of each credential: where it lives,
+ * who it is, which inbound it is on, and (for WireGuard) its address --
+ * see deleteUserPayload. */
+const DELETION_SELECT = {
+  id: true,
+  nodeId: true,
+  protocol: true,
+  externalUserId: true,
+  credentialsJson: true,
+  protocolConfig: { select: { transport: true, inboundTag: true } },
+} satisfies Prisma.ProtocolUserSelect;
 
 @Injectable()
 export class CustomersService {
@@ -165,17 +178,17 @@ export class CustomersService {
 
     const protocolUsers = await this.prisma.protocolUser.findMany({
       where: { subscription: { customerId: id } },
-      select: { id: true, nodeId: true, protocol: true, externalUserId: true },
+      select: DELETION_SELECT,
     });
 
     // Tell each node to drop the user before the row disappears --
     // otherwise the credential keeps working on the engine while the
-    // panel believes the customer is gone.
+    // panel believes the customer is gone. Aimed at the user's own
+    // inbound (see command-target.ts): untargeted, a WebSocket or relay
+    // customer's delete landed on the default inbound and was acked
+    // while their credential went on working.
     for (const user of protocolUsers) {
-      await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", {
-        protocol: user.protocol,
-        externalUserId: user.externalUserId,
-      });
+      await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
     }
 
     // Ordered by dependency, innermost first. Invoices and payment
@@ -236,14 +249,11 @@ export class CustomersService {
     // node but the first.
     const protocolUsers = await this.prisma.protocolUser.findMany({
       where: { subscription: { customerId: id } },
-      select: { nodeId: true, protocol: true, externalUserId: true },
+      select: DELETION_SELECT,
     });
 
     for (const user of protocolUsers) {
-      await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", {
-        protocol: user.protocol,
-        externalUserId: user.externalUserId,
-      });
+      await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
     }
 
     // Unique, so it cannot collide with a real address or with another

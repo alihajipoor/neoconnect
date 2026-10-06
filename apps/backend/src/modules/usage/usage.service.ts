@@ -5,6 +5,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { EmailService } from "../email/email.service";
 import { lowDataWarningEmail, expiringSoonEmail, toLocale } from "../email/templates";
+import { commandTarget } from "../protocol-users/command-target";
 
 export interface UsageDeltaInput {
   externalUserId: string;
@@ -137,10 +138,17 @@ export class UsageService {
   }
 
   private async disableProtocolUsers(subscriptionId: string) {
-    const users = await this.prisma.protocolUser.findMany({ where: { subscriptionId, status: "ACTIVE" } });
+    const users = await this.prisma.protocolUser.findMany({
+      where: { subscriptionId, status: "ACTIVE" },
+      // For the inbound. Untargeted, a suspension of a WebSocket or relay
+      // customer landed on the default inbound, was acked, and left the
+      // credential working -- see command-target.ts.
+      include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
+    });
     for (const user of users) {
       await this.agentGateway.enqueueCommand(user.nodeId, "DISABLE_USER", {
         protocol: user.protocol,
+        ...commandTarget(user.protocolConfig),
         externalUserId: user.externalUserId,
       });
       await this.prisma.protocolUser.update({ where: { id: user.id }, data: { status: "DISABLED" } });

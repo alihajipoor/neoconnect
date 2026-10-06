@@ -5,6 +5,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { generateCredentials } from "../protocol-users/generate-credentials";
+import { commandTarget } from "../protocol-users/command-target";
 import { CreateRouteDto } from "./dto/create-route.dto";
 import { exitHandleMinter } from "./exit-handle";
 
@@ -395,6 +396,10 @@ export class RoutesService {
       });
       await this.agentGateway.enqueueCommand(exitProtocolConfig.nodeId, "DELETE_USER", {
         protocol: exitProtocolConfig.protocol,
+        // The same listener create() put the uplink on; without it a
+        // relay whose exit runs two inbounds of one protocol would have
+        // the uplink removed from the wrong one, acked, and left live.
+        ...commandTarget(exitProtocolConfig),
         externalUserId: `route:${route.id}`,
       });
 

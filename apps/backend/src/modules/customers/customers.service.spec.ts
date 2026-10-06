@@ -1,6 +1,7 @@
 import { ConflictException, NotFoundException } from "@nestjs/common";
 import * as argon2 from "argon2";
 import { CustomersService } from "./customers.service";
+import { encryptCredentials } from "../protocol-users/credentials-crypto";
 
 function buildCustomer(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -165,15 +166,57 @@ describe("CustomersService", () => {
       // working on the engine while the panel shows the customer gone.
       prisma.customer.findUnique.mockResolvedValue(buildCustomer());
       prisma.protocolUser.findMany.mockResolvedValue([
-        { id: "pu-1", nodeId: "node-1", protocol: "WIREGUARD", externalUserId: "peer-key" },
+        {
+          id: "pu-1",
+          nodeId: "node-1",
+          protocol: "WIREGUARD",
+          externalUserId: "peer-key",
+          credentialsJson: encryptCredentials({ privateKey: "secret", address: "10.66.0.9/32" }),
+          protocolConfig: { transport: "TCP", inboundTag: null },
+        },
       ]);
 
       await service.remove("customer-1");
 
+      // The address travels so the node can clear the peer's speed cap;
+      // the private key never does.
       expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "DELETE_USER", {
         protocol: "WIREGUARD",
+        transport: "TCP",
         externalUserId: "peer-key",
+        credentials: { address: "10.66.0.9/32" },
       });
+    });
+
+    // Untargeted, a delete for a WebSocket or relay customer landed on the
+    // node's default inbound, was acked, and left the credential working.
+    it("aims each delete at the customer's own inbound", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.protocolUser.findMany.mockResolvedValue([
+        {
+          id: "pu-ws",
+          nodeId: "node-1",
+          protocol: "XRAY_VLESS_TLS",
+          externalUserId: "uuid-ws",
+          credentialsJson: encryptCredentials({ uuid: "uuid-ws" }),
+          protocolConfig: { transport: "WS", inboundTag: null },
+        },
+        {
+          id: "pu-relay",
+          nodeId: "ir-1",
+          protocol: "XRAY_VLESS_REALITY",
+          externalUserId: "uuid-relay",
+          credentialsJson: encryptCredentials({ uuid: "uuid-relay" }),
+          protocolConfig: { transport: "TCP", inboundTag: "vless-in-fr" },
+        },
+      ]);
+
+      await service.remove("customer-1");
+
+      expect(agentGateway.enqueueCommand.mock.calls.map((c) => c[2])).toEqual([
+        { protocol: "XRAY_VLESS_TLS", transport: "WS", externalUserId: "uuid-ws" },
+        { protocol: "XRAY_VLESS_REALITY", transport: "TCP", inboundTag: "vless-in-fr", externalUserId: "uuid-relay" },
+      ]);
     });
 
     it("refuses to delete a customer who has completed payments", async () => {
@@ -210,16 +253,23 @@ describe("CustomersService", () => {
       // several spread across nodes -- and any this misses keeps working
       // indefinitely, with nothing to report it.
       prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      const target = { transport: "TCP", inboundTag: null };
       prisma.protocolUser.findMany.mockResolvedValue([
-        { nodeId: "node-a", protocol: "WIREGUARD", externalUserId: "wg-1" },
-        { nodeId: "node-b", protocol: "XRAY_VLESS_REALITY", externalUserId: "xr-1" },
-        { nodeId: "node-c", protocol: "IKEV2", externalUserId: "ike-1" },
+        { nodeId: "node-a", protocol: "WIREGUARD", externalUserId: "wg-1", credentialsJson: encryptCredentials({ address: "10.66.0.2/32" }), protocolConfig: target },
+        { nodeId: "node-b", protocol: "XRAY_VLESS_TLS", externalUserId: "xr-1", credentialsJson: encryptCredentials({ uuid: "xr-1" }), protocolConfig: { transport: "WS", inboundTag: null } },
+        { nodeId: "node-c", protocol: "IKEV2", externalUserId: "ike-1", credentialsJson: encryptCredentials({ username: "ike-1" }), protocolConfig: target },
       ]);
 
       const result = await service.deleteOwnAccount("customer-1");
 
       expect(agentGateway.enqueueCommand).toHaveBeenCalledTimes(3);
       expect(agentGateway.enqueueCommand.mock.calls.map((c) => c[0])).toEqual(["node-a", "node-b", "node-c"]);
+      // Each on the customer's own inbound: the WebSocket one included.
+      expect(agentGateway.enqueueCommand.mock.calls[1][2]).toEqual({
+        protocol: "XRAY_VLESS_TLS",
+        transport: "WS",
+        externalUserId: "xr-1",
+      });
       expect(result.credentialsRevoked).toBe(3);
     });
 

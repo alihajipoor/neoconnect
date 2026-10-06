@@ -1,5 +1,6 @@
 import { ProtocolUsersService } from "./protocol-users.service";
 import { encryptCredentials } from "./credentials-crypto";
+import { deleteUserPayload } from "./command-target";
 
 /**
  * Commands must name the inbound a credential actually lives on.
@@ -98,5 +99,46 @@ describe("commands name the inbound", () => {
     expect(payloadOf(agentGateway, "DISABLE_USER")).toEqual(
       expect.objectContaining({ inboundTag: "vless-fr-in", transport: "TCP" }),
     );
+  });
+});
+
+/** A WireGuard delete carries the peer's tunnel address so the node can
+ * clear its speed cap. The allocator reuses the lowest free address, so
+ * a cap left behind was inherited by the next peer -- and per-device
+ * sign-out frees addresses all the time. The private key must never
+ * travel with it. */
+describe("deleteUserPayload", () => {
+  const target = { transport: "TCP", inboundTag: null };
+
+  it("sends a WireGuard peer's address and nothing else of its credentials", () => {
+    const payload = deleteUserPayload(
+      {
+        protocol: "WIREGUARD",
+        externalUserId: "peer-pub",
+        credentialsJson: encryptCredentials({ privateKey: "never-send-me", address: "10.66.0.7/32" }),
+      },
+      target,
+    );
+
+    expect(payload).toEqual({
+      protocol: "WIREGUARD",
+      transport: "TCP",
+      externalUserId: "peer-pub",
+      credentials: { address: "10.66.0.7/32" },
+    });
+    expect(JSON.stringify(payload)).not.toContain("never-send-me");
+  });
+
+  it("sends no credentials at all for any other protocol", () => {
+    const payload = deleteUserPayload(
+      { protocol: "XRAY_TROJAN", externalUserId: "u", credentialsJson: encryptCredentials({ password: "p" }) },
+      target,
+    );
+    expect(payload).not.toHaveProperty("credentials");
+  });
+
+  it("still deletes a WireGuard row whose credentials cannot be read", () => {
+    const payload = deleteUserPayload({ protocol: "WIREGUARD", externalUserId: "peer", credentialsJson: "garbage" }, target);
+    expect(payload).toEqual({ protocol: "WIREGUARD", transport: "TCP", externalUserId: "peer" });
   });
 });
