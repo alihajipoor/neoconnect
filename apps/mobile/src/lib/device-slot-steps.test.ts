@@ -509,7 +509,26 @@ describe("Disconnect", () => {
     await vi.advanceTimersByTimeAsync(1_500);
     expect(done).toBe(true);
     expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/claim", "/customer/vpn/release"]);
-    expect(calls[1].body).toEqual({ subscriptionId: SUB });
+    // Naming the grant it gives back, so a release that lands after the
+    // next Connect's claim frees nothing.
+    expect(calls[1].body).toEqual({ subscriptionId: SUB, handle: GRANT.handle });
     expect(slot.standing()).toBe("none");
+  });
+
+  /** The phone's commonest path in Iran: no answer before dialling, and
+   * none through the tunnel either. No grant is known, and a release
+   * naming none would free whatever this phone holds -- the slot of a
+   * Connect pressed meanwhile included -- so nothing is sent. */
+  it("sends no release when no grant was ever answered", async () => {
+    answer = () => "hang";
+    const { slot } = session();
+    vi.useFakeTimers();
+    const claimed = claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, slot);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await claimed;
+    expect(slot.standing()).toBe("unclaimed");
+
+    await slot.release();
+    expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/claim"]);
   });
 });
