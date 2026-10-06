@@ -193,8 +193,9 @@ export function configureDeviceIdentity(next: { platform?: DevicePlatform; label
  * None at all when the platform is unknown -- the web portal, or a
  * webview this does not recognise. Sending neither leaves the device's
  * name as it was, which is the right answer when there is nothing true
- * to say. A platform with no label clears an older label the server
- * held, which is right too: there is nothing more specific to say.
+ * to say. The server likewise keeps a label it holds when a request
+ * names none; one an older app sent that was only a kind ("Windows PC")
+ * it reads back as no label at all.
  */
 export function deviceHeaders(env?: DeviceEnvironment): Record<string, string> {
   const platform = override.platform ?? detectDevicePlatform(env);
