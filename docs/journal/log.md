@@ -2759,3 +2759,49 @@ here; iOS needs the Mac. Still open: a signed-out client's VPN
 credentials stay valid on the nodes until revoked server-side
 (per-device credentials would fix it); node SSH access; ir1 offline
 since 2026-09-12.
+
+## 2026-10-05 (late) — per-device VPN credentials, backend (branch `claude/per-device-credentials`)
+
+The gap the night entry left open: signing out revoked the device's
+refresh session but not its VPN credentials, which were per
+subscription and shared by every device. Design in
+`docs/per-device-credentials.md`.
+
+`ProtocolUser.sessionId` (nullable, FK to `customer_sessions`, RESTRICT;
+migration `20261007_per_device_credentials`, additive, no backfill).
+NULL is the shared credential every existing row already is. A device
+whose access token carries `sid` is given its own credential on each
+route of its ACTIVE subscriptions the first time it calls
+`GET /customer/protocol-users` (or switch-route), and is answered with
+those, any gap filled by the shared row. Sign-out revokes the session,
+then `DELETE_USER`s that session's rows on every node -- no other
+device's. Password reset/change and an admin-set password end the other
+sessions and their credentials; a change keeps the caller's session. An
+hourly `device-credentials` sweep retries failed revocations and
+reclaims sessions idle 30 days *and* without traffic for 30 days.
+Device cap 5 per customer (`CUSTOMER_DEVICE_CREDENTIAL_LIMIT`), LRU
+eviction. WireGuard allocation now serialised per config. Usage, caps,
+expiry, concurrency, re-assert and deletion all key off
+`subscriptionId` and needed no change. No agent change, no client
+change.
+
+Shared credentials stay valid and provisioned (phase 1). So sign-out
+does **not** yet cut off a copy of the shared credentials a device held
+before its first fetch after deploy. Revoking them is phase 2 and an
+owner decision; the doc has the preconditions.
+
+**Proven:** backend typecheck, lint, and unit tests -- 78 suites, 860
+tests (77/825 before), including mutation checks that the shared-only
+legacy list, the signed-out-session refusal and the WireGuard lock are
+each caught by a test when removed; `prisma migrate diff` from the
+previous schema produces exactly the committed SQL. **Unverified:**
+everything end to end. The migration has not run against a database, no
+node has received a per-device user, no client has connected with one,
+and no sign-out has been seen to remove one from a node. Also unproven:
+that Windows' built-in IKEv2 and iOS's NEVPNManager profile pick up new
+credentials on the next connect rather than reusing stored ones.
+
+Found, not fixed: deletion, quota/expiry suspension and the concurrency
+disconnect send user commands without `transport`/`inboundTag`, so on a
+multi-inbound node they can miss the real inbound; an admin disabling a
+customer touches no credentials.
