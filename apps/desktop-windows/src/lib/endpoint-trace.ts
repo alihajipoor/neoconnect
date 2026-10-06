@@ -151,22 +151,118 @@ export const API_ENDPOINT_MAX = 2000;
  * attempts.ts for why a client still has to fit inside it. */
 export const LEGACY_API_ENDPOINT_MAX = 200;
 
-const CUT_MARK = " [cut]";
+/** One piece of a rendered field, for cutting: an entry under its leg
+ * (`req`, `refresh`, `retry`, `probe`), or a piece with no leg -- "none
+ * dialled", or a cut mark, which carries how many entries it stands
+ * for. */
+interface Piece {
+  leg: string | null;
+  text: string;
+  cut?: number;
+}
 
-/** Shortens a rendered trace to `max` characters, on an entry boundary.
+const CUT_MARK = /^\[(\d+) cut\]$/;
+
+function cutMark(count: number): Piece {
+  return { leg: null, text: `[${count} cut]`, cut: count };
+}
+
+function toPieces(text: string): Piece[] {
+  const pieces: Piece[] = [];
+  for (const section of text.split("; ")) {
+    const mark = CUT_MARK.exec(section);
+    if (mark) {
+      pieces.push(cutMark(Number(mark[1])));
+      continue;
+    }
+    const leg = /^([a-z]+): ([\s\S]*)$/.exec(section);
+    if (!leg) {
+      if (section !== "") pieces.push({ leg: null, text: section });
+      continue;
+    }
+    for (const part of leg[2].split(" ")) if (part !== "") pieces.push({ leg: leg[1], text: part });
+  }
+  return pieces;
+}
+
+/** Back to one line, in the rendered form: a leg's label before its
+ * first entry, and again after anything that interrupts it. Two cut
+ * marks that end up side by side become one. */
+function fromPieces(pieces: Piece[]): string {
+  const merged: Piece[] = [];
+  for (const piece of pieces) {
+    const last = merged[merged.length - 1];
+    if (piece.cut !== undefined && last?.cut !== undefined) merged[merged.length - 1] = cutMark(last.cut + piece.cut);
+    else merged.push(piece);
+  }
+  const sections: string[] = [];
+  let leg: string | null = null;
+  let parts: string[] = [];
+  const close = () => {
+    if (leg !== null && parts.length > 0) sections.push(`${leg}: ${parts.join(" ")}`);
+    parts = [];
+  };
+  for (const piece of merged) {
+    if (piece.leg === null) {
+      close();
+      leg = null;
+      sections.push(piece.text);
+      continue;
+    }
+    if (piece.leg !== leg) {
+      close();
+      leg = piece.leg;
+    }
+    parts.push(piece.text);
+  }
+  close();
+  return sections.join("; ");
+}
+
+/** `pieces` with `n` of them taken out of the middle, and a mark saying
+ * how many entries went in their place. An earlier mark that falls inside
+ * the cut is counted into the new one. */
+function cutMiddle(pieces: Piece[], n: number): Piece[] {
+  if (n <= 0) return pieces;
+  const start = Math.ceil((pieces.length - n) / 2);
+  const count = pieces.slice(start, start + n).reduce((sum, p) => sum + (p.cut ?? 1), 0);
+  return [...pieces.slice(0, start), cutMark(count), ...pieces.slice(start + n)];
+}
+
+/** Shortens a rendered trace to `max` characters, on entry boundaries.
  *
  * Length is the one thing that can make the server refuse the whole
  * report -- a 400, which `send` counts as delivered -- so the field is
- * fitted here rather than trusted to fit. Whole entries are dropped from
- * the end, oldest kept, and the mark says something was. */
+ * fitted here rather than trusted to fit.
+ *
+ * What goes first is the middle of the attempt list. Its first entries
+ * say where the walk started and its last say how it ended, which leg
+ * ran out; the run of identical timeouts between them is what a long
+ * trace is mostly made of. The `probe:` section, when there is one, is
+ * kept whole for as long as anything else can give way: it is the one
+ * part a trace cannot reconstruct, and it comes last, so cutting from
+ * the end -- as this once did -- removed it first. Only when the
+ * attempts are down to their first and last entry does the probe lose
+ * its own middle; then the remaining attempts go, then the rest.
+ *
+ * Every cut leaves `[N cut]` where the N entries were. */
 export function clipTrace(text: string, max: number): string {
   if (text.length <= max) return text;
-  const room = Math.max(0, max - CUT_MARK.length);
-  const head = text.slice(0, room);
-  const boundary = Math.max(head.lastIndexOf(" "), head.lastIndexOf(";"));
-  const kept = (boundary > 0 ? head.slice(0, boundary) : head)
-    // A leg's label with none of its entries left after it says nothing.
-    .replace(/(^|;\s*)[a-z]+:\s*$/, "")
-    .replace(/[;\s]+$/, "");
-  return `${kept}${CUT_MARK}`.trim().slice(0, max);
+  const pieces = toPieces(text);
+  const probeAt = pieces.findIndex((p) => p.leg === "probe");
+  const tried = probeAt === -1 ? pieces : pieces.slice(0, probeAt);
+  const probe = probeAt === -1 ? [] : pieces.slice(probeAt);
+
+  let fromTried = 0;
+  let fromProbe = 0;
+  const render = () => fromPieces([...cutMiddle(tried, fromTried), ...cutMiddle(probe, fromProbe)]);
+  const fits = () => render().length <= max;
+  // First and last entry of each part, kept until there is no other way.
+  const KEEP = 2;
+  while (!fits() && fromTried < tried.length - KEEP) fromTried++;
+  while (!fits() && fromProbe < probe.length - KEEP) fromProbe++;
+  while (!fits() && fromTried < tried.length) fromTried++;
+  while (!fits() && fromProbe < probe.length) fromProbe++;
+  // Only a `max` too small for a single mark gets here still too long.
+  return render().slice(0, max);
 }

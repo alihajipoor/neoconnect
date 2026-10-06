@@ -1038,9 +1038,11 @@ model ClientAttempt {
   ///     "retry") separated by "; ", or "none dialled". After a failed
   ///     sign-in or a failed refresh on resume -- never before a connect
   ///     -- a last `probe:` section gives the stage each failed address
-  ///     failed at (dns, blockpage, tcp, tls, cert, *-timeout, ok). Ends
-  ///     " [cut]" if it had to be shortened -- to 200 characters when it
-  ///     reached a server from before the limit was raised. The
+  ///     failed at (dns, blockpage, tcp, tls, cert, *-timeout, ok). If it
+  ///     had to be shortened -- to 200 characters when it reached a server
+  ///     from before the limit was raised -- "[N cut]" stands where N
+  ///     entries were taken from the middle of the attempts, and from the
+  ///     probe's middle only once the attempts are down to two. The
   ///     vocabulary is in endpoint-trace.ts and control-plane-probe.ts in
   ///     the desktop client.
   apiEndpoint String?

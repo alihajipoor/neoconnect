@@ -166,7 +166,7 @@ describe("the length of apiEndpoint", () => {
     expect(bodies).toHaveLength(2);
     expect(String(bodies[0].apiEndpoint).length).toBeGreaterThan(200);
     expect(String(bodies[1].apiEndpoint).length).toBeLessThanOrEqual(200);
-    expect(String(bodies[1].apiEndpoint).endsWith("[cut]")).toBe(true);
+    expect(String(bodies[1].apiEndpoint)).toMatch(/; \[\d+ cut\]; /);
     // Everything else is the same report.
     expect({ ...bodies[1], apiEndpoint: null }).toEqual({ ...bodies[0], apiEndpoint: null });
   });
