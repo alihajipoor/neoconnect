@@ -43,9 +43,17 @@ vi.mock("@tauri-apps/plugin-http", () => ({
   },
 }));
 
-// The IPv6 half of the module reaches for a Tauri command it has no
-// business invoking here.
-vi.mock("@tauri-apps/api/core", () => ({ invoke: () => Promise.reject(new Error("not used")) }));
+/** `probe_ipv4_egress`: whether the public internet answers when none of
+ * our endpoints did. Unset, it fails like a command that is not there --
+ * which is what every test written before it existed assumes. */
+const internet = vi.fn<() => Promise<boolean>>();
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (command: string) =>
+    command === "probe_ipv4_egress"
+      ? (internet() ?? Promise.reject(new Error("not set")))
+      : Promise.reject(new Error("not used")),
+}));
 
 const { captureBaselineIp, verifyEgress, confirmEgressWithin } = await import("./egress");
 
@@ -61,6 +69,7 @@ const FI_MIRROR = "https://fi1.neoxify.site:2053/api";
 
 afterEach(() => {
   endpoints.mockReset();
+  internet.mockReset();
   answers.clear();
   scripts.clear();
   asked.length = 0;
@@ -187,6 +196,37 @@ describe("comparing the address the world sees", () => {
     // And with no baseline at all, the same: nothing to compare and
     // nothing refuted.
     await expect(verifyEgress(null)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+  });
+
+  it("asks the public internet before blaming the tunnel for our silence", async () => {
+    // The panel host down, or our CDN refusing the node's exit address:
+    // not one endpoint answers, and every request times out. From a
+    // working tunnel that is our outage, not the tunnel's -- and the
+    // public internet answering through it is what shows that.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    internet.mockResolvedValue(true);
+    const baseline = { ip: CLIENT, from: CDN };
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+  });
+
+  it("still calls it unreachable when nothing at all answers", async () => {
+    // The case the check exists for: a tunnel black-holing everything.
+    // Ours silent, the internet silent: that is a measured negative.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    internet.mockResolvedValue(false);
+    const baseline = { ip: CLIENT, from: CDN };
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "unreachable" });
+    expect(internet).toHaveBeenCalled();
+  });
+
+  it("does not ask the internet when our own endpoint answered", async () => {
+    endpoints.mockResolvedValue([CDN]);
+    answers.set(CDN, { ip: "203.0.113.10" });
+    internet.mockResolvedValue(true);
+    await verifyEgress({ ip: CLIENT, from: CDN });
+    expect(internet).not.toHaveBeenCalled();
   });
 
   it("still takes an address from a later endpoint after an error page", async () => {

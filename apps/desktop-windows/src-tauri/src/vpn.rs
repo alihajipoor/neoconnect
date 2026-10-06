@@ -775,14 +775,51 @@ const IPV6_PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
 /// the common case -- is never reported as anything.
 #[tauri::command]
 pub async fn probe_ipv6_egress() -> bool {
+    any_reaches(IPV6_PROBES, IPV6_PROBE_TIMEOUT).await
+}
+
+/// Public IPv4 addresses used to ask whether this machine reaches the
+/// internet at all, independently of our own API.
+///
+/// The same two operators as `IPV6_PROBES`, for the same reasons:
+/// literal addresses, so the family is not up to the resolver, and two
+/// of them, so one filtered anycast address does not decide the answer.
+const IPV4_PROBES: [(&str, u16); 2] = [("1.1.1.1", 443), ("8.8.8.8", 443)];
+
+/// A little longer than the IPv6 probe: this one is asked through a
+/// tunnel, from Iran to a node and out again, and a slow-but-working
+/// path must not read as a dead one.
+const IPV4_PROBE_TIMEOUT: Duration = Duration::from_millis(3000);
+
+/// Whether the public IPv4 internet answers from here, right now.
+///
+/// Asked only when none of our own endpoints answered `/health/ip` at
+/// all -- see `egress.ts`. That silence has two very different causes.
+/// The tunnel may be black-holing everything, which is the case the
+/// egress check exists to catch; or our control plane may be down or
+/// unreachable from the node while the tunnel carries everything else
+/// perfectly well. Read as the first, the second used to mark every
+/// connected customer "degraded" at once and send the automatic ladder
+/// round to tear their working tunnels down.
+///
+/// A completed handshake here says traffic is flowing. It does not say
+/// it flowed *through the tunnel* -- the address comparison is the only
+/// thing that says that -- so the frontend treats a yes as "no verdict",
+/// never as proof.
+#[tauri::command]
+pub async fn probe_ipv4_egress() -> bool {
+    any_reaches(IPV4_PROBES, IPV4_PROBE_TIMEOUT).await
+}
+
+/// Whether either of two literal addresses completes a TCP handshake in
+/// time. Concurrently, so the whole check costs one timeout rather than
+/// two.
+async fn any_reaches(probes: [(&'static str, u16); 2], timeout: Duration) -> bool {
     use tokio::net::TcpStream;
 
-    // Concurrently, so the whole check costs one timeout rather than
-    // two. It is taken on the connect path, and this screen has already
-    // been paid for being patient there.
-    let attempts = IPV6_PROBES.map(|(address, port)| async move {
+    let attempts = probes.map(|(address, port)| async move {
         matches!(
-            tokio::time::timeout(IPV6_PROBE_TIMEOUT, TcpStream::connect((address, port))).await,
+            tokio::time::timeout(timeout, TcpStream::connect((address, port))).await,
             Ok(Ok(_))
         )
     });

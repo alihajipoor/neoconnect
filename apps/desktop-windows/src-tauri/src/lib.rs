@@ -155,6 +155,10 @@ pub fn run() {
             // probe address would be refused by the ACL and the check
             // would always answer "no IPv6". See vpn::probe_ipv6_egress.
             vpn::probe_ipv6_egress,
+            // The egress check's second opinion when none of our own
+            // endpoints answered: is it the tunnel, or is it us? See
+            // vpn::probe_ipv4_egress.
+            vpn::probe_ipv4_egress,
             vpn::measure_latency,
             vpn::probe_tcp,
             vpn::network_fingerprint,

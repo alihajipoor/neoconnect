@@ -229,12 +229,38 @@ export async function verifyEgress(
   // disconnected and failing open. The tunnel's health is not ours to
   // borrow from the control plane's.
   if (reading === null && answered) return { state: "indeterminate", exitIp: null };
-  if (reading === null) return { state: "unreachable" };
+  // Nothing of ours answered at all: every request timed out or was
+  // refused. That is what a black-holing tunnel looks like -- and also
+  // what our panel host being down, or our CDN refusing the node's exit
+  // address, looks like from a tunnel that is fine. A second, independent
+  // instrument tells them apart: if the public internet answers, traffic
+  // is flowing and the silence is ours, so there is no verdict. Only
+  // when that fails too is it the tunnel.
+  if (reading === null) {
+    return (await ipv4Reaches()) ? { state: "indeterminate", exitIp: null } : { state: "unreachable" };
+  }
   if (baseline === null) return { state: "indeterminate", exitIp: reading.ip };
   if (reading.from !== baseline.from) return { state: "indeterminate", exitIp: reading.ip };
   return reading.ip === baseline.ip
     ? { state: "bypassingTunnel", exitIp: reading.ip }
     : { state: "throughTunnel", exitIp: reading.ip };
+}
+
+/** Whether the public IPv4 internet answers from here, asked only when
+ * none of our own endpoints did. See `vpn::probe_ipv4_egress`.
+ *
+ * A socket in the Rust side, for the reason `ipv6Reaches` gives: the
+ * HTTP permission would refuse any address that is not ours.
+ *
+ * Never throws. A command that could not be reached -- the mobile app,
+ * which shares this file and does not register it -- is no evidence, and
+ * leaves the verdict exactly where it was before this existed. */
+async function ipv4Reaches(): Promise<boolean> {
+  try {
+    return (await invoke<boolean>("probe_ipv4_egress")) === true;
+  } catch {
+    return false;
+  }
 }
 
 /** How often a new attempt starts while a tunnel is being checked. */
