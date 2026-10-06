@@ -3525,3 +3525,32 @@ whether this WebView still carries the model is unchecked. The card's
 new wording has not been rendered. Nothing has reached the real
 backend, a filtered network or a phone; obligation 11 is exactly the
 censored-path case that needs the rig.
+
+## 2026-10-06 — released desktop 0.9.44 and mobile 0.2.23
+
+From `main` `3bafbe0` (merge of `claude/rc-0.9.44`): per-device
+credentials and device slots (backend + both clients), engine-death
+honesty (Windows service + app), control-plane telemetry. The backend
+was deployed from the same commit first (dump
+`pre-0944-20261006-143327.sql.gz`; no new migrations beyond the
+morning's). Before tagging: desktop 727 / mobile 72 / backend 1,041
+tests, service 471 + ipc 58 + Tauri 29 Rust tests, all on this PC; CI
+green on the candidate (Go agent, shellcheck, desktop tests,
+TypeScript); the VM regression on the candidate: DNS on all 8 protocols
+with 0 queries leaving the NIC, the NIC leak capture on all 8 with no
+IPv6 and IPv4 only to the node apart from the known pre-tunnel
+keepalives (to germany-1's API mirror), Custom mode at the NIC, engine
+death re-measured on every engine, and the slot claimed on connect and
+released on disconnect. The installed 0.9.44 smoke test: engine death
+reported in 0.91s, slot claim and release.
+
+`release-android.yml` published straight to `neoxify-releases` for the
+first time (the change from 2026-10-06); `/updates/installer/android`
+serves 0.2.23 without a hand copy. The desktop update feed offers 0.9.44
+to 0.9.43.
+
+**Unverified:** the two-device refusal and takeover (needs a second
+signed-in device of one account); anything on a phone (Android 0.2.23
+and the iOS build); a censored network. The VM froze twice under guest
+control (2026-10-05 and 2026-10-06, both as a WireGuard or IKEv2 test
+began) and needed a hard reset; cause unknown, no product effect seen.
