@@ -34,7 +34,7 @@ function harness(claims: ClaimOutcome[], renewals: RenewOutcome[] = []) {
   let clock = 1_000_000;
   const claim = vi.fn(async (_request: unknown, _budget?: number) => claims.shift() ?? GRANT);
   const renew = vi.fn(async (_sub: string, _budget?: number) => renewals.shift() ?? HELD);
-  const release = vi.fn(async (_sub?: string | null) => undefined);
+  const release = vi.fn(async (_request: { subscriptionId: string; handle: string }) => undefined);
   const session = createDeviceSlotSession({ claim, renew, release, now: () => clock });
   return {
     session,
@@ -357,11 +357,11 @@ describe("before an automatic reconnect (obligation 9)", () => {
 });
 
 describe("release", () => {
-  it("releases a held slot on Disconnect, and forgets it", async () => {
+  it("releases a held slot on Disconnect, naming its grant, and forgets it", async () => {
     const h = harness([GRANT]);
     await h.session.beforeDial({ subscriptionId: SUB });
     await h.session.release();
-    expect(h.release).toHaveBeenCalledWith(SUB);
+    expect(h.release).toHaveBeenCalledWith({ subscriptionId: SUB, handle: "mine" });
     expect(h.session.standing()).toBe("none");
     // Nothing renewed after Disconnect.
     h.advance(600_000);
@@ -369,11 +369,82 @@ describe("release", () => {
     expect(h.renew).not.toHaveBeenCalled();
   });
 
-  it("releases an unclaimed slot too -- the claim may have arrived", async () => {
-    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true }]);
+  /** A reconnect whose claim went unanswered: if it never arrived, the
+   * slot is still under the grant before it, and naming that one gives
+   * it back. If it did arrive, the old handle frees nothing. */
+  it("releases an unclaimed slot too, by the last grant known -- the claim may not have arrived", async () => {
+    const h = harness([GRANT, UNANSWERED]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(5 * 60_000);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    expect(h.session.standing()).toBe("unclaimed");
+    await h.session.release();
+    expect(h.release).toHaveBeenCalledWith({ subscriptionId: SUB, handle: "mine" });
+  });
+
+  /** A release naming no grant frees whatever this device holds -- and,
+   * arriving late, that is the slot a Connect pressed since was just
+   * granted. With no grant known there is nothing safe to send. */
+  it("never sends a release that names no grant", async () => {
+    const h = harness([UNANSWERED]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    expect(h.session.standing()).toBe("unclaimed");
+    await h.session.release();
+    expect(h.release).not.toHaveBeenCalled();
+  });
+
+  /** Every claim answers with a new handle, even one made while holding
+   * the slot; the server frees the slot only under the one it is held
+   * by now. */
+  it("names the latest grant: a claim made while holding the slot gives a new handle", async () => {
+    const h = harness([GRANT, { kind: "granted", grant: { ...HELD.grant, handle: "moved" } }]);
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" });
+    await h.session.afterConnected({ protocolUserId: "cred-b" });
+    await h.session.release();
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenCalledWith({ subscriptionId: SUB, handle: "moved" });
+  });
+
+  it("names the grant a renewal gave back after the slot lapsed", async () => {
+    const h = harness([GRANT], [{ kind: "held", grant: { ...HELD.grant, handle: "regranted" } }]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    await h.session.onPoll();
+    await h.session.release();
+    expect(h.release).toHaveBeenCalledWith({ subscriptionId: SUB, handle: "regranted" });
+  });
+
+  /** Disconnect, Connect, Disconnect: each release names its own
+   * connect's grant, so the first one, landing late, cannot free the
+   * second connect's slot. */
+  it("gives each connect's release that connect's grant", async () => {
+    const h = harness([GRANT, { kind: "granted", grant: { ...HELD.grant, handle: "second" } }]);
     await h.session.beforeDial({ subscriptionId: SUB });
     await h.session.release();
-    expect(h.release).toHaveBeenCalledWith(SUB);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    await h.session.release();
+    expect(h.release.mock.calls.map((c) => c[0])).toEqual([
+      { subscriptionId: SUB, handle: "mine" },
+      { subscriptionId: SUB, handle: "second" },
+    ]);
+  });
+
+  it("forgets the grants it knew on sign-out, and never names one on another subscription", async () => {
+    const h = harness([GRANT, UNANSWERED, UNANSWERED]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    await h.session.release();
+    h.release.mockClear();
+
+    // Another subscription: the grant known is not on it.
+    await h.session.beforeDial({ subscriptionId: "sub-2" });
+    await h.session.release();
+    expect(h.release).not.toHaveBeenCalled();
+
+    // Signed out: the server released everything, and nothing is known.
+    h.session.reset();
+    await h.session.beforeDial({ subscriptionId: SUB });
+    await h.session.release();
+    expect(h.release).not.toHaveBeenCalled();
   });
 
   it("sends nothing for a slot that is not this device's", async () => {
@@ -509,7 +580,10 @@ describe("a request still out at Disconnect", () => {
     return (value: T) => finish(value);
   }
 
-  it("is followed by a second release when its answer says the slot was kept", async () => {
+  /** The renewal reached the server after the release, found no slot,
+   * and gave one back under a new handle -- the one the second release
+   * has to name. */
+  it("is followed by a second release, naming the grant its answer left", async () => {
     const h = harness([GRANT]);
     const finish = pending<RenewOutcome>(h.renew);
     await h.session.beforeDial({ subscriptionId: SUB });
@@ -517,17 +591,18 @@ describe("a request still out at Disconnect", () => {
     const poll = h.session.onPoll();
     await h.session.release();
     expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenLastCalledWith({ subscriptionId: SUB, handle: "mine" });
 
-    finish(HELD);
+    finish({ kind: "held", grant: { ...HELD.grant, handle: "regranted" } });
     expect(await poll).toEqual({ kind: "keep" });
     await settle();
 
     expect(h.release).toHaveBeenCalledTimes(2);
-    expect(h.release).toHaveBeenLastCalledWith(SUB);
+    expect(h.release).toHaveBeenLastCalledWith({ subscriptionId: SUB, handle: "regranted" });
     expect(h.session.standing()).toBe("none");
   });
 
-  it("is followed by a second release when it got no answer -- it may have arrived", async () => {
+  it("is followed by a second release when it got no answer -- by the last grant known", async () => {
     const h = harness([GRANT]);
     const finish = pending<RenewOutcome>(h.renew);
     await h.session.beforeDial({ subscriptionId: SUB });
@@ -538,6 +613,19 @@ describe("a request still out at Disconnect", () => {
     await poll;
     await settle();
     expect(h.release).toHaveBeenCalledTimes(2);
+    expect(h.release).toHaveBeenLastCalledWith({ subscriptionId: SUB, handle: "mine" });
+  });
+
+  it("is not followed by one when no grant can be named", async () => {
+    const h = harness([]);
+    const finish = pending<ClaimOutcome>(h.claim);
+    const decision = h.session.beforeDial({ subscriptionId: SUB });
+    await settle();
+    await h.session.release();
+    finish(UNANSWERED);
+    await decision;
+    await settle();
+    expect(h.release).not.toHaveBeenCalled();
   });
 
   it("is not followed by one when its answer says the slot is someone else's", async () => {
@@ -569,7 +657,7 @@ describe("a request still out at Disconnect", () => {
     await settle();
 
     expect(h.release).toHaveBeenCalledTimes(1);
-    expect(h.release).toHaveBeenCalledWith(SUB);
+    expect(h.release).toHaveBeenCalledWith({ subscriptionId: SUB, handle: "mine" });
     expect(h.session.standing()).toBe("none");
   });
 

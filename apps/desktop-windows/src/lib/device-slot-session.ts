@@ -150,18 +150,24 @@ export interface DeviceSlotSession {
   reset(): void;
 }
 
-/** Whether an answer that settled after a release may have left this
- * device holding a slot on the server: a grant that was counted, or a
- * request that got no answer in time and may have arrived all the same. */
-function mayHoldSlot(answer: ClaimOutcome | RenewOutcome): boolean {
+/** The grant an answer that settled after a release may have left this
+ * device holding on the server, by handle.
+ *
+ * A counted grant names its own. A request that got no answer in time
+ * may have arrived all the same; what it left is unknowable, so the
+ * best that can be named is the last grant this device was told of --
+ * `known` -- which frees the slot if that grant is still the one it is
+ * under, and nothing if not. Null: nothing to give back, or nothing that
+ * can be named. */
+function heldBy(answer: ClaimOutcome | RenewOutcome, known: string | null): string | null {
   switch (answer.kind) {
     case "granted":
     case "held":
-      return answer.grant.enforced;
+      return answer.grant.enforced ? answer.grant.handle : null;
     case "unanswered":
-      return answer.retryable;
+      return answer.retryable ? known : null;
     default:
-      return false;
+      return null;
   }
 }
 
@@ -212,6 +218,29 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
   const inFlight = new Set<Promise<ClaimOutcome | RenewOutcome>>();
   /** The release on the wire, if one is. See `beforeDial`. */
   let releasing: Promise<void> | null = null;
+  /** The handle of the latest counted grant the server gave this device,
+   * and the subscription it is on. What a release names.
+   *
+   * Every claim -- even one made while holding the slot -- answers with
+   * a new handle, and so does a renewal that gives a lapsed slot back;
+   * the server frees a slot on release only when the handle named is
+   * the one it is held under now. So a release that lands after the next
+   * Connect's claim frees nothing, as it must.
+   *
+   * Kept across a Disconnect and a new connect, until sign-out: if the
+   * release never arrived and the next claim goes unanswered, this grant
+   * may still be the one the slot is under, and naming it is the only
+   * way to give it back. Naming a grant that has since been replaced
+   * frees nothing, so keeping it costs nothing. */
+  let lastGrant: { subscriptionId: string; handle: string } | null = null;
+
+  /** The handle a release of `target` names, or null when no grant of
+   * this device's on it is known -- and then no release is sent: one
+   * naming no grant frees whatever is held, a newer connect's slot
+   * included. */
+  function knownHandle(target: string): string | null {
+    return lastGrant !== null && lastGrant.subscriptionId === target ? lastGrant.handle : null;
+  }
 
   function due(): boolean {
     return now() - lastAskedAt + RENEW_SLACK_MS >= renewEveryMs;
@@ -231,12 +260,17 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     return request;
   }
 
-  function sendRelease(target: string): Promise<void> {
-    const sent: Promise<void> = release(target)
-      .catch(() => undefined)
-      .finally(() => {
-        if (releasing === sent) releasing = null;
-      });
+  /** Releases each grant named, one after another. Several only when
+   * answers that settled after a Disconnect named more than one; each
+   * frees the slot only if it is still held under that grant. */
+  function sendRelease(target: string, handles: string[]): Promise<void> {
+    const sent: Promise<void> = (async () => {
+      for (const handle of handles) {
+        await release({ subscriptionId: target, handle }).catch(() => undefined);
+      }
+    })().finally(() => {
+      if (releasing === sent) releasing = null;
+    });
     releasing = sent;
     return sent;
   }
@@ -246,6 +280,9 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     const at = now();
     lastAskedAt = at;
     lastConfirmedAt = at;
+    if (grant.enforced && grant.handle !== null && subscriptionId !== null) {
+      lastGrant = { subscriptionId, handle: grant.handle };
+    }
     // Unlimited is the one case nothing will ever count. A limit with
     // nothing counted is a server that may start counting -- see
     // `uncounted`.
@@ -356,9 +393,10 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       const sameSlot = target !== null && target === subscriptionId;
 
       // Already holding it, and confirmed within a renewal -- a reconnect
-      // from the health poll. Claiming again would be idempotent, and
-      // would also be a request through a tunnel that has just been
-      // judged not to carry traffic, which is three seconds of nothing.
+      // from the health poll. Claiming again would only keep the slot
+      // under a new handle, and would be a request through a tunnel
+      // that has just been judged not to carry traffic, which is three
+      // seconds of nothing.
       // The next renewal says if it was lost.
       //
       // Only while it is fresh: confirmed by the server, not merely
@@ -424,9 +462,9 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       }
       if (standing === "held" && protocolUserId !== null && protocolUserId !== claimedProtocolUserId) {
         // The ladder landed on a different credential from the one the
-        // claim named. Claiming again is idempotent (same slot, same
-        // handle) and moves the attribution, so a shared credential's
-        // traffic counts as this device's.
+        // claim named. Claiming again keeps the slot (under a new handle,
+        // which the grant records) and moves the attribution, so a shared
+        // credential's traffic counts as this device's.
         return whileConnected(await claimNow(protocolUserId, LATE_CLAIM_BUDGET_MS));
       }
       return { kind: "keep" };
@@ -521,6 +559,9 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
 
     async release() {
       const target = subscriptionId;
+      // `unclaimed` too: the claim may have arrived even though its answer
+      // did not. Nothing for `unenforced` or `uncounted` (nothing was
+      // recorded) or `displaced` (the slot is already someone else's).
       const held = standing === "held" || standing === "unclaimed";
       epoch += 1;
       const releasedIn = epoch;
@@ -540,26 +581,37 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       // count a device that is off, and the customer's phone would be
       // told "in use on Windows PC" for the ninety seconds that takes to
       // go stale. So once whatever was out has settled, the slot is
-      // released again: when its answer was a counted grant, or when no
-      // answer came and it may have arrived anyway. Never when anything
-      // has started since -- that slot is a new connect's.
+      // released again, naming the grant the answer left: a counted
+      // grant's own handle, or, when no answer came and the request may
+      // have arrived anyway, the last one known. Never when anything has
+      // started since -- that slot is a new connect's.
       const outstanding = [...inFlight];
       if (outstanding.length > 0) {
         void Promise.all(outstanding).then(
           (answers) => {
-            if (epoch === releasedIn && answers.some(mayHoldSlot)) void sendRelease(target);
+            if (epoch !== releasedIn) return;
+            const known = knownHandle(target);
+            const handles = [
+              ...new Set(answers.map((a) => heldBy(a, known)).filter((h): h is string => h !== null)),
+            ];
+            if (handles.length > 0) void sendRelease(target, handles);
           },
           () => undefined,
         );
       }
-      // `unclaimed` too: the claim may have arrived even though its answer
-      // did not. Nothing for `unenforced` or `uncounted` (nothing was
-      // recorded) or `displaced` (the slot is already someone else's).
-      if (held) await sendRelease(target);
+      // By the latest grant's handle, and only by it. With none known --
+      // a claim that was sent and never answered -- nothing is sent: if
+      // that claim arrived, its slot goes stale ninety seconds after the
+      // tunnel stops carrying traffic, which "Use on this device instead"
+      // covers on the other device; a release naming no grant could free
+      // the slot of a Connect pressed in the meantime instead.
+      const handle = knownHandle(target);
+      if (held && handle !== null) await sendRelease(target, [handle]);
     },
 
     reset() {
       epoch += 1;
+      lastGrant = null;
       standing = "none";
       subscriptionId = null;
       claimedProtocolUserId = null;

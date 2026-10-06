@@ -303,20 +303,34 @@ export async function renewSlot(subscriptionId: string, budgetMs = RENEW_BUDGET_
   return classifyFailure(result) ?? { kind: "unanswered", reason: result.error, retryable: false };
 }
 
-/** Gives the slot back, on one subscription or (none named) on every one
- * this device holds.
+export interface ReleaseRequest {
+  subscriptionId: string;
+  /** The `handle` of the grant being given back: the latest claim's, or
+   * the renewal's that re-granted the slot.
+   *
+   * Required, and that is the point of it. A release is fire and forget,
+   * and the request can still be walking the API's mirrors seconds after
+   * the customer pressed Connect again; the claim that Connect made gave
+   * the slot a new handle, so a late release naming the old one frees
+   * nothing. One naming no handle frees whatever this device holds --
+   * the new connect's slot included -- so this app never sends one. */
+  handle: string;
+}
+
+/** Gives one grant back.
  *
  * Fire and forget: resolves within `budgetMs` whatever happens and never
  * rejects, and nothing should wait for it before tearing down. A release
  * that does not arrive costs the slot staying taken until it goes stale
  * (90 s), which "Use on this device instead" covers on the other device.
  */
-export async function releaseSlot(subscriptionId?: string | null, budgetMs = RELEASE_BUDGET_MS): Promise<void> {
+export async function releaseSlot(request: ReleaseRequest, budgetMs = RELEASE_BUDGET_MS): Promise<void> {
   try {
     await withinBudget(budgetMs, (signal) =>
       apiRequest<void>("/customer/vpn/release", {
         method: "POST",
-        body: JSON.stringify(subscriptionId ? { subscriptionId } : {}),
+        // Only the fields the contract names: the API rejects unknown ones.
+        body: JSON.stringify({ subscriptionId: request.subscriptionId, handle: request.handle }),
         signal,
       }),
     );

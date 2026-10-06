@@ -323,17 +323,20 @@ describe("renew", () => {
 });
 
 describe("release", () => {
-  it("names the subscription, or nothing to release everywhere", async () => {
-    replies["/customer/vpn/release"] = [{ status: 204 }, { status: 204 }];
-    await releaseSlot(SUB);
-    await releaseSlot();
-    expect(sent.map((s) => s.body)).toEqual([{ subscriptionId: SUB }, {}]);
+  /** A release without a handle frees whatever the device holds -- a
+   * late one, the slot a Connect pressed since has just been granted. */
+  it("names the subscription and the grant it gives back, and nothing else", async () => {
+    replies["/customer/vpn/release"] = [{ status: 204 }];
+    await releaseSlot({ subscriptionId: SUB, handle: "Zm9vYmFyYmF6" });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].url).toBe("https://a.example/customer/vpn/release");
+    expect(sent[0].body).toEqual({ subscriptionId: SUB, handle: "Zm9vYmFyYmF6" });
   });
 
   it("is over within its budget when nothing answers, and never throws", async () => {
     replies["/customer/vpn/release"] = ["hang", "hang"];
     const started = Date.now();
-    await expect(releaseSlot(SUB, 50)).resolves.toBeUndefined();
+    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" }, 50)).resolves.toBeUndefined();
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 });
