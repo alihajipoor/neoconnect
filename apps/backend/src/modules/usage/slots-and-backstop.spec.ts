@@ -272,6 +272,38 @@ describe("device slots and the backstop together", () => {
     expect(w.gateway.reassertCredentials).toHaveBeenCalledWith([PHONE]);
   });
 
+  /** The PC holds the slot and, its own credential on route A not
+   * confirmed yet, dials the shared credential there and names it. An
+   * old app on the phone uses the shared credential of route B, where
+   * the PC's own is confirmed -- so that traffic is not the PC's, and is
+   * a second device. Holding "the shared credentials" disabled route A's
+   * too: the slot holder's own connection. */
+  it("holds the shared credentials without the one a slot holder named", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const w = world(1, [
+      row("shared-a", { routeId: "route-a" }),
+      row("shared-b", { routeId: "route-b" }),
+      row("pc-a", { sessionId: PC, routeId: "route-a", provisionedAt: null }),
+      row("pc-b", { sessionId: PC, routeId: "route-b" }),
+    ]);
+    await w.slots.claim(as(PC), { subscriptionId: SUB, protocolUserId: "shared-a" });
+
+    for (let i = 0; i < 4; i++) {
+      await report(w.backstop, "node-1", [
+        { ext: "ext-shared-a", bytes: 500 },
+        { ext: "ext-shared-b", bytes: 500 },
+      ]);
+      await jest.advanceTimersByTimeAsync(30_000);
+      await w.slots.renew(as(PC), { subscriptionId: SUB });
+    }
+
+    const disabled = w.gateway.enqueueCommand.mock.calls
+      .filter((c) => c[1] === "DISABLE_USER")
+      .map((c) => (c[2] as { externalUserId: string }).externalUserId);
+    expect(disabled).toEqual(["ext-shared-b"]);
+    expect(w.rows.find((r) => r.id === "shared-a")!.heldUntil).toBeNull();
+  });
+
   // And the housekeeping still happens: a subscription nobody uses lets
   // its slots go.
   it("still lets the slots of a subscription with no traffic and no renewals expire", async () => {

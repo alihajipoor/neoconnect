@@ -367,7 +367,7 @@ export class ConcurrencyService {
       return;
     }
 
-    for (const key of victims) await this.hold(subscriptionId, key, now);
+    for (const key of victims) await this.hold(subscriptionId, key, now, new Set(slots.credit.keys()));
     this.logger.warn(
       `Subscription ${subscriptionId}: ${tally} against a limit of ${limit}; holding ${victims.map(describe).join(", ")}`,
     );
@@ -397,18 +397,28 @@ export class ConcurrencyService {
 
   /** Holds one device: every ACTIVE credential it has on the
    * subscription, targeted at its own inbound, kept off the re-assert by
-   * the lease. Only in enforce mode. */
-  private async hold(subscriptionId: string, key: DeviceKey, now: number) {
-    const users = await this.prisma.protocolUser.findMany({
-      where: { subscriptionId, status: "ACTIVE", sessionId: sessionIdOf(key) },
-      select: {
-        id: true,
-        nodeId: true,
-        protocol: true,
-        externalUserId: true,
-        protocolConfig: { select: { transport: true, inboundTag: true } },
-      },
-    });
+   * the lease. Only in enforce mode.
+   *
+   * `credited` are the shared credentials slot holders named in their
+   * claims. Their traffic is the holder's (resolveDevices), so they are
+   * not part of the shared pseudo-device, and holding it must not touch
+   * them: a PC whose own credential on route A was not confirmed yet
+   * dials the shared one there and names it, while an old app on the
+   * phone uses the shared credential of route B -- holding "the shared
+   * credentials" then cut the PC, the slot holder, as well. */
+  private async hold(subscriptionId: string, key: DeviceKey, now: number, credited: Set<string>) {
+    const users = (
+      await this.prisma.protocolUser.findMany({
+        where: { subscriptionId, status: "ACTIVE", sessionId: sessionIdOf(key) },
+        select: {
+          id: true,
+          nodeId: true,
+          protocol: true,
+          externalUserId: true,
+          protocolConfig: { select: { transport: true, inboundTag: true } },
+        },
+      })
+    ).filter((u) => !credited.has(u.id));
     if (users.length === 0) return;
 
     // The lease first: if the commands below fail, the re-assert must
