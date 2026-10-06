@@ -6,11 +6,15 @@ import {
   releaseSlot,
   RENEW_BUDGET_MS,
   renewSlot,
+  refusalReport,
   STANDING_CHECK_BUDGET_MS,
   type ClaimOutcome,
   type DeviceLimitRefusal,
   type SlotDevice,
 } from "./device-slots";
+import type { AttemptReport } from "./attempts";
+import type { SlotNotice } from "./device-slot-notice";
+import type { SubscriptionStatus } from "./subscription-state";
 
 /** This device's slot, from Connect to Disconnect.
  *
@@ -237,11 +241,18 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       const takeover = request.takeover ?? [];
       const sameSlot = target !== null && target === subscriptionId;
 
-      // Already holding it -- a reconnect from the health poll. Claiming
-      // again would be idempotent, and would also be a request through a
-      // tunnel that has just been judged not to carry traffic, which is
-      // three seconds of nothing. The next renewal says if it was lost.
-      if (sameSlot && takeover.length === 0 && (standing === "held" || standing === "unenforced")) {
+      // Already holding it, and renewed on time -- a reconnect from the
+      // health poll. Claiming again would be idempotent, and would also
+      // be a request through a tunnel that has just been judged not to
+      // carry traffic, which is three seconds of nothing. The next
+      // renewal says if it was lost.
+      //
+      // Only while it is fresh. A slot last renewed before the tunnel
+      // dropped on its own may have gone stale and been given to another
+      // device since, and finding that out by renewal after dialling is
+      // exactly the late enforcement claiming first exists to avoid.
+      const fresh = standing === "unenforced" || (standing === "held" && !due());
+      if (sameSlot && takeover.length === 0 && fresh) {
         return { kind: "dial" };
       }
 
@@ -328,8 +339,17 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     },
 
     adopt(request) {
+      const target = request.subscriptionId ?? null;
+      // The same tunnel seen again -- the dashboard remounting after a
+      // trip to Settings. What is already known about its slot stands;
+      // except `displaced`, which with a tunnel still up means the
+      // teardown did not take, and is asked again so it is acted on.
+      if (target !== null && target === subscriptionId && standing !== "none" && standing !== "displaced") {
+        dialledProtocolUserId ??= request.protocolUserId ?? null;
+        return;
+      }
       epoch += 1;
-      subscriptionId = request.subscriptionId ?? null;
+      subscriptionId = target;
       claimedProtocolUserId = null;
       dialledProtocolUserId = request.protocolUserId ?? null;
       retryClaim = true;
@@ -387,4 +407,65 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       limit = null;
     },
   };
+}
+
+/** The app's one slot.
+ *
+ * Module-level rather than per screen: the dashboard unmounts whenever
+ * Settings is open, and the slot -- and the renewal clock -- belongs to
+ * the tunnel, which outlives it. Sign-out forgets it (see
+ * `endCustomerSession`); the server releases it there by itself. */
+export const deviceSlot: DeviceSlotSession = createDeviceSlotSession();
+
+/** Anything the slot can say that stops this device: a connect refused
+ * before dialling, or a session ended while connected. */
+export type SlotStopReason =
+  | Exclude<PreDial, { kind: "dial" }>
+  | Exclude<SlotEvent, { kind: "keep" }>
+  | Exclude<StandingCheck, { kind: "clear" | "unanswered" }>;
+
+/** What a dashboard does about a `SlotStopReason`, worked out once for
+ * both clients. */
+export interface SlotStop {
+  /** The card to show, or null (a sign-out: the app is already on its
+   * way to the sign-in screen, and there is nothing to add). */
+  notice: SlotNotice | null;
+  /** The attempt report, when a connect was stopped -- REJECTED with no
+   * ladder, so it records no dial, marks no route as failing and teaches
+   * nothing about this network's best route. Null for a session ended
+   * while connected, whose connect was already reported as it happened.
+   * A late refusal is reported: it is the answer the connect never got. */
+  report: AttemptReport | null;
+  /** A status to show the plan-ended state for, when the subscription
+   * has stopped. Null when the server named none this app knows. */
+  subscriptionStatus: SubscriptionStatus | null;
+  /** Whether the subscription has stopped, named or not. */
+  inactive: boolean;
+}
+
+const STATUSES: readonly SubscriptionStatus[] = ["ACTIVE", "SUSPENDED", "EXPIRED", "PENDING", "CANCELLED"];
+
+export function slotStop(reason: SlotStopReason, when: "beforeDial" | "whileConnected"): SlotStop {
+  const none = { notice: null, report: null, subscriptionStatus: null, inactive: false };
+  switch (reason.kind) {
+    case "refused":
+      return { ...none, notice: { kind: "refused", refusal: reason.refusal }, report: refusalReport("DEVICE_LIMIT") };
+    case "takeoverLimited":
+      return {
+        ...none,
+        notice: { kind: "takeoverLimited", retryAfterSec: reason.retryAfterSec },
+        report: refusalReport("TAKEOVER_LIMIT"),
+      };
+    case "displaced":
+      return { ...none, notice: { kind: "displaced", by: reason.by, at: reason.at } };
+    case "inactive":
+      return {
+        ...none,
+        report: when === "beforeDial" ? refusalReport("SUBSCRIPTION_INACTIVE") : null,
+        subscriptionStatus: STATUSES.find((s) => s === reason.subscriptionStatus && s !== "ACTIVE") ?? null,
+        inactive: true,
+      };
+    case "signedOut":
+      return none;
+  }
 }

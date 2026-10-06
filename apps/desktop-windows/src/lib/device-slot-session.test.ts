@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDeviceSlotSession } from "./device-slot-session";
+import { createDeviceSlotSession, slotStop } from "./device-slot-session";
 import type { ClaimOutcome, RenewOutcome } from "./device-slots";
 
 /** The slot's life from Connect to Disconnect, with the three calls stood
@@ -96,6 +96,14 @@ describe("before dialling", () => {
     await h.session.beforeDial({ subscriptionId: SUB });
     expect(await h.session.beforeDial({ subscriptionId: SUB })).toEqual({ kind: "dial" });
     expect(h.claim).toHaveBeenCalledTimes(1);
+  });
+
+  it("claims again a slot whose renewal is overdue -- the tunnel dropped on its own meanwhile", async () => {
+    const h = harness([GRANT, { kind: "refused", refusal: REFUSAL }]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(5 * 60_000);
+    expect(await h.session.beforeDial({ subscriptionId: SUB })).toEqual({ kind: "refused", refusal: REFUSAL });
+    expect(h.claim).toHaveBeenCalledTimes(2);
   });
 
   it("dials with nothing to claim on", async () => {
@@ -266,6 +274,24 @@ describe("a tunnel the app did not bring up", () => {
     expect(h.session.standing()).toBe("held");
   });
 
+  it("keeps what it knows when the dashboard comes back from Settings", async () => {
+    const h = harness([GRANT]);
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" });
+    h.session.adopt({ subscriptionId: SUB });
+    expect(h.session.standing()).toBe("held");
+    await h.session.onPoll();
+    expect(h.claim).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks again about a displaced slot whose tunnel is somehow still up", async () => {
+    const h = harness([GRANT, { kind: "refused", refusal: REFUSAL }], [{ kind: "displaced", by: null, at: null }]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    await h.session.onPoll();
+    h.session.adopt({ subscriptionId: SUB });
+    expect(await h.session.onPoll()).toEqual({ kind: "refused", refusal: REFUSAL });
+  });
+
   it("is refused like any late claim when the slot went elsewhere meanwhile", async () => {
     const h = harness([{ kind: "refused", refusal: REFUSAL }]);
     h.session.adopt({ subscriptionId: SUB });
@@ -359,5 +385,46 @@ describe("release", () => {
     h.session.reset();
     expect(h.release).not.toHaveBeenCalled();
     expect(h.session.standing()).toBe("none");
+  });
+});
+
+describe("what a dashboard does when the slot stops it", () => {
+  it("shows the refusal and reports it as a limit, with no ladder", () => {
+    const stop = slotStop({ kind: "refused", refusal: REFUSAL }, "beforeDial");
+    expect(stop.notice).toEqual({ kind: "refused", refusal: REFUSAL });
+    expect(stop.report).toEqual({ kind: "CONNECT", outcome: "REJECTED", reason: "DEVICE_LIMIT" });
+    expect(stop.report?.attempts).toBeUndefined();
+    expect(stop.inactive).toBe(false);
+  });
+
+  it("says who took the slot over, and reports nothing -- the connect was reported when it happened", () => {
+    const by = { handle: "phone", label: "Android phone", platform: "android" };
+    const stop = slotStop({ kind: "displaced", by, at: null }, "whileConnected");
+    expect(stop.notice).toEqual({ kind: "displaced", by, at: null });
+    expect(stop.report).toBeNull();
+  });
+
+  it("hands an ended subscription to the plan-ended state", () => {
+    expect(slotStop({ kind: "inactive", subscriptionStatus: "EXPIRED" }, "beforeDial")).toEqual({
+      notice: null,
+      report: { kind: "CONNECT", outcome: "REJECTED", reason: "SUBSCRIPTION_INACTIVE" },
+      subscriptionStatus: "EXPIRED",
+      inactive: true,
+    });
+    const midSession = slotStop({ kind: "inactive", subscriptionStatus: "SOMETHING_NEW" }, "whileConnected");
+    expect(midSession).toMatchObject({ report: null, subscriptionStatus: null, inactive: true });
+  });
+
+  it("says when a takeover has to wait, and adds nothing to a sign-out", () => {
+    expect(slotStop({ kind: "takeoverLimited", retryAfterSec: 60 }, "beforeDial").notice).toEqual({
+      kind: "takeoverLimited",
+      retryAfterSec: 60,
+    });
+    expect(slotStop({ kind: "signedOut" }, "beforeDial")).toEqual({
+      notice: null,
+      report: null,
+      subscriptionStatus: null,
+      inactive: false,
+    });
   });
 });

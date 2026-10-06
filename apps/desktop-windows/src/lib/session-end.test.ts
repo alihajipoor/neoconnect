@@ -309,3 +309,20 @@ describe("ending a session ends the tunnel", () => {
     expect(seenDuringTeardown).toBe(before + 1);
   });
 });
+
+describe("ending a session forgets this device's slot", () => {
+  /** Sign-out releases the slot on the server by itself
+   * (docs/device-slots.md, obligation 8), so nothing is sent -- but a
+   * renewal still owed to the old session must not run, or claim, under
+   * the next one. */
+  it("forgets the slot without a request of its own", async () => {
+    const { deviceSlot } = await import("./device-slot-session");
+    deviceSlot.adopt({ subscriptionId: "6f1c2b9e-0000-4000-8000-000000000001" });
+    expect(deviceSlot.standing()).toBe("unclaimed");
+
+    await endCustomerSession();
+
+    expect(deviceSlot.standing()).toBe("none");
+    expect(calls.filter((c) => c.url.includes("/customer/vpn/"))).toEqual([]);
+  });
+});
