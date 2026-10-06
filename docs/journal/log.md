@@ -2901,3 +2901,52 @@ lines before enforcing; the rig tests in the design (false-positive soak
 per protocol, PC-then-phone, takeover with captures, censored path,
 non-claiming clients, long Xray download, IKEv2, restart during a hold,
 Android screen-off) gate it.
+
+## 2026-10-06 — device slots, Windows client (branch `claude/device-slots-desktop`)
+
+Built on `claude/per-device-credentials` (`f960994`). Not merged, not
+released. Needs that backend deployed first: against today's production
+backend every claim is a 404, which the client reads as "no answer, dial
+anyway, stop asking" -- so the branch is harmless before the deploy, and
+does nothing either.
+
+**Where things are.** All of the platform-neutral logic is in
+`apps/desktop-windows/src/lib`, for the mobile client to reuse through
+`@shared`: `device-identity.ts` (the two headers; nothing from the web
+portal), `device-slots.ts` (claim/renew/release, every answer turned into
+an outcome; only 409 `DEVICE_LIMIT` / `SUBSCRIPTION_INACTIVE` and 429
+`TAKEOVER_LIMIT` stop a dial), `device-slot-session.ts` (the state
+machine, a module-level `deviceSlot`, and `slotStop` -- what to show and
+report), `device-slot-notice.ts` (the card's words, en/fa),
+`components/DeviceSlotCard.tsx`. `Dashboard.tsx` only wires them.
+
+**Decisions taken here, not in the contract:**
+- The claim runs alongside the config refresh rather than after it, so a
+  blackholed API costs max(6 s, 3 s), not 9 s. It names the on-screen
+  credential; once the ladder lands, an idempotent re-claim moves the
+  slot to the one it landed on.
+- A held slot is not re-claimed by an automatic reconnect while its
+  renewal is current (the request would go into the tunnel just judged
+  dead), but is re-claimed by any connect once overdue.
+- The slot is also released after a failed or cancelled connect and when
+  the tunnel is observed gone on its own -- not only on Disconnect --
+  so the other device is never told "in use on Windows PC" about a PC
+  that is not connected.
+- A claim refused *after* dialling (the pre-dial one went unanswered)
+  disconnects and shows the refusal card, like a takeover.
+- `deviceLimit: null` skips the claim; an absent `deviceLimit` (older
+  backend) does not.
+
+**PROVEN (unit tests and typecheck only):** desktop JS 37 files / 526
+tests (442 before this branch's first commit), typecheck clean; mobile
+JS 4 / 34 and `tsc` clean against the changed shared files; web portal
+and macOS shells `tsc` clean; the frontend bundles. The card was
+rendered in a throwaway browser harness in both languages (no overflow,
+100-140 px) -- outside the app.
+**UNVERIFIED:** everything else. No claim, renewal or release has
+reached a real backend; the dashboard wiring has not run (it needs the
+Tauri runtime and two signed-in devices on a Starter account); the card
+has not been seen inside the 400x640 dashboard; nothing on a censored
+network. The PC-then-phone, takeover and displaced scenarios are rig
+work, as is checking that a displaced device really does not run its
+ladder.
