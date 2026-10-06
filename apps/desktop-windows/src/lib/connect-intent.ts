@@ -68,6 +68,24 @@ export function declareIntent(prev: IntentState, intent: Intent): IntentState {
   return { intent, generation: prev.generation + 1 };
 }
 
+/** Makes every answer still in flight old news, without declaring
+ * anything.
+ *
+ * For an observation that outranks whatever is already on its way: the
+ * tunnel the screen was vouching for has gone. The fifteen-second
+ * health check takes its status first and its egress or probe reading
+ * afterwards, seconds later -- so one that asked before the engine died
+ * would otherwise land "degraded", "unverified" or even "connected" on
+ * top of "VPN connection lost", about a tunnel that no longer exists.
+ * Advancing the stamp is what makes `isCurrent` refuse it.
+ *
+ * The intent is left as it is. Nothing was asked for; the app is still
+ * idle, and the next observation is shown as it is.
+ */
+export function supersedeAnswers(prev: IntentState): IntentState {
+  return { intent: prev.intent, generation: prev.generation + 1 };
+}
+
 /** Whether an answer fetched under `generation` still describes what the
  * app is doing. */
 export function isCurrent(now: IntentState, generation: number): boolean {

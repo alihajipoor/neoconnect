@@ -333,7 +333,10 @@ pub(super) fn clear_tunnel_service(limits: &crate::lifecycle::budget::Limits) ->
 /// while connected. Failure is not reported: "there was nothing to
 /// remove" is the expected outcome most of the time.
 pub fn remove_tunnel_if_present(engines: &Engines) {
-    if !tunnel_is_running() {
+    // Registered, not running: a tunnel service whose process died is
+    // still `StartAutomatic`, and comes back at the next boot unless it
+    // is removed here.
+    if !tunnel_service_registered() {
         return;
     }
     let _ = disconnect(engines);
@@ -618,6 +621,166 @@ mod tests {
         let out = format!("old=\t0\nnew=\t{}\n", NOW - 10);
         assert_eq!(parse_handshake(&out, NOW), HandshakeHealth::Alive { age_secs: 10 });
     }
+
+    /// The liveness bug, as a table. A registered service is not a
+    /// running tunnel: a tunnel service whose process died stays
+    /// registered in `Stopped`, and reading that as "up" is how a dead
+    /// WireGuard tunnel would have been reported connected indefinitely.
+    #[test]
+    fn a_stopped_tunnel_service_is_not_a_running_tunnel() {
+        assert!(!counts_as_running(&ScmView::NotRegistered));
+        assert!(!counts_as_running(&ScmView::Stopped(None)));
+        assert!(!counts_as_running(&ScmView::Stopped(Some(1))));
+        assert!(counts_as_running(&ScmView::Running(Some(4242))));
+        assert!(counts_as_running(&ScmView::Running(None)));
+        // Still stopping, or not readable: not proof of down, so not
+        // reported as down.
+        assert!(counts_as_running(&ScmView::Pending));
+        assert!(counts_as_running(&ScmView::Unreadable));
+    }
+
+    /// On a machine without our tunnel service, both questions say no --
+    /// and removing it is the registration question, so a stopped one is
+    /// still removed. Asked of the real service manager.
+    #[test]
+    fn with_no_tunnel_service_installed_nothing_is_running_or_registered() {
+        if tunnel_service_registered() {
+            // A developer machine with a live tunnel; nothing to assert.
+            return;
+        }
+        assert!(!tunnel_is_running());
+        assert_eq!(scm_view(), ScmView::NotRegistered);
+    }
+
+    /// The watch on the tunnel service, end to end against a real
+    /// process: the service manager is scripted, the process it names is
+    /// a real one, and killing that process has to be noticed within the
+    /// slice -- not on the next status poll.
+    #[test]
+    fn a_tunnel_service_whose_process_dies_is_noticed_promptly() {
+        use crate::lifecycle::engine_watch::{watch, Gone};
+        use std::os::windows::process::CommandExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let mut process = std::process::Command::new(r"C:\Windows\System32\ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .creation_flags(0x0800_0000)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawning ping");
+        let pid = process.id();
+
+        // Starting, then running as `pid`, then -- once the process has
+        // been killed -- still "running" for a few looks (the manager is
+        // not instant), then stopped with an exit code.
+        let killed = Arc::new(AtomicBool::new(false));
+        let seen_killed = Arc::clone(&killed);
+        let mut looks_after_kill = 0;
+        let mut looks = 0;
+        let query = move || {
+            looks += 1;
+            if looks < 3 {
+                return ScmView::Pending;
+            }
+            if !seen_killed.load(Ordering::SeqCst) {
+                return ScmView::Running(Some(pid));
+            }
+            looks_after_kill += 1;
+            if looks_after_kill < 3 {
+                ScmView::Running(Some(pid))
+            } else {
+                ScmView::Stopped(Some(1066))
+            }
+        };
+
+        let reports: Arc<Mutex<Vec<Gone>>> = Arc::default();
+        let into = Arc::clone(&reports);
+        let guard = watch(
+            9,
+            "test-wg",
+            Box::new(ServiceLiveness::with_query(query)),
+            Arc::new(move |g: Gone| into.lock().unwrap().push(g)),
+        )
+        .expect("starting a watch");
+
+        // Long enough to have reached Running and be waiting on the
+        // process; nothing must be reported while it is alive.
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(reports.lock().unwrap().is_empty(), "reported a live tunnel service as gone");
+
+        killed.store(true, Ordering::SeqCst);
+        let killed_at = Instant::now();
+        process.kill().unwrap();
+        let _ = process.wait();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reports.lock().unwrap().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let reports = reports.lock().unwrap();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].generation, 9);
+        assert_eq!(reports[0].detail, Some(1066), "the service's own exit code");
+        assert!(
+            reports[0].at.saturating_duration_since(killed_at) < Duration::from_secs(2),
+            "noticed {:?} after the process died",
+            reports[0].at.saturating_duration_since(killed_at)
+        );
+        drop(guard);
+    }
+
+    /// A tunnel service that is removed outright -- not stopped, gone --
+    /// is an ending too.
+    #[test]
+    fn a_tunnel_service_that_disappears_is_gone() {
+        use crate::lifecycle::engine_watch::{Liveness, Look};
+        let mut liveness = ServiceLiveness::with_query(|| ScmView::NotRegistered);
+        assert!(matches!(liveness.look(), Look::Gone(None)));
+        let mut liveness = ServiceLiveness::with_query(|| ScmView::Pending);
+        assert!(matches!(liveness.look(), Look::Again), "a starting service is not an ending");
+    }
+
+    /// Only "no such service" is an absent service. Every other reason
+    /// the manager would not open it is a question that went unanswered,
+    /// and used to be read as a definite ending -- the engine watch
+    /// reporting a live tunnel gone, and `tunnel_is_running` answering
+    /// `false` over it.
+    #[test]
+    fn only_a_service_that_does_not_exist_is_not_registered() {
+        let open_failed = |code: i32| view_of_open_error(&windows_service::Error::Winapi(std::io::Error::from_raw_os_error(code)));
+        assert_eq!(open_failed(1060), ScmView::NotRegistered, "ERROR_SERVICE_DOES_NOT_EXIST");
+        for code in [
+            5,    // ERROR_ACCESS_DENIED
+            6,    // ERROR_INVALID_HANDLE
+            8,    // ERROR_NOT_ENOUGH_MEMORY
+            123,  // ERROR_INVALID_NAME
+            1053, // ERROR_SERVICE_REQUEST_TIMEOUT
+            1072, // ERROR_SERVICE_MARKED_FOR_DELETE
+            1115, // ERROR_SHUTDOWN_IN_PROGRESS
+        ] {
+            let view = open_failed(code);
+            assert_eq!(view, ScmView::Unreadable, "error {code}");
+            assert!(counts_as_running(&view), "error {code} read as a tunnel that is down");
+        }
+        assert_eq!(
+            view_of_open_error(&windows_service::Error::ArgumentHasNulByte("service name")),
+            ScmView::Unreadable
+        );
+    }
+
+    /// The same at the watch: a manager that cannot be asked, once or for
+    /// a while, is not an ending, and the process already held goes on
+    /// being waited on.
+    #[test]
+    fn a_tunnel_service_that_cannot_be_opened_is_not_gone() {
+        use crate::lifecycle::engine_watch::{Liveness, Look};
+        let mut liveness = ServiceLiveness::with_query(|| ScmView::Unreadable);
+        for _ in 0..3 {
+            assert!(matches!(liveness.look(), Look::Again), "an unanswered question was taken for an ending");
+        }
+        assert!(liveness.may_return(), "a stopped tunnel service can be started again without us");
+    }
 }
 
 /// What the peer's handshake says about the tunnel.
@@ -636,15 +799,182 @@ pub enum HandshakeHealth {
     Unknown,
 }
 
-/// Asks the service manager whether the tunnel service exists at all.
-/// Opening it is enough -- a tunnel service that exists is one
-/// wireguard.exe created and has not torn down.
+/// Whether the tunnel service is registered at all, running or not.
+///
+/// The question for everything that *removes* it -- the untracked arm of
+/// a disconnect, repair, the diagnostics snapshot -- because a
+/// registered service is residue whatever state it is in: it is
+/// `StartAutomatic`, so a stopped one comes back up at the next boot.
+pub fn tunnel_service_registered() -> bool {
+    !matches!(scm_view(), ScmView::NotRegistered)
+}
+
+/// Whether the tunnel is up, as far as the service manager can say.
+///
+/// This used to be [`tunnel_service_registered`] under this name -- it
+/// asked whether the service could be *opened*, never whether it was
+/// running. A tunnel service whose process died stays registered, in
+/// `Stopped`, so `status` went on answering `connected: true` for a
+/// WireGuard tunnel that no longer existed, and the session was never
+/// torn down: its DNS confinement, pinned to the dead adapter, went on
+/// blocking plain DNS for the whole machine until the customer pressed
+/// Disconnect. Read from the code rather than measured -- the VM run
+/// that found the Xray case did not kill a WireGuard tunnel.
 ///
 /// Note this says nothing about whether the tunnel works; see
 /// [`handshake_health`] for that.
 pub fn tunnel_is_running() -> bool {
+    counts_as_running(&scm_view())
+}
+
+/// The rule, apart from the service manager so it can be tested.
+///
+/// Anything short of `Stopped` counts, deliberately including the
+/// pending states and a status that could not be read. A tunnel that is
+/// still stopping may still be carrying traffic for a moment, and "I
+/// could not ask" is not "it is down" -- answering down there would be a
+/// tunnel state nothing verified, in the direction that tells a customer
+/// with a live tunnel that they have none.
+pub(super) fn counts_as_running(view: &ScmView) -> bool {
+    match view {
+        ScmView::NotRegistered | ScmView::Stopped(_) => false,
+        ScmView::Running(_) | ScmView::Pending | ScmView::Unreadable => true,
+    }
+}
+
+/// What the service manager says about the tunnel service, reduced to
+/// what liveness needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScmView {
+    /// No such service: never installed, or removed.
+    NotRegistered,
+    /// Registered, and its status could not be read.
+    Unreadable,
+    /// Stopped, with the service's own exit code when it set one.
+    Stopped(Option<i64>),
+    /// Starting, stopping, pausing or continuing.
+    Pending,
+    /// Running, with its process id when the manager gave one.
+    Running(Option<u32>),
+}
+
+pub(super) fn scm_view() -> ScmView {
+    use windows_service::service::ServiceExitCode;
     let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else {
-        return false;
+        // Nothing can be asked. Treated as unreadable rather than as
+        // absent, for the reason `counts_as_running` gives.
+        return ScmView::Unreadable;
     };
-    manager.open_service(TUNNEL_SERVICE_NAME, ServiceAccess::QUERY_STATUS).is_ok()
+    let service = match manager.open_service(TUNNEL_SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+        Ok(service) => service,
+        Err(e) => return view_of_open_error(&e),
+    };
+    match service.query_status() {
+        Ok(status) => match status.current_state {
+            ServiceState::Stopped => ScmView::Stopped(match status.exit_code {
+                ServiceExitCode::Win32(0) => None,
+                ServiceExitCode::Win32(code) | ServiceExitCode::ServiceSpecific(code) => {
+                    Some(i64::from(code))
+                }
+            }),
+            ServiceState::Running => ScmView::Running(status.process_id),
+            _ => ScmView::Pending,
+        },
+        Err(_) => ScmView::Unreadable,
+    }
+}
+
+/// What a failure to open the tunnel service says about it.
+///
+/// Only `ERROR_SERVICE_DOES_NOT_EXIST` means there is no such service.
+/// Everything else -- a manager too busy to answer, access refused, a
+/// handle that could not be allocated -- is the question going
+/// unanswered, and reading that as "not registered" turned a failed
+/// query into a definite ending: the engine watch reported the tunnel
+/// gone and the status poll answered `connected: false` over a tunnel
+/// that was up. "Could not ask" is not "down".
+fn view_of_open_error(error: &windows_service::Error) -> ScmView {
+    const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
+    match error {
+        windows_service::Error::Winapi(e) if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST) => {
+            ScmView::NotRegistered
+        }
+        _ => ScmView::Unreadable,
+    }
+}
+
+/// The tunnel service as a [`Liveness`], for the engine watch.
+///
+/// wireguard.exe runs each tunnel as its own service process, which is
+/// what dies when the tunnel does -- and the WireGuardNT adapter and the
+/// kill-switch filters go with it. So once the service manager says
+/// `Running` this waits on that process, by a handle opened from the pid
+/// the manager reports; until then, and between a process ending and the
+/// manager marking the service stopped, it asks again.
+///
+/// The service manager is asked on every look, not only when there is
+/// nothing to wait on. A slice is a second, so that is one query a
+/// second, and it is what makes a pid reused between the process exiting
+/// and the handle being opened harmless: the manager says `Stopped` on
+/// the next look whatever the handle is waiting on.
+///
+/// `query` is the service manager in the service ([`scm_view`], by way
+/// of `Engines`) and a script in tests.
+///
+/// [`Liveness`]: crate::lifecycle::engine_watch::Liveness
+pub(super) struct ServiceLiveness<Q> {
+    query: Q,
+    held: Option<(u32, crate::lifecycle::engine_watch::OwnedHandle)>,
+}
+
+impl<Q: FnMut() -> ScmView> ServiceLiveness<Q> {
+    pub(super) fn with_query(query: Q) -> Self {
+        Self { query, held: None }
+    }
+}
+
+impl<Q: FnMut() -> ScmView + Send + 'static> crate::lifecycle::engine_watch::Liveness for ServiceLiveness<Q> {
+    fn look(&mut self) -> crate::lifecycle::engine_watch::Look {
+        use crate::lifecycle::engine_watch::{open_process, Look};
+        let held_alive = self.held.as_ref().is_some_and(|(_, h)| !h.is_signalled());
+        match (self.query)() {
+            ScmView::NotRegistered => Look::Gone(None),
+            ScmView::Stopped(code) => Look::Gone(code),
+            ScmView::Running(Some(pid)) => match &self.held {
+                Some((held, handle)) if *held == pid => {
+                    if held_alive {
+                        Look::WaitOn(handle.raw())
+                    } else {
+                        // Our handle says the process ended and the
+                        // manager has not caught up. A moment, not a wait.
+                        Look::Again
+                    }
+                }
+                _ => match open_process(pid) {
+                    Ok(handle) => {
+                        let raw = handle.raw();
+                        self.held = Some((pid, handle));
+                        Look::WaitOn(raw)
+                    }
+                    // Gone between the query and the open, or not ours to
+                    // open. The next look asks the manager again.
+                    Err(_) => Look::Again,
+                },
+            },
+            // Mid-transition, or the manager could not say. Keep waiting
+            // on the process already held if it is still there; there is
+            // nothing to conclude from a state that is passing through.
+            ScmView::Running(None) | ScmView::Pending | ScmView::Unreadable => match &self.held {
+                Some((_, handle)) if held_alive => Look::WaitOn(handle.raw()),
+                _ => Look::Again,
+            },
+        }
+    }
+
+    /// A stopped service can be started again without us -- by the
+    /// manager's recovery actions, or by anyone allowed to start it -- so
+    /// a `Stopped` seen once is checked before it is believed.
+    fn may_return(&self) -> bool {
+        true
+    }
 }

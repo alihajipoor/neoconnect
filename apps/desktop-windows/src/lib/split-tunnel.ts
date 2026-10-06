@@ -1,6 +1,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
 import { exitsForGames, groupMembers, type GameExitGroup } from "./game-apps";
+import { CUSTOM_MODE_CHANGE_CAP_MS, statusDisturbances } from "./status-disturbance";
 
 /** Custom mode: route only the chosen applications through the tunnel.
  *
@@ -281,6 +282,12 @@ export async function pushSplitTunnel(
    * machines. */
   egress: string | null = null,
 ): Promise<void> {
+  // Marked for the drop check while it runs. Turning the mode on or off
+  // rebuilds the tunnel, and a status asked meanwhile can say "no
+  // tunnel" over one that is about to be up again -- which must not be
+  // told to the customer as their connection being lost. See
+  // `status-disturbance`.
+  const done = statusDisturbances.begin(CUSTOM_MODE_CHANGE_CAP_MS);
   await invoke("vpn_set_split_tunnel", {
     enabled: settings.enabled,
     apps: settings.apps,
@@ -313,7 +320,7 @@ export async function pushSplitTunnel(
     // one would report a stale exit for a tunnel that may have been
     // rebuilt against a different node entirely.
     egress,
-  });
+  }).finally(done);
 }
 
 /** One running application, as the service reports it. */

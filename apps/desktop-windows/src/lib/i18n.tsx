@@ -535,6 +535,17 @@ const en = {
   "dash.protectedHint": "Your traffic is encrypted and routed through Neoxify.",
   "dash.notProtected": "You're not protected",
   "dash.notProtectedHint": "Connect to encrypt your traffic and hide your IP.",
+  // A tunnel the screen was vouching for closed without anyone asking.
+  // "You're not protected / Connect to encrypt..." above is written for
+  // somebody who has not connected yet; this is somebody whose traffic
+  // was protected a second ago and is not now. Measured on 2026-10-06:
+  // the engine died, traffic went out direct in 0.2s, and the screen said
+  // "You're protected" for another 17 seconds. It now says this instead,
+  // within about a second. No promise of a reconnect: nothing reconnects
+  // on its own.
+  "dash.dropped": "VPN connection lost",
+  "dash.droppedHint":
+    "The tunnel closed, so your traffic is now going out without Neoxify and is not protected. Connect again to protect it.",
   "dash.degraded": "Not carrying traffic",
   "dash.degradedHint": "The tunnel is up but the server isn't responding. Your traffic is NOT protected. Try reconnecting or pick another server.",
   // The third answer, and the one the screen had no words for.
@@ -1211,6 +1222,9 @@ const fa: Record<TranslationKey, string> = {
   "dash.protectedHint": "ترافیک شما رمزگذاری شده و از طریق نئوکسیفای عبور می‌کند.",
   "dash.notProtected": "شما محافظت نمی‌شوید",
   "dash.notProtectedHint": "برای رمزگذاری ترافیک و پنهان‌کردن آی‌پی خود متصل شوید.",
+  "dash.dropped": "اتصال VPN قطع شد",
+  "dash.droppedHint":
+    "تونل بسته شد، بنابراین ترافیک شما اکنون بدون نئوکسیفای ارسال می‌شود و محافظت نمی‌شود. برای محافظت، دوباره وصل شوید.",
   "dash.degraded": "ترافیک عبور نمی‌کند",
   "dash.degradedHint": "تونل برقرار است اما سرور پاسخ نمی‌دهد. ترافیک شما محافظت نمی‌شود. دوباره وصل شوید یا سرور دیگری انتخاب کنید.",
   "dash.unverified": "متصل، اما تأیید نشده",

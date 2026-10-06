@@ -3041,3 +3041,246 @@ behaviour's limits. **UNVERIFIED:** everything else, as before. The
 dashboards' use of the store has not been rendered. Nothing has reached
 a real backend, a filtered network or a phone; the takeover through the
 tunnel is exactly the case that needs the rig and a censored path.
+
+## 2026-10-06 — an engine that dies: the app kept saying "protected"
+
+Branch `claude/engine-death-honesty`, not merged, not released.
+
+### The measurement
+
+In `Neoxify-Test`, desktop 0.9.43, fi-finland, Stealth (Xray), capture
+at the NIC miniport (`pktmon --comp nics`) and the app's text sampled
+through WebView2 DevTools on the same clock:
+
+- **Full tunnel:** `xray.exe` killed (`Stop-Process -Force`). Traffic
+  went out direct within 0.2s -- 875 packets to the probe address in
+  30s -- and the dashboard said "You're protected" for **17.0s**, then
+  "You're not protected" with no reconnect.
+- **Custom mode** (curl.exe selected): the selected app's traffic
+  failed for 4.7s, then went direct (840 packets) once the split-tunnel
+  watchdog saw `neoconnect0` gone; "You're protected" until **8.1s**.
+- `cleanup.log` said nothing about the engine -- only the split
+  tunnel's adapter-gone stop and a DNS-rule clear.
+
+Why: the service held no wait on any engine. A dead engine was found
+only by `status()` calling `try_wait`, and `status()` ran when the app's
+fifteen-second health poll asked. Until then the session stayed in the
+slot -- routes, WFP filters (which permit port 53 only through the dead
+adapter), NRPT rule, Custom mode pinned to a vanished adapter -- and
+the screen repeated the last poll's verdict.
+
+Fail open stays. The defect was the claim, not the fail-open: nothing
+on this branch blocks traffic or reconnects.
+
+### What changed
+
+**Service.** `lifecycle::engine_watch`: a plain thread per session,
+waiting on what the kernel signals when the engine ends, and a ledger
+of generations. `begin_session` is now the only way into the slot and
+always starts a watch; `Slot::end` closes the generation before the
+engine is handed back, so no teardown of ours (Disconnect, a connect
+clearing the decks, a Custom-mode rebuild) can read as a drop. On a
+drop the pipe queues phase one (`end_dead_session`: re-check the engine
+really ended, then Custom mode, routes, WFP filters, NRPT by registry --
+no PowerShell) and behind it phase two (`finish_dead_session`: the
+ordinary thorough `disconnect()`, only if no session has begun since).
+Each drop writes one `cleanup.log` line: "the tunnel engine ended on
+its own | <protocol>, exit code N, noticed by the engine watch; routes,
+filters and DNS rule released Nms after it was seen". A `Status` that
+falls back while the owning thread is busy answers from the ledger
+first, so it says down without PowerShell.
+
+Per engine:
+
+| Engine | Watched by | Also changed |
+|---|---|---|
+| Xray: four engine profiles -- `XRAY_VLESS_REALITY` (Stealth), `XRAY_VLESS_TLS` (Stealth HTTPS, and Stealth Web when its transport is WS), `XRAY_TROJAN` (Stealth Lite), `SHADOWSOCKS` | a duplicate of `xray.exe`'s own process handle | -- |
+| OpenVPN | a duplicate of `openvpn.exe`'s process handle | phase one purges its pushed half-defaults by destination, as the hard stop does |
+| WireGuard | the tunnel service's process (pid from the service manager once Running), the manager re-asked every second | `tunnel_is_running` now means "registered and not Stopped"; it used to mean "can be opened", so a dead tunnel stayed `connected: true` forever (read from code, never measured). Only "no such service" (1060) is not registered; any other failure to open it is unreadable, which counts as running. Handshake reading reused for 5s |
+| IKEv2 | `RasConnectionNotificationW(RASCN_Disconnection)` on the held handle, plus `RasGetConnectStatusW` once a second | -- |
+
+`XRAY_VMESS` ("Stealth (legacy)") has a label in the app but no desktop
+`ConnectProfile`, so the desktop cannot connect with it and nothing here
+covers it. Stated rather than left out of the table.
+
+**App.** A one-second liveness poll while a tunnel is shown: one
+status call, no egress, no probe; skipped during a ladder pass, a press,
+a Custom-mode change or the Custom-mode probe. `droppedFromPoll` decides:
+an answer must have arrived (a failed call is a miss, never a drop), it
+must be the service's verified "no tunnel" (`health: down`), nothing of
+ours may have disturbed it, no connect/disconnect of ours in flight, and
+the screen claiming a tunnel (the middle two since the review). The
+headline is then "VPN connection lost / The tunnel closed, so your
+traffic is now going out without Neoxify and is not protected. Connect
+again to protect it." (and Persian), destructive colour. The
+fifteen-second poll keeps its interval and its evidence; since the
+review its "no tunnel" goes through the same rule and wording, and one
+it cannot trust counts as a miss.
+
+**One behaviour goes away, on purpose.** A WireGuard tunnel whose
+service process died used to be rebuilt by the app: status kept saying
+`connected: true`, the egress check then read degraded twice, and the
+ladder reconnected -- the only protocol that recovered by itself, and
+only because the service misreported it. Now it is reported as lost,
+like the others, and nothing reconnects. Whether a dropped tunnel
+should reconnect automatically is a product decision this branch does
+not take; it only stops the false "connected".
+
+**IPC: no new field or variant.** The optional `tunnel_ended` field the
+plan mentioned was not added: the freeze rule says every variant and
+field keeps its shape and meaning, and whether an additive field is
+allowed is the rule owner's call. What the review fixes did instead (see
+below) stays inside the meanings the IPC already gives: `health: down`
+is "nothing is running" and `unknown` is "no trustworthy evidence", so a
+status the service could not verify -- its fallback while the owning
+thread is busy -- now says `connected: false` with `unknown`, and only
+`down` is a drop to the app.
+
+**Mixed versions** (corrected after review; the first version of this
+entry said both directions were "unchanged", which was not true):
+
+- *This app on a 0.9.43 service.* Xray, OpenVPN and IKEv2 deaths are
+  caught at the next one-second poll, because the old service checks
+  the engine on every status call (`try_wait`, RAS). WireGuard is not:
+  the old service's `tunnel_is_running` means "can be opened", so a dead
+  tunnel stays `connected: true` there forever, and the app says
+  connected. And the old service reads the WireGuard handshake on every
+  status (it has no `HANDSHAKE_REUSE_FOR`), so on WireGuard it spawns
+  `wg.exe` once a second. The app cannot avoid that: `Status` carries
+  no option, and the only request that names the service's version is
+  `Diagnostics`, which runs netsh and PowerShell on the owning thread --
+  far heavier than what it would save. It lasts while the app and
+  service are out of step; the installer replaces both in one step, so
+  in practice only after an install whose service step failed. A 0.9.43
+  service also says `down` for its fallback's guesses, so there the app
+  falls back on its own guard (it knows when it started a Custom-mode
+  change or probe), and a guess during any other long operation would
+  still read as a drop.
+- *A 0.9.43 app on this service.* The service tears the dead session
+  down within about a second and traffic goes direct (fail open), but
+  the old app polls only every fifteen seconds and says "You're
+  protected" until then -- the measured 17s becomes up to 15s, not 1s.
+
+### Proven, by tests on this PC
+
+`cargo test --workspace`: service 454 passed, 6 ignored (was 432); ipc
+58; tauri lib 18 passed, 1 ignored. `pnpm test`: 451 (was 435).
+`cargo check --workspace --all-targets` clean, no new warnings.
+
+- 32 real processes killed at the same instant are each noticed by
+  their own watch, for their own generation: slowest 6ms alone, 10-15ms
+  under the full suite.
+- 32 sessions ended on purpose report nothing and leave no watch thread
+  -- including the half whose watch outlives the kill, where only the
+  closed generation stands in the way.
+- Each of the five process-engine labels (the four Xray profiles and
+  OpenVPN), killed behind the service's back, is reported in under 2s
+  and torn down exactly once; a stale report leaves a newer session
+  alone; a status poll that finds the death first takes the same steps.
+- 32 engines dying while a Disconnect races them, in both orders: each
+  session ended exactly once, nothing left in the slot.
+- Over a real pipe: a dead engine leaves the slot 65-115ms after the
+  kill with nobody asking; a status while the owning thread is busy
+  says down.
+- WireGuard's watch against a real process with the service manager
+  scripted; IKEv2's against a handle RAS never issued (no crash, no
+  drop recorded).
+- App: the drop rule's table, the headline table ("protected" for one
+  state only), and source assertions that the liveness poll goes
+  through the rule and the stamp and makes no egress or probe call.
+
+### Unverified -- needs the VM, not done here
+
+Nothing on this branch has carried a packet. The coordinating session
+is to repeat the 2026-10-06 method (pktmon at the NIC, DevTools text on
+the same clock) for: `xray.exe` killed on each of the four Xray engine
+profiles, and on Stealth Web (VLESS_TLS over WS), full tunnel and
+Custom mode; `openvpn.exe` killed; the
+`WireGuardTunnel$neoconnect` process killed; IKEv2 dropped
+(`rasdial Neoxify /disconnect`). Expected: a `cleanup.log` line within
+about a second, the headline changed within about two, packets still
+direct (fail open), DNS resolving afterwards, no reconnect.
+
+Specifically unproven until then:
+
+- That `RasConnectionNotificationW` fires for a real IKEv2 drop. If it
+  does not, the once-a-second status call still catches it.
+- That the WireGuard tunnel service runs as its own process whose pid
+  the manager reports, and whether the manager restarts it after a crash
+  (recovery actions were not checked). If it restarts it before phase
+  one asks, the review fixes below take the report back and keep
+  watching; if after, phase two removes it as a leftover. Shown against
+  a scripted manager; not seen on a real one.
+- That MOBIKE moving an IKEv2 connection takes it out of `Connected` at
+  all, and if so whether `RasGetConnectStatusW` can say so in the moment
+  phase one asks. Handled the same way; covered only by a stand-in
+  source, since no test here has a real RAS connection.
+- That a WireGuard tunnel service never reads `Stopped` between
+  `/installtunnelservice` returning and starting. If it did, the watch
+  would end a tunnel that was about to come up. Believed not, from
+  wireguard-windows' install path; not observed.
+- The INFERRED rows of the map that preceded this work: plain DNS and
+  IPv6 blocked in the gap before the old poll, WireGuard staying
+  "connected" after its process died, IKEv2's fallback launching
+  PowerShell. The fix assumes them; no capture has shown them.
+
+### Review fixes (two reviews of `bc3b2ca`)
+
+1. **A drop the engine contradicts stayed on record** (both reviews).
+   The watch recorded before phase one asked; when phase one found the
+   engine running it returned, leaving the record -- so the Status and
+   Disconnect fallbacks answered "no tunnel" for a live one -- and the
+   session unwatched for good, since a watch that reports has finished.
+   Triggers: a WireGuard tunnel service restarted by the manager, a
+   failed service-manager query, an IKEv2 connection out of `Connected`
+   while MOBIKE moves it. Now a source that can come back (the tunnel
+   service, RAS) records unconfirmed, and only a confirmed drop answers
+   a fallback; phase one finding the engine alive retracts the record
+   and starts the watch again (at most one look a second for a source
+   that keeps contradicting itself; three re-arms per session logged).
+2. **Any `OpenService` failure read as "not registered".** Only 1060
+   (`ERROR_SERVICE_DOES_NOT_EXIST`) does now; the rest are unreadable.
+3. **The app took any `connected: false` as a verified drop.** The
+   service's busy fallback now answers "nothing seen" with `health:
+   unknown` (and the untracked arm of `status()` does too when PowerShell
+   could not answer for IKEv2); the app says "connection lost" only on
+   `down`. Within the frozen IPC: no field or variant added, both values
+   keep the meanings the IPC gives them, and shipped apps read every
+   `connected: false` alike. The app also marks its own disturbances --
+   a Custom-mode change, which rebuilds the tunnel, and the Custom-mode
+   probe, which holds the owning thread -- and sets aside any answer one
+   began during, which closes the probe race (the probe starts after
+   the health check's own status, so it could begin while a liveness
+   look was already waiting). The fifteen-second check counts an
+   untrusted "no tunnel" as a miss rather than publishing it.
+4. **A stale health check could overwrite "connection lost".** The drop
+   now advances the publish stamp, and the check stops once overtaken.
+5. **Phase two could repeat a thorough pass** a Disconnect or the app
+   going away had already run for that session. It skips it now.
+6. **A drop taken over by a Disconnect, a connect or the app going away
+   before phase one was never logged.** `end_session` logs it now, once.
+7. **`wg.exe` once a second on a 0.9.43 service.** Not avoidable from
+   the app; stated under *Mixed versions* above.
+8. **A stale comment** in `status()`, and the Xray rows above (four
+   engine profiles; `XRAY_VMESS` has no desktop profile).
+9. **The compatibility claim** -- corrected under *Mixed versions*.
+
+Tests after the fixes: `cargo test --workspace` service 471 passed, 6
+ignored (was 454); ipc 58; tauri lib 18 passed, 1 ignored. `pnpm test`
+465 (was 451). `pnpm typecheck` clean. `cargo check --workspace
+--all-targets`: no new warnings.
+
+What those prove, and what they do not: the re-arm, the retraction and
+the unconfirmed record are exercised on real processes and over a real
+pipe, with the service manager scripted for WireGuard; IKEv2's trigger
+only through a stand-in source. The app-side rules are unit tests and
+source assertions. No capture, no real rebuild, no real MOBIKE: all of
+it is unverified in the sense this file uses, and belongs in the VM run
+above.
+
+### Traps
+
+- The service tests write to `C:\ProgramData\Neoxify\cleanup.log` when
+  that directory is writable -- on this PC it is, because the service is
+  not installed and earlier tests created it. Every line there is test
+  output. Do not read it as a field log on this machine.
