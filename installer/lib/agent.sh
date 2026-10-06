@@ -3781,6 +3781,33 @@ action_engines_agent() {
   panel_url="$(jq -r '.panelUrl' /etc/neoxify/agent.json)"
   node_id="$(jq -r '.nodeId' /etc/neoxify/agent.json)"
 
+  # Whether this is a relay, from the panel, before anything is installed.
+  #
+  # Every relay guard in this file reads node_is_relay -- no NAT for the
+  # client subnet, no MASQUERADE in wg0's hooks, phantun in front of the
+  # UDP engines, a relayed rather than direct route, the relay Xray
+  # template -- and only action_install_agent ever set it. From this
+  # menu it was unset, every guard read "no", and adding WireGuard,
+  # OpenVPN or IKEv2 to ir1 here would have put back the MASQUERADE rules
+  # removed from it by hand on 2026-08-17 and registered a direct route:
+  # the relay egressing Iranian customers in Iran, the app showing the
+  # exit's country. Found by the 2026-10-06 review.
+  #
+  # The panel holds the authoritative role, and existing relays have no
+  # local marker to read instead. If it cannot be read, nothing is
+  # installed: guessing wrong in one direction is exactly that leak.
+  local token role
+  token="$(get_admin_bearer_token)" || return 1
+  role="$(curl -fsSL "$panel_url/nodes/$node_id" -H "Authorization: Bearer $token" 2>/dev/null | jq -r '.role // empty' 2>/dev/null || true)"
+  if [[ -z "$role" ]]; then
+    echo "ERROR: could not read this node's role from the panel -- refusing to install an engine" >&2
+    echo "  without knowing whether this is a relay." >&2
+    return 1
+  fi
+  local node_is_relay="n"
+  [[ "$role" == "RELAY" ]] && node_is_relay="y"
+  echo "  This node is $role in the panel."
+
   cat <<'EOF'
 
   1) Install/reconfigure Xray (VLESS+REALITY)
