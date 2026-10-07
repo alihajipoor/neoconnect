@@ -1889,6 +1889,22 @@ probe_reality_dest() {
   return 0
 }
 
+# The xray binary install_xray tests a config with. A variable so the
+# gate below can be run against a stand-in: scripts/test-xray-config-gate.sh.
+XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
+
+# Runs `xray run -test` against a config file before it is put into
+# service. Prints what Xray objected to, and returns non-zero, when it
+# refuses.
+xray_test_config() {
+  local config_path="$1"
+  if ! "$XRAY_BIN" run -test -config "$config_path" >/dev/null 2>&1; then
+    echo "ERROR: Xray refuses the new config:" >&2
+    "$XRAY_BIN" run -test -config "$config_path" 2>&1 | tail -5 >&2 || true
+    return 1
+  fi
+}
+
 # Installs xray-core, generates a REALITY keypair, and writes a config
 # with an empty client list -- users are hot-added/removed entirely
 # through the agent's HandlerService calls (see
@@ -2573,9 +2589,7 @@ PY
   # Tested before the restart, and the previous config put back if it
   # fails. A config Xray refuses is every protocol on the node down at
   # once, and a re-run of this function is exactly when one gets written.
-  if ! /usr/local/bin/xray run -test -config "$config_path" >/dev/null 2>&1; then
-    echo "ERROR: Xray refuses the new config:" >&2
-    /usr/local/bin/xray run -test -config "$config_path" 2>&1 | tail -5 >&2 || true
+  if ! xray_test_config "$config_path"; then
     if [[ -n "$config_backup" ]]; then
       cp -a "$config_backup" "$config_path"
       echo "  The previous config is back in place and Xray was not restarted." >&2
