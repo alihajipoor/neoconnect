@@ -230,8 +230,9 @@ matching its latest released tag.
 **The production backend tracks `main`** as of 2026-10-06 (`3bafbe0`,
 the 0.9.44 / 0.2.23 release, with migrations through
 `20261008_session_labels` applied; per-device credentials and device
-slots are live, `CONCURRENCY_CUT` is left at its default `shadow` --
-see `docs/device-slots.md` before changing it). It is deployed over SSH to the
+slots are live. `CONCURRENCY_CUT=enforce` is set in the panel host's
+`infra/.env` (the owner turned the device-limit backstop on on
+2026-10-07; the code default is `shadow`) -- see `docs/device-slots.md`). It is deployed over SSH to the
 panel host with the key at `C:\Users\aliha\.ssh\neoxify_panel`: dump the
 database to `/root/db-backups/pre-<what>-<time>.sql.gz` first, then
 `git pull --ff-only` in `/root/neoconnect` and
