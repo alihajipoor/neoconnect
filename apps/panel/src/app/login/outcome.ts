@@ -19,10 +19,25 @@ function messageOf(body: unknown): string | string[] | undefined {
   return undefined;
 }
 
-export function passwordFailure(status: number, body: unknown): string {
+/**
+ * Whose attempts the backend's per-address limits counted.
+ *
+ * - "yours": the panel forwarded this browser's own address
+ *   (forwardedClientHeaders), so the limits are this operator's.
+ * - "shared": it had no address it could trust and sent none, so the
+ *   backend counted the panel's own -- one bucket for every sign-in
+ *   through the panel, anyone's failures included. Telling the operator
+ *   "from your address" then sends them looking at their own network for
+ *   a limit somebody else spent.
+ */
+export type Counted = "yours" | "shared";
+
+const whose = (counted: Counted) => (counted === "yours" ? "from your address" : "through this panel, from anyone");
+
+export function passwordFailure(status: number, body: unknown, counted: Counted): string {
   const message = messageOf(body);
   if (status === 401) return "Invalid email or password.";
-  if (status === 429) return "Too many sign-in attempts from your address. Wait a minute and try again.";
+  if (status === 429) return `Too many sign-in attempts ${whose(counted)}. Wait a minute and try again.`;
   if (status === 400) {
     // The ValidationPipe's list: a password under eight characters, which
     // no admin account has, so it cannot be the right one.
@@ -31,7 +46,7 @@ export function passwordFailure(status: number, body: unknown): string {
     // wording points customers at neoxify.net, which is not where an
     // operator signs in.
     if (message.startsWith("Too many recent sign-in attempts")) {
-      return "Too many recent failed sign-ins for this account or from your address, and the security check could not be completed. Wait a few minutes and try again.";
+      return `Too many recent failed sign-ins for this account or ${whose(counted)}, and the security check could not be completed. Wait a few minutes and try again.`;
     }
     // The security check itself: expired, already used, or minted easier
     // than the account's recent failures now require. Each says to try
@@ -48,7 +63,7 @@ export interface MfaFailure {
   keepToken: boolean;
 }
 
-export function mfaFailure(status: number, body: unknown): MfaFailure {
+export function mfaFailure(status: number, body: unknown, counted: Counted): MfaFailure {
   const message = messageOf(body);
   if (status === 401) {
     if (message === "Invalid MFA code") return { error: "Invalid code. Please try again.", keepToken: true };
@@ -58,7 +73,7 @@ export function mfaFailure(status: number, body: unknown): MfaFailure {
     return { error: "This sign-in expired. Please sign in again.", keepToken: false };
   }
   if (status === 429) {
-    return { error: "Too many attempts from your address. Wait a minute, then enter a fresh code.", keepToken: true };
+    return { error: `Too many attempts ${whose(counted)}. Wait a minute, then enter a fresh code.`, keepToken: true };
   }
   if (status === 400) return { error: "Enter the 6-digit code from your authenticator app.", keepToken: true };
   return { error: `The backend could not check the code (HTTP ${status}). Please try again.`, keepToken: true };

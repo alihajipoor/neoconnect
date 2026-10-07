@@ -91,6 +91,27 @@ describe("the password step", () => {
     const state = await loginAction({}, form({ email: "ops@example.com", password: "right-password" }));
     expect(state.error).not.toMatch(/invalid email or password/i);
     expect(state.error).toMatch(/wait a minute/i);
+    expect(state.error).toMatch(/from your address/);
+  });
+
+  // With no address it can vouch for, the panel sends none and the backend
+  // counts the panel's own: one bucket for every sign-in, anyone's
+  // failures included. "From your address" would be untrue.
+  it("does not blame the operator's address for a limit every sign-in shares", async () => {
+    incoming.headers = new Headers();
+    reply = { status: 429, body: { message: "ThrottlerException: Too Many Requests" } };
+    const limited = await loginAction({}, form({ email: "ops@example.com", password: "right-password" }));
+    expect(sent[0].headers["X-Forwarded-For"]).toBeUndefined();
+    expect(limited.error).not.toMatch(/your address/);
+    expect(limited.error).toMatch(/through this panel, from anyone/);
+
+    reply = {
+      status: 400,
+      body: { message: "Too many recent sign-in attempts. Please sign in at neoxify.net, or wait 30 minutes and try again." },
+    };
+    const challenged = await loginAction({}, form({ email: "ops@example.com", password: "right-password" }));
+    expect(challenged.error).not.toMatch(/your address/);
+    expect(challenged.error).toMatch(/for this account or through this panel/);
   });
 
   it("passes on what was wrong with the security check", async () => {
@@ -142,6 +163,16 @@ describe("the code step", () => {
     const limited = await loginAction({}, code());
     expect(limited.mfaToken).toBe("mfa-token");
     expect(limited.error).not.toMatch(/invalid code/i);
+    expect(limited.error).toMatch(/from your address/);
+  });
+
+  it("does not blame the operator's address for the shared limit either", async () => {
+    incoming.headers = new Headers();
+    reply = { status: 429, body: {} };
+    const limited = await loginAction({}, code());
+    expect(limited.mfaToken).toBe("mfa-token");
+    expect(limited.error).not.toMatch(/your address/);
+    expect(limited.error).toMatch(/through this panel, from anyone/);
   });
 
   it("goes back to the password step when the step is spent", async () => {

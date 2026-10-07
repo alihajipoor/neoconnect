@@ -5,7 +5,7 @@ import { backendUrl } from "@/lib/backend";
 import { forwardedClientHeaders } from "@/lib/client-address";
 import { parseSolution, type Challenge } from "@/lib/pow";
 import { setSessionCookies } from "@/lib/session";
-import { mfaFailure, passwordFailure } from "./outcome";
+import { type Counted, mfaFailure, passwordFailure } from "./outcome";
 
 export interface LoginState {
   error?: string;
@@ -66,11 +66,12 @@ async function passwordStep(formData: FormData): Promise<LoginState> {
     return { error: "Email and password are required." };
   }
 
+  const forwarded = await forwardedClientHeaders();
   let res: Response;
   try {
     res = await fetch(`${backendUrl()}/auth/login`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(await forwardedClientHeaders()) },
+      headers: { "Content-Type": "application/json", ...forwarded },
       body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
       cache: "no-store",
     });
@@ -79,7 +80,7 @@ async function passwordStep(formData: FormData): Promise<LoginState> {
   }
 
   if (!res.ok) {
-    return { error: passwordFailure(res.status, await res.json().catch(() => null)) };
+    return { error: passwordFailure(res.status, await res.json().catch(() => null), countedAs(forwarded)) };
   }
 
   const body = (await res.json()) as
@@ -100,11 +101,12 @@ async function verifyMfaStep(mfaToken: string, formData: FormData): Promise<Logi
     return { error: "Enter the 6-digit code from your authenticator app.", mfaToken };
   }
 
+  const forwarded = await forwardedClientHeaders();
   let res: Response;
   try {
     res = await fetch(`${backendUrl()}/auth/mfa/verify`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(await forwardedClientHeaders()) },
+      headers: { "Content-Type": "application/json", ...forwarded },
       body: JSON.stringify({ mfaToken, code }),
       cache: "no-store",
     });
@@ -116,11 +118,17 @@ async function verifyMfaStep(mfaToken: string, formData: FormData): Promise<Logi
     // Dropping mfaToken from the returned state sends the form back to the
     // password step -- right for an expired challenge or a locked code
     // step, wrong for a mistyped code.
-    const failure = mfaFailure(res.status, await res.json().catch(() => null));
+    const failure = mfaFailure(res.status, await res.json().catch(() => null), countedAs(forwarded));
     return failure.keepToken ? { error: failure.error, mfaToken } : { error: failure.error };
   }
 
   const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };
   await setSessionCookies({ accessToken, refreshToken });
   redirect("/overview");
+}
+
+/** Whether the backend's per-address limits were this browser's or the
+ * panel's shared one (see Counted in outcome.ts). */
+function countedAs(forwarded: Record<string, string>): Counted {
+  return "X-Forwarded-For" in forwarded ? "yours" : "shared";
 }
