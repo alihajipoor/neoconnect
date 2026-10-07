@@ -80,13 +80,24 @@ describe("startSocialSignIn", () => {
 });
 
 describe("the exchange", () => {
-  it("posts the verifier with the code", async () => {
+  const VERIFIER = "v".repeat(43);
+  const TOKENS = { accessToken: "a", refreshToken: "r" };
+  /** What a backend from before the binding answers an exchange carrying
+   * `verifier`: the global ValidationPipe's forbidNonWhitelisted refusal,
+   * as `failureFrom` in api.ts reads it. */
+  const OLD_BACKEND = { ok: false, error: "property verifier should not exist", status: 400 };
+  const EXPIRED = { ok: false, error: "This sign-in has expired -- please try again", status: 400 };
+
+  /** socialSignIn with the exchange answering `replies` in turn, and
+   * what it was sent. */
+  async function signInAgainst(replies: unknown[], verifier: string | null = VERIFIER) {
     vi.resetModules();
     const bodies: unknown[] = [];
+    const setTokens = vi.fn();
     vi.doMock("./api", () => ({
       publicRequest: async (_path: string, init: RequestInit) => {
         bodies.push(JSON.parse(String(init.body)));
-        return { ok: false, error: "stood in for" };
+        return replies.shift() ?? { ok: false, error: "stood in for" };
       },
       apiRequest: vi.fn(),
     }));
@@ -95,15 +106,45 @@ describe("the exchange", () => {
       reportAttempt: vi.fn(),
     }));
     vi.doMock("./social-auth", () => ({
-      startSocialSignIn: async () => ({ kind: "handoff", code: "the-code", verifier: "v".repeat(43) }),
+      startSocialSignIn: async () => ({ kind: "handoff", code: "the-code", verifier: verifier ?? undefined }),
     }));
-    vi.doMock("./session", () => ({ setTokens: vi.fn() }));
+    vi.doMock("./session", () => ({ setTokens }));
     vi.doMock("./customer", () => ({ clearGamingProfileCache: vi.fn() }));
     vi.doMock("./i18n", () => ({ currentLanguage: () => "en" }));
     vi.doMock("./control-plane-probe", () => ({ probeAddendum: async () => undefined }));
 
     const { socialSignIn } = await import("./auth");
-    await socialSignIn("google");
-    expect(bodies).toEqual([{ code: "the-code", verifier: "v".repeat(43) }]);
+    const result = await socialSignIn("google");
+    return { result, bodies, setTokens };
+  }
+
+  it("posts the verifier with the code", async () => {
+    const { bodies } = await signInAgainst([]);
+    expect(bodies).toEqual([{ code: "the-code", verifier: VERIFIER }]);
+  });
+
+  it("asks once more without it when the backend predates the binding", async () => {
+    // A client released before the backend deploy: without this, Google
+    // and Facebook sign-in ended in a 400 until the backend went out.
+    const { result, bodies, setTokens } = await signInAgainst([OLD_BACKEND, { ok: true, data: TOKENS }]);
+    expect(bodies).toEqual([{ code: "the-code", verifier: VERIFIER }, { code: "the-code" }]);
+    expect(result).toEqual({ ok: true, data: TOKENS });
+    expect(setTokens).toHaveBeenCalledWith(TOKENS);
+  });
+
+  it("takes any other refusal as final", async () => {
+    // What the new backend says to a wrong verifier, an unbound code
+    // presented with one, or a code already spent. Asked again without
+    // the verifier, an unbound injected code would be handed over.
+    for (const refusal of [EXPIRED, { ...OLD_BACKEND, status: 422 }, { ok: false, error: "Could not reach Neoxify." }]) {
+      const { result, bodies } = await signInAgainst([refusal, { ok: true, data: TOKENS }]);
+      expect(bodies).toEqual([{ code: "the-code", verifier: VERIFIER }]);
+      expect(result).toEqual(refusal);
+    }
+  });
+
+  it("sends a bare code once when this runtime made no verifier", async () => {
+    const { bodies } = await signInAgainst([OLD_BACKEND], null);
+    expect(bodies).toEqual([{ code: "the-code" }]);
   });
 });

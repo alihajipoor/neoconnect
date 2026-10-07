@@ -174,22 +174,7 @@ export async function socialSignIn(
           },
           trace,
         )
-      : // Google and Facebook finished on the server; this only collects
-        // the session it is already holding -- with the verifier for the
-        // PKCE challenge the flow started with, without which the server
-        // will not hand over a session bound to it (social-auth.ts).
-        await publicRequest<TokenPair>(
-          "/customer-auth/social/exchange",
-          {
-            method: "POST",
-            body: JSON.stringify(
-              outcome.verifier
-                ? { code: outcome.code, verifier: outcome.verifier }
-                : { code: outcome.code },
-            ),
-          },
-          trace,
-        );
+      : await exchangeHandoff(outcome.code, outcome.verifier, trace);
 
   if (result.ok) {
     // Same reasoning as login(): before the tokens, so a stale
@@ -199,6 +184,49 @@ export async function socialSignIn(
     await setTokens(result.data);
   }
   reportAuth("SIGN_IN", result, trace);
+  return result;
+}
+
+/** What a backend from before the PKCE binding says to an exchange that
+ * carries a verifier: its validation forbids any property its DTO does
+ * not declare, and that refusal is worded by class-validator, not by us.
+ * A backend with the binding declares `verifier` and never says it. */
+const VERIFIER_UNKNOWN = /\bproperty verifier should not exist\b/;
+
+/** Google and Facebook finished on the server; this only collects the
+ * session it is already holding -- with the verifier for the PKCE
+ * challenge the flow started with, without which the server will not
+ * hand over a session bound to it (social-auth.ts).
+ *
+ * Once more without the verifier, but only when the server refused the
+ * field itself. That is a backend from before the binding, and without
+ * this a client released ahead of that backend's deploy could not finish
+ * Google or Facebook sign-in at all -- which also meant main could not
+ * cut a client hotfix until the backend had gone out. It reopens
+ * nothing:
+ *  - that backend's validation ran before its handler, so the code was
+ *    never looked at, let alone spent, and that backend binds nothing --
+ *    the retry asks for exactly what every released client asks for;
+ *  - a backend with the binding never words a refusal this way, and it
+ *    spends the code before checking the verifier, so even a retry it
+ *    provoked could collect nothing.
+ * Any other refusal -- an expired code, a wrong verifier -- is final. */
+async function exchangeHandoff(
+  code: string,
+  verifier: string | undefined,
+  trace: EndpointTrace,
+): Promise<ApiResult<TokenPair>> {
+  const exchange = (body: { code: string; verifier?: string }) =>
+    publicRequest<TokenPair>(
+      "/customer-auth/social/exchange",
+      { method: "POST", body: JSON.stringify(body) },
+      trace,
+    );
+  if (!verifier) return exchange({ code });
+  const result = await exchange({ code, verifier });
+  if (!result.ok && result.status === 400 && VERIFIER_UNKNOWN.test(result.error)) {
+    return exchange({ code });
+  }
   return result;
 }
 
