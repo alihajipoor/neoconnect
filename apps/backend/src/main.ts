@@ -56,8 +56,13 @@ async function bootstrap() {
   // than the bug being fixed.
   //
   // Safe because the backend is published as 127.0.0.1:4000 in
-  // infra/docker-compose.prod.yml, so nginx is the only way in and the hop
-  // count is always exactly one.
+  // infra/docker-compose.prod.yml, so from outside nginx is the only way in
+  // and the hop count is always exactly one. The one other direct caller is
+  // the panel's own server, over the compose network: it signs operators in
+  // on their behalf, and sends X-Forwarded-For with the single address nginx
+  // gave it (apps/panel/src/lib/client-address.ts) -- without that every
+  // admin sign-in was one address, and five wrong passwords from anyone
+  // locked every operator out of the panel.
   //
   // What this does NOT give is the customer's own address for anything
   // that arrives through a node -- its API mirror, or a live tunnel. Then

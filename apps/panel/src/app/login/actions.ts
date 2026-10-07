@@ -2,7 +2,10 @@
 
 import { redirect } from "next/navigation";
 import { backendUrl } from "@/lib/backend";
+import { forwardedClientHeaders } from "@/lib/client-address";
+import { parseSolution, type Challenge } from "@/lib/pow";
 import { setSessionCookies } from "@/lib/session";
+import { mfaFailure, passwordFailure } from "./outcome";
 
 export interface LoginState {
   error?: string;
@@ -11,6 +14,38 @@ export interface LoginState {
   // the 6-digit code (see login-form.tsx). Absent -> we're on the
   // email/password step.
   mfaToken?: string;
+}
+
+/**
+ * A proof-of-work challenge for the password step, priced by the backend
+ * against this account's and this browser's recent failures.
+ *
+ * Fetched through the panel rather than by the browser from /api/, so that
+ * the address the backend prices it for is the same one the sign-in is
+ * then counted against (see forwardedClientHeaders), and so it works where
+ * the panel has no /api/ in front of it (local development). Solved in the
+ * browser (login-form.tsx).
+ *
+ * Undefined when the backend cannot be asked: the sign-in then goes
+ * without a solution, which LoginGuard accepts until there have been
+ * recent failures, and refuses with a message after that.
+ */
+export async function requestLoginChallenge(email: string): Promise<Challenge | undefined> {
+  try {
+    const res = await fetch(`${backendUrl()}/login-challenge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(await forwardedClientHeaders()) },
+      // The email prices the challenge against that account's recent
+      // failures; LoginGuard's DTO refuses a malformed one, so it is sent
+      // only when it looks like an address.
+      body: JSON.stringify({ scope: "admin", ...(email.includes("@") ? { email: email.trim() } : {}) }),
+      cache: "no-store",
+    });
+    if (!res.ok) return undefined;
+    return (await res.json()) as Challenge;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function loginAction(prevState: LoginState, formData: FormData): Promise<LoginState> {
@@ -25,6 +60,7 @@ export async function loginAction(prevState: LoginState, formData: FormData): Pr
 async function passwordStep(formData: FormData): Promise<LoginState> {
   const email = String(formData.get("email") ?? "").trim();
   const password = String(formData.get("password") ?? "");
+  const challenge = parseSolution(formData.get("challenge"));
 
   if (!email || !password) {
     return { error: "Email and password are required." };
@@ -34,8 +70,8 @@ async function passwordStep(formData: FormData): Promise<LoginState> {
   try {
     res = await fetch(`${backendUrl()}/auth/login`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
+      headers: { "Content-Type": "application/json", ...(await forwardedClientHeaders()) },
+      body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
       cache: "no-store",
     });
   } catch {
@@ -43,7 +79,7 @@ async function passwordStep(formData: FormData): Promise<LoginState> {
   }
 
   if (!res.ok) {
-    return { error: "Invalid email or password." };
+    return { error: passwordFailure(res.status, await res.json().catch(() => null)) };
   }
 
   const body = (await res.json()) as
@@ -68,7 +104,7 @@ async function verifyMfaStep(mfaToken: string, formData: FormData): Promise<Logi
   try {
     res = await fetch(`${backendUrl()}/auth/mfa/verify`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(await forwardedClientHeaders()) },
       body: JSON.stringify({ mfaToken, code }),
       cache: "no-store",
     });
@@ -77,15 +113,11 @@ async function verifyMfaStep(mfaToken: string, formData: FormData): Promise<Logi
   }
 
   if (!res.ok) {
-    // A stale/expired mfaToken (5 min TTL) should send the user back to
-    // the password step rather than looping on a code that can never
-    // succeed -- res.status 401 covers both "wrong code" and "expired
-    // challenge"; either way, dropping mfaToken from the returned state
-    // resets the form to step 1 on the next render.
-    if (res.status === 401) {
-      return { error: "Invalid or expired code. Please sign in again." };
-    }
-    return { error: "Invalid code. Please try again.", mfaToken };
+    // Dropping mfaToken from the returned state sends the form back to the
+    // password step -- right for an expired challenge or a locked code
+    // step, wrong for a mistyped code.
+    const failure = mfaFailure(res.status, await res.json().catch(() => null));
+    return failure.keepToken ? { error: failure.error, mfaToken } : { error: failure.error };
   }
 
   const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };

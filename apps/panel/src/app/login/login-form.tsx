@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState } from "react";
-import { loginAction, type LoginState } from "./actions";
+import { type FormEvent, startTransition, useActionState, useState } from "react";
+import { loginAction, requestLoginChallenge, type LoginState } from "./actions";
+import { solve, type Solution } from "@/lib/pow";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,7 +12,29 @@ const initialState: LoginState = {};
 
 export function LoginForm() {
   const [state, formAction, pending] = useActionState(loginAction, initialState);
+  const [checking, setChecking] = useState(false);
   const mfaStep = Boolean(state.mfaToken);
+
+  // The password step carries a solved proof-of-work challenge, as the
+  // apps' sign-ins do. LoginGuard requires one once an account or an
+  // address has recent failures; without it the panel could not sign
+  // anyone into an account somebody else was failing against on purpose.
+  // Solved here, in the browser, so the work falls on whoever is signing
+  // in and never on the panel's server.
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    if (!mfaStep) {
+      setChecking(true);
+      try {
+        const solution = await solveChallengeFor(String(form.get("email") ?? ""));
+        if (solution) form.set("challenge", JSON.stringify(solution));
+      } finally {
+        setChecking(false);
+      }
+    }
+    startTransition(() => formAction(form));
+  }
 
   return (
     <Card className="w-full border-white/10 bg-card/80 shadow-2xl shadow-black/40 backdrop-blur-sm">
@@ -22,7 +45,7 @@ export function LoginForm() {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form action={formAction} className="flex flex-col gap-4">
+        <form onSubmit={onSubmit} className="flex flex-col gap-4">
           {mfaStep ? (
             <>
               <input type="hidden" name="mfaToken" value={state.mfaToken} />
@@ -65,11 +88,22 @@ export function LoginForm() {
               {state.error}
             </p>
           ) : null}
-          <Button type="submit" disabled={pending} size="lg" className="mt-2">
-            {pending ? "Verifying..." : mfaStep ? "Verify" : "Sign in"}
+          <Button type="submit" disabled={pending || checking} size="lg" className="mt-2">
+            {checking ? "Running security check..." : pending ? "Verifying..." : mfaStep ? "Verify" : "Sign in"}
           </Button>
         </form>
       </CardContent>
     </Card>
   );
+}
+
+/** Best effort, as in the apps: with no solution the sign-in still goes,
+ * and the backend says plainly if it needed one. */
+async function solveChallengeFor(email: string): Promise<Solution | undefined> {
+  try {
+    const challenge = await requestLoginChallenge(email);
+    return challenge ? await solve(challenge) : undefined;
+  } catch {
+    return undefined;
+  }
 }
