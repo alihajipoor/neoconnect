@@ -43,11 +43,7 @@ import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { iapAvailable } from "@shared/lib/iap";
 import { endedNotice } from "@shared/lib/subscription-state";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
-import {
-  captureBaselineIp,
-  verifyEgress,
-  type BaselineIp,
-} from "@shared/lib/egress";
+import { captureBaselineIp, type BaselineIp } from "@shared/lib/egress";
 import {
   classifyConnectionError,
   type ClassifiedError,
@@ -107,7 +103,6 @@ import {
   hasVpnPermission,
   requestVpnPermission,
   vpnStatus,
-  type VpnStatus,
 } from "../lib/vpn";
 import {
   buildXrayConfig,
@@ -116,6 +111,14 @@ import {
   TUN_MTU,
 } from "../lib/xray-config";
 import { loadChosenRoute, saveChosenRoute } from "../lib/route-preference";
+import {
+  confirmEgress,
+  pollEgress,
+  pollState,
+  rungOutcome,
+  stateFromStatus,
+  tunnelUp,
+} from "../lib/tunnel-evidence";
 
 /** The Android dashboard.
  *
@@ -134,57 +137,8 @@ import { loadChosenRoute, saveChosenRoute } from "../lib/route-preference";
  */
 const HEALTH_POLL_MS = 15_000;
 
-/** How long a fresh tunnel gets to prove it carries traffic.
- *
- * More patient than the Windows client's six seconds, and for a reason
- * that only applies here: a phone's radio may be idle when the tunnel
- * comes up, and the first packet after that pays for waking it. */
-const VERIFY_TIMEOUT_MS = 12_000;
-const VERIFY_INTERVAL_MS = 1_200;
-
-/** Seconds without a WireGuard handshake before the tunnel is treated as
- * dead. Matches the Windows service's own threshold -- WireGuard
- * rehandshakes about every two minutes under traffic, so three is late
- * enough not to cry wolf and early enough to be useful. */
-const HANDSHAKE_STALE_SECS = 180;
-
-/** Waits for traffic to actually flow, rather than asking once.
- *
- * Returns as soon as there is proof, so a working connection stays fast.
- */
-async function confirmEgress(
-  // A `BaselineIp`, not a bare address. `verifyEgress` refuses to
-  // compare two readings that came from different endpoints -- a node
-  // mirror answers `/health/ip` with the node's own address, which is
-  // indistinguishable from a working tunnel -- so the endpoint that
-  // gave the reading has to travel with it. See `egress.ts`.
-  baseline: BaselineIp | null,
-  cancelled: () => boolean = () => false,
-): Promise<boolean> {
-  const deadline = Date.now() + VERIFY_TIMEOUT_MS;
-  for (;;) {
-    // Checked every pass, not only at the end: this loop is most of the
-    // time a hanging protocol spends in "checking connection", so a
-    // cancel that is not honoured here is a button that does nothing.
-    if (cancelled()) return false;
-    const verdict = await verifyEgress(baseline);
-    if (verdict.state === "throughTunnel") return true;
-    // No baseline to compare against means the check cannot answer the
-    // question. Falling back to handshake evidence beats inventing a
-    // verdict from a comparison that was never valid.
-    if (verdict.state === "indeterminate") return true;
-    if (Date.now() >= deadline) return false;
-    await new Promise((r) => setTimeout(r, VERIFY_INTERVAL_MS));
-  }
-}
-
-/** Turns what the plugin reports into the one thing to display.
- *
- * `lastHandshakeAgeSecs` is null for protocols with no handshake to read.
- * That stays optimistic on purpose -- the alternative is marking every
- * connection of those protocols degraded, which is crying wolf, and the
- * egress check is the honest signal for them anyway.
- */
+// What a status, an egress reading or a ladder rung entitles this screen
+// to say lives in ../lib/tunnel-evidence, where it is tested.
 
 /** How long to wait for the device to stop being routed through a VPN
  * before telling the customer the disconnect did not finish.
@@ -216,14 +170,6 @@ async function waitForTeardown(): Promise<boolean> {
     await new Promise((r) => setTimeout(r, TEARDOWN_POLL_MS));
   }
   return false;
-}
-
-function stateFromStatus(status: VpnStatus): ConnectionState {
-  if (!status.connected) return "disconnected";
-  if (status.lastHandshakeAgeSecs === null) return "connected";
-  return status.lastHandshakeAgeSecs <= HANDSHAKE_STALE_SECS
-    ? "connected"
-    : "degraded";
 }
 
 /** The subscription worth showing. PENDING and CANCELLED entitle nobody
@@ -572,8 +518,7 @@ export function Dashboard({
   // not a recovery. This becomes the mid-session failover trigger when
   // the Xray engines land.
   useEffect(() => {
-    if (connectionState !== "connected" && connectionState !== "degraded")
-      return;
+    if (!tunnelUp(connectionState)) return;
 
     // The plan's device limit, renewed on this poll every
     // `renewEverySec` (every fourth poll at the contract's sixty seconds;
@@ -625,22 +570,24 @@ export function Dashboard({
         return;
       }
 
-      const egress = await verifyEgress(baselineIp);
+      const egress = await pollEgress(baselineIp);
       if (!live || slotTeardown.owed()) return;
-      const carrying =
-        egress.state === "throughTunnel" || egress.state === "indeterminate";
       if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
+      // An indeterminate reading -- no baseline, as for every tunnel
+      // adopted on relaunch, or no comparable endpoint -- used to count
+      // as carrying, so an adopted tunnel read "You're protected" on
+      // every poll whether or not anything was behind it. It is
+      // "unverified" now unless a fresh handshake vouches for it.
+      const next = pollState(fromStatus, egress);
       // "It kept working", for the per-ISP tags. Only a changed exit
       // address advances the clock; an indeterminate reading neither
       // advances nor resets it, and anything else starts it over.
-      if (egress.state === "throughTunnel" && fromStatus === "connected") {
+      if (egress.state === "throughTunnel" && next === "connected") {
         sessionTrackerRef.current.healthy(settledRouteRef.current);
       } else if (egress.state !== "indeterminate") {
         sessionTrackerRef.current.broken();
       }
-      setConnectionState(
-        carrying && fromStatus === "connected" ? "connected" : "degraded",
-      );
+      setConnectionState(next);
     }, HEALTH_POLL_MS);
 
     return () => {
@@ -757,7 +704,7 @@ export function Dashboard({
       return;
     }
 
-    if (connectionState === "connected" || connectionState === "degraded") {
+    if (tunnelUp(connectionState)) {
       // This phone stops using one of the plan's devices. Released fire
       // and forget, within a second and a half, and never in front of
       // the teardown: started while the tunnel is still up, the request
@@ -794,8 +741,7 @@ export function Dashboard({
     // isn't responding when nothing measured that.
     const slotOwed = slotTeardown.owed();
     const customerOwed = customerTeardown.owed();
-    const tunnelUp = connectionState === "connected" || connectionState === "degraded";
-    if (slotOwed || customerOwed || tunnelUp) {
+    if (slotOwed || customerOwed || tunnelUp(connectionState)) {
       setConnectionState("disconnecting");
       const result = slotOwed
         ? await slotTeardown.retry(teardownOnce)
@@ -1104,7 +1050,12 @@ export function Dashboard({
       });
     };
 
-    for (const candidate of candidates) {
+    /** Whether the ladder would dial this candidate rather than skip it.
+     * Kept beside the skip below, so "the last rung" means the last one
+     * actually dialled. */
+    const willDial = (c: ProtocolUser) => !(c.protocol === "IKEV2" && allowedApps.length > 0);
+
+    for (const [index, candidate] of candidates.entries()) {
       // The customer pressed stop. Whatever this attempt left behind is
       // torn down by the toggle that set the flag, so this only has to
       // stop walking the list.
@@ -1114,12 +1065,30 @@ export function Dashboard({
         candidate.protocol,
         candidate.connection?.transport,
       );
+      // The last rung may land on an answer from an endpoint other than
+      // the baseline's, as "unverified"; every earlier one asks only the
+      // baseline's endpoint, where an answer can prove something, and
+      // moves on otherwise. The Windows ladder's rule.
+      const isLast = !candidates.slice(index + 1).some(willDial);
 
       // Taken while nothing is up. Captured through a live tunnel it
       // would record the exit address as the "before" value, and every
       // later comparison would read a working connection as a leak.
-      const baseline =
-        pendingBaseline !== undefined ? pendingBaseline : await captureBaselineIp();
+      //
+      // Which for every rung after the first means waiting for the last
+      // one to be gone: `disconnect` deliberately returns before the
+      // platform has finished, and a baseline taken in that window went
+      // into the dying tunnel -- timing out on the first endpoint and
+      // shifting the reading to another, or, for a tunnel that started
+      // carrying just too late, recording the node's exit address as the
+      // "before". Not gone within the wait, there is no baseline: the
+      // rung can still land, as "unverified", never as proven.
+      let baseline: BaselineIp | null;
+      if (pendingBaseline !== undefined) {
+        baseline = pendingBaseline;
+      } else {
+        baseline = (await waitForTeardown()) ? await captureBaselineIp() : null;
+      }
       pendingBaseline = undefined;
       setBaselineIp(baseline);
 
@@ -1193,10 +1162,13 @@ export function Dashboard({
         // something to send, so this request *is* that traffic. It forces
         // the handshake and answers the stronger question at the same
         // time -- did our packets actually leave via the server.
-        const carried = await confirmEgress(baseline, () => cancelRef.current);
-        if (cancelRef.current) return reportCancelled();
-        if (carried) {
-          const verdict = await verifyEgress(baseline);
+        const verdict = await confirmEgress(baseline, {
+          cancelled: () => cancelRef.current,
+          sameEndpointOnly: !isLast,
+        });
+        if (verdict === null || cancelRef.current) return reportCancelled();
+        const outcome = rungOutcome(verdict, { baselineTaken: baseline !== null, isLast });
+        if (outcome !== "notCarrying") {
           setExitIp(verdict.state === "throughTunnel" ? verdict.exitIp : null);
           // Only when it is not what they asked for. Announcing "switched
           // to Fast" to somebody who chose Fast is noise.
@@ -1212,13 +1184,14 @@ export function Dashboard({
           // reporting real work.
           if (chosenRouteId && candidate.routeId !== chosenRouteId)
             setFailedOverTo(label);
-          setConnectionState("connected");
-          // `confirmEgress` also accepts an indeterminate reading (no
-          // baseline to compare), so "carried" here is not always proof.
-          // Only a changed exit address is, and only that is remembered
-          // as working on this network or counted for the per-ISP tags --
-          // the same rule the Windows ladder follows for `unverified`.
-          const proven = verdict.state === "throughTunnel";
+          // "unverified" is a landing, not a failure -- nothing measured a
+          // problem -- but it is shown as "Connected, not confirmed". It
+          // used to be shown as "You're protected". Only a changed exit
+          // address is proof, and only that is remembered as working on
+          // this network or counted for the per-ISP tags -- the same rule
+          // the Windows ladder follows for `unverified`.
+          setConnectionState(outcome);
+          const proven = outcome === "connected";
           remember(candidate.routeId, candidate.protocol, proven);
           if (proven) {
             void saveLastGood(rememberLastGood(lastGood, networkId, candidate.routeId));
@@ -1371,6 +1344,8 @@ export function Dashboard({
   const connectLabel =
     connectionState === "connected"
       ? t("dash.connected")
+      : connectionState === "unverified"
+        ? t("dash.unverifiedShort")
       : connectionState === "degraded"
         ? t("dash.degraded")
         : connectionState === "connecting"
@@ -1444,6 +1419,8 @@ export function Dashboard({
               className={
                 connectionState === "connected"
                   ? "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]"
+                  : connectionState === "unverified"
+                    ? "size-1.5 shrink-0 rounded-full bg-highlight shadow-[0_0_8px_var(--highlight)]"
                   : connectionState === "degraded"
                     ? "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]"
                     : "size-1.5 shrink-0 rounded-full bg-muted-foreground/50"
@@ -1474,6 +1451,8 @@ export function Dashboard({
                         className={
                           connectionState === "connected"
                             ? "text-sm font-semibold text-success"
+                            : connectionState === "unverified"
+                              ? "text-sm font-semibold text-highlight"
                             : connectionState === "degraded"
                               ? "text-sm font-semibold text-warning"
                               : "text-sm font-semibold text-foreground"
@@ -1488,6 +1467,8 @@ export function Dashboard({
                           ? t("dash.disconnecting")
                           : connectionState === "connected"
                           ? t("dash.protected")
+                          : connectionState === "unverified"
+                            ? t("dash.unverified")
                           : connectionState === "degraded"
                             ? t("dash.degraded")
                             : connectionState === "connecting" ||
@@ -1500,6 +1481,8 @@ export function Dashboard({
                           ? null
                           : connectionState === "connected"
                           ? t("dash.protectedHint")
+                          : connectionState === "unverified"
+                            ? t("dash.unverifiedHint")
                           : connectionState === "degraded"
                             ? t("dash.degradedHint")
                             : connectionState === "connecting" ||
@@ -1511,7 +1494,8 @@ export function Dashboard({
                           Windows client learned this the expensive way:
                           five releases of "it always connects as Fast"
                           were a working failover that told nobody. */}
-                      {connectionState === "connected" && failedOverTo ? (
+                      {(connectionState === "connected" || connectionState === "unverified") &&
+                      failedOverTo ? (
                         <p className="mt-1 text-xs text-amber-400/90">
                           {t("dash.switchedTo")}{" "}
                           <span className="font-medium">{failedOverTo}</span>
