@@ -5,6 +5,7 @@ import type { Node, ProtocolConfig, Route } from "@/lib/types";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { deleteRoute } from "./actions";
 import { RouteFormDialog } from "./route-form-dialog";
+import { routeDeleteWarning } from "./delete-warning";
 import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -21,11 +22,14 @@ export function RoutesTable({
   protocolConfigs,
   nodes,
   canManage,
+  trialRouteId,
 }: {
   routes: Route[];
   protocolConfigs: ProtocolConfig[];
   nodes: Node[];
   canManage: boolean;
+  /** The free-trial route, so deleting it can say what that does. */
+  trialRouteId?: string | null;
 }) {
   const describe = (protocolConfigId: string | null) => {
     if (!protocolConfigId) return "—";
@@ -109,7 +113,7 @@ export function RoutesTable({
                               </DropdownMenuItem>
                             }
                             title="Delete this route?"
-                            description={`This permanently removes ${route.name}. Existing protocol users on it will block deletion.`}
+                            description={routeDeleteWarning(route, trialRouteId)}
                             successMessage="Route deleted"
                             onConfirm={() => deleteRoute(route.id)}
                           />

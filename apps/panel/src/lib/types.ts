@@ -114,6 +114,9 @@ export interface Route {
   isEnabled: boolean;
   createdAt: string;
   updatedAt: string;
+  /** How many customer credentials are on the route -- all of which a
+   * delete revokes. Absent from a backend older than this field. */
+  protocolUserCount?: number;
 }
 
 export interface FreeTrialSettings {

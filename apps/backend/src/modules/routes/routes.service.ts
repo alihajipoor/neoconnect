@@ -73,8 +73,16 @@ export class RoutesService {
     if (added) this.logger.log(`Backfilled route ${routeId} onto ${added} subscription(s)`);
   }
 
-  list() {
-    return this.prisma.route.findMany({ orderBy: { createdAt: "desc" } });
+  /** The admin list, with how many credentials each route carries.
+   * remove() revokes every one of them rather than refusing, so the panel
+   * shows the number in its delete confirmation -- which used to promise
+   * that customers on the route would block the delete. */
+  async list() {
+    const routes = await this.prisma.route.findMany({
+      orderBy: { createdAt: "desc" },
+      include: { _count: { select: { protocolUsers: true } } },
+    });
+    return routes.map(({ _count, ...route }) => ({ ...route, protocolUserCount: _count.protocolUsers }));
   }
 
   /** Customer-facing: which Routes a plan's customers may pick, i.e. the
