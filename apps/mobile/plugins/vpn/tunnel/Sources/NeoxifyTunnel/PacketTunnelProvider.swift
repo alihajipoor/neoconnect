@@ -64,10 +64,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// egress check said "protected".
     ///
     /// What happens to the captured packets: every node is IPv4-only, so
-    /// they go nowhere. Xray hands them to a node that cannot dial IPv6;
-    /// WireGuard sends them to a peer whose allowed IPs do not include
-    /// this source. Blackholed, not leaked, and the ULA source makes RFC
-    /// 6724 address selection prefer IPv4 for global destinations.
+    /// they go nowhere. WireGuard sends them to a peer whose allowed IPs
+    /// do not include this source, and they are dropped. Xray is not a
+    /// clean blackhole for TCP, going by how its tun inbound is built
+    /// (read, not measured): its stack completes the handshake locally,
+    /// hands the connection to a node that cannot dial IPv6, and the
+    /// connection is then reset -- open, then failed, rather than
+    /// refused. Not leaked either way, and the ULA source makes RFC 6724
+    /// address selection prefer IPv4 for global destinations, which is
+    /// what should keep most connections off that path.
     ///
     /// UNVERIFIED. No iOS build has carried a packet. Whether apps on a
     /// dual-stack network now fall back to IPv4 cleanly -- or whether
