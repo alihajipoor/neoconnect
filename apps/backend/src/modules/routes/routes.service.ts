@@ -133,6 +133,7 @@ export class RoutesService {
         name: true,
         exitProtocolConfigId: true,
         uplinkAssertedAt: true,
+        entryAssertedAt: true,
         // Only ever fed to the HMAC below -- never returned. See
         // exit-handle.ts for why the node's own identity must not leave
         // this process.
@@ -158,7 +159,7 @@ export class RoutesService {
     });
 
     return routes.map(
-      ({ exitProtocolConfigId, exitProtocolConfig, uplinkAssertedAt, entryProtocolConfig, ...route }) => ({
+      ({ exitProtocolConfigId, exitProtocolConfig, uplinkAssertedAt, entryAssertedAt, entryProtocolConfig, ...route }) => ({
       ...route,
       protocol: entryProtocolConfig.protocol,
       transport: entryProtocolConfig.transport,
@@ -207,8 +208,12 @@ export class RoutesService {
       // rule; the exits had lost the uplink credential and rejected every
       // connection. So a relay route whose exit has not recently
       // confirmed the uplink is reported OFFLINE, which is what it is.
+      //
+      // And the same for the entry's own half -- its outbound, rule and
+      // policy route -- which a relay can fail to rebuild while it
+      // heartbeats happily (ir1 without its relay-tun device, 2026-08-14).
       nodeStatus:
-        exitProtocolConfigId !== null && !uplinkIsFresh(uplinkAssertedAt)
+        exitProtocolConfigId !== null && (!uplinkIsFresh(uplinkAssertedAt) || !uplinkIsFresh(entryAssertedAt))
           ? "OFFLINE"
           : entryProtocolConfig.node.status,
       }),

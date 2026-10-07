@@ -82,6 +82,12 @@ const ROUTE_REASSERT_INTERVAL_MS = 60_000;
  * restart-then-reassert cycle restores the uplink. */
 export const UPLINK_ACK_PREFIX = "reassert-uplink:";
 
+/** Command-id prefix for a route's ENTRY re-assert (the CONFIGURE_ROUTE
+ * the sweep writes to the relay). Its ack is the entry half of the
+ * route's health, written to Route.entryAssertedAt as the uplink's is to
+ * uplinkAssertedAt. */
+export const ROUTE_ACK_PREFIX = "reassert-route:";
+
 /** Command-id prefix for re-asserting a credential no node has confirmed
  * yet (ProtocolUser.provisionedAt is null). Its ack is what records the
  * confirmation; a confirmed credential is re-asserted under the plain
@@ -651,7 +657,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       if (opts.persist) {
         await this.enqueueCommand(nodeId, "CONFIGURE_ROUTE", payload);
       } else {
-        this.writeCommand(nodeId, `reassert-route:${route.id}`, "CONFIGURE_ROUTE", payload);
+        this.writeCommand(nodeId, `${ROUTE_ACK_PREFIX}${route.id}`, "CONFIGURE_ROUTE", payload);
       }
     }
     this.logger.log(`Re-asserted ${routes.length} relay route(s) on node ${nodeId}`);
@@ -706,6 +712,20 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       data: ok
         ? { uplinkAssertedAt: new Date(), uplinkLastError: null }
         : { uplinkLastError: (error ?? "unknown error").slice(0, 500) },
+    });
+  }
+
+  /** The same for the entry half: what the route's ENTRY node said about
+   * a CONFIGURE_ROUTE for it. Only that node may say -- the command is
+   * only ever written to it. A failure leaves entryAssertedAt alone, so
+   * one slow or failed ack does not flap the route; three missed sweeps
+   * (UPLINK_FRESH_MS) report it down. */
+  private async recordEntryResult(routeId: string, ok: boolean, error: string | undefined, fromNodeId: string) {
+    await this.prisma.route.updateMany({
+      where: { id: routeId, entryProtocolConfig: { is: { nodeId: fromNodeId } } },
+      data: ok
+        ? { entryAssertedAt: new Date(), entryLastError: null }
+        : { entryLastError: (error || "unknown error").slice(0, 500) },
     });
   }
 
@@ -919,6 +939,18 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // And the entry half, from the relay. Before, a rejected one was only
+    // logged (below), and the route kept reporting ONLINE on the strength
+    // of the exit's uplink alone.
+    if (ack.commandId.startsWith(ROUTE_ACK_PREFIX)) {
+      const routeId = ack.commandId.slice(ROUTE_ACK_PREFIX.length);
+      if (!ack.success) {
+        this.logger.error(`Route ${routeId} entry re-assert REJECTED by node ${nodeId}: ${ack.error}`);
+      }
+      await this.recordEntryResult(routeId, ack.success, ack.error, nodeId);
+      return;
+    }
+
     // Every synthetic re-assert id, not just the user sweep's.
     //
     // This test was `startsWith("reassert:")`, which is the user sweep's
@@ -946,6 +978,17 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     if (!command) {
       // Not this node's command, or none at all. Nothing to record.
       return;
+    }
+
+    // A stored CONFIGURE_ROUTE -- from creating the route, or the persisted
+    // re-assert on reconnect -- says as much about the entry half as the
+    // sweep's does.
+    const configuredRouteId = (command.payloadJson as { routeId?: unknown } | null)?.routeId;
+    if (command.type === "CONFIGURE_ROUTE" && typeof configuredRouteId === "string") {
+      if (!ack.success) {
+        this.logger.error(`Route ${configuredRouteId} entry configuration REJECTED by node ${nodeId}: ${ack.error}`);
+      }
+      await this.recordEntryResult(configuredRouteId, ack.success, ack.error, nodeId);
     }
 
     // A stored CREATE_USER or ENABLE_USER the node carried out means the

@@ -742,6 +742,16 @@ model Route {
   /// the ack handler only logged failures whose command id began
   /// `reassert:`, so route and uplink asserts fell through it.
   uplinkLastError  String?
+  /// The other half: when the ENTRY node last confirmed it holds this
+  /// route's outbound and routing rule (and, for a WireGuard, OpenVPN or
+  /// IKEv2 entry, the policy route into the relay tunnel), i.e. the last
+  /// successful ack of a CONFIGURE_ROUTE for it. Without it an entry
+  /// whose half could not be rebuilt -- ir1 with its relay-tun device
+  /// missing, 2026-08-14 -- was logged and reported ONLINE. NULL means
+  /// never confirmed, and reads as down, as for uplinkAssertedAt.
+  entryAssertedAt  DateTime?
+  /// The last error the entry node returned for that, cleared on success.
+  entryLastError   String?
 
   entryProtocolConfig ProtocolConfig      @relation("RouteEntry", fields: [entryProtocolConfigId], references: [id])
   exitProtocolConfig  ProtocolConfig?     @relation("RouteExit", fields: [exitProtocolConfigId], references: [id])
