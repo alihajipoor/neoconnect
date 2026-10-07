@@ -14,10 +14,13 @@ vi.mock("./api-endpoints", () => ({ apiEndpoints: () => endpoints() }));
 type Reply = { status: number; body: unknown } | "no answer";
 const replies = new Map<string, Reply>();
 const calls: { base: string; timeoutMs: number }[] = [];
+/** What `probe_ipv4_egress` -- a verified TLS handshake with a public
+ * resolver -- answers. */
+let internet = false;
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (command: string, args: { base: string; timeoutMs: number }) => {
-    if (command === "probe_ipv4_egress") return Promise.resolve(false);
+    if (command === "probe_ipv4_egress") return Promise.resolve(internet);
     if (command !== "health_ip_v4") return Promise.reject(new Error(`unexpected ${command}`));
     calls.push(args);
     const reply = replies.get(args.base);
@@ -42,6 +45,7 @@ afterEach(() => {
   endpoints.mockReset();
   replies.clear();
   calls.length = 0;
+  internet = false;
   pluginFetch.mockClear();
 });
 
@@ -60,15 +64,26 @@ describe("the egress check on Windows", () => {
     expect(pluginFetch).not.toHaveBeenCalled();
   });
 
-  it("tells an error page from silence, as it did through fetch", async () => {
+  it("leaves an answer with no address to the public-internet probe", async () => {
+    // On Windows an error page from ours is not the verdict: the probe
+    // is. Through a working tunnel during an outage of ours the resolvers
+    // answer, and there is no verdict; with them silent too the tunnel is
+    // dead, whatever the connected node's own mirror (routed around the
+    // tunnel) said.
     endpoints.mockResolvedValue([CDN, MIRROR]);
     const baseline = { ip: "192.0.2.228", from: CDN };
 
     replies.set(CDN, { status: 502, body: null });
     replies.set(MIRROR, { status: 502, body: null });
+    internet = true;
     await expect(verifyEgress(baseline)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+    internet = false;
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "unreachable" });
 
     replies.clear();
+    internet = true;
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+    internet = false;
     await expect(verifyEgress(baseline)).resolves.toEqual({ state: "unreachable" });
   });
 
