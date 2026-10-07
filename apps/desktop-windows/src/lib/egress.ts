@@ -38,9 +38,12 @@ import { rememberNetwork } from "./network-identity";
  * record is reached over IPv6 first, so the baseline was the customer's
  * IPv6 address. Against that, any IPv4 reading differs, and the check
  * said "throughTunnel" whatever IPv4 was doing -- including going round
- * the tunnel in the clear. Two things now stop that: the Windows client
- * asks over IPv4 only (`setHealthIpTransport`, `health-ip-v4.ts`), and a
- * pair of different families is never compared (`verifyEgress`).
+ * the tunnel in the clear. Two things now stop that: both clients ask
+ * over IPv4 only (`setHealthIpTransport`, `health-ip-v4.ts`), and a pair
+ * of different families is never compared (`verifyEgress`). The phones
+ * got the first later than Windows, and the second alone was not enough
+ * there: it turned the false "throughTunnel" into an "indeterminate" on
+ * every rung of a dual-stack phone's connect, which the ladder rejects.
  */
 
 /** Short: this runs while the customer is watching a spinner, and a
@@ -119,7 +122,9 @@ export type HealthIpAnswer = { status: number; body: unknown };
 export type HealthIpTransport = (base: string, timeoutMs: number) => Promise<HealthIpAnswer>;
 
 /** The default: tauri-plugin-http's fetch, which lets the system choose
- * the address family. What the mobile app, which shares this file, uses. */
+ * the address family. Neither app uses it once started -- both install
+ * the IPv4-only transport from their `main.tsx` -- so it is what runs
+ * before that, and in tests that install nothing. */
 const fetchTransport: HealthIpTransport = async (base, timeoutMs) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -134,9 +139,9 @@ const fetchTransport: HealthIpTransport = async (base, timeoutMs) => {
 
 let transport: HealthIpTransport = fetchTransport;
 
-/** Replaces how `/health/ip` is asked. The Windows client installs an
- * IPv4-only transport at startup (`health-ip-v4.ts`, from `main.tsx`), so
- * the baseline and every later reading are the same family. */
+/** Replaces how `/health/ip` is asked. Both clients install an IPv4-only
+ * transport at startup (`health-ip-v4.ts`, from each app's `main.tsx`),
+ * so the baseline and every later reading are the same family. */
 export function setHealthIpTransport(next: HealthIpTransport): void {
   transport = next;
 }
@@ -357,9 +362,12 @@ export async function verifyEgress(
   // AAAA record before connecting -- against the IPv4 reading every full
   // tunnel produces differs whatever IPv4 did, and called that
   // "throughTunnel" with the customer's own IPv4 address on screen as
-  // the exit. The Windows client now asks over IPv4 only, so this does
-  // not fire there; it is what keeps the mobile app, and anything that
-  // ever skips that, from reading a non-comparison as proof.
+  // the exit. Both clients now ask over IPv4 only, so this should not
+  // fire; it is what keeps anything that ever skips that from reading a
+  // non-comparison as proof. It is no substitute for the transport,
+  // though: on the phones, before they had it, this fired on every
+  // reading of a dual-stack connect, and each rung with another to try
+  // was torn down for it.
   if (familyOf(reading.ip) !== familyOf(baseline.ip)) {
     return { state: "indeterminate", exitIp: reading.ip };
   }

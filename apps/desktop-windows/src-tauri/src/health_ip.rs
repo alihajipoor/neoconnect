@@ -24,6 +24,13 @@
 //! answer with a made-up status: the frontend tells those two apart,
 //! because an error page from our own API is an outage of ours and
 //! silence may be a dead tunnel.
+//!
+//! The mobile app compiles this file by path (`apps/mobile/src-tauri/
+//! src/lib.rs`), as it does `control_plane_probe.rs`. Its tunnels are
+//! IPv4 only too -- Android's VpnService blocks the family it was not
+//! given, and iOS claims IPv6 only so it cannot leave beside the tunnel
+//! -- so the same mismatch turned every reading of a dual-stack phone's
+//! connect into a non-comparison. Changes here ship in both apps.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
