@@ -34,14 +34,20 @@ export class ClientAttemptsController {
    * So the token is verified if present and ignored entirely if not.
    * An expired or forged one leaves the report anonymous rather than
    * rejecting it.
+   *
+   * A sign-in token only, as CustomerJwtStrategy accepts: the emailed
+   * verify-email and password-reset tokens are signed with the same
+   * secret, and an account that never verified would otherwise count as
+   * one of the distinct customers the per-ISP tags require.
    */
   private customerIdFrom(req: Request): string | undefined {
     const header = req.headers.authorization;
     if (!header?.startsWith("Bearer ")) return undefined;
     try {
-      const payload = this.jwt.verify<CustomerAccessTokenPayload>(header.slice(7), {
+      const payload = this.jwt.verify<CustomerAccessTokenPayload & { purpose?: unknown }>(header.slice(7), {
         secret: this.config.get<string>("customerJwt.accessSecret"),
       });
+      if (payload.purpose !== undefined) return undefined;
       return payload.sub;
     } catch {
       return undefined;
