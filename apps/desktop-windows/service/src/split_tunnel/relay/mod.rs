@@ -512,6 +512,13 @@ impl Drop for Relays {
     /// whoever remembered to call `stop`.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        // No thread, no acceptor to wake: a `start` refused its first
+        // thread. Skipped rather than tried because the listener went
+        // with that thread, and Windows answers a connect to a loopback
+        // port nobody holds only after retrying it for two seconds.
+        if self.threads.is_empty() {
+            return;
+        }
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.tcp_port));
         // The UDP receive is woken the same way, by being given
         // something to receive. It used to be left to notice the flag on
@@ -696,28 +703,66 @@ pub fn start(
     let udp_port = udp.local_addr()?.port();
     udp.set_read_timeout(Some(POLL_INTERVAL))?;
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let upstreams = Arc::new(UdpUpstreams::default());
-    let own_sockets = Arc::new(OwnSockets::default());
-    let carried = Arc::new(Carried::default());
-    let mut threads = Vec::new();
+    // Assembled before the first thread starts, so that from then on a
+    // failure is a return that drops it -- and the drop stops and joins
+    // whatever had started. Built the other way round, a refusal to
+    // start the second or third thread left the first one blocked in
+    // `accept` on a `0.0.0.0` listener with nothing that knew to stop it,
+    // for the life of the service.
+    let mut relays = Relays {
+        tcp_port,
+        udp_port,
+        own_sockets: Arc::new(OwnSockets::default()),
+        stop: Arc::new(AtomicBool::new(false)),
+        upstreams: Arc::new(UdpUpstreams::default()),
+        carried: Arc::new(Carried::default()),
+        threads: Vec::new(),
+    };
 
-    threads.push({
-        let (nat, tunnel, stop, own, exits, carried) =
-            (nat.clone(), tunnel.clone(), stop.clone(), own_sockets.clone(), exits.clone(), carried.clone());
-        std::thread::spawn(move || accept_tcp(tcp, nat, tunnel, stop, own, exits, carried))
-    });
-    threads.push({
-        let (nat, stop, upstreams, own, stats) =
-            (nat.clone(), stop.clone(), upstreams.clone(), own_sockets.clone(), stats.clone());
-        std::thread::spawn(move || serve_udp(udp, nat, tunnel, stop, upstreams, own, stats, exits))
-    });
-    threads.push({
-        let (stop, upstreams) = (stop.clone(), upstreams.clone());
-        std::thread::spawn(move || expire_flows(nat, stop, upstreams))
-    });
+    let accept = {
+        let (nat, tunnel, stop, own, exits, carried) = (
+            nat.clone(),
+            tunnel.clone(),
+            relays.stop.clone(),
+            relays.own_sockets.clone(),
+            exits.clone(),
+            relays.carried.clone(),
+        );
+        spawn_relay_thread(move || accept_tcp(tcp, nat, tunnel, stop, own, exits, carried))?
+    };
+    relays.threads.push(accept);
+    let serve = {
+        let (nat, stop, upstreams, own, stats) = (
+            nat.clone(),
+            relays.stop.clone(),
+            relays.upstreams.clone(),
+            relays.own_sockets.clone(),
+            stats.clone(),
+        );
+        spawn_relay_thread(move || serve_udp(udp, nat, tunnel, stop, upstreams, own, stats, exits))?
+    };
+    relays.threads.push(serve);
+    let expire = {
+        let (stop, upstreams) = (relays.stop.clone(), relays.upstreams.clone());
+        spawn_relay_thread(move || expire_flows(nat, stop, upstreams))?
+    };
+    relays.threads.push(expire);
 
-    Ok(Relays { tcp_port, udp_port, own_sockets, stop, upstreams, carried, threads })
+    Ok(relays)
+}
+
+/// Starts one of the relay's three threads, or says why the OS would
+/// not.
+///
+/// `std::thread::spawn` panics instead, which is how a partial start
+/// used to leak -- see [`start`]. Refused, the bring-up fails with the
+/// relay's usual error and the caller's unwind does the rest.
+fn spawn_relay_thread(body: impl FnOnce() + Send + 'static) -> io::Result<std::thread::JoinHandle<()>> {
+    #[cfg(test)]
+    if tests::REFUSED_SPAWNS.with(|refuse| refuse.borrow_mut().pop_front()).unwrap_or(false) {
+        return Err(io::Error::other("thread refused, as the test asked"));
+    }
+    std::thread::Builder::new().spawn(body)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1186,6 +1231,50 @@ mod tests {
     /// only needs somewhere for them to go.
     fn counters() -> Arc<Stats> {
         Arc::new(Stats::default())
+    }
+
+    thread_local! {
+        /// Which of this thread's next calls to `spawn_relay_thread` to
+        /// refuse, in order. Per thread, so tests running beside each
+        /// other cannot refuse each other's threads.
+        pub(super) static REFUSED_SPAWNS: std::cell::RefCell<std::collections::VecDeque<bool>> =
+            Default::default();
+    }
+
+    /// A relay the OS will not give all three threads to fails to start
+    /// and leaves nothing running.
+    ///
+    /// It used to panic part way instead, with the acceptor already
+    /// detached and blocked on a `0.0.0.0` listener that nothing would
+    /// ever stop -- the supervisor caught the panic, so the service ran
+    /// on with it. Measured here the way the session tests measure a
+    /// thread left running: everything handed to the relay's threads is
+    /// held by nobody else once `start` has returned. And quickly -- with
+    /// the first thread refused there is no listener left to wake, and a
+    /// connect to it would sit out Windows' two-second loopback retry.
+    #[test]
+    fn a_relay_that_cannot_start_every_thread_leaves_none_running() {
+        for refused in 0..3 {
+            REFUSED_SPAWNS.with(|plan| *plan.borrow_mut() = (0..3).map(|n| n == refused).collect());
+            let (nat, tunnel, stats, exits) =
+                (Arc::new(Nat::new()), Arc::new(TunnelInterface::default()), counters(), Arc::new(ExitRelays::default()));
+            let began = Instant::now();
+            let outcome = start(nat.clone(), tunnel.clone(), stats.clone(), exits.clone());
+            let took = began.elapsed();
+            REFUSED_SPAWNS.with(|plan| plan.borrow_mut().clear());
+
+            let Err(error) = outcome else { panic!("thread {refused} was refused, so the start must fail") };
+            assert!(error.to_string().contains("refused, as the test asked"), "thread {refused}: {error}");
+            for (what, held) in [
+                ("the flow table", Arc::strong_count(&nat)),
+                ("the tunnel record", Arc::strong_count(&tunnel)),
+                ("the counters", Arc::strong_count(&stats)),
+                ("the exit table", Arc::strong_count(&exits)),
+            ] {
+                assert_eq!(held, 1, "thread {refused} refused: a relay thread still holds {what}");
+            }
+            assert!(took < Duration::from_secs(1), "thread {refused} refused: the failed start took {took:?}");
+        }
     }
 
     #[test]
