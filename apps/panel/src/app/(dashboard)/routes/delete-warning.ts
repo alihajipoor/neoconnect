@@ -17,13 +17,17 @@ export function routeDeleteWarning(
 ): string {
   const parts = [`This permanently removes ${route.name}. Customers on it do not stop the delete.`];
   const n = route.protocolUserCount;
+  // "On the node" is a queued command (AgentGatewayService.enqueueCommand):
+  // sent at once to a connected node, and to one that is not when it
+  // reconnects -- which may be after the delete has long been forgotten.
+  const delivery = "the node is told at once, or when it next connects if it is offline";
   if (n === undefined) {
-    parts.push("Every customer credential on it is revoked on its node immediately.");
+    parts.push(`Every customer credential on it is revoked: ${delivery}.`);
   } else if (n === 0) {
     parts.push("No customer credentials are on it.");
   } else {
     parts.push(
-      `${n === 1 ? "The 1 customer credential" : `All ${n} customer credentials`} on it ${n === 1 ? "is" : "are"} revoked on the node immediately: those customers lose this route at once, and keep their others.`,
+      `${n === 1 ? "The 1 customer credential" : `All ${n} customer credentials`} on it ${n === 1 ? "is" : "are"} revoked: ${delivery}. Those customers lose this route and keep their others.`,
     );
   }
   if (route.exitProtocolConfigId) parts.push("Its uplink to the exit node is removed too.");

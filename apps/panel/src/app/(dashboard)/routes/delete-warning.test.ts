@@ -9,8 +9,18 @@ describe("routeDeleteWarning", () => {
     const text = routeDeleteWarning(route);
     expect(text).not.toMatch(/block/i);
     expect(text).toMatch(/do not stop the delete/);
-    expect(text).toMatch(/All 37 customer credentials on it are revoked on the node immediately/);
+    expect(text).toMatch(/All 37 customer credentials on it are revoked/);
     expect(text).toMatch(/uplink to the exit node is removed/);
+  });
+
+  // The revocations are queued commands: a node that is offline gets them
+  // when it reconnects, and until then its credentials still work.
+  it("does not promise the node acts at once when it may be offline", () => {
+    for (const protocolUserCount of [37, 1, undefined]) {
+      const text = routeDeleteWarning({ ...route, protocolUserCount });
+      expect(text).not.toMatch(/immediately|at once:/);
+      expect(text).toMatch(/or when it next connects if it is offline/);
+    }
   });
 
   it("counts one, none, and an unknown number honestly", () => {
