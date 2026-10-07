@@ -76,7 +76,7 @@ type IpReading = { ip: string; from: string };
 
 async function publicIp(
   onBody: (body: Record<string, unknown>) => void,
-  { only, deadline }: BaselineOptions,
+  { only, deadline, nodeAddresses }: BaselineOptions,
 ): Promise<IpReading | null> {
   // The same endpoint list the rest of the app uses, and for a sharper
   // reason here: this check decides whether the customer is told they
@@ -84,7 +84,10 @@ async function publicIp(
   // report a perfectly working tunnel as carrying nothing -- turning a
   // reachability problem into a false accusation against the VPN.
   const bases = only !== undefined ? [only] : await apiEndpoints();
-  return (await readFrom(bases, EGRESS_TIMEOUT_MS, { onBody, deadline })).reading;
+  const nodes =
+    nodeAddresses === undefined ? null : new Set([...nodeAddresses].map((ip) => comparable(ip)));
+  const skip = nodes === null ? undefined : (ip: string) => nodes.has(comparable(ip));
+  return (await readFrom(bases, EGRESS_TIMEOUT_MS, { onBody, deadline, skip })).reading;
 }
 
 /** How a baseline is taken, when the caller has reason to narrow it. */
@@ -97,7 +100,31 @@ export type BaselineOptions = {
    * and no request outlives. Without one, each endpoint gets its own
    * full timeout and the list can take many of them. */
   deadline?: number;
+  /** Our own nodes' public addresses, as far as the caller knows them.
+   *
+   * A baseline is taken with no tunnel up, so it should be this device's
+   * own address -- and one of our nodes' addresses never is. Two things
+   * produce one: a node mirror whose nginx proxies through the CDN rather
+   * than to the origin, which then answers `/health/ip` with the node's
+   * address to everyone who asks (five of six mirrors were in that state
+   * on 2026-08-31, and the installer still builds one that way without
+   * NEOXIFY_PANEL_ORIGIN); and a tunnel not yet gone. Kept as the
+   * "before", either one turned a working tunnel into a leak: asked again
+   * through that mirror the same address comes back, which reads as
+   * `bypassingTunnel` -- held against the route, and on a health poll
+   * "Your traffic is NOT protected".
+   *
+   * Such a reading is passed over and the next endpoint asked, so a
+   * mirror that does report the caller can still supply the baseline.
+   * None at all, and there is no baseline, which the caller already
+   * handles as "nothing can be proven". */
+  nodeAddresses?: Iterable<string>;
 };
+
+/** An address as compared against a set of them. */
+function comparable(ip: string): string {
+  return plainAddress(ip.trim()).toLowerCase();
+}
 
 /** What asking the list produced: a reading, and -- whether or not there
  * was one -- whether anything answered at all.
@@ -176,6 +203,7 @@ async function readFrom(
   {
     onBody,
     deadline,
+    skip,
   }: {
     onBody?: (body: Record<string, unknown>) => void;
     /** Epoch ms. The walk stops there, and the request in flight is
@@ -183,6 +211,10 @@ async function readFrom(
      * through a tunnel that black-holes everything, a walk at six
      * seconds each was a minute before the health poll could say so. */
     deadline?: number;
+    /** An address that is not an answer to the question asked; the
+     * endpoint that gave it is passed over like one with no address.
+     * See `BaselineOptions.nodeAddresses`. */
+    skip?: (ip: string) => boolean;
   } = {},
 ): Promise<ReadResult> {
   let answered = false;
@@ -209,7 +241,9 @@ async function readFrom(
       const body = res.body;
       if (body !== null && typeof body === "object" && typeof (body as { ip?: unknown }).ip === "string") {
         const ip = (body as { ip: string }).ip;
-        if (ip) {
+        // Before `onBody`, too: what such an endpoint says about the
+        // network is about the node's, not the customer's.
+        if (ip && !skip?.(ip)) {
           onBody?.(body as Record<string, unknown>);
           return { reading: { ip, from: base }, answered };
         }

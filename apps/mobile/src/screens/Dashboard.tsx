@@ -113,6 +113,7 @@ import {
 import { loadChosenRoute, saveChosenRoute } from "../lib/route-preference";
 import {
   confirmEgress,
+  nodeAddressesOf,
   pollEgress,
   pollState,
   rejectionIsEvidence,
@@ -507,7 +508,8 @@ export function Dashboard({
     }
 
     if (adopted === "disconnected") {
-      setBaselineIp(await captureBaselineIp());
+      // Never one of our nodes' addresses; see `nodeAddressesOf`.
+      setBaselineIp(await captureBaselineIp({ nodeAddresses: nodeAddressesOf(usersResult.data) }));
       setExitIp(null);
     }
   }
@@ -989,7 +991,15 @@ export function Dashboard({
     // another, which is what makes filtering differ. Unknown shares one
     // bucket, as on Windows. Reused as the first candidate's baseline
     // below rather than asked for twice.
-    let pendingBaseline: BaselineIp | null | undefined = await captureBaselineIp();
+    //
+    // Every baseline in this pass passes over a reading of one of our
+    // own nodes' addresses: a mirror reporting its node's address gives
+    // one to anyone who asks, and compared against it again through
+    // that mirror, a working tunnel read as a leak. See `nodeAddressesOf`.
+    // Every credential the account holds, not only the usable ones: a
+    // mirror's node is a node whatever this build can dial on it.
+    const nodeAddresses = nodeAddressesOf(all);
+    let pendingBaseline: BaselineIp | null | undefined = await captureBaselineIp({ nodeAddresses });
     setBaselineIp(pendingBaseline);
     const networkId = networkKeyFromAsn();
     const [lastGood, history, reachability] = await Promise.all([
@@ -1088,7 +1098,7 @@ export function Dashboard({
       if (pendingBaseline !== undefined) {
         baseline = pendingBaseline;
       } else {
-        baseline = (await waitForTeardown()) ? await captureBaselineIp() : null;
+        baseline = (await waitForTeardown()) ? await captureBaselineIp({ nodeAddresses }) : null;
       }
       pendingBaseline = undefined;
       setBaselineIp(baseline);

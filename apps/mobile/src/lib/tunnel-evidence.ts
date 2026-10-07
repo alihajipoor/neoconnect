@@ -159,13 +159,43 @@ export function rejectionIsEvidence(verdict: EgressVerdict): boolean {
   return verdict.state === "bypassingTunnel" || verdict.state === "unreachable";
 }
 
+/** Our nodes' public addresses, as far as this customer's credentials
+ * name them: each one's `connection.host`, which the server fills with
+ * the node's `publicIp`.
+ *
+ * For `captureBaselineIp`'s `nodeAddresses`. A pre-connect reading of one
+ * of these is never this phone's own address; it is a node mirror that
+ * answers `/health/ip` with its node's address to everyone (or a tunnel
+ * not yet gone). Taken as the baseline, every comparison through that
+ * mirror afterwards came back "the same address" -- `bypassingTunnel`,
+ * which the ladder holds against the route and the poll shows as "Your
+ * traffic is NOT protected" -- over a tunnel that worked.
+ *
+ * The mirrors this app derives from its own credentials (`mirrorsFrom`)
+ * live on exactly these nodes. One from the signed bundle on a node this
+ * customer has no credential for is not covered: its address is not
+ * known here. */
+export function nodeAddressesOf(users: readonly { connection?: { host?: string } | null }[]): Set<string> {
+  const addresses = new Set<string>();
+  for (const user of users) {
+    const host = user.connection?.host?.trim();
+    if (host) addresses.add(host);
+  }
+  return addresses;
+}
+
 /** The egress reading for a health poll.
  *
  * The baseline's own endpoint first: it is the only one whose answer can
  * prove anything, and the API client races endpoints and remembers the
  * winner, so the head of the list moves more often than a baseline does.
  * The whole list only when that endpoint does not answer, so a blocked
- * mirror reads as "no comparison" rather than as a dead tunnel. */
+ * mirror reads as "no comparison" rather than as a dead tunnel.
+ *
+ * Asking the baseline's endpoint is only as good as the baseline: one
+ * from a mirror that reports its own node's address would make this
+ * "bypassingTunnel" on every poll of a working tunnel. The dashboard
+ * keeps those out of baselines; see `nodeAddressesOf`. */
 export async function pollEgress(baseline: BaselineIp | null): Promise<EgressVerdict> {
   if (baseline === null) return verifyEgress(null);
   const own = await verifyEgress(baseline, { sameEndpointOnly: true });
