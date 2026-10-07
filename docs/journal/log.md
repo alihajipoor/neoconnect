@@ -4459,3 +4459,161 @@ checks, the suite having no DOM), `actions.test.ts` 2, `pow.test.ts` 1,
   this PC); its check loop, copied out, refused a "null" and an empty
   server.key and passed real PEM files.
 - Everything the first entry lists as unverified still is.
+
+---
+
+## 2026-10-06 — egress check: the connected node's own mirror (branch `claude/egress-own-mirror`)
+
+**Status:** pushed to `claude/egress-own-mirror`, cut from
+`claude/rc-0.9.45-final` at 3330e95. Not merged, not tagged, not
+released. **Not yet run in the VM** -- the coordinating session owns
+that proof.
+**Touches:** `src-tauri/src/health_ip.rs` (both apps), `src/lib/egress.ts`,
+new `src/lib/tunnel-server.ts`, `src/lib/ladder-pass.ts`, both
+Dashboards, `apps/mobile/src/lib/tunnel-evidence.ts`.
+
+### What was measured (by the coordinating session, not here)
+
+In the VM, on the 0.9.45 candidate, connected on Stealth to finland1 --
+exit FI, tunnel verifiably carrying traffic -- the dashboard said
+"Connected, not confirmed" where 0.9.44 said "You're protected".
+`health_ip_v4` called from the running app for every bundle endpoint,
+through the tunnel: every endpoint (panel and CDN hosts, the other
+nodes' mirrors) answered finland1's address, **except finland1's own
+mirror, which answered the VM's home address**. The client routes the
+node's own address around the tunnel -- the host route that lets the
+tunnel reach its server -- so a request to that node's mirror never
+enters the tunnel. finland1's mirror only started answering `/health/ip`
+that day (its HTTP/1.1 fallback was fixed on the node); the other four
+already did.
+
+What that does to `egress.ts`, which compares only readings from the same
+endpoint and asks in `apiEndpoints()` order (last good first): with the
+baseline from the connected node's own mirror -- likely wherever the
+panel hosts are blocked and that mirror is what works -- either (a) the
+reading comes from another endpoint: `indeterminate`, "not confirmed"
+(what was seen), or (b) from the same mirror: the home address again,
+`bypassingTunnel`, "NOT protected" over a working tunnel, a strike, and
+the automatic ladder tearing it down. (b) is plausibly live today on
+0.9.44 / 0.2.23.
+
+Found while writing the tests, same cause: **a dead tunnel was masked.**
+With the tunnel carrying nothing, that one mirror still answers (around
+it), so the walk had a reading -- `indeterminate`, no strike, no
+failover -- on Windows too, because the public-internet probe is only
+asked when no endpoint gave an address. On the phones its error page
+did the same through the "an error page is a round trip" rule.
+
+### The fix
+
+- `health_ip_v4` returns `peer`: the address the request actually
+  connected to (reqwest's `remote_addr`, TLS included). New command
+  `resolve_ipv4`: a server name to its IPv4 addresses through the system
+  resolver, bounded -- as `engines::xray::resolve_server` does. Both
+  registered in both apps.
+- `egress.ts`: readings carry `peer`. A `TunnelServer` (the connected
+  route's server addresses) can be given to `captureBaselineIp`,
+  `verifyEgress` and `confirmEgressWithin`. An answer whose peer is on it
+  is passed over and the next endpoint asked -- for the baseline (the
+  server of the rung about to be dialled) and for every reading while
+  connected. `fromTunnelServer(reading, server)` is exported.
+- `tunnel-server.ts`: a credential's server addresses --
+  `connection.host` (the node's validated `publicIp`, what Xray dials),
+  `publicParams.endpointHost` (IKEv2 dials the certificate name) and the
+  host of `credentials.endpoint` (WireGuard, OpenVPN). Literals as they
+  are, names through `resolve_ipv4`, just before the rung is dialled.
+- Windows: each rung computes it before settling; the settle never asks
+  a `known` endpoint on it (and gives the walk the longer ceiling, as with
+  nothing known); the rung's check passes it; it is kept in
+  `ladderPass.tunnelServer` for the health poll of whichever Dashboard is
+  mounted.
+- Phones: the same per rung, through `confirmEgress` and `pollEgress`.
+  The pass's first baseline is taken before the rung is known; if it came
+  from the first rung's server it is taken again (nothing is up yet).
+
+**Rules changed, and why.** Kept as they were: same-endpoint
+comparison, IPv4 only, the fixed list order, Windows' public-TLS probe,
+the phones' `nodeAddresses` skip.
+
+1. An answer from the tunnel's server no longer counts as "answered".
+   It never entered the tunnel; counting it kept a dead tunnel at "no
+   verdict" on the phones.
+2. `sameEndpointOnly` with a baseline whose own endpoint is on the
+   tunnel's server walks the list instead: that endpoint cannot answer
+   through the tunnel, and its silence would read "unreachable" on the
+   phones. It can only end `indeterminate` -- never an accusation.
+3. **Added:** an answer naming the very address it was fetched from is
+   passed over, baseline or reading, both apps. That is a mirror
+   proxying through the CDN (installed without NEOXIFY_PANEL_ORIGIN)
+   describing itself. Asked to check that such a mirror is still
+   handled: for the *connected* node's mirror the new skip covers it;
+   for *another* node's, the phones' `nodeAddresses` did, but Windows
+   passes none, and a test showed it taking that mirror's answer as the
+   baseline and then `bypassingTunnel` on a rung that asks the baseline's
+   endpoint. This rule closes that wherever the transport reports the
+   peer (always, with the IPv4 transport both apps install). It does not
+   catch a mirror whose node egresses from a different address than the
+   one it is reached at.
+
+### Proven, on this PC
+
+- Counts: desktop `pnpm test` 55 files / 826 tests (was 53 / 800),
+  `pnpm typecheck` clean; `cargo test --workspace` lib 43 passed / 4
+  ignored (was 40), ipc 58, service 478 / 6 ignored; mobile `pnpm test`
+  10 files / 128 (was 9 / 118), `tsc --noEmit -p .` clean;
+  `apps/mobile/src-tauri` `cargo check` and `--all-targets` clean, and its
+  `health_ip` tests (compiled by path) pass there too.
+- Every behaviour test fails on the code before it: against 3330e95's
+  `egress.ts`, 10 of 14 in `egress-own-mirror.test.ts` fail; the other 4
+  are the controls, and they reproduce (a), (b) and the self-reporting
+  mirror on the old code. Mobile: 9 fail on the old shared `egress.ts` +
+  `tunnel-evidence.ts` + Dashboard -- 6 of the 8 in `own-mirror.test.ts`
+  (the other 2 are controls reproducing (a) and (b)), the 2 new
+  `tunnel-evidence` tests, and 1 existing one whose expected call shape
+  changed. `health-ip-v4.test.ts`'s new test fails on the old
+  `egress.ts`. The Windows wiring assertions: 6 fail on the old Dashboard
+  / `ladder-pass.ts`. The Rust tests do not compile without the new field
+  and command.
+- `peer` over real TLS: `live_health_ip` against a public, non-Neoxify
+  https host returned its address as `peer` (rustls carries reqwest's
+  connection info). No Neoxify host was contacted.
+
+### Unverified
+
+- **The whole fix in the VM.** Owed: connected on Stealth to finland1
+  with finland1's mirror as the last good endpoint, `health_ip_v4` for
+  that mirror reports finland1's address as `peer`; the ladder's baseline
+  comes from the next endpoint; the dashboard says "You're protected" and
+  the health poll keeps it; and a black-holed tunnel is struck.
+- Which engines route their server around the tunnel. Measured for Xray
+  (Stealth) on Windows only. WireGuard, OpenVPN, IKEv2 and both phones
+  are unmeasured. The skip is right either way: an endpoint on the
+  server is reached around the tunnel or through it to the node itself,
+  and neither is the exit as the world sees it.
+- The name-resolving path (`endpointHost`) was exercised only against
+  this machine's resolver with `localhost`.
+- A system proxy: reqwest would connect to the proxy, and `peer` would
+  be the proxy's address.
+
+### Left open
+
+- **Censored networks, Windows health poll.** Where the bare network
+  blocks the panel hosts and the connected node's mirror led the list,
+  the baseline now comes from the next endpoint that answers *bare* (say
+  another node's mirror), while the poll -- in list order -- gets its
+  reading from the first that answers *through the tunnel* (the panel
+  host, now reachable): different endpoints, `indeterminate`, "Connected,
+  not confirmed". Honest, and no longer an accusation or a teardown, but
+  not "protected". The ladder's earlier rungs and the phones' poll ask
+  the baseline's endpoint first and do prove it. Fixing it means letting
+  the Windows poll ask the baseline's endpoint first too, which the list
+  order was kept to avoid (a self-reporting mirror as baseline); rule 3
+  removes most of that reason. A decision, not taken here.
+- A tunnel adopted across an app restart has no tunnel server -- and no
+  baseline, so nothing is compared that the skip would have protected.
+- Concurrent exits' servers are not in the set: the service installs one
+  host route, for the primary server (`routing::install_full_tunnel`).
+- When only the target node's own mirror answers on the bare network,
+  the settle now walks for its full ceiling looking for another endpoint
+  and ends with no baseline -- "not confirmed" rather than a false
+  "NOT protected".
