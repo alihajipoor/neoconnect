@@ -91,6 +91,11 @@ type Dispatcher struct {
 	// reconnect on a different address does not strand the old rule, and
 	// a re-asserted cap that is already in place is not applied again.
 	shapedAddresses map[string]map[string]string
+	// protocol -> users whose rule in shapedAddresses carries a cap that
+	// has since changed, for protocols whose addresses appear at connect
+	// time. The address stays recorded so the rule can still be found and
+	// removed; this says it has to be applied again. See applyRateLimit.
+	staleCaps map[string]map[string]bool
 	// protocol -> when its root qdisc was last seen in place. See
 	// shapingIntact.
 	rootSeenAt map[string]time.Time
@@ -103,6 +108,7 @@ func New() *Dispatcher {
 		discoverers:     make(map[string]AddressDiscoverer),
 		rateLimits:      make(map[string]rateLimit),
 		shapedAddresses: make(map[string]map[string]string),
+		staleCaps:       make(map[string]map[string]bool),
 		rootSeenAt:      make(map[string]time.Time),
 	}
 }
@@ -387,9 +393,22 @@ func (d *Dispatcher) applyRateLimit(ctx context.Context, payload commandPayload)
 	changed := !known || previous != limit
 	d.rateLimits[payload.ExternalUserID] = limit
 	if changed {
-		// Forgetting where they are shaped is what makes the next pass
-		// re-apply: the rule there carries the old cap.
-		delete(d.shapedAddresses[payload.Protocol], payload.ExternalUserID)
+		if _, connectTime := d.discoverers[payload.Protocol]; connectTime && d.shapedAddresses[payload.Protocol][payload.ExternalUserID] != "" {
+			// Marked stale rather than forgotten. The record is also how
+			// ReconcileShaping finds this rule to remove when the client
+			// disconnects: forgotten, a client that left before the next
+			// pass left its old cap on that pool address, inherited by
+			// whoever is handed it next -- for good, if they are uncapped.
+			// Found by the second 2026-10-06 review.
+			if d.staleCaps[payload.Protocol] == nil {
+				d.staleCaps[payload.Protocol] = make(map[string]bool)
+			}
+			d.staleCaps[payload.Protocol][payload.ExternalUserID] = true
+		} else {
+			// Forgetting where they are shaped is what makes the apply below
+			// happen: the rule there carries the old cap.
+			delete(d.shapedAddresses[payload.Protocol], payload.ExternalUserID)
+		}
 	}
 	d.mu.Unlock()
 
@@ -472,6 +491,7 @@ func (d *Dispatcher) markRootSeen(protocol string) {
 func (d *Dispatcher) clearRateLimit(ctx context.Context, payload commandPayload) {
 	d.mu.Lock()
 	delete(d.rateLimits, payload.ExternalUserID)
+	delete(d.staleCaps[payload.Protocol], payload.ExternalUserID)
 	if byUser, ok := d.shapedAddresses[payload.Protocol]; ok {
 		if address := byUser[payload.ExternalUserID]; address != "" {
 			delete(byUser, payload.ExternalUserID)
@@ -549,6 +569,10 @@ func (d *Dispatcher) ReconcileShaping(ctx context.Context) {
 		for k, v := range d.rateLimits {
 			limits[k] = v
 		}
+		stale := make(map[string]bool, len(d.staleCaps[protocol]))
+		for k := range d.staleCaps[protocol] {
+			stale[k] = true
+		}
 		d.mu.Unlock()
 
 		rootReady := false
@@ -557,9 +581,9 @@ func (d *Dispatcher) ReconcileShaping(ctx context.Context) {
 			if !capped || (limit.downloadMbps == 0 && limit.uploadMbps == 0) {
 				continue
 			}
-			// Already shaped at this address -- re-applying every poll
-			// would churn tc rules for no reason.
-			if shaped[userID] == address {
+			// Already shaped at this address, with the cap as it is now --
+			// re-applying every poll would churn tc rules for no reason.
+			if shaped[userID] == address && !stale[userID] {
 				continue
 			}
 			if !rootReady {
@@ -580,6 +604,7 @@ func (d *Dispatcher) ReconcileShaping(ctx context.Context) {
 			}
 			d.mu.Lock()
 			d.shapedAddresses[protocol][userID] = address
+			delete(d.staleCaps[protocol], userID)
 			d.mu.Unlock()
 		}
 
@@ -589,6 +614,7 @@ func (d *Dispatcher) ReconcileShaping(ctx context.Context) {
 			if _, online := addresses[userID]; !online {
 				_ = s.Remove(ctx, address)
 				delete(d.shapedAddresses[protocol], userID)
+				delete(d.staleCaps[protocol], userID)
 			}
 		}
 		d.mu.Unlock()
