@@ -10,6 +10,7 @@ import {
   type RepairReport,
   type RepairStep,
 } from "../lib/repair";
+import { autoReconnect } from "../lib/auto-reconnect";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import { Button, Card } from "../components/ui";
 import { cn } from "../lib/utils";
@@ -71,6 +72,11 @@ export function RepairNetwork({
   }, []);
 
   const run = useCallback(async () => {
+    // The repair disconnects. That is the customer's doing, not a drop,
+    // so a tunnel it takes down is not reconnected behind it, and a
+    // reconnect waiting between attempts does not dial into the middle
+    // of it.
+    autoReconnect.cancel("customer");
     setBusy(true);
     setReport(null);
     setUnreachable(null);

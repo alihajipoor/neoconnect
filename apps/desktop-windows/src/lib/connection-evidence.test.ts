@@ -6,6 +6,7 @@ import {
   droppedFromPoll,
   fullTunnelPollState,
   handshakeEvidence,
+  droppedUnseen,
   headlineFor,
   isTunnelUp,
   LIVENESS_POLL_MS,
@@ -488,6 +489,36 @@ describe("noticing that the tunnel has gone", () => {
 
   it("asks often enough that the old seventeen seconds cannot happen", () => {
     expect(LIVENESS_POLL_MS).toBeLessThanOrEqual(1_000);
+  });
+
+  describe("for a screen that was away when it went", () => {
+    // Settings unmounts the dashboard and both polls with it. The screen
+    // mounted on return shows nothing yet; whether the app was vouching
+    // for a tunnel stands in for what it was showing.
+    it("is a drop when the app was vouching for a tunnel the service says is gone", () => {
+      expect(droppedUnseen(true, "idle", ENDED, false)).toBe(true);
+    });
+
+    it("holds the poll's every other condition", () => {
+      expect(droppedUnseen(false, "idle", ENDED, false)).toBe(false);
+      expect(droppedUnseen(true, "idle", GUESSED, false)).toBe(false);
+      expect(droppedUnseen(true, "idle", null, false)).toBe(false);
+      expect(droppedUnseen(true, "idle", ENDED, true)).toBe(false);
+      expect(droppedUnseen(true, "connect", ENDED, false)).toBe(false);
+      expect(droppedUnseen(true, "disconnect", ENDED, false)).toBe(false);
+    });
+
+    it("is the poll's rule, with the screen's claim swapped for the app's", () => {
+      for (const shown of [...LIVE, ...NOT_LIVE]) {
+        for (const answer of [ENDED, GUESSED, null]) {
+          for (const disturbed of [false, true]) {
+            expect(droppedFromPoll(shown, "idle", answer, disturbed)).toBe(
+              droppedUnseen(LIVE.includes(shown), "idle", answer, disturbed),
+            );
+          }
+        }
+      }
+    });
   });
 });
 

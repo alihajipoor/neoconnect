@@ -418,10 +418,30 @@ export function droppedFromPoll(
   status: Pick<VpnStatus, "connected" | "health"> | null,
   disturbed: boolean,
 ): boolean {
+  return droppedUnseen(isTunnelUp(shown), intent, status, disturbed);
+}
+
+/** The same rule, for a screen that was not there to see the tunnel go.
+ *
+ * The dashboard unmounts whenever Settings is open, and with it both
+ * polls, so a tunnel that dies meanwhile is found only when the screen
+ * mounts again -- which starts at "disconnected", with nothing shown to
+ * have been claiming a tunnel. `vouching` stands in for "the screen was
+ * claiming one": the app still holds a tunnel it would reconnect
+ * (`auto-reconnect.ts`, `vouching`), which nothing of ours has ended or
+ * forgotten since. Every other condition is `droppedFromPoll`'s, so the
+ * two cannot drift: an answer that arrived, the service's verified "no
+ * tunnel", nothing of ours in flight or disturbing it. */
+export function droppedUnseen(
+  vouching: boolean,
+  intent: Intent,
+  status: Pick<VpnStatus, "connected" | "health"> | null,
+  disturbed: boolean,
+): boolean {
   if (status === null) return false;
   if (intent !== "idle") return false;
   if (disturbed) return false;
-  if (!isTunnelUp(shown)) return false;
+  if (!vouching) return false;
   return noTunnelVerified(status);
 }
 

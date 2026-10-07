@@ -84,6 +84,18 @@ export const QUICK_DEATHS_TO_STOP = 3;
  * a tunnel coming back on its own long after. */
 export const BLOCKED_WAIT_MAX_MS = 30 * 60_000;
 
+/** The longest one attempt is waited for before it is counted as failed.
+ *
+ * A ladder pass is bounded rung by rung, and its guard expires after
+ * `LADDER_MAX_MS` without progress -- but a pass wedged on a call that
+ * never returns never resolves its promise either, and an episode waiting
+ * on it would say "Reconnecting..." for as long as the app stayed open.
+ * Past this, the attempt is a failure like any other (and by then the
+ * budget is spent, so the episode ends and says the connection was
+ * lost); whatever the wedged pass reports afterwards is ignored. Longer
+ * than a pass's own guard, so no live pass is given up on. */
+export const ATTEMPT_MAX_MS = 180_000;
+
 /** Why an episode ended without a tunnel -- or never started. */
 export type ReconnectStop =
   /** A press that takes over: Connect, Disconnect, stopping a pass, a
@@ -316,6 +328,13 @@ export function reconnectLost(phase: ReconnectPhase): boolean {
   return phase.kind === "idle" && phase.lost;
 }
 
+/** Whether the app is vouching for a tunnel that, if it dropped, would be
+ * reconnected: what a screen mounting with nothing on it yet uses in
+ * place of "what it was showing" -- see `droppedUnseen`. */
+export function vouching(phase: ReconnectPhase): boolean {
+  return phase.kind === "armed";
+}
+
 export class AutoReconnect {
   private phase: ReconnectPhase = IDLE;
   private timer: unknown = null;
@@ -363,7 +382,11 @@ export class AutoReconnect {
    *
    * `fresh` when this app has just brought it up -- a pass landed -- so
    * the quick-death clock starts now. Otherwise (a tunnel adopted from
-   * the service, a recheck) an armed tunnel keeps its clock.
+   * the service) an armed tunnel keeps its clock, and an idle controller
+   * arms -- unless the customer's own press is what left it idle. A
+   * Disconnect whose teardown did not finish leaves a tunnel up that the
+   * customer asked to be rid of; the screen re-reading it on return from
+   * Settings must not make its later death something to reconnect.
    *
    * Ignored while an attempt runs: that attempt's own outcome is what
    * arms, carrying the quick-death count. While waiting, a tunnel that
@@ -392,6 +415,7 @@ export class AutoReconnect {
         });
         return;
       case "idle":
+        if (!fresh && (this.phase.stopped === "customer" || this.phase.stopped === "stopped")) return;
         this.set({ kind: "armed", since: now, routeId, quickDeaths: 0, session: this.deps.session() });
         return;
     }
@@ -407,6 +431,10 @@ export class AutoReconnect {
    * Returns whether an episode began. "lost" means the screen says "VPN
    * connection lost" and waits for the customer, as before. */
   dropped({ exclusion = null }: { exclusion?: ReconnectStop | null } = {}): "reconnecting" | "lost" {
+    // An episode already under way: an engine a failed pass left running
+    // (shown as "degraded") has died too. The episode goes on, and its
+    // next pass tears down whatever is left anyway.
+    if (this.phase.kind === "waiting" || this.phase.kind === "attempting") return "reconnecting";
     if (this.phase.kind !== "armed") return "lost";
     const armed = this.phase;
     const now = this.deps.now();
@@ -437,14 +465,27 @@ export class AutoReconnect {
    * second call cannot re-word how an episode already ended. */
   cancel(why: ReconnectStop): void {
     if (this.phase.kind === "idle") {
-      if (this.phase.lost && !lostAfter(why)) this.set(IDLE);
+      if (this.phase.lost && !lostAfter(why)) this.set({ kind: "idle", lost: false, stopped: why });
       return;
     }
     if (this.phase.kind === "armed") {
-      this.set(IDLE);
+      // Not an episode, so nothing is reported -- but remembered, so a
+      // re-read of the same tunnel cannot arm it again (see `tunnelUp`).
+      this.set({ kind: "idle", lost: false, stopped: why });
       return;
     }
     this.stop(why, this.attemptsMade());
+  }
+
+  /** The screen has stopped vouching for a tunnel without a drop: an
+   * automatic pass of the app's own (the mid-session failover) ended
+   * with nothing up, or a re-read found nothing where the screen could
+   * not tell before ("Can't tell right now"). Neither is a drop by the
+   * screen's rule, so an armed tunnel is simply forgotten -- left armed,
+   * the next screen to mount would take the service's "nothing is
+   * running" for a drop it had missed. Episodes are left alone. */
+  forget(): void {
+    if (this.phase.kind === "armed") this.set(IDLE);
   }
 
   /** The network or the app's visibility may have changed. */
@@ -579,15 +620,23 @@ export class AutoReconnect {
     const token = ++this.token;
     const startedAt = this.deps.now();
     this.set({ kind: "attempting", attempt, startedAt, episode });
+    let watchdog: unknown = null;
     let outcome: ReconnectOutcome;
     try {
-      outcome = await runner({
-        attempt: attempt + 1,
-        maxAttempts: RECONNECT_MAX_ATTEMPTS,
-        resumeRouteId: episode.routeId,
-      });
+      outcome = await Promise.race([
+        runner({
+          attempt: attempt + 1,
+          maxAttempts: RECONNECT_MAX_ATTEMPTS,
+          resumeRouteId: episode.routeId,
+        }),
+        new Promise<ReconnectOutcome>((resolve) => {
+          watchdog = this.deps.setTimer(() => resolve({ kind: "failed" }), ATTEMPT_MAX_MS);
+        }),
+      ]);
     } catch {
       outcome = { kind: "failed" };
+    } finally {
+      if (watchdog !== null) this.deps.clearTimer(watchdog);
     }
     // Ended or superseded while it ran -- a press, a sign-out. Whatever
     // that did stands.

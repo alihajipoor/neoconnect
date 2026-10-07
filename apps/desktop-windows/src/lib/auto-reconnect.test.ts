@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { AttemptReport } from "./attempts";
+import { LADDER_MAX_MS } from "./ladder-pass";
 import {
   asReconnectReport,
+  ATTEMPT_MAX_MS,
   AutoReconnect,
   BLOCKED_WAIT_MAX_MS,
   QUICK_DEATH_MS,
@@ -415,6 +417,28 @@ describe("the customer outranks it", () => {
     expect(reconnectLost(h.rc.current())).toBe(false);
   });
 
+  it("a tunnel the customer asked to be rid of is not armed again by a re-read", async () => {
+    // A Disconnect whose teardown did not finish: the tunnel is still up,
+    // and the screen, back from Settings, adopts it. Its later death is
+    // not something to reconnect -- the customer asked for it down.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    await h.advance(10 * 60_000);
+    h.rc.cancel("customer");
+    h.rc.tunnelUp({ routeId: null });
+    expect(h.rc.dropped()).toBe("lost");
+    await h.advance(60_000);
+    expect(h.asked).toHaveLength(0);
+    // Control: a tunnel the app has just brought up again is armed.
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    expect(h.rc.current().kind).toBe("armed");
+    // And on a fresh app, an adopted tunnel is armed too.
+    const fresh = harness();
+    fresh.rc.tunnelUp({ routeId: null });
+    expect(fresh.rc.current().kind).toBe("armed");
+  });
+
   it("a Disconnect while connected disarms, so a later death is not reconnected", async () => {
     const h = harness();
     h.bind();
@@ -477,6 +501,75 @@ describe("what rules a reconnect out", () => {
     await h.advance(10 * 60_000);
     expect(h.asked).toHaveLength(2);
     expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "refused" });
+  });
+});
+
+describe("what is not a new drop", () => {
+  it("a second death during an episode does not start a second one", async () => {
+    // A failed pass can leave an engine up, shown as "degraded"; when it
+    // dies the screen reports a drop again. The episode carries on with
+    // its own count rather than starting over at attempt one.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(0); // attempt 1 failed; attempt 2 due in 2s
+    expect(h.rc.dropped()).toBe("reconnecting");
+    await h.advance(2_000);
+    expect(h.asked.map((a) => a.attempt)).toEqual([1, 2]);
+  });
+
+  it("a tunnel the app took down itself is forgotten, not reconnected", async () => {
+    // The mid-session failover tears the armed tunnel down on purpose;
+    // when it lands nothing, the screen forgets it.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    await h.advance(10 * 60_000);
+    h.rc.forget();
+    expect(h.rc.dropped()).toBe("lost");
+    await h.advance(60_000);
+    expect(h.asked).toHaveLength(0);
+    expect(h.reports).toHaveLength(0);
+  });
+
+  it("forgetting leaves an episode alone", async () => {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(0);
+    h.rc.forget();
+    await h.advance(2_000);
+    expect(h.asked).toHaveLength(2);
+  });
+});
+
+describe("a pass that never comes back", () => {
+  it("is counted as failed after a ceiling, so the episode cannot hang on it", async () => {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(ATTEMPT_MAX_MS - 1_000);
+    expect(h.rc.current().kind).toBe("attempting");
+    await h.advance(2_000);
+    // Past the ceiling, and past the budget with it: the episode ends,
+    // and says the connection was lost.
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "budget" });
+    // What the wedged pass says afterwards changes nothing.
+    h.settle({ kind: "connected", routeId: "r" });
+    await h.advance(0);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "budget" });
+  });
+
+  it("is waited for as long as a live pass can take", () => {
+    // Longer than a pass's own guard: no live pass is given up on.
+    expect(ATTEMPT_MAX_MS).toBeGreaterThan(LADDER_MAX_MS);
   });
 });
 
