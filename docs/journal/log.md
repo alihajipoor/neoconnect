@@ -3593,8 +3593,26 @@ and `migration-safety.spec.ts` checks both; their SQL matches what
   15 minutes, but a connected tunnel keeps working. Which ones:
   `SELECT c.id FROM customers c WHERE c.status = 'DISABLED' AND EXISTS (SELECT 1 FROM protocol_users pu JOIN subscriptions s ON s.id = pu."subscriptionId" WHERE s."customerId" = c.id AND pu.status = 'ACTIVE');`
 - **Relay routes read OFFLINE** in the route list until their entry node
-  acks a CONFIGURE_ROUTE: seconds after it reconnects, at most a minute.
-  That status is display and a tiebreak in the apps; it gates nothing.
+  acks a CONFIGURE_ROUTE. How long that takes is not measured, and "at
+  most a minute" (said here before) is not proven: on reconnect the
+  route goes out only after the outbox replay and the full user
+  re-assert, and the agent works through commands one at a time, so a
+  relay with many users -- IKEv2 ones reload every secret per user --
+  can take longer. The status is display and a tiebreak in the apps
+  (desktop 0.9.44 also labels a custom exit on that route as down); it
+  blocks no connection.
+- **Rolling back re-enables everyone disabled after the deploy.**
+  Disabling leaves credential rows ACTIVE on purpose (switchOffCustomer);
+  main's re-assert has no customer filter, so within a minute of a
+  rollback it puts every such customer's credentials back on the nodes.
+  No worse than main today, but after a rollback re-disable them by hand.
+- **Stripe must send two events it may not be subscribed to.** A Stripe
+  payment is now marked FAILED only on `checkout.session.expired` or
+  `payment_intent.canceled` (771a0d4); `payment_intent.payment_failed`
+  leaves it PENDING because Checkout retries on the same PaymentIntent.
+  Check the endpoint in the Stripe dashboard lists both. If not, no
+  Stripe row is marked FAILED again -- harmless (they stay PENDING), but
+  the payments list stops showing failures.
 - **iOS purchases:** before `APPLE_BUNDLE_ID` is given to the production
   container, redeem one sandbox purchase from a real iPhone. The new chain
   check was only run against Apple-shaped chains under a throwaway root.
@@ -3604,6 +3622,9 @@ and `migration-safety.spec.ts` checks both; their SQL matches what
 Backend 99 suites / 1,182 tests, typecheck and lint clean. Each fix
 has a test that fails on the code before it; the commit message says how
 many. `bash -n installer/lib/agent.sh`; shellcheck is not installed here.
+After the review fixes below: 99 suites / 1,188 tests, typecheck and
+lint clean; each of the three new fixes' tests was run against the code
+before it and failed.
 
 ### Unverified
 
@@ -3624,13 +3645,20 @@ many. `bash -n installer/lib/agent.sh`; shellcheck is not installed here.
   success. Read from the code: every command is acked, and re-asserts
   have been idempotent since b267f5f (in v0.2.9). The nodes' versions
   were not checked.
+- No query here has met a real Postgres. The unit tests mock Prisma, and
+  CI's Postgres only applies the migrations. So the new `where` filters
+  (the live-credential and plan filters among them) are checked as
+  objects, not as rows they select, and admin delete's handling of the
+  foreign keys is checked against the schema, not against a database.
 
 ### Not fixed, and why
 
 - **Sign-in, sign-up, password reset, the sign-in challenge and
   LoginGuard's per-source counters still count per address.** Customers
   behind one node mirror still share those buckets, and anyone can empty
-  them. Signed-in requests and refresh no longer share (00b27cc). The real
+  them. Signed-in requests and refresh no longer share (00b27cc), nor do
+  signed-in attempt reports and App Store redemptions (ab0a942); an
+  anonymous attempt report still counts per address. The real
   client is in X-Forwarded-For, but tunnel traffic arrives from the same
   node address with a header the customer wrote. Trusting it would give
   every connected customer a fresh sign-in budget per forged header. The
@@ -3644,3 +3672,37 @@ many. `bash -n installer/lib/agent.sh`; shellcheck is not installed here.
 - The relay Xray template's default outbound is still `direct`, so a new
   relay would not fail closed the way ir1 does by hand. That is a node
   config question, not a backend one.
+- **A password sign-in grants a trial to any verified account with no
+  subscription.** Eligibility is "has no subscription at all", so if an
+  operator deletes a customer's trial subscription, the next sign-in
+  grants a new one. Main already did this through the unauthenticated
+  verify-code branch (a974423 closed that route, and sign-in is where the
+  retry lives now), so it is not a regression. Making a trial once per
+  account needs a persisted marker -- a product call, not made here.
+
+### After the adversarial review
+
+The review of `ec83104` found one blocking defect and eight lows.
+
+- **Fixed, blocking (8045019): one plan's speed cap went to every
+  plan.** `reapplyRateLimits` spread `liveCredentialWhere()` after
+  `subscription: { planId }`; da575bb gave that helper a `subscription`
+  key of its own, which replaced the plan filter. An admin editing
+  Starter's cap would have shaped every live WireGuard and OpenVPN
+  customer on every plan to Starter's speed, with nothing to undo it.
+  Never deployed. The spec had built its expected value with the same
+  spread, so it asserted the bug.
+- **Fixed (1aec444): re-enabling a credential put a disabled customer
+  back on the nodes.** A renewal or a reactivation called
+  `setEnabled(true)`, which sent ENABLE_USER whatever the account's
+  status. It now asks liveCredentialWhere (minus the row's own status)
+  first and leaves the row off its node until it is live.
+- **Fixed (ab0a942):** attempt reports and App Store redemptions count
+  per signed-in session (above).
+- **Documented:** rollback re-enables disabled customers; the relay
+  OFFLINE window is not bounded; the Stripe event subscription (all in
+  the deploy notes above). The trial-on-sign-in note (above).
+- **Not real:** "switch-route can return a PENDING or CANCELLED
+  subscription's leftover credential". Its only caller,
+  `POST /customer/subscriptions/:id/route`, refuses any subscription
+  that is not ACTIVE before calling it.
