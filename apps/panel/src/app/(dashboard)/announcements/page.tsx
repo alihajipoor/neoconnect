@@ -1,7 +1,8 @@
 import { redirect } from "next/navigation";
 import { apiFetch } from "@/lib/api";
 import { getSession } from "@/lib/session";
-import type { Route, SubscriptionPlan } from "@/lib/types";
+import { fetchRoutes } from "@/lib/infra";
+import type { SubscriptionPlan } from "@/lib/types";
 import { AnnouncementForm } from "./announcement-form";
 
 // SUPERADMIN-only, same gating as the backend's POST /announcements/send
@@ -13,7 +14,7 @@ export default async function AnnouncementsPage() {
 
   const [plans, routes] = await Promise.all([
     apiFetch<SubscriptionPlan[]>("/plans"),
-    apiFetch<Route[]>("/routes"),
+    fetchRoutes(),
   ]);
 
   return (

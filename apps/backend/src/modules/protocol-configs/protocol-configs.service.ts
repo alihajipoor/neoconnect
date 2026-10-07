@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
-import { Protocol, type Prisma } from "@prisma/client";
+import { AdminRole, Protocol, type Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreateProtocolConfigDto } from "./dto/create-protocol-config.dto";
 import { UpdateProtocolConfigDto } from "./dto/update-protocol-config.dto";
@@ -12,6 +12,35 @@ import { decryptCredentials, encryptCredentials } from "../protocol-users/creden
  * and everything already issued against them depends on them staying
  * exactly as they are. */
 const SERVER_MANAGED_PUBLIC_PARAMS = ["caCertPem", "caKeyPem", "serverCertPem", "serverKeyPem"] as const;
+
+/** A config as `role` may read it back from the API.
+ *
+ * publicParamsJson holds OpenVPN's private keys despite its name, and a
+ * plain read returned them to every staff role -- SUPPORT and BILLING
+ * included, whose panel pages then carried them to the browser. With the
+ * CA key anyone can sign a client certificate the node accepts, owned by
+ * no customer and revoked by nothing short of a new CA (which reissues
+ * every certificate on the node); with the server key, impersonate the
+ * node to its OpenVPN customers.
+ *
+ * - caKeyPem goes to nobody. Certificates are signed here, from the
+ *   database; no reader of this API uses it.
+ * - serverKeyPem goes to SUPERADMIN only:
+ *   installer/maintenance/restore-openvpn-from-panel.sh reads it back
+ *   through GET /protocol-configs to rebuild a wiped node with the same CA.
+ *
+ * Reads only. The create response is the installer's one chance to get
+ * the server key and is unchanged; an update keeps both keys whatever the
+ * caller sends (SERVER_MANAGED_PUBLIC_PARAMS), so a PATCH built from a
+ * redacted read loses nothing. */
+export function readableBy<T extends { publicParamsJson: Prisma.JsonValue }>(config: T, role: AdminRole): T {
+  const params = config.publicParamsJson;
+  if (!params || typeof params !== "object" || Array.isArray(params)) return config;
+  const { caKeyPem: _ca, serverKeyPem, ...rest } = params as Record<string, Prisma.JsonValue>;
+  void _ca;
+  const kept = role === AdminRole.SUPERADMIN && serverKeyPem !== undefined ? { ...rest, serverKeyPem } : rest;
+  return { ...config, publicParamsJson: kept };
+}
 
 /** The publicParamsJson keys an admin must supply per protocol, and what
  * each one is, so the error can say what to go and find rather than just

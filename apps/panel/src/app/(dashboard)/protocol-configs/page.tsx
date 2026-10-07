@@ -1,12 +1,13 @@
 import { apiFetch } from "@/lib/api";
 import { getSession, requireStaff } from "@/lib/session";
-import type { Node, ProtocolConfig } from "@/lib/types";
+import { fetchProtocolConfigs } from "@/lib/infra";
+import type { Node } from "@/lib/types";
 import { ProtocolConfigsTable } from "./protocol-configs-table";
 
 export default async function ProtocolConfigsPage() {
   await requireStaff();
   const [protocolConfigs, nodes, session] = await Promise.all([
-    apiFetch<ProtocolConfig[]>("/protocol-configs"),
+    fetchProtocolConfigs(),
     apiFetch<Node[]>("/nodes"),
     getSession(),
   ]);
