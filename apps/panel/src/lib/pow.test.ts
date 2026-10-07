@@ -5,11 +5,18 @@ import { mint, verify } from "../../../backend/src/modules/login-guard/proof-of-
 import { parseSolution, solve } from "./pow";
 
 describe("solve", () => {
-  it.each([1, 8, 12, 15])("finds a nonce the backend accepts at %i bits", async (bits) => {
-    const challenge = mint(bits);
-    const solution = await solve(challenge);
-    expect(verify(solution)).toEqual({ ok: true });
-  });
+  // 9 crosses a byte boundary; 12 is the floor LoginGuard issues. Not
+  // higher: the work is random, and 15 bits ran past vitest's 5 s once on
+  // a loaded CI runner -- the speed is not what this checks.
+  it.each([1, 8, 9, 12])(
+    "finds a nonce the backend accepts at %i bits",
+    async (bits) => {
+      const challenge = mint(bits);
+      const solution = await solve(challenge);
+      expect(verify(solution)).toEqual({ ok: true });
+    },
+    30_000,
+  );
 
   it("changes nothing the backend signed", async () => {
     const challenge = mint(4);
