@@ -65,6 +65,9 @@ features = [
     # can choose from what is running instead of hunting through
     # Program Files for an executable.
     "Win32_System_Diagnostics_ToolHelp",
+    # ProcessIdToSessionId, so the picker lists only the caller's own
+    # session's processes -- see split_tunnel::picker::running_apps.
+    "Win32_System_RemoteDesktop",
     # GetIconInfo and DestroyIcon, for the picker's icons. The window
     # check this was first enabled for lives in the Tauri client now:
     # a session-0 service sees none of the customer's windows.

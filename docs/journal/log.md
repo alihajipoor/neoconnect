@@ -3874,3 +3874,171 @@ traffic; an IKEv2 terminate on a live session, and the retry; install_xray
 on a live relay end to end; block-private-egress.sh's remote half
 (syntax-checked only); the WireGuard subnet guard; a backend restart with
 nodes reconnecting inside the first sweep.
+
+## 2026-10-06 — desktop review fixes (branch `claude/review-fixes-desktop`, off `main` `1cd85c6`)
+
+**Status:** pushed, not merged, not released. Fourteen confirmed
+findings from the full review of the desktop area; thirteen fixed, one
+partly. Commit messages carry the detail; this records what is proven
+and what is not.
+
+### Fixed
+
+- **Control-plane outage tore down working tunnels** (high). The egress
+  check now tells an HTTP answer of any status from our own endpoints
+  (`00e9ffe`) and, when nothing of ours answers at all, a TCP handshake
+  with 1.1.1.1 / 8.8.8.8:443 through the tunnel (`4189cc4`, new
+  `probe_ipv4_egress`) apart from a dead tunnel: both are now
+  `indeterminate`, so the poll falls back to the handshake, counts no
+  strike and runs no ladder. With no baseline, every rung is judged on
+  its handshake rather than rejected, and the wait for proof that cannot
+  come ends at once (`4f2123a`). **The TCP probe was wrong for every
+  Xray protocol** -- xray's tun answers the handshake itself -- and is
+  now a verified TLS handshake; see the follow-up entry below.
+- **"You're protected" on a dual-stack machine while IPv4 bypassed**
+  (medium). `/health/ip` is asked over IPv4 only on Windows (new
+  `health_ip_v4` command, reqwest bound to `0.0.0.0`, installed from
+  `main.tsx`), and two readings of different families are never
+  compared (`9ad2458`). The mobile app keeps the plugin's fetch and gets
+  only the family guard.
+- Remount over a live tunnel showed "not protected" (high) and a pass
+  outliving the screen (medium): `44dfcd5` (`lib/ladder-pass`, sync
+  before loading ends). Unbounded egress walks (medium): `e226923`.
+  Snapshot written after sign-out (low, both clients): `90393c7`.
+  IPv6 alarm in Custom mode (medium): `25d148c`. Mirror 502 winning the
+  race (medium, shared with mobile): `b2167a7`. Verify-email deep link
+  (low): `33135db`. Repair survey order (low): `8fafe35`, which also
+  raises `REPAIR_WORST_CASE` 735s → 885s and the app's deadline to 900s
+  (ten idle-arm spawns were never itemised), and fixes the JS repair
+  wrapper, left at 205s when the Rust deadline went to 750s. Stop vs
+  app watch (low): `07754b1`. Disconnect vs a queued Connect (low):
+  `e14de8b`. Pipe: ArmGaming refused, running-app list limited to the
+  caller's session (low): `a738dc8`.
+
+### Partly fixed
+
+- **Capability scope fixed at build time** (medium), `d82b640`: a domain
+  the seed uses for two or more hosts now gets a wildcard, so a node
+  added later on an existing mirror domain is in scope for builds from
+  now on; `bundle.mjs sign --previous <last signed bundle>` warns about
+  hosts installed clients will refuse. **Not done:** extending the scope
+  at runtime from a signature-verified bundle in Rust. A new domain or a
+  bare IP still needs a client release, and every build up to desktop
+  0.9.44 / mobile 0.2.23 still scopes exact hosts only.
+
+### Proven, on this PC
+
+Desktop `pnpm test` 770 passed in 50 files (725 in 44 before), `pnpm
+typecheck` clean; mobile vitest 72 passed, `tsc --noEmit` clean;
+`cargo test --workspace` Tauri 35 passed (2 ignored), ipc 58, service
+477 (6 ignored); `cargo check --workspace --all-targets` with no new
+warnings. Every fix has a test shown to fail on the old code, except
+the pure-source orderings, which assert the wiring. Two are
+measurements rather than models: `health_ip.rs` shows on this machine's
+loopback that the pinned request makes no IPv6 connection where an
+unpinned client answers over `[::1]`; and the queued-Connect test
+drives the real pipe and fails without the fix (the connect ran and
+reported the missing wireguard.exe). `apply-capability-scope.mjs` and
+`bundle.mjs sign --previous` were run end to end on a synthetic,
+documentation-names-only seed.
+
+### Unverified
+
+- Everything about real traffic: no VM run of this branch. The outage
+  case (backend down under a live tunnel), the remount/adopt flow, the
+  repair CLI on a machine with residue, and a service stop with the app
+  open all need the rig.
+- Dual-stack behaviour against the real CDN: this PC has no IPv6. Also
+  whether the CDN treats `health_ip_v4`'s requests as it treats the
+  plugin's (same User-Agent string on purpose; not observed).
+- Whether 1.1.1.1 / 8.8.8.8:443 answer through every protocol from a
+  censored network.
+
+### Deploy order
+
+None of it needs the backend, an agent release or a node change. The
+app and the service ship in one installer and must: `REPAIR_WORST_CASE`
+is compiled into both. The operator should start passing `--previous`
+when signing the next endpoint bundle.
+
+## 2026-10-06 — review of the desktop fixes: the IPv4 probe and the lows (same branch)
+
+**Status:** pushed to `claude/review-fixes-desktop`, not merged, not
+released. An adversarial review of the entry above found one blocking
+defect and eleven lows. The blocking one is fixed and measured; seven
+lows are fixed, two are recorded as deferred, two needed no code.
+
+### The blocking finding, measured
+
+`probe_ipv4_egress` asked for a TCP handshake with 1.1.1.1 / 8.8.8.8 on
+443. Under VLESS-REALITY, VLESS-TLS, Trojan and Shadowsocks that is
+answered by xray.exe itself: its `tun` inbound is a gVisor stack that
+completes the three-way handshake before handing the connection to the
+outbound (`proxy/tun/stack_gvisor.go` in the bundled v26.1.23). So the
+probe said yes whenever xray.exe ran, and a node blocked mid-session --
+the common failure in Iran -- read as "our API is down": no strike, no
+failover, "Connected, not confirmed" over a dead tunnel; with no
+baseline the ladder stopped on a dead Xray rung.
+
+Measured on `Neoxify-Test` with the bundled xray.exe, a `tun` inbound on
+its own adapter and host routes for both resolvers into it (the app was
+not involved; the probe ran as the Tauri crate's test binary):
+
+| xray outbound | TCP handshake (old probe) | verified TLS (new probe) |
+|---|---|---|
+| none (no tunnel) | yes | yes |
+| VLESS to a working relay (xray on the host, loopback) | yes | yes, 20ms |
+| VLESS to 192.0.2.1 (never answers) | **yes** | no, at the 5s limit |
+
+The relay's own log showed both probes' connections arriving and dialled
+out. A first attempt with a `freedom` outbound looped back into the tun
+(its dial to 1.1.1.1 followed the host route) and is not evidence of
+anything. The probe is now a TLS handshake whose certificate verifies
+for `one.one.one.one` / `dns.google`, using the control-plane probe's
+handshake and roots (`16c8050`). It also decides whenever no endpoint
+gave an address, not only when none answered: the connected node's own
+mirror is on the node's address, routed around the tunnel, so its 502
+said nothing about the tunnel. Where the command does not exist (mobile)
+an error page from ours still counts as traffic flowing.
+
+### The lows
+
+- Writes stop at an HTML 502 or 520 as at 504/524 (`5b43d08`): nginx's
+  502 also means the upstream closed mid-request, and 520 an unreadable
+  origin answer, so a resent purchase or redemption could run twice.
+- App watch: a thread the OS would not start is `Unwatchable` and tears
+  down, instead of sharing `WatchAbandoned` with the service stop
+  (`057e4e9`).
+- The egress baseline lives in the ladder-pass store, so a screen
+  remounted mid-connect compares against the pass's baseline; the guard
+  is renewed at every rung, so a long ladder no longer outlives
+  `LADDER_MAX_MS` (`66362a2`).
+- A new state's first health check runs once the one in flight ends,
+  instead of waiting up to fifteen seconds (`ffdfe9f`).
+- `health_ip_v4` refuses every loopback host in a release build; its
+  HTTPS path was run against two public HTTPS hosts that are not ours
+  (404 in 49ms and 323ms) (`f0bc90c`).
+- A flaky test from `e226923` (1 failure in 5 runs) was a real edge: a
+  timer firing a millisecond early let the walk ask the next endpoint
+  with a 1ms budget (`2c6d322`).
+- Mobile, through the shared code: an error page from every endpoint is
+  "no verdict", which mobile shows as "Connected" (it was "degraded"),
+  and on a dual-stack phone an IPv6 baseline against an IPv4 reading is
+  no longer proof, so `saveLastGood` does not save on it. Both are the
+  intended rules; neither has a mobile-side test.
+- Deferred: the baseline walk capped at two endpoint timeouts (a bare
+  network that black-holes the first two endpoints in order gets no
+  baseline, so bypass is undetectable for that session; unverified how
+  often), and `bundle.mjs --previous` standing in for what shipped
+  clients allow (a host first added in that bundle is not warned about;
+  knowing each build's seed needs the release to record it, or #11's
+  runtime scope).
+
+### Unverified
+
+Everything in the entry above still is, and: the new probe through
+WireGuard, OpenVPN and IKEv2 (kernel tunnels, so a TCP handshake did
+cross them, but the TLS one has not been run through them); the 5s limit
+on a slow censored path; whether a node's network reaches 1.1.1.1 and
+8.8.8.8 on 443 (both are also the tunnel's DNS, so a node that cannot is
+already broken for customers).

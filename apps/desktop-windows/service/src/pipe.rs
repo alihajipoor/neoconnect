@@ -153,6 +153,15 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
                 let engines = engines.clone();
                 tokio::spawn(async move {
                     let signal = watch.exited().await;
+                    // The service is stopping: its own teardown is
+                    // running, and cancelling it here would leave it half
+                    // done. See `client_watch::tears_down`.
+                    if !crate::lifecycle::client_watch::tears_down(
+                        signal,
+                        crate::lifecycle::client_watch::shutting_down(),
+                    ) {
+                        return;
+                    }
                     crate::cleanup_log::note("the app went away", &signal.reason());
 
                     // Whatever it was doing is no longer wanted by
@@ -298,11 +307,28 @@ fn state_after_a_drop(ledger: &Ledger) -> Option<Response> {
     })
 }
 
+/// The Windows session of the process on the other end of `stream`.
+fn client_session(stream: &NamedPipeServer) -> Option<u32> {
+    use std::os::windows::io::AsRawHandle;
+    let mut session = 0u32;
+    // SAFETY: the handle is the live server end of this connection, and
+    // `session` is a valid out pointer for the call.
+    let ok = unsafe {
+        windows_sys::Win32::System::Pipes::GetNamedPipeClientSessionId(stream.as_raw_handle(), &mut session)
+    };
+    (ok != 0).then_some(session)
+}
+
 async fn handle_connection(
     stream: NamedPipeServer,
     engines: Supervisor<Engines>,
     ledger: Arc<Ledger>,
 ) -> std::io::Result<()> {
+    // Which Windows session the caller is in, asked of the kernel once per
+    // connection, for the one request that answers about other people's
+    // processes. None when it cannot be said, which that request reads
+    // as "nobody's".
+    let caller_session = client_session(&stream);
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
@@ -314,7 +340,7 @@ async fn handle_connection(
         }
 
         let response = match serde_json::from_str::<Request>(line.trim()) {
-            Ok(request) => dispatch(request, &engines, &ledger).await,
+            Ok(request) => dispatch(request, &engines, &ledger, caller_session).await,
             // Deliberately does not echo the input back -- an error
             // message is the one thing that crosses back to a caller,
             // and reflecting unparsed bytes into it is a needless way to
@@ -675,6 +701,21 @@ mod tests {
         );
     }
 
+    /// A well-formed config is refused too: arming would let any local
+    /// user steer machine-wide DNS, and no production client can arm.
+    /// See `GAMING_DNS_ARMABLE`. Nothing is installed.
+    #[tokio::test]
+    async fn refuses_to_arm_gaming_from_the_pipe() {
+        let name = r"\\.\pipe\neoconnect-test-gaming-refused";
+        start_server(name).await;
+        let request = r#"{"type":"armGaming","config":{"dohUrl":"https://fi1.example.net/dns-query","proxyIp":"192.0.2.10","proxyPort":443,"namespaces":["bank.example"]}}"#;
+        let reply = round_trip(name, request).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "error", "{parsed}");
+        assert_eq!(parsed["message"], GAMING_UNAVAILABLE, "{parsed}");
+        assert!(!crate::gaming::is_armed());
+    }
+
     /// The same for a namespace carrying a shell metacharacter, which
     /// would otherwise reach a PowerShell command line in a process
     /// running as SYSTEM.
@@ -950,6 +991,70 @@ mod tests {
         assert_eq!(parsed["connected"], false, "{parsed}");
     }
 
+    /// A Disconnect reaches a Connect that is queued but not yet running.
+    ///
+    /// `cancel_running` only reaches the job on the owning thread, and a
+    /// connect queued behind it -- behind a disconnect's thorough pass,
+    /// which cannot be hurried -- started afterwards with a fresh token
+    /// and dialled in full, after the customer had pressed stop and been
+    /// told "disconnected". The exe directory here has no engines, so a
+    /// connect that ran would fail naming wireguard.exe; one that was
+    /// abandoned says so and never gets that far.
+    #[tokio::test]
+    async fn a_disconnect_abandons_a_connect_still_in_the_queue() {
+        let name = r"\\.\pipe\neoconnect-test-queued-connect";
+        let engines = start_server(name).await;
+
+        // Something the cancel cannot hurry, like the thorough pass.
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let busy = engines.run(move |_engines: &mut Engines, _token| {
+            let _ = parked.recv_timeout(std::time::Duration::from_secs(30));
+        });
+
+        let profile = ConnectProfile::Wireguard(WireguardProfile {
+            private_key: "GMSgBTYpH7yC6bV88xblWmViQlk+bHxiTDsdsi+WgXI=".into(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
+            endpoint: "203.0.113.5:51888".into(),
+        });
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let connect = tokio::spawn(async move { round_trip(name, &request).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let disconnect = tokio::spawn(async move { round_trip(name, r#"{"type":"disconnect"}"#).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let _ = release.send(());
+        let _ = busy.await;
+
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(20), connect)
+            .await
+            .expect("the queued connect answers")
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "error", "{parsed}");
+        assert_eq!(
+            parsed["message"],
+            crate::lifecycle::budget::ABANDONED,
+            "the connect ran after the disconnect: {parsed}"
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(20), disconnect).await;
+
+        // And a connect queued after the disconnect is not affected.
+        let profile = ConnectProfile::Wireguard(WireguardProfile {
+            private_key: "GMSgBTYpH7yC6bV88xblWmViQlk+bHxiTDsdsi+WgXI=".into(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
+            endpoint: "203.0.113.5:51888".into(),
+        });
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(round_trip(name, &request).await.trim()).unwrap();
+        assert!(parsed["message"].as_str().unwrap().contains("wireguard.exe"), "{parsed}");
+    }
+
     #[tokio::test]
     async fn reports_a_missing_engine_binary_clearly() {
         let name = r"\\.\pipe\neoconnect-test-missing-engine";
@@ -989,6 +1094,29 @@ const STATUS_LOCK_WAIT: Duration = Duration::from_secs(1);
 /// connection attempt finished first.
 const DISCONNECT_LOCK_WAIT: Duration = Duration::from_secs(2);
 
+/// Whether `ArmGaming` may install anything. Off.
+///
+/// Arming installs machine-wide NRPT rules, as SYSTEM, sending lookups
+/// for the configured suffixes to the configured DoH URL -- both taken
+/// from the request. The pipe is open to every authenticated local user
+/// (`security.rs`), so on a shared PC a standard user could point every
+/// account's lookups for any domain at a resolver of their own, and keep
+/// it armed past the idle watchdog by asking for status every twenty
+/// seconds. Changing machine-wide DNS policy normally needs an
+/// administrator.
+///
+/// No legitimate caller is lost. The DNS half of Gaming mode is a dead
+/// branch by decision (apps/backend/src/modules/gaming/gaming.module.ts,
+/// 2026-08-25): no node runs a resolver, so the backend never hands a
+/// client a config and no client can arm in production. Disarm, status
+/// and the sweep of leftovers stay, so rules from an older build can
+/// still be removed. If the resolver is ever built, this goes back on
+/// together with a caller check and a DoH host pinned to our own
+/// domains -- not before.
+const GAMING_DNS_ARMABLE: bool = false;
+
+const GAMING_UNAVAILABLE: &str = "Gaming mode is not available in this version.";
+
 /// One request, one answer.
 ///
 /// The lock is taken per request rather than for the whole function, and
@@ -1007,7 +1135,12 @@ fn gone() -> Response {
     Response::Error { message: "the service is shutting down".to_string() }
 }
 
-async fn dispatch(request: Request, engines: &Supervisor<Engines>, ledger: &Ledger) -> Response {
+async fn dispatch(
+    request: Request,
+    engines: &Supervisor<Engines>,
+    ledger: &Ledger,
+    caller_session: Option<u32>,
+) -> Response {
     match request {
         Request::Status => {
             // Raced against a deadline rather than waiting its turn.
@@ -1091,7 +1224,15 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>, ledger: &Ledg
         // being polled and a Disconnect could not even be read. Not the
         // engine queue either: listing apps must not wait behind a
         // connect.
-        Request::ListRunningApps => match tokio::task::spawn_blocking(crate::split_tunnel::running_apps).await {
+        // Only the caller's own Windows session. This runs as SYSTEM and
+        // can read every process's image path, and the pipe is open to
+        // every local user: unfiltered, any of them could list what the
+        // others were running, user-profile paths included.
+        Request::ListRunningApps => match tokio::task::spawn_blocking(move || {
+            crate::split_tunnel::running_apps(caller_session)
+        })
+        .await
+        {
             Ok(apps) => Response::RunningApps { apps },
             Err(_) => Response::Error { message: "could not list running applications".to_string() },
         },
@@ -1104,6 +1245,12 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>, ledger: &Ledg
             // would be useless if it had to wait for it. The token it
             // cancels is the one that job published, and the one engine
             // code polls, so a single call reaches every layer.
+            //
+            // And a connect still *queued* -- behind a thorough pass, say
+            // -- is told it is no longer wanted, which no token reaches:
+            // it would otherwise start with a fresh one after this has
+            // answered "disconnected". See `Supervisor::supersede`.
+            engines.supersede();
             engines.cancel_running();
 
             let hard = engines.run(|engines: &mut Engines, token| {
@@ -1203,8 +1350,17 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>, ledger: &Ledg
                         .to_string(),
                 };
             }
+            // Taken as the connect is queued, and checked when it starts:
+            // a Disconnect that arrived in between means the customer no
+            // longer wants this tunnel, and nothing is dialled.
+            let wanted = engines.generation();
             engines
                 .run(move |engines: &mut Engines, token| {
+                    if wanted.superseded() {
+                        return Response::Error {
+                            message: crate::lifecycle::budget::ABANDONED.to_string(),
+                        };
+                    }
                     crate::engines::adopt_token(token);
                     match engines.connect(&profile, &exits) {
                         Ok(()) => Response::Ok,
@@ -1217,6 +1373,9 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>, ledger: &Ledg
         Request::ArmGaming { config } => {
             if let Err(e) = config.validate() {
                 return Response::Error { message: e.to_string() };
+            }
+            if !GAMING_DNS_ARMABLE {
+                return Response::Error { message: GAMING_UNAVAILABLE.to_string() };
             }
             engines
                 .run(move |engines: &mut Engines, token| {

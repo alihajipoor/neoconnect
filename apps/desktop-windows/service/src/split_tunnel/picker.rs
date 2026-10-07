@@ -23,6 +23,15 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 
 use super::owner::image_path;
 
+/// Whether `pid` runs in Windows session `session`. A process that has
+/// ended, or whose session cannot be read, is not in anyone's.
+fn in_session(pid: u32, session: u32) -> bool {
+    let mut actual = 0u32;
+    // SAFETY: a plain call with a valid out pointer.
+    let ok = unsafe { windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId(pid, &mut actual) };
+    ok != 0 && actual == session
+}
+
 /// The applications a customer would recognise, grouped one entry per
 /// product, for the picker to offer.
 ///
@@ -36,7 +45,17 @@ use super::owner::image_path;
 /// falling back to the install directory when there is none. That is
 /// what puts `Discord.exe` and `Update.exe` under a single "Discord".
 /// Sorted by name so the order does not shuffle between refreshes.
-pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp> {
+///
+/// Only processes in `session` -- the caller's Windows session -- are
+/// listed. This runs as SYSTEM and can read every process's image path,
+/// and the pipe that asks is open to every local user; unfiltered, any of
+/// them could list what the others were running, user-profile folders
+/// included. None lists nothing: a caller whose session could not be
+/// established is nobody's to answer for.
+pub fn running_apps(session: Option<u32>) -> Vec<neoconnect_ipc::RunningApp> {
+    let Some(session) = session else {
+        return Vec::new();
+    };
     let mut by_product: HashMap<String, (String, Vec<String>, Vec<u32>)> = HashMap::new();
 
     // SAFETY: a plain call; an invalid handle is checked below.
@@ -53,6 +72,11 @@ pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp> {
     let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
     while ok != 0 {
         let pid = entry.th32ProcessID;
+        if !in_session(pid, session) {
+            // SAFETY: same handle and entry as above.
+            ok = unsafe { Process32NextW(snapshot, &mut entry) };
+            continue;
+        }
         if let Some(path) = image_path(pid) {
             if is_user_application(&path) {
                 let (key, label) = product_of(&path);
@@ -332,6 +356,36 @@ fn is_user_application(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The listing answers for the caller's own session and nobody
+    /// else's. Every pid it returns is in that session; a session with
+    /// no processes -- or none established -- lists nothing.
+    ///
+    /// A pid that has exited since the listing has no session left to
+    /// read, and is skipped rather than counted against the filter: with
+    /// other work running beside the test (a `pnpm test` spawning bash),
+    /// a short-lived process listed a moment earlier was measured failing
+    /// the check that way. One whose session can still be read must be
+    /// in this one.
+    #[test]
+    fn lists_only_the_callers_own_session() {
+        let session_of = |pid: u32| -> Option<u32> {
+            let mut session = 0u32;
+            // SAFETY: a plain call with a valid out pointer.
+            let ok = unsafe { windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId(pid, &mut session) };
+            (ok != 0).then_some(session)
+        };
+        let mine = session_of(std::process::id()).expect("this test process's session could not be read");
+        for app in running_apps(Some(mine)) {
+            for pid in &app.pids {
+                if let Some(theirs) = session_of(*pid) {
+                    assert_eq!(theirs, mine, "{} (pid {pid}) is in session {theirs}, not {mine}", app.name);
+                }
+            }
+        }
+        assert!(running_apps(Some(u32::MAX - 7)).is_empty(), "a session nobody is in listed processes");
+        assert!(running_apps(None).is_empty(), "an unknown caller was answered");
+    }
 
     /// The case that put scoring here: Edge ships an
     /// `elevation_service.exe` that sorts before `msedge.exe`, and taking

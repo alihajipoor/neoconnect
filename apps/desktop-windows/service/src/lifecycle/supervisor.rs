@@ -39,6 +39,7 @@
 //! being cured.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -74,11 +75,32 @@ pub struct Supervisor<S> {
     /// clone or replace one `Arc` and never across a `.await` or any
     /// work at all, so it can never be the thing somebody waits on.
     running: Arc<Mutex<Option<CancelToken>>>,
+    /// How many times what was queued has been superseded. See
+    /// [`Supervisor::supersede`].
+    superseded: Arc<AtomicU64>,
 }
 
 impl<S> Clone for Supervisor<S> {
     fn clone(&self) -> Self {
-        Self { jobs: self.jobs.clone(), running: Arc::clone(&self.running) }
+        Self {
+            jobs: self.jobs.clone(),
+            running: Arc::clone(&self.running),
+            superseded: Arc::clone(&self.superseded),
+        }
+    }
+}
+
+/// Where the queue stood when a job was queued, for a job that must not
+/// run once something has superseded it. See [`Supervisor::supersede`].
+pub struct Generation {
+    at: u64,
+    cell: Arc<AtomicU64>,
+}
+
+impl Generation {
+    /// Whether anything superseded the queue after this was taken.
+    pub fn superseded(&self) -> bool {
+        self.cell.load(Ordering::SeqCst) != self.at
     }
 }
 
@@ -94,7 +116,7 @@ impl<S: Send + 'static> Supervisor<S> {
             .spawn(move || Self::serve(state, inbox, mine))
             .expect("spawning the supervisor thread");
 
-        Self { jobs, running }
+        Self { jobs, running, superseded: Arc::new(AtomicU64::new(0)) }
     }
 
     fn serve(mut state: S, inbox: Receiver<Job<S>>, running: Arc<Mutex<Option<CancelToken>>>) {
@@ -184,6 +206,33 @@ impl<S: Send + 'static> Supervisor<S> {
         if let Some(token) = token {
             token.cancel();
         }
+    }
+
+    /// Marks everything queued so far as no longer wanted -- for the jobs
+    /// that ask.
+    ///
+    /// `cancel_running` reaches only the job running now. A connect
+    /// queued *behind* it -- behind a disconnect's thorough pass, which
+    /// never adopts its token and cannot be hurried -- got a fresh token
+    /// when it started and ran in full after the customer had pressed
+    /// stop and been told "disconnected": a dialled server, routes and a
+    /// DNS rule, for up to a whole connect, before the hard stop queued
+    /// behind it took them down again.
+    ///
+    /// Not a cancellation of the queue. A teardown queued earlier must
+    /// still run, and run to the end; cancelling it would have its helpers
+    /// abort themselves (the self-cancel trap wireguard.rs documents). So
+    /// this only moves a number, and a job that must not outlive it -- a
+    /// connect -- takes a [`Generation`] when it is queued and checks it
+    /// before doing anything.
+    pub fn supersede(&self) {
+        self.superseded.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Where the queue stands now. Take it immediately before queueing
+    /// the job that will check it.
+    pub fn generation(&self) -> Generation {
+        Generation { at: self.superseded.load(Ordering::SeqCst), cell: Arc::clone(&self.superseded) }
     }
 }
 
@@ -337,5 +386,28 @@ mod tests {
         let sup = Supervisor::spawn((), "test-idle-cancel");
         sup.cancel_running();
         assert_eq!(sup.run(|_: &mut (), _| 1).await, Ok(1));
+    }
+
+    /// A job queued before a `supersede` learns of it when it starts; one
+    /// queued after does not; and nothing is cancelled by it -- a
+    /// teardown queued earlier still runs to the end.
+    #[tokio::test]
+    async fn superseding_reaches_queued_work_without_cancelling_it() {
+        let sup = Supervisor::spawn((), "test-supersede");
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let busy = sup.run(move |_: &mut (), _| {
+            let _ = parked.recv_timeout(Duration::from_secs(10));
+        });
+
+        let before = sup.generation();
+        let queued_before = sup.run(move |_: &mut (), token: &CancelToken| (before.superseded(), token.is_cancelled()));
+        sup.supersede();
+        let after = sup.generation();
+        let queued_after = sup.run(move |_: &mut (), _| after.superseded());
+
+        release.send(()).unwrap();
+        busy.await.unwrap();
+        assert_eq!(queued_before.await.unwrap(), (true, false), "superseded, and not cancelled");
+        assert!(!queued_after.await.unwrap());
     }
 }

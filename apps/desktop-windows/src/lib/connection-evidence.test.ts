@@ -10,6 +10,8 @@ import {
   isTunnelUp,
   LIVENESS_POLL_MS,
   noTunnelVerified,
+  rungJudgedByHandshake,
+  showsIpv6Escape,
   stateFromStatus,
   type VpnStatus,
 } from "./connection-evidence";
@@ -208,6 +210,107 @@ describe("combining the connect path's two instruments", () => {
     expect(combineEvidence("disconnected", { state: "throughTunnel", exitIp: "1.2.3.4" })).toBe(
       "disconnected",
     );
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Our control plane down under a working tunnel.
+ *
+ * Every endpoint answers 502 (the backend container being rebuilt; every
+ * mirror proxies to it) or nothing answers at all (the panel host down)
+ * while the public internet is fine. The egress check now calls that
+ * `indeterminate` -- see egress.test.ts -- and these pin what the screen
+ * and the ladder do with it.
+ * ------------------------------------------------------------------ */
+
+describe("an outage of ours, seen from a working tunnel", () => {
+  const ourOutage: EgressVerdict = { state: "indeterminate", exitIp: null };
+  const blackHole: EgressVerdict = { state: "unreachable" };
+
+  it("does not mark a tunnel degraded on the poll, so no strike and no ladder", () => {
+    // Xray, OpenVPN, IKEv2: nothing proven, nothing refuted.
+    expect(fullTunnelPollState("unverified", ourOutage)).toBe("unverified");
+    // WireGuard with a live handshake keeps its green.
+    expect(fullTunnelPollState("connected", ourOutage)).toBe("connected");
+    // A tunnel that really is carrying nothing still says so.
+    expect(fullTunnelPollState("unverified", blackHole)).toBe("degraded");
+  });
+
+  it("judges an earlier rung on its handshake when no baseline could be taken", () => {
+    // No baseline: no candidate can ever be proven, so rejecting each for
+    // lacking proof walked every working protocol off the ladder.
+    expect(rungJudgedByHandshake(ourOutage, { isLast: false, baselineTaken: false })).toBe(true);
+    // With a baseline, an earlier rung still has to prove itself while
+    // another candidate waits.
+    expect(rungJudgedByHandshake(ourOutage, { isLast: false, baselineTaken: true })).toBe(false);
+    // A black hole is a measured negative either way: next protocol.
+    expect(rungJudgedByHandshake(blackHole, { isLast: false, baselineTaken: false })).toBe(false);
+    // The last rung always falls back to the handshake.
+    expect(rungJudgedByHandshake(blackHole, { isLast: true, baselineTaken: true })).toBe(true);
+    // And proof needs no fallback.
+    expect(
+      rungJudgedByHandshake({ state: "throughTunnel", exitIp: "203.0.113.10" }, { isLast: true, baselineTaken: true }),
+    ).toBe(false);
+  });
+
+  it("is what the connect ladder asks, rather than a bare isLast", () => {
+    const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+    expect(dashboard).toContain("rungJudgedByHandshake(egress, {");
+    expect(dashboard).toContain("baselineTaken: baselineIpRef.current !== null");
+    // The shape that rejected every earlier rung without a comparison.
+    expect(dashboard).not.toMatch(/: isLast\s*\n\s*\? combineEvidence\(await confirmReachable\(\), egress\)/);
+  });
+});
+
+describe("the IPv6 escape alarm", () => {
+  it("is raised for a full tunnel whose IPv6 is getting out", () => {
+    expect(showsIpv6Escape("connected", { customMode: false, escaping: true })).toBe(true);
+    expect(showsIpv6Escape("unverified", { customMode: false, escaping: true })).toBe(true);
+    expect(showsIpv6Escape("connected", { customMode: false, escaping: false })).toBe(false);
+    expect(showsIpv6Escape("disconnected", { customMode: false, escaping: true })).toBe(false);
+  });
+
+  it("is never raised in Custom mode, where the probe sees only this app's direct traffic", () => {
+    // On any network with working IPv6 the app's own probe gets out
+    // directly in Custom mode, by design, and the red line used to fire
+    // on every connect -- telling the customer to reconnect over a
+    // tunnel carrying their chosen apps.
+    expect(showsIpv6Escape("connected", { customMode: true, escaping: true })).toBe(false);
+    expect(showsIpv6Escape("unverified", { customMode: true, escaping: true })).toBe(false);
+  });
+
+  it("is what the screen asks", () => {
+    const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+    expect(dashboard).toContain("showsIpv6Escape(connectionState, { customMode: splitTunnelActive, escaping: ipv6Escaping })");
+    expect(dashboard).not.toContain("isTunnelUp(connectionState) && ipv6Escaping ?");
+  });
+});
+
+describe("measurements that cannot outlive what they serve", () => {
+  // The walk of the endpoint list used to be unbounded wherever it ran:
+  // a dozen endpoints at six seconds each. Source assertions, for the
+  // reason given in "the wiring the pure functions cannot check".
+  const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+
+  it("caps the health poll's egress walk and runs one measurement at a time", () => {
+    expect(dashboard).toContain("verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS })");
+    // One at a time; a newer state's first check waits rather than
+    // running beside it (dashboard-remount.test.ts has the rest).
+    expect(dashboard).toMatch(
+      /if \(healthCheckInFlightRef\.current\) \{\s+if \(catchUp\) healthCheckWantedRef\.current = \(\) => check\(\);\s+return;\s+\}\s+healthCheckInFlightRef\.current = true;/,
+    );
+  });
+
+  it("settles each candidate on an endpoint already known to answer, within a ceiling", () => {
+    expect(dashboard).toContain("settleAndCaptureBaseline(settleBudget, knownBaseline)");
+    expect(dashboard).toContain("captureBaselineIp({ only: known.from, deadline })");
+    expect(dashboard).toContain("captureBaselineIp({ deadline: walkDeadline })");
+    // The shape that checked its budget only between whole walks.
+    expect(dashboard).not.toMatch(/for \(;;\) \{\s*const ip = await captureBaselineIp\(\);/);
+  });
+
+  it("stops a pass whose guard expired once a newer pass has started", () => {
+    expect(dashboard).toContain("if (ladderGenerationRef.current !== generation) break;");
   });
 });
 
@@ -423,7 +526,7 @@ describe("the liveness wiring the pure functions cannot check", () => {
   const start = dashboard.indexOf("const look = async () => {");
   const end = dashboard.indexOf("const id = setInterval(() => void look(), LIVENESS_POLL_MS);", start);
   const look = dashboard.slice(start, end);
-  const checkStart = dashboard.indexOf("const check = async () => {");
+  const checkStart = dashboard.indexOf("const measure = async (): Promise<boolean> => {");
   const check = dashboard.slice(
     checkStart,
     dashboard.indexOf("const id = setInterval(() => void check(), HEALTH_POLL_MS);", checkStart),
@@ -484,7 +587,7 @@ describe("the liveness wiring the pure functions cannot check", () => {
     // probe. If the tunnel was found gone meanwhile, nothing it measured
     // may reach the screen or the per-ISP tags.
     const measured = check.indexOf("verdict = fullTunnelPollState(fromStatus, egress);");
-    const guard = check.indexOf("if (!isCurrent(intentRef.current, generation)) return;", measured);
+    const guard = check.indexOf("if (!isCurrent(intentRef.current, generation)) return false;", measured);
     const tags = check.indexOf("sessionTrackerRef.current.healthy(");
     expect(measured).toBeGreaterThan(0);
     expect(guard).toBeGreaterThan(measured);

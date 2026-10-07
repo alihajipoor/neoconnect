@@ -38,15 +38,15 @@ pub const PIPE_NAME: &str = r"\\.\pipe\neoconnect-service";
 ///
 /// **Derived from the code, and only from the code.** Every spawn on
 /// `engines::repair::run`'s call graph is bounded by one of three
-/// constants, and the pass makes at most 37 of them:
+/// constants, and the pass makes at most 47 of them:
 ///
 /// ```text
-///   36 x HELPER_BUDGET (15s)                                540s
+///   46 x HELPER_BUDGET (15s)                                690s
 ///    1 x dns::REPAIR_CMDLET_BUDGET (60s)                     60s
-///                                        process budget     600s
+///                                        process budget     750s
 ///    3 x wireguard::TUNNEL_SERVICE_GONE_WITHIN (45s),
 ///        which are SCM poll loops and spawn nothing          135s
-///                                                  total    735s
+///                                                  total    885s
 /// ```
 ///
 /// The 45s waits are counted because they are wall-clock the caller
@@ -61,9 +61,9 @@ pub const PIPE_NAME: &str = r"\\.\pipe\neoconnect-service";
 ///
 ///  * **Timeout overshoot.** A spawn that expires costs its budget plus
 ///    up to `REAP_BUDGET` and two pipe drains -- pessimally ~7s each,
-///    ~261s over 37 spawns. That requires all 37 children to ignore a
+///    ~329s over 47 spawns. That requires all 47 children to ignore a
 ///    kill. It is slack this number does not carry, and it is the reason
-///    the constant below is rounded up rather than set to 735 exactly.
+///    the app's deadline is rounded up rather than set to 885 exactly.
 ///  * **`InstalledRoutes::remove`**, one `route.exe` per route at 15s
 ///    each. The count is runtime data, not a constant, so there is no
 ///    honest number to add.
@@ -74,7 +74,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\neoconnect-service";
 /// developer workstation and about 48s on a constrained guest. This
 /// number is what the code *permits*, so that a repair which is still
 /// working is never reported as a hang.
-pub const REPAIR_WORST_CASE: std::time::Duration = std::time::Duration::from_secs(735);
+pub const REPAIR_WORST_CASE: std::time::Duration = std::time::Duration::from_secs(885);
 
 /// Requests the app can make of the service. One JSON object per line.
 #[derive(Debug, Serialize, Deserialize)]
