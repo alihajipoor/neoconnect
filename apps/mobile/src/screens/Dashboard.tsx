@@ -43,7 +43,7 @@ import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { iapAvailable } from "@shared/lib/iap";
 import { endedNotice } from "@shared/lib/subscription-state";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
-import { captureBaselineIp, fromTunnelServer, type BaselineIp } from "@shared/lib/egress";
+import { askedAroundTunnel, type BaselineIp, type TunnelServer } from "@shared/lib/egress";
 import { tunnelServerOf } from "@shared/lib/tunnel-server";
 import {
   classifyConnectionError,
@@ -120,6 +120,7 @@ import {
   rejectionIsEvidence,
   rungOutcome,
   stateFromStatus,
+  takeBaseline,
   tunnelUp,
 } from "../lib/tunnel-evidence";
 
@@ -282,13 +283,14 @@ export function Dashboard({
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [exitIp, setExitIp] = useState<string | null>(null);
   const [baselineIp, setBaselineIp] = useState<BaselineIp | null>(null);
-  /** The addresses the connected rung's tunnel is dialled at, for the
-   * health poll: an endpoint on them is reached around the tunnel and
-   * answers with the phone's own address, so the poll passes it over
-   * (`TunnelServer` in the shared egress.ts). Set as each rung is dialled.
+  /** Where the connected rung's tunnel is dialled, and whether the phone
+   * reaches it around the tunnel, for the health poll: where it does, an
+   * endpoint there answers with the phone's own address, so the poll
+   * passes it over (`TunnelServer` in the shared egress.ts). Set as each
+   * rung is dialled.
    * Lost with the screen, like the baseline -- and with no baseline there
    * is nothing for that mirror's answer to be compared with. */
-  const tunnelServerRef = useRef<ReadonlySet<string> | null>(null);
+  const tunnelServerRef = useRef<TunnelServer | null>(null);
   /** Names the protocol actually in use when it is not the one the
    * customer asked for.
    *
@@ -516,8 +518,9 @@ export function Dashboard({
     }
 
     if (adopted === "disconnected") {
-      // Never one of our nodes' addresses; see `nodeAddressesOf`.
-      setBaselineIp(await captureBaselineIp({ nodeAddresses: nodeAddressesOf(usersResult.data) }));
+      // Never one of our nodes' addresses; see `nodeAddressesOf`. Within
+      // a ceiling; see `takeBaseline`.
+      setBaselineIp(await takeBaseline({ nodeAddresses: nodeAddressesOf(usersResult.data) }));
       setExitIp(null);
     }
   }
@@ -581,8 +584,8 @@ export function Dashboard({
         return;
       }
 
-      // Never an answer from the connected server's own mirror, which is
-      // reached around the tunnel; see `tunnelServerRef`.
+      // Never an answer from the connected server's own mirror where that
+      // is reached around the tunnel; see `tunnelServerRef`.
       const egress = await pollEgress(baselineIp, tunnelServerRef.current ?? undefined);
       if (!live || slotTeardown.owed()) return;
       if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
@@ -1009,7 +1012,8 @@ export function Dashboard({
     // Every credential the account holds, not only the usable ones: a
     // mirror's node is a node whatever this build can dial on it.
     const nodeAddresses = nodeAddressesOf(all);
-    let pendingBaseline: BaselineIp | null | undefined = await captureBaselineIp({ nodeAddresses });
+    // Within a ceiling, as every baseline in the pass; see `takeBaseline`.
+    let pendingBaseline: BaselineIp | null | undefined = await takeBaseline({ nodeAddresses });
     setBaselineIp(pendingBaseline);
     const networkId = networkKeyFromAsn();
     const [lastGood, history, reachability] = await Promise.all([
@@ -1105,21 +1109,33 @@ export function Dashboard({
       // "before". Not gone within the wait, there is no baseline: the
       // rung can still land, as "unverified", never as proven.
       //
-      // And never from an endpoint on this rung's own server. The phone
-      // reaches that address around the tunnel, so once it is up the
-      // node's own mirror answers with the phone's own address however
-      // well the tunnel works: a baseline from it read a working tunnel as
-      // a leak (`TunnelServer` in the shared egress.ts). The pass's first
-      // baseline was taken before the rung was known; if it came from
-      // there, nothing is up yet and it is simply taken again, passing
-      // that endpoint over. Names resolve here, as the engine is about to.
-      const tunnelServer = await tunnelServerOf(candidate);
+      // And never from an endpoint on this rung's own server where the
+      // phone reaches that address around the tunnel -- IKEv2, by
+      // assumption; Xray and WireGuard send it through the tunnel, by the
+      // source (`reachesServerAround` in the shared tunnel-server.ts).
+      // There, once the tunnel is up, the node's own mirror answers with
+      // the phone's own address however well the tunnel works, and a
+      // baseline from it read a working tunnel as a leak (`TunnelServer`
+      // in the shared egress.ts). The pass's first baseline was taken
+      // before the rung was known; if it came from there, nothing is up
+      // yet and it is simply taken again, passing that endpoint over.
+      //
+      // Names resolve once nothing of ours is up -- for every rung after
+      // the first, after the wait -- so the lookup cannot go into the
+      // last rung's tunnel, and just before this one is dialled, as the
+      // engine is about to.
+      let tunnelServer: TunnelServer;
       let baseline: BaselineIp | null;
-      if (pendingBaseline !== undefined && !fromTunnelServer(pendingBaseline, tunnelServer)) {
-        baseline = pendingBaseline;
+      if (pendingBaseline !== undefined) {
+        // The first rung: the pass tore everything down before it began.
+        tunnelServer = await tunnelServerOf(candidate, "phone");
+        baseline = askedAroundTunnel(pendingBaseline, tunnelServer)
+          ? await takeBaseline({ nodeAddresses, tunnelServer })
+          : pendingBaseline;
       } else {
-        const nothingUp = pendingBaseline !== undefined || (await waitForTeardown());
-        baseline = nothingUp ? await captureBaselineIp({ nodeAddresses, tunnelServer }) : null;
+        const nothingUp = await waitForTeardown();
+        tunnelServer = await tunnelServerOf(candidate, "phone");
+        baseline = nothingUp ? await takeBaseline({ nodeAddresses, tunnelServer }) : null;
       }
       pendingBaseline = undefined;
       setBaselineIp(baseline);
@@ -1150,7 +1166,7 @@ export function Dashboard({
 
       try {
         // From here a tunnel to this server may be up; the health poll
-        // passes over its endpoints.
+        // needs to know how its endpoints are reached.
         tunnelServerRef.current = tunnelServer;
         if (candidate.protocol === "IKEV2") {
           await connectIkev2({

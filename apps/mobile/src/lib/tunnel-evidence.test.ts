@@ -14,7 +14,8 @@ import type { BaselineIp, EgressVerdict, VerifyOptions } from "@shared/lib/egres
 const calls: { baseline: BaselineIp | null; options: VerifyOptions | undefined }[] = [];
 let answers: EgressVerdict[] = [];
 
-vi.mock("@shared/lib/egress", () => ({
+vi.mock("@shared/lib/egress", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@shared/lib/egress")>()),
   verifyEgress: (baseline: BaselineIp | null, options?: VerifyOptions) => {
     calls.push({ baseline, options });
     const next = answers.length > 1 ? answers.shift()! : answers[0];
@@ -164,6 +165,13 @@ describe("confirmEgress", () => {
     await expect(confirmEgress(BASELINE, { intervalMs: 5, timeoutMs: 20 })).resolves.toEqual(BYPASS);
   });
 
+  it("asks the baseline's endpoint first on every check, the last rung's included", async () => {
+    answers = [BYPASS, THROUGH];
+    await confirmEgress(BASELINE, { intervalMs: 1, timeoutMs: 5_000 });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c.options?.baselineFirst === true)).toBe(true);
+  });
+
   it("passes sameEndpointOnly through to every check", async () => {
     answers = [BYPASS, THROUGH];
     await confirmEgress(BASELINE, { sameEndpointOnly: true, intervalMs: 1, timeoutMs: 5_000 });
@@ -171,10 +179,10 @@ describe("confirmEgress", () => {
   });
 
   it("passes the rung's server through to every check", async () => {
-    // So the shared check can pass over the node's own mirror, which the
-    // phone reaches around the tunnel (see egress-own-mirror.test.ts).
+    // So the shared check knows the node's own mirror, and whether the
+    // phone reaches it around the tunnel (see own-mirror.test.ts).
     answers = [BYPASS, THROUGH];
-    const server = new Set(["203.0.113.41"]);
+    const server = { addresses: ["203.0.113.41"], reachedAround: true };
     await confirmEgress(BASELINE, { tunnelServer: server, intervalMs: 1, timeoutMs: 5_000 });
     expect(calls).toHaveLength(2);
     expect(calls.every((c) => c.options?.tunnelServer === server)).toBe(true);
@@ -209,7 +217,7 @@ describe("pollEgress", () => {
   });
 
   it("passes the connected server to every walk it makes", async () => {
-    const server = new Set(["203.0.113.41"]);
+    const server = { addresses: ["203.0.113.41"], reachedAround: true };
     answers = [UNREACHABLE, INDETERMINATE];
     await pollEgress(BASELINE, server);
     answers = [INDETERMINATE];

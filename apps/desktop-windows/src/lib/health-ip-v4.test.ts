@@ -96,15 +96,19 @@ describe("the egress check on Windows", () => {
 
   it("keeps the address the command connected to, and passes over the tunnel's own server", async () => {
     // `health_ip_v4` reports where the request actually went. The
-    // connected node's own mirror is reached around the tunnel and
-    // answers with the customer's home address; through this transport
-    // it is recognised and the next endpoint asked.
+    // connected node's own mirror is reached around the tunnel on
+    // Windows' Xray, and answers with the customer's home address;
+    // through this transport it is recognised and the next endpoint
+    // asked.
     endpoints.mockResolvedValue([MIRROR, CDN]);
     replies.set(MIRROR, { status: 200, body: { ip: "192.0.2.228" }, peer: "203.0.113.41" });
     replies.set(CDN, { status: 200, body: { ip: "203.0.113.41" }, peer: "198.51.100.10" });
     await expect(captureBaselineIp()).resolves.toEqual({ ip: "192.0.2.228", from: MIRROR, peer: "203.0.113.41" });
     await expect(
-      verifyEgress({ ip: "192.0.2.228", from: CDN, peer: "198.51.100.10" }, { tunnelServer: ["203.0.113.41"] }),
+      verifyEgress(
+        { ip: "192.0.2.228", from: CDN, peer: "198.51.100.10" },
+        { tunnelServer: { addresses: ["203.0.113.41"], reachedAround: true } },
+      ),
     ).resolves.toEqual({ state: "throughTunnel", exitIp: "203.0.113.41" });
   });
 

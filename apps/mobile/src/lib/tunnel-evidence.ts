@@ -1,5 +1,14 @@
 import type { ConnectionState } from "@shared/components/ConnectOrb";
-import { verifyEgress, type BaselineIp, type EgressVerdict, type TunnelServer } from "@shared/lib/egress";
+import {
+  BASELINE_HEDGE_MS,
+  captureBaselineIp,
+  EGRESS_TIMEOUT_MS,
+  verifyEgress,
+  type BaselineIp,
+  type BaselineOptions,
+  type EgressVerdict,
+  type TunnelServer,
+} from "@shared/lib/egress";
 import type { VpnStatus } from "./vpn";
 
 /** What the phone is entitled to say about its tunnel, given what it has
@@ -70,10 +79,10 @@ export type ConfirmOptions = {
    * answer `indeterminate`, which on a rung with another protocol still
    * to try is no reason to stop -- see `rungOutcome`. */
   sameEndpointOnly?: boolean;
-  /** The rung's server. An endpoint on it is reached around the tunnel
-   * and answers with the phone's own address however well the tunnel
-   * works, so its answers are passed over. See `TunnelServer` in the
-   * shared egress.ts. */
+  /** The rung's server, and whether the phone reaches it around the
+   * tunnel. Where it does, an endpoint on it answers with the phone's own
+   * address however well the tunnel works, so its answers are passed
+   * over. See `TunnelServer` in the shared egress.ts. */
   tunnelServer?: TunnelServer;
   cancelled?: () => boolean;
   timeoutMs?: number;
@@ -88,7 +97,14 @@ export type ConfirmOptions = {
  * fast. It used to return as soon as a reading was `indeterminate` too,
  * and the caller called that "connected". Now an indeterminate reading
  * is kept waiting for the comparable one, except with no baseline at
- * all, where asking again cannot produce one. */
+ * all, where asking again cannot produce one.
+ *
+ * The baseline's endpoint first, even on the last rung, where the rest of
+ * the list is still asked after it (`VerifyOptions.baselineFirst`). In
+ * list order, a baseline from a mirror -- what answers on a network that
+ * filters the panel hosts, and the hedged walk in `takeBaseline` may
+ * settle on a later endpoint anyway -- was compared with nothing: through
+ * the tunnel the panel host answers first. */
 export async function confirmEgress(
   // A `BaselineIp`, not a bare address. `verifyEgress` refuses to compare
   // two readings from different endpoints -- a node mirror answers
@@ -110,7 +126,7 @@ export async function confirmEgress(
     // time a hanging protocol spends in "checking connection", so a
     // cancel that is not honoured here is a button that does nothing.
     if (cancelled()) return null;
-    const verdict = await verifyEgress(baseline, { sameEndpointOnly, tunnelServer });
+    const verdict = await verifyEgress(baseline, { sameEndpointOnly, tunnelServer, baselineFirst: true });
     if (cancelled()) return null;
     if (verdict.state === "throughTunnel") return verdict;
     if (baseline === null && verdict.state === "indeterminate") return verdict;
@@ -165,29 +181,35 @@ export function rejectionIsEvidence(verdict: EgressVerdict): boolean {
   return verdict.state === "bypassingTunnel" || verdict.state === "unreachable";
 }
 
-/** Our nodes' public addresses, as far as this customer's credentials
- * name them: each one's `connection.host`, which the server fills with
- * the node's `publicIp`.
+/** Our nodes' public addresses, for `captureBaselineIp`'s
+ * `nodeAddresses`. Shared with Windows, which passes them too now; see
+ * `nodeAddressesOf` in the shared tunnel-server.ts. */
+export { nodeAddressesOf } from "@shared/lib/tunnel-server";
+
+/** The longest a phone's baseline walk may take.
  *
- * For `captureBaselineIp`'s `nodeAddresses`. A pre-connect reading of one
- * of these is never this phone's own address; it is a node mirror that
- * answers `/health/ip` with its node's address to everyone (or a tunnel
- * not yet gone). Taken as the baseline, every comparison through that
- * mirror afterwards came back "the same address" -- `bypassingTunnel`,
- * which the ladder holds against the route and the poll shows as "Your
- * traffic is NOT protected" -- over a tunnel that worked.
- *
- * The mirrors this app derives from its own credentials (`mirrorsFrom`)
- * live on exactly these nodes. One from the signed bundle on a node this
- * customer has no credential for is not covered: its address is not
- * known here. */
-export function nodeAddressesOf(users: readonly { connection?: { host?: string } | null }[]): Set<string> {
-  const addresses = new Set<string>();
-  for (const user of users) {
-    const host = user.connection?.host?.trim();
-    if (host) addresses.add(host);
-  }
-  return addresses;
+ * There was no ceiling at all, and the walk went endpoint by endpoint at
+ * six seconds each. That mostly did not show: the last endpoint that
+ * worked leads the list and answers at once. It showed the moment that
+ * endpoint was passed over -- an IKEv2 rung whose server's own mirror
+ * was the last good endpoint -- and the walk went on into the panel
+ * hosts a censored network filters, tens of seconds per rung with no
+ * end to the pass. The Windows settle's ceiling, for the same walk. */
+export const BASELINE_WALK_MS = 2 * EGRESS_TIMEOUT_MS;
+
+/** A baseline, within `BASELINE_WALK_MS`, the list walked hedged
+ * (`BaselineOptions.hedgeMs`) so endpoints the bare network filters do
+ * not use the ceiling up one after another. Null when nothing answered
+ * in time -- which every caller already treats as "nothing can be
+ * proven", never as a failure. */
+export function takeBaseline(
+  options: Pick<BaselineOptions, "nodeAddresses" | "tunnelServer"> = {},
+): Promise<BaselineIp | null> {
+  return captureBaselineIp({
+    ...options,
+    deadline: Date.now() + BASELINE_WALK_MS,
+    hedgeMs: BASELINE_HEDGE_MS,
+  });
 }
 
 /** The egress reading for a health poll.
@@ -203,10 +225,11 @@ export function nodeAddressesOf(users: readonly { connection?: { host?: string }
  * "bypassingTunnel" on every poll of a working tunnel. The dashboard
  * keeps those out of baselines; see `nodeAddressesOf`.
  *
- * `tunnelServer` is the connected rung's server: an endpoint on it is
- * reached around the tunnel, so it is passed over on every walk here,
- * and a baseline from one is never asked alone. See `TunnelServer` in
- * the shared egress.ts. */
+ * `tunnelServer` is the connected rung's server. Where the phone reaches
+ * it around the tunnel (IKEv2, by assumption), an endpoint on it is
+ * passed over on every walk here, and a baseline from one is never asked
+ * alone; through the tunnel (Xray, WireGuard, by the source) it is as
+ * good a witness as any. See `TunnelServer` in the shared egress.ts. */
 export async function pollEgress(baseline: BaselineIp | null, tunnelServer?: TunnelServer): Promise<EgressVerdict> {
   if (baseline === null) return verifyEgress(null, { tunnelServer });
   const own = await verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer });

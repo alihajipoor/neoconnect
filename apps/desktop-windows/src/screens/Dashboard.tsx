@@ -9,18 +9,19 @@ import { formatBytes } from "../lib/utils";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import { concurrentExitsFor } from "../lib/concurrent-exits";
 import {
+  askedAroundTunnel,
+  BASELINE_HEDGE_MS,
   captureBaselineIp,
   captureIpv6Baseline,
   checkIpv6,
   EGRESS_TIMEOUT_MS,
-  fromTunnelServer,
   verifyEgress,
   confirmEgressWithin,
   type BaselineIp,
   type EgressVerdict,
   type TunnelServer,
 } from "../lib/egress";
-import { tunnelServerOf } from "../lib/tunnel-server";
+import { literalTunnelServer, nodeAddressesOf, tunnelServerOf } from "../lib/tunnel-server";
 import {
   combineEvidence,
   customModePollState,
@@ -297,14 +298,21 @@ const VERIFY_TIMEOUT_MS = 30_000;
 
 /** Waits for traffic to actually start flowing, rather than asking once.
  * See `confirmEgressWithin` for how the attempts are made, and
- * `TunnelServer` for why the rung's server goes with it. */
+ * `TunnelServer` for why the rung's server goes with it.
+ *
+ * The baseline's endpoint first even on the last rung, where the rest of
+ * the list is still asked after it: in list order, a baseline taken from
+ * a mirror on a network that filters the panel hosts was compared with
+ * nothing, because through the tunnel the panel host answers first --
+ * and the one connect that could have been proven landed "not
+ * confirmed". See `VerifyOptions.baselineFirst`. */
 function confirmEgress(
   baseline: BaselineIp | null,
   budgetMs: number,
   sameEndpointOnly: boolean,
   tunnelServer: TunnelServer,
 ): Promise<EgressVerdict> {
-  return confirmEgressWithin(baseline, budgetMs, { sameEndpointOnly, tunnelServer });
+  return confirmEgressWithin(baseline, budgetMs, { sameEndpointOnly, tunnelServer, baselineFirst: true });
 }
 
 /** How long to wait for ordinary networking to come back after tearing
@@ -392,24 +400,39 @@ const FAILOVER_SETTLE_TIMEOUT_MS = 2_500;
  * pass with nothing known yet, so a first endpoint that is blocked on
  * the bare network still leaves the next one time to answer.
  *
- * `tunnelServer` is the server of the rung about to be dialled. No
- * baseline comes from an endpoint on it: once that tunnel is up, the
- * endpoint is reached around the tunnel and answers with this same home
- * address -- read as "NOT protected" over a working tunnel -- so the
- * next endpoint supplies it instead. A `known` endpoint on it is not
- * asked at all, and the walk gets the longer ceiling, as with nothing
- * known. See `TunnelServer` in egress.ts.
+ * `tunnelServer` is the server of the rung about to be dialled. Where
+ * this client reaches it around the tunnel, no baseline comes from an
+ * endpoint on it: once that tunnel is up, the endpoint answers with this
+ * same home address -- read as "NOT protected" over a working tunnel --
+ * so the next endpoint supplies it instead. A `known` endpoint on it is
+ * not asked at all, and the walk gets the longer ceiling, as with
+ * nothing known. See `TunnelServer` in egress.ts.
+ *
+ * The walk is hedged (`BaselineOptions.hedgeMs`). The known endpoint is
+ * passed over exactly where it mattered most: in Iran, where the panel
+ * hosts are filtered and the last endpoint that worked is a mirror --
+ * often the mirror of the node being dialled. Walked strictly in turn,
+ * the list then spent its whole twelve seconds timing out the two panel
+ * hosts at its head and ended with no baseline, "not confirmed", before
+ * it reached the next mirror, which would have answered at once.
+ *
+ * `nodeAddresses` are every node the account holds a credential on. A
+ * reading of one is never this machine's own address (see
+ * `BaselineOptions.nodeAddresses`); the phones always passed them, and
+ * now that the comparisons ask the baseline's endpoint first, Windows
+ * needs them as much.
  */
 async function settleAndCaptureBaseline(
   budgetMs: number,
   known: BaselineIp | null,
   tunnelServer: TunnelServer,
+  nodeAddresses: ReadonlySet<string>,
 ): Promise<BaselineIp | null> {
   const deadline = Date.now() + budgetMs;
-  const ask = known !== null && !fromTunnelServer(known, tunnelServer) ? known : null;
+  const ask = known !== null && !askedAroundTunnel(known, tunnelServer) ? known : null;
   if (ask !== null) {
     for (;;) {
-      const ip = await captureBaselineIp({ only: ask.from, deadline, tunnelServer });
+      const ip = await captureBaselineIp({ only: ask.from, deadline, tunnelServer, nodeAddresses });
       if (ip !== null) return ip;
       if (Date.now() >= deadline) break;
       await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
@@ -420,7 +443,12 @@ async function settleAndCaptureBaseline(
     Date.now() + (ask === null ? 2 * EGRESS_TIMEOUT_MS : EGRESS_TIMEOUT_MS),
   );
   for (;;) {
-    const ip = await captureBaselineIp({ deadline: walkDeadline, tunnelServer });
+    const ip = await captureBaselineIp({
+      deadline: walkDeadline,
+      tunnelServer,
+      nodeAddresses,
+      hedgeMs: BASELINE_HEDGE_MS,
+    });
     if (ip !== null) return ip;
     if (Date.now() >= walkDeadline) return null;
     await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
@@ -1043,10 +1071,16 @@ export function Dashboard({
    * of a filtered endpoint list outlived a connect pressed during it,
    * finished through the new tunnel, and wrote the tunnel's own exit
    * address over the pass's baseline -- which reads every later check as
-   * a leak. */
-  async function captureBaselinesWhileDown(): Promise<void> {
+   * a leak.
+   *
+   * `users` are the credentials on screen, for their nodes' addresses:
+   * see `settleAndCaptureBaseline`. */
+  async function captureBaselinesWhileDown(users: readonly ProtocolUser[]): Promise<void> {
     const passAtStart = ladderGenerationRef.current;
-    const baseline = await captureBaselineIp({ deadline: Date.now() + 2 * EGRESS_TIMEOUT_MS });
+    const baseline = await captureBaselineIp({
+      deadline: Date.now() + 2 * EGRESS_TIMEOUT_MS,
+      nodeAddresses: nodeAddressesOf(users),
+    });
     const hadIpv6 = await captureIpv6Baseline();
     if (ladderGenerationRef.current !== passAtStart || ladderInFlight()) return;
     baselineIpRef.current = baseline;
@@ -1098,7 +1132,7 @@ export function Dashboard({
           .catch(() => setNetworkId(null));
         void loadLastGood().then(setLastGood);
         void loadConnectHistory().then(setHistory);
-        if (adopted === "disconnected") await captureBaselinesWhileDown();
+        if (adopted === "disconnected") await captureBaselinesWhileDown(cached.protocolUsers);
         return;
       }
 
@@ -1176,7 +1210,7 @@ export function Dashboard({
     // Only when the service actually said so -- "unknown" is not a no,
     // and a baseline captured through a tunnel we simply could not ask
     // about turns every later comparison into a false leak report.
-    if (adopted === "disconnected") await captureBaselinesWhileDown();
+    if (adopted === "disconnected") await captureBaselinesWhileDown(usersResult.data);
   }
 
   // A pass this screen adopted rather than started (see
@@ -1417,13 +1451,23 @@ export function Dashboard({
         // everything, every endpoint times out, and at six seconds each
         // the first strike used to land a minute after the tunnel died.
         //
-        // And never an answer from the connected server's own mirror,
-        // which is reached around the tunnel: with the baseline from it,
-        // the home address came back unchanged and a working tunnel read
-        // "NOT protected", struck, and was in time torn down. See
+        // And never an answer from the connected server's own mirror
+        // where that is reached around the tunnel: with the baseline from
+        // it, the home address came back unchanged and a working tunnel
+        // read "NOT protected", struck, and was in time torn down. See
         // `TunnelServer` in egress.ts.
+        //
+        // The baseline's endpoint first, then the rest of the list. In
+        // list order, a baseline from a mirror -- what answers on a
+        // network that filters the panel hosts -- was never compared:
+        // through the tunnel the panel host answers first, and every
+        // poll of a working tunnel said "Connected, not confirmed".
         const tunnelServer = ladderPass.tunnelServer.current ?? undefined;
-        const egress = await verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS, tunnelServer });
+        const egress = await verifyEgress(baselineIpRef.current, {
+          totalMs: HEALTH_EGRESS_TOTAL_MS,
+          tunnelServer,
+          baselineFirst: true,
+        });
         if (!isCurrent(intentRef.current, generation)) return false;
         if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
         verdict = fullTunnelPollState(fromStatus, egress);
@@ -2143,6 +2187,9 @@ export function Dashboard({
       // settling, so a candidate does not walk the whole list again. See
       // settleAndCaptureBaseline.
       let knownBaseline: BaselineIp | null = baselineIpRef.current;
+      // Every node the account holds a credential on, for the baselines:
+      // a reading of one of them is never this machine's own address.
+      const nodeAddresses = nodeAddressesOf(dialable);
 
       for (const [index, candidate] of candidates.entries()) {
         if (cancelRef.current || sessionGeneration() !== sessionAtStart) break;
@@ -2164,18 +2211,29 @@ export function Dashboard({
         const settleBudget = isLast ? SETTLE_TIMEOUT_MS : FAILOVER_SETTLE_TIMEOUT_MS;
         const verifyBudget = isLast ? VERIFY_TIMEOUT_MS : FAILOVER_VERIFY_TIMEOUT_MS;
 
-        // Where this rung's tunnel will be dialled. The service routes
-        // that address around the tunnel, so an endpoint on it -- the
-        // node's own API mirror -- answers with the customer's home
-        // address however well the tunnel works: no baseline from it,
-        // and no reading from it while connected. Names are resolved
-        // here, as the engine is about to; `connection.host` is an
-        // address and costs nothing. See `TunnelServer` in egress.ts.
-        const tunnelServer = await tunnelServerOf(candidate);
+        // Where this rung's tunnel will be dialled. For every engine but
+        // WireGuard the service (or the engine) routes that address
+        // around the tunnel, so an endpoint on it -- the node's own API
+        // mirror -- answers with the customer's home address however
+        // well the tunnel works: no baseline from it, and no reading
+        // from it while connected. See `TunnelServer` in egress.ts.
+        //
+        // The settle gets the literal addresses only: `connection.host`
+        // is one and names the node. Names are resolved after it, once
+        // the previous rung's tunnel is known to be gone -- a lookup
+        // before then could go into it -- and just before this one is
+        // dialled, as the engine is about to.
+        const settleServer = literalTunnelServer(candidate, "windows");
         // Fresh every attempt, and taken only once plain networking is
         // confirmed working. See settleAndCaptureBaseline.
-        baselineIpRef.current = await settleAndCaptureBaseline(settleBudget, knownBaseline, tunnelServer);
+        baselineIpRef.current = await settleAndCaptureBaseline(
+          settleBudget,
+          knownBaseline,
+          settleServer,
+          nodeAddresses,
+        );
         if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
+        const tunnelServer = await tunnelServerOf(candidate, "windows");
         // Once per pass, not once per candidate: whether this machine
         // has public IPv6 is a fact about its network, not about which
         // protocol is being tried, and re-measuring it five times would

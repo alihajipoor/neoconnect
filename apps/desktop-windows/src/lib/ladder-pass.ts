@@ -16,7 +16,7 @@
  * writes them exactly as it did its refs.
  */
 
-import type { BaselineIp } from "./egress";
+import type { BaselineIp, TunnelServer } from "./egress";
 
 /** After this long without a step forward, a ladder pass is presumed
  * never to return.
@@ -65,10 +65,10 @@ const cancel = { current: false };
  * of the session. Null in a fresh app: a tunnel the service kept up
  * across a restart has no honest "before". */
 const baseline: { current: BaselineIp | null } = { current: null };
-/** The addresses the pass's tunnel is dialled at -- the server of the
- * rung it is on, and once it lands, of the route it landed on. The
- * egress check passes over any endpoint on them: the client routes that
- * address around the tunnel, so such an endpoint answers with the
+/** Where the pass's tunnel is dialled -- the server of the rung it is
+ * on, and once it lands, of the route it landed on -- and whether this
+ * client reaches it around the tunnel. Where it does, the egress check
+ * passes over any endpoint there: such an endpoint answers with the
  * customer's own address however well the tunnel works (see
  * `TunnelServer` in egress.ts).
  *
@@ -77,7 +77,7 @@ const baseline: { current: BaselineIp | null } = { current: null };
  * mounted. Null in a fresh app, like the baseline -- which for a tunnel
  * kept up across a restart leaves nothing to compare, so nothing the
  * server's own mirror says can be held against that tunnel either. */
-const tunnelServer: { current: ReadonlySet<string> | null } = { current: null };
+const tunnelServer: { current: TunnelServer | null } = { current: null };
 
 const endListeners = new Set<() => void>();
 

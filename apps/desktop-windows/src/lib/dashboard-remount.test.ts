@@ -78,8 +78,9 @@ describe("the ladder's guard, outside the screen", () => {
     // Without it a remounted screen's poll could not pass over the
     // connected node's own mirror, which answers from around the tunnel.
     expect(ladderPass.tunnelServer.current).toBeNull();
-    ladderPass.tunnelServer.current = new Set(["203.0.113.41"]);
-    expect(ladderPass.tunnelServer.current).toEqual(new Set(["203.0.113.41"]));
+    const server = { addresses: new Set(["203.0.113.41"]), reachedAround: true };
+    ladderPass.tunnelServer.current = server;
+    expect(ladderPass.tunnelServer.current).toBe(server);
     ladderPass.reset();
     expect(ladderPass.tunnelServer.current).toBeNull();
   });
@@ -183,9 +184,14 @@ describe("the Dashboard's wiring", () => {
   });
 
   it("does not let a slow baseline land over a connect started meanwhile", () => {
-    const start = dashboard.indexOf("async function captureBaselinesWhileDown()");
+    const start = dashboard.indexOf("async function captureBaselinesWhileDown(");
+    expect(start).toBeGreaterThan(-1);
     const capture = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
-    expect(capture).toContain("captureBaselineIp({ deadline: Date.now() + 2 * EGRESS_TIMEOUT_MS })");
+    // Within a ceiling, and never one of our nodes' addresses (see
+    // `settleAndCaptureBaseline`).
+    expect(capture).toMatch(
+      /captureBaselineIp\(\{\s*deadline: Date\.now\(\) \+ 2 \* EGRESS_TIMEOUT_MS,\s*nodeAddresses: nodeAddressesOf\(users\),\s*\}\)/,
+    );
     expect(capture).toContain("if (ladderGenerationRef.current !== passAtStart || ladderInFlight()) return;");
   });
 });

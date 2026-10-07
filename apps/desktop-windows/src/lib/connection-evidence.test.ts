@@ -293,8 +293,8 @@ describe("measurements that cannot outlive what they serve", () => {
   const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
 
   it("caps the health poll's egress walk and runs one measurement at a time", () => {
-    expect(dashboard).toContain(
-      "verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS, tunnelServer })",
+    expect(dashboard).toMatch(
+      /verifyEgress\(baselineIpRef\.current, \{\s*totalMs: HEALTH_EGRESS_TOTAL_MS,\s*tunnelServer,\s*baselineFirst: true,\s*\}\)/,
     );
     // One at a time; a newer state's first check waits rather than
     // running beside it (dashboard-remount.test.ts has the rest).
@@ -304,9 +304,15 @@ describe("measurements that cannot outlive what they serve", () => {
   });
 
   it("settles each candidate on an endpoint already known to answer, within a ceiling", () => {
-    expect(dashboard).toContain("settleAndCaptureBaseline(settleBudget, knownBaseline, tunnelServer)");
-    expect(dashboard).toContain("captureBaselineIp({ only: ask.from, deadline, tunnelServer })");
-    expect(dashboard).toContain("captureBaselineIp({ deadline: walkDeadline, tunnelServer })");
+    expect(dashboard).toMatch(
+      /settleAndCaptureBaseline\(\s*settleBudget,\s*knownBaseline,\s*settleServer,\s*nodeAddresses,\s*\)/,
+    );
+    expect(dashboard).toContain("captureBaselineIp({ only: ask.from, deadline, tunnelServer, nodeAddresses })");
+    // Hedged, so endpoints the bare network black-holes do not use the
+    // ceiling up one after another (egress-own-mirror.test.ts).
+    expect(dashboard).toMatch(
+      /captureBaselineIp\(\{\s*deadline: walkDeadline,\s*tunnelServer,\s*nodeAddresses,\s*hedgeMs: BASELINE_HEDGE_MS,\s*\}\)/,
+    );
     // The shape that checked its budget only between whole walks.
     expect(dashboard).not.toMatch(/for \(;;\) \{\s*const ip = await captureBaselineIp\(\);/);
   });
@@ -602,17 +608,20 @@ describe("the liveness wiring the pure functions cannot check", () => {
   });
 });
 
-/** The egress check passes over endpoints on the tunnel's own server,
- * which the client routes around the tunnel (`TunnelServer` in
- * egress.ts; the behaviour is in egress-own-mirror.test.ts). Whether the
- * screen tells it which server that is, is wiring, asserted here like
- * the rest. */
+/** The egress check passes over endpoints on the tunnel's own server
+ * where the client routes that server around the tunnel (`TunnelServer`
+ * in egress.ts; the behaviour is in egress-own-mirror.test.ts). Whether
+ * the screen tells it which server that is, and how this platform
+ * reaches it, is wiring, asserted here like the rest. */
 describe("the tunnel's own server, named to the egress check", () => {
   const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
 
   it("names the rung's server to every baseline and check it makes while connecting", () => {
-    expect(dashboard).toContain("const tunnelServer = await tunnelServerOf(candidate);");
-    expect(dashboard).toContain("settleAndCaptureBaseline(settleBudget, knownBaseline, tunnelServer)");
+    expect(dashboard).toContain('const settleServer = literalTunnelServer(candidate, "windows");');
+    expect(dashboard).toContain('const tunnelServer = await tunnelServerOf(candidate, "windows");');
+    expect(dashboard).toMatch(
+      /settleAndCaptureBaseline\(\s*settleBudget,\s*knownBaseline,\s*settleServer,\s*nodeAddresses,\s*\)/,
+    );
     expect(dashboard).toContain("confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer)");
     // Kept for the health poll, from whichever Dashboard is mounted.
     expect(dashboard).toContain("ladderPass.tunnelServer.current = tunnelServer;");
@@ -621,22 +630,45 @@ describe("the tunnel's own server, named to the egress check", () => {
     );
   });
 
-  it("names the connected server to the health poll", () => {
-    expect(dashboard).toContain("const tunnelServer = ladderPass.tunnelServer.current ?? undefined;");
-    expect(dashboard).toMatch(/verifyEgress\(baselineIpRef\.current, \{[^}]*tunnelServer[^}]*\}\)/);
+  it("resolves the rung's server names only once the settle says nothing of ours is up", () => {
+    // A lookup before then could go into the previous rung's dying
+    // tunnel, and wait on it or answer from its resolver. The settle
+    // needs only the literal `connection.host`.
+    const loop = dashboard.slice(dashboard.indexOf('const settleServer = literalTunnelServer(candidate, "windows");'));
+    expect(loop.indexOf("await settleAndCaptureBaseline(")).toBeGreaterThan(-1);
+    expect(loop.indexOf("await settleAndCaptureBaseline(")).toBeLessThan(
+      loop.indexOf('await tunnelServerOf(candidate, "windows")'),
+    );
+    expect(loop.indexOf('await tunnelServerOf(candidate, "windows")')).toBeLessThan(
+      loop.indexOf('await invoke("vpn_connect"'),
+    );
   });
 
-  it("takes no baseline while connecting without the rung's server", () => {
-    // Every capture inside the settle passes it; the one taken when the
+  it("names the connected server to the health poll, which asks the baseline's endpoint first", () => {
+    expect(dashboard).toContain("const tunnelServer = ladderPass.tunnelServer.current ?? undefined;");
+    expect(dashboard).toMatch(/verifyEgress\(baselineIpRef\.current, \{[^}]*tunnelServer,[^}]*baselineFirst: true[^}]*\}\)/);
+    // And the ladder's checks, the last rung included.
+    expect(dashboard).toContain(
+      "confirmEgressWithin(baseline, budgetMs, { sameEndpointOnly, tunnelServer, baselineFirst: true })",
+    );
+  });
+
+  it("takes no baseline while connecting without the rung's server or the nodes' addresses", () => {
+    // Every capture inside the settle passes them; the one taken when the
     // screen loads has no rung yet, and the settle passes over a `known`
-    // endpoint on the server instead (`fromTunnelServer`).
+    // endpoint on the server instead (`askedAroundTunnel`).
     const settle = dashboard.slice(
       dashboard.indexOf("async function settleAndCaptureBaseline("),
       dashboard.indexOf("function describeAttempts("),
     );
     const captures = [...settle.matchAll(/captureBaselineIp\(([^)]*)\)/g)].map((m) => m[1]);
     expect(captures).toHaveLength(2);
-    for (const args of captures) expect(args).toContain("tunnelServer");
-    expect(settle).toContain("!fromTunnelServer(known, tunnelServer)");
+    for (const args of captures) {
+      expect(args).toContain("tunnelServer");
+      expect(args).toContain("nodeAddresses");
+    }
+    expect(settle).toContain("!askedAroundTunnel(known, tunnelServer)");
+    // Every node the account holds a credential on.
+    expect(dashboard).toContain("const nodeAddresses = nodeAddressesOf(dialable);");
   });
 });

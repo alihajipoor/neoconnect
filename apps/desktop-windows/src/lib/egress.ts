@@ -46,13 +46,13 @@ import { rememberNetwork } from "./network-identity";
  * every rung of a dual-stack phone's connect, which the ladder rejects.
  *
  * And it holds only for a reading that went through the tunnel at all.
- * The client routes the tunnel's own server address around the tunnel --
- * the host route that lets the tunnel reach its server -- so a node
- * mirror on that address is asked over the customer's own line, and
+ * Where the client routes the tunnel's own server address around the
+ * tunnel -- the host route that lets the tunnel reach its server -- a
+ * node mirror on that address is asked over the customer's own line, and
  * answers with their home address through a tunnel that works. Measured
- * on 2026-10-06, Stealth to finland1: every endpoint answered the node's
- * address except finland1's own mirror, which answered the VM's home
- * address. Its answer is no evidence either way; see `TunnelServer`.
+ * on 2026-10-06 on Windows, Stealth to finland1: every endpoint answered
+ * the node's address except finland1's own mirror, which answered the
+ * VM's home address. Not every engine does that; see `TunnelServer`.
  */
 
 /** Short: this runs while the customer is watching a spinner, and a
@@ -88,19 +88,21 @@ export const EGRESS_TIMEOUT_MS = 6000;
  */
 type IpReading = { ip: string; from: string; peer?: string };
 
-/** The addresses a tunnel is dialled at: the connected route's server,
- * or -- for a baseline -- the server of the route about to be dialled.
- * Address literals; `tunnel-server.ts` builds one from a credential,
- * resolving any name the way the engines do.
+/** Where a tunnel is dialled, and whether this client reaches that
+ * address around the tunnel or through it: the connected route's
+ * server, or -- for a baseline -- the server of the route about to be
+ * dialled. `addresses` are literals; `tunnel-server.ts` builds one from
+ * a credential, resolving any name the way the engines do, and decides
+ * `reachedAround` per platform and engine.
  *
- * The client routes this address around the tunnel. It has to: it is
- * the host route that lets the tunnel's own packets reach the server
- * without looping back into the tunnel. So a `/health/ip` request to an
- * endpoint that sits on it -- that node's own API mirror -- never enters
- * the tunnel, and the mirror sees the customer's real address. Measured
- * on 2026-10-06 through a working Stealth tunnel to finland1: every
- * endpoint answered finland1's address except finland1's own mirror,
- * which answered the VM's home address.
+ * **Around** (`reachedAround: true`): the client installs a host route
+ * for the server so the tunnel's own packets reach it without looping
+ * back into the tunnel. A `/health/ip` request to an endpoint on that
+ * address -- that node's own API mirror -- then never enters the tunnel,
+ * and the mirror sees the customer's real address. Measured on
+ * 2026-10-06 on Windows, through a working Stealth tunnel to finland1:
+ * every endpoint answered finland1's address except finland1's own
+ * mirror, which answered the VM's home address.
  *
  * Such an answer is no evidence about the tunnel at all, and both ways
  * it was used went wrong. Compared with a baseline from the same mirror
@@ -112,20 +114,74 @@ type IpReading = { ip: string; from: string; peer?: string };
  * and the reading from any other endpoint, it was `indeterminate`:
  * "Connected, not confirmed" where 0.9.44 said "You're protected".
  *
- * So an answer from one of these addresses is passed over, as if the
- * endpoint had not answered, and the next one is asked: for a baseline
- * (after connecting, that endpoint can only be asked around the tunnel,
- * so a baseline from it can never be compared with anything), and for
- * every reading taken while connected. */
-export type TunnelServer = ReadonlySet<string> | readonly string[];
+ * So an answer from such an address is passed over, as if the endpoint
+ * had not answered, and the next one is asked: for a baseline (after
+ * connecting, that endpoint can only be asked around the tunnel, so a
+ * baseline from it can never be compared with anything), and for every
+ * reading taken while connected.
+ *
+ * **Through** (`reachedAround: false`): the engine keeps only its own
+ * sockets off the tunnel -- Android's VpnService `protect`, iOS's packet
+ * tunnel, wireguard.exe binding its socket to the physical interface --
+ * and everything else this app sends, to the server's address included,
+ * goes into the tunnel. From reading the source, NOT measured; see
+ * `tunnel-server.ts` for which engines are taken to be which. There the
+ * server's own mirror is as good a witness as any other endpoint, and a
+ * better one in Iran, where it may be the only one answering on the
+ * bare line: before connecting it reports the home address, through a
+ * direct tunnel the request reaches the node from inside it and the
+ * node hands it on from its own address, and through a relay the exit's
+ * address. Nothing is passed over. The one adjustment is to the
+ * self-report rule in `readFrom`: an answer naming the very address it
+ * was fetched from is normally a mirror describing itself, but from the
+ * baseline's own endpoint on this server -- one whose baseline answer
+ * named the caller, not itself -- it is the node relaying our request
+ * from inside the tunnel, which is exactly the proof asked for.
+ *
+ * Which way is right matters in both directions. Passing over an
+ * endpoint reached through the tunnel throws away the only proof some
+ * customers have; trusting one reached around it accuses a working
+ * tunnel. So where a platform's routing is not known, `tunnel-server.ts`
+ * says "around": its cost is "not confirmed", never an accusation. */
+export type TunnelServer = {
+  readonly addresses: ReadonlySet<string> | readonly string[];
+  readonly reachedAround: boolean;
+};
 
-/** Whether a reading came from an endpoint on `tunnelServer` -- one that,
- * with that tunnel up, is asked around it. False when either is not
- * known: a reading whose transport could not say where it connected, or
- * no server given. */
-export function fromTunnelServer(reading: IpReading | null, tunnelServer: TunnelServer | null | undefined): boolean {
-  if (reading?.peer === undefined || tunnelServer == null) return false;
-  return addressSet(tunnelServer).has(comparable(reading.peer));
+/** Whether, with this server's tunnel up, the endpoint that gave this
+ * reading is asked around the tunnel -- so a reading from it now says
+ * nothing, and a baseline from it can never be compared with one. False
+ * when either is not known (a reading whose transport could not say
+ * where it connected, or no server given), and always for a server
+ * reached through the tunnel. */
+export function askedAroundTunnel(reading: IpReading | null, tunnelServer: TunnelServer | null | undefined): boolean {
+  if (reading?.peer === undefined || !tunnelServer?.reachedAround) return false;
+  return addressSet(tunnelServer.addresses).has(comparable(reading.peer));
+}
+
+/** The addresses answers are passed over from: the server's, where it is
+ * reached around the tunnel, and none otherwise. */
+function aroundSet(tunnelServer: TunnelServer | undefined): Set<string> | undefined {
+  return tunnelServer?.reachedAround ? addressSet(tunnelServer.addresses) : undefined;
+}
+
+/** Which self-naming answer is the tunnel's own server relaying our
+ * request rather than a mirror describing itself -- see `TunnelServer`,
+ * "Through". Only from the baseline's own endpoint, only on a server
+ * reached through the tunnel, and only when that endpoint's baseline
+ * answer was verifiably the caller's address (its peer known, and not
+ * what it named): a baseline with no peer could itself have been a
+ * self-report, and this would then compare it with the same self-report
+ * and call a working tunnel a leak. */
+function relayedByServer(
+  baseline: BaselineIp | null,
+  tunnelServer: TunnelServer | undefined,
+): ((base: string, peer: string) => boolean) | undefined {
+  if (baseline === null || tunnelServer === undefined || tunnelServer.reachedAround) return undefined;
+  if (baseline.peer === undefined || comparable(baseline.ip) === comparable(baseline.peer)) return undefined;
+  const server = addressSet(tunnelServer.addresses);
+  if (!server.has(comparable(baseline.peer))) return undefined;
+  return (base, peer) => base === baseline.from && server.has(comparable(peer));
 }
 
 /** A set of addresses, each as compared. */
@@ -135,7 +191,7 @@ function addressSet(addresses: Iterable<string>): Set<string> {
 
 async function publicIp(
   onBody: (body: Record<string, unknown>) => void,
-  { only, deadline, nodeAddresses, tunnelServer }: BaselineOptions,
+  { only, deadline, nodeAddresses, tunnelServer, hedgeMs }: BaselineOptions,
 ): Promise<IpReading | null> {
   // The same endpoint list the rest of the app uses, and for a sharper
   // reason here: this check decides whether the customer is told they
@@ -145,9 +201,20 @@ async function publicIp(
   const bases = only !== undefined ? [only] : await apiEndpoints();
   const nodes = nodeAddresses === undefined ? null : addressSet(nodeAddresses);
   const skip = nodes === null ? undefined : (ip: string) => nodes.has(comparable(ip));
-  const around = tunnelServer === undefined ? undefined : addressSet(tunnelServer);
-  return (await readFrom(bases, EGRESS_TIMEOUT_MS, { onBody, deadline, skip, around })).reading;
+  const around = aroundSet(tunnelServer);
+  const walk = { onBody, deadline, skip, around };
+  const read =
+    hedgeMs === undefined
+      ? readFrom(bases, EGRESS_TIMEOUT_MS, walk)
+      : readHedged(bases, EGRESS_TIMEOUT_MS, hedgeMs, walk);
+  return (await read).reading;
 }
+
+/** How long a baseline walk with `hedgeMs` waits on one endpoint before
+ * asking the next one beside it. Longer than a healthy endpoint takes
+ * to answer from Iran (three round trips to Europe, under a second), so
+ * on a network where the first endpoint works this asks it alone. */
+export const BASELINE_HEDGE_MS = 1_000;
 
 /** How a baseline is taken, when the caller has reason to narrow it. */
 export type BaselineOptions = {
@@ -178,12 +245,27 @@ export type BaselineOptions = {
    * None at all, and there is no baseline, which the caller already
    * handles as "nothing can be proven". */
   nodeAddresses?: Iterable<string>;
-  /** The server of the route about to be dialled. An endpoint on it is
-   * passed over and the next one asked: once that tunnel is up, the
-   * endpoint is reached around it, so a baseline from it could only be
-   * compared with an answer that never went through the tunnel. See
-   * `TunnelServer`. */
+  /** The server of the route about to be dialled. Where it is reached
+   * around the tunnel, an endpoint on it is passed over and the next one
+   * asked: once that tunnel is up, the endpoint is reached around it, so
+   * a baseline from it could only be compared with an answer that never
+   * went through the tunnel. Reached through the tunnel, it changes
+   * nothing. See `TunnelServer`. */
   tunnelServer?: TunnelServer;
+  /** Walk the list hedged rather than strictly in turn: an endpoint that
+   * has not answered within this many ms gets the next one asked beside
+   * it, and the first acceptable answer to arrive is the baseline. See
+   * `readHedged`.
+   *
+   * For the walks that have to find *some* endpoint answering on the
+   * bare network, fast, on a network that blocks the first few: the
+   * Windows settle and the phones' baselines. In Iran the panel hosts
+   * lead the list and are filtered, and a strict walk spent its whole
+   * ceiling timing them out -- six seconds each -- before it reached a
+   * mirror that would have answered at once. Which endpoint supplies the
+   * baseline does not matter so long as the comparison asks it again;
+   * see `VerifyOptions.baselineFirst`. */
+  hedgeMs?: number;
 };
 
 /** An address as compared against a set of them. */
@@ -257,90 +339,174 @@ function plainAddress(ip: string): string {
  * round trips (TCP, TLS 1.3, the request) do not fit in it off a LAN. */
 const MIN_REQUEST_MS = 10;
 
+/** How a walk of the list treats what comes back. */
+type WalkOptions = {
+  onBody?: (body: Record<string, unknown>) => void;
+  /** Epoch ms. The walk stops there, and the request in flight is
+   * given only what is left -- the list holds a dozen endpoints, and
+   * through a tunnel that black-holes everything, a walk at six
+   * seconds each was a minute before the health poll could say so. */
+  deadline?: number;
+  /** An address that is not an answer to the question asked; the
+   * endpoint that gave it is passed over like one with no address.
+   * See `BaselineOptions.nodeAddresses`. */
+  skip?: (ip: string) => boolean;
+  /** The tunnel's server, as compared, where it is reached around the
+   * tunnel. An endpoint whose connection went to one of these was asked
+   * around it; see `TunnelServer`. */
+  around?: ReadonlySet<string>;
+  /** Which self-naming answers are the tunnel's own server relaying the
+   * request, not a mirror describing itself; see `relayedByServer`. */
+  relayed?: (base: string, peer: string) => boolean;
+};
+
+/** What one endpoint came back with: a reading if it gave one, the body
+ * that reading came in (for `onBody`, which only the reading the walk
+ * keeps may reach), and whether it answered at all. */
+type OneAnswer = { reading: IpReading | null; body?: Record<string, unknown>; answered: boolean };
+
+/** Asks one endpoint, and judges its answer. Never throws. */
+async function askOne(
+  base: string,
+  budget: number,
+  { skip, around, relayed }: WalkOptions,
+): Promise<OneAnswer> {
+  try {
+    const res = await transport(base, budget);
+    const peer = typeof res.peer === "string" && res.peer ? plainAddress(res.peer.trim()) : undefined;
+    // The tunnel's own server, reached around the tunnel: not even "an
+    // answer" in the sense below. Packets that never entered the tunnel
+    // say nothing about whether it carries anything -- an error page from
+    // there counted as one used to make a dead tunnel read as an outage
+    // of ours wherever nothing else could be asked.
+    if (peer !== undefined && around?.has(comparable(peer))) return { reading: null, answered: false };
+    // An error page is still an answer, and it is the only thing that
+    // tells an outage of ours apart from a tunnel carrying nothing.
+    if (res.status < 200 || res.status >= 300) return { reading: null, answered: true };
+    const body = res.body;
+    if (body !== null && typeof body === "object" && typeof (body as { ip?: unknown }).ip === "string") {
+      const ip = (body as { ip: string }).ip;
+      // An endpoint reporting the very address it was reached at is
+      // describing itself, not the caller: a node mirror that proxies
+      // through the CDN, which then names the node (one installed
+      // without NEOXIFY_PANEL_ORIGIN). Never this device's address,
+      // with a tunnel up or not -- the same reasoning as
+      // `nodeAddresses`, for a mirror whose node no credential here
+      // names. Except where it is the tunnel's own server, reached
+      // through the tunnel, handing on our request from its own address
+      // (`relayed`).
+      const selfReport =
+        peer !== undefined && comparable(ip) === comparable(peer) && !relayed?.(base, peer);
+      // Before `onBody`, too: what such an endpoint says about the
+      // network is about the node's, not the customer's.
+      if (ip && !selfReport && !skip?.(ip)) {
+        return {
+          reading: { ip, from: base, ...(peer !== undefined ? { peer } : {}) },
+          body: body as Record<string, unknown>,
+          answered: true,
+        };
+      }
+    }
+    return { reading: null, answered: true };
+  } catch {
+    // No answer. Exhausting the list returns no reading, which the
+    // caller already treats as "no evidence" rather than as failure.
+    return { reading: null, answered: false };
+  }
+}
+
+/** What is left of `deadline` for one more request, or null when no
+ * further endpoint may be asked. */
+function budgetFor(timeoutMs: number, deadline: number | undefined): number | null {
+  if (deadline === undefined) return timeoutMs;
+  const left = deadline - Date.now();
+  // Not `<= 0`. A timer can fire a millisecond before `Date.now()`
+  // reaches the deadline it was set for, so the request that was
+  // given the whole remainder could time out with a sliver still
+  // "left" -- and the next endpoint was then asked with a budget no
+  // TLS handshake could fit in. Caught as a flaky test, where the
+  // stand-in for that next endpoint answers at once.
+  if (left < MIN_REQUEST_MS) return null;
+  return Math.min(timeoutMs, left);
+}
+
 /** The first answer from `bases`, tried in order.
  *
  * Each endpoint gets its own budget rather than sharing one. A first
  * address that is blocked burns the whole timeout doing nothing, and a
  * shared deadline would leave the working one no time to answer.
  */
-async function readFrom(
-  bases: string[],
-  timeoutMs: number,
-  {
-    onBody,
-    deadline,
-    skip,
-    around,
-  }: {
-    onBody?: (body: Record<string, unknown>) => void;
-    /** Epoch ms. The walk stops there, and the request in flight is
-     * given only what is left -- the list holds a dozen endpoints, and
-     * through a tunnel that black-holes everything, a walk at six
-     * seconds each was a minute before the health poll could say so. */
-    deadline?: number;
-    /** An address that is not an answer to the question asked; the
-     * endpoint that gave it is passed over like one with no address.
-     * See `BaselineOptions.nodeAddresses`. */
-    skip?: (ip: string) => boolean;
-    /** The tunnel's server, as compared. An endpoint whose connection
-     * went to one of these was asked around the tunnel; see
-     * `TunnelServer`. */
-    around?: ReadonlySet<string>;
-  } = {},
-): Promise<ReadResult> {
+async function readFrom(bases: string[], timeoutMs: number, options: WalkOptions = {}): Promise<ReadResult> {
   let answered = false;
   for (const base of bases) {
-    let budget = timeoutMs;
-    if (deadline !== undefined) {
-      const left = deadline - Date.now();
-      // Not `<= 0`. A timer can fire a millisecond before `Date.now()`
-      // reaches the deadline it was set for, so the request that was
-      // given the whole remainder could time out with a sliver still
-      // "left" -- and the next endpoint was then asked with a budget no
-      // TLS handshake could fit in. Caught as a flaky test, where the
-      // stand-in for that next endpoint answers at once.
-      if (left < MIN_REQUEST_MS) break;
-      budget = Math.min(budget, left);
-    }
-    try {
-      const res = await transport(base, budget);
-      const peer = typeof res.peer === "string" && res.peer ? plainAddress(res.peer.trim()) : undefined;
-      // The tunnel's own server: asked around the tunnel, so not even
-      // "an answer" in the sense below. Packets that never entered the
-      // tunnel say nothing about whether it carries anything -- an error
-      // page from there counted as one used to make a dead tunnel read
-      // as an outage of ours wherever nothing else could be asked.
-      if (peer !== undefined && around?.has(comparable(peer))) continue;
-      // Set before the status is looked at: an error page is still an
-      // answer, and it is the only thing that tells an outage of ours
-      // apart from a tunnel carrying nothing.
-      answered = true;
-      if (res.status < 200 || res.status >= 300) continue;
-      const body = res.body;
-      if (body !== null && typeof body === "object" && typeof (body as { ip?: unknown }).ip === "string") {
-        const ip = (body as { ip: string }).ip;
-        // An endpoint reporting the very address it was reached at is
-        // describing itself, not the caller: a node mirror that proxies
-        // through the CDN, which then names the node (one installed
-        // without NEOXIFY_PANEL_ORIGIN). Never this device's address,
-        // with a tunnel up or not -- the same reasoning as
-        // `nodeAddresses`, for a mirror whose node no credential here
-        // names, and on Windows, which passes none.
-        const selfReport = peer !== undefined && comparable(ip) === comparable(peer);
-        // Before `onBody`, too: what such an endpoint says about the
-        // network is about the node's, not the customer's.
-        if (ip && !selfReport && !skip?.(ip)) {
-          onBody?.(body as Record<string, unknown>);
-          return { reading: { ip, from: base, ...(peer !== undefined ? { peer } : {}) }, answered };
-        }
-      }
-    } catch {
-      // Try the next one. Exhausting the list returns no reading, which
-      // the caller already treats as "no evidence" rather than as
-      // failure.
+    const budget = budgetFor(timeoutMs, options.deadline);
+    if (budget === null) break;
+    const one = await askOne(base, budget, options);
+    if (one.answered) answered = true;
+    if (one.reading !== null) {
+      if (one.body !== undefined) options.onBody?.(one.body);
+      return { reading: one.reading, answered };
     }
   }
   return { reading: null, answered };
+}
+
+/** `readFrom`, hedged: an endpoint that has neither answered nor failed
+ * within `hedgeMs` gets the next one asked beside it, and one that fails
+ * gets the next asked at once. The first acceptable answer to arrive
+ * wins, whichever endpoint it came from; the requests still in flight
+ * are left to finish and ignored.
+ *
+ * Only for baselines (`BaselineOptions.hedgeMs`). A strict walk on a
+ * network that blocks the head of the list -- the panel hosts, in Iran
+ * -- spends a whole endpoint timeout on each before it reaches one that
+ * answers, and the settle's ceiling ran out on the second. Hedged, the
+ * same walk reaches the first working mirror a second or two in.
+ */
+function readHedged(
+  bases: string[],
+  timeoutMs: number,
+  hedgeMs: number,
+  options: WalkOptions = {},
+): Promise<ReadResult> {
+  return new Promise((resolve) => {
+    let next = 0;
+    let inFlight = 0;
+    let answered = false;
+    let done = false;
+    let hedge: ReturnType<typeof setTimeout> | undefined;
+    const finish = (one: OneAnswer | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(hedge);
+      if (one?.reading && one.body !== undefined) options.onBody?.(one.body);
+      resolve({ reading: one?.reading ?? null, answered });
+    };
+    const launch = () => {
+      clearTimeout(hedge);
+      if (done) return;
+      const budget = next < bases.length ? budgetFor(timeoutMs, options.deadline) : null;
+      if (budget === null) {
+        // Nothing more may be asked: the list is spent or the deadline
+        // is. Whatever is still in flight may yet answer.
+        next = bases.length;
+        if (inFlight === 0) finish(null);
+        return;
+      }
+      const base = bases[next++];
+      inFlight += 1;
+      void askOne(base, budget, options).then((one) => {
+        inFlight -= 1;
+        if (one.answered) answered = true;
+        if (one.reading !== null) finish(one);
+        // This one is done without a reading, so the next starts now
+        // rather than when the hedge would have started it.
+        else launch();
+      });
+      hedge = setTimeout(launch, hedgeMs);
+    };
+    launch();
+  });
 }
 
 /** The address the world saw before connecting, and who reported it.
@@ -398,12 +564,28 @@ export type VerifyOptions = {
    * without it the first sign of that came a minute after the tunnel
    * died. */
   totalMs?: number;
-  /** The connected route's server. Its endpoints are asked around the
-   * tunnel, so their answers are passed over and the next endpoint
-   * asked. Every caller with a tunnel up passes it where it knows it;
-   * without it, the connected node's own mirror can answer with the
-   * customer's home address. See `TunnelServer`. */
+  /** The connected route's server. Reached around the tunnel, its
+   * endpoints' answers are passed over and the next endpoint asked;
+   * reached through it, the baseline's own endpoint there may answer
+   * with the server's address and still be believed. Every caller with a
+   * tunnel up passes it where it knows it; without it, on Windows, the
+   * connected node's own mirror can answer with the customer's home
+   * address. See `TunnelServer`. */
   tunnelServer?: TunnelServer;
+  /** Ask the baseline's endpoint before the rest of the list, rather than
+   * walking the list in its fixed order. The rest is still asked if it
+   * does not answer, so where `indeterminate` is an outcome worth having
+   * (the ladder's last rung, the Windows health poll) it still is.
+   *
+   * Without it, the baseline's endpoint is only reached if every one
+   * ahead of it is silent, and through a tunnel they mostly are not: on
+   * a censored network the baseline comes from whatever answers on the
+   * bare line -- a mirror, with the panel hosts filtered -- while through
+   * the tunnel the panel host at the head of the list answers first.
+   * Different endpoints, `indeterminate`, "Connected, not confirmed" on
+   * every poll of a tunnel that works. See `verifyEgress` for why the
+   * list order used to be kept anyway, and why that no longer holds. */
+  baselineFirst?: boolean;
 };
 
 /** Compares the address the world sees now against the one it saw before
@@ -437,33 +619,51 @@ export type VerifyOptions = {
  * wrong endpoint. The tunnel had been carrying traffic for four of those
  * seconds and the ladder threw it away.
  *
- * Without it the list keeps its fixed order rather than moving the
- * baseline's endpoint to the front. A baseline can come from a mirror
- * that reports its own node's address to everyone; asked again it
- * answers the same, and comparing those two would accuse a working
- * tunnel of leaking where the list order lets the CDN answer and the
- * guard above say, correctly, that nothing was compared.
+ * Without either option the list keeps its fixed order. That order used
+ * to be kept on purpose: a baseline could come from a mirror that
+ * reports its own node's address to everyone; asked again it answers the
+ * same, and comparing those two would accuse a working tunnel of leaking
+ * where the list order lets the CDN answer and the guard above say,
+ * correctly, that nothing was compared. Baselines no longer come from
+ * such a mirror wherever the transport reports the address it connected
+ * to -- the IPv4 transport both apps install always does -- because an
+ * answer naming that very address is passed over (`readFrom`), and both
+ * apps pass their nodes' addresses besides (`nodeAddresses`). So
+ * `baselineFirst` may move the baseline's endpoint to the front, and the
+ * callers whose readings otherwise straddle endpoints use it.
  *
- * Whatever the order, an endpoint on `tunnelServer` is passed over: it is
- * reached around the tunnel, and its answer is the customer's own
- * address however well the tunnel works. That includes the baseline's
- * own endpoint, should it be one -- then `sameEndpointOnly` walks the
- * list instead, since the one endpoint it would ask cannot answer
- * through the tunnel, and silence from it would read as a dead tunnel
- * wherever the public-internet probe is not there to say otherwise.
+ * Whatever the order, an endpoint on a `tunnelServer` reached around the
+ * tunnel is passed over: its answer is the customer's own address
+ * however well the tunnel works. That includes the baseline's own
+ * endpoint, should it be one -- then `sameEndpointOnly` walks the list
+ * instead, since the one endpoint it would ask cannot answer through the
+ * tunnel, and silence from it would read as a dead tunnel wherever the
+ * public-internet probe is not there to say otherwise.
  */
 export async function verifyEgress(
   baseline: BaselineIp | null,
   options: VerifyOptions = {},
 ): Promise<EgressVerdict> {
-  const { attemptMs = EGRESS_TIMEOUT_MS, sameEndpointOnly = false, totalMs, tunnelServer } = options;
+  const {
+    attemptMs = EGRESS_TIMEOUT_MS,
+    sameEndpointOnly = false,
+    totalMs,
+    tunnelServer,
+    baselineFirst = false,
+  } = options;
   const deadline = totalMs === undefined ? undefined : Date.now() + totalMs;
-  const around = tunnelServer === undefined ? undefined : addressSet(tunnelServer);
-  const bases =
-    sameEndpointOnly && baseline !== null && !fromTunnelServer(baseline, around)
-      ? [baseline.from]
-      : await apiEndpoints();
-  const { reading, answered } = await readFrom(bases, attemptMs, { deadline, around });
+  const around = aroundSet(tunnelServer);
+  // The baseline's endpoint, where asking it can still mean something.
+  const own = baseline !== null && !askedAroundTunnel(baseline, tunnelServer) ? baseline.from : null;
+  let bases: string[];
+  if (sameEndpointOnly && own !== null) {
+    bases = [own];
+  } else {
+    const listed = await apiEndpoints();
+    bases = baselineFirst && own !== null ? [own, ...listed.filter((base) => base !== own)] : listed;
+  }
+  const relayed = relayedByServer(baseline, tunnelServer);
+  const { reading, answered } = await readFrom(bases, attemptMs, { deadline, around, relayed });
 
   // No address from any of ours. Two very different things look like
   // that from here: a tunnel black-holing everything, which is what this
@@ -480,15 +680,16 @@ export async function verifyEgress(
   // resolver. If that answers, traffic is getting out and the silence is
   // ours -- no verdict. If it does not, it is the tunnel, error pages or
   // not: the connected node's own mirror is on the node's address, which
-  // is routed around the tunnel, so its 502 says nothing about whether
-  // the tunnel carries anything.
+  // the service routes around the tunnel for every engine but WireGuard,
+  // so its 502 says nothing about whether the tunnel carries anything.
   //
   // Where there is no such instrument (the mobile app, which shares this
   // file), an error page from one of ours is the evidence there is: it
   // came back over TLS with one of our names, so packets made a round
   // trip, and that is "no verdict". Silence is still unreachable there.
-  // Not one from the tunnel's own server, when the caller named it:
-  // that round trip went around the tunnel (`readFrom`).
+  // Not one from the tunnel's own server where that is reached around
+  // the tunnel, when the caller named it: that round trip never entered
+  // the tunnel (`askOne`).
   if (reading === null) {
     const internet = await ipv4Reaches();
     const flowing = internet ?? answered;
@@ -569,9 +770,14 @@ export const VERIFY_INTERVAL_MS = 1_500;
 export function confirmEgressWithin(
   baseline: BaselineIp | null,
   budgetMs: number,
-  options: { sameEndpointOnly?: boolean; intervalMs?: number; tunnelServer?: TunnelServer } = {},
+  options: {
+    sameEndpointOnly?: boolean;
+    intervalMs?: number;
+    tunnelServer?: TunnelServer;
+    baselineFirst?: boolean;
+  } = {},
 ): Promise<EgressVerdict> {
-  const { sameEndpointOnly = false, intervalMs = VERIFY_INTERVAL_MS, tunnelServer } = options;
+  const { sameEndpointOnly = false, intervalMs = VERIFY_INTERVAL_MS, tunnelServer, baselineFirst } = options;
   const deadline = Date.now() + budgetMs;
   let last: EgressVerdict = { state: "unreachable" };
 
@@ -594,6 +800,7 @@ export function confirmEgressWithin(
         attemptMs: Math.min(EGRESS_TIMEOUT_MS, remaining),
         sameEndpointOnly,
         tunnelServer,
+        baselineFirst,
       })
         .then((verdict) => {
           if (verdict.state === "throughTunnel") finish(verdict);

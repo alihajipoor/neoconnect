@@ -117,10 +117,12 @@ describe("a self-reporting mirror before connecting", () => {
 describe("the dashboard", () => {
   it("passes our nodes' addresses to every baseline it takes", () => {
     const source = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
-    const calls = [...source.matchAll(/captureBaselineIp\(([^)]*)\)/g)].map((m) => m[1]);
-    // The screen-load baseline, the ladder's first, and each rung's after
-    // a teardown.
-    expect(calls).toHaveLength(3);
+    // Every one through `takeBaseline`, which puts a ceiling on it
+    // (own-mirror.test.ts): the screen-load baseline, the ladder's first,
+    // the first rung's retake, and each rung's after a teardown.
+    expect(source).not.toContain("captureBaselineIp(");
+    const calls = [...source.matchAll(/takeBaseline\(([^)]*)\)/g)].map((m) => m[1]);
+    expect(calls).toHaveLength(4);
     for (const args of calls) expect(args).toContain("nodeAddresses");
   });
 });
