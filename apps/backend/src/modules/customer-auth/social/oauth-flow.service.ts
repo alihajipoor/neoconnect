@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -20,7 +20,9 @@ import { ConfigService } from "@nestjs/config";
  * at `/social/:provider/start`, the provider redirects back to
  * `/social/:provider/callback` here, this service does the exchange,
  * and the app collects the finished session with a one-time handoff
- * code. Three short-lived secrets, none of which is useful alone.
+ * code. Three short-lived secrets, none of which is useful alone -- and
+ * the handoff is bound to a PKCE pair the app made, so the code alone is
+ * not enough either. See `consumeHandoff`.
  */
 
 export type BrowserProvider = "google" | "facebook";
@@ -83,14 +85,23 @@ const HANDOFF_TTL_MS = 2 * 60 * 1000;
  */
 export const APP_CALLBACK_URL = "neoconnect://social-callback";
 
+/** A PKCE S256 challenge (RFC 7636): base64url of a SHA-256 digest, so
+ * exactly 43 characters with no padding. */
+export const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
+
 interface PendingState {
   provider: BrowserProvider;
   locale: string;
+  /** The PKCE challenge the app started with, when it sent one. */
+  challenge?: string;
   expiresAt: number;
 }
 
 interface PendingHandoff {
   tokens: { accessToken: string; refreshToken: string };
+  /** Carried over from the state, so only the app instance that started
+   * the flow can collect what it produced. See `consumeHandoff`. */
+  challenge?: string;
   expiresAt: number;
 }
 
@@ -147,13 +158,22 @@ export class OauthFlowService {
     for (const [key, value] of this.handoffs) if (value.expiresAt <= now) this.handoffs.delete(key);
   }
 
-  /** Step one: where the browser should go. */
-  start(provider: BrowserProvider, locale: string): string {
+  /** Step one: where the browser should go.
+   *
+   * `challenge` is the app's PKCE challenge, when it sent one. It rides
+   * with the state to the callback and from there onto the handoff. A
+   * malformed one is refused outright rather than stored: it can only
+   * come from a broken client, and binding a handoff to something no
+   * verifier can match would strand the customer at the last step. */
+  start(provider: BrowserProvider, locale: string, challenge?: string): string {
     this.sweep();
+    if (challenge !== undefined && !PKCE_CHALLENGE.test(challenge)) {
+      throw new BadRequestException("That sign-in request was malformed");
+    }
 
     const endpoints = PROVIDERS[provider];
     const state = randomBytes(32).toString("base64url");
-    this.states.set(state, { provider, locale, expiresAt: Date.now() + STATE_TTL_MS });
+    this.states.set(state, { provider, locale, challenge, expiresAt: Date.now() + STATE_TTL_MS });
 
     const url = new URL(endpoints.authorizeUrl);
     url.searchParams.set("client_id", this.required(endpoints.clientIdKey));
@@ -225,22 +245,54 @@ export class OauthFlowService {
    * is handled by whichever app claims the scheme, lands in browser
    * history, and on desktop crosses a plaintext loopback hop -- none of
    * which should ever carry a refresh token. What crosses instead is
-   * this code, which is single-use, expires in minutes, and is worth
-   * nothing to anyone who cannot also reach our API.
+   * this code, which is single-use and expires in minutes.
+   *
+   * It used to be described as "worth nothing to anyone who cannot also
+   * reach our API", which was not a protection: on Android any app can
+   * claim `neoconnect://social-callback`, receive the redirect in the
+   * victim's place, and reach the API exactly as easily (RFC 8252 §8.1).
+   * So the code is bound to the PKCE challenge the app started with,
+   * when it sent one, and only the matching verifier collects it.
    */
-  storeHandoff(tokens: { accessToken: string; refreshToken: string }): string {
+  storeHandoff(tokens: { accessToken: string; refreshToken: string }, challenge?: string): string {
     this.sweep();
     const code = randomBytes(32).toString("base64url");
-    this.handoffs.set(code, { tokens, expiresAt: Date.now() + HANDOFF_TTL_MS });
+    this.handoffs.set(code, { tokens, challenge, expiresAt: Date.now() + HANDOFF_TTL_MS });
     return code;
   }
 
-  /** Step four: the app trades the code for the session, once. */
-  consumeHandoff(code: string): { accessToken: string; refreshToken: string } {
+  /** Step four: the app trades the code for the session, once.
+   *
+   * Burned before it is checked, so a wrong verifier spends it too:
+   * nobody gets a second guess, and the interceptor's one try costs the
+   * real app nothing it could have used anyway.
+   *
+   * The binding is enforced in both directions, and each closes one
+   * attack:
+   *  - a bound code with no verifier, or the wrong one, is someone who
+   *    intercepted the redirect without the app's secret;
+   *  - an unbound code presented WITH a verifier is a handoff from a
+   *    flow this app did not start -- an attacker's own sign-in, injected
+   *    so the victim's app collects the attacker's session.
+   * Both are refused with the same words as an expired code, so nothing
+   * tells a prober which it hit.
+   *
+   * A code with no binding and no verifier is still accepted: that is
+   * every client released before this change (desktop 0.9.44, mobile
+   * 0.2.23), and refusing it would end social sign-in for them. Making
+   * the challenge required is the last step, once those are gone. */
+  consumeHandoff(code: string, verifier?: string): { accessToken: string; refreshToken: string } {
     this.sweep();
     const pending = this.handoffs.get(code);
-    if (!pending) throw new BadRequestException("This sign-in has expired -- please try again");
+    const expired = () => new BadRequestException("This sign-in has expired -- please try again");
+    if (!pending) throw expired();
     this.handoffs.delete(code);
+
+    if (pending.challenge === undefined && verifier === undefined) return pending.tokens;
+    if (pending.challenge === undefined || verifier === undefined) throw expired();
+    const presented = Buffer.from(createHash("sha256").update(verifier).digest("base64url"));
+    const expected = Buffer.from(pending.challenge);
+    if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) throw expired();
     return pending.tokens;
   }
 }
