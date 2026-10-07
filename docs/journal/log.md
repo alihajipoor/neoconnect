@@ -4786,3 +4786,59 @@ VM**, and the VM run owed is harder than the last entry said (below).
   ladder moving them off a working protocol -- until 0.9.45 ships. Hold
   or roll back that node change, or keep that mirror off `/health/ip`.
   A production change; not touched here.
+
+## 2026-10-07 — released desktop 0.9.45 and mobile 0.2.24; the egress own-mirror bug
+
+From `main` `f9479c2`: the full review's mobile and panel fixes, the
+egress own-mirror fix, the iOS store build, on top of the backend, agent
+and desktop fixes already merged. Backend and panel deployed from the
+same commit first (dump `pre-0945-20261007-084149.sql.gz`; no
+migrations); the panel sign-in form is served as POST.
+
+**Found in the VM before release, and fixed (`claude/egress-own-mirror`).**
+The 0.9.45 candidate showed "Connected, not confirmed" over a working
+Stealth tunnel. Asking every bundle endpoint for `/health/ip` through
+the tunnel: all answered the node's address except the connected node's
+own mirror, which answered the customer's home address -- the client
+routes its server's address around the tunnel, so that mirror is reached
+from outside it. Measured per engine through finland1: Xray, OpenVPN and
+IKEv2 reach their own server's mirror around the tunnel (home address);
+WireGuard through it (a tunnel-internal address). With the baseline from
+that mirror the check either compared nothing ("not confirmed") or, from
+the same mirror, called a working tunnel "NOT protected". Plausibly live
+for 0.9.44 / 0.2.23 customers whose last-good endpoint is the mirror of
+the node they connect to; finland1's mirror joined the other four in
+answering when its HTTP/1.1 fallback was fixed on 2026-10-07.
+Fix: `health_ip_v4` reports the peer it connected to; readings and
+baselines from the tunnel's own server are skipped where that server is
+reached around the tunnel; every check asks the baseline's endpoint
+first; the IPv4 check ignores system proxies.
+**Proven in the VM** (0.9.45 RC with the fix, finland1, last-good =
+finland1's own mirror): Stealth, Compatible, Built-in and Fast all
+"You're protected" with the FI exit; with the panel hosts blocked on the
+guest's physical NIC only (a censored control plane), Stealth and Fast
+still "You're protected", stable across a health poll.
+
+**Regression on the release candidate** (8 protocols, finland1): DNS 0
+queries at the NIC on all 8; NIC capture: no IPv6 on any, IPv4 only to
+the node apart from FIN/RST of two pre-tunnel HTTPS connections and
+1-byte keepalives to two nodes' mirrors on :2053 from the app's own
+pre-tunnel connections (the known residue).
+
+**CI**: the mobile capability-scope test failed once by timing -- turbo
+ran the desktop build (which writes the shared seed) alongside the
+mobile tests. Tests now run after the builds that write the seed
+(`turbo.json`).
+
+**The VM stalls.** VirtualBox runs on the Windows hypervisor here (NEM:
+"AMD-V is not available" in VBox.log, because Hyper-V/VBS is on): the VM
+process sometimes stops dead (0% CPU, guest clock frozen) or guest
+control stops answering. Four times on 2026-10-06/07, once mid-upgrade,
+leaving the service removed until the installer was re-run. Not a
+product fault. `vm/tools/robust-batch.ps1` detects both and power-cycles.
+Turning Hyper-V/VBS off on the host would remove it; that is the
+owner's call.
+
+**Unverified:** anything on a phone (Android 0.2.24, iOS); the iOS
+"Xray reaches its own server through the tunnel" premise; a real
+censored network.
