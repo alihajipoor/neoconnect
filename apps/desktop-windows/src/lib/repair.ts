@@ -56,12 +56,15 @@ export interface RepairReport {
  * often the thing misbehaving -- the worst case is several of those
  * budgets end to end.
  *
- * A little longer than the Rust side's own deadline (195s), so a
- * timeout surfaces as the service's sentence about being stuck rather
- * than as this one racing it. Both moved up by 45s together when the
- * NRPT clear's budget did; the gap between them is the point, so they
- * have to move as a pair. */
-const REPAIR_TIMEOUT_MS = 205_000;
+ * A little longer than the Rust side's own deadline (`REPAIR_TIMEOUT`
+ * in src-tauri/src/vpn.rs, 900s), so a timeout surfaces as the
+ * service's sentence about being stuck rather than as this one racing
+ * it. The gap between them is the point, so they have to move as a
+ * pair -- and they had not: the Rust deadline went from 195s to 750s
+ * when it was re-derived from the call graph, and this stayed at 205s,
+ * abandoning a repair the service was still entitled to be running.
+ * repair.test.ts now reads the Rust number and holds this above it. */
+export const REPAIR_TIMEOUT_MS = 910_000;
 
 /** Everything a step's outcome can be, plus whether the pass as a whole
  * counts as a success.

@@ -95,6 +95,16 @@ export default function App() {
     if (!token) return;
 
     const result = await verifyEmailByToken(token);
+    // Somebody is signed in: leave them, and their tunnel, alone. Tokens
+    // are only ever stored for a verified account, so a verify link has
+    // nothing for a signed-in app to act on -- the common case is the
+    // customer clicking the email's button after verifying by code. It
+    // used to switch to the sign-in screen regardless, over a session
+    // that was never ended: the tunnel stayed up with its polls stopped,
+    // "Sign in" implied a device doing nothing, and signing in as someone
+    // else adopted the first account's tunnel. Asked of the store, not of
+    // `screen`, which this handler -- registered once -- would see stale.
+    if (await getTokens().catch(() => null)) return;
     setPendingAuth(null);
     setLoginNotice(
       result.ok ? "Email verified! Sign in to continue." : `Couldn't verify your email: ${result.error}`,

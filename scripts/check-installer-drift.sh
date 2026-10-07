@@ -47,4 +47,27 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   exit 1
 fi
 
-echo "installer covers all ${#required[@]} backend environment variables"
+# The same drift through the other door: variables read with
+# ConfigService.get("X") rather than through configuration.ts. Those come
+# from the container's environment, and infra/.env reaches the container
+# only through the backend's environment block in compose. APPLE_BUNDLE_ID
+# and APPLE_ALLOW_SANDBOX were read this way and never passed through, so
+# every App Store purchase was refused in production -- and this check
+# did not look.
+mapfile -t read_by_name < <(grep -rhoE '[cC]onfig(Service)?\.get(<[^>]*>)?\("[A-Z][A-Z0-9_]+"' apps/backend/src --include='*.ts' --exclude='*.spec.ts' | sed -E 's/.*\("//; s/"$//' | sort -u)
+unpassed=()
+for key in "${read_by_name[@]}"; do
+  if grep -qE "^\s+$key:" "$COMPOSE"; then continue; fi
+  unpassed+=("$key")
+done
+
+if [[ ${#unpassed[@]} -gt 0 ]]; then
+  echo "These environment variables are read by the backend but never passed into its container:" >&2
+  printf '  %s\n' "${unpassed[@]}" >&2
+  echo >&2
+  echo "Add them to the backend's environment block in $COMPOSE -- a value in" >&2
+  echo "infra/.env alone never reaches the container." >&2
+  exit 1
+fi
+
+echo "installer covers all ${#required[@]} backend environment variables, and compose passes all ${#read_by_name[@]} read by name"

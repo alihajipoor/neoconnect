@@ -88,3 +88,40 @@ func TestRegisterTransportDoesNotDisturbTheDefault(t *testing.T) {
 		t.Fatal("the WebSocket provisioner is not reachable by its own key")
 	}
 }
+
+// reportingProvisioner reports one user's usage and sessions.
+type reportingProvisioner struct{ countingProvisioner }
+
+func (r *reportingProvisioner) StatsSince(context.Context) ([]common.UsageDelta, error) {
+	return []common.UsageDelta{{ExternalUserID: "u-1", BytesUp: 1, BytesDown: 2}}, nil
+}
+
+func (r *reportingProvisioner) SessionCounts() (map[string]int, error) {
+	return map[string]int{"u-1": 1}, nil
+}
+
+// The transport is the agent's own lookup key, not a protocol. What the
+// WebSocket inbound counted went out labelled "XRAY_VLESS_TLS|WS", which
+// no backend list contains: its session counts walked past the filter
+// that discounts Xray's 60-second tail, and usage under it would be
+// dropped as an unknown protocol.
+func TestReportsCarryTheProtocolNotTheTransport(t *testing.T) {
+	d := New()
+	d.RegisterTransport("XRAY_VLESS_TLS", "WS", &reportingProvisioner{})
+
+	counts, errs := d.CollectSessionCounts()
+	if len(errs) != 0 || len(counts) != 1 {
+		t.Fatalf("expected one session count, got %+v (errors %v)", counts, errs)
+	}
+	if counts[0].Protocol != "XRAY_VLESS_TLS" {
+		t.Fatalf("session count labelled %q, want the protocol alone", counts[0].Protocol)
+	}
+
+	deltas, errs := d.CollectStats(context.Background())
+	if len(errs) != 0 || len(deltas) != 1 {
+		t.Fatalf("expected one delta, got %+v (errors %v)", deltas, errs)
+	}
+	if deltas[0].Protocol != "XRAY_VLESS_TLS" {
+		t.Fatalf("usage labelled %q, want the protocol alone", deltas[0].Protocol)
+	}
+}

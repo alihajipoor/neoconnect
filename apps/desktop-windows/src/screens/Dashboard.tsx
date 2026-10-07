@@ -12,6 +12,7 @@ import {
   captureBaselineIp,
   captureIpv6Baseline,
   checkIpv6,
+  EGRESS_TIMEOUT_MS,
   verifyEgress,
   confirmEgressWithin,
   type BaselineIp,
@@ -27,6 +28,8 @@ import {
   isTunnelUp,
   LIVENESS_POLL_MS,
   noTunnelVerified,
+  rungJudgedByHandshake,
+  showsIpv6Escape,
   stateFromStatus,
   type HeadlineTone,
   type VpnStatus,
@@ -67,6 +70,7 @@ import {
   type SlotStopReason,
 } from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
+import { ladderPass } from "../lib/ladder-pass";
 import { isServiceTimeout, withTimeout } from "../lib/service-call";
 import { PROBE_CAP_MS, statusDisturbances } from "../lib/status-disturbance";
 import {
@@ -154,6 +158,13 @@ const HEALTH_POLL_MS = 15_000;
  * it. */
 const MIN_CHECK_GAP_MS = 5_000;
 
+/** The most one health poll's egress check may spend walking the
+ * endpoint list. Two endpoints' worth: a first endpoint that hangs still
+ * leaves the next its full timeout, and a tunnel that black-holes
+ * everything is called out in about twelve seconds plus the internet
+ * probe, not after every endpoint in the list has timed out in turn. */
+const HEALTH_EGRESS_TOTAL_MS = 2 * EGRESS_TIMEOUT_MS;
+
 /** Consecutive bad polls before the app moves a live connection itself.
  *
  * One bad reading is not evidence: a laptop waking, a moment of packet
@@ -211,22 +222,6 @@ const TRANSIENT_RECHECK_MS: Partial<Record<ConnectionState, number>> = {
  * first answer is routinely a stale "up". */
 const TEARDOWN_SETTLE_MS = 6_000;
 const TEARDOWN_POLL_MS = 1_000;
-
-/** After this, a ladder pass is presumed never to return.
- *
- * A boolean guard was enough while every step was guaranteed to finish.
- * It is not once a step can hang forever: the pass holding the guard
- * may never reach its own `finally`, and then every press of Connect
- * reads as "cancel the pass in progress" and the app can never connect
- * again. That is the third press that froze the window.
- *
- * Sized off the ladder's own worst case rather than picked: four
- * rejected candidates at roughly ten seconds each, plus a last one
- * given the patient budgets (six to settle, thirty to prove egress,
- * eight to confirm reachability), lands near ninety seconds. Two and a
- * half minutes is comfortably past that, so no real pass is ever
- * declared dead, and a wedged one stops holding the app hostage. */
-const LADDER_MAX_MS = 150_000;
 
 /** How long to give a fresh tunnel to prove itself before calling it
  * degraded.
@@ -373,13 +368,46 @@ const FAILOVER_SETTLE_TIMEOUT_MS = 2_500;
  * not a reason to refuse to connect -- their network may be fine and
  * ours may not be -- so the caller proceeds without a baseline and falls
  * back to handshake evidence.
+ *
+ * **Bounded, which it was not.** The budget used to be checked only
+ * between whole walks of the endpoint list, and one walk is a dozen
+ * endpoints at six seconds each when the bare network filters them. So
+ * a 2.5-second settle could cost a minute, once per candidate, and a
+ * pass ran far past `LADDER_MAX_MS` -- whose guard then expired under a
+ * pass still dialling, and a press started a second ladder beside it.
+ *
+ * Now `known`, an endpoint that already answered on this network (the
+ * pass's previous baseline, or the one taken when the screen loaded), is
+ * asked alone first, within the budget: it is the one that is going to
+ * answer, and it is the one the `sameEndpointOnly` check will ask. Only
+ * if it does not is the whole list walked, in its fixed order -- the
+ * order is what keeps a mirror reporting its own node's address from
+ * supplying a baseline the CDN would have -- and that walk has a
+ * ceiling of its own: one endpoint timeout past the budget, or two for a
+ * pass with nothing known yet, so a first endpoint that is blocked on
+ * the bare network still leaves the next one time to answer.
  */
-async function settleAndCaptureBaseline(budgetMs = SETTLE_TIMEOUT_MS): Promise<BaselineIp | null> {
+async function settleAndCaptureBaseline(
+  budgetMs = SETTLE_TIMEOUT_MS,
+  known: BaselineIp | null = null,
+): Promise<BaselineIp | null> {
   const deadline = Date.now() + budgetMs;
+  if (known !== null) {
+    for (;;) {
+      const ip = await captureBaselineIp({ only: known.from, deadline });
+      if (ip !== null) return ip;
+      if (Date.now() >= deadline) break;
+      await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
+    }
+  }
+  const walkDeadline = Math.max(
+    deadline,
+    Date.now() + (known === null ? 2 * EGRESS_TIMEOUT_MS : EGRESS_TIMEOUT_MS),
+  );
   for (;;) {
-    const ip = await captureBaselineIp();
+    const ip = await captureBaselineIp({ deadline: walkDeadline });
     if (ip !== null) return ip;
-    if (Date.now() >= deadline) return null;
+    if (Date.now() >= walkDeadline) return null;
     await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
   }
 }
@@ -440,6 +468,10 @@ export function Dashboard({
   const [error, setError] = useState<string | null>(null);
   const [me, setMe] = useState<Customer | null>(null);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
+  /** The same, for callbacks registered once that run much later -- an
+   * adopted pass ending. */
+  const subscriptionRef = useRef<Subscription | null>(null);
+  subscriptionRef.current = subscription;
   const [protocolUser, setProtocolUser] = useState<ProtocolUser | null>(null);
   /** Every credential this subscription holds -- one per route its plan
    * allows. The list is the failover ladder; `protocolUser` is whichever
@@ -488,14 +520,24 @@ export function Dashboard({
    * interleaving would have each tearing down the other's engine.
    *
    * Read through `ladderInFlight`, never directly: the guard is held for
-   * as long as a pass could still plausibly be alive, not forever. */
-  const ladderRunningRef = useRef(false);
+   * as long as a pass could still plausibly be alive, not forever.
+   *
+   * One per app, not per screen (`lib/ladder-pass`): a pass outlives the
+   * Dashboard that started it whenever Settings is opened mid-connect,
+   * and the screen mounted on return has to see it. */
+  const ladderRunningRef = ladderPass.running;
   /** When the pass holding the guard began, so the guard can expire. */
-  const ladderStartedAtRef = useRef(0);
+  const ladderStartedAtRef = ladderPass.startedAt;
   /** Which pass is the current one. A pass that outlived its deadline
    * has been superseded, and must not be allowed to clear a newer
    * pass's guard or write state on its way out. */
-  const ladderGenerationRef = useRef(0);
+  const ladderGenerationRef = ladderPass.generation;
+  /** The pass this screen started, if any -- as opposed to one it found
+   * running when it mounted, which it adopts instead. */
+  const ownPassRef = useRef(0);
+  /** The intent this screen declared on adopting a pass it did not
+   * start, until that pass ends. */
+  const adoptedPassIntentRef = useRef<number | null>(null);
   /** Consecutive polls that found a live tunnel not carrying traffic. */
   const strikesRef = useRef(0);
   /** Consecutive polls the service did not answer at all. */
@@ -514,8 +556,9 @@ export function Dashboard({
   const lastCheckAtRef = useRef(0);
   /** Set when the customer asks to stop a ladder in progress. Checked
    * between steps rather than interrupting one, so the engine is never
-   * left half-started. */
-  const cancelRef = useRef(false);
+   * left half-started. Shared with the pass for the same reason as the
+   * guard: a stop pressed on a remounted screen has to reach it. */
+  const cancelRef = ladderPass.cancel;
   const [signingOut, setSigningOut] = useState(false);
   /** What the customer last asked for, and the stamp that lets an answer
    * still in flight discover it has been overtaken.
@@ -535,6 +578,10 @@ export function Dashboard({
   const [tunnelDropped, setTunnelDropped] = useState(false);
   /** Single-flight for the one-second liveness poll. */
   const livenessInFlightRef = useRef(false);
+  /** Single-flight for the fifteen-second health poll's measurement. */
+  const healthCheckInFlightRef = useRef(false);
+  /** A newer run's first check, waiting for the one in flight to end. */
+  const healthCheckWantedRef = useRef<(() => Promise<void>) | null>(null);
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
   /** What the plan's device limit has to say, when it is why this device
    * is not connected: refused before dialling, taken over by another
@@ -572,8 +619,11 @@ export function Dashboard({
   /** The address the world saw before connecting. Captured while still
    * disconnected -- taken afterwards it would be the tunnel's own exit
    * address and the comparison would be meaningless. A ref rather than
-   * state because nothing renders from it. */
-  const baselineIpRef = useRef<BaselineIp | null>(null);
+   * state because nothing renders from it, and the pass's rather than
+   * this screen's: a screen remounted mid-connect adopts the pass, and
+   * must compare against the baseline that pass took. See
+   * `ladderPass.baseline`. */
+  const baselineIpRef = ladderPass.baseline;
   const [exitIp, setExitIp] = useState<string | null>(null);
   /** Taken from the service, never from the Settings toggle.
    *
@@ -644,7 +694,7 @@ export function Dashboard({
    * keeps the first risk from costing anything visible.
    */
   function ladderInFlight(): boolean {
-    return ladderRunningRef.current && Date.now() - ladderStartedAtRef.current < LADDER_MAX_MS;
+    return ladderPass.inFlight();
   }
 
   /** Records what the customer just asked for and returns its stamp.
@@ -919,7 +969,80 @@ export function Dashboard({
     return () => clearInterval(id);
   }, []);
 
+  /** Asks the service what is running and puts that on screen -- called
+   * before the screen leaves its loading state, on both the online and
+   * the offline path.
+   *
+   * The screen starts at "disconnected" on every mount, and a mount is
+   * every return from Settings or Plans, not only a launch. The offline
+   * path used to return before ever asking, and nothing revisits
+   * "disconnected" -- no poll runs there and it is not a transient state
+   * -- so a customer in Custom mode on a network that filters our API,
+   * whose own app traffic goes direct by design, came back from Settings
+   * to "You're not protected" and a Connect button over a tunnel carrying
+   * their traffic, indefinitely; a press tore that tunnel down. The
+   * online path showed the same for the length of one more request. If
+   * the service does not answer, this is "unknown", which says so and
+   * asks again on its own.
+   *
+   * A pass already under way owns the state and is left alone -- it
+   * takes its own baseline besides, so null here leaves both alone. If
+   * it is a pass this screen did not start (one started by a Dashboard
+   * that unmounted when Settings opened; see `lib/ladder-pass`), the
+   * screen adopts it: it says "Connecting...", a press means stop, and
+   * when the pass ends the screen asks the service what it left.
+   */
+  async function adoptServiceState(sub: Subscription | null): Promise<ConnectionState | null> {
+    if (ladderInFlight()) {
+      if (ladderGenerationRef.current !== ownPassRef.current && adoptedPassIntentRef.current === null) {
+        const intent = beginIntent("connect");
+        adoptedPassIntentRef.current = intent;
+        publishObserved(intent, "connecting");
+      }
+      return null;
+    }
+    const adopted = await syncFromService();
+    // A tunnel this window did not bring up still uses one of the plan's
+    // devices. Nothing is known about its slot, so the first health poll
+    // claims it -- or, if the dashboard has merely been away in
+    // Settings, carries on with what was already known. Not one the
+    // device limit is still taking down: that one is not being used, it
+    // is being given up, and the recheck below goes on doing that.
+    if (isTunnelUp(adopted) && !slotTeardown.owed()) {
+      deviceSlot.adopt({ subscriptionId: sub?.id, deviceLimit: sub?.deviceLimit });
+    }
+    return adopted;
+  }
+
+  /** The IPv4 and IPv6 baselines, once the service has said nothing is
+   * up.
+   *
+   * Only meaningful while nothing is up: taken through a live tunnel this
+   * would record the exit address as the "before" value and every later
+   * comparison would wrongly read as a leak. The same window, for the
+   * same reason, and the same trap for IPv6: asked while a tunnel is up,
+   * "can this machine reach public IPv6" is the question being tested
+   * rather than the baseline for it.
+   *
+   * Bounded, and dropped if a connect began meanwhile. Unbounded, a walk
+   * of a filtered endpoint list outlived a connect pressed during it,
+   * finished through the new tunnel, and wrote the tunnel's own exit
+   * address over the pass's baseline -- which reads every later check as
+   * a leak. */
+  async function captureBaselinesWhileDown(): Promise<void> {
+    const passAtStart = ladderGenerationRef.current;
+    const baseline = await captureBaselineIp({ deadline: Date.now() + 2 * EGRESS_TIMEOUT_MS });
+    const hadIpv6 = await captureIpv6Baseline();
+    if (ladderGenerationRef.current !== passAtStart || ladderInFlight()) return;
+    baselineIpRef.current = baseline;
+    ipv6BaselineRef.current = hadIpv6;
+    setExitIp(null);
+  }
+
   async function loadAll(preferRouteId?: string) {
+    // Which customer session this load is for. See sessionGeneration: a
+    // sign-out bumps it before it clears anything.
+    const sessionAtStart = sessionGeneration();
     setLoading(true);
     setError(null);
     const [meResult, subsResult, usersResult] = await Promise.all([getMe(), getSubscriptions(), getProtocolUsers()]);
@@ -950,12 +1073,17 @@ export function Dashboard({
         );
         setOfflineSince(cached.savedAt);
         setError(null);
+        // The service, before the screen claims anything. This path is
+        // the one that matters most: our API unreachable is the ordinary
+        // state of a censored network, tunnel or no tunnel.
+        const adopted = await adoptServiceState(cached.subscription);
         setLoading(false);
         void invoke<string | null>("network_fingerprint")
           .then(setNetworkId)
           .catch(() => setNetworkId(null));
         void loadLastGood().then(setLastGood);
         void loadConnectHistory().then(setHistory);
+        if (adopted === "disconnected") await captureBaselinesWhileDown();
         return;
       }
 
@@ -982,6 +1110,11 @@ export function Dashboard({
     // itself honoured the choice.
     const chosen = preferRouteId ?? chosenRouteId;
     setProtocolUser(usersResult.data.find((u) => u.routeId === chosen) ?? usersResult.data[0] ?? null);
+    // The tunnel outlives the app: the helper service keeps it up if the
+    // window is closed, so on open the UI has to adopt whatever is
+    // actually running rather than assuming disconnected -- and before
+    // the screen is drawn, not after the route list below has answered.
+    const adopted = await adoptServiceState(sub);
     setLoading(false);
 
     // Best-effort, and deliberately not awaited together with the rest:
@@ -1006,46 +1139,49 @@ export function Dashboard({
       }
     }
 
+    // A sign-out landed while the route list was in flight -- the button
+    // is drawn as soon as the screen leaves loading, before that request
+    // returns. Everything below is for a session that has ended: the
+    // snapshot above all, which would write the signed-out customer's
+    // credentials back to disk after the sign-out cleared them.
+    if (sessionGeneration() !== sessionAtStart) return;
+
     // Written only after a wholly successful fetch, so a partial answer
-    // can never overwrite a good cache with a worse one.
-    void saveSnapshot({
-      subscription: sub,
-      protocolUsers: usersResult.data,
-      routes: currentRoutes,
-    });
+    // can never overwrite a good cache with a worse one. Asked again at
+    // the moment of writing, for a sign-out that lands in between.
+    void saveSnapshot(
+      {
+        subscription: sub,
+        protocolUsers: usersResult.data,
+        routes: currentRoutes,
+      },
+      () => sessionGeneration() === sessionAtStart,
+    );
 
-    // The tunnel outlives the app: the helper service keeps it up if the
-    // window is closed, so on open the UI has to adopt whatever is
-    // actually running rather than assuming disconnected. A pass already
-    // under way owns the state and must not be overwritten by a reload
-    // of the account data -- and takes its own baseline besides, so null
-    // here leaves both alone.
-    const adopted = ladderInFlight() ? null : await syncFromService();
-    // A tunnel this window did not bring up still uses one of the plan's
-    // devices. Nothing is known about its slot, so the first health poll
-    // claims it -- or, if the dashboard has merely been away in
-    // Settings, carries on with what was already known. Not one the
-    // device limit is still taking down: that one is not being used, it
-    // is being given up, and the recheck below goes on doing that.
-    if (adopted !== null && isTunnelUp(adopted) && !slotTeardown.owed()) {
-      deviceSlot.adopt({ subscriptionId: sub?.id, deviceLimit: sub?.deviceLimit });
-    }
-
-    // Only meaningful while nothing is up: taken through a live tunnel
-    // this would record the exit address as the "before" value and every
-    // later comparison would wrongly read as a leak.
     // Only when the service actually said so -- "unknown" is not a no,
     // and a baseline captured through a tunnel we simply could not ask
     // about turns every later comparison into a false leak report.
-    if (adopted === "disconnected") {
-      baselineIpRef.current = await captureBaselineIp();
-      // The same window, for the same reason, and the same trap: asked
-      // while a tunnel is up, "can this machine reach public IPv6" is
-      // the question being tested rather than the baseline for it.
-      ipv6BaselineRef.current = await captureIpv6Baseline();
-      setExitIp(null);
-    }
+    if (adopted === "disconnected") await captureBaselinesWhileDown();
   }
+
+  // A pass this screen adopted rather than started (see
+  // `adoptServiceState`) reports its outcome to the screen that started
+  // it, which is gone. When it ends, this screen asks the service what it
+  // left -- a verified tunnel, a failed pass's teardown -- and the polls
+  // take over from there. Not after a press of its own since: a stop has
+  // its own answer coming.
+  useEffect(
+    () =>
+      ladderPass.onEnd(() => {
+        const adopted = adoptedPassIntentRef.current;
+        if (adopted === null) return;
+        adoptedPassIntentRef.current = null;
+        if (!isCurrent(intentRef.current, adopted)) return;
+        endIntent(adopted);
+        void adoptServiceState(subscriptionRef.current);
+      }),
+    [],
+  );
 
   // Asks the one question the IPv4 egress check cannot: is IPv6 still
   // reaching the internet while we are connected?
@@ -1106,10 +1242,13 @@ export function Dashboard({
   useEffect(() => {
     if (!isTunnelUp(connectionState)) return;
 
-    const check = async () => {
+    // One measurement: what the poll found, and whether it calls for the
+    // automatic ladder. The ladder itself runs outside the single-flight
+    // below, which only covers the measuring.
+    const measure = async (): Promise<boolean> => {
       // A ladder already running will decide the state itself; polling
       // underneath it would fight over the same fields.
-      if (ladderInFlight()) return;
+      if (ladderInFlight()) return false;
       lastCheckAtRef.current = Date.now();
 
       // Stamped before the first question, not after the last answer.
@@ -1151,7 +1290,7 @@ export function Dashboard({
         status = await serviceStatus();
       } catch {
         miss();
-        return;
+        return false;
       }
 
       // A "no tunnel" the service could not verify -- its fallback's
@@ -1165,7 +1304,7 @@ export function Dashboard({
       const disturbed = statusDisturbances.since(mark);
       if (!status.connected && (disturbed || !noTunnelVerified(status))) {
         miss();
-        return;
+        return false;
       }
       statusMissesRef.current = 0;
 
@@ -1179,7 +1318,7 @@ export function Dashboard({
       const slotEvent = await deviceSlot.onPoll();
       if (slotEvent.kind !== "keep") {
         await endForSlot(slotEvent);
-        return;
+        return false;
       }
 
       // Read from the status this check just took, not from the
@@ -1207,9 +1346,9 @@ export function Dashboard({
         // goes through the same rule and is worded the same way.
         if (droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) {
           publishDrop(generation);
-          return;
+          return false;
         }
-        if (publishObserved(generation, "disconnected") === null) return;
+        if (publishObserved(generation, "disconnected") === null) return false;
         // The tunnel went on its own, and nothing renews a slot without
         // one. Given back, rather than left to turn the customer's other
         // device away as "in use" for the ninety seconds it takes to go
@@ -1217,7 +1356,7 @@ export function Dashboard({
         void deviceSlot.release();
         setConnectedAt(null);
         strikesRef.current = 0;
-        return;
+        return false;
       }
 
       // Proof rather than inference: did a packet just make the round
@@ -1259,8 +1398,11 @@ export function Dashboard({
           .finally(probed);
         verdict = customModePollState(fromStatus, carried);
       } else {
-        const egress = await verifyEgress(baselineIpRef.current);
-        if (!isCurrent(intentRef.current, generation)) return;
+        // A ceiling on the whole walk: through a tunnel that black-holes
+        // everything, every endpoint times out, and at six seconds each
+        // the first strike used to land a minute after the tunnel died.
+        const egress = await verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS });
+        if (!isCurrent(intentRef.current, generation)) return false;
         if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
         verdict = fullTunnelPollState(fromStatus, egress);
       }
@@ -1270,7 +1412,7 @@ export function Dashboard({
       // follows is about a tunnel the screen no longer describes, and a
       // reading taken through a tunnel that has since ended must not
       // count towards the per-ISP tags.
-      if (!isCurrent(intentRef.current, generation)) return;
+      if (!isCurrent(intentRef.current, generation)) return false;
 
       // "It kept working", for the per-ISP tags: a proven check advances
       // the session clock, a failed one restarts it. `unverified` does
@@ -1287,21 +1429,21 @@ export function Dashboard({
         // teardown would hand every Xray session in Custom mode to the
         // failover ladder on a timer.
         if (publishObserved(generation, verdict) !== null) strikesRef.current = 0;
-        return;
+        return false;
       }
 
       // Dropped rather than counted when it has been overtaken: a strike
       // is evidence about the tunnel the customer is on, and this
       // verdict is about one they have already asked to leave.
-      if (publishObserved(generation, verdict) === null) return;
+      if (publishObserved(generation, verdict) === null) return false;
       strikesRef.current += 1;
 
       // Below the threshold, or too soon after a full pass already
       // failed, this only reports -- it does not act.
-      if (strikesRef.current < MID_SESSION_STRIKES) return;
-      if (Date.now() < cooldownUntilRef.current) return;
+      if (strikesRef.current < MID_SESSION_STRIKES) return false;
+      if (Date.now() < cooldownUntilRef.current) return false;
       // Never after the device limit ended this session. See slotLostRef.
-      if (slotLostRef.current) return;
+      if (slotLostRef.current) return false;
 
       // A tunnel that is up and carrying nothing is the case a customer
       // cannot fix themselves and should not have to: the old behaviour
@@ -1310,7 +1452,39 @@ export function Dashboard({
       // moment to ask anything of them.
       strikesRef.current = 0;
       cooldownUntilRef.current = Date.now() + MID_SESSION_COOLDOWN_MS;
-      await runLadder({ automatic: true });
+      return true;
+    };
+
+    // Single-flight, like the liveness poll. A measurement through a dead
+    // tunnel waits out every endpoint's timeout, and the interval kept
+    // starting new ones on top of it every fifteen seconds -- each
+    // holding requests on a link that was already not answering.
+    //
+    // Shared across runs of this effect, deliberately: two measurements
+    // at once could count two strikes off one failure. But a run's own
+    // first check (`catchUp`) is not simply dropped when one from before
+    // the state changed is still going -- it used to be, and then nothing
+    // measured the new state until the interval came round, up to
+    // fifteen seconds later. It runs as soon as that one finishes, unless
+    // that one handed the tunnel to the ladder, or this run has ended.
+    let live = true;
+    const check = async ({ catchUp = false } = {}) => {
+      if (!live) return;
+      if (healthCheckInFlightRef.current) {
+        if (catchUp) healthCheckWantedRef.current = () => check();
+        return;
+      }
+      healthCheckInFlightRef.current = true;
+      let failover = false;
+      try {
+        failover = await measure();
+      } finally {
+        healthCheckInFlightRef.current = false;
+      }
+      const wanted = healthCheckWantedRef.current;
+      healthCheckWantedRef.current = null;
+      if (failover) await runLadder({ automatic: true });
+      else if (wanted) void wanted();
     };
 
     // Once straight away, then on the interval.
@@ -1326,10 +1500,11 @@ export function Dashboard({
     // Nothing on screen waits for this: it is fired and forgotten, and
     // every write it makes goes through `publishObserved`, so an answer
     // overtaken by a press is dropped rather than shown.
-    if (Date.now() - lastCheckAtRef.current >= MIN_CHECK_GAP_MS) void check();
+    if (Date.now() - lastCheckAtRef.current >= MIN_CHECK_GAP_MS) void check({ catchUp: true });
     const id = setInterval(() => void check(), HEALTH_POLL_MS);
 
     return () => {
+      live = false;
       clearInterval(id);
       // Any change of state ends the stretch of continuous health being
       // timed -- a disconnect, a reconnect onto the same route, or a dip
@@ -1694,6 +1869,7 @@ export function Dashboard({
     // pass finally waking would clear the live pass's guard and write
     // its own long-obsolete verdict over the screen.
     const generation = ++ladderGenerationRef.current;
+    ownPassRef.current = generation;
     // Which customer session this pass dials for. See sessionGeneration:
     // a sign-out can land while the pass is mid-ladder, from this screen
     // or from one that cannot reach `cancelRef`.
@@ -1939,9 +2115,23 @@ export function Dashboard({
       // nothing about the network. Feeds the per-ISP tags; see
       // `failedDial`.
       const dials: Dial[] = [];
+      // An endpoint known to answer `/health/ip` on this network without
+      // a tunnel: the baseline taken when the screen loaded or the last
+      // pass connected, then each candidate's own. Asked first when
+      // settling, so a candidate does not walk the whole list again. See
+      // settleAndCaptureBaseline.
+      let knownBaseline: BaselineIp | null = baselineIpRef.current;
 
       for (const [index, candidate] of candidates.entries()) {
         if (cancelRef.current || sessionGeneration() !== sessionAtStart) break;
+        // A pass whose guard expired and that a newer pass has replaced
+        // stops dialling here, rather than tearing that pass's engine
+        // down with its next connect.
+        if (ladderGenerationRef.current !== generation) break;
+        // Still alive: each rung renews the guard, so a long ladder on a
+        // filtered network keeps it while a wedged step still loses it.
+        // See `LADDER_MAX_MS`.
+        ladderPass.progress(generation);
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
         if (candidate.routeId === shownRouteId) triedShownRoute = true;
@@ -1954,7 +2144,8 @@ export function Dashboard({
 
         // Fresh every attempt, and taken only once plain networking is
         // confirmed working. See settleAndCaptureBaseline.
-        baselineIpRef.current = await settleAndCaptureBaseline(settleBudget);
+        baselineIpRef.current = await settleAndCaptureBaseline(settleBudget, knownBaseline);
+        if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
         // Once per pass, not once per candidate: whether this machine
         // has public IPv6 is a fact about its network, not about which
         // protocol is being tried, and re-measuring it five times would
@@ -2106,11 +2297,16 @@ export function Dashboard({
             // it", which is a distinction for the error message, not
             // for deciding whether to try the next protocol. Another
             // candidate waiting makes moving on strictly better than
-            // diagnosing.
+            // diagnosing -- except when no baseline could be taken, and
+            // no candidate can ever be proven; see
+            // `rungJudgedByHandshake`.
             verdict =
               egress.state === "throughTunnel"
                 ? "connected"
-                : isLast
+                : rungJudgedByHandshake(egress, {
+                      isLast,
+                      baselineTaken: baselineIpRef.current !== null,
+                    })
                   ? combineEvidence(await confirmReachable(), egress)
                   : "degraded";
             reason = egress.state;
@@ -2345,6 +2541,10 @@ export function Dashboard({
       // outlived its deadline has already been replaced, and clearing
       // the guard here would unlock a newer pass that is still running.
       if (ladderGenerationRef.current === generation) ladderRunningRef.current = false;
+      // A screen mounted while this pass ran -- Settings opened and closed
+      // mid-connect -- adopted it and is waiting to ask the service what
+      // it left. This screen, if it is still the one mounted, ignores it.
+      if (ladderGenerationRef.current === generation) ladderPass.ended();
     }
   }
 
@@ -2724,8 +2924,11 @@ export function Dashboard({
                           styling and no hedging -- their IPv4 may be
                           perfectly tunnelled and their IPv6 is going out
                           in the clear, which is the exact combination
-                          that made this leak invisible for so long. */}
-                      {isTunnelUp(connectionState) && ipv6Escaping ? (
+                          that made this leak invisible for so long.
+                          Not in Custom mode, where the probe measures
+                          only this app's own, deliberately direct,
+                          traffic -- see `showsIpv6Escape`. */}
+                      {showsIpv6Escape(connectionState, { customMode: splitTunnelActive, escaping: ipv6Escaping }) ? (
                         <p className="mt-1 text-xs text-destructive">{t("dash.ipv6Escaping")}</p>
                       ) : null}
 

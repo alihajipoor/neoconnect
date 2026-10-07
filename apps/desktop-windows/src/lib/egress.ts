@@ -25,12 +25,22 @@ import { rememberNetwork } from "./network-identity";
  * changed about the route. See `IpReading` and `verifyEgress`.
  *
  * It closes that hole for **IPv4 and nothing else**, which this file
- * used to claim was no hole at all. The comparison is done over
- * whichever family reached `/health/ip`, and on every node that is
- * IPv4 -- so a machine leaking IPv6 alongside a perfectly good IPv4
- * tunnel reads as "throughTunnel". That combination was measured, on
- * three of the four protocols tested. The IPv6 check at the bottom of
- * this file exists because of it.
+ * used to claim was no hole at all. A machine leaking IPv6 alongside a
+ * perfectly good IPv4 tunnel reads as "throughTunnel". That combination
+ * was measured, on three of the four protocols tested. The IPv6 check at
+ * the bottom of this file exists because of it.
+ *
+ * And the comparison is only IPv4 at all where something makes it so.
+ * This file used to assume `/health/ip` was always reached over IPv4,
+ * which holds for a reading taken through a node -- every node is
+ * IPv4-only, and a full tunnel blocks IPv6 machine-wide -- and not for
+ * the baseline: on a machine with native IPv6, an endpoint with an AAAA
+ * record is reached over IPv6 first, so the baseline was the customer's
+ * IPv6 address. Against that, any IPv4 reading differs, and the check
+ * said "throughTunnel" whatever IPv4 was doing -- including going round
+ * the tunnel in the clear. Two things now stop that: the Windows client
+ * asks over IPv4 only (`setHealthIpTransport`, `health-ip-v4.ts`), and a
+ * pair of different families is never compared (`verifyEgress`).
  */
 
 /** Short: this runs while the customer is watching a spinner, and a
@@ -61,14 +71,93 @@ export const EGRESS_TIMEOUT_MS = 6000;
  */
 type IpReading = { ip: string; from: string };
 
-async function publicIp(onBody?: (body: Record<string, unknown>) => void): Promise<IpReading | null> {
+async function publicIp(
+  onBody: (body: Record<string, unknown>) => void,
+  { only, deadline }: BaselineOptions,
+): Promise<IpReading | null> {
   // The same endpoint list the rest of the app uses, and for a sharper
   // reason here: this check decides whether the customer is told they
   // are protected. Pinned to one address, a blocked control plane would
   // report a perfectly working tunnel as carrying nothing -- turning a
   // reachability problem into a false accusation against the VPN.
-  return readFrom(await apiEndpoints(), EGRESS_TIMEOUT_MS, onBody);
+  const bases = only !== undefined ? [only] : await apiEndpoints();
+  return (await readFrom(bases, EGRESS_TIMEOUT_MS, { onBody, deadline })).reading;
 }
+
+/** How a baseline is taken, when the caller has reason to narrow it. */
+export type BaselineOptions = {
+  /** Ask this one endpoint and no other -- one that already answered on
+   * this network, so the per-candidate settle does not walk the whole
+   * list again for every protocol. */
+  only?: string;
+  /** Absolute time (epoch ms) after which no further endpoint is asked,
+   * and no request outlives. Without one, each endpoint gets its own
+   * full timeout and the list can take many of them. */
+  deadline?: number;
+};
+
+/** What asking the list produced: a reading, and -- whether or not there
+ * was one -- whether anything answered at all.
+ *
+ * The second half is the difference between "our API is having a bad
+ * day" and "nothing gets through this tunnel", and the two used to be
+ * the same `null`. Every base is https, so an HTTP status of any kind --
+ * the 502 every mirror and the CDN return while the backend container is
+ * being rebuilt, say -- can only have come from our own CDN, mirror or
+ * panel, after a TLS handshake with one of our names. A censor cannot
+ * forge one, and packets that made that round trip were not black-holed.
+ */
+type ReadResult = { reading: IpReading | null; answered: boolean };
+
+/** What one `/health/ip` request came back with: the HTTP status, and
+ * the parsed body when there was a JSON one. */
+export type HealthIpAnswer = { status: number; body: unknown };
+
+/** How one `/health/ip` request is made. Resolves with whatever HTTP
+ * answer came back, of any status; rejects only when none did -- that
+ * difference is `ReadResult.answered`. */
+export type HealthIpTransport = (base: string, timeoutMs: number) => Promise<HealthIpAnswer>;
+
+/** The default: tauri-plugin-http's fetch, which lets the system choose
+ * the address family. What the mobile app, which shares this file, uses. */
+const fetchTransport: HealthIpTransport = async (base, timeoutMs) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}/health/ip`, { signal: controller.signal });
+    const body: unknown = res.ok ? await res.json().catch(() => null) : null;
+    return { status: res.status, body };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+let transport: HealthIpTransport = fetchTransport;
+
+/** Replaces how `/health/ip` is asked. The Windows client installs an
+ * IPv4-only transport at startup (`health-ip-v4.ts`, from `main.tsx`), so
+ * the baseline and every later reading are the same family. */
+export function setHealthIpTransport(next: HealthIpTransport): void {
+  transport = next;
+}
+
+/** Which family an address reported by `/health/ip` belongs to. An
+ * IPv4-mapped IPv6 literal is the IPv4 address it carries. */
+function familyOf(ip: string): 4 | 6 {
+  return plainAddress(ip).includes(":") ? 6 : 4;
+}
+
+/** An address as compared: an IPv4-mapped IPv6 literal is the IPv4
+ * address it carries, so one server writing the same address two ways
+ * cannot read as a change of route. */
+function plainAddress(ip: string): string {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
+  return mapped ? mapped[1] : ip;
+}
+
+/** Below this much of a deadline, no further endpoint is asked: three
+ * round trips (TCP, TLS 1.3, the request) do not fit in it off a LAN. */
+const MIN_REQUEST_MS = 10;
 
 /** The first answer from `bases`, tried in order.
  *
@@ -79,27 +168,54 @@ async function publicIp(onBody?: (body: Record<string, unknown>) => void): Promi
 async function readFrom(
   bases: string[],
   timeoutMs: number,
-  onBody?: (body: Record<string, unknown>) => void,
-): Promise<IpReading | null> {
+  {
+    onBody,
+    deadline,
+  }: {
+    onBody?: (body: Record<string, unknown>) => void;
+    /** Epoch ms. The walk stops there, and the request in flight is
+     * given only what is left -- the list holds a dozen endpoints, and
+     * through a tunnel that black-holes everything, a walk at six
+     * seconds each was a minute before the health poll could say so. */
+    deadline?: number;
+  } = {},
+): Promise<ReadResult> {
+  let answered = false;
   for (const base of bases) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let budget = timeoutMs;
+    if (deadline !== undefined) {
+      const left = deadline - Date.now();
+      // Not `<= 0`. A timer can fire a millisecond before `Date.now()`
+      // reaches the deadline it was set for, so the request that was
+      // given the whole remainder could time out with a sliver still
+      // "left" -- and the next endpoint was then asked with a budget no
+      // TLS handshake could fit in. Caught as a flaky test, where the
+      // stand-in for that next endpoint answers at once.
+      if (left < MIN_REQUEST_MS) break;
+      budget = Math.min(budget, left);
+    }
     try {
-      const res = await fetch(`${base}/health/ip`, { signal: controller.signal });
-      if (!res.ok) continue;
-      const body = (await res.json()) as { ip?: string };
-      if (body.ip) {
-        onBody?.(body);
-        return { ip: body.ip, from: base };
+      const res = await transport(base, budget);
+      // Set before the status is looked at: an error page is still an
+      // answer, and it is the only thing that tells an outage of ours
+      // apart from a tunnel carrying nothing.
+      answered = true;
+      if (res.status < 200 || res.status >= 300) continue;
+      const body = res.body;
+      if (body !== null && typeof body === "object" && typeof (body as { ip?: unknown }).ip === "string") {
+        const ip = (body as { ip: string }).ip;
+        if (ip) {
+          onBody?.(body as Record<string, unknown>);
+          return { reading: { ip, from: base }, answered };
+        }
       }
     } catch {
-      // Try the next one. Exhausting the list returns null, which the
-      // caller already treats as "no evidence" rather than as failure.
-    } finally {
-      clearTimeout(timer);
+      // Try the next one. Exhausting the list returns no reading, which
+      // the caller already treats as "no evidence" rather than as
+      // failure.
     }
   }
-  return null;
+  return { reading: null, answered };
 }
 
 /** The address the world saw before connecting, and who reported it.
@@ -118,7 +234,8 @@ export type BaselineIp = IpReading;
  * own. See network-identity.ts. A baseline that could not be taken at
  * all leaves the held network alone -- no answer is not evidence of a
  * different network. */
-export const captureBaselineIp = (): Promise<IpReading | null> => publicIp((body) => rememberNetwork(body));
+export const captureBaselineIp = (options: BaselineOptions = {}): Promise<IpReading | null> =>
+  publicIp((body) => rememberNetwork(body), options);
 
 export type EgressVerdict =
   /** The exit address changed: traffic is provably leaving via the VPN. */
@@ -129,11 +246,12 @@ export type EgressVerdict =
   /** Nothing answered. Either the tunnel is black-holing traffic or the
    * connection is genuinely down; both mean the customer is not working. */
   | { state: "unreachable" }
-  /** No comparison was possible: either there is no baseline at all, or
-   * the two readings did not come from the same endpoint and so are not
-   * measuring the same thing. Reported rather than guessed, so the UI
-   * can withhold a verdict instead of inventing one in either
-   * direction. */
+  /** No comparison was possible: either there is no baseline at all, the
+   * two readings did not come from the same endpoint and so are not
+   * measuring the same thing, or our API gave no address while traffic
+   * is plainly getting out (an outage of ours, not of the tunnel).
+   * Reported rather than guessed, so the UI can withhold a verdict
+   * instead of inventing one in either direction. */
   | { state: "indeterminate"; exitIp: string | null };
 
 export type VerifyOptions = {
@@ -150,6 +268,11 @@ export type VerifyOptions = {
    * health poll) the fallback stays.
    */
   sameEndpointOnly?: boolean;
+  /** A ceiling on the whole walk, not just on each endpoint. The health
+   * poll sets one: through a dead tunnel every endpoint times out, and
+   * without it the first sign of that came a minute after the tunnel
+   * died. */
+  totalMs?: number;
 };
 
 /** Compares the address the world sees now against the one it saw before
@@ -194,17 +317,74 @@ export async function verifyEgress(
   baseline: BaselineIp | null,
   options: VerifyOptions = {},
 ): Promise<EgressVerdict> {
-  const { attemptMs = EGRESS_TIMEOUT_MS, sameEndpointOnly = false } = options;
+  const { attemptMs = EGRESS_TIMEOUT_MS, sameEndpointOnly = false, totalMs } = options;
+  const deadline = totalMs === undefined ? undefined : Date.now() + totalMs;
   const bases =
     sameEndpointOnly && baseline !== null ? [baseline.from] : await apiEndpoints();
-  const reading = await readFrom(bases, attemptMs);
+  const { reading, answered } = await readFrom(bases, attemptMs, { deadline });
 
-  if (reading === null) return { state: "unreachable" };
+  // No address from any of ours. Two very different things look like
+  // that from here: a tunnel black-holing everything, which is what this
+  // check exists to catch, and an outage of ours under a tunnel that is
+  // fine -- our panel host down, the CDN refusing the node's exit, or a
+  // 502 from every mirror while the backend is being redeployed. Read as
+  // the first, the second turned every connected customer "degraded" at
+  // once, and two of those in a row ran the automatic ladder: a working
+  // tunnel torn down, every protocol then rejected against the same
+  // outage, the customer left disconnected and failing open.
+  //
+  // A second, independent instrument tells them apart where there is
+  // one (the Windows client): a verified TLS handshake with a public
+  // resolver. If that answers, traffic is getting out and the silence is
+  // ours -- no verdict. If it does not, it is the tunnel, error pages or
+  // not: the connected node's own mirror is on the node's address, which
+  // is routed around the tunnel, so its 502 says nothing about whether
+  // the tunnel carries anything.
+  //
+  // Where there is no such instrument (the mobile app, which shares this
+  // file), an error page from one of ours is the evidence there is: it
+  // came back over TLS with one of our names, so packets made a round
+  // trip, and that is "no verdict". Silence is still unreachable there.
+  if (reading === null) {
+    const internet = await ipv4Reaches();
+    const flowing = internet ?? answered;
+    return flowing ? { state: "indeterminate", exitIp: null } : { state: "unreachable" };
+  }
   if (baseline === null) return { state: "indeterminate", exitIp: reading.ip };
   if (reading.from !== baseline.from) return { state: "indeterminate", exitIp: reading.ip };
-  return reading.ip === baseline.ip
+  // Two families are two different questions, like two endpoints. An
+  // IPv6 baseline -- a dual-stack machine reaching an endpoint with an
+  // AAAA record before connecting -- against the IPv4 reading every full
+  // tunnel produces differs whatever IPv4 did, and called that
+  // "throughTunnel" with the customer's own IPv4 address on screen as
+  // the exit. The Windows client now asks over IPv4 only, so this does
+  // not fire there; it is what keeps the mobile app, and anything that
+  // ever skips that, from reading a non-comparison as proof.
+  if (familyOf(reading.ip) !== familyOf(baseline.ip)) {
+    return { state: "indeterminate", exitIp: reading.ip };
+  }
+  return plainAddress(reading.ip) === plainAddress(baseline.ip)
     ? { state: "bypassingTunnel", exitIp: reading.ip }
     : { state: "throughTunnel", exitIp: reading.ip };
+}
+
+/** Whether the public IPv4 internet answers from here, asked only when
+ * none of our own endpoints gave an address. See `vpn::probe_ipv4_egress`:
+ * a TLS handshake whose certificate verified, never a bare TCP one, which
+ * Xray's tunnel answers locally whether or not the node is there.
+ *
+ * In the Rust side, for the reason `ipv6Reaches` gives: the HTTP
+ * permission would refuse any address that is not ours.
+ *
+ * Never throws. Null when the command could not be asked -- the mobile
+ * app, which shares this file and does not register it -- which is no
+ * evidence either way, and the caller falls back to what it had. */
+async function ipv4Reaches(): Promise<boolean | null> {
+  try {
+    return (await invoke<boolean>("probe_ipv4_egress")) === true;
+  } catch {
+    return null;
+  }
 }
 
 /** How often a new attempt starts while a tunnel is being checked. */
@@ -269,6 +449,12 @@ export function confirmEgressWithin(
       })
         .then((verdict) => {
           if (verdict.state === "throughTunnel") finish(verdict);
+          // With no baseline there is no proof to wait for: the best any
+          // later attempt can say is this. Waiting out the budget only
+          // held a customer whose network will not let us take one --
+          // our API down, or every address filtered -- on a spinner for
+          // thirty seconds before the handshake was even asked.
+          else if (baseline === null && verdict.state === "indeterminate") finish(verdict);
           else last = verdict;
         })
         // A rejection is no evidence either way; the next attempt is
@@ -286,9 +472,11 @@ export function confirmEgressWithin(
  * The check at the top of this file compares one address against
  * another. That is a complete answer for IPv4 and no answer at all for
  * IPv6, because a machine can have both families and they can behave
- * differently: `/health/ip` is reached over IPv4, returns the node's
- * address, and the comparison says "throughTunnel" -- while the same
- * machine's IPv6 walks out of the physical NIC in clear text.
+ * differently: through a full tunnel `/health/ip` is reached over IPv4
+ * (on Windows it is only ever asked over IPv4; see the note at the top),
+ * returns the node's address, and the comparison says "throughTunnel" --
+ * while the same machine's IPv6 walks out of the physical NIC in clear
+ * text.
  *
  * That is not hypothetical. It is what was measured on client 0.9.25
  * with plain full tunnel and split tunnel off, on OpenVPN, IKEv2 and

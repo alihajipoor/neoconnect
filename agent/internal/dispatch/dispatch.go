@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane/pb"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/common"
@@ -79,15 +81,24 @@ type Dispatcher struct {
 	// Protocols whose addresses only exist while a client is connected.
 	discoverers map[string]AddressDiscoverer
 
-	// mu guards the two maps below, which the reconcile loop reads on the
+	// mu guards the maps below, which the reconcile loop reads on the
 	// stats tick while Execute writes to them from the command stream.
 	mu sync.Mutex
 	// What the control plane said each user is allowed, kept because the
 	// address to apply it to may not exist until they connect.
 	rateLimits map[string]rateLimit
 	// protocol -> userID -> the address currently shaped for them, so a
-	// reconnect on a different address does not strand the old rule.
+	// reconnect on a different address does not strand the old rule, and
+	// a re-asserted cap that is already in place is not applied again.
 	shapedAddresses map[string]map[string]string
+	// protocol -> users whose rule in shapedAddresses carries a cap that
+	// has since changed, for protocols whose addresses appear at connect
+	// time. The address stays recorded so the rule can still be found and
+	// removed; this says it has to be applied again. See applyRateLimit.
+	staleCaps map[string]map[string]bool
+	// protocol -> when its root qdisc was last seen in place. See
+	// shapingIntact.
+	rootSeenAt map[string]time.Time
 }
 
 func New() *Dispatcher {
@@ -97,6 +108,8 @@ func New() *Dispatcher {
 		discoverers:     make(map[string]AddressDiscoverer),
 		rateLimits:      make(map[string]rateLimit),
 		shapedAddresses: make(map[string]map[string]string),
+		staleCaps:       make(map[string]map[string]bool),
+		rootSeenAt:      make(map[string]time.Time),
 	}
 }
 
@@ -124,6 +137,25 @@ func provisionerKey(protocol, transport string) string {
 		return protocol
 	}
 	return protocol + "|" + transport
+}
+
+// wireProtocol is the protocol a registry key reports under: the Protocol
+// enum the control plane knows, without the transport only the agent's
+// own lookup needs.
+//
+// Reports used to carry the key itself, so everything the WebSocket
+// inbound's provisioner counted went out as "XRAY_VLESS_TLS|WS" -- a
+// protocol no backend list contains. Its session counts walked past the
+// filter that drops Xray's 60-second tail (ConcurrencyService's
+// COUNTS_IGNORED), putting back the false "two devices" a clean switch
+// from PC to phone used to produce; and a usage delta under that label
+// would be dropped as an unknown protocol. Found by the 2026-10-06
+// review.
+func wireProtocol(key string) string {
+	if i := strings.IndexByte(key, '|'); i >= 0 {
+		return key[:i]
+	}
+	return key
 }
 
 func describeTarget(protocol, transport string) string {
@@ -167,7 +199,7 @@ func (d *Dispatcher) CollectStats(ctx context.Context) ([]common.UsageDelta, []e
 			continue
 		}
 		for i := range protoDeltas {
-			protoDeltas[i].Protocol = protocol
+			protoDeltas[i].Protocol = wireProtocol(protocol)
 		}
 		deltas = append(deltas, protoDeltas...)
 	}
@@ -217,7 +249,7 @@ func (d *Dispatcher) CollectSessionCounts() ([]SessionCount, []error) {
 		for user, n := range perUser {
 			counts = append(counts, SessionCount{
 				ExternalUserID:  user,
-				Protocol:        protocol,
+				Protocol:        wireProtocol(protocol),
 				DistinctSources: uint32(n),
 			})
 		}
@@ -328,29 +360,130 @@ func (d *Dispatcher) executeRouteCommand(ctx context.Context, cmd *pb.Command) (
 // faster than their plan, which is a billing discrepancy rather than an
 // outage. Failing here would instead retry the whole provisioning and
 // leave them with no VPN at all.
+//
+// Idempotent, because the control plane's re-asserts carry the caps too
+// (to agents new enough for this): every CREATE_USER for every capped
+// user, every 60 s. Before that, caps arrived only at first provisioning
+// and on a plan edit, and lived only here, in memory -- so an agent
+// restart (every rollout) left every OpenVPN customer who reconnected
+// afterwards unshaped, and a `wg-quick` restart or a reboot did the same
+// for WireGuard, until an admin happened to edit the plan. Re-applying on
+// each re-assert instead would remove and re-add every capped user's tc
+// rules once a minute: a moment uncapped each time, queued packets
+// dropped, a dozen tc processes per user.
+//
+// So it records the cap and applies only what changed. A cap that differs
+// from the one recorded is re-applied wherever the user is shaped. For a
+// protocol whose addresses appear at connect time, ReconcileShaping does
+// the applying. For one whose address comes with the command, a user
+// already shaped at that address with that cap is left alone -- unless
+// the interface's root qdisc has gone, which means every rule on it went
+// too.
 func (d *Dispatcher) applyRateLimit(ctx context.Context, payload commandPayload) {
 	if payload.DownloadMbps == 0 && payload.UploadMbps == 0 {
 		return
 	}
+	limit := rateLimit{payload.DownloadMbps, payload.UploadMbps}
+
 	// Remembered regardless of whether it can be applied right now: for a
 	// protocol that assigns addresses at connect time, this is the only
 	// record of what the user is allowed when they later come online.
 	d.mu.Lock()
-	d.rateLimits[payload.ExternalUserID] = rateLimit{payload.DownloadMbps, payload.UploadMbps}
+	previous, known := d.rateLimits[payload.ExternalUserID]
+	changed := !known || previous != limit
+	d.rateLimits[payload.ExternalUserID] = limit
+	if changed {
+		if _, connectTime := d.discoverers[payload.Protocol]; connectTime && d.shapedAddresses[payload.Protocol][payload.ExternalUserID] != "" {
+			// Marked stale rather than forgotten. The record is also how
+			// ReconcileShaping finds this rule to remove when the client
+			// disconnects: forgotten, a client that left before the next
+			// pass left its old cap on that pool address, inherited by
+			// whoever is handed it next -- for good, if they are uncapped.
+			// Found by the second 2026-10-06 review.
+			if d.staleCaps[payload.Protocol] == nil {
+				d.staleCaps[payload.Protocol] = make(map[string]bool)
+			}
+			d.staleCaps[payload.Protocol][payload.ExternalUserID] = true
+		} else {
+			// Forgetting where they are shaped is what makes the apply below
+			// happen: the rule there carries the old cap.
+			delete(d.shapedAddresses[payload.Protocol], payload.ExternalUserID)
+		}
+	}
 	d.mu.Unlock()
 
 	s, ok := d.shapers[payload.Protocol]
 	if !ok {
-		log.Printf("rate limit ignored for %s: this protocol has no per-user address to shape", payload.Protocol)
+		if changed {
+			log.Printf("rate limit ignored for %s: this protocol has no per-user address to shape", payload.Protocol)
+		}
 		return
 	}
+	if _, connectTime := d.discoverers[payload.Protocol]; connectTime {
+		return
+	}
+
+	address := payload.Credentials["address"]
+	intact := d.shapingIntact(ctx, payload.Protocol, s)
+	d.mu.Lock()
+	already := intact && !changed && address != "" && d.shapedAddresses[payload.Protocol][payload.ExternalUserID] == address
+	d.mu.Unlock()
+	if already {
+		return
+	}
+
 	if err := s.EnsureRoot(ctx); err != nil {
 		log.Printf("rate limit for %s: %v", payload.ExternalUserID, err)
 		return
 	}
-	if err := s.Apply(ctx, payload.Credentials["address"], payload.DownloadMbps, payload.UploadMbps); err != nil {
+	d.markRootSeen(payload.Protocol)
+	if err := s.Apply(ctx, address, payload.DownloadMbps, payload.UploadMbps); err != nil {
 		log.Printf("rate limit for %s: %v", payload.ExternalUserID, err)
+		return
 	}
+	d.mu.Lock()
+	if d.shapedAddresses[payload.Protocol] == nil {
+		d.shapedAddresses[payload.Protocol] = make(map[string]string)
+	}
+	d.shapedAddresses[payload.Protocol][payload.ExternalUserID] = address
+	d.mu.Unlock()
+}
+
+// rootCheckFresh is how long a root qdisc seen in place is trusted before
+// it is looked at again. A re-assert sweep sends every user's CREATE_USER
+// within seconds, so this is one `tc qdisc show` per sweep rather than one
+// per user.
+const rootCheckFresh = 10 * time.Second
+
+// shapingIntact reports whether the rules recorded in shapedAddresses for
+// this protocol can still be there: whether its root qdisc is. When it is
+// not -- `wg-quick` recreated the interface -- or cannot be read, that
+// record is wiped, so every capped user is applied again as their
+// command arrives.
+func (d *Dispatcher) shapingIntact(ctx context.Context, protocol string, s *shaper.Shaper) bool {
+	d.mu.Lock()
+	seen, ok := d.rootSeenAt[protocol]
+	d.mu.Unlock()
+	if ok && time.Since(seen) < rootCheckFresh {
+		return true
+	}
+
+	present, err := s.RootPresent(ctx)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err == nil && present {
+		d.rootSeenAt[protocol] = time.Now()
+		return true
+	}
+	delete(d.rootSeenAt, protocol)
+	delete(d.shapedAddresses, protocol)
+	return false
+}
+
+func (d *Dispatcher) markRootSeen(protocol string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.rootSeenAt[protocol] = time.Now()
 }
 
 // clearRateLimit removes a user cap. Best-effort for the same reason: a
@@ -358,6 +491,7 @@ func (d *Dispatcher) applyRateLimit(ctx context.Context, payload commandPayload)
 func (d *Dispatcher) clearRateLimit(ctx context.Context, payload commandPayload) {
 	d.mu.Lock()
 	delete(d.rateLimits, payload.ExternalUserID)
+	delete(d.staleCaps[payload.Protocol], payload.ExternalUserID)
 	if byUser, ok := d.shapedAddresses[payload.Protocol]; ok {
 		if address := byUser[payload.ExternalUserID]; address != "" {
 			delete(byUser, payload.ExternalUserID)
@@ -435,6 +569,10 @@ func (d *Dispatcher) ReconcileShaping(ctx context.Context) {
 		for k, v := range d.rateLimits {
 			limits[k] = v
 		}
+		stale := make(map[string]bool, len(d.staleCaps[protocol]))
+		for k := range d.staleCaps[protocol] {
+			stale[k] = true
+		}
 		d.mu.Unlock()
 
 		rootReady := false
@@ -443,9 +581,9 @@ func (d *Dispatcher) ReconcileShaping(ctx context.Context) {
 			if !capped || (limit.downloadMbps == 0 && limit.uploadMbps == 0) {
 				continue
 			}
-			// Already shaped at this address -- re-applying every poll
-			// would churn tc rules for no reason.
-			if shaped[userID] == address {
+			// Already shaped at this address, with the cap as it is now --
+			// re-applying every poll would churn tc rules for no reason.
+			if shaped[userID] == address && !stale[userID] {
 				continue
 			}
 			if !rootReady {
@@ -466,6 +604,7 @@ func (d *Dispatcher) ReconcileShaping(ctx context.Context) {
 			}
 			d.mu.Lock()
 			d.shapedAddresses[protocol][userID] = address
+			delete(d.staleCaps[protocol], userID)
 			d.mu.Unlock()
 		}
 
@@ -475,6 +614,7 @@ func (d *Dispatcher) ReconcileShaping(ctx context.Context) {
 			if _, online := addresses[userID]; !online {
 				_ = s.Remove(ctx, address)
 				delete(d.shapedAddresses[protocol], userID)
+				delete(d.staleCaps[protocol], userID)
 			}
 		}
 		d.mu.Unlock()

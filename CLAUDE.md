@@ -336,6 +336,9 @@ This repo is public. Never paste credentials into commits, logs, or
 chat. When querying the database, select named columns — several tables
 carry encrypted credential blobs.
 
-Two credentials are known-exposed and still need rotating: turkey-1's
-root password and singapore-1's `agent.json` private key. See
-`docs/journal/HANDOVER-2026-08-22.md` §6.
+turkey-1's root password is known-exposed (`docs/journal/HANDOVER-2026-08-22.md`
+§6). Changing it is the owner's to do: they keep root password login on
+purpose (2026-10-07), so do not disable or rotate it, or change any
+node's sshd authentication. singapore-1's exposed `agent.json` key was
+rotated on 2026-10-07 (new pair generated on the node; the old key no
+longer authenticates).

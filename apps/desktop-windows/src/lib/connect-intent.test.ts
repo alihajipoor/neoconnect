@@ -267,7 +267,8 @@ describe("the wiring the pure functions cannot check", () => {
     // The callback is now a named `check`, invoked both on a leading
     // edge and on the interval, so the slice is taken from its
     // declaration rather than from an inline `setInterval`.
-    const start = source.indexOf("const check = async () => {");
+    // Its body is now `measure`, wrapped by a single-flight `check`.
+    const start = source.indexOf("const measure = async (): Promise<boolean> => {");
     expect(start).toBeGreaterThan(0);
     const end = source.indexOf("const id = setInterval(() => void check(), HEALTH_POLL_MS);", start);
     expect(end).toBeGreaterThan(start);

@@ -171,7 +171,7 @@ impl ClientWatch {
         // An ordinary thread is not the runtime's to wait for: it ends
         // when it notices nobody is listening, and the process can exit
         // regardless.
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name(format!("neoxify-watch-{pid}"))
             .spawn(move || {
                 // Moved in, so the handle is closed when this ends
@@ -200,20 +200,35 @@ impl ClientWatch {
                 };
                 let _ = tx.send(outcome);
             })
-            .ok();
+            .is_ok();
 
-        match rx.await {
-            Ok(true) => ExitSignal::Exited { pid },
-            // The wait returned something other than "the object is
-            // signalled". Reported rather than retried: treating an
-            // unexplained result as "still running" would leave a tunnel
-            // up on a machine whose app is gone, which is the failure
-            // this module exists to prevent. Fail towards tearing down.
-            Ok(false) => ExitSignal::Unknown { pid },
-            // The thread ended without answering, which happens when the
-            // service is shutting down. Nobody is left to tear down for.
-            Err(_) => ExitSignal::WatchAbandoned { pid },
-        }
+        signal_for(pid, spawned, rx.await.ok())
+    }
+}
+
+/// What a watch's ending means, from whether its thread ever started and
+/// what, if anything, it answered.
+///
+/// Apart from `exited` so the one case that cannot be staged in a test
+/// -- the OS refusing a thread -- is still pinned down.
+fn signal_for(pid: u32, spawned: bool, answer: Option<bool>) -> ExitSignal {
+    match (spawned, answer) {
+        // Never watched at all. Not `WatchAbandoned`, which since the
+        // stop fix (07754b1) tears nothing down: a watch that could not
+        // start must not leave the client's tunnel up with only the idle
+        // watchdog to notice the app has gone. Fail towards tearing
+        // down, as for an unexplained wait.
+        (false, _) => ExitSignal::Unwatchable { pid },
+        (true, Some(true)) => ExitSignal::Exited { pid },
+        // The wait returned something other than "the object is
+        // signalled". Reported rather than retried: treating an
+        // unexplained result as "still running" would leave a tunnel
+        // up on a machine whose app is gone, which is the failure
+        // this module exists to prevent. Fail towards tearing down.
+        (true, Some(false)) => ExitSignal::Unknown { pid },
+        // The thread ended without answering, which it does only when
+        // the service is shutting down. Nobody is left to tear down for.
+        (true, None) => ExitSignal::WatchAbandoned { pid },
     }
 }
 
@@ -277,16 +292,37 @@ fn process_image(pid: u32) -> Option<String> {
     (ok != 0).then(|| String::from_utf16_lossy(&buffer[..len as usize]))
 }
 
-/// Why a watch ended. Every variant means "do not keep this client's
-/// tunnel up"; they differ only in what gets written to the log.
+/// Why a watch ended. `Exited`, `Unknown` and `Unwatchable` mean "do not
+/// keep this client's tunnel up". `WatchAbandoned` does not: it means the
+/// service is stopping, and the stop has its own teardown -- see
+/// [`tears_down`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitSignal {
     /// The normal case: the process is gone.
     Exited { pid: u32 },
     /// The wait returned unexpectedly. Treated as an exit.
     Unknown { pid: u32 },
+    /// The watch's thread could not be started, so nothing would ever
+    /// notice the app going. Treated as an exit.
+    Unwatchable { pid: u32 },
     /// The runtime is going away, so nobody is left to tear down for.
     WatchAbandoned { pid: u32 },
+}
+
+/// Whether a watch that just ended should run the app-went-away
+/// teardown.
+///
+/// Not while the service is stopping. The stop path (main.rs) cancels
+/// what is running, queues its own full teardown and waits for it; the
+/// watch, abandoned within a second of the stop beginning, used to read
+/// that as the app going away: it logged so, cancelled the *stop's*
+/// teardown -- the job running at that moment, whose route.exe, poke and
+/// `/uninstalltunnelservice` helpers then died mid-step -- and queued a
+/// replacement the process then exited without running. An app that
+/// genuinely exits at the same moment needs nothing more: the stop's
+/// teardown is a full disconnect and a gaming disarm.
+pub fn tears_down(signal: ExitSignal, service_stopping: bool) -> bool {
+    !service_stopping && !matches!(signal, ExitSignal::WatchAbandoned { .. })
 }
 
 impl ExitSignal {
@@ -296,6 +332,9 @@ impl ExitSignal {
             Self::Exited { pid } => format!("the app (pid {pid}) exited"),
             Self::Unknown { pid } => {
                 format!("the wait on the app (pid {pid}) ended unexpectedly; treating it as gone")
+            }
+            Self::Unwatchable { pid } => {
+                format!("could not start watching the app (pid {pid}); treating it as gone")
             }
             Self::WatchAbandoned { pid } => {
                 format!("stopped watching the app (pid {pid}); the service is shutting down")
@@ -318,6 +357,30 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         )
+    }
+
+    /// A service stop is not the app going away. The watch is abandoned
+    /// within a second of a stop beginning, and treating that as an exit
+    /// cancelled the stop's own teardown mid-step.
+    #[test]
+    fn a_service_stop_does_not_run_the_app_teardown() {
+        assert!(tears_down(ExitSignal::Exited { pid: 1 }, false));
+        assert!(tears_down(ExitSignal::Unknown { pid: 1 }, false));
+        assert!(!tears_down(ExitSignal::WatchAbandoned { pid: 1 }, false));
+        // An app that really exits while the service stops: the stop's
+        // teardown already covers it.
+        assert!(!tears_down(ExitSignal::Exited { pid: 1 }, true));
+
+        // And the pipe's watch task asks before it logs or cancels.
+        let pipe = include_str!("../pipe.rs");
+        let asked = pipe.find("client_watch::tears_down(").expect("the watch task asks");
+        let noted = asked + pipe[asked..].find("\"the app went away\"").unwrap();
+        let cancelled = noted + pipe[noted..].find("engines.cancel_running()").unwrap();
+        assert!(asked < noted && noted < cancelled);
+        assert!(
+            pipe[..asked].rfind("watch.exited().await").is_some(),
+            "the check is on the watch's own signal"
+        );
     }
 
     /// The property the whole design rests on: the watch names the
@@ -436,11 +499,39 @@ mod tests {
         for signal in [
             ExitSignal::Exited { pid: 42 },
             ExitSignal::Unknown { pid: 42 },
+            ExitSignal::Unwatchable { pid: 42 },
             ExitSignal::WatchAbandoned { pid: 42 },
         ] {
             let reason = signal.reason();
             assert!(reason.contains("42"), "{signal:?} must name the pid: {reason}");
             assert!(!reason.is_empty());
         }
+    }
+
+    /// Only a watch that ran and was told to stop is "abandoned". One
+    /// whose thread the OS would not start never watched anything, and
+    /// mapping it to `WatchAbandoned` -- which it shared a branch with,
+    /// the dropped sender -- left the client's tunnel up with nothing but
+    /// the idle watchdog to notice the app had gone, once 07754b1 made
+    /// that signal tear nothing down.
+    #[test]
+    fn a_watch_that_never_started_still_tears_down() {
+        let never = signal_for(7, false, None);
+        assert_eq!(never, ExitSignal::Unwatchable { pid: 7 });
+        assert!(tears_down(never, false));
+        // Still not during a service stop, whose teardown covers it.
+        assert!(!tears_down(never, true));
+
+        assert_eq!(signal_for(7, true, Some(true)), ExitSignal::Exited { pid: 7 });
+        assert_eq!(signal_for(7, true, Some(false)), ExitSignal::Unknown { pid: 7 });
+        assert_eq!(signal_for(7, true, None), ExitSignal::WatchAbandoned { pid: 7 });
+        assert!(!tears_down(signal_for(7, true, None), false));
+
+        // And `exited` hands the spawn result over rather than dropping it.
+        let source = include_str!("client_watch.rs");
+        let exited = &source[source.find("pub async fn exited(self)").unwrap()..];
+        let exited = &exited[..exited.find("\n    }\n").unwrap()];
+        assert!(exited.contains("let spawned = std::thread::Builder::new()"));
+        assert!(exited.contains("signal_for(pid, spawned, rx.await.ok())"));
     }
 }

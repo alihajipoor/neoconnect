@@ -37,18 +37,43 @@ type Provisioner struct {
 	// a machine that happens to have WireGuard tools, so the test skipped
 	// everywhere it mattered and proved nothing.
 	lookPath func(string) (string, error)
+	// How the per-peer counters are read: `wg show <iface> transfer`.
+	// Injected so the restart case below can be tested without a kernel.
+	readTransfer func(ctx context.Context) ([]byte, error)
 
 	mu       sync.Mutex
 	lastSeen map[string][2]uint64 // pubkey -> cumulative [rx, tx] at last poll
+	// primed is false until the first successful read since this process
+	// started. That read is recorded as the baseline and reports nothing.
+	//
+	// wg's counters are cumulative from when the peer was added, and they
+	// live in the kernel, so they survive an agent restart -- which every
+	// agent rollout is, by design: the engines are left running. lastSeen
+	// does not survive it. Without a baseline, the first poll after a
+	// restart reported each peer's whole lifetime counter as new usage,
+	// billing every customer again for everything they had ever used on
+	// this node: a peer at 30 GB on a 50 GB plan, with that 30 GB already
+	// counted, went to 60 GB and was cut off for quota. Found by the
+	// 2026-10-06 review.
+	//
+	// The cost is the traffic between the old process's last poll and
+	// this one's first, under a minute of it, uncounted. That is the safe
+	// direction. Peers first seen after the baseline count from zero, as
+	// before: their counters started when they were added.
+	primed bool
 }
 
 func New(iface string) *Provisioner {
-	return &Provisioner{
+	p := &Provisioner{
 		iface:     iface,
 		sysNetDir: "/sys/class/net",
 		lookPath:  exec.LookPath,
 		lastSeen:  make(map[string][2]uint64),
 	}
+	p.readTransfer = func(ctx context.Context) ([]byte, error) {
+		return exec.CommandContext(ctx, "wg", "show", p.iface, "transfer").Output()
+	}
+	return p
 }
 
 // notServingWireguard reports whether there is no WireGuard here to poll:
@@ -126,13 +151,18 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 	if p.notServingWireguard() {
 		return nil, nil
 	}
-	out, err := exec.CommandContext(ctx, "wg", "show", p.iface, "transfer").Output()
+	out, err := p.readTransfer(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("wg show %s transfer: %w", p.iface, err)
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Only a successful read can be the baseline -- see primed. A failed
+	// one, or the early return above, leaves the next read to take it.
+	baseline := !p.primed
+	p.primed = true
 
 	var deltas []common.UsageDelta
 	seen := make(map[string]bool)
@@ -160,6 +190,9 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 			deltaTx = tx
 		}
 		p.lastSeen[pubKey] = [2]uint64{rx, tx}
+		if baseline {
+			continue
+		}
 
 		if deltaRx > 0 || deltaTx > 0 {
 			// Server rx (bytes received from the peer) is the user's

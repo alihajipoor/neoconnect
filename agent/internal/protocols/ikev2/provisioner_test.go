@@ -2,9 +2,13 @@ package ikev2
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/neoxify/neoxify-hub/agent/internal/protocols/common"
 )
 
 // A path that cannot exist, so these tests never depend on whether the
@@ -75,5 +79,187 @@ func TestSwanctlAvailableResolvesPathsAndBareNames(t *testing.T) {
 	// Bare name that is certainly not on PATH.
 	if New("x", "neoxify-definitely-not-a-real-binary").swanctlAvailable() {
 		t.Error("a bare name not on PATH should be unavailable")
+	}
+}
+
+func TestAnAgentRestartDoesNotBillSATotalsAgain(t *testing.T) {
+	// strongSwan keeps running across an agent restart and rekey_time is
+	// 0s, so a CHILD_SA's totals can cover a whole connection. A fresh
+	// agent process used to report all of it again on its first poll.
+	lines := strings.Split(filled(t), "\n")
+	firstOnly := lines[0] + "\nlist-sas reply {}\n"
+	p, f := withFake(t, firstOnly)
+	ctx := context.Background()
+
+	deltas, err := p.StatsSince(ctx)
+	if err != nil {
+		t.Fatalf("first poll: %v", err)
+	}
+	if len(deltas) != 0 {
+		t.Fatalf("the first poll after a start must be a baseline, got %+v", deltas)
+	}
+
+	// The first customer receives 1000 bytes; a second connects after the
+	// baseline, and its SA started from zero, so all of it is new.
+	f.listSAs = strings.Replace(filled(t), "bytes-out=85956", "bytes-out=86956", 1)
+	deltas, err = p.StatsSince(ctx)
+	if err != nil {
+		t.Fatalf("second poll: %v", err)
+	}
+	got := map[string][2]uint64{}
+	for _, d := range deltas {
+		got[d.ExternalUserID] = [2]uint64{d.BytesUp, d.BytesDown}
+	}
+	if len(got) != 2 || got["nx-user1"] != [2]uint64{0, 1000} || got["nx-user2"] != [2]uint64{62669, 257213} {
+		t.Fatalf("expected growth for the first customer and the new SA in full, got %v", got)
+	}
+}
+
+func TestDisablingAUserEndsOnlyTheirSession(t *testing.T) {
+	// The finding: `--terminate --eap-id` is not a swanctl option, so it
+	// failed before reaching charon, the failure was swallowed, and a
+	// disabled customer stayed connected. With the fake checking options
+	// the way swanctl does, the old code terminates nothing here.
+	p, f := withFake(t, filled(t))
+
+	if err := p.SetEnabled(context.Background(), "nx-user1", false); err != nil {
+		t.Fatalf("SetEnabled(false): %v", err)
+	}
+	if len(f.terminated) != 1 || f.terminated[0] != "1" {
+		t.Fatalf("expected exactly IKE SA 1 terminated, got %v", f.terminated)
+	}
+
+	// DELETE_USER takes the same path.
+	if err := p.RemoveUser(context.Background(), "nx-user2"); err != nil {
+		t.Fatalf("RemoveUser: %v", err)
+	}
+	if len(f.terminated) != 2 || f.terminated[1] != "2" {
+		t.Fatalf("expected IKE SA 2 terminated next, got %v", f.terminated)
+	}
+}
+
+func TestRemovingAUserWithNoSessionIsNotAnError(t *testing.T) {
+	p, f := withFake(t, filled(t))
+	if err := p.RemoveUser(context.Background(), "nx-nobody"); err != nil {
+		t.Fatalf("RemoveUser: %v", err)
+	}
+	if len(f.terminated) != 0 {
+		t.Fatalf("other customers' sessions were ended: %v", f.terminated)
+	}
+}
+
+func TestAFailedTerminateIsReported(t *testing.T) {
+	// Swallowing this is what let the old bug pass unnoticed: the command
+	// was acked as done while the session kept running.
+	p, f := withFake(t, filled(t))
+	f.terminateErr = errors.New("exit status 1")
+	if err := p.SetEnabled(context.Background(), "nx-user1", false); err == nil {
+		t.Fatal("a terminate that failed, on a session still up, must fail the command")
+	}
+}
+
+func TestASessionThatEndedOnItsOwnIsNotAFailure(t *testing.T) {
+	// The client hung up between the list and the terminate.
+	p, f := withFake(t, filled(t))
+	f.terminateErr = errors.New("exit status 1")
+	f.onTerminate = func(f *fakeSwanctl) {
+		f.listSAs = strings.Split(f.listSAs, "\n")[1] + "\nlist-sas reply {}\n"
+	}
+	if err := p.SetEnabled(context.Background(), "nx-user1", false); err != nil {
+		t.Fatalf("a session that is already gone is not a failure: %v", err)
+	}
+}
+
+func TestAFailedTerminateIsRetriedOnTheNextPoll(t *testing.T) {
+	// The control plane sends DISABLE_USER once; a command that fails is
+	// marked FAILED and never sent again. So a terminate that failed left
+	// a revoked customer connected for as long as their client stayed up.
+	p, f := withFake(t, filled(t))
+	ctx := context.Background()
+	f.terminateErr = errors.New("exit status 1")
+	if err := p.SetEnabled(ctx, "nx-user1", false); err == nil {
+		t.Fatal("the failed terminate must still fail the command")
+	}
+
+	f.terminateErr = nil
+	if _, err := p.StatsSince(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(f.terminated) != 1 || f.terminated[0] != "1" {
+		t.Fatalf("expected the next poll to end IKE SA 1, got %v", f.terminated)
+	}
+
+	// Still listed -- charon has not let go yet -- so it is ended again.
+	if _, err := p.StatsSince(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(f.terminated) != 2 {
+		t.Fatalf("expected another attempt while the SA is still listed, got %v", f.terminated)
+	}
+
+	// Gone: nothing more is tried, then or later.
+	f.listSAs = strings.Split(filled(t), "\n")[1] + "\nlist-sas reply {}\n"
+	for i := 0; i < 2; i++ {
+		if _, err := p.StatsSince(ctx); err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+	}
+	f.listSAs = filled(t)
+	if _, err := p.StatsSince(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(f.terminated) != 2 {
+		t.Fatalf("a session already seen ended was ended again: %v", f.terminated)
+	}
+}
+
+func TestADeletedUserWhoseTerminateFailedIsRetriedToo(t *testing.T) {
+	p, f := withFake(t, filled(t))
+	ctx := context.Background()
+	f.listErr = errors.New("connecting to 'unix:///var/run/charon.vici' failed")
+	if err := p.RemoveUser(ctx, "nx-user2"); err == nil {
+		t.Fatal("expected the failed list to fail the command")
+	}
+	f.listErr = nil
+	if _, err := p.StatsSince(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(f.terminated) != 1 || f.terminated[0] != "2" {
+		t.Fatalf("expected IKE SA 2 ended on the next poll, got %v", f.terminated)
+	}
+}
+
+func TestReprovisioningStopsTheRetry(t *testing.T) {
+	// Disabled, then enabled again before the retry got to it: the session
+	// is the customer's to keep.
+	p, f := withFake(t, filled(t))
+	ctx := context.Background()
+	f.terminateErr = errors.New("exit status 1")
+	_ = p.SetEnabled(ctx, "nx-user1", false)
+	f.terminateErr = nil
+	user := common.ProtocolUser{ExternalUserID: "nx-user1", Credentials: map[string]string{"username": "nx-user1", "password": "secret-1"}}
+	if err := p.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := p.StatsSince(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(f.terminated) != 0 {
+		t.Fatalf("a re-enabled customer's session was ended: %v", f.terminated)
+	}
+}
+
+func TestOnlyASuccessfulListIsTheBaseline(t *testing.T) {
+	p, f := withFake(t, filled(t))
+	ctx := context.Background()
+
+	f.listErr = errors.New("connecting to 'unix:///var/run/charon.vici' failed: No such file or directory")
+	if _, err := p.StatsSince(ctx); err == nil {
+		t.Fatal("expected the failed list to be reported")
+	}
+	f.listErr = nil
+	deltas, err := p.StatsSince(ctx)
+	if err != nil || len(deltas) != 0 {
+		t.Fatalf("the first successful list must be the baseline, got %+v, %v", deltas, err)
 	}
 }

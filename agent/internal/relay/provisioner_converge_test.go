@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	hcommand "github.com/xtls/xray-core/app/proxyman/command"
+	"github.com/xtls/xray-core/app/router"
 	rcommand "github.com/xtls/xray-core/app/router/command"
 	"github.com/xtls/xray-core/core"
 )
@@ -58,25 +59,56 @@ func (f *fakeHandler) RemoveOutbound(_ context.Context, in *hcommand.RemoveOutbo
 	return &hcommand.RemoveOutboundResponse{}, nil
 }
 
+// A stand-in for Xray's router with the same property as the outbound
+// registry: AddRule refuses a ruleTag that is already taken, in Xray's
+// own words (app/router/router.go), and there is no update. It keeps the
+// inbound tags each rule matches, which is what a stale rule gets wrong.
 type fakeRouting struct {
 	rcommand.RoutingServiceClient
 
-	rules map[string]bool
+	rules   map[string][]string // ruleTag -> inbound tags it matches
+	removes int
 }
 
-func (f *fakeRouting) AddRule(_ context.Context, _ *rcommand.AddRuleRequest, _ ...grpc.CallOption) (*rcommand.AddRuleResponse, error) {
-	// The rule half is already tolerant of its own duplicate; it is not
-	// what this test is about.
+func newFakeRouting() *fakeRouting {
+	return &fakeRouting{rules: map[string][]string{}}
+}
+
+func (f *fakeRouting) AddRule(_ context.Context, in *rcommand.AddRuleRequest, _ ...grpc.CallOption) (*rcommand.AddRuleResponse, error) {
+	msg, err := in.Config.GetInstance()
+	if err != nil {
+		return nil, err
+	}
+	cfg, ok := msg.(*router.Config)
+	if !ok || len(cfg.Rule) != 1 {
+		return nil, errors.New("fake router: expected a router.Config with one rule")
+	}
+	rule := cfg.Rule[0]
+	if _, taken := f.rules[rule.RuleTag]; taken {
+		return nil, errors.New("duplicate ruleTag " + rule.RuleTag)
+	}
+	f.rules[rule.RuleTag] = append([]string(nil), rule.InboundTag...)
 	return &rcommand.AddRuleResponse{}, nil
 }
 
+func (f *fakeRouting) RemoveRule(_ context.Context, in *rcommand.RemoveRuleRequest, _ ...grpc.CallOption) (*rcommand.RemoveRuleResponse, error) {
+	f.removes++
+	delete(f.rules, in.RuleTag)
+	return &rcommand.RemoveRuleResponse{}, nil
+}
+
 func newProvisioner(h *fakeHandler) *Provisioner {
+	return newProvisionerWith(h, newFakeRouting())
+}
+
+func newProvisionerWith(h *fakeHandler, r *fakeRouting) *Provisioner {
 	return &Provisioner{
 		handlerConn:      h,
-		routingConn:      &fakeRouting{rules: map[string]bool{}},
+		routingConn:      r,
 		tunInboundTag:    "relay-tun-in",
 		tunInterfaceName: "nx-tun0",
 		appliedProxy:     map[string]string{},
+		appliedRule:      map[string]string{},
 	}
 }
 
@@ -214,6 +246,73 @@ func TestConfigureRouteReportsAFailedRebuild(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "rebuilding") {
 		t.Fatalf("error does not say what failed: %v", err)
+	}
+}
+
+// The rule's version of the outage. An admin moves a relay entry to a
+// dedicated inbound -- the documented repair for a wrong tag -- and the
+// sweep sends CONFIGURE_ROUTE with the new tag. AddRule says "duplicate
+// ruleTag", which was taken as "already applied": the live rule kept
+// matching the old inbound, the command was acked every 60s, and the
+// customers re-provisioned onto the new inbound matched no rule at all.
+func TestConfigureRouteRebuildsARuleWhoseInboundChanged(t *testing.T) {
+	r := newFakeRouting()
+	p := newProvisionerWith(newFakeHandler(), r)
+	ctx := context.Background()
+
+	payload := payloadWithSNI("www.shatel.ir")
+	if err := p.ConfigureRoute(ctx, payload); err != nil {
+		t.Fatalf("first ConfigureRoute: %v", err)
+	}
+	if got := r.rules[tag]; len(got) != 1 || got[0] != "vless-in" {
+		t.Fatalf("expected the rule to match vless-in, got %v", got)
+	}
+
+	payload.EntryInboundTag = "vless-fr-in"
+	if err := p.ConfigureRoute(ctx, payload); err != nil {
+		t.Fatalf("second ConfigureRoute: %v", err)
+	}
+	if got := r.rules[tag]; len(got) != 1 || got[0] != "vless-fr-in" {
+		t.Fatalf("the rule still matches %v: a changed CONFIGURE_ROUTE was acked and applied to nothing", got)
+	}
+}
+
+// And, as for the outbound, an unchanged rule is left alone: a rebuild is
+// a moment in which that inbound's new connections match nothing, and
+// the sweep runs every 60s.
+func TestConfigureRouteLeavesAnUnchangedRuleAlone(t *testing.T) {
+	r := newFakeRouting()
+	p := newProvisionerWith(newFakeHandler(), r)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		if err := p.ConfigureRoute(ctx, payloadWithSNI("www.shatel.ir")); err != nil {
+			t.Fatalf("ConfigureRoute #%d: %v", i, err)
+		}
+	}
+	if r.removes != 0 {
+		t.Fatalf("an unchanged rule was torn down %d time(s)", r.removes)
+	}
+}
+
+// After an agent restart nothing says what the live rule matches, so it
+// is rebuilt once rather than assumed right.
+func TestARuleConvergesAfterAgentRestart(t *testing.T) {
+	h, r := newFakeHandler(), newFakeRouting()
+	ctx := context.Background()
+
+	stale := payloadWithSNI("www.shatel.ir")
+	if err := newProvisionerWith(h, r).ConfigureRoute(ctx, stale); err != nil {
+		t.Fatalf("pre-restart ConfigureRoute: %v", err)
+	}
+
+	fresh := stale
+	fresh.EntryInboundTag = "vless-fr-in"
+	if err := newProvisionerWith(h, r).ConfigureRoute(ctx, fresh); err != nil {
+		t.Fatalf("post-restart ConfigureRoute: %v", err)
+	}
+	if got := r.rules[tag]; len(got) != 1 || got[0] != "vless-fr-in" {
+		t.Fatalf("a restarted agent left the stale rule in place: %v", got)
 	}
 }
 

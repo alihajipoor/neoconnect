@@ -2694,6 +2694,7 @@ name = "neoconnect-desktop"
 version = "0.9.44"
 dependencies = [
  "neoconnect-ipc",
+ "reqwest 0.12.28",
  "rustls",
  "serde",
  "serde_json",
