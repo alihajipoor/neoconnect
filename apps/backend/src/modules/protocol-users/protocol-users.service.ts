@@ -11,6 +11,7 @@ import { rateLimitFor } from "./rate-limit";
 import { generateCredentials } from "./generate-credentials";
 import { KeyedLock } from "./keyed-lock";
 import { commandTarget, deleteUserPayload } from "./command-target";
+import { liveOnceActiveWhere } from "./live-credentials";
 import { sharedWireGuardReserve, wireGuardPoolSize } from "./wireguard-subnet";
 import { DeviceSlotsService } from "../device-slots/device-slots.service";
 
@@ -1181,7 +1182,17 @@ export class ProtocolUsersService {
   async setEnabled(id: string, enabled: boolean) {
     const user = await this.getRaw(id);
 
-    if (enabled) {
+    if (enabled && !(await this.liveOnceActive(id))) {
+      // Marked ACTIVE below, but not put on its node: the account is
+      // disabled, the subscription is not ACTIVE, the device-limit backstop
+      // holds it, or its device signed out. A renewal confirming after an
+      // operator disabled the customer, and a subscription reactivated
+      // under a disabled account, both came through here and sent
+      // ENABLE_USER -- and since the re-assert skips such rows, nothing ever
+      // sent the DISABLE_USER again. The re-assert puts the row back within
+      // a minute of it becoming live, so nothing more is needed here.
+      this.logger.log(`Credential ${id} marked ACTIVE but left off its node until it is live`);
+    } else if (enabled) {
       // Re-enabling needs the original credentials back, not just a flag
       // flip -- see the SetEnabled contract in agent/internal/protocols/common.
       const credentials = decryptCredentials(user.credentialsJson);
@@ -1204,6 +1215,14 @@ export class ProtocolUsersService {
       data: { status: enabled ? "ACTIVE" : "DISABLED" },
     });
     return withDecryptedCredentials(updated);
+  }
+
+  /** Whether this row would be live (liveCredentialWhere) if it were
+   * ACTIVE -- the one thing setEnabled(true) is about to change. Asked of
+   * the database with the re-assert's own definition, so the two cannot
+   * disagree about what belongs on a node. */
+  private async liveOnceActive(id: string): Promise<boolean> {
+    return (await this.prisma.protocolUser.count({ where: { AND: [{ id }, liveOnceActiveWhere()] } })) > 0;
   }
 
   private async usedWireGuardAddresses(protocolConfigId: string): Promise<string[]> {

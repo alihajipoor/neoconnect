@@ -38,8 +38,15 @@ import type { Prisma } from "@prisma/client";
  * whichever of those the other side also sets. That is how a plan's new
  * speed cap reached every plan (PlansService.reapplyRateLimits). */
 export function liveCredentialWhere(now = new Date()): Prisma.ProtocolUserWhereInput {
+  return { status: "ACTIVE", ...liveOnceActiveWhere(now) };
+}
+
+/** Everything liveCredentialWhere asks except the row's own status: the
+ * credentials that would be live if they were ACTIVE. What re-enabling one
+ * asks before it puts it back on its node (ProtocolUsersService.setEnabled),
+ * so the two cannot disagree about what belongs there. */
+export function liveOnceActiveWhere(now = new Date()): Prisma.ProtocolUserWhereInput {
   return {
-    status: "ACTIVE",
     subscription: { status: "ACTIVE", customer: { status: "ACTIVE" } },
     AND: [
       { OR: [{ sessionId: null }, { session: { is: { revokedAt: null } } }] },

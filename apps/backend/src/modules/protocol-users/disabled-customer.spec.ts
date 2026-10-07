@@ -1,5 +1,6 @@
 import { ProtocolUsersService } from "./protocol-users.service";
-import { liveCredentialWhere } from "./live-credentials";
+import { liveCredentialWhere, liveOnceActiveWhere } from "./live-credentials";
+import { encryptCredentials } from "./credentials-crypto";
 import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
 /** A customer an operator has DISABLED.
@@ -116,5 +117,67 @@ describe("a disabled customer's credentials", () => {
 
     await expect(service.switchRoute("sub-1", "route-1")).rejects.toThrow(/disabled/);
     expect(prisma.protocolUser.findFirst).not.toHaveBeenCalled();
+  });
+
+  /** setEnabled(true) as a renewal (a crypto payment confirming after the
+   * operator disabled the account) or a subscription reactivation calls it.
+   * `liveOnceActive` is the database's answer to "would this row be live
+   * if it were ACTIVE" -- 0 for a disabled customer's. */
+  function enablingService(liveOnceActive: number) {
+    const prisma = {
+      protocolUser: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: "pu-1",
+          nodeId: "node-1",
+          protocol: "WIREGUARD",
+          externalUserId: "peer-1",
+          status: "DISABLED",
+          credentialsJson: encryptCredentials({ privateKey: "k", address: "10.66.0.2/32" }),
+          protocolConfig: { transport: "TCP", inboundTag: null },
+        }),
+        count: jest.fn().mockResolvedValue(liveOnceActive),
+        update: jest.fn().mockImplementation(({ data }) =>
+          Promise.resolve({ id: "pu-1", status: data.status, credentialsJson: encryptCredentials({ privateKey: "k" }) }),
+        ),
+      },
+    };
+    const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
+    const service = new ProtocolUsersService(prisma as never, agentGateway as never, deviceSlotsStub() as never);
+    return { service, prisma, agentGateway };
+  }
+
+  it("are not put back on their nodes by re-enabling one", async () => {
+    // Re-enabling used to send ENABLE_USER whatever the account's status.
+    // The re-assert skips a disabled customer's rows, so nothing ever sent
+    // the DISABLE_USER again: a client with cached credentials connected.
+    const { service, prisma, agentGateway } = enablingService(0);
+    jest.spyOn(service["logger"], "log").mockImplementation(() => undefined);
+
+    const result = await service.setEnabled("pu-1", true);
+
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    // The row is ACTIVE all the same, so the re-assert restores it within
+    // a minute of the account being ACTIVE again.
+    expect(prisma.protocolUser.update).toHaveBeenCalledWith({ where: { id: "pu-1" }, data: { status: "ACTIVE" } });
+    expect(result.status).toBe("ACTIVE");
+    // The question asked is liveCredentialWhere's, minus the row's own
+    // status -- an ACTIVE customer and subscription among it.
+    const anyTime = expect.any(Date) as unknown as Date;
+    expect(prisma.protocolUser.count).toHaveBeenCalledWith({ where: { AND: [{ id: "pu-1" }, liveOnceActiveWhere(anyTime)] } });
+    expect(liveCredentialWhere(anyTime)).toEqual({ status: "ACTIVE", ...liveOnceActiveWhere(anyTime) });
+    expect(liveOnceActiveWhere(anyTime)).toMatchObject({ subscription: { status: "ACTIVE", customer: { status: "ACTIVE" } } });
+  });
+
+  it("are put back on their nodes by re-enabling one once the account is live", async () => {
+    const { service, agentGateway } = enablingService(1);
+
+    await service.setEnabled("pu-1", true);
+
+    expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "ENABLE_USER", {
+      protocol: "WIREGUARD",
+      transport: "TCP",
+      externalUserId: "peer-1",
+      credentials: { privateKey: "k", address: "10.66.0.2/32" },
+    });
   });
 });
