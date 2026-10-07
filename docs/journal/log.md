@@ -4206,7 +4206,12 @@ crate (Windows host). Against the old code 14 of the new tests fail
 (10 mobile, 4 desktop); the rest are controls that reproduce the review
 or pin behaviour that did not change.
 
-**UNVERIFIED:** none of it on a phone. That `health_ip_v4` builds and
-connects on Android and iOS (only the host target was compiled here);
-the dual-stack fix on a real IPv6 network; the retry against a real old
-backend.
+**COMPILED, in CI on `6fa282e` (compiles, nothing more):** the mobile
+crate with `health_ip` and reqwest for Android, in a `debug-android.yml`
+run dispatched on this branch (aarch64, throwaway key, private 7-day
+artifact; run 37571589242), and for the iOS simulator in `CI (iOS)` run
+37571567114. `ci.yml` green on the same commit (run 37571567156).
+
+**UNVERIFIED:** none of it on a phone. That `health_ip_v4` connects, and
+asks over IPv4, on a real Android or iOS network stack; the dual-stack
+fix on a real IPv6 network; the retry against a real old backend.
