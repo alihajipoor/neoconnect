@@ -25,6 +25,7 @@ import type { Customer, Subscription } from "@shared/lib/types";
 const COPY = {
   en: {
     signOut: "Sign out",
+    signingOut: "Signing out…",
     loading: "Loading your account…",
     plan: "Your plan",
     noPlanTitle: "No active plan",
@@ -48,6 +49,7 @@ const COPY = {
   },
   fa: {
     signOut: "خروج",
+    signingOut: "در حال خروج…",
     loading: "در حال بارگذاری حساب شما…",
     plan: "اشتراک شما",
     noPlanTitle: "اشتراک فعالی ندارید",
@@ -127,9 +129,20 @@ export function Account({
     CANCELLED: c.statusCancelled,
   };
 
+  // The server is told before the tokens go (it needs them to revoke the
+  // session), and on a filtered network that can take up to 8 s. Shown,
+  // so nobody closes the tab believing they are already signed out.
+  const [signingOut, setSigningOut] = useState(false);
+
   async function signOut() {
-    await logout();
-    onLoggedOut();
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      await logout();
+      onLoggedOut();
+    } finally {
+      setSigningOut(false);
+    }
   }
 
   return (
@@ -138,9 +151,11 @@ export function Account({
         <Logo />
         <button
           onClick={() => void signOut()}
-          className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          disabled={signingOut}
+          aria-busy={signingOut}
+          className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline disabled:opacity-60"
         >
-          {c.signOut}
+          {signingOut ? c.signingOut : c.signOut}
         </button>
       </header>
 
