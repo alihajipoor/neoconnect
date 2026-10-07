@@ -3554,3 +3554,93 @@ signed-in device of one account); anything on a phone (Android 0.2.23
 and the iOS build); a censored network. The VM froze twice under guest
 control (2026-10-05 and 2026-10-06, both as a WireGuard or IKEv2 test
 began) and needed a hard reset; cause unknown, no product effect seen.
+
+## 2026-10-06 — backend review fixes (branch `claude/review-fixes-backend`)
+
+**Status:** done on the branch and pushed; not merged, not deployed.
+**Touches:** `apps/backend` (billing, customer-auth, customers,
+protocol-users, subscriptions, auth, agent-gateway, routes, health,
+client-attempts, the global throttle guard), migrations
+`20261009_admin_mfa_last_step` and `20261010_route_entry_health`, one
+comment in `installer/lib/agent.sh`.
+
+The 31 confirmed backend findings of the full review, which come down
+to 20 distinct problems, plus M33 (WebSocket session counts). One commit
+per problem; the commit messages say why. The ones touching money and
+live access: `provisionAll` minting working credentials for
+PENDING/CANCELLED/EXPIRED/SUSPENDED subscriptions (da575bb); a declined
+Stripe attempt writing off the PaymentIntent so the later success was
+dropped (771a0d4); StoreKit JWS accepted on any chain to Apple Root
+CA - G3 (90332ed); the unauthenticated verify-email-code branch granting
+a trial and returning decrypted credentials (a974423).
+
+### What a deploy does -- read before deploying
+
+Backend only. No client or agent release depends on it, and no client
+needs it first. Both migrations are two nullable columns between them,
+and `migration-safety.spec.ts` checks both; their SQL matches what
+`prisma migrate diff` generates from main's schema.
+
+- **First boot switches off unpaid access.** The backfill removes the
+  ACTIVE credentials of PENDING and CANCELLED subscriptions and disables
+  those of EXPIRED and SUSPENDED ones, and logs the counts at warn. Anyone
+  using one loses that tunnel at deploy, which is the fix. Count first,
+  read-only:
+  `SELECT s.status, count(*) FROM protocol_users pu JOIN subscriptions s ON s.id = pu."subscriptionId" WHERE pu.status = 'ACTIVE' AND s.status <> 'ACTIVE' GROUP BY s.status;`
+- **Customers disabled before this deploy keep their node credentials**
+  until each is saved as DISABLED again in the panel (85f082b). Their
+  refresh is refused from the deploy, so their apps lose the API within
+  15 minutes, but a connected tunnel keeps working. Which ones:
+  `SELECT c.id FROM customers c WHERE c.status = 'DISABLED' AND EXISTS (SELECT 1 FROM protocol_users pu JOIN subscriptions s ON s.id = pu."subscriptionId" WHERE s."customerId" = c.id AND pu.status = 'ACTIVE');`
+- **Relay routes read OFFLINE** in the route list until their entry node
+  acks a CONFIGURE_ROUTE: seconds after it reconnects, at most a minute.
+  That status is display and a tiebreak in the apps; it gates nothing.
+- **iOS purchases:** before `APPLE_BUNDLE_ID` is given to the production
+  container, redeem one sandbox purchase from a real iPhone. The new chain
+  check was only run against Apple-shaped chains under a throwaway root.
+
+### Proven, on this PC
+
+Backend 99 suites / 1,182 tests, typecheck and lint clean. Each fix
+has a test that fails on the code before it; the commit message says how
+many. `bash -n installer/lib/agent.sh`; shellcheck is not installed here.
+
+### Unverified
+
+- Nothing ran against production, a node, Stripe, Apple, Plisio or
+  NowPayments. The Stripe retry-on-one-PaymentIntent fix is unit-tested
+  on the webhook handler, not replayed from Stripe's test mode; the
+  Plisio reconcile follows the documented API and was never called.
+- That `req.ip` is the node's address for mirror and tunnel traffic is
+  from reading the code and the panel nginx template, plus the
+  reviewer's local proxy-addr run. The production panel nginx is
+  hand-maintained and was not read.
+- `/health/ip` now signs a network only for the address nginx saw, or
+  Cloudflare's header when that address is a Cloudflare edge. A
+  customer whose baseline goes through a node mirror pointed at the
+  origin (`NEOXIFY_PANEL_ORIGIN`) gets no token now. Whether any
+  production mirror is set up that way is not known.
+- The relay entry health assumes every agent acks CONFIGURE_ROUTE
+  success. Read from the code: every command is acked, and re-asserts
+  have been idempotent since b267f5f (in v0.2.9). The nodes' versions
+  were not checked.
+
+### Not fixed, and why
+
+- **Sign-in, sign-up, password reset, the sign-in challenge and
+  LoginGuard's per-source counters still count per address.** Customers
+  behind one node mirror still share those buckets, and anyone can empty
+  them. Signed-in requests and refresh no longer share (00b27cc). The real
+  client is in X-Forwarded-For, but tunnel traffic arrives from the same
+  node address with a header the customer wrote. Trusting it would give
+  every connected customer a fresh sign-in budget per forged header. The
+  fix is for the mirror to authenticate its hop (a per-node secret header
+  or a client certificate). That is an installer change and a rollout to
+  every node: an owner decision.
+- grpc-js `call.destroy()` sends the agent no status on any close path
+  (noted in c289e79); its own change.
+- Re-signing up with the same Apple ID after deleting an account needs
+  Apple's token revocation (noted in d240bbe).
+- The relay Xray template's default outbound is still `direct`, so a new
+  relay would not fail closed the way ir1 does by hand. That is a node
+  config question, not a backend one.
