@@ -4991,3 +4991,177 @@ plan has no gaming).
 repair once ("couldn't be repaired"), which booted on Continue. The VM
 now runs with 2 vCPUs instead of 4, under which the 0.9.46 install
 completed; whether that helps is not established.
+
+## 2026-10-07 — automatic reconnect after a drop (branch `claude/auto-reconnect`)
+
+**Status:** pushed to `claude/auto-reconnect`, off `main` at `454112b`.
+Not merged, not tagged, not released. **Not run in the VM** -- the
+coordinating session is to prove it there by killing the engine (list
+under *Unverified*). Nothing on this branch has carried a packet.
+**Touches:** JS/TS only. Shared: `apps/desktop-windows/src/lib/`
+`auto-reconnect.ts` (new), `failover.ts`, `connection-evidence.ts`,
+`connect-intent.ts`, `i18n.tsx`; `components/RepairNetwork.tsx`; both
+dashboards; `apps/mobile/src/lib/reconnect-steps.ts` (new) and
+`apps/mobile/src/App.tsx`. No Rust, no Kotlin, no Swift, no backend.
+
+Owner decision 2026-10-07: when the tunnel ends without the customer
+asking, the app reconnects instead of waiting for Connect. Until now the
+desktop said "VPN connection lost" within ~1-2 s (engine-death detection,
+the 2026-10-06 entries) and waited; the phones said "You're not
+protected" on the next fifteen-second poll and waited.
+
+**Fail open is unchanged and no kill switch was added.** While the
+tunnel is down nothing is blocked; the screen says "Reconnecting..." with
+"The tunnel closed. Until it's back, your traffic is going out without
+Neoxify and is not protected." (Persian too). "You're protected" comes
+back only from the reconnect pass's own egress proof, exactly as after a
+press of Connect -- the episode never claims anything itself.
+
+### The state machine (`auto-reconnect.ts`, one instance per app)
+
+| State | Means | Leaves on |
+|---|---|---|
+| `idle` (+ `lost`) | nothing to reconnect; `lost` = an episode ended without a tunnel, headline "VPN connection lost" | a pass landing (`armed`); any press clears `lost` |
+| `armed` | a tunnel the app vouches for: a pass that landed (clock starts), or one adopted from the service | a drop (`waiting`, or `idle`+lost); a press, the device limit, a sign-out (`idle`); the app's own teardown -- the mid-session failover landing nothing, a recheck finding nothing -- forgets it (`idle`) |
+| `waiting` | between attempts; `blockedBy` network / foreground / null | its backoff timer (`attempting`); network or app back (`attempting` at once); a press (`idle`) |
+| `attempting` | one ladder pass running | landed (`armed`, quick-death count kept); failed (`waiting`, next attempt); stop outcome (`idle`+lost) |
+
+**Triggers.** Windows: `publishDrop`, the one place a drop is said,
+after `droppedFromPoll` (liveness poll, 1 s; health poll, 15 s) has ruled
+out our own teardowns and disturbances; and `droppedUnseen` -- the same
+rule with "the screen was showing a tunnel" replaced by "the app is armed
+for this session" -- when a screen mounting back from Settings finds the
+tunnel verifiably gone (both polls unmount with the screen, so that drop
+was never seen before). Phones: the health poll's "nothing is running"
+while a tunnel is shown, now also run as the app comes to the front, and
+`droppedWhileAway` on a screen mounting.
+
+**Exclusions** (no episode, or it ends): any customer press except a
+recheck -- Connect (takes over at once), Disconnect, stopping a pass,
+"Stop reconnecting", "Use on this device instead", a change of mode or
+server, a repair; a sign-out or expired session (`sessionGeneration`,
+checked at the drop and before every attempt); the device limit -- a
+displacement or refusal while connected, a teardown it still owes, a
+refusal on the reconnect's own claim (the refusal card shows); a
+subscription not `ACTIVE`, or a pass failing on `concurrentLimit`,
+`quotaExhausted`, `subscriptionInactive`; gaming mode; nothing usable to
+dial (phones); on phones, another VPN still holding the device or the VPN
+permission gone. App quit and upgrade need nothing: the episode lives in
+the process, and a fresh process starts `idle` (an adopted tunnel is
+armed, a missing one is not a drop).
+
+**Backoff.** Immediate, then 2 s, 5 s, 10 s, 20 s, 30 s -- six passes at
+most. No new pass starts once 120 s have gone on backoff and passes (a
+running pass is never interrupted); a pass that never returns counts as
+failed after 180 s. Three deaths in a row within 60 s of coming up stop
+it without another attempt. No network (`navigator.onLine` false), or a
+phone app in the background, pauses the episode without spending
+attempts or budget, for 30 minutes at most -- then "VPN connection lost".
+
+### What is shared and what is per platform
+
+- Shared (desktop `src/lib`, mobile through `@shared`): the episode, its
+  order (`orderCandidates` `resumeRouteId` -- the route that was up
+  first, ahead of the pin, then the normal order), the headline
+  (`headlineFor` `reconnecting`, never over a tunnel that is up or over
+  "unknown"), the orb label ("Reconnect now" between attempts --
+  `pressFor`), the words, and the telemetry shape.
+- Windows: the triggers above; each attempt is `runLadder({ automatic,
+  reconnect })`, so the device-limit claim behaves as for the mid-session
+  failover (standing check first when the slot was never confirmed).
+  The slot is now given back at a drop when nothing will reconnect;
+  during an episode the reconnect's claim renews it.
+- Phones: attempts wait for the app to be in front
+  (`setRequiresForeground`). There is no background work to run them
+  from -- Android's tunnel service is a separate process with no
+  JavaScript, iOS suspends the app -- so a drop in the background is
+  **reconnected when the app is next opened**, and says
+  "Reconnecting..." then. Before each attempt (`reconnectPreflight`): a
+  bounded wait for the device to be out of every VPN (another app's VPN
+  stops the episode, *before* the permission is asked, since on Android
+  `VpnService.prepare` can itself move the VPN back to a once-allowed
+  app -- read from AOSP, not observed), then the permission, never the
+  consent dialog. The phone's headline and orb label now come from the
+  shared tables; it gains "VPN connection lost", which it never had.
+- iOS: **no on-demand rules.** NEVPNManager could reconnect in the
+  background by itself, but turning that on silently was ruled out; the
+  gap is that an iOS tunnel that stops while the app is in the background
+  stays down until the app is opened. Turning on-demand on is a product
+  decision (and a profile change customers would see in Settings).
+
+**Telemetry**, within the current backend DTO (its enums are not
+extended): a reconnect's pass goes out as `CONNECT` with a `reason`
+starting `auto-reconnect attempt N of at most 6 after the tunnel
+dropped` -- `SUCCESS` kept when it lands (the per-ISP data reads only the
+rungs), a failure filed as `OTHER` with what it would have been in the
+reason. Every episode that ends without a tunnel files one
+`CONNECT`/`OTHER` row, `auto-reconnect stopped after N attempt(s): ...`
+or `auto-reconnect not attempted after the tunnel dropped: ...`; a
+sign-out files nothing. The panel does not yet filter on the prefix.
+
+### Proven -- tests on this PC
+
+- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **924
+  passed, 58 files** (853 / 56 on `main`); `pnpm typecheck` clean.
+- `apps/mobile`: `pnpm test` **156 passed, 11 files** (140 / 10 on
+  `main`); `npx tsc --noEmit -p .` clean.
+- No Rust touched, so `cargo test --workspace` was not run. Kotlin and
+  Swift cannot be built here and were not changed.
+- The episode, on a clock the test owns: the attempt start times
+  (0, 2, 7, 17, 37, 67 s after the drop), the budget (four 30-second
+  passes, then stop), the quick-death stop and its reset, offline and
+  background pauses that cost nothing, the 30-minute ceiling (also when
+  the clock jumps past it with no timer firing, as after sleep), a press
+  winning over a pass that reports later, sign-out at the drop and
+  between attempts, the device-limit refusal, a wedged pass, a second
+  drop during an episode, no re-arming of a tunnel the customer asked to
+  be rid of, no vouching across sessions. The wiring in both dashboards
+  by source assertion, as for the liveness poll.
+- 22 mutations of the shared logic and 10 of the phone's, each removing
+  one rule; every one fails a test. One survived at first (the ceiling
+  check on waking) and got its test.
+
+### Unverified -- needs the VM, or a phone
+
+In `Neoxify-Test`, NIC capture (`pktmon --comp nics`) and the app's text
+on one clock, for each of: `xray.exe` killed on the four Xray profiles,
+full tunnel and Custom mode; `openvpn.exe` killed; the
+`WireGuardTunnel$neoconnect` process killed; `rasdial Neoxify
+/disconnect`. Expected: "Reconnecting..." within ~1-2 s, packets direct
+meanwhile (fail open), "You're protected" only after the new pass's
+egress proof with the node's exit IP, the same route as before when it
+still works, and telemetry rows with the `auto-reconnect` reason. Then:
+
+- Killing the engine three times within a minute: two reconnects, then
+  "VPN connection lost" and no more passes.
+- The guest's adapter disabled after a kill: the offline hint, no
+  passes; re-enabled: a pass at once. Whether WebView2's
+  `navigator.onLine` follows the adapter in the guest is not known.
+- A kill while Settings is open: on return, "Reconnecting..." -- the
+  `droppedUnseen` path.
+- A kill while the window is minimized: WebView2 throttles timers in a
+  minimized window to about one a minute (see the heartbeat note in
+  `src-tauri/src/lib.rs`), so detection and each backoff step may take
+  that long. Not measured.
+- A device-limit refusal on a reconnect's claim (needs a second device
+  on a limited plan): the card, "VPN connection lost", no further passes.
+
+**Known gaps, not decided here:**
+
+- A disconnect made outside the app is indistinguishable from a drop and
+  is reconnected: Windows' own VPN flyout for IKEv2's RAS entry, or the
+  WireGuard tunnel service stopped by hand; Android's VPN settings
+  "Disconnect" when it leaves the permission in place (believed to, from
+  AOSP; unobserved); the iOS Settings toggle, on the next foreground.
+  Telling them apart needs native signals (Android `onRevoke`, iOS
+  `fetchLastDisconnectError`) that the IPC and plugins do not carry.
+- Android IKEv2: `Ikev2Engine.isUp` reads a platform tunnel that is
+  re-negotiating (`STATE_CONNECTING`) as down. The poll used to say
+  "You're not protected" over it; now it also redials. Unobserved.
+- A service that stops answering mid-session ("Can't tell right now")
+  and comes back with nothing running is *not* reconnected: by the drop
+  rule the screen was not claiming a tunnel then, and the armed tunnel is
+  forgotten.
+- Mobile on a network where the API is unreachable takes the cached
+  path in `loadAll`, which never adopts the platform's state (unchanged
+  from before), so nothing is armed for a tunnel adopted that way.
