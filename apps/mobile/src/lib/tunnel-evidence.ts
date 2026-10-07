@@ -1,5 +1,5 @@
 import type { ConnectionState } from "@shared/components/ConnectOrb";
-import { verifyEgress, type BaselineIp, type EgressVerdict } from "@shared/lib/egress";
+import { verifyEgress, type BaselineIp, type EgressVerdict, type TunnelServer } from "@shared/lib/egress";
 import type { VpnStatus } from "./vpn";
 
 /** What the phone is entitled to say about its tunnel, given what it has
@@ -70,6 +70,11 @@ export type ConfirmOptions = {
    * answer `indeterminate`, which on a rung with another protocol still
    * to try is no reason to stop -- see `rungOutcome`. */
   sameEndpointOnly?: boolean;
+  /** The rung's server. An endpoint on it is reached around the tunnel
+   * and answers with the phone's own address however well the tunnel
+   * works, so its answers are passed over. See `TunnelServer` in the
+   * shared egress.ts. */
+  tunnelServer?: TunnelServer;
   cancelled?: () => boolean;
   timeoutMs?: number;
   intervalMs?: number;
@@ -94,6 +99,7 @@ export async function confirmEgress(
 ): Promise<EgressVerdict | null> {
   const {
     sameEndpointOnly = false,
+    tunnelServer,
     cancelled = () => false,
     timeoutMs = VERIFY_TIMEOUT_MS,
     intervalMs = VERIFY_INTERVAL_MS,
@@ -104,7 +110,7 @@ export async function confirmEgress(
     // time a hanging protocol spends in "checking connection", so a
     // cancel that is not honoured here is a button that does nothing.
     if (cancelled()) return null;
-    const verdict = await verifyEgress(baseline, { sameEndpointOnly });
+    const verdict = await verifyEgress(baseline, { sameEndpointOnly, tunnelServer });
     if (cancelled()) return null;
     if (verdict.state === "throughTunnel") return verdict;
     if (baseline === null && verdict.state === "indeterminate") return verdict;
@@ -195,12 +201,17 @@ export function nodeAddressesOf(users: readonly { connection?: { host?: string }
  * Asking the baseline's endpoint is only as good as the baseline: one
  * from a mirror that reports its own node's address would make this
  * "bypassingTunnel" on every poll of a working tunnel. The dashboard
- * keeps those out of baselines; see `nodeAddressesOf`. */
-export async function pollEgress(baseline: BaselineIp | null): Promise<EgressVerdict> {
-  if (baseline === null) return verifyEgress(null);
-  const own = await verifyEgress(baseline, { sameEndpointOnly: true });
+ * keeps those out of baselines; see `nodeAddressesOf`.
+ *
+ * `tunnelServer` is the connected rung's server: an endpoint on it is
+ * reached around the tunnel, so it is passed over on every walk here,
+ * and a baseline from one is never asked alone. See `TunnelServer` in
+ * the shared egress.ts. */
+export async function pollEgress(baseline: BaselineIp | null, tunnelServer?: TunnelServer): Promise<EgressVerdict> {
+  if (baseline === null) return verifyEgress(null, { tunnelServer });
+  const own = await verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer });
   if (own.state !== "unreachable") return own;
-  return verifyEgress(baseline);
+  return verifyEgress(baseline, { tunnelServer });
 }
 
 /** The state a health poll shows for a tunnel that is still up.

@@ -43,7 +43,8 @@ import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { iapAvailable } from "@shared/lib/iap";
 import { endedNotice } from "@shared/lib/subscription-state";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
-import { captureBaselineIp, type BaselineIp } from "@shared/lib/egress";
+import { captureBaselineIp, fromTunnelServer, type BaselineIp } from "@shared/lib/egress";
+import { tunnelServerOf } from "@shared/lib/tunnel-server";
 import {
   classifyConnectionError,
   type ClassifiedError,
@@ -281,6 +282,13 @@ export function Dashboard({
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [exitIp, setExitIp] = useState<string | null>(null);
   const [baselineIp, setBaselineIp] = useState<BaselineIp | null>(null);
+  /** The addresses the connected rung's tunnel is dialled at, for the
+   * health poll: an endpoint on them is reached around the tunnel and
+   * answers with the phone's own address, so the poll passes it over
+   * (`TunnelServer` in the shared egress.ts). Set as each rung is dialled.
+   * Lost with the screen, like the baseline -- and with no baseline there
+   * is nothing for that mirror's answer to be compared with. */
+  const tunnelServerRef = useRef<ReadonlySet<string> | null>(null);
   /** Names the protocol actually in use when it is not the one the
    * customer asked for.
    *
@@ -573,7 +581,9 @@ export function Dashboard({
         return;
       }
 
-      const egress = await pollEgress(baselineIp);
+      // Never an answer from the connected server's own mirror, which is
+      // reached around the tunnel; see `tunnelServerRef`.
+      const egress = await pollEgress(baselineIp, tunnelServerRef.current ?? undefined);
       if (!live || slotTeardown.owed()) return;
       if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
       // An indeterminate reading -- no baseline, as for every tunnel
@@ -1094,11 +1104,22 @@ export function Dashboard({
       // carrying just too late, recording the node's exit address as the
       // "before". Not gone within the wait, there is no baseline: the
       // rung can still land, as "unverified", never as proven.
+      //
+      // And never from an endpoint on this rung's own server. The phone
+      // reaches that address around the tunnel, so once it is up the
+      // node's own mirror answers with the phone's own address however
+      // well the tunnel works: a baseline from it read a working tunnel as
+      // a leak (`TunnelServer` in the shared egress.ts). The pass's first
+      // baseline was taken before the rung was known; if it came from
+      // there, nothing is up yet and it is simply taken again, passing
+      // that endpoint over. Names resolve here, as the engine is about to.
+      const tunnelServer = await tunnelServerOf(candidate);
       let baseline: BaselineIp | null;
-      if (pendingBaseline !== undefined) {
+      if (pendingBaseline !== undefined && !fromTunnelServer(pendingBaseline, tunnelServer)) {
         baseline = pendingBaseline;
       } else {
-        baseline = (await waitForTeardown()) ? await captureBaselineIp({ nodeAddresses }) : null;
+        const nothingUp = pendingBaseline !== undefined || (await waitForTeardown());
+        baseline = nothingUp ? await captureBaselineIp({ nodeAddresses, tunnelServer }) : null;
       }
       pendingBaseline = undefined;
       setBaselineIp(baseline);
@@ -1128,6 +1149,9 @@ export function Dashboard({
       }
 
       try {
+        // From here a tunnel to this server may be up; the health poll
+        // passes over its endpoints.
+        tunnelServerRef.current = tunnelServer;
         if (candidate.protocol === "IKEV2") {
           await connectIkev2({
             // The hostname, never connection.host -- Android validates
@@ -1176,6 +1200,7 @@ export function Dashboard({
         const verdict = await confirmEgress(baseline, {
           cancelled: () => cancelRef.current,
           sameEndpointOnly: !isLast,
+          tunnelServer,
         });
         if (verdict === null || cancelRef.current) return reportCancelled();
         const outcome = rungOutcome(verdict, { baselineTaken: baseline !== null, isLast });

@@ -170,6 +170,16 @@ describe("confirmEgress", () => {
     expect(calls.every((c) => c.options?.sameEndpointOnly === true)).toBe(true);
   });
 
+  it("passes the rung's server through to every check", async () => {
+    // So the shared check can pass over the node's own mirror, which the
+    // phone reaches around the tunnel (see egress-own-mirror.test.ts).
+    answers = [BYPASS, THROUGH];
+    const server = new Set(["203.0.113.41"]);
+    await confirmEgress(BASELINE, { tunnelServer: server, intervalMs: 1, timeoutMs: 5_000 });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c.options?.tunnelServer === server)).toBe(true);
+  });
+
   it("answers null once cancelled", async () => {
     answers = [BYPASS];
     let cancelled = false;
@@ -195,7 +205,17 @@ describe("pollEgress", () => {
   it("asks the whole list when there is no baseline", async () => {
     answers = [INDETERMINATE];
     await pollEgress(null);
-    expect(calls).toEqual([{ baseline: null, options: undefined }]);
+    expect(calls).toEqual([{ baseline: null, options: {} }]);
+  });
+
+  it("passes the connected server to every walk it makes", async () => {
+    const server = new Set(["203.0.113.41"]);
+    answers = [UNREACHABLE, INDETERMINATE];
+    await pollEgress(BASELINE, server);
+    answers = [INDETERMINATE];
+    await pollEgress(null, server);
+    expect(calls).toHaveLength(3);
+    expect(calls.every((c) => c.options?.tunnelServer === server)).toBe(true);
   });
 });
 
