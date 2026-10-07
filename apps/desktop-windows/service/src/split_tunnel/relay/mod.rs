@@ -194,7 +194,7 @@ pub fn set_relay_log(path: PathBuf) {
 
 fn stats_note(message: &str) {
     if let Some(path) = RELAY_LOG.get() {
-        super::append(path, message);
+        super::log_file::append(path, message);
     }
 }
 
@@ -1150,7 +1150,7 @@ fn expire_flows(nat: Arc<Nat>, stop: Arc<AtomicBool>, upstreams: Arc<UdpUpstream
     // Interruptible, because this thread is joined during teardown: a
     // plain five-second sleep between sweeps meant Disconnect could sit
     // for five seconds after everything else was already torn down.
-    while super::sleep_unless_stopped(&stop, EXPIRY_INTERVAL) {
+    while super::worker::sleep_unless_stopped(&stop, EXPIRY_INTERVAL) {
         for nat_port in nat.expire_idle() {
             upstreams.close(nat_port);
         }

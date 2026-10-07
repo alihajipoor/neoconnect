@@ -72,7 +72,7 @@ const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// returning success is not that: it means the request was accepted, not
 /// that the stack has finished plumbing it.
 ///
-/// This is the same condition `split_tunnel::wait_for_addressed_adapter`
+/// This is the same condition `split_tunnel::session::tunnel::wait_for_addressed_adapter`
 /// waits for before pinning a socket, arrived at from the other
 /// direction. On a healthy machine it is satisfied on the first poll.
 ///
@@ -607,7 +607,7 @@ fn wait_for_address(expected: Ipv4Addr, limits: &crate::lifecycle::budget::Limit
         }
         // Any other address, once the deadline has passed. Deliberately
         // not a failure, and the same concession
-        // `split_tunnel::wait_for_addressed_adapter` makes: `Adapter`
+        // `split_tunnel::session::tunnel::wait_for_addressed_adapter` makes: `Adapter`
         // reports the *first* usable IPv4 on the interface, and Windows
         // can self-assign an APIPA 169.254.x that sorts ahead of the one
         // netsh just set -- the very thing that once made this adapter

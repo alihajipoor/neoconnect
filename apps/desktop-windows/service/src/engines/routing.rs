@@ -518,7 +518,7 @@ const HALF_DEFAULTS: [(&str, &str); 2] =
 /// 0 says nothing about whether a socket can then use it, so a
 /// try-one-then-fall-back-on-error chain can never discover this. The
 /// caller resolves it by probing, not by predicting -- see
-/// `split_tunnel::install_verified_route`.
+/// `split_tunnel::session::tunnel::install_verified_route`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassiveRouteShape {
     /// Next hop 0.0.0.0: deliver directly on the interface.

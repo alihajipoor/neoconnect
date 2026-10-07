@@ -1,0 +1,634 @@
+//! One Custom-mode session: what bringing it up acquires, what it holds
+//! while it runs, and the order it is taken down in.
+//!
+//! `SplitTunnel` holds at most one of these, in its `ActiveSlot`, and
+//! asks it everything it knows about a running session. Everything that
+//! outlives a session -- the customer's selection, the exit table the
+//! engine layer writes, the restart notice -- stays on `SplitTunnel`.
+
+mod convergence;
+mod logger;
+mod tunnel;
+mod watchdog;
+
+use std::net::Ipv4Addr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
+
+use neoconnect_ipc::SplitTunnelMode;
+
+use crate::adapters;
+use crate::engines::ipv6_block;
+use crate::engines::routing::InstalledRoutes;
+use crate::split_tunnel::log_file::{append, LOG_FILE};
+use crate::split_tunnel::{firewall, flows, health, intercept, net, relay, tables, SharedSelection};
+
+use convergence::Convergence;
+use logger::{Audit, Logger};
+use tunnel::{default_routes, install_verified_route, wait_for_addressed_adapter};
+use watchdog::Watchdog;
+
+/// The resolver every lookup is sent to while Custom mode is on.
+///
+/// The same one the tunnels push for a full tunnel, so this is not a
+/// second opinion arriving through a different door -- it is already
+/// reachable through every node. See `intercept::decide::is_dns` for why Custom
+/// mode carries lookups at all.
+const CUSTOM_MODE_RESOLVER: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
+
+/// A running Custom-mode session.
+pub(super) struct Session {
+    redirect: intercept::Running,
+    /// The flow tables the redirect loop decides against.
+    ///
+    /// Held here so a selection change can throw the leave-alone
+    /// verdicts away -- see `set_selection`. It is the same `Arc` the
+    /// loop, the relays and the audit hold; there is one table.
+    nat: Arc<flows::Nat>,
+    relays: relay::Relays,
+    /// Held for its Drop: without it the stack accepts none of the
+    /// redirected connections. See the firewall module.
+    allowance: firewall::Allowance,
+    tunnel: Arc<net::pin::TunnelInterface>,
+    route: InstalledRoutes,
+    logger: Logger,
+    /// The reset loop that keeps closing pre-existing connections for
+    /// the first seconds. Held so it is stopped with the session.
+    convergence: Convergence,
+    /// The backstop that switches interception off if the tunnel goes
+    /// away without anybody noticing. Held so it is stopped with the
+    /// session.
+    watchdog: Watchdog,
+    /// Set by the watchdog when it has stopped interception, so the
+    /// status poll can say so instead of reporting a Custom mode that
+    /// looks live and is not. Nothing in this product reports a state
+    /// it has not verified, and "still intercepting" is such a state.
+    watchdog_tripped: Arc<std::sync::atomic::AtomicBool>,
+    /// The per-app IPv6 block, when one could be installed.
+    ///
+    /// `None` is normal and not a fault: "everything except these" does
+    /// not want one, and a machine where the filtering engine refuses
+    /// still gets the redirect loop's own IPv6 block. See
+    /// `engines::ipv6_block::SelectedAppsIpv6Block` for what it adds
+    /// over that, and for why the same idea is unsound for IPv4.
+    ipv6_apps: Option<ipv6_block::SelectedAppsIpv6Block>,
+    log_path: PathBuf,
+    /// When interception began, so a warm-up is not mistaken
+    /// for a fault. See intercept::stats::WARMUP.
+    started: Instant,
+}
+
+/// Installs the per-app IPv6 block for the current selection, or
+/// explains in the log why it did not.
+///
+/// # Why a failure here is written down and not returned
+///
+/// Custom mode's job is to carry a selected application's **IPv4**
+/// through the tunnel, and it does that whether or not these filters
+/// exist. Refusing to start the feature because the filtering engine
+/// would not take a filter would leave a customer in Iran with no
+/// tunnel at all in exchange for closing a narrow IPv6 gap that
+/// `intercept::handle_ipv6_parsed` still covers for every packet it can
+/// attribute. That trade is the wrong way round, so this returns
+/// `None` and says so on disk.
+///
+/// # Why "everything except these" gets nothing
+///
+/// In that mode the redirect loop's answer for a packet whose owner it
+/// cannot see is already *block* --
+/// `Selection::tunnel_when_owner_unknown` is true there -- so the hole
+/// these filters close does not exist. The WFP shape for that mode
+/// would be a machine-wide block with a hole per excluded application,
+/// which is a much larger blast radius bought for nothing measured.
+/// Stated rather than silently skipped.
+fn install_ipv6_app_block(
+    selection: &SharedSelection,
+    log_dir: &Path,
+    log_path: &Path,
+) -> Option<ipv6_block::SelectedAppsIpv6Block> {
+    let (mode, paths) = {
+        let selection = selection.read().unwrap_or_else(|e| e.into_inner());
+        (selection.mode(), selection.paths().to_vec())
+    };
+
+    if !matches!(mode, SplitTunnelMode::OnlySelected) {
+        append(
+            log_path,
+            "IPv6: no per-app filters in this mode -- the redirect loop already blocks IPv6 \
+             whose owner it cannot see when everything except the named apps is tunnelled",
+        );
+        return None;
+    }
+    if paths.is_empty() {
+        return None;
+    }
+
+    match ipv6_block::SelectedAppsIpv6Block::install(&paths, log_dir) {
+        Ok(block) => {
+            append(
+                log_path,
+                &format!(
+                    "IPv6: {} app(s) blocked at ALE_AUTH_CONNECT_V6 as well as in the loop",
+                    paths.len()
+                ),
+            );
+            Some(block)
+        }
+        Err(e) => {
+            // Named as a reduction rather than as a failure, because
+            // that is what it is: the loop still blocks everything it
+            // can attribute.
+            append(
+                log_path,
+                &format!(
+                    "IPv6: per-app filters unavailable ({e}); the redirect loop is the only \
+                     block this session has"
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// This service's own executable.
+///
+/// Excluded from redirection unconditionally. When no tunnel is up the
+/// proxy's onward socket is unpinned and looks like any other
+/// application's, so without this the proxy would intercept its own
+/// traffic and hand it back to itself.
+fn own_image_path() -> String {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Everything belonging to Neoxify itself, which must never be routed
+/// through the tunnel Neoxify is managing.
+///
+/// The service was already here, because its own lookups being fed into
+/// its own proxy took DNS out for the whole machine. **The app has the
+/// same problem in "everything except these" mode** and it was missed:
+/// in that mode anything the customer did not exclude is tunnelled, and
+/// the app is not something a customer would think to exclude. Its
+/// requests to the API then depend on the tunnel it is supposed to be
+/// controlling.
+///
+/// Reported exactly that way -- the app span for twenty seconds, gave
+/// up with "can't reach Neoxify right now", and then could not say
+/// whether it was connected, while the browser beside it was plainly
+/// going out through the VPN. A control panel must not lose contact
+/// with the thing it controls because that thing is working.
+///
+/// The app sits one directory above the service, which lives in
+/// `resources\`.
+fn own_images() -> Vec<String> {
+    let service = own_image_path();
+    let mut images = vec![service.clone()];
+
+    if let Some(app) = std::path::Path::new(&service)
+        .parent()
+        .and_then(|resources| resources.parent())
+        .map(|root| root.join("neoconnect-desktop.exe"))
+    {
+        images.push(app.to_string_lossy().into_owned());
+    }
+    images
+}
+
+impl Session {
+    /// Brings a session up against a tunnel that is already running
+    /// passively -- the body of `SplitTunnel::start` once it has
+    /// decided there is something to intercept.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start(
+        adapter_name: &str,
+        node: Ipv4Addr,
+        log_dir: &Path,
+        limits: &crate::lifecycle::budget::Limits,
+        selection: &SharedSelection,
+        exits: &Arc<relay::ExitRelays>,
+        mode: SplitTunnelMode,
+    ) -> Result<Self, String> {
+        // Needed before the session is assembled, because choosing the
+        // route writes to it.
+        let log_path = log_dir.join(LOG_FILE);
+
+        let tunnel_adapter = wait_for_addressed_adapter(adapter_name, limits)?;
+        let tunnel_address = tunnel_adapter
+            .ipv4
+            .ok_or_else(|| format!("{adapter_name} came up without an address"))?;
+
+        let uplink = adapters::physical_uplink(&[adapter_name])
+            .map_err(|e| format!("could not enumerate network adapters: {e}"))?
+            .ok_or_else(|| "no physical network connection to send traffic over".to_string())?;
+        let local_addr = uplink
+            .ipv4
+            .ok_or_else(|| "the physical network connection has no address".to_string())?;
+
+        let nat = Arc::new(flows::Nat::new());
+
+        // Which interface the proxy sends a redirected connection out
+        // of: the VPN adapter, in both directions of the list.
+        //
+        // Being redirected *is* being tunnelled here. The tunnel is
+        // passive either way -- it owns no default route, so nothing
+        // reaches it except what this pins there -- and the two modes
+        // differ only in which processes get pinned:
+        // `Selection::should_tunnel` answers `matches()` for "only
+        // these" and `!matches()` for "everything except these". So
+        // "everything except these" is a passive tunnel with almost
+        // everything redirected into it, not a full tunnel with a few
+        // applications carved out.
+        //
+        // A comment here used to describe that second design -- full
+        // tunnel, redirected connections pinned to the physical link --
+        // and it was wrong in a way worth naming, because it reads like
+        // an invariant somebody could build on. There is no branch on
+        // `mode` in this function at all; the line below is what runs
+        // for both. The rewriting, the NAT and the return leg really are
+        // identical either way, which is the part that was true.
+        let tunnel =
+            Arc::new(net::pin::TunnelInterface::new(tunnel_adapter.index, tunnel_address));
+
+        // The route is chosen by trying it, not by predicting it. See
+        // install_verified_route.
+        let route =
+            install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path, limits)?;
+        // Created here rather than inside `intercept::start`, because
+        // the relay counts into the same table and the relay is started
+        // first -- the firewall allowance and the reachability wait sit
+        // between the two.
+        let stats = Arc::new(intercept::Stats::default());
+        let relays = match relay::start(nat.clone(), tunnel.clone(), stats.clone(), exits.clone())
+        {
+            Ok(relays) => relays,
+            Err(e) => {
+                // `route` is removed by its Drop on the way out.
+                return Err(format!("could not start the local relay: {e}"));
+            }
+        };
+
+        // Before the redirect starts, so that no packet is ever sent
+        // to a port the firewall is still dropping.
+        let allowance =
+            match firewall::Allowance::install(
+                local_addr,
+                tunnel_address,
+                relays.tcp_port,
+                relays.udp_port,
+            ) {
+                Ok(allowance) => allowance,
+                Err(e) => {
+                    relays.stop();
+                    // `route` is removed by its Drop on the way out.
+                    return Err(e);
+                }
+            };
+
+        // The allowance is installed by netsh, and netsh returning is
+        // not the same as the rule being effective for new flows. There
+        // is a window of a second or two where the redirect is running
+        // and every packet it sends to the proxy is still dropped.
+        //
+        // That window is the whole customer-visible bug. DNS is the
+        // first thing anything does, so a browser opening a site during
+        // it gets "No such host is known" or a stall of ten to twenty
+        // seconds -- measured -- while Telegram, which connects to
+        // addresses it already holds and never resolves, is instant.
+        // Same machine, same tunnel, opposite experience, and it made
+        // the feature look broken to everyone who tested it with a
+        // browser.
+        //
+        // So wait for proof instead of assuming. A completed TCP
+        // handshake to the relay means the rule is live and the listener
+        // is up; nothing is redirected until that succeeds.
+        // So the relay can report a datagram it had to drop. Set before
+        // the redirect starts, because the first seconds are exactly
+        // when it matters.
+        relay::set_relay_log(log_path.clone());
+
+        if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port, limits) {
+            relays.stop();
+            // `route` is removed by its Drop on the way out.
+            return Err(e);
+        }
+
+        let redirect = intercept::Redirect {
+            local_addr,
+            local_interface: uplink.index,
+            node_addr: node,
+            tcp_proxy_port: relays.tcp_port,
+            udp_proxy_port: relays.udp_port,
+            own_images: own_images(),
+            own_sockets: relays.own_sockets.clone(),
+            dns_resolver: CUSTOM_MODE_RESOLVER,
+            // A full tunnel already resolves through the VPN, so there
+            // is nothing to rescue and redirecting lookups would push
+            // them back out of it.
+            // Both directions, because the tunnel is passive in both:
+            // whatever is not carried resolves on the local network
+            // otherwise, which is the leak this closes.
+            carry_dns: true,
+            // Begun by `intercept::start` as interception starts -- the
+            // route probe and the firewall wait sit between here and there.
+            activated: intercept::Activation::pending(),
+            exits: exits.clone(),
+        };
+
+        // Recorded before anything can go wrong with it: if Custom mode
+        // turns out to route nothing, the first question is always
+        // whether it was pointed at the right adapter and the right
+        // local address, and this is the only place that is written
+        // down.
+        // Whether any application is narrowed to particular
+        // destinations is written down here for one reason: a scoped
+        // app not being carried and an unscoped app not being carried
+        // are the same symptom on a packet capture and two completely
+        // different faults. Without this line the first question on the
+        // rig cannot be answered from the evidence.
+        //
+        // It says only whether scoping is in play, never which
+        // addresses. The list is the customer's own catalogue choice
+        // and belongs in no log this may be asked to send anywhere.
+        let scoped = selection
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_scopes();
+        let header = format!(
+            "custom mode ({direction}, {scoping}) on {adapter_name} (index {}, tunnel {tunnel_address})              via {local_addr}, node {node}, proxy tcp {} udp {}",
+            tunnel_adapter.index,
+            relays.tcp_port,
+            relays.udp_port,
+            direction = match mode {
+                SplitTunnelMode::OnlySelected => "only the selected apps are tunnelled",
+                SplitTunnelMode::AllExcept => "everything except the selected apps is tunnelled",
+            },
+            scoping = if scoped {
+                "some apps narrowed to specific destinations"
+            } else {
+                "every selected app carried in full"
+            }
+        );
+
+        // Cloned before the table is handed to the redirect loop: the
+        // audit has to ask the same table the loop is filling, or it
+        // would report every carried flow as an escape from itself.
+        let audit = Audit {
+            nat: nat.clone(),
+            selection: selection.clone(),
+            own_images: own_images(),
+            node,
+            proxy_ports: (relays.tcp_port, relays.udp_port),
+            named: std::collections::HashSet::new(),
+            last_run: Instant::now(),
+        };
+
+        // The same table the redirect loop fills and the audit reads,
+        // held once more so the reset can ask it whether a row it is
+        // about to close is one the tunnel is already carrying.
+        let reset_nat = nat.clone();
+
+        // Before the redirect starts, so there is no instant in which
+        // Custom mode is on and nothing is refusing a selected app's
+        // IPv6. Held in a local until the session is assembled: if
+        // `intercept::start` fails below, this is dropped on the way out
+        // and the filters go with it.
+        let ipv6_apps = install_ipv6_app_block(selection, log_dir, &log_path);
+
+        let nat_for_active = nat.clone();
+        match intercept::start(redirect, nat, selection.clone(), stats) {
+            Ok(running) => {
+                let logger =
+                    Logger::start(log_path.clone(), running.stats.clone(), header, audit);
+
+                // Only now, with the redirect actually running, so
+                // that what an application reconnects into is the
+                // tunnel rather than the ordinary route it just
+                // left. Doing it earlier would simply hand it the
+                // same connection back.
+                let outcome = {
+                    // Poison is survived here as it is at the other
+                    // nine read sites, and this is the site where it
+                    // matters most. `intercept::start` has already
+                    // returned by now, so a panic between here and
+                    // `Session` being assembled leaves interception
+                    // live, `RUNNING` false, and nothing in `active`
+                    // for `stop` to take -- a redirect the service no
+                    // longer knows it is running and cannot tear down.
+                    // That is the stranded-background-tunnel complaint,
+                    // reachable from one unwrap.
+                    let selection = selection.read().unwrap_or_else(|e| e.into_inner());
+                    tables::reset_selected_connections(
+                        &selection,
+                        node,
+                        &own_images(),
+                        &|transport, port, destination, destination_port| {
+                            reset_nat.has_flow(transport, port, destination, destination_port)
+                        },
+                    )
+                };
+                append(
+                    &log_path,
+                    &format!(
+                        "closed {} existing connection(s) so they rebuild through the tunnel",
+                        outcome.closed
+                    ),
+                );
+                for failure in &outcome.failures {
+                    append(&log_path, &format!("  reset: {failure}"));
+                }
+
+                // One pass cannot close a connection that is still in
+                // SYN_SENT -- SetTcpEntry has no way to -- so keep
+                // rescanning for the length of the redirect's activation
+                // window. See Convergence.
+                let convergence = Convergence::start(
+                    selection.clone(),
+                    log_path.clone(),
+                    node,
+                    own_images(),
+                    reset_nat,
+                    outcome.closed,
+                );
+
+                // Started last, with everything it watches already up,
+                // so it cannot mistake a session still being assembled
+                // for one whose tunnel has failed.
+                let watchdog_tripped =
+                    Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let watchdog = Watchdog::start(
+                    adapter_name.to_string(),
+                    tunnel_adapter.index,
+                    tunnel_address,
+                    tunnel.clone(),
+                    running.stopper(),
+                    log_path.clone(),
+                    watchdog_tripped.clone(),
+                );
+
+                Ok(Session {
+                    redirect: running,
+                    nat: nat_for_active,
+                    relays,
+                    allowance,
+                    tunnel,
+                    route,
+                    logger,
+                    convergence,
+                    watchdog,
+                    watchdog_tripped,
+                    ipv6_apps,
+                    log_path,
+                    started: Instant::now(),
+                })
+            }
+            Err(e) => {
+                relays.stop();
+                // `route` is removed by its Drop on the way out.
+                Err(e)
+            }
+        }
+    }
+
+    /// What the live counters say is wrong, or `None` when nothing is.
+    /// See `SplitTunnel::complaint`.
+    pub(super) fn complaint(&self) -> Option<String> {
+        // Ahead of the counters, because it explains them. Once the
+        // backstop has switched interception off the numbers stop
+        // moving, and "nothing is coming back" would be a true reading
+        // pointed at the wrong cause.
+        if self.watchdog_tripped.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some(
+                "The VPN adapter Custom mode was using disappeared, so it stopped \
+                 redirecting and your applications are using your ordinary \
+                 connection. Reconnect to protect them again."
+                    .to_string(),
+            );
+        }
+        self.redirect.stats.complaint(self.started.elapsed())
+    }
+
+    /// Whether the tunnel is really carrying traffic. See
+    /// `SplitTunnel::probe`.
+    pub(super) fn probe(&self) -> Result<(), String> {
+        // Real traffic beats a synthetic connection. If the customer's
+        // own packets are already proving the path is broken, say so in
+        // their terms instead of opening a socket that tests a different
+        // path and may well succeed.
+        if let Some(problem) = self.redirect.stats.complaint(self.started.elapsed()) {
+            append(&self.log_path, &format!("probe FAILED (counters): {problem}"));
+            append(&self.log_path, &format!("  {}", self.redirect.stats.summary()));
+            return Err(problem);
+        }
+
+        // `prove_carries`, not `probe`. The two ask different questions
+        // and only one of them is fit to be turned into "You're
+        // protected" on a customer's screen: `probe` completes a TCP
+        // handshake, which under Xray's own `tun` inbound is answered by
+        // xray.exe's userspace stack without a packet leaving the
+        // machine, and which a REALITY server quietly proxying to its
+        // decoy site satisfies just as readily as a working one.
+        //
+        // `prove_carries` requires a reply the destination had to send.
+        // Route selection still uses `probe`: it is asking whether a
+        // route shape can be attached to at all, which is exactly what a
+        // handshake settles.
+        let outcome = health::prove_carries(&self.tunnel);
+
+        // Written down because this verdict is what decides whether the
+        // ladder keeps this protocol or moves to the next one. Without
+        // it the log showed a tunnel that looked healthy and gave no
+        // hint why the app had abandoned it.
+        match &outcome {
+            Ok(()) => append(&self.log_path, "probe: the tunnel carried a test connection"),
+            Err(e) => {
+                append(&self.log_path, &format!("probe FAILED: {e}"));
+                // The routing table, at the moment it mattered.
+                //
+                // Three rounds were spent reasoning about why a pinned
+                // socket could not reach anything, each guess costing
+                // the customer another build. What the guessing needed
+                // and never had was the table the stack was actually
+                // consulting, so it is written down here instead.
+                for line in default_routes() {
+                    append(&self.log_path, &format!("  route  {line}"));
+                }
+            }
+        }
+        outcome
+    }
+
+    /// Brings a running session in line with a selection the customer
+    /// has just edited. See `SplitTunnel::set_selection`.
+    pub(super) fn selection_changed(&mut self, selection: &SharedSelection) {
+        // The customer's choice has to reach the next packet, not the
+        // next packet after a timer they cannot see. A leave-alone
+        // verdict recorded while an app was unselected would otherwise
+        // keep answering for its UDP flows for `DIRECT_VERDICT_TTL`.
+        //
+        // Strictly downstream of nothing: this throws a cache away, it
+        // does not decide anything. Every flow it forgets is decided
+        // again by `decide`, through the same owner lookup and the same
+        // refusal for anything unattributable. See
+        // `flows::Nat::forget_direct`.
+        self.nat.forget_direct();
+        let log_dir = self.log_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        // Dropped first, and deliberately: two overlapping sets would
+        // both be live, and the old one names applications that are no
+        // longer selected. The gap is microseconds and the redirect
+        // loop covers it, which is the same fail-open trade the rest of
+        // this module makes.
+        self.ipv6_apps = None;
+        self.ipv6_apps = install_ipv6_app_block(selection, &log_dir, &self.log_path);
+    }
+
+    /// Takes the session down, in the order each step's comment
+    /// explains.
+    pub(super) fn stop(self) {
+        // First of all, and before the join below can take any time:
+        // the backstop must not be looking for a vanished adapter while
+        // the session it would complain about is being taken down on
+        // purpose. Stopping it is also what keeps `stop()` from being
+        // joined by a thread it is itself joining.
+        self.watchdog.stop();
+        // Interception first. Stopping the relays while packets were
+        // still being rewritten to them would send a selected app's
+        // traffic to a port with nothing behind it -- a blackout rather
+        // than the fail-open this promises.
+        self.redirect.stop();
+        // Before the relays, and for the same reason interception is
+        // stopped before them: this thread closes customers' connections
+        // on the assumption that a tunnel is there to rebuild them
+        // through, and that assumption stops being true here.
+        self.convergence.stop();
+        self.relays.stop();
+        let mut allowance = self.allowance;
+        allowance.remove();
+        self.logger.stop();
+        let mut route = self.route;
+        route.remove();
+        // Last, so that at no point is Custom mode still intercepting
+        // while a selected app's IPv6 has already been let out again.
+        // Both blocks come off together as far as the customer is
+        // concerned; the order only decides which way the overlap falls,
+        // and the safe way is for the WFP one to outlast the loop.
+        if let Some(mut block) = self.ipv6_apps {
+            block.remove();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn this_service_knows_its_own_executable() {
+        // The self-exclusion depends on it. An empty string here would
+        // match nothing, and the proxy would be free to intercept its
+        // own upstream connections.
+        let image = own_image_path();
+        assert!(image.to_lowercase().ends_with(".exe"), "got {image}");
+    }
+}

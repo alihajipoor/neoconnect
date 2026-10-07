@@ -1525,7 +1525,7 @@ mod tests {
     ///
     /// The NRPT rule steers the machine's lookups at this address, and
     /// Custom mode's redirect carries them only because it is a public
-    /// address its filter admits. `split_tunnel::CUSTOM_MODE_RESOLVER`
+    /// address its filter admits. `split_tunnel::session::CUSTOM_MODE_RESOLVER`
     /// is the third copy of it and is what actually answers. If an
     /// engine pointed the rule somewhere else, Custom mode would send
     /// every lookup to an address the tunnel does not carry -- which
@@ -1538,7 +1538,7 @@ mod tests {
             "the two engines must name one resolver"
         );
         // Kept as a literal on purpose: this is the value
-        // split_tunnel::CUSTOM_MODE_RESOLVER holds, and the point of the
+        // split_tunnel::session::CUSTOM_MODE_RESOLVER holds, and the point of the
         // assertion is to fail if either side is edited alone.
         assert_eq!(super::super::xray::TUN_DNS, "1.1.1.1");
     }
