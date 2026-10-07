@@ -11,11 +11,34 @@
 #
 # Everything after `--` is handed to `tauri ios build`, so:
 #   scripts/build-ios.sh -- --target aarch64-sim --debug
+#
+# A submission to App Store Connect also needs its signing and its
+# numbers, all four together:
+#   NEOXIFY_IOS_SIGNING=appstore APPLE_DEVELOPMENT_TEAM=<team id> \
+#   NEOXIFY_IOS_MARKETING_VERSION=1.0.0 NEOXIFY_IOS_BUILD_NUMBER=<n> \
+#   scripts/build-ios.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 args=()
 if [ "${1:-}" = "--" ]; then shift; args=("$@"); fi
+
+# A store build, checked before anything expensive.
+#
+# The numbers are the App Store's own, not tauri.conf.json's: its 1.0.x
+# version record and a build number above every one already uploaded
+# (1.0.0 (6) on 2026-09-30, from mobile 0.2.21). Uploading an IPA that
+# carries Tauri's 0.2.x after that is refused, and the version is easy to
+# forget because nothing else in a release needs it -- so a store build
+# without both stops here rather than after an archive and an export.
+# Record which mobile version each upload carries in docs/journal/log.md.
+store=""
+if [ "${NEOXIFY_IOS_SIGNING:-}" = "appstore" ]; then
+  : "${APPLE_DEVELOPMENT_TEAM:?a store build needs APPLE_DEVELOPMENT_TEAM}"
+  : "${NEOXIFY_IOS_MARKETING_VERSION:?a store build needs NEOXIFY_IOS_MARKETING_VERSION, the App Store version record (e.g. 1.0.0)}"
+  : "${NEOXIFY_IOS_BUILD_NUMBER:?a store build needs NEOXIFY_IOS_BUILD_NUMBER, above every build already uploaded}"
+  store=1
+fi
 
 # Tauri moves the archived .app to build/<target>/ with a plain
 # rename and does not clear the destination first, so the *second* and
@@ -93,7 +116,45 @@ fi
 # bash 3.2 (what macOS ships) treats an empty array as unset under
 # `set -u`, so the plain "${args[@]}" aborts a build invoked with no
 # arguments at all -- which is every release build.
-pnpm exec tauri ios build ${args[@]+"${args[@]}"}
+if [ -n "$store" ]; then
+  # Archive only. Tauri's export cannot sign this app -- see
+  # ExportOptions-appstore.plist in add-tunnel-extension.mjs -- and fails
+  # with EXPORT FAILED after a perfectly good archive.
+  pnpm exec tauri ios build --archive-only ${args[@]+"${args[@]}"}
+else
+  pnpm exec tauri ios build ${args[@]+"${args[@]}"}
+fi
+
+if [ -n "$store" ]; then
+  apple=src-tauri/gen/apple
+  archive=$apple/build/mobile_iOS.xcarchive
+  out=$apple/build/arm64
+  rm -f "$out/Neoxify.ipa"
+  xcodebuild -exportArchive -archivePath "$archive" \
+    -exportOptionsPlist "$apple/ExportOptions-appstore.plist" -exportPath "$out"
+
+  # Proof it took, read back from the products rather than the inputs:
+  # the numbers on both bundles in the IPA, and signatures that verify on
+  # the archive as well as the IPA. 1.0.0 (6) got exactly these wrong --
+  # its numbers were patched in after signing, by hand, and its archive
+  # no longer verifies.
+  codesign --verify --deep --strict "$archive/Products/Applications/Neoxify.app"
+  unpacked=$(mktemp -d)
+  ditto -x -k "$out/Neoxify.ipa" "$unpacked"
+  codesign --verify --deep --strict "$unpacked/Payload/Neoxify.app"
+  want="$NEOXIFY_IOS_MARKETING_VERSION ($NEOXIFY_IOS_BUILD_NUMBER)"
+  for bundle in Neoxify.app Neoxify.app/PlugIns/NeoxifyTunnel.appex; do
+    plist="$unpacked/Payload/$bundle/Info.plist"
+    got="$(plutil -extract CFBundleShortVersionString raw "$plist") ($(plutil -extract CFBundleVersion raw "$plist"))"
+    if [ "$got" != "$want" ]; then
+      echo "error: $bundle is $got in the IPA, not $want" >&2
+      rm -rf "$unpacked"
+      exit 1
+    fi
+  done
+  rm -rf "$unpacked"
+  echo "store IPA: $out/Neoxify.ipa, $want, signed and verified. Not uploaded."
+fi
 
 # After, not before: `tauri ios build` runs `pnpm build` itself, so
 # dist/ is only the store bundle once that has finished. Checking first

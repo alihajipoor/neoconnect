@@ -79,6 +79,12 @@ const signing = (profile) =>
       `\n        CODE_SIGN_IDENTITY: "Apple Distribution"` +
       `\n        PROVISIONING_PROFILE_SPECIFIER: "${profile}"`
     : "";
+// The two App Store profiles, named once: the targets' signing settings
+// and the export options scripts/build-ios.sh signs the IPA with all have
+// to agree on them, and the export fails on the slightest mismatch.
+const APP_STORE_PROFILE = "Neoxify AppStore 2026";
+const TUNNEL_STORE_PROFILE = "Neoxify Tunnel AppStore 2026";
+const TUNNEL_BUNDLE_ID = "com.neoxify.mobile.tunnel";
 // One directory per bundle, because the file has to be called
 // PrivacyInfo.xcprivacy on disk. XcodeGen's `name:` renames the
 // reference in the project navigator, not the file that gets copied,
@@ -91,14 +97,72 @@ const privacy = (bundle) => join(mobile, "ios", "privacy", bundle);
 // outright. Tauri sets the app's from this file and sets nothing on the
 // extension, so it defaulted to XcodeGen's 1.0 and the mismatch would
 // only have surfaced on the first real submission.
-const version = JSON.parse(
+const tauriConf = JSON.parse(
   readFileSync(join(mobile, "src-tauri", "tauri.conf.json"), "utf8"),
-).version;
+);
+const version = tauriConf.version;
 if (!version) {
   console.error("add-tunnel-extension: no version in tauri.conf.json");
   process.exit(1);
 }
 const rel = (p) => relative(apple, p);
+
+// The App Store's two version numbers, written into the BUILT Info.plist
+// by a phase inside each target's build -- after Xcode has processed the
+// plist, before it signs the bundle.
+//
+// Not into project.yml, which is where this used to go and where it did
+// nothing. `tauri ios build` sets the bundle versions itself after this
+// script has run -- CFBundleShortVersionString from tauri.conf.json,
+// CFBundleVersion through agvtool -- so the 2026-09-30 submission built
+// 0.2.21 under a spec that said 1.0.0. Its 1.0.0 (6) was a plutil patch
+// of the archive afterwards, which left that archive's own signature
+// broken. Set here instead, the archive is signed over the final values.
+//
+// The numbers are written into the phase now, as literals, rather than
+// read from the environment when it runs: `tauri ios build` does not pass
+// our environment through to the build phases. A phase that read
+// NEOXIFY_IOS_* at build time found nothing and changed nothing
+// (2026-10-06), while the same phase under a plain xcodebuild saw them.
+// So the phase exists only in a store build's project; build-ios.sh
+// regenerates the project before every build, which strips it again.
+//
+// `$VAR`, never `${VAR}`, in the script: XcodeGen expands `${VAR}` from
+// its own environment while generating, which is how a build-time
+// variable once became a value baked in by the previous run.
+//
+// Both targets carry it, because App Store Connect wants the extension's
+// numbers equal to the app's. The plist is an input so the phase is
+// ordered after Info.plist processing, and deliberately not an output:
+// that file already has a producer, and naming a second one is a
+// "multiple commands produce" error.
+const storeVersion = process.env.NEOXIFY_IOS_MARKETING_VERSION || "";
+const storeBuild = process.env.NEOXIFY_IOS_BUILD_NUMBER || "";
+// Apple's own format for both: one to three period-separated integers.
+// Checked here because the values go into a shell script verbatim.
+for (const [name, value] of [
+  ["NEOXIFY_IOS_MARKETING_VERSION", storeVersion],
+  ["NEOXIFY_IOS_BUILD_NUMBER", storeBuild],
+]) {
+  if (value && !/^\d+(\.\d+){0,2}$/.test(value)) {
+    console.error(`add-tunnel-extension: ${name}=${value} is not 1-3 period-separated integers`);
+    process.exit(1);
+  }
+}
+const setKey = (key, value) =>
+  value ? `          /usr/libexec/PlistBuddy -c "Set :${key} ${value}" "$plist"\n` : "";
+const STORE_NUMBERS =
+  storeVersion || storeBuild
+    ? `    postBuildScripts:
+      - name: Store version numbers
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        script: |
+          plist="$TARGET_BUILD_DIR/$INFOPLIST_PATH"
+${setKey("CFBundleShortVersionString", storeVersion)}${setKey("CFBundleVersion", storeBuild)}          echo "store numbers: $PRODUCT_NAME $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist") ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist"))"
+`
+    : "";
 
 let text = readFileSync(spec, "utf8");
 
@@ -120,6 +184,12 @@ text = text.replace(
 text = text.replace(new RegExp(`^      - target: ${EXT_TARGET}\\n`, "m"), "");
 text = text.replace(
   /^      - framework: .*NeoxifyXray\.xcframework\n        embed: true\n/m,
+  "",
+);
+// and the app's store-numbers phase. The extension's copy went with its
+// block above, so this can only match the app's.
+text = text.replace(
+  /^    postBuildScripts:\n      - name: Store version numbers\n(?:[ ]{8,}.*\n)*/gm,
   "",
 );
 
@@ -171,10 +241,10 @@ const extension = `
           - packet-tunnel-provider
         com.apple.security.application-groups:
           - ${GROUP}
-    settings:
+${STORE_NUMBERS}    settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.neoxify.mobile.tunnel
-        PRODUCT_NAME: ${EXT_TARGET}${team}${signing("Neoxify Tunnel AppStore 2026")}
+        PRODUCT_BUNDLE_IDENTIFIER: ${TUNNEL_BUNDLE_ID}
+        PRODUCT_NAME: ${EXT_TARGET}${team}${signing(TUNNEL_STORE_PROFILE)}
         # Go's net package calls into the system resolver, so the
         # framework leaves _res_9_nsearch undefined until libresolv is
         # linked. Without it the extension fails at link time with a
@@ -347,6 +417,17 @@ text = text.replace(
 // put CODE_SIGN_STYLE inside `entitlements:` as a sibling of
 // `properties:`, where XcodeGen simply ignores it. The build then fails
 // with "requires a development team" and nothing points at the reason.
+//
+// Stripped first, every copy, and only then added back for a store
+// build. Without the strip each store build stacked another set -- the
+// spec left by 2026-09-30 carried two -- and a later device or simulator
+// build kept them, signing with the App Store profile it had not asked
+// for.
+const APP_STORE_SIGNING =
+  `        CODE_SIGN_STYLE: Manual\n` +
+  `        CODE_SIGN_IDENTITY: "Apple Distribution"\n` +
+  `        PROVISIONING_PROFILE_SPECIFIER: "${APP_STORE_PROFILE}"\n`;
+text = text.split(APP_STORE_SIGNING).join("");
 if (process.env.NEOXIFY_IOS_SIGNING === "appstore") {
   const appSettings = new RegExp(
     `(^  ${APP_TARGET}:\\n(?:.*\\n)*?    settings:\\n      base:\\n)`,
@@ -356,65 +437,68 @@ if (process.env.NEOXIFY_IOS_SIGNING === "appstore") {
     console.error(`add-tunnel-extension: no settings block found on ${APP_TARGET}`);
     process.exit(1);
   }
-  text = text.replace(
-    appSettings,
-    `$1        CODE_SIGN_STYLE: Manual\n` +
-      `        CODE_SIGN_IDENTITY: "Apple Distribution"\n` +
-      `        PROVISIONING_PROFILE_SPECIFIER: "Neoxify AppStore 2026"\n`,
-  );
+  text = text.replace(appSettings, (_, head) => head + APP_STORE_SIGNING);
 }
 
-
-// The App Store's two version numbers, when they need to differ from
-// the one in tauri.conf.json.
-//
-// Tauri writes both CFBundleShortVersionString and CFBundleVersion from
-// that single value, which is right for every other channel and wrong
-// here. Apple wants the short string to match the version record in App
-// Store Connect ("1.0.0"), and the build number to be strictly greater
-// than every build already uploaded against it -- compared as dotted
-// integers, so "0.2.21" is LOWER than the existing "4" and is refused
-// at upload with a message about the version already existing.
-//
-// Both are env-driven and both default to leaving the file alone, so
-// nothing changes for a simulator build, a device build, or CI.
-const marketingVersion = process.env.NEOXIFY_IOS_MARKETING_VERSION;
-const buildNumber = process.env.NEOXIFY_IOS_BUILD_NUMBER;
-if (marketingVersion || buildNumber) {
-  // REPLACE Tauri's values rather than add our own. Both end up in the
-  // same `properties:` map, and YAML keeps the last of a duplicated key
-  // -- the exact trap described above for `entitlements:`. Prepending
-  // produced a spec that read 1.0.0 at the top, 0.2.21 lower down, and
-  // built 0.2.21 while reporting that it had set 1.0.0.
-  //
-  // Anchored inside the app target's info block so the tunnel's own
-  // version, a few lines earlier in the file, is left alone: the
-  // extension's short version has to match the app's, but its build
-  // number is Tauri's business and nothing here needs to move it.
-  const infoBlock = new RegExp(
-    `(^  ${APP_TARGET}:\\n(?:.*\\n)*?    info:\\n(?:.*\\n)*?)(    entitlements:\\n)`,
-    "m",
-  );
-  const found = text.match(infoBlock);
-  if (!found) {
-    console.error(`add-tunnel-extension: no info block found on ${APP_TARGET}`);
+// The app's store-numbers phase (see STORE_NUMBERS), as a key of its own.
+// Tauri's app target has `preBuildScripts:` and no `postBuildScripts:`,
+// so this adds one rather than a duplicate that would silently win.
+if (STORE_NUMBERS) {
+  const appPreBuild = new RegExp(`(^  ${APP_TARGET}:\\n(?:.*\\n)*?)(    preBuildScripts:\\n)`, "m");
+  if (!appPreBuild.test(text)) {
+    console.error(`add-tunnel-extension: no preBuildScripts found on ${APP_TARGET}`);
     process.exit(1);
   }
-  let block = found[1];
-  const replaceIn = (key, value) => {
-    const re = new RegExp(`(\\n        ${key}: )"?[^"\\n]*"?`);
-    if (!re.test(block)) {
-      console.error(`add-tunnel-extension: ${key} not found on ${APP_TARGET}`);
-      process.exit(1);
-    }
-    block = block.replace(re, `$1"${value}"`);
-  };
-  if (marketingVersion) replaceIn("CFBundleShortVersionString", marketingVersion);
-  if (buildNumber) replaceIn("CFBundleVersion", buildNumber);
-  text = text.replace(infoBlock, block + "$2");
+  text = text.replace(appPreBuild, (_, head, tail) => head + STORE_NUMBERS + tail);
+}
+
+// The export options for a store build, beside the project.
+//
+// Tauri's own export cannot produce this IPA. It names no profile, and
+// with no Apple ID signed into Xcode nothing finds one carrying App
+// Groups, Network Extensions, Personal VPN and Sign in with Apple:
+// "EXPORT FAILED" after a good archive, on 2026-09-30 and again on
+// 2026-10-06. So scripts/build-ios.sh archives with Tauri and exports
+// with this, which names both.
+//
+// `destination: export` writes the IPA and nothing else -- uploading
+// stays a separate, deliberate step. manageAppVersionAndBuildNumber is
+// off so Xcode does not renumber what the store-numbers phase set.
+if (process.env.NEOXIFY_IOS_SIGNING === "appstore") {
+  const teamId = process.env.APPLE_DEVELOPMENT_TEAM;
+  if (!teamId) {
+    console.error("add-tunnel-extension: NEOXIFY_IOS_SIGNING=appstore needs APPLE_DEVELOPMENT_TEAM");
+    process.exit(1);
+  }
+  writeFileSync(
+    join(apple, "ExportOptions-appstore.plist"),
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>method</key><string>app-store-connect</string>
+	<key>destination</key><string>export</string>
+	<key>teamID</key><string>${teamId}</string>
+	<key>signingStyle</key><string>manual</string>
+	<key>signingCertificate</key><string>Apple Distribution</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>${tauriConf.identifier}</key><string>${APP_STORE_PROFILE}</string>
+		<key>${TUNNEL_BUNDLE_ID}</key><string>${TUNNEL_STORE_PROFILE}</string>
+	</dict>
+	<key>manageAppVersionAndBuildNumber</key><false/>
+	<key>uploadSymbols</key><true/>
+</dict>
+</plist>
+`,
+  );
+  console.log("add-tunnel-extension: wrote ExportOptions-appstore.plist");
+}
+
+if (STORE_NUMBERS) {
   console.log(
-    `add-tunnel-extension: app version ${marketingVersion ?? "(unchanged)"} ` +
-      `build ${buildNumber ?? "(unchanged)"}`,
+    `add-tunnel-extension: store numbers ${storeVersion || "(Tauri's)"} ` +
+      `(${storeBuild || "Tauri's"}), written into both targets' build`,
   );
 }
 
