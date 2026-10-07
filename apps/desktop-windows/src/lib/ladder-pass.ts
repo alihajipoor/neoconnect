@@ -65,6 +65,19 @@ const cancel = { current: false };
  * of the session. Null in a fresh app: a tunnel the service kept up
  * across a restart has no honest "before". */
 const baseline: { current: BaselineIp | null } = { current: null };
+/** The addresses the pass's tunnel is dialled at -- the server of the
+ * rung it is on, and once it lands, of the route it landed on. The
+ * egress check passes over any endpoint on them: the client routes that
+ * address around the tunnel, so such an endpoint answers with the
+ * customer's own address however well the tunnel works (see
+ * `TunnelServer` in egress.ts).
+ *
+ * Here beside the baseline, and for the same reason: the health poll
+ * needs it for the rest of the session, from whichever Dashboard is
+ * mounted. Null in a fresh app, like the baseline -- which for a tunnel
+ * kept up across a restart leaves nothing to compare, so nothing the
+ * server's own mirror says can be held against that tunnel either. */
+const tunnelServer: { current: ReadonlySet<string> | null } = { current: null };
 
 const endListeners = new Set<() => void>();
 
@@ -74,6 +87,7 @@ export const ladderPass = {
   generation,
   cancel,
   baseline,
+  tunnelServer,
 
   /** Whether a pass could still be running. */
   inFlight(now = Date.now()): boolean {
@@ -117,6 +131,7 @@ export const ladderPass = {
     generation.current = 0;
     cancel.current = false;
     baseline.current = null;
+    tunnelServer.current = null;
     endListeners.clear();
   },
 };

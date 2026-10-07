@@ -74,6 +74,16 @@ describe("the ladder's guard, outside the screen", () => {
     expect(ladderPass.baseline.current).toBeNull();
   });
 
+  it("keeps the tunnel's server beside it, for the health poll of whichever screen is mounted", () => {
+    // Without it a remounted screen's poll could not pass over the
+    // connected node's own mirror, which answers from around the tunnel.
+    expect(ladderPass.tunnelServer.current).toBeNull();
+    ladderPass.tunnelServer.current = new Set(["203.0.113.41"]);
+    expect(ladderPass.tunnelServer.current).toEqual(new Set(["203.0.113.41"]));
+    ladderPass.reset();
+    expect(ladderPass.tunnelServer.current).toBeNull();
+  });
+
   it("tells a screen that adopted a pass when it ends, until it stops listening", () => {
     const heard: string[] = [];
     const stop = ladderPass.onEnd(() => heard.push("first"));

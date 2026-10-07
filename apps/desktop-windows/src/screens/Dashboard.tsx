@@ -13,11 +13,14 @@ import {
   captureIpv6Baseline,
   checkIpv6,
   EGRESS_TIMEOUT_MS,
+  fromTunnelServer,
   verifyEgress,
   confirmEgressWithin,
   type BaselineIp,
   type EgressVerdict,
+  type TunnelServer,
 } from "../lib/egress";
+import { tunnelServerOf } from "../lib/tunnel-server";
 import {
   combineEvidence,
   customModePollState,
@@ -293,13 +296,15 @@ async function confirmReachable(): Promise<ConnectionState> {
 const VERIFY_TIMEOUT_MS = 30_000;
 
 /** Waits for traffic to actually start flowing, rather than asking once.
- * See `confirmEgressWithin` for how the attempts are made. */
+ * See `confirmEgressWithin` for how the attempts are made, and
+ * `TunnelServer` for why the rung's server goes with it. */
 function confirmEgress(
   baseline: BaselineIp | null,
-  budgetMs = VERIFY_TIMEOUT_MS,
-  sameEndpointOnly = false,
+  budgetMs: number,
+  sameEndpointOnly: boolean,
+  tunnelServer: TunnelServer,
 ): Promise<EgressVerdict> {
-  return confirmEgressWithin(baseline, budgetMs, { sameEndpointOnly });
+  return confirmEgressWithin(baseline, budgetMs, { sameEndpointOnly, tunnelServer });
 }
 
 /** How long to wait for ordinary networking to come back after tearing
@@ -386,15 +391,25 @@ const FAILOVER_SETTLE_TIMEOUT_MS = 2_500;
  * ceiling of its own: one endpoint timeout past the budget, or two for a
  * pass with nothing known yet, so a first endpoint that is blocked on
  * the bare network still leaves the next one time to answer.
+ *
+ * `tunnelServer` is the server of the rung about to be dialled. No
+ * baseline comes from an endpoint on it: once that tunnel is up, the
+ * endpoint is reached around the tunnel and answers with this same home
+ * address -- read as "NOT protected" over a working tunnel -- so the
+ * next endpoint supplies it instead. A `known` endpoint on it is not
+ * asked at all, and the walk gets the longer ceiling, as with nothing
+ * known. See `TunnelServer` in egress.ts.
  */
 async function settleAndCaptureBaseline(
-  budgetMs = SETTLE_TIMEOUT_MS,
-  known: BaselineIp | null = null,
+  budgetMs: number,
+  known: BaselineIp | null,
+  tunnelServer: TunnelServer,
 ): Promise<BaselineIp | null> {
   const deadline = Date.now() + budgetMs;
-  if (known !== null) {
+  const ask = known !== null && !fromTunnelServer(known, tunnelServer) ? known : null;
+  if (ask !== null) {
     for (;;) {
-      const ip = await captureBaselineIp({ only: known.from, deadline });
+      const ip = await captureBaselineIp({ only: ask.from, deadline, tunnelServer });
       if (ip !== null) return ip;
       if (Date.now() >= deadline) break;
       await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
@@ -402,10 +417,10 @@ async function settleAndCaptureBaseline(
   }
   const walkDeadline = Math.max(
     deadline,
-    Date.now() + (known === null ? 2 * EGRESS_TIMEOUT_MS : EGRESS_TIMEOUT_MS),
+    Date.now() + (ask === null ? 2 * EGRESS_TIMEOUT_MS : EGRESS_TIMEOUT_MS),
   );
   for (;;) {
-    const ip = await captureBaselineIp({ deadline: walkDeadline });
+    const ip = await captureBaselineIp({ deadline: walkDeadline, tunnelServer });
     if (ip !== null) return ip;
     if (Date.now() >= walkDeadline) return null;
     await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
@@ -1401,7 +1416,14 @@ export function Dashboard({
         // A ceiling on the whole walk: through a tunnel that black-holes
         // everything, every endpoint times out, and at six seconds each
         // the first strike used to land a minute after the tunnel died.
-        const egress = await verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS });
+        //
+        // And never an answer from the connected server's own mirror,
+        // which is reached around the tunnel: with the baseline from it,
+        // the home address came back unchanged and a working tunnel read
+        // "NOT protected", struck, and was in time torn down. See
+        // `TunnelServer` in egress.ts.
+        const tunnelServer = ladderPass.tunnelServer.current ?? undefined;
+        const egress = await verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS, tunnelServer });
         if (!isCurrent(intentRef.current, generation)) return false;
         if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
         verdict = fullTunnelPollState(fromStatus, egress);
@@ -2142,9 +2164,17 @@ export function Dashboard({
         const settleBudget = isLast ? SETTLE_TIMEOUT_MS : FAILOVER_SETTLE_TIMEOUT_MS;
         const verifyBudget = isLast ? VERIFY_TIMEOUT_MS : FAILOVER_VERIFY_TIMEOUT_MS;
 
+        // Where this rung's tunnel will be dialled. The service routes
+        // that address around the tunnel, so an endpoint on it -- the
+        // node's own API mirror -- answers with the customer's home
+        // address however well the tunnel works: no baseline from it,
+        // and no reading from it while connected. Names are resolved
+        // here, as the engine is about to; `connection.host` is an
+        // address and costs nothing. See `TunnelServer` in egress.ts.
+        const tunnelServer = await tunnelServerOf(candidate);
         // Fresh every attempt, and taken only once plain networking is
         // confirmed working. See settleAndCaptureBaseline.
-        baselineIpRef.current = await settleAndCaptureBaseline(settleBudget, knownBaseline);
+        baselineIpRef.current = await settleAndCaptureBaseline(settleBudget, knownBaseline, tunnelServer);
         if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
         // Once per pass, not once per candidate: whether this machine
         // has public IPv6 is a fact about its network, not about which
@@ -2176,6 +2206,10 @@ export function Dashboard({
                 splitTunnelSettings.apps,
               )
             : [];
+          // From here a tunnel to this server may be up, and the health
+          // poll -- from whichever Dashboard is mounted -- needs to know
+          // which endpoints it reaches around it.
+          ladderPass.tunnelServer.current = tunnelServer;
           await invoke("vpn_connect", {
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
@@ -2288,7 +2322,7 @@ export function Dashboard({
           } else {
             // Only the last rung can use an answer from an endpoint other
             // than the baseline's; see `VerifyOptions.sameEndpointOnly`.
-            const egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast);
+            const egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer);
             setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
 
             // The reachability check is worth its eight seconds only

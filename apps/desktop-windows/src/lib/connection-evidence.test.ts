@@ -293,7 +293,9 @@ describe("measurements that cannot outlive what they serve", () => {
   const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
 
   it("caps the health poll's egress walk and runs one measurement at a time", () => {
-    expect(dashboard).toContain("verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS })");
+    expect(dashboard).toContain(
+      "verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS, tunnelServer })",
+    );
     // One at a time; a newer state's first check waits rather than
     // running beside it (dashboard-remount.test.ts has the rest).
     expect(dashboard).toMatch(
@@ -302,9 +304,9 @@ describe("measurements that cannot outlive what they serve", () => {
   });
 
   it("settles each candidate on an endpoint already known to answer, within a ceiling", () => {
-    expect(dashboard).toContain("settleAndCaptureBaseline(settleBudget, knownBaseline)");
-    expect(dashboard).toContain("captureBaselineIp({ only: known.from, deadline })");
-    expect(dashboard).toContain("captureBaselineIp({ deadline: walkDeadline })");
+    expect(dashboard).toContain("settleAndCaptureBaseline(settleBudget, knownBaseline, tunnelServer)");
+    expect(dashboard).toContain("captureBaselineIp({ only: ask.from, deadline, tunnelServer })");
+    expect(dashboard).toContain("captureBaselineIp({ deadline: walkDeadline, tunnelServer })");
     // The shape that checked its budget only between whole walks.
     expect(dashboard).not.toMatch(/for \(;;\) \{\s*const ip = await captureBaselineIp\(\);/);
   });
@@ -597,5 +599,44 @@ describe("the liveness wiring the pure functions cannot check", () => {
   it("takes the headline from the table rather than re-deriving it", () => {
     expect(dashboard).toContain("headlineFor(connectionState, { dropped: tunnelDropped");
     expect(dashboard).not.toContain('t("dash.protected")');
+  });
+});
+
+/** The egress check passes over endpoints on the tunnel's own server,
+ * which the client routes around the tunnel (`TunnelServer` in
+ * egress.ts; the behaviour is in egress-own-mirror.test.ts). Whether the
+ * screen tells it which server that is, is wiring, asserted here like
+ * the rest. */
+describe("the tunnel's own server, named to the egress check", () => {
+  const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+
+  it("names the rung's server to every baseline and check it makes while connecting", () => {
+    expect(dashboard).toContain("const tunnelServer = await tunnelServerOf(candidate);");
+    expect(dashboard).toContain("settleAndCaptureBaseline(settleBudget, knownBaseline, tunnelServer)");
+    expect(dashboard).toContain("confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer)");
+    // Kept for the health poll, from whichever Dashboard is mounted.
+    expect(dashboard).toContain("ladderPass.tunnelServer.current = tunnelServer;");
+    expect(dashboard.indexOf("ladderPass.tunnelServer.current = tunnelServer;")).toBeLessThan(
+      dashboard.indexOf('await invoke("vpn_connect"'),
+    );
+  });
+
+  it("names the connected server to the health poll", () => {
+    expect(dashboard).toContain("const tunnelServer = ladderPass.tunnelServer.current ?? undefined;");
+    expect(dashboard).toMatch(/verifyEgress\(baselineIpRef\.current, \{[^}]*tunnelServer[^}]*\}\)/);
+  });
+
+  it("takes no baseline while connecting without the rung's server", () => {
+    // Every capture inside the settle passes it; the one taken when the
+    // screen loads has no rung yet, and the settle passes over a `known`
+    // endpoint on the server instead (`fromTunnelServer`).
+    const settle = dashboard.slice(
+      dashboard.indexOf("async function settleAndCaptureBaseline("),
+      dashboard.indexOf("function describeAttempts("),
+    );
+    const captures = [...settle.matchAll(/captureBaselineIp\(([^)]*)\)/g)].map((m) => m[1]);
+    expect(captures).toHaveLength(2);
+    for (const args of captures) expect(args).toContain("tunnelServer");
+    expect(settle).toContain("!fromTunnelServer(known, tunnelServer)");
   });
 });
