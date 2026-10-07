@@ -2,7 +2,8 @@ import { Controller, Get, Ip, Req, ServiceUnavailableException } from "@nestjs/c
 import type { Request } from "express";
 import { SkipThrottle } from "@nestjs/throttler";
 import { PrismaService } from "../../prisma/prisma.service";
-import { clientIpOf } from "../../common/client-ip";
+import { clientIpOf, verifiedClientIpOf } from "../../common/client-ip";
+import { CLOUDFLARE_ASN } from "../../common/cloudflare";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
 
 /** The caller's country, as a two-letter code, when the CDN told us.
@@ -61,7 +62,7 @@ export class HealthController {
   @Get("ip")
   async ip(@Ip() ip: string, @Req() req: Request) {
     const address = clientIpOf(req) || ip;
-    return { ip: address, country: countryOf(req), ...(await this.networkOf(address)) };
+    return { ip: address, country: countryOf(req), ...(await this.networkOf(address, verifiedClientIpOf(req, ip))) };
   }
 
   /** Which network the caller is on, and a signed note saying so.
@@ -84,12 +85,30 @@ export class HealthController {
    * because then it would name a data centre, not the customer's ISP.
    * Also omitted while the table has not loaded. Never throws: this
    * endpoint is what the egress check depends on, and a lookup problem
-   * must cost the tags, not the connection. */
-  private async networkOf(address: string | undefined) {
+   * must cost the tags, not the connection.
+   *
+   * `asn` describes the echoed address and is for the caller alone (the
+   * phone apps key their per-network memories on it). `network` is
+   * signed, and is what reports carry back into everyone's per-ISP tags,
+   * so it is issued only when the address the server can vouch for
+   * (`vouched`, see verifiedClientIpOf) is on that same network. It was
+   * signed from the echoed address, which a caller reaching the origin
+   * directly chooses with a CF-Connecting-IP or X-Forwarded-For header:
+   * a token for any carrier, from anywhere. The cost is that a customer
+   * whose baseline goes through a node mirror pointed at the origin gets
+   * no token -- unknown, which the tags already handle, rather than
+   * forgeable. */
+  private async networkOf(address: string | undefined, vouched: string | undefined) {
     try {
       const info = await this.identity.identify(address);
       if (!info) return {};
-      return { asn: info.asn, asnOrg: info.org || undefined, network: this.identity.attest(info.asn) ?? undefined };
+      const seen = vouched === address ? info : await this.identity.identify(vouched);
+      const signable = seen !== null && seen.asn === info.asn && seen.asn !== CLOUDFLARE_ASN;
+      return {
+        asn: info.asn,
+        asnOrg: info.org || undefined,
+        network: signable ? (this.identity.attest(info.asn) ?? undefined) : undefined,
+      };
     } catch {
       return {};
     }
