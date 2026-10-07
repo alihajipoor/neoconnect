@@ -1020,7 +1020,7 @@ impl Engines {
     /// Two gates, and both are load-bearing.
     ///
     /// **Custom mode is excluded**, which is what `wants_interception`
-    /// asks. The 0.9.27 block in `split_tunnel/redirect.rs` already
+    /// asks. The 0.9.27 block in `split_tunnel/intercept` already
     /// covers that path, and covers it *per application*: a selected
     /// app's IPv6 is dropped and an unselected one's is left exactly as
     /// it was, which is the whole premise of a split tunnel. Installing

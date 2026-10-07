@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 
-use super::proxy::{attach_to_tunnel, TunnelInterface};
+use super::net::pin::{attach_to_tunnel, TunnelInterface};
 
 /// Addresses used only to prove the tunnel carries traffic.
 ///

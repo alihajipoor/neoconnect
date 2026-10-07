@@ -31,7 +31,7 @@ use std::net::Ipv4Addr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use super::owner::Transport;
+use super::policy::Transport;
 
 /// Where a redirected packet was really going, plus what has to be put
 /// back on the way home.
@@ -59,7 +59,7 @@ pub struct Origin {
     /// from `addr:port` as usual.
     pub upstream: Option<std::net::SocketAddrV4>,
     /// Which concurrent exit this flow leaves from, as an index into
-    /// [`super::proxy::ExitRelays`].
+    /// [`super::relay::ExitRelays`].
     ///
     /// `None` -- overwhelmingly the common case -- means the session's
     /// own tunnel adapter, which is what every flow used before
@@ -89,7 +89,7 @@ pub struct Origin {
     /// `Origin` is `Copy` and is held per live flow. A `String` here
     /// would make it neither, and would allocate on the packet path.
     /// The index is meaningful because
-    /// [`super::proxy::ExitRelays`] is fixed for the life of a
+    /// [`super::relay::ExitRelays`] is fixed for the life of a
     /// session -- see the note on that type.
     pub exit: Option<u8>,
 }
@@ -211,7 +211,7 @@ struct Tables {
     /// re-decides from scratch, so a stale verdict never got to answer
     /// for a new peer. UDP has no SYN, so a verdict recorded against one
     /// peer covered every other peer that port reached until the TTL
-    /// lapsed -- including a name lookup, which `redirect::decide`
+    /// lapsed -- including a name lookup, which `intercept::decide`
     /// carries through the tunnel whoever makes it, and which this cache
     /// was answering *before* that rule was ever consulted. A datagram
     /// answered from here never reaches the DNS branch at all.
@@ -235,7 +235,7 @@ pub enum Verdict {
     Unknown,
     /// Swallow it. Used only where letting the packet through would send
     /// it somewhere the customer asked it not to go -- see the DNS
-    /// branch in `redirect::decide`.
+    /// branch in `intercept::decide`.
     Drop,
 }
 
@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn a_leave_alone_verdict_does_not_answer_for_a_name_lookup() {
-        // The same bug where it costs the most. `redirect::decide`
+        // The same bug where it costs the most. `intercept::decide`
         // carries a DNS query through the tunnel whoever makes it, and
         // it drops one it cannot carry rather than handing it to the
         // resolver the network supplied -- for somebody in Iran, their

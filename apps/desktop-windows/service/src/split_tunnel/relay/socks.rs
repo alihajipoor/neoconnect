@@ -5,7 +5,7 @@
 //!
 //! Everywhere else in this feature, an onward socket is placed on the
 //! tunnel by pinning it to an interface (`IP_UNICAST_IF`) and binding
-//! its source address -- see [`super::proxy::TunnelInterface`]. That
+//! its source address -- see [`crate::split_tunnel::net::pin::TunnelInterface`]. That
 //! mechanism can only ever name **one** egress, because there is only
 //! one tunnel adapter and one address on it.
 //!
@@ -29,7 +29,7 @@
 //!   relay meant to reach, and continuing would be talking to something
 //!   unidentified.
 //! * **IPv4 destinations only.** The relay decides about IPv4 flows;
-//!   `redirect.rs` blocks a selected application's IPv6 outright rather
+//!   `intercept` blocks a selected application's IPv6 outright rather
 //!   than carrying it. Names never reach here either -- the relay has
 //!   an address by the time it dials, because the application it is
 //!   carrying already resolved one.
@@ -292,7 +292,7 @@ impl UdpAssociation {
     ///
     /// A datagram larger than `buffer` is an error, not a shorter
     /// datagram -- the same answer a plain `UdpSocket` gives on Windows,
-    /// so the pinned and exit paths in `proxy.rs` agree. Truncating it
+    /// so the pinned and exit paths in `relay/mod.rs` agree. Truncating it
     /// would hand an application part of a packet as though it were
     /// whole, which is the reason fragments are refused below.
     pub fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddrV4)> {

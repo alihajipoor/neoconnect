@@ -812,7 +812,7 @@ pub struct AppPlacement {
 ///
 /// The client refuses to send a scope it cannot vouch for, and the
 /// service refuses to build one it cannot fully parse -- see
-/// `split_tunnel::owner::Scope::new`, which returns `None` if a single
+/// `split_tunnel::policy::scope::Scope::new`, which returns `None` if a single
 /// prefix is unreadable rather than scoping to the rest. Two
 /// independent refusals, because one of them being wrong is a ban.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

@@ -122,7 +122,7 @@ Redacted in the working tree (history untouched):
 - `docs/design/gaming-mode.md` — the Iran-to-node latency table now
   names nodes without addresses.
 - `docs/ikev2-node.md`, `docs/detection-resistance.md`.
-- `apps/desktop-windows/service/src/split_tunnel/{owner.rs,redirect.rs}`
+- `apps/desktop-windows/service/src/split_tunnel/{policy/internet.rs,intercept/mod.rs,intercept/decide.rs}` (then `owner.rs` and `redirect.rs`)
   — the Custom-mode DNS-leak capture.
 - `apps/desktop-windows/src/lib/{egress,connection-config.test,
   connection-evidence.test,egress.test}.ts`.

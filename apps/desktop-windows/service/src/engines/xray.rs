@@ -72,7 +72,7 @@ const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// returning success is not that: it means the request was accepted, not
 /// that the stack has finished plumbing it.
 ///
-/// This is the same condition `split_tunnel::wait_for_addressed_adapter`
+/// This is the same condition `split_tunnel::session::tunnel::wait_for_addressed_adapter`
 /// waits for before pinning a socket, arrived at from the other
 /// direction. On a healthy machine it is satisfied on the first poll.
 ///
@@ -357,7 +357,7 @@ fn exit_tags(index: usize) -> (String, String) {
 /// # Why the inbounds are loopback and SOCKS5
 ///
 /// Loopback because the split tunnel's WinDivert filter ends in `not
-/// loopback` (see `split_tunnel::redirect::filter_for`), so the relay's
+/// loopback` (see `split_tunnel::intercept::filter_for`), so the relay's
 /// hop into Xray is invisible to the loop that would otherwise capture
 /// it and feed it back to itself.
 ///
@@ -607,7 +607,7 @@ fn wait_for_address(expected: Ipv4Addr, limits: &crate::lifecycle::budget::Limit
         }
         // Any other address, once the deadline has passed. Deliberately
         // not a failure, and the same concession
-        // `split_tunnel::wait_for_addressed_adapter` makes: `Adapter`
+        // `split_tunnel::session::tunnel::wait_for_addressed_adapter` makes: `Adapter`
         // reports the *first* usable IPv4 on the interface, and Windows
         // can self-assign an APIPA 169.254.x that sorts ahead of the one
         // netsh just set -- the very thing that once made this adapter
@@ -757,7 +757,7 @@ pub fn connect(
 ///
 /// Deliberately not a fixed port range. A hardcoded port that something
 /// else already holds fails on a customer's machine with no way to pick
-/// another -- the same reasoning `proxy::start` gives for binding its
+/// another -- the same reasoning `relay::start` gives for binding its
 /// relay ports at zero.
 fn free_loopback_port() -> Result<u16, String> {
     std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))

@@ -323,7 +323,7 @@ impl Stub {
         self.stop.store(true, Ordering::SeqCst);
         // The UDP workers wake on their own read timeout. The TCP
         // acceptor blocks in `accept`, which no flag reaches, so it is
-        // woken by connecting to it -- the `split_tunnel::proxy`
+        // woken by connecting to it -- the `split_tunnel::relay`
         // precedent.
         let _ = TcpStream::connect(self.addr);
         for thread in self.threads {
