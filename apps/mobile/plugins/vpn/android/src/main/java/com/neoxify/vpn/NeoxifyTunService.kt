@@ -54,6 +54,12 @@ class NeoxifyTunService : VpnService(), Protector {
      */
     private var startAttempted = false
 
+    /** Whether this service instance has been handed a tunnel to run.
+     * Set on the main thread, in onStartCommand, before the start thread
+     * exists -- so unlike `startAttempted` it is already true for a
+     * start that has not reached the engine yet. */
+    private var configured = false
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -169,7 +175,27 @@ class NeoxifyTunService : VpnService(), Protector {
         // reference it could call, and the static `instance` it used to
         // use is a different static in a different address space.
         val config = intent?.getStringExtra(EXTRA_CONFIG)
+        if (config == null && !configured) {
+            // Started with nothing to run, by the system rather than by
+            // this app -- always-on VPN after a reboot sends exactly this.
+            // A state file found now was left by an earlier process that
+            // died without onDestroy, and this one has no tunnel to back
+            // it. Deleted, and the service stops rather than sitting in
+            // the foreground with a "Connected" notification and nothing
+            // behind it.
+            Log.i(TAG, "started with no tunnel configuration; stopping")
+            clearState(this)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (config != null) {
+            configured = true
             val mtu = intent.getIntExtra(EXTRA_MTU, 1500)
             val dns = intent.getStringExtra(EXTRA_DNS) ?: "1.1.1.1"
             val apps = intent.getStringArrayListExtra(EXTRA_APPS) ?: arrayListOf()
@@ -252,9 +278,15 @@ class NeoxifyTunService : VpnService(), Protector {
         super.onDestroy()
     }
 
-    /** Android's own "stop VPN" button lands here. */
+    /** Android's own "stop VPN" button lands here, and so does another
+     * VPN app taking over. */
     override fun onRevoke() {
         teardown()
+        // The tunnel is gone but this process may not be, and the system
+        // has a VPN network up for whoever took over -- the two things
+        // the main process checks the file against. Left saying "up",
+        // it would pass both.
+        clearState(this)
         super.onRevoke()
     }
 
@@ -450,12 +482,20 @@ class NeoxifyTunService : VpnService(), Protector {
         const val STATE_UP = "up"
         const val STATE_ERROR = "error"
 
+        /** The process this service runs in, as a suffix of the package
+         * name. Must match `android:process` in the manifest: the main
+         * process looks for it by this name to tell a live state file
+         * from one a dead process left behind. */
+        const val PROCESS_SUFFIX = ":xray"
+
         /** Where this service tells the main process how it went.
          *
          * Both processes belong to the same app and share this
          * directory, so no permissions or provider are involved. Absent
-         * means "not running", which is also the correct reading after
-         * the system kills either process. */
+         * means "not running". Present is only a claim: a process the
+         * system kills -- reboot, app update, force-stop, a crash --
+         * never runs onDestroy, so "up" survives it. Readers check the
+         * process before believing it; see NeoxifyVpnPlugin.xrayTunnelLive. */
         fun stateFile(context: android.content.Context): java.io.File =
             java.io.File(context.filesDir, "xray-state")
 
