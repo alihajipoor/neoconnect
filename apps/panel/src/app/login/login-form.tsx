@@ -1,6 +1,7 @@
 "use client";
 
-import { type FormEvent, startTransition, useActionState, useState } from "react";
+import { type FormEvent, Fragment, startTransition, useActionState, useState } from "react";
+import { requestFormReset } from "react-dom";
 import { loginAction, requestLoginChallenge, type LoginState } from "./actions";
 import { solve, type Solution } from "@/lib/pow";
 import { Button } from "@/components/ui/button";
@@ -23,7 +24,8 @@ export function LoginForm() {
   // in and never on the panel's server.
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const element = event.currentTarget;
+    const form = new FormData(element);
     if (!mfaStep) {
       setChecking(true);
       try {
@@ -33,7 +35,17 @@ export function LoginForm() {
         setChecking(false);
       }
     }
-    startTransition(() => formAction(form));
+    startTransition(() => {
+      // What React does itself when it runs a form's action, and stopped
+      // doing when this handler took the submit over: clear the
+      // uncontrolled fields once the action settles. Without it the
+      // password stayed in its <input> -- which React then reused for the
+      // code step, as type="text": the admin password shown in clear in
+      // the "Authentication code" box. The keyed steps below stop that
+      // reuse too.
+      requestFormReset(element);
+      formAction(form);
+    });
   }
 
   return (
@@ -45,9 +57,25 @@ export function LoginForm() {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={onSubmit} className="flex flex-col gap-4">
+        {/* `action` as well as `onSubmit`, though onSubmit does the
+            submitting once the page has hydrated. `action` is what makes
+            the server render `method="POST"` and the action's hidden
+            fields (login-form.test.tsx). Without it the server-rendered
+            form had neither, and a submit before the script loaded (a
+            slow or filtered link, Enter right after autofill) was a
+            native GET with the admin password in the URL -- and so in
+            nginx's access log. Before hydration the form posts to
+            loginAction with no solved challenge, which the backend
+            accepts until there have been recent failures. After
+            hydration React does not also run `action`: onSubmit calls
+            preventDefault() before its first await, and React's form
+            handling skips a submit that is already prevented. */}
+        <form action={formAction} onSubmit={onSubmit} className="flex flex-col gap-4">
+          {/* Keyed so that changing step replaces the fields rather than
+              reusing one step's <input> elements, and what was typed into
+              them, for the other's. */}
           {mfaStep ? (
-            <>
+            <Fragment key="code-step">
               <input type="hidden" name="mfaToken" value={state.mfaToken} />
               <div className="flex flex-col gap-2">
                 <Label htmlFor="code">Authentication code</Label>
@@ -64,9 +92,9 @@ export function LoginForm() {
                   className="text-center text-lg tracking-[0.5em]"
                 />
               </div>
-            </>
+            </Fragment>
           ) : (
-            <>
+            <Fragment key="password-step">
               <div className="flex flex-col gap-2">
                 <Label htmlFor="email">Email</Label>
                 <Input id="email" name="email" type="email" autoComplete="email" required autoFocus />
@@ -81,7 +109,7 @@ export function LoginForm() {
                   required
                 />
               </div>
-            </>
+            </Fragment>
           )}
           {state.error ? (
             <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
