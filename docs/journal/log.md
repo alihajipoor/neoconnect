@@ -4094,3 +4094,69 @@ their old Pro subscription's credentials and have an ACTIVE one).
 **Still open:** turkey-1's exposed root password (needs the owner: they
 may log in with it); the HTTP/1.1 vs h2 question for the other nodes'
 mirrors was checked only from one uncensored client.
+
+## 2026-10-06 (evening) — iOS: the one shipped build left had the seed; 0.2.23 carried traffic on an iPhone
+
+**Did iOS 0.2.18–0.2.21 ship the placeholder seed?** Not the one
+build that can still be opened. Nothing survives for 0.2.18, 0.2.19,
+0.2.20 or 1.0.0 (5): exports and kept logs were under `/tmp`, cleared
+at the 2026-10-04 reboot, and `build-ios.sh` deletes the previous
+archive. The archive behind 1.0.0 (6) -- Tauri version 0.2.21,
+uploaded 2026-09-30 -- survived, now in
+`~/Library/Developer/Xcode/Archives/2026-09-30/`. Its executable
+carries the real seed (v3, issued 2026-09-02, 8 endpoints, identical
+to today's) and allow globs for exactly those 8 hosts. So the leading
+candidate in *the "Windows can't reach the API" rows were iOS* is
+false for build 6 and unproven for the rest: 0.2.18 was built with
+`NEOXIFY_SKIP_SEED=1` (whatever seed was on disk), and nothing records
+what 0.2.19 and 0.2.20 fetched. **The iOS control-plane failure rate is
+still unexplained.** The globs show with `grep -a`; the seed sits in
+the brotli-compressed frontend, reached by following Tauri's asset
+table to `/assets/index-*.js`.
+
+**Built mobile 0.2.23** from `main` `1cd85c6`, not uploaded and not to
+be: store-signed (Apple Distribution, the *AppStore 2026* profiles),
+0.2.23 (0.2.23), seed v3 fetched fresh, entitlements in both
+signatures, store-bundle assertion clean. IPA at
+`apps/mobile/src-tauri/gen/apple/build/arm64/Neoxify.ipa` (23.5 MB);
+archive and IPA also in `~/Library/Developer/Xcode/Archives/2026-10-06/`;
+log in `~/Library/Logs/neoxify-ios/`. The xcframework on disk
+(2026-09-26) already has #58's heap bound (checked in its `init.0`),
+so it was not rebuilt.
+
+**On a real iPhone** (17 Pro Max, iOS 26.6), a development re-sign of
+the same archive (`xcodebuild -exportArchive`, the *Dev 2026* profiles,
+installed with `devicectl`):
+- Sign-in went through one of the seed's mirrors -- the app's
+  `api-endpoints.json` recorded it as last-good -- so the seed and the
+  HTTP scope work on iOS: a non-`neoxify.site` host was allowed and
+  answered.
+- **Stealth (VLESS+REALITY) on germany-1 carried traffic**: Safari's
+  exit IP matched the node's address in the app's own route cache, the
+  first packets the iOS tunnel has demonstrably carried. Disconnect put
+  the home IP back and the extension process exited. A 2-minute speed
+  test ran with the extension never killed, and a Stealth tunnel then
+  stayed up in one process for over an hour.
+- `devicectl` reads a development build's container (`device info
+  files` / `copy from`), which is how the endpoint and route were read
+  without the UI. Its process list occasionally drops a process for one
+  poll; confirm a "stop" with a second reading.
+
+**Store builds: fixed on `claude/ios-store-build` (`4e2c84a`), not yet
+merged.** Until it is, `pnpm ios:build` cannot make an uploadable IPA
+here: no Apple ID is signed into Xcode, so Tauri's export finds no
+profile with Sign in with Apple (`EXPORT FAILED` after a good archive),
+and `NEOXIFY_IOS_MARKETING_VERSION` never stuck -- `tauri ios build`
+sets the bundle versions itself, and build 6's 1.0.0 was a `plutil`
+patch of its archive, which is why that archive's signature no longer
+verifies. The branch sets the numbers in a build phase before signing
+and exports with the App Store profiles itself; the commit says why
+both obvious ways of passing the numbers fail. Numbering, the owner's
+decision: the App Store's own 1.0.x line with a rising build number,
+each upload's mobile version recorded here. Next is 1.0.0 (7), to be
+built from 0.2.24.
+
+**Unverified:** WireGuard, IKEv2, Stealth HTTPS / Web / Lite and
+Shadowsocks on the phone; sign-out while connected; IPv6 (this Wi-Fi
+has none -- the cellular check, expected to show 0.2.23 leaking, is
+still to run); a censored network.
