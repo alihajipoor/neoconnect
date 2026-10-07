@@ -7,7 +7,7 @@ const endpoints = vi.fn<() => Promise<string[]>>();
  * A base missing from the map is treated as unreachable. `hang` never
  * answers and ends only when the caller aborts -- what a request made in
  * a new adapter's first seconds was measured doing. */
-type Answer = { ip: string } | { status: number } | "unreachable" | "hang";
+type Answer = { ip: string } | { status: number } | { failAt: number } | "unreachable" | "hang";
 const answers = new Map<string, Answer>();
 /** Answers given one per request, in order, before `answers` applies --
  * for an endpoint whose behaviour changes while a tunnel comes up. */
@@ -29,6 +29,13 @@ vi.mock("@tauri-apps/plugin-http", () => ({
     }
     if (answer === undefined || answer === "unreachable") {
       return Promise.reject(new Error(`no route to ${base}`));
+    }
+    // Fails at a given moment (epoch ms) -- a request whose timer fired a
+    // little before the deadline it was set for.
+    if ("failAt" in answer) {
+      return new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Request canceled")), Math.max(0, answer.failAt - Date.now())),
+      );
     }
     // An HTTP answer with no address in it: an error page from a mirror
     // or the CDN while the backend behind them is down.
@@ -447,6 +454,22 @@ describe("the check made while a tunnel is coming up", () => {
     expect(Date.now() - started).toBeLessThan(1_000);
     // The deadline went to the first endpoint; nothing was left to ask
     // the second.
+    expect(asked).toEqual([CDN]);
+  });
+
+  it("asks nothing more with only a sliver of the deadline left", async () => {
+    // The flake the test above used to have, made to happen every time:
+    // the first request ends a few milliseconds short of the deadline --
+    // a timer can fire before `Date.now()` reaches the moment it was set
+    // for -- and the next endpoint used to be asked with what was left,
+    // a budget no real request fits in. Here it answers at once, so it
+    // supplied a baseline the deadline had already ruled out.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(FI_MIRROR, { ip: NODE });
+    const deadline = Date.now() + 100;
+    answers.set(CDN, { failAt: deadline - 5 });
+
+    await expect(captureBaselineIp({ deadline })).resolves.toBeNull();
     expect(asked).toEqual([CDN]);
   });
 

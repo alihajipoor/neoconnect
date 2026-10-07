@@ -155,6 +155,10 @@ function plainAddress(ip: string): string {
   return mapped ? mapped[1] : ip;
 }
 
+/** Below this much of a deadline, no further endpoint is asked: three
+ * round trips (TCP, TLS 1.3, the request) do not fit in it off a LAN. */
+const MIN_REQUEST_MS = 10;
+
 /** The first answer from `bases`, tried in order.
  *
  * Each endpoint gets its own budget rather than sharing one. A first
@@ -181,7 +185,13 @@ async function readFrom(
     let budget = timeoutMs;
     if (deadline !== undefined) {
       const left = deadline - Date.now();
-      if (left <= 0) break;
+      // Not `<= 0`. A timer can fire a millisecond before `Date.now()`
+      // reaches the deadline it was set for, so the request that was
+      // given the whole remainder could time out with a sliver still
+      // "left" -- and the next endpoint was then asked with a budget no
+      // TLS handshake could fit in. Caught as a flaky test, where the
+      // stand-in for that next endpoint answers at once.
+      if (left < MIN_REQUEST_MS) break;
       budget = Math.min(budget, left);
     }
     try {
