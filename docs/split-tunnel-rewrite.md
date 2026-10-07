@@ -71,16 +71,20 @@ arrive through it, and the two long waits inside clamp against it — see
 
 ```rust
 pub fn running_without_the_lock() -> bool        // mod.rs — pipe.rs status fallback
-pub use owner::{Selection, SharedSelection}
+pub use policy::{Selection, SharedSelection}
 pub use picker::running_apps
-pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp>  // picker.rs — pipe.rs
-pub(crate) const firewall::RULE: &str            // repair.rs
+pub fn running_apps(session: Option<u32>) -> Vec<neoconnect_ipc::RunningApp>  // picker/mod.rs — pipe.rs
+pub(crate) const firewall::RULE: &str            // net/firewall.rs, via `pub(crate) use net::firewall` — repair.rs
 pub(crate) fn firewall::delete_rule()            // janitor.rs, repair.rs
 ```
 
-`running_apps` moved from `owner.rs` to `picker.rs` (040f80f). What
-callers outside the subsystem see -- `split_tunnel::running_apps` --
-did not change, which is the boundary; only the re-export line did.
+`running_apps` moved from `owner.rs` to `picker.rs` (040f80f), and the
+restructure moved `Selection` to `policy/` and the firewall module to
+`net/`. What callers outside the subsystem see --
+`split_tunnel::{Selection, SharedSelection, running_apps,
+running_without_the_lock}` and `split_tunnel::firewall::{RULE,
+delete_rule}` -- did not change, which is the boundary; only the
+re-export lines did.
 
 `running_without_the_lock` exists because `Status` must be answerable
 while the engine lock is held; it is the split-tunnel half of the same
@@ -88,7 +92,7 @@ escape hatch `engines::os_visible_tunnel` provides. It must stay
 lock-free.
 
 `CUSTOM_MODE_RESOLVER` is **not** boundary: it is a private const in
-`mod.rs` that `engines/dns.rs` only mentions in prose.
+`session/mod.rs` that `engines/dns.rs` only mentions in prose.
 
 ## Rules
 
@@ -337,21 +341,99 @@ split every relayed socket with `try_clone` long before this work. The
 lesson for anything here that tears down: test it with many instances
 at once, not one.
 
+### The restructure
+
+The target design below, done on `claude/split-tunnel-restructure`
+(2026-10-07, off the 0.9.45 release candidate `bb3679a`), one commit
+per step, each compiling and passing the whole suite on Windows. The
+moves changed no behaviour. The four that are not moves -- the
+selection set, the `Drop`s, drop-order teardown and the typed ladder
+-- came after the code they change had stopped moving, except the
+selection set, which landed as soon as `policy/` existed.
+
+| Step | Commit |
+|---|---|
+| `divert.rs`, `firewall.rs` -> `net/` (boundary path kept by re-export) | 199e9ce |
+| `picker.rs`, `icon.rs` -> `picker/` | dba1057 |
+| `flows.rs` -> `flows/` | 81bf6b0 |
+| `owner.rs` -> `policy/` (pure; a test holds it so) and `tables/` | 6c99d13 |
+| `Selection`'s paths in a set: `matches` is a hash lookup, its doc true | f7c1233 |
+| `proxy.rs`, `socks.rs` -> `relay/`; pinning -> `net/pin.rs` | cbe0eb7 |
+| `redirect.rs` -> `intercept/` (`decide`, `packet`, `stats` split out) | 3e0787b |
+| the running session out of `mod.rs` -> `session/`, `worker.rs`, `log_file.rs` | ff0960c |
+| every part of a session releases itself in `Drop` (`Running`, `Relays`, a shared `Worker` for the three session threads) | 39f98e5 |
+| a session is torn down in drop order; `start`'s four hand-written unwinds gone | 3129e8b |
+| `decide`'s ladder carries its order in types | 785c9d0 |
+
+What `split_tunnel/` is now, one job per module:
+
+| Module | Job |
+|---|---|
+| `mod.rs` | `SplitTunnel` -- the frozen boundary -- and the slot holding a session |
+| `policy/` | `Selection`, scopes, the verdict vocabularies, `is_public_*`. Pure |
+| `tables/` | one typed reader of the `MIB_*_OWNER_PID` tables; owner cache; reset and audit |
+| `picker/` | `running_apps`, product names, icons |
+| `net/` | `divert`, `firewall`, `pin` -- the thin Windows layer |
+| `flows/` | the NAT and flow tables |
+| `relay/` | the relays and the connections they own; exits; own sockets; SOCKS5 |
+| `health.rs` | tunnel verification, which relays nothing |
+| `intercept/` | the WinDivert loop; `decide` (the ladder), `packet`, `stats` |
+| `session/` | one running session: `Parts` and its `Windows` implementation, the bring-up, logger, watchdog, convergence, the tunnel and route |
+| `worker.rs`, `log_file.rs` | the stoppable thread and the log file both the session and the relay use |
+
+**How teardown works now.** `Session`'s first eight fields are declared
+in exactly the order `stop` used to run by hand -- watchdog,
+interception, convergence, relays, allowance, logger, route, IPv6
+block -- and each releases itself in `Drop`, so `SplitTunnel::stop` is
+`drop(self.active.take())`. A bring-up that fails releases what it
+holds in the order the old unwinds did (relays, IPv6 block, allowance,
+route), kept by declaring those locals ahead of the relays: locals drop
+in reverse declaration order. A panic after interception or the relays
+began used to strand them; the unwind now stops them. That is the only
+behaviour change in the restructure, and it is on a path no test or
+customer has hit.
+
+**How the ladder works now.** Seven rungs, one function each, each
+taking the previous rung's token by value; a token's fields are private
+to the ladder and each is built in one place. Skipping or reordering a
+rung is a type error. The DNS rung builds its `Origin` with `exit: None`
+and holds no `Carry`; only the last rung can name an exit. The `decide`
+tests are unchanged.
+
+**What is tested that was not.** `stop`'s ordering and the bring-up's
+release order on each failing step, listed above as untested, now have
+tests against stand-in parts (`session/fake.rs`): the real relays,
+logger and `Worker`, stand-ins for the route, allowance, IPv6 block,
+interception and the threads that touch real tables or adapters. One of
+them brings up and drops 32 sessions at once and requires every part
+released once and in order, every object handed to a thread released --
+so no thread is left running -- and every relay port closed. Each
+session test was made to fail by the mistake it guards against -- a
+field moved, a declaration moved, a `Worker` that does not join, relays
+dropped without being stopped -- before it was trusted. `start`,
+`probe` and `complaint` against the real Windows layer still have no
+test.
+
+Test counts on Windows, `cargo test --workspace`: service 478 passed /
+6 ignored before, 485 / 6 after (seven new: policy purity, the stack
+path edge, two `Worker`, three session); ipc 58; desktop 44 / 5.
+Split-tunnel tests: 239 before, 246 after. No test was deleted; the
+existing ones moved with their code, and the `decide` tests did not
+change at all.
+
 ### What this did not do
 
-* **The directory re-organisation below.** Findings were fixed where
-  they lived; only `health.rs` and `picker.rs` were split out, because
-  those were whole jobs with no packet-path role. The remaining moves
-  are mechanical and can be made whenever they stop being churn.
-* **`start`'s eight jobs and `stop`'s hand-ordered sequence.** The
-  dangerous half -- a route left behind by a forgotten unwind -- is
-  closed by `Drop`. Restructuring the rest means changing the bring-up
-  sequence itself, which cannot be checked without a VPN session and
-  the rig.
+* **`start`'s eight jobs.** `Session::start` is still the one function
+  that brings a session up, and its sequence is unchanged step for step
+  -- deliberately, because a different bring-up sequence cannot be
+  checked without a VPN session and the rig. What changed is that it
+  no longer unwinds by hand.
 * **Anything against real packets.** All of the above is proven by
   unit tests on Windows and by reading. No change here has carried a
   game's traffic through a real tunnel since it was made, and per
   `CLAUDE.md` that stays **unverified** until a capture says otherwise.
+  That now includes the whole restructure: Custom mode and gaming mode
+  in the VM are owed before it merges.
 
 ## Target design
 
@@ -380,3 +462,9 @@ Follows from the above, and the rule is one job per module:
    four manual unwind paths disappear.
 
 `SplitTunnel` stays exactly as the boundary above defines it.
+
+All eight are done -- see "The restructure" under "Where it stands"
+for the commits and what each module now holds. One thing the list
+did not foresee: `session/` takes its parts from a `Parts` trait, the
+shape `lifecycle::teardown::HardStopSteps` already has, so that the
+drop order can be tested without Windows.
