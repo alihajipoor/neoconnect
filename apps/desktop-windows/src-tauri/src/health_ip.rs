@@ -55,15 +55,45 @@ const USER_AGENT: &str = "tauri-plugin-http/2.5.9";
 ///
 /// The frontend's HTTP permission is scoped by the capability file, and
 /// this command sits outside it, so it does its own narrowing: one fixed
-/// path, https only (plain http only for a local development backend),
-/// no credentials, query or fragment smuggled in through the base.
+/// path, https only, no credentials, query or fragment smuggled in
+/// through the base -- and no address on this machine except in a
+/// development build, which talks to a local backend (plain http
+/// allowed). A release build has no local backend, and allowing one let
+/// the webview have this command fetch `/health/ip` from any port on
+/// loopback.
+///
+/// Not narrowed to our own hosts. The endpoint list grows at run time
+/// from signed bundles, and the capability scope -- fixed when the app
+/// was built -- is exactly what lags it (see `bundle.mjs sign
+/// --previous`); a copy of that scope here would refuse the hosts the
+/// egress check most needs on a network where the older ones are
+/// blocked. What a hostile page could get from this is the status and a
+/// small JSON body of a GET to a fixed path, without cookies or
+/// credentials.
 pub fn health_url(base: &str) -> Result<reqwest::Url, &'static str> {
+    health_url_allowing(base, cfg!(debug_assertions))
+}
+
+/// `health_url`, with whether a local development backend is allowed
+/// given explicitly so both rules can be tested from one build.
+fn health_url_allowing(base: &str, local_backend: bool) -> Result<reqwest::Url, &'static str> {
     let url = reqwest::Url::parse(&format!("{}/health/ip", base.trim_end_matches('/')))
         .map_err(|_| "not a URL")?;
-    let local_dev = matches!(url.host_str(), Some("localhost") | Some("127.0.0.1"));
+    // An IPv6 literal comes back from `host_str` in its brackets.
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if loopback && !local_backend {
+        return Err("an address on this machine is not an API base");
+    }
     match url.scheme() {
         "https" => {}
-        "http" if local_dev => {}
+        "http" if loopback => {}
         _ => return Err("not an https address"),
     }
     if url.host_str().is_none()
@@ -140,9 +170,58 @@ mod tests {
 
     #[test]
     fn allows_plain_http_only_for_a_local_backend() {
-        assert!(health_url("http://localhost:4000/api").is_ok());
-        assert!(health_url("http://127.0.0.1:4000/api").is_ok());
-        assert!(health_url("http://connect.neoxify.site/api").is_err());
+        assert!(health_url_allowing("http://localhost:4000/api", true).is_ok());
+        assert!(health_url_allowing("http://127.0.0.1:4000/api", true).is_ok());
+        assert!(health_url_allowing("http://connect.neoxify.site/api", true).is_err());
+        assert!(health_url_allowing("http://connect.neoxify.site/api", false).is_err());
+    }
+
+    /// A release build has no local backend, and the command sits outside
+    /// the capability scope: the webview could otherwise have it fetch
+    /// from any port on this machine, over https as well as http.
+    #[test]
+    fn a_release_build_asks_nothing_on_this_machine() {
+        for base in [
+            "http://localhost:4000/api",
+            "https://localhost:8443/api",
+            "https://LOCALHOST/api",
+            "http://127.0.0.1:4000/api",
+            "https://127.0.0.1:9/api",
+            "https://127.5.5.5/api",
+            "https://[::1]:8443/api",
+        ] {
+            assert!(health_url_allowing(base, false).is_err(), "{base} should be refused");
+        }
+        assert!(health_url_allowing("https://connect.neoxify.site/api", false).is_ok());
+        assert!(health_url_allowing("https://mirror.example:2053/api", false).is_ok());
+        // Which rule the build gets.
+        assert_eq!(
+            health_url("https://localhost:8443/api").is_ok(),
+            cfg!(debug_assertions),
+        );
+    }
+
+    /// The HTTPS path, which the tests above never take (they use plain
+    /// http on loopback), against a real server, by hand:
+    ///
+    /// ```text
+    /// NEOXIFY_HEALTH_IP_LIVE=https://host[:port]/base \
+    ///   cargo test -p neoconnect-desktop --lib live_health_ip -- --ignored --nocapture
+    /// ```
+    ///
+    /// Any https base will do to show the TLS and IPv4-only connection
+    /// work (a host without `/health/ip` answers 404, which is still an
+    /// answer); ours to see the address it reports. Ignored because its
+    /// answer depends on the network, and the base comes from the
+    /// environment so no host is committed.
+    #[test]
+    #[ignore]
+    fn live_health_ip() {
+        let base = std::env::var("NEOXIFY_HEALTH_IP_LIVE").expect("set NEOXIFY_HEALTH_IP_LIVE=https://...");
+        let started = std::time::Instant::now();
+        let answer = tauri::async_runtime::block_on(health_ip_v4(base, 6_000));
+        println!("{answer:?} in {}ms", started.elapsed().as_millis());
+        assert!(answer.is_ok(), "no HTTP answer over IPv4");
     }
 
     /// Serves exactly one HTTP response on `listener`, in a thread, and
