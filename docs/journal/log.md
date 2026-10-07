@@ -3572,7 +3572,9 @@ and what is not.
   `indeterminate`, so the poll falls back to the handshake, counts no
   strike and runs no ladder. With no baseline, every rung is judged on
   its handshake rather than rejected, and the wait for proof that cannot
-  come ends at once (`4f2123a`).
+  come ends at once (`4f2123a`). **The TCP probe was wrong for every
+  Xray protocol** -- xray's tun answers the handshake itself -- and is
+  now a verified TLS handshake; see the follow-up entry below.
 - **"You're protected" on a dual-stack machine while IPv4 bypassed**
   (medium). `/health/ip` is asked over IPv4 only on Windows (new
   `health_ip_v4` command, reqwest bound to `0.0.0.0`, installed from
@@ -3638,3 +3640,85 @@ None of it needs the backend, an agent release or a node change. The
 app and the service ship in one installer and must: `REPAIR_WORST_CASE`
 is compiled into both. The operator should start passing `--previous`
 when signing the next endpoint bundle.
+
+## 2026-10-06 — review of the desktop fixes: the IPv4 probe and the lows (same branch)
+
+**Status:** pushed to `claude/review-fixes-desktop`, not merged, not
+released. An adversarial review of the entry above found one blocking
+defect and eleven lows. The blocking one is fixed and measured; seven
+lows are fixed, two are recorded as deferred, two needed no code.
+
+### The blocking finding, measured
+
+`probe_ipv4_egress` asked for a TCP handshake with 1.1.1.1 / 8.8.8.8 on
+443. Under VLESS-REALITY, VLESS-TLS, Trojan and Shadowsocks that is
+answered by xray.exe itself: its `tun` inbound is a gVisor stack that
+completes the three-way handshake before handing the connection to the
+outbound (`proxy/tun/stack_gvisor.go` in the bundled v26.1.23). So the
+probe said yes whenever xray.exe ran, and a node blocked mid-session --
+the common failure in Iran -- read as "our API is down": no strike, no
+failover, "Connected, not confirmed" over a dead tunnel; with no
+baseline the ladder stopped on a dead Xray rung.
+
+Measured on `Neoxify-Test` with the bundled xray.exe, a `tun` inbound on
+its own adapter and host routes for both resolvers into it (the app was
+not involved; the probe ran as the Tauri crate's test binary):
+
+| xray outbound | TCP handshake (old probe) | verified TLS (new probe) |
+|---|---|---|
+| none (no tunnel) | yes | yes |
+| VLESS to a working relay (xray on the host, loopback) | yes | yes, 20ms |
+| VLESS to 192.0.2.1 (never answers) | **yes** | no, at the 5s limit |
+
+The relay's own log showed both probes' connections arriving and dialled
+out. A first attempt with a `freedom` outbound looped back into the tun
+(its dial to 1.1.1.1 followed the host route) and is not evidence of
+anything. The probe is now a TLS handshake whose certificate verifies
+for `one.one.one.one` / `dns.google`, using the control-plane probe's
+handshake and roots (`16c8050`). It also decides whenever no endpoint
+gave an address, not only when none answered: the connected node's own
+mirror is on the node's address, routed around the tunnel, so its 502
+said nothing about the tunnel. Where the command does not exist (mobile)
+an error page from ours still counts as traffic flowing.
+
+### The lows
+
+- Writes stop at an HTML 502 or 520 as at 504/524 (`5b43d08`): nginx's
+  502 also means the upstream closed mid-request, and 520 an unreadable
+  origin answer, so a resent purchase or redemption could run twice.
+- App watch: a thread the OS would not start is `Unwatchable` and tears
+  down, instead of sharing `WatchAbandoned` with the service stop
+  (`057e4e9`).
+- The egress baseline lives in the ladder-pass store, so a screen
+  remounted mid-connect compares against the pass's baseline; the guard
+  is renewed at every rung, so a long ladder no longer outlives
+  `LADDER_MAX_MS` (`66362a2`).
+- A new state's first health check runs once the one in flight ends,
+  instead of waiting up to fifteen seconds (`ffdfe9f`).
+- `health_ip_v4` refuses every loopback host in a release build; its
+  HTTPS path was run against two public HTTPS hosts that are not ours
+  (404 in 49ms and 323ms) (`f0bc90c`).
+- A flaky test from `e226923` (1 failure in 5 runs) was a real edge: a
+  timer firing a millisecond early let the walk ask the next endpoint
+  with a 1ms budget (`2c6d322`).
+- Mobile, through the shared code: an error page from every endpoint is
+  "no verdict", which mobile shows as "Connected" (it was "degraded"),
+  and on a dual-stack phone an IPv6 baseline against an IPv4 reading is
+  no longer proof, so `saveLastGood` does not save on it. Both are the
+  intended rules; neither has a mobile-side test.
+- Deferred: the baseline walk capped at two endpoint timeouts (a bare
+  network that black-holes the first two endpoints in order gets no
+  baseline, so bypass is undetectable for that session; unverified how
+  often), and `bundle.mjs --previous` standing in for what shipped
+  clients allow (a host first added in that bundle is not warned about;
+  knowing each build's seed needs the release to record it, or #11's
+  runtime scope).
+
+### Unverified
+
+Everything in the entry above still is, and: the new probe through
+WireGuard, OpenVPN and IKEv2 (kernel tunnels, so a TCP handshake did
+cross them, but the TLS one has not been run through them); the 5s limit
+on a slow censored path; whether a node's network reaches 1.1.1.1 and
+8.8.8.8 on 443 (both are also the tunnel's DNS, so a node that cannot is
+already broken for customers).
