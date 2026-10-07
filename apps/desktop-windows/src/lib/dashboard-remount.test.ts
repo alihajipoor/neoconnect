@@ -35,6 +35,45 @@ describe("the ladder's guard, outside the screen", () => {
     expect(ladderPass.inFlight(start + 1)).toBe(false);
   });
 
+  it("stays held for a pass that keeps stepping forward, however long the ladder", () => {
+    // Seven rejected rungs on a filtered network, each a settle of up to
+    // twelve seconds plus a start and a verify: past LADDER_MAX_MS from
+    // the start, with the pass alive throughout. Measured from the start,
+    // the guard expired under it and a press started a second ladder.
+    const start = 1_000_000;
+    ladderPass.running.current = true;
+    ladderPass.generation.current = 3;
+    ladderPass.startedAt.current = start;
+    const rung = 25_000;
+    for (let i = 1; i <= 7; i++) ladderPass.progress(3, start + i * rung);
+    expect(ladderPass.inFlight(start + 7 * rung + 1)).toBe(true);
+    expect(ladderPass.inFlight(start + 7 * rung + LADDER_MAX_MS - 1)).toBe(true);
+    // A step that hangs still loses the guard.
+    expect(ladderPass.inFlight(start + 7 * rung + LADDER_MAX_MS)).toBe(false);
+  });
+
+  it("lets only the pass holding the guard renew it", () => {
+    const start = 1_000_000;
+    ladderPass.running.current = true;
+    ladderPass.generation.current = 4;
+    ladderPass.startedAt.current = start;
+    // A pass that outlived its guard and was replaced (generation 3).
+    ladderPass.progress(3, start + 100_000);
+    expect(ladderPass.startedAt.current).toBe(start);
+    // Nor once no pass is running.
+    ladderPass.running.current = false;
+    ladderPass.progress(4, start + 100_000);
+    expect(ladderPass.startedAt.current).toBe(start);
+  });
+
+  it("keeps the pass's baseline for whichever screen is mounted, until reset", () => {
+    expect(ladderPass.baseline.current).toBeNull();
+    ladderPass.baseline.current = { ip: "192.0.2.228", from: "https://connect.neoxify.site/api" };
+    expect(ladderPass.baseline.current).toEqual({ ip: "192.0.2.228", from: "https://connect.neoxify.site/api" });
+    ladderPass.reset();
+    expect(ladderPass.baseline.current).toBeNull();
+  });
+
   it("tells a screen that adopted a pass when it ends, until it stops listening", () => {
     const heard: string[] = [];
     const stop = ladderPass.onEnd(() => heard.push("first"));
@@ -63,6 +102,22 @@ describe("the Dashboard's wiring", () => {
     expect(dashboard).toContain("const cancelRef = ladderPass.cancel;");
     expect(dashboard).not.toMatch(/const (ladderRunningRef|ladderGenerationRef|cancelRef) = useRef\(/);
     expect(dashboard).toContain("return ladderPass.inFlight();");
+  });
+
+  it("keeps the egress baseline in the shared store, so an adopted pass brings it along", () => {
+    expect(dashboard).toContain("const baselineIpRef = ladderPass.baseline;");
+    expect(dashboard).not.toMatch(/const baselineIpRef = useRef/);
+  });
+
+  it("renews the guard at every rung, right after checking it is still the current pass", () => {
+    const loop = dashboard.indexOf("for (const [index, candidate] of candidates.entries()) {");
+    expect(loop).toBeGreaterThan(0);
+    const checked = dashboard.indexOf("if (ladderGenerationRef.current !== generation) break;", loop);
+    const renewed = dashboard.indexOf("ladderPass.progress(generation);", loop);
+    const settled = dashboard.indexOf("await settleAndCaptureBaseline(", loop);
+    expect(checked).toBeGreaterThan(loop);
+    expect(renewed).toBeGreaterThan(checked);
+    expect(renewed).toBeLessThan(settled);
   });
 
   it("asks the service before leaving the loading state when our API is unreachable", () => {

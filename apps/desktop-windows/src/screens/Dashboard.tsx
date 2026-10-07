@@ -617,8 +617,11 @@ export function Dashboard({
   /** The address the world saw before connecting. Captured while still
    * disconnected -- taken afterwards it would be the tunnel's own exit
    * address and the comparison would be meaningless. A ref rather than
-   * state because nothing renders from it. */
-  const baselineIpRef = useRef<BaselineIp | null>(null);
+   * state because nothing renders from it, and the pass's rather than
+   * this screen's: a screen remounted mid-connect adopts the pass, and
+   * must compare against the baseline that pass took. See
+   * `ladderPass.baseline`. */
+  const baselineIpRef = ladderPass.baseline;
   const [exitIp, setExitIp] = useState<string | null>(null);
   /** Taken from the service, never from the Settings toggle.
    *
@@ -2106,6 +2109,10 @@ export function Dashboard({
         // stops dialling here, rather than tearing that pass's engine
         // down with its next connect.
         if (ladderGenerationRef.current !== generation) break;
+        // Still alive: each rung renews the guard, so a long ladder on a
+        // filtered network keeps it while a wedged step still loses it.
+        // See `LADDER_MAX_MS`.
+        ladderPass.progress(generation);
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
         if (candidate.routeId === shownRouteId) triedShownRoute = true;
