@@ -20,6 +20,16 @@
 //! the same drops, where it used to strand whatever had already started
 //! -- interception included.
 //!
+//! The three orders are not the same, and need not be. Stopping a
+//! running session: watchdog, interception, convergence, relays,
+//! allowance, logger, route, IPv6 block. A step that fails: relays, IPv6
+//! block, allowance, route -- interception never started. A panic after
+//! interception started: whatever came after the relays, newest first
+//! (convergence, logger, interception), then the same four. What all
+//! three keep is what the customer depends on: the packet loop stops
+//! before the relays it sends to, and the per-app IPv6 block comes off
+//! after the loop. Each order has a test.
+//!
 //! The parts themselves come from [`Parts`], so the order can be tested
 //! without Windows; [`Windows`] is the real thing.
 
@@ -331,6 +341,12 @@ impl<P: Parts> Session<P> {
         // by hand used to: the relays first, then the IPv6 block, then
         // the firewall allowance, then the route. A local that was never
         // assigned is not dropped at all.
+        //
+        // Everything declared after the relays -- interception, the
+        // logger, the convergence -- drops before them on a panic, which
+        // is what keeps the packet loop from outliving the relays it
+        // sends to. Declaring any of those three up here with these two
+        // would break that, and only the panic test would notice.
         let allowance;
         let ipv6_apps;
 
@@ -758,6 +774,41 @@ mod tests {
         let Err(error) = start(&ledger, 99, Some("relays"), &dir) else { unreachable!() };
         assert!(error.starts_with("could not start the local relay: "), "{error}");
         assert!(ledger.still_held().is_empty(), "a failed bring-up left a thread running: {:?}", ledger.still_held());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bring-up that panics after interception started releases
+    /// everything, with the packet loop stopped before the relays and
+    /// the per-app IPv6 block outlasting it.
+    ///
+    /// Nothing in the bring-up should panic, and the supervisor catches
+    /// it if something does -- so the cost of a panic here used to be
+    /// interception left running with nothing that knew to stop it. Now
+    /// the unwind stops it, in an order that is neither the disconnect's
+    /// nor a failing step's: the parts acquired after the relays go
+    /// first, newest first, then the four a failing step releases. That
+    /// order comes from where each local is *declared*, and a declaration
+    /// moved up beside `allowance` and `ipv6_apps` would put the packet
+    /// loop after the relays it sends to with no other test noticing.
+    #[test]
+    fn a_bring_up_that_panics_stops_interception_before_the_relays() {
+        let ledger = Arc::new(Ledger::default());
+        let dir = scratch("panic");
+        let cases: [(&str, &[&str]); 4] = [
+            ("logger", &["interception", "relays", "ipv6", "allowance", "route"]),
+            ("reset", &["logger", "interception", "relays", "ipv6", "allowance", "route"]),
+            ("convergence", &["logger", "interception", "relays", "ipv6", "allowance", "route"]),
+            ("watchdog", &["convergence", "logger", "interception", "relays", "ipv6", "allowance", "route"]),
+        ];
+        for (n, (panic_at, expected)) in cases.into_iter().enumerate() {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start(&ledger, n, Some(panic_at), &dir)));
+            let Err(payload) = outcome else { panic!("{panic_at}: the bring-up was meant to panic") };
+            let message = payload.downcast_ref::<String>().map(String::as_str).unwrap_or_default();
+            assert!(message.contains("panicked, as the test asked"), "{panic_at}: a different panic: {message}");
+            assert_eq!(ledger.released(n), expected, "{panic_at}: released in the wrong order");
+            assert!(balanced(&ledger, n), "{panic_at}: acquired {:?}, released {:?}", ledger.acquired(n), ledger.released(n));
+        }
+        assert!(ledger.still_held().is_empty(), "a panicked bring-up left a thread running: {:?}", ledger.still_held());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

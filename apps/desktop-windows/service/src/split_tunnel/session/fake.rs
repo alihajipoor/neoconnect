@@ -171,6 +171,11 @@ pub(super) struct Fake {
     pub(super) session: usize,
     /// The step that fails, by the name the ledger uses for it, or
     /// `reachable` for the wait that has no part of its own.
+    ///
+    /// The steps that cannot fail -- `logger`, `reset` (the first pass
+    /// of the activation reset, which has no part of its own),
+    /// `convergence` and `watchdog` -- panic instead, which is the only
+    /// way out of a bring-up they have.
     pub(super) fail_at: Option<&'static str>,
 }
 
@@ -179,6 +184,12 @@ impl Fake {
         match self.fail_at {
             Some(failing) if failing == step => Err(format!("{step} refused, as the test asked")),
             _ => Ok(()),
+        }
+    }
+
+    fn panics(&self, step: &str) {
+        if self.fail_at == Some(step) {
+            panic!("{step} panicked, as the test asked");
         }
     }
 
@@ -281,6 +292,7 @@ impl Parts for Fake {
     }
 
     fn start_logger(&self, path: PathBuf, stats: Arc<intercept::Stats>, header: String, audit: Audit) -> Held<Logger> {
+        self.panics("logger");
         self.held("logger", Logger::start(path, stats, header, audit))
     }
 
@@ -291,6 +303,7 @@ impl Parts for Fake {
         _own_images: &[String],
         _nat: &flows::Nat,
     ) -> tables::ResetOutcome {
+        self.panics("reset");
         tables::ResetOutcome::default()
     }
 
@@ -303,6 +316,7 @@ impl Parts for Fake {
         nat: Arc<flows::Nat>,
         _closed_already: usize,
     ) -> Held<Worker> {
+        self.panics("convergence");
         self.held("convergence", idle_thread((selection, nat)))
     }
 
@@ -316,6 +330,7 @@ impl Parts for Fake {
         _log_path: PathBuf,
         tripped: Arc<AtomicBool>,
     ) -> Held<Worker> {
+        self.panics("watchdog");
         self.held("watchdog", idle_thread((tunnel, tripped)))
     }
 }
