@@ -59,7 +59,7 @@ pub struct Origin {
     /// from `addr:port` as usual.
     pub upstream: Option<std::net::SocketAddrV4>,
     /// Which concurrent exit this flow leaves from, as an index into
-    /// [`super::proxy::ExitRelays`].
+    /// [`super::relay::ExitRelays`].
     ///
     /// `None` -- overwhelmingly the common case -- means the session's
     /// own tunnel adapter, which is what every flow used before
@@ -89,7 +89,7 @@ pub struct Origin {
     /// `Origin` is `Copy` and is held per live flow. A `String` here
     /// would make it neither, and would allocate on the packet path.
     /// The index is meaningful because
-    /// [`super::proxy::ExitRelays`] is fixed for the life of a
+    /// [`super::relay::ExitRelays`] is fixed for the life of a
     /// session -- see the note on that type.
     pub exit: Option<u8>,
 }

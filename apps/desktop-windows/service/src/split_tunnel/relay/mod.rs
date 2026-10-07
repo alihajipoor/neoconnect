@@ -27,28 +27,28 @@
 //! UDP socket hold several peers at once without their replies being
 //! delivered to each other.
 
-use std::collections::{HashMap, HashSet};
+mod exits;
+mod own;
+mod socks;
+
+use std::collections::HashMap;
 use std::io;
-use std::mem::size_of;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
-use std::os::windows::io::AsRawSocket;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
-use windows_sys::Win32::Networking::WinSock::setsockopt;
 
 use super::flows::Nat;
-use super::socks;
+use super::net::pin::{attach_to_tunnel, TunnelInterface};
 use super::policy::Transport;
 use super::redirect::Stats;
 
-/// `IPPROTO_IP`, the option level `IP_UNICAST_IF` lives at.
-const IPPROTO_IP: i32 = 0;
-/// `IP_UNICAST_IF`. Not exposed by socket2, so it is set by hand.
-const IP_UNICAST_IF: i32 = 31;
+pub use exits::ExitRelays;
+pub use own::OwnSockets;
+use own::{register, Registration};
 
 /// How long the upstream half of a redirected connection may take.
 /// Generous enough for a distant node, short enough that a dead tunnel
@@ -60,302 +60,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How often idle flows are swept.
 const EXPIRY_INTERVAL: Duration = Duration::from_secs(5);
-
-/// The interface redirected traffic should leave by, as a live value
-/// rather than a snapshot.
-///
-/// Zero means no tunnel, which is the fail-open case: sockets are left
-/// unpinned and take the ordinary route.
-pub struct TunnelInterface {
-    index: AtomicU32,
-    /// The tunnel's own address, held as bits so it can live beside the
-    /// index without a lock.
-    ///
-    /// Sockets are bound to it as well as pinned to the interface.
-    /// `IP_UNICAST_IF` alone was enough for WireGuard and not for Xray
-    /// or OpenVPN, whose TUN adapters answered every pinned connect with
-    /// WSAEHOSTUNREACH -- so Custom mode worked on exactly the one
-    /// protocol the spike happened to test it against. Binding the
-    /// source address states which interface the packet belongs to in
-    /// the way the stack cannot decline to honour.
-    address: AtomicU32,
-}
-
-impl TunnelInterface {
-    pub fn new(index: u32, address: Ipv4Addr) -> Self {
-        Self {
-            index: AtomicU32::new(index),
-            address: AtomicU32::new(u32::from(address)),
-        }
-    }
-
-    pub fn set(&self, index: u32, address: Ipv4Addr) {
-        self.index.store(index, Ordering::Relaxed);
-        self.address.store(u32::from(address), Ordering::Relaxed);
-    }
-
-    /// Marks that no tunnel is available. Zero is not a valid interface
-    /// index, so it doubles as the fail-open signal.
-    pub fn clear(&self) {
-        self.index.store(0, Ordering::Relaxed);
-        self.address.store(0, Ordering::Relaxed);
-    }
-
-    pub(super) fn get(&self) -> Option<(u32, Ipv4Addr)> {
-        match self.index.load(Ordering::Relaxed) {
-            0 => None,
-            index => Some((index, Ipv4Addr::from(self.address.load(Ordering::Relaxed)))),
-        }
-    }
-}
-
-impl Default for TunnelInterface {
-    fn default() -> Self {
-        Self { index: AtomicU32::new(0), address: AtomicU32::new(0) }
-    }
-}
-
-/// The concurrent exits the running engine is offering, and the
-/// loopback SOCKS5 port that reaches each.
-///
-/// # Why this is not a second `TunnelInterface`
-///
-/// [`TunnelInterface`] names *an adapter*. There is one adapter, one
-/// address on it, and one default route at one metric -- every one of
-/// those a singleton that `docs/design/per-game-exits.md` §2.3 lists as
-/// blocking a second engine. Nothing here is an adapter. Each entry is
-/// a port on loopback that the one running Xray process is listening
-/// on, and Xray's own routing table is what turns a port into a node.
-/// So this table can hold three exits while the machine still has one
-/// tunnel adapter, one route and one janitor.
-///
-/// # Why the table is fixed for the life of a session
-///
-/// [`super::flows::Origin`] stores an *index* into this table rather
-/// than the exit's name, because `Origin` is `Copy` and is stored per
-/// live flow. An index is only meaningful against the table it was
-/// taken from, so the table is written when an engine starts and
-/// cleared when it stops, and never edited in between. Changing a
-/// customer's *preferences* mid-session does not touch it: preferences
-/// live on [`super::policy::Selection`] and say which exit an
-/// application wants, while this says which exits exist. The two are
-/// separately mutable precisely so that the index a flow is holding
-/// cannot come to mean a different node underneath it.
-#[derive(Default)]
-pub struct ExitRelays {
-    /// Exit identifier -> loopback port, in the order the engine
-    /// created the inbounds, which is the order the indices count in.
-    table: Mutex<Vec<(String, u16)>>,
-}
-
-impl ExitRelays {
-    /// Records the exits an engine has just brought up.
-    ///
-    /// Truncated to [`neoconnect_ipc::MAX_CONCURRENT_EXITS`] rather
-    /// than refused. This is the last of the three places that ceiling
-    /// is enforced and the only one on the packet path's side of the
-    /// pipe; by the time a table is being written the customer's
-    /// engine is already up, so refusing here would mean a live
-    /// session with no exits at all instead of a live session with the
-    /// three it is allowed.
-    pub fn set(&self, exits: Vec<(String, u16)>) {
-        let mut table = self.table.lock().unwrap();
-        *table = exits;
-        table.truncate(neoconnect_ipc::MAX_CONCURRENT_EXITS);
-    }
-
-    /// Forgets them, which is the fail-open state: every flow goes back
-    /// to the one tunnel adapter.
-    pub fn clear(&self) {
-        self.table.lock().unwrap().clear();
-    }
-
-    /// Whether any concurrent exit is live. The packet path asks this
-    /// first so that a session with none -- overwhelmingly the common
-    /// case -- costs one atomic-free length check and nothing else.
-    pub fn is_empty(&self) -> bool {
-        self.table.lock().unwrap().is_empty()
-    }
-
-    /// The index an exit identifier occupies, if the engine brought it
-    /// up.
-    ///
-    /// `None` for an identifier the engine does not have, and that is
-    /// the fail-open case rather than an error: the application is
-    /// carried on the session's own exit and reported as
-    /// `ExitPlacement::Fallback`. A game that keeps working from the
-    /// wrong address beats a game that stops.
-    pub fn index_of(&self, exit: &str) -> Option<u8> {
-        let table = self.table.lock().unwrap();
-        table
-            .iter()
-            .position(|(name, _)| name == exit)
-            // The ceiling is 3, so a `u8` cannot truncate; the cast is
-            // safe by the same invariant `set` maintains.
-            .map(|i| i as u8)
-    }
-
-    /// The loopback port at an index.
-    pub fn port_at(&self, index: u8) -> Option<u16> {
-        self.table.lock().unwrap().get(index as usize).map(|(_, port)| *port)
-    }
-}
-
-/// The local addresses of the relay's own onward sockets.
-///
-/// The redirect loop has to recognise the relay's own traffic, or it
-/// sends the relay's onward packets back into the relay. It used to
-/// answer that question from the connection tables, via
-/// `OwnerLookup::image_for_port`, and that is a race it loses: the
-/// lookup will not rebuild its snapshot more than once every
-/// `MIN_REFRESH_INTERVAL`, so a socket created microseconds ago is
-/// invisible for up to that long. The onward socket for a redirected
-/// flow is *always* microseconds old when it sends its first packet.
-///
-/// Measured on this machine, two DNS lookups fired with a gap between
-/// them, Custom mode on a WireGuard tunnel:
-///
-/// ```text
-///   gap=  0ms  answered=0/2      gap= 25ms  answered=2/2
-///   gap=  5ms  answered=1/2      gap= 50ms  answered=2/2
-///   gap= 10ms  answered=0/2      gap=250ms  answered=2/2
-/// ```
-///
-/// The cliff sits exactly on the 20ms refresh interval. Any two lookups
-/// closer together than that lost *both* answers -- which is a page
-/// whose text arrives and whose images and stylesheets do not, because
-/// the browser resolves those hosts in one burst. NTP through the same
-/// relay, eight flows at once, lost nothing: it never enters the DNS
-/// branch, so it never needed the guard that was failing.
-///
-/// So ownership is recorded by the side that creates the socket, before
-/// it can send anything, rather than inferred afterwards from a table
-/// that has not caught up.
-#[derive(Default)]
-pub struct OwnSockets {
-    tcp: Mutex<HashSet<SocketAddrV4>>,
-    udp: Mutex<HashSet<SocketAddrV4>>,
-}
-
-impl OwnSockets {
-    fn set(&self, transport: Transport) -> &Mutex<HashSet<SocketAddrV4>> {
-        match transport {
-            Transport::Tcp => &self.tcp,
-            Transport::Udp => &self.udp,
-        }
-    }
-
-    /// Whether this source is one of the relay's own onward sockets.
-    ///
-    /// Keyed on the address as well as the port, and that is not
-    /// belt-and-braces. The onward sockets are bound to the tunnel's
-    /// address while applications are bound to the machine's LAN
-    /// address, so the same port number is legitimately in use by both
-    /// at the same time. Matching on the port alone would hand an
-    /// application's packet the "this is ours, leave it alone" verdict
-    /// and quietly drop it out of the tunnel.
-    pub fn contains(&self, transport: Transport, source: Ipv4Addr, port: u16) -> bool {
-        self.set(transport).lock().unwrap_or_else(|e| e.into_inner()).contains(&SocketAddrV4::new(source, port))
-    }
-
-    fn insert(&self, transport: Transport, addr: SocketAddrV4) {
-        self.set(transport).lock().unwrap_or_else(|e| e.into_inner()).insert(addr);
-    }
-
-    fn remove(&self, transport: Transport, addr: &SocketAddrV4) {
-        self.set(transport).lock().unwrap_or_else(|e| e.into_inner()).remove(addr);
-    }
-}
-
-/// Keeps one onward socket registered for exactly as long as it exists.
-///
-/// A guard rather than paired calls because the ways a relayed flow ends
-/// are many -- the app closes it, the far end closes it, the flow is
-/// expired, the relay is torn down -- and a registration left behind
-/// would claim a port number that Windows is free to hand to an
-/// application next, which is the leak `contains` guards against.
-pub(super) struct Registration {
-    own: Arc<OwnSockets>,
-    transport: Transport,
-    addr: SocketAddrV4,
-}
-
-impl Drop for Registration {
-    fn drop(&mut self) {
-        self.own.remove(self.transport, &self.addr);
-    }
-}
-
-/// Registers a socket that has already been bound, if it was bound to a
-/// real address.
-///
-/// Returns `None` in the fail-open case, where the socket is left
-/// unpinned and unbound and so has no address to be known by until it
-/// connects. That case is unchanged: no tunnel is up, and the image
-/// check in `redirect::decide` is what covers it -- as it always did.
-fn register(own: &Arc<OwnSockets>, socket: &Socket, transport: Transport) -> Option<Registration> {
-    let addr = socket.local_addr().ok()?.as_socket_ipv4()?;
-    if addr.ip().is_unspecified() {
-        return None;
-    }
-    own.insert(transport, addr);
-    Some(Registration { own: own.clone(), transport, addr })
-}
-
-/// Ties a socket to the tunnel: pinned to the interface, and bound to
-/// the address that interface owns.
-///
-/// Both, not either. The pin constrains which routes may be chosen; the
-/// bind states where the packet comes from. WireGuard's adapter was
-/// happy with the pin alone, which is why this looked finished, but
-/// Xray's and OpenVPN's TUNs refused to route for it -- every pinned
-/// connect came back WSAEHOSTUNREACH and every Xray protocol failed its
-/// probe, so the ladder fell through to WireGuard every single time.
-pub(super) fn attach_to_tunnel(socket: &Socket, index: u32, address: Ipv4Addr) -> io::Result<()> {
-    pin_to_interface(socket, index)?;
-    // Port 0: the source address is what matters, the port is not.
-    socket.bind(&SocketAddr::from((address, 0)).into())
-}
-
-/// Whether a socket can actually be attached to this tunnel yet.
-///
-/// Calls `attach_to_tunnel` rather than reimplementing a lighter
-/// version of it, because a readiness check that tests something
-/// *similar* to the real operation is worse than none: 0.8.4 checked a
-/// plain `bind` while production pins the interface first and then
-/// binds, so the check passed on adapters where the real attach still
-/// failed with WSAEADDRNOTAVAIL, and the wait it was supposed to
-/// provide never happened.
-pub(super) fn can_attach(index: u32, address: Ipv4Addr) -> bool {
-    let Ok(socket) = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) else {
-        return false;
-    };
-    attach_to_tunnel(&socket, index, address).is_ok()
-}
-
-/// Restricts a socket to one interface's routes.
-///
-/// The index goes in network byte order for IPv4 -- and host order for
-/// IPv6, an asymmetry that produces a socket pinned to an interface
-/// which does not exist rather than an error.
-fn pin_to_interface(socket: &Socket, index: u32) -> io::Result<()> {
-    let value = index.to_be();
-    // SAFETY: the socket is live for the call, and `value` is a u32
-    // whose address and length are passed consistently.
-    let rc = unsafe {
-        setsockopt(
-            socket.as_raw_socket() as usize,
-            IPPROTO_IP,
-            IP_UNICAST_IF,
-            &value as *const u32 as *const u8,
-            size_of::<u32>() as i32,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
 
 /// A TCP socket placed on the tunnel, or on the normal route if none is
 /// up.
@@ -1466,69 +1170,6 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_interface_means_no_tunnel() {
-        // Zero is not a valid interface index, and it is what the
-        // controller stores between engines. Pinning to it would fail
-        // every connection during a failover, which is precisely the
-        // moment the decided behaviour is to let traffic through.
-        let tunnel = TunnelInterface::default();
-        assert_eq!(tunnel.get(), None);
-        tunnel.set(14, Ipv4Addr::new(10, 66, 0, 3));
-        assert_eq!(tunnel.get(), Some((14, Ipv4Addr::new(10, 66, 0, 3))));
-        tunnel.clear();
-        assert_eq!(tunnel.get(), None);
-    }
-
-    #[test]
-    fn an_onward_socket_is_known_by_its_address_and_not_by_its_port_alone() {
-        // The onward sockets are bound to the tunnel's address and
-        // applications to the machine's LAN address, so the same port
-        // number is legitimately in use by both at once. Keyed on the
-        // port alone, an application's packet would be answered "this is
-        // ours" and left out of the tunnel -- a leak, and a silent one.
-        let own = Arc::new(OwnSockets::default());
-        let tunnel = Ipv4Addr::new(10, 66, 0, 2);
-        let lan = Ipv4Addr::new(192, 168, 1, 20);
-        own.insert(Transport::Udp, SocketAddrV4::new(tunnel, 51000));
-
-        assert!(own.contains(Transport::Udp, tunnel, 51000));
-        assert!(!own.contains(Transport::Udp, lan, 51000), "an app on the same port is not ours");
-        // Transports are separate namespaces for the same reason.
-        assert!(!own.contains(Transport::Tcp, tunnel, 51000));
-    }
-
-    #[test]
-    fn a_registration_lasts_exactly_as_long_as_its_socket() {
-        // A registration left behind claims a port number that Windows
-        // is then free to hand to an application, which is the leak the
-        // test above describes -- arriving later instead of at once.
-        let own = Arc::new(OwnSockets::default());
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-        socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into()).unwrap();
-        let bound = socket.local_addr().unwrap().as_socket_ipv4().unwrap();
-
-        let registration = register(&own, &socket, Transport::Udp).expect("a bound socket registers");
-        assert!(own.contains(Transport::Udp, *bound.ip(), bound.port()));
-
-        drop(registration);
-        assert!(!own.contains(Transport::Udp, *bound.ip(), bound.port()));
-    }
-
-    #[test]
-    fn an_unbound_socket_is_not_registered_under_a_wildcard_address() {
-        // The fail-open case: no tunnel, so the socket is left unpinned
-        // and has no address until it connects. Registering 0.0.0.0 here
-        // would match every application on that port number. That case is
-        // covered by the image check in `redirect::decide`, as it always
-        // was, and this returns nothing rather than something wrong.
-        let own = Arc::new(OwnSockets::default());
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-        socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)).into()).unwrap();
-
-        assert!(register(&own, &socket, Transport::Udp).is_none());
-    }
-
-    #[test]
     fn relays_bind_distinct_ephemeral_ports() {
         // The redirect filter is built from these, so they have to be
         // real and they have to differ.
@@ -1538,25 +1179,6 @@ mod tests {
         assert!(relays.udp_port > 0);
         assert_ne!(relays.tcp_port, relays.udp_port);
         relays.stop();
-    }
-
-    #[test]
-    #[ignore = "same unguaranteed premise as the probe test above"]
-    fn a_socket_pinned_to_a_nonexistent_interface_cannot_connect() {
-        // The property Custom mode's honesty rests on. `setsockopt`
-        // itself accepts any index -- checked here, and it does -- so
-        // the guarantee cannot come from the call succeeding. It comes
-        // from the connect afterwards: a pinned socket is restricted to
-        // that interface's routes, an interface that does not exist has
-        // none, and the connection fails rather than quietly taking the
-        // ordinary route. If that ever changed, a broken tunnel would
-        // present as a working one.
-        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-        pin_to_interface(&socket, u32::MAX).expect("the option itself is accepted");
-
-        let target = SocketAddr::from((Ipv4Addr::new(1, 1, 1, 1), 443));
-        let result = socket.connect_timeout(&target.into(), Duration::from_secs(5));
-        assert!(result.is_err(), "a pinned socket must not fall back to the normal route");
     }
 
     /// Opens a real connected TCP pair on loopback and hands back both
@@ -2052,45 +1674,6 @@ mod tests {
         assert!(median < Duration::from_millis(200), "relays.stop took {took:?}");
     }
 
-    /// The property Custom mode's honesty rests on, with a running test
-    /// at last: a socket pinned to a real interface that has no route to
-    /// a destination fails, rather than quietly leaving by the ordinary
-    /// route. If it fell back, a selected app's traffic would go out in
-    /// the clear the moment the tunnel stopped carrying it, while every
-    /// check said it was pinned.
-    ///
-    /// The two earlier attempts pinned to an index that names nothing,
-    /// and Windows treated that as no pin at all -- see the ignored test
-    /// in `health.rs`. Loopback is a real adapter on every Windows
-    /// machine and carries no route to the internet, so it is the
-    /// stand-in for a tunnel adapter with nowhere to send.
-    ///
-    /// Measured first on 2026-10-04: unpinned, the connect to a public
-    /// resolver succeeded; pinned to loopback, it failed in 59µs with
-    /// WSAENETUNREACH. The unpinned control is what makes the pinned
-    /// failure mean something -- on a machine with no network at all
-    /// both fail, and the assertion that matters still holds.
-    #[test]
-    fn a_socket_pinned_to_an_interface_with_no_route_fails_instead_of_falling_back() {
-        const LOOPBACK_INTERFACE: u32 = 1;
-        let target: SocketAddr = "1.1.1.1:443".parse().unwrap();
-
-        let pinned = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-        pin_to_interface(&pinned, LOOPBACK_INTERFACE).expect("loopback is a real interface to pin to");
-        let error = pinned
-            .connect_timeout(&target.into(), Duration::from_secs(4))
-            .expect_err("a pinned socket must not reach a destination its interface has no route to");
-        assert!(
-            matches!(error.kind(), io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable),
-            "it must fail as unreachable, not by timing out on some other path: {error:?}"
-        );
-
-        let plain = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-        if plain.connect_timeout(&target.into(), Duration::from_secs(4)).is_err() {
-            eprintln!("no ordinary route to {target} here, so the pinned failure proves less than it could");
-        }
-    }
-
     fn ended(result: &io::Result<usize>) -> bool {
         match result {
             Ok(n) => *n == 0,
@@ -2216,75 +1799,4 @@ mod tests {
         assert!(carried.lock().live.is_empty());
     }
 
-    // -----------------------------------------------------------------
-    // The concurrent-exit table.
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn an_empty_exit_table_is_the_fail_open_state() {
-        let exits = ExitRelays::default();
-        assert!(exits.is_empty());
-        assert_eq!(exits.index_of("germany-1"), None);
-        assert_eq!(exits.port_at(0), None);
-    }
-
-    #[test]
-    fn an_exit_resolves_to_the_port_its_inbound_listens_on() {
-        let exits = ExitRelays::default();
-        exits.set(vec![("turkey-1".into(), 41080), ("germany-1".into(), 41081)]);
-        assert_eq!(exits.index_of("turkey-1"), Some(0));
-        assert_eq!(exits.index_of("germany-1"), Some(1));
-        assert_eq!(exits.port_at(0), Some(41080));
-        assert_eq!(exits.port_at(1), Some(41081));
-    }
-
-    /// An identifier the engine did not bring up is `None`, which is
-    /// the fail-open case: the flow takes the session's own exit rather
-    /// than the first entry in the table.
-    ///
-    /// Answering with index 0 would be the ban signature -- one game
-    /// silently sent to another game's node.
-    #[test]
-    fn an_unknown_exit_resolves_to_nothing_rather_than_to_the_first() {
-        let exits = ExitRelays::default();
-        exits.set(vec![("turkey-1".into(), 41080)]);
-        assert_eq!(exits.index_of("germany-1"), None);
-    }
-
-    /// The last of the three places the ceiling is applied. By the time
-    /// a table is written the engine is already up, so refusing here
-    /// would mean a live session with no exits rather than a live
-    /// session with the three it is allowed.
-    #[test]
-    fn the_exit_table_never_holds_more_than_the_ceiling() {
-        let exits = ExitRelays::default();
-        exits.set(vec![
-            ("a".into(), 1),
-            ("b".into(), 2),
-            ("c".into(), 3),
-            ("d".into(), 4),
-            ("e".into(), 5),
-        ]);
-        assert_eq!(exits.index_of("c"), Some(2));
-        assert_eq!(
-            exits.index_of("d"),
-            None,
-            "past the ceiling, and falling back is the only honest answer"
-        );
-        assert_eq!(exits.port_at(neoconnect_ipc::MAX_CONCURRENT_EXITS as u8), None);
-    }
-
-    /// Clearing must move every game back to the session's exit in one
-    /// step. A table that emptied one entry at a time would move a
-    /// game's binaries at different moments, which is the two-source-
-    /// address signature the whole feature is shaped around.
-    #[test]
-    fn clearing_the_table_takes_every_exit_at_once() {
-        let exits = ExitRelays::default();
-        exits.set(vec![("turkey-1".into(), 41080), ("germany-1".into(), 41081)]);
-        exits.clear();
-        assert!(exits.is_empty());
-        assert_eq!(exits.index_of("turkey-1"), None);
-        assert_eq!(exits.index_of("germany-1"), None);
-    }
 }

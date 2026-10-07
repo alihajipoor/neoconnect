@@ -757,7 +757,7 @@ pub fn connect(
 ///
 /// Deliberately not a fixed port range. A hardcoded port that something
 /// else already holds fails on a customer's machine with no way to pick
-/// another -- the same reasoning `proxy::start` gives for binding its
+/// another -- the same reasoning `relay::start` gives for binding its
 /// relay ports at zero.
 fn free_loopback_port() -> Result<u16, String> {
     std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))

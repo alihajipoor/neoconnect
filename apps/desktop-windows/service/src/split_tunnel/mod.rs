@@ -18,7 +18,7 @@
 //! 3. [`redirect`] intercepts outbound packets, works out which
 //!    application each belongs to, and rewrites the selected ones to a
 //!    local proxy.
-//! 4. [`proxy`] carries them onward on sockets pinned to the tunnel with
+//! 4. [`relay`] carries them onward on sockets pinned to the tunnel with
 //!    `IP_UNICAST_IF`, and relays the replies back.
 //!
 //! Each of those was proven separately against a real node before any of
@@ -54,9 +54,8 @@ mod health;
 mod net;
 mod picker;
 mod policy;
-mod proxy;
 mod redirect;
-mod socks;
+mod relay;
 mod tables;
 
 use std::net::Ipv4Addr;
@@ -176,7 +175,7 @@ pub struct SplitTunnel {
     /// every WireGuard, OpenVPN and IKEv2 session, and every Xray
     /// session where the customer placed no game. Empty is the state in
     /// which this feature costs one length check per carried packet.
-    exits: Arc<proxy::ExitRelays>,
+    exits: Arc<relay::ExitRelays>,
     active: ActiveSlot,
     /// Processes that were already running when the customer selected
     /// them, as `(lowercased image path, pid)`.
@@ -209,11 +208,11 @@ struct Active {
     /// verdicts away -- see `set_selection`. It is the same `Arc` the
     /// loop, the relays and the audit hold; there is one table.
     nat: Arc<flows::Nat>,
-    relays: proxy::Relays,
+    relays: relay::Relays,
     /// Held for its Drop: without it the stack accepts none of the
     /// redirected connections. See the firewall module.
     allowance: firewall::Allowance,
-    tunnel: Arc<proxy::TunnelInterface>,
+    tunnel: Arc<net::pin::TunnelInterface>,
     route: InstalledRoutes,
     logger: Logger,
     /// The reset loop that keeps closing pre-existing connections for
@@ -450,7 +449,7 @@ impl Watchdog {
         adapter_name: String,
         index: u32,
         address: Ipv4Addr,
-        tunnel: Arc<proxy::TunnelInterface>,
+        tunnel: Arc<net::pin::TunnelInterface>,
         stopper: redirect::Stopper,
         log_path: PathBuf,
         tripped: Arc<std::sync::atomic::AtomicBool>,
@@ -803,7 +802,7 @@ fn default_routes() -> Vec<String> {
 fn install_verified_route(
     tunnel_address: Ipv4Addr,
     tunnel_index: u32,
-    tunnel: &proxy::TunnelInterface,
+    tunnel: &net::pin::TunnelInterface,
     log_path: &Path,
     limits: &crate::lifecycle::budget::Limits,
 ) -> Result<InstalledRoutes, String> {
@@ -938,7 +937,7 @@ impl SplitTunnel {
             enabled: false,
             selection: SharedSelection::default(),
             egress: None,
-            exits: Arc::new(proxy::ExitRelays::default()),
+            exits: Arc::new(relay::ExitRelays::default()),
             active: ActiveSlot::empty(),
             pre_existing: Vec::new(),
             #[cfg(test)]
@@ -1261,7 +1260,7 @@ impl SplitTunnel {
         // for both. The rewriting, the NAT and the return leg really are
         // identical either way, which is the part that was true.
         let tunnel =
-            Arc::new(proxy::TunnelInterface::new(tunnel_adapter.index, tunnel_address));
+            Arc::new(net::pin::TunnelInterface::new(tunnel_adapter.index, tunnel_address));
 
         // The route is chosen by trying it, not by predicting it. See
         // install_verified_route.
@@ -1272,7 +1271,7 @@ impl SplitTunnel {
         // first -- the firewall allowance and the reachability wait sit
         // between the two.
         let stats = Arc::new(redirect::Stats::default());
-        let relays = match proxy::start(nat.clone(), tunnel.clone(), stats.clone(), self.exits.clone())
+        let relays = match relay::start(nat.clone(), tunnel.clone(), stats.clone(), self.exits.clone())
         {
             Ok(relays) => relays,
             Err(e) => {
@@ -1318,7 +1317,7 @@ impl SplitTunnel {
         // So the relay can report a datagram it had to drop. Set before
         // the redirect starts, because the first seconds are exactly
         // when it matters.
-        proxy::set_relay_log(log_path.clone());
+        relay::set_relay_log(log_path.clone());
 
         if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port, limits) {
             relays.stop();
@@ -1742,7 +1741,7 @@ fn wait_for_addressed_adapter(
             Ok(Some(adapter))
                 if adapter
                     .ipv4
-                    .is_some_and(|ip| proxy::can_attach(adapter.index, ip))
+                    .is_some_and(|ip| net::pin::can_attach(adapter.index, ip))
                     || (adapter.ipv4.is_some() && std::time::Instant::now() >= deadline) =>
             {
                 return Ok(adapter)

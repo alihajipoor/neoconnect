@@ -5,7 +5,7 @@
 //!
 //! Everywhere else in this feature, an onward socket is placed on the
 //! tunnel by pinning it to an interface (`IP_UNICAST_IF`) and binding
-//! its source address -- see [`super::proxy::TunnelInterface`]. That
+//! its source address -- see [`crate::split_tunnel::net::pin::TunnelInterface`]. That
 //! mechanism can only ever name **one** egress, because there is only
 //! one tunnel adapter and one address on it.
 //!

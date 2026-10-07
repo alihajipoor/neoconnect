@@ -273,7 +273,7 @@ use super::net::divert::{recalculate_checksums, Handle};
 use super::flows::{Nat, Origin, Verdict};
 use super::policy::{Family, Scoped, Selection, SharedSelection, Transport, Unattributed};
 use super::tables::OwnerLookup;
-use super::proxy::{ExitRelays, OwnSockets};
+use super::relay::{ExitRelays, OwnSockets};
 
 /// The largest packet WinDivert will hand over.
 const MAX_PACKET: usize = 65_575;
@@ -537,7 +537,7 @@ pub struct Stats {
     /// question.
     pub udp_reply_failed: AtomicU64,
     /// Datagrams dropped because their flow never got an upstream
-    /// socket -- see `proxy::PendingFlows`.
+    /// socket -- see `relay::PendingFlows`.
     ///
     /// Either the bind was still failing after the full retry, or the
     /// flow held its cap of datagrams while it waited. Both are the
@@ -4568,7 +4568,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_custom_mode_blocks_ipv6_and_keeps_carrying_ipv4() {
-        use super::super::{net::firewall, proxy};
+        use super::super::{net::{firewall, pin}, relay};
         use neoconnect_ipc::SplitTunnelMode;
         use std::process::Command;
         use std::sync::RwLock;
@@ -4581,13 +4581,13 @@ mod tests {
         let nat = Arc::new(Nat::new());
         // Index zero is the fail-open signal, so this is a relay with no
         // tunnel under it rather than one pointed at a broken tunnel.
-        let tunnel = Arc::new(proxy::TunnelInterface::new(0, Ipv4Addr::UNSPECIFIED));
+        let tunnel = Arc::new(pin::TunnelInterface::new(0, Ipv4Addr::UNSPECIFIED));
         // One table for both halves, as production wires it: the relay
         // counts its own UDP losses into the same counters the loop
         // fills.
         let stats = Arc::new(Stats::default());
         let relays =
-            proxy::start(nat.clone(), tunnel, stats.clone(), Arc::new(ExitRelays::default())).expect("relays must start");
+            relay::start(nat.clone(), tunnel, stats.clone(), Arc::new(ExitRelays::default())).expect("relays must start");
         // Both sources are the local address here, and that is not a
         // shortcut. The relay's upstream socket is normally bound to the
         // tunnel's address, which is what makes the second allowance
