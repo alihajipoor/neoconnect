@@ -49,11 +49,10 @@
 //! traffic can leave unprotected while reconnecting.** Leaking silently
 //! is the failure this project has spent the most effort removing.
 
-mod divert;
-pub(crate) mod firewall;
 mod flows;
 mod health;
 mod icon;
+mod net;
 mod owner;
 mod picker;
 mod proxy;
@@ -71,6 +70,9 @@ use crate::adapters;
 use crate::engines::ipv6_block;
 use crate::engines::routing::{self, InstalledRoutes};
 
+// Boundary: `engines::janitor` and `engines::repair` reach `delete_rule`
+// and `RULE` by this path, so it stays where they look for it.
+pub(crate) use net::firewall;
 pub use owner::{Selection, SharedSelection};
 pub use picker::running_apps;
 

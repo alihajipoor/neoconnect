@@ -269,7 +269,7 @@ use neoconnect_ipc::SplitTunnelMode;
 use windivert_sys::address::WINDIVERT_ADDRESS;
 use windivert_sys::{WinDivertFlags, WinDivertLayer};
 
-use super::divert::{recalculate_checksums, Handle};
+use super::net::divert::{recalculate_checksums, Handle};
 use super::flows::{Nat, Origin, Verdict};
 use super::owner::{
     Family, OwnerLookup, Scoped, Selection, SharedSelection, Transport, Unattributed,
@@ -1017,7 +1017,7 @@ pub fn start(
     // Checked before opening so a filter problem is reported as one.
     // WinDivertOpen fails with a generic error for a bad expression,
     // which is indistinguishable from the driver refusing to load.
-    super::divert::compile_filter(&filter)
+    super::net::divert::compile_filter(&filter)
         .map_err(|e| format!("internal error: the packet filter is invalid ({e})"))?;
 
     let handle = Handle::open(&filter, WinDivertLayer::Network, WinDivertFlags::new())
@@ -4317,11 +4317,11 @@ mod tests {
         let real_google_v6 = ipv6_packet("2607:f8b0:400a:809::200e", 443, &[]);
 
         assert!(
-            super::super::divert::eval_filter(&filter, &real_google_v6, &outbound_address(true)),
+            super::super::net::divert::eval_filter(&filter, &real_google_v6, &outbound_address(true)),
             "an IPv6 connection to the internet must reach the loop"
         );
         assert!(
-            super::super::divert::eval_filter(
+            super::super::net::divert::eval_filter(
                 &filter,
                 &ipv4_syn(Ipv4Addr::new(142, 250, 74, 78), 443),
                 &outbound_address(false)
@@ -4345,7 +4345,7 @@ mod tests {
             ("::ffff:8.8.8.8", "IPv4-mapped, which the IPv4 half handles"),
         ] {
             assert!(
-                !super::super::divert::eval_filter(
+                !super::super::net::divert::eval_filter(
                     &filter,
                     &ipv6_packet(address, 443, &[]),
                     &outbound_address(true)
@@ -4569,7 +4569,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_custom_mode_blocks_ipv6_and_keeps_carrying_ipv4() {
-        use super::super::{firewall, proxy};
+        use super::super::{net::firewall, proxy};
         use neoconnect_ipc::SplitTunnelMode;
         use std::process::Command;
         use std::sync::RwLock;
@@ -4692,7 +4692,7 @@ mod tests {
             activated: Activation::begun_now(),
             exits: Arc::new(ExitRelays::default()),
         });
-        super::super::divert::compile_filter(&filter).expect("the filter must compile");
+        super::super::net::divert::compile_filter(&filter).expect("the filter must compile");
     }
 
     /// The half of "select a game that is already running" that already
@@ -5106,15 +5106,15 @@ mod tests {
         // real evaluator, because that is the only thing whose opinion
         // counts.
         let filter = filter_for(&sample_redirect());
-        super::super::divert::compile_filter(&filter).expect("the filter must compile");
+        super::super::net::divert::compile_filter(&filter).expect("the filter must compile");
         let lan = icmp_packet(Ipv4Addr::new(192, 168, 1, 1), ICMP_ECHO_REQUEST);
         assert!(
-            !super::super::divert::eval_filter(&filter, &lan, &outbound_address(false)),
+            !super::super::net::divert::eval_filter(&filter, &lan, &outbound_address(false)),
             "a ping to the LAN must not even reach the loop"
         );
         let internet = icmp_packet(Ipv4Addr::new(203, 0, 113, 9), ICMP_ECHO_REQUEST);
         assert!(
-            super::super::divert::eval_filter(&filter, &internet, &outbound_address(false)),
+            super::super::net::divert::eval_filter(&filter, &internet, &outbound_address(false)),
             "a ping to the internet must reach the loop, or it cannot be refused"
         );
     }
