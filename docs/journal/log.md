@@ -4727,8 +4727,12 @@ VM**, and the VM run owed is harder than the last entry said (below).
 release candidate (`claude/rc-0.9.45-final` at `bb3679a`). Not merged,
 not tagged, not released. **Not run in the VM** -- that is owed before
 it merges, and the coordinating session is running it.
-**Touches:** `apps/desktop-windows/service/src/split_tunnel/**`; doc
-comments only in `engines/{dns,routing,xray}.rs` and `gaming/stub.rs`.
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/**`;
+`scripts/check-exit-groups.sh`, which reads `Selection::with_exits` and
+had to follow it to `policy/mod.rs` (the CI step failed on 6c99d13 to
+ed31fc8, fixed at e6e8362); comments only in
+`engines/{dns,routing,xray}.rs`, `gaming/stub.rs` and
+`src-tauri/nsis-hooks.nsh`.
 
 `docs/split-tunnel-rewrite.md` "Where it stands" has the commit-by-commit
 table and the new module map. In one line each: the moves (`net/`,
