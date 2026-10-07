@@ -4955,3 +4955,39 @@ far end never answers is unmeasured.
 - Everything the restructure entry lists, unchanged.
 - The real `intercept::Running` drop: still reached only by the ignored
   live test. The `Drop` bound stops its deletion, not its emptying.
+
+## 2026-10-07 (early) — the split-tunnel rewrite finished; desktop 0.9.46
+
+`claude/split-tunnel-restructure`: the target layout (policy/, tables/,
+picker/, net/, flows/, relay/, intercept/, session/), `Selection` paths
+in a set, `decide` as typed rungs, and start/stop as RAII acquisition in
+the old order -- pinned by tests, including 32 sessions started and
+dropped at once with half carrying TCP and UDP through real relays. Two
+adversarial reviews: no high or medium findings; the lows were fixed.
+Plus `claude/custom-except-header`: in "All except these" the dashboard
+said "only the apps you chose go through Neoxify", the opposite of what
+happens -- found in the VM tonight, pre-existing since c329c5b.
+
+**Proven in the VM** (finland1, Stealth):
+- restructured build `7d74033`: Custom mode "Only these apps" -- curl
+  (selected) exits FI, PowerShell US, 0 curl packets direct at the NIC
+  vs 13 from the control; "All except these" -- curl direct (27 packets),
+  PowerShell FI with 0 direct; after each Disconnect: no service
+  listeners, no firewall rules, no routes via a tunnel adapter, the
+  per-app IPv6 block removed, split tunnel stopped, WinDivert gone.
+  xray.exe killed under Custom mode: "VPN connection lost" at 1.23s (2.0s
+  before the restructure), the same clean teardown after.
+- 0.9.46 installer itself: upgrade in 63s, service hash = build, the
+  header correct in both modes, Custom mode connect / routing / clean
+  teardown again.
+**Not re-run on 0.9.46**, because the VM stalled: the full-tunnel
+8-protocol DNS and NIC regression. Full tunnel never starts the split
+tunnel, and that regression passed on 0.9.45 the same night. Gaming mode
+is untouched apart from a comment and was not run (the test account's
+plan has no gaming).
+
+**The VM.** Four stalls and four hung installs overnight (NEM, see the
+0.9.45 entry); repeated hard power-offs then left Windows in automatic
+repair once ("couldn't be repaired"), which booted on Continue. The VM
+now runs with 2 vCPUs instead of 4, under which the 0.9.46 install
+completed; whether that helps is not established.

@@ -204,11 +204,12 @@ Client-side changes and new releases are fine.
   on the desktop client and a hotfix has to be cuttable the minute it is
   needed.
 - Work on a branch, push small commits often, merge when verified.
-- `claude/service-rewrite` is the open branch: the Windows service
-  rewrite (`docs/windows-service-rewrite.md`) and, inside it, the
-  split-tunnel rewrite (`docs/split-tunnel-rewrite.md`, whose *Where it
-  stands* section lists what has landed). `claude/concurrent-multi-exit-v2`
-  and `rig/cme-v2-verify`, named here before, are both merged.
+- No long-lived branch is open. The Windows service rewrite
+  (`docs/windows-service-rewrite.md`) and the split-tunnel rewrite
+  (`docs/split-tunnel-rewrite.md`) are both finished and shipped, the
+  latter in desktop 0.9.46 (2026-10-07). `claude/service-rewrite`,
+  `claude/concurrent-multi-exit-v2` and `rig/cme-v2-verify`, named here
+  before, are all merged.
 
 ## Versions and tags
 
