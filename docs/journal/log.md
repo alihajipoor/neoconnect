@@ -4587,9 +4587,12 @@ the phones' `nodeAddresses` skip.
   the health poll keeps it; and a black-holed tunnel is struck.
 - Which engines route their server around the tunnel. Measured for Xray
   (Stealth) on Windows only. WireGuard, OpenVPN, IKEv2 and both phones
-  are unmeasured. The skip is right either way: an endpoint on the
-  server is reached around the tunnel or through it to the node itself,
-  and neither is the exit as the world sees it.
+  are unmeasured. *(Corrected in review, next entry: this said the skip
+  was right either way. It is not. Reached through the tunnel, the
+  server's own mirror is a witness -- it sees the node relaying the
+  request, or a relay's exit -- and the source says that is how the
+  phones' Xray and WireGuard and wireguard.exe reach it. Skipping it
+  there threw away the only proof some customers have.)*
 - The name-resolving path (`endpointHost`) was exercised only against
   this machine's resolver with `localhost`.
 - A system proxy: reqwest would connect to the proxy, and `peer` would
@@ -4617,3 +4620,103 @@ the phones' `nodeAddresses` skip.
   the settle now walks for its full ceiling looking for another endpoint
   and ends with no baseline -- "not confirmed" rather than a false
   "NOT protected".
+
+## 2026-10-07 — egress own-mirror, review round (same branch)
+
+**Status:** pushed to `claude/egress-own-mirror`. Not merged, not tagged,
+not released, nothing on a node or the panel touched. **Not run in the
+VM**, and the VM run owed is harder than the last entry said (below).
+
+### What the review found, and what was done
+
+- **The first round's premise holds only for Xray on Windows.** The
+  service installs a host route for the server for Xray alone
+  (`routing::install_full_tunnel`). wireguard.exe installs none and binds
+  its own socket; Android's Xray routes `0.0.0.0/0` into the tunnel and
+  protects only xray-core's sockets, with this app deliberately inside;
+  iOS uses a made-up `tunnelRemoteAddress`; GoBackend excludes nothing.
+  So on those the server's own mirror is reached *through* the tunnel,
+  and is a witness: before connecting it names the customer, through a
+  direct tunnel the node relays the request from its own address, through
+  a relay the exit's. Skipping it lost the only proof a customer has
+  where that mirror is all that answers on the bare line (Iran relay
+  during a shutdown). Now `TunnelServer` carries `reachedAround`, from
+  `reachesServerAround(platform, protocol)`: around for Windows Xray,
+  OpenVPN, IKEv2 and phone IKEv2; through for WireGuard everywhere and
+  the phones' Xray; unknown = around (costs "not confirmed", never an
+  accusation). Only an around server is skipped. Through, the baseline's
+  own endpoint may answer with its own address and be believed -- only
+  when that endpoint's baseline answer verifiably named the caller.
+- **Windows on a censored network ended "not confirmed" anyway.** The
+  poll walked the list in order (panel host first through the tunnel,
+  baseline from a mirror), and the settle spent its 12s timing out the
+  filtered panel hosts. Now every rung and the Windows poll ask the
+  baseline's endpoint first (`baselineFirst`), the settle walks hedged
+  (`BASELINE_HEDGE_MS`: the next endpoint asked a second in, or at once
+  when one fails), and Windows passes its nodes' addresses to every
+  baseline as the phones do.
+- **The phones' baselines had no ceiling.** All four go through
+  `takeBaseline` (2 x 6s, hedged). The phones' last rung asks the
+  baseline's endpoint first too.
+- **Lows:** names resolved after the previous rung's tunnel is gone
+  (Windows: the settle uses the literal `connection.host`; phones: after
+  `waitForTeardown`); `resolve_ipv4` has a JS stall guard; `health_ip_v4`
+  uses no proxy at all (reqwest had `system-proxy` on in this tree, so
+  the Windows system proxy applied -- a proxy's exit is the same before
+  and after connecting). Not done: skipping a known-server endpoint
+  without fetching it (one wasted request per walk).
+
+### Proven, on this PC
+
+- Desktop `pnpm test` 55 files / 851 (was 826), `pnpm typecheck` clean;
+  `cargo test --workspace` lib 44 passed / 5 ignored (was 43 / 4), ipc
+  58, service 478 / 6 ignored. Mobile `pnpm test` 10 files / 140 (was
+  128), `tsc --noEmit -p .` clean; `apps/mobile/src-tauri` `cargo check`
+  and `--all-targets` clean, its `health_ip` tests 11 passed / 2 ignored.
+- On the previous head (4ef2f6c) the new tests fail: desktop 44 (27 of
+  32 in `egress-own-mirror.test.ts`, 9 of 13 in `tunnel-server.test.ts`,
+  6 wiring, 2 more), mobile `own-mirror.test.ts` does not load and 2
+  more fail. Many of those fail on the changed `TunnelServer` shape; the
+  behaviour each fix replaces is reproduced on the new code by a
+  control -- the phones' lost proof (`FI_AS_IF_AROUND`), the poll that
+  compared nothing in list order, the settle that spent its ceiling, the
+  phones' unbounded walk. `asks_around_any_proxy` fails without
+  `no_proxy()` (checked by removing it).
+
+### Unverified
+
+- **All of it on a real network.** The VM run owed must block the panel
+  hosts on the guest's physical interface only (a firewall rule scoped to
+  that interface, so the tunnel still carries them); with the panel hosts
+  answering, even the first round would show "protected" there, which
+  proves nothing for Iran. Owed on Stealth (around) and WireGuard
+  (through).
+- **Every routing claim but Windows Xray.** If a "through" engine in fact
+  routes its server around, its own mirror answers the home address and
+  reads `bypassingTunnel` -- what 0.9.44 did for every engine, not new.
+  A phone and a Windows WireGuard capture decide it.
+- **WireGuard to the node's own mirror** is delivered locally on the node
+  without SNAT, so the mirror may see the client's tunnel address (a
+  private one) -- `throughTunnel` with that as the exit IP on screen.
+  From reading; was the same on 0.9.44.
+- A node that refuses to relay to its own address (an Xray routing rule,
+  say) makes a "through" rung that asks only that mirror hear silence:
+  "unreachable", rejected. Also as on 0.9.44.
+- The relayed-answer rule trusts the baseline's proof that the mirror is
+  not self-reporting. A mirror flipped to self-reporting between baseline
+  and reading (its origin name turned CDN-proxied) would read a leaking
+  tunnel as through -- for the tunnel's own mirror on through engines
+  only.
+
+### Left open
+
+- A relay's *exit* node's own mirror names itself through the tunnel and
+  is skipped as a self-report: with the baseline from it, "not confirmed".
+- Adopted tunnels (no server, no baseline) and concurrent exits'
+  servers, as before.
+- **Live, needs a decision:** finland1's mirror answering `/health/ip`
+  since 2026-10-06 plausibly exposes 0.9.44 / 0.2.23 customers on Xray,
+  OpenVPN or IKEv2 to finland1 to (b) -- "NOT protected", a strike, the
+  ladder moving them off a working protocol -- until 0.9.45 ships. Hold
+  or roll back that node change, or keep that mirror off `/health/ip`.
+  A production change; not touched here.
