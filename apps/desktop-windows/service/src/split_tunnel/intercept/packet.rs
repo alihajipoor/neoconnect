@@ -78,7 +78,7 @@ pub(super) struct Parsed {
 ///   the same first packet we would have to hold. For a sweep that pings
 ///   170 hosts once each, *every* packet is a first packet, so there is
 ///   nothing to correlate against in time.
-/// * **The relay could not carry one if we knew.** `proxy.rs` is a
+/// * **The relay could not carry one if we knew.** `relay/` is a
 ///   transparent NAT relay with no wire protocol: the loop rewrites the
 ///   destination to the relay's port and the source to a synthetic NAT
 ///   port, and the relay recovers the real destination *from that source

@@ -1,6 +1,6 @@
 //! The local relay that puts a selected app's traffic into the tunnel.
 //!
-//! The redirect loop (see `nat.rs`) hands connections here; this half
+//! The redirect loop (see `intercept/`) hands connections here; this half
 //! carries them the rest of the way. Its one real trick is how the
 //! onward socket is placed on the tunnel:
 //!
@@ -9,7 +9,7 @@
 //! route selection; it does not create a route. A tunnel brought up
 //! passively owns no routes at all, so a socket pinned to it fails with
 //! ENETUNREACH until the controller adds a default route through it at a
-//! metric nothing else would ever prefer (see `mod.rs`).
+//! metric nothing else would ever prefer (see `session/tunnel.rs`).
 //!
 //! Everything else follows from that. The interface index is read at the
 //! moment each socket is created rather than captured once, which is
@@ -22,7 +22,7 @@
 //! feature -- a game must not stall for the seconds a protocol switch
 //! takes -- and the UI is responsible for saying so plainly.
 //!
-//! Everything here is keyed on the synthetic port `flows.rs` assigns
+//! Everything here is keyed on the synthetic port `flows/` assigns
 //! each flow, never on the app's own source port. That is what lets one
 //! UDP socket hold several peers at once without their replies being
 //! delivered to each other.

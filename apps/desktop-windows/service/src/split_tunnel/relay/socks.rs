@@ -292,7 +292,7 @@ impl UdpAssociation {
     ///
     /// A datagram larger than `buffer` is an error, not a shorter
     /// datagram -- the same answer a plain `UdpSocket` gives on Windows,
-    /// so the pinned and exit paths in `proxy.rs` agree. Truncating it
+    /// so the pinned and exit paths in `relay/mod.rs` agree. Truncating it
     /// would hand an application part of a packet as though it were
     /// whole, which is the reason fragments are refused below.
     pub fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddrV4)> {

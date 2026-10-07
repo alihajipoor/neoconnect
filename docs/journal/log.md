@@ -4783,3 +4783,53 @@ was left alone. Do not push it over this one.
 - **The one behaviour change**: a panic after interception began now
   stops it on the unwind instead of stranding it. No test makes that
   panic happen against the real driver.
+
+## 2026-10-07 — split tunnel restructure, review round (same branch)
+
+**Status:** pushed to `claude/split-tunnel-restructure`. Not merged, not
+tagged, not released. **Still not run in the VM** -- the restructure
+entry above lists what is owed, and nothing here reduces it.
+**Touches:** `split_tunnel/{session,relay,intercept}`,
+`engines/routing.rs` (comment), and comments and docs that still named
+`owner.rs`, `proxy.rs` and `redirect.rs` paths.
+
+Two adversarial reviews, no high or medium findings. The lows and their
+commits are in `docs/split-tunnel-rewrite.md`, "The review round". In
+short: `Parts` bounds five part types by `Drop` so deleting one of those
+impls no longer compiles silently; `relay::start` no longer leaks its
+acceptor when the OS refuses a thread; the panic release order is
+documented and tested; the 32-session test now carries a TCP connection
+and a UDP flow through half its sessions and checks the UDP ports too.
+
+**Left for the merge:** commits 6c99d13 to ed31fc8 fail the
+`check-exit-groups.sh` CI step (fixed at e6e8362). Squash, or fold
+e6e8362 into 6c99d13 -- rewriting the pushed branch now would
+invalidate every hash the design doc cites.
+
+**A gotcha found on the way, not changed:** after the relays stop, both
+ends of a carried TCP connection see it close at once, but the relay's
+copy threads stay in their reads until each end closes in answer --
+measured, 16 of 16 still there twenty seconds on with both ends held
+open. A test that checks "no thread left" right after a drop will fail
+on any session that carried a connection; give it the far ends' close
+first. Pre-existing since eb181a7. How long a thread lingers when the
+far end never answers is unmeasured.
+
+### Proven -- unit tests on Windows, this PC
+
+- `cargo check --workspace --all-targets` clean after every commit with
+  the baseline's warnings and no new ones; `cargo test --workspace` green
+  after every commit: service 485 / 6 ignored before, 487 / 6 after;
+  ipc 58; desktop 44 / 5. Split-tunnel tests 248 (245 / 3).
+- Each new check was made to fail by the mistake it guards against:
+  each of the five `Drop` impls deleted (compile error); a partial relay
+  left unstopped, and a wake-up connect with no listener (2.00s); the
+  interception local declared beside `allowance`; `Carried::close_all`
+  removed (16 of 32 sessions, 3 of 3 runs); `Worker`'s join removed (8
+  of 32, 3 of 3). The session tests passed 25 runs in a row.
+
+### Unverified
+
+- Everything the restructure entry lists, unchanged.
+- The real `intercept::Running` drop: still reached only by the ignored
+  live test. The `Drop` bound stops its deletion, not its emptying.

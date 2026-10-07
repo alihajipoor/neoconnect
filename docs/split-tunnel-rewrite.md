@@ -266,7 +266,8 @@ socket does not fall back to the ordinary route — had **no running
 test**. Its only evidence was a customer log quoted in a comment. A
 rewrite must not read those names as coverage.
 
-**It has one now** (`proxy.rs`,
+**It has one now** (`net/pin.rs` since the restructure; written in
+`proxy.rs`,
 `a_socket_pinned_to_an_interface_with_no_route_fails_instead_of_falling_back`).
 The ignored tests pinned to an index that names nothing, which Windows
 treats as no pin. Pinned instead to loopback -- a real adapter with no
@@ -389,9 +390,19 @@ block -- and each releases itself in `Drop`, so `SplitTunnel::stop` is
 holds in the order the old unwinds did (relays, IPv6 block, allowance,
 route), kept by declaring those locals ahead of the relays: locals drop
 in reverse declaration order. A panic after interception or the relays
-began used to strand them; the unwind now stops them. That is the only
-behaviour change in the restructure, and it is on a path no test or
-customer has hit.
+began used to strand them; the unwind now stops them, releasing what
+came after the relays newest first (convergence, logger, interception)
+and then the same four. The three orders differ; what all three keep is
+that the packet loop stops before the relays it sends to and the
+per-app IPv6 block outlasts the loop. That is the first of two
+behaviour changes, both on paths no customer has hit; the second is
+under "The review round" below.
+
+Nothing calls a part's release by name any more, and the session tests
+use stand-ins, so `Parts` bounds the route, relays, allowance, IPv6
+block and interception by `Drop`: deleting one of those five impls is a
+compile error, as deleting the `stop()` or `remove()` the old `stop`
+called was. Emptying one still compiles.
 
 **How the ladder works now.** Seven rungs, one function each, each
 taking the previous rung's token by value; a token's fields are private
@@ -407,19 +418,63 @@ logger and `Worker`, stand-ins for the route, allowance, IPv6 block,
 interception and the threads that touch real tables or adapters. One of
 them brings up and drops 32 sessions at once and requires every part
 released once and in order, every object handed to a thread released --
-so no thread is left running -- and every relay port closed. Each
-session test was made to fail by the mistake it guards against -- a
-field moved, a declaration moved, a `Worker` that does not join, relays
-dropped without being stopped -- before it was trusted. `start`,
+so no thread is left running -- and every relay port, TCP and UDP,
+closed; half of those sessions are carrying a TCP connection and a UDP
+flow through their real relays when they are dropped (see the review
+round below for what that found). A panic at each infallible step of
+the bring-up has a test of its own. Each session test was made to fail
+by the mistake it guards against -- a field moved, a declaration moved,
+a `Worker` that does not join, relays dropped without being stopped or
+without closing what they carry -- before it was trusted. `start`,
 `probe` and `complaint` against the real Windows layer still have no
-test.
+test, and neither does the real `intercept::Running`'s `Drop`: only the
+ignored live test reaches it.
 
 Test counts on Windows, `cargo test --workspace`: service 478 passed /
 6 ignored before, 485 / 6 after (seven new: policy purity, the stack
 path edge, two `Worker`, three session); ipc 58; desktop 44 / 5.
 Split-tunnel tests: 239 before, 246 after. No test was deleted; the
 existing ones moved with their code, and the `decide` tests did not
-change at all.
+change at all. After the review round: service 487 / 6, split-tunnel
+248 (245 / 3).
+
+#### The review round
+
+Two adversarial reviews found nothing high or medium. The lows, each
+fixed in its own commit with the suite green on Windows:
+
+| Finding | Commit |
+|---|---|
+| Deleting a part's `Drop` compiled and passed every test (the session tests use stand-ins); `routing.rs` still called the route's `Drop` a backstop | 96d9637 |
+| `relay::start` under thread exhaustion panicked with the acceptor already detached on `0.0.0.0` -- pre-existing; now an error, and the partial relay is stopped | 8e79e07 |
+| The release order on a panic after interception started was neither written down nor tested | 5942b53 |
+| The 32-session test carried no connection, probed only the TCP port, and its comment put the failing unwinds among the teardowns when they ran among the bring-ups | 43f2ae1 |
+| Comments and docs still pointing at `owner.rs`, `proxy.rs` and `redirect.rs` paths, two of them audit claims | the commit adding this table |
+
+The second behaviour change is 8e79e07: a relay the OS will not give
+its threads now fails the bring-up with "could not start the local
+relay: ..." instead of panicking.
+
+**Found while making the 32-session test carry connections, and not
+changed:** when the relays stop, both ends of a carried TCP connection
+see it close at once, but the relay's two copy threads stay in their
+reads until each end closes its socket in answer -- 16 of 16 still
+there twenty seconds after the drop with both ends held open, gone
+within milliseconds once they let go. Present since the relay began
+owning its connections (eb181a7); the `Drop` comment said the threads
+unblock on the shutdown, and now says what was measured. An application
+and a server answer a close by closing, so ordinarily this costs one
+round trip. How long a thread lingers when the far end never answers --
+the upstream pinned to a tunnel that has already gone -- is unmeasured.
+Waking them -- cancelling a read blocked in another thread, or putting
+the copy loops on a timeout -- is a teardown change on the data path,
+and wants the rig rather than a unit test.
+
+Not done here: the restructure's history has seven commits (6c99d13 to
+ed31fc8) that fail the `check-exit-groups.sh` CI step, fixed at
+e6e8362. Making each commit pass means rewriting published history and
+every hash this document cites, so it is left to the merge: squash, or
+fold e6e8362 into 6c99d13 then.
 
 ### What this did not do
 
