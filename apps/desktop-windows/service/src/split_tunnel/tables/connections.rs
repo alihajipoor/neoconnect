@@ -326,7 +326,7 @@ pub struct Escape {
 ///
 /// # Why this exists at all
 ///
-/// Every number in `redirect::Stats` is counted from inside the packet
+/// Every number in `intercept::Stats` is counted from inside the packet
 /// loop, which means all of them are blind in the same direction: they
 /// can only describe packets the loop was given. A connection that
 /// escaped -- because its SYN raced the owner lookup, because it was

@@ -29,7 +29,7 @@
 //!   relay meant to reach, and continuing would be talking to something
 //!   unidentified.
 //! * **IPv4 destinations only.** The relay decides about IPv4 flows;
-//!   `redirect.rs` blocks a selected application's IPv6 outright rather
+//!   `intercept` blocks a selected application's IPv6 outright rather
 //!   than carrying it. Names never reach here either -- the relay has
 //!   an address by the time it dials, because the application it is
 //!   carrying already resolved one.

@@ -357,7 +357,7 @@ fn exit_tags(index: usize) -> (String, String) {
 /// # Why the inbounds are loopback and SOCKS5
 ///
 /// Loopback because the split tunnel's WinDivert filter ends in `not
-/// loopback` (see `split_tunnel::redirect::filter_for`), so the relay's
+/// loopback` (see `split_tunnel::intercept::filter_for`), so the relay's
 /// hop into Xray is invisible to the loop that would otherwise capture
 /// it and feed it back to itself.
 ///

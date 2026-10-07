@@ -15,7 +15,7 @@
 //!    name without making it attractive to anything that does not. Which
 //!    *shape* of route that has to be is adapter-dependent and is
 //!    settled by trying it -- see [`install_verified_route`].
-//! 3. [`redirect`] intercepts outbound packets, works out which
+//! 3. [`intercept`] intercepts outbound packets, works out which
 //!    application each belongs to, and rewrites the selected ones to a
 //!    local proxy.
 //! 4. [`relay`] carries them onward on sockets pinned to the tunnel with
@@ -53,8 +53,8 @@ mod flows;
 mod health;
 mod net;
 mod picker;
+mod intercept;
 mod policy;
-mod redirect;
 mod relay;
 mod tables;
 
@@ -201,7 +201,7 @@ pub struct SplitTunnel {
 }
 
 struct Active {
-    redirect: redirect::Running,
+    redirect: intercept::Running,
     /// The flow tables the redirect loop decides against.
     ///
     /// Held here so a selection change can throw the leave-alone
@@ -237,7 +237,7 @@ struct Active {
     ipv6_apps: Option<ipv6_block::SelectedAppsIpv6Block>,
     log_path: PathBuf,
     /// When interception began, so a warm-up is not mistaken
-    /// for a fault. See redirect::WARMUP.
+    /// for a fault. See intercept::stats::WARMUP.
     started: Instant,
 }
 
@@ -245,7 +245,7 @@ struct Active {
 ///
 /// The same one the tunnels push for a full tunnel, so this is not a
 /// second opinion arriving through a different door -- it is already
-/// reachable through every node. See `redirect::is_dns` for why Custom
+/// reachable through every node. See `intercept::decide::is_dns` for why Custom
 /// mode carries lookups at all.
 const CUSTOM_MODE_RESOLVER: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
 
@@ -311,7 +311,7 @@ struct Logger {
 impl Logger {
     fn start(
         path: PathBuf,
-        stats: Arc<redirect::Stats>,
+        stats: Arc<intercept::Stats>,
         header: String,
         mut audit: Audit,
     ) -> Self {
@@ -450,7 +450,7 @@ impl Watchdog {
         index: u32,
         address: Ipv4Addr,
         tunnel: Arc<net::pin::TunnelInterface>,
-        stopper: redirect::Stopper,
+        stopper: intercept::Stopper,
         log_path: PathBuf,
         tripped: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
@@ -522,7 +522,7 @@ impl Watchdog {
 /// applying and appearing not to.
 ///
 /// So the pass becomes a loop: rescan every [`RESET_RESCAN`] for
-/// [`redirect::ACTIVATION_GRACE`], closing rows as they arrive in a state
+/// [`intercept::ACTIVATION_GRACE`], closing rows as they arrive in a state
 /// that can be closed. The two durations are the same one on purpose --
 /// while this is running, the redirect loop refuses those connections
 /// rather than exempting them, and a refusal that outlived the thing
@@ -550,7 +550,7 @@ impl Convergence {
         let thread = {
             let stop = stop.clone();
             std::thread::spawn(move || {
-                let deadline = Instant::now() + redirect::ACTIVATION_GRACE;
+                let deadline = Instant::now() + intercept::ACTIVATION_GRACE;
                 let mut closed = closed_already;
                 let mut passes = 0usize;
                 // Overwritten by each pass, so it holds the LAST pass's
@@ -623,7 +623,7 @@ impl Convergence {
 
 /// The periodic check for connections that got away.
 ///
-/// Everything `redirect::Stats` counts is counted from inside the packet
+/// Everything `intercept::Stats` counts is counted from inside the packet
 /// loop, so all of it is blind to a connection the loop never saw -- and
 /// a connection the loop never saw is exactly what a leak is. This walks
 /// the machine's own connection tables instead and asks which of them
@@ -655,7 +655,7 @@ impl Audit {
         self.last_run.elapsed() >= AUDIT_INTERVAL
     }
 
-    fn run(&mut self, path: &Path, stats: &redirect::Stats) {
+    fn run(&mut self, path: &Path, stats: &intercept::Stats) {
         self.last_run = Instant::now();
 
         // Copied rather than held: what follows is four table walks and
@@ -1266,11 +1266,11 @@ impl SplitTunnel {
         // install_verified_route.
         let route =
             install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path, limits)?;
-        // Created here rather than inside `redirect::start`, because
+        // Created here rather than inside `intercept::start`, because
         // the relay counts into the same table and the relay is started
         // first -- the firewall allowance and the reachability wait sit
         // between the two.
-        let stats = Arc::new(redirect::Stats::default());
+        let stats = Arc::new(intercept::Stats::default());
         let relays = match relay::start(nat.clone(), tunnel.clone(), stats.clone(), self.exits.clone())
         {
             Ok(relays) => relays,
@@ -1325,7 +1325,7 @@ impl SplitTunnel {
             return Err(e);
         }
 
-        let redirect = redirect::Redirect {
+        let redirect = intercept::Redirect {
             local_addr,
             local_interface: uplink.index,
             node_addr: node,
@@ -1341,9 +1341,9 @@ impl SplitTunnel {
             // whatever is not carried resolves on the local network
             // otherwise, which is the leak this closes.
             carry_dns: true,
-            // Begun by `redirect::start` as interception starts -- the
+            // Begun by `intercept::start` as interception starts -- the
             // route probe and the firewall wait sit between here and there.
-            activated: redirect::Activation::pending(),
+            activated: intercept::Activation::pending(),
             exits: self.exits.clone(),
         };
 
@@ -1404,12 +1404,12 @@ impl SplitTunnel {
         // Before the redirect starts, so there is no instant in which
         // Custom mode is on and nothing is refusing a selected app's
         // IPv6. Held in a local until the session is assembled: if
-        // `redirect::start` fails below, this is dropped on the way out
+        // `intercept::start` fails below, this is dropped on the way out
         // and the filters go with it.
         let ipv6_apps = install_ipv6_app_block(&self.selection, log_dir, &log_path);
 
         let nat_for_active = nat.clone();
-        match redirect::start(redirect, nat, self.selection.clone(), stats) {
+        match intercept::start(redirect, nat, self.selection.clone(), stats) {
             Ok(running) => {
                 let logger =
                     Logger::start(log_path.clone(), running.stats.clone(), header, audit);
@@ -1422,7 +1422,7 @@ impl SplitTunnel {
                 let outcome = {
                     // Poison is survived here as it is at the other
                     // nine read sites, and this is the site where it
-                    // matters most. `redirect::start` has already
+                    // matters most. `intercept::start` has already
                     // returned by now, so a panic between here and
                     // `Active` being assembled leaves interception
                     // live, `RUNNING` false, and nothing in `active`
@@ -1515,7 +1515,7 @@ impl SplitTunnel {
     ///
     /// Read from the real path under the customer's own traffic, which
     /// is the one thing [`Self::probe`] cannot do -- see
-    /// [`redirect::Stats::complaint`]. Reported on every status poll
+    /// [`intercept::Stats::complaint`]. Reported on every status poll
     /// rather than only at connect, because the numbers that matter are
     /// zero at connect and only become meaningful once the chosen apps
     /// have actually tried to send something.
@@ -1661,7 +1661,7 @@ impl SplitTunnel {
 /// exist. Refusing to start the feature because the filtering engine
 /// would not take a filter would leave a customer in Iran with no
 /// tunnel at all in exchange for closing a narrow IPv6 gap that
-/// `redirect::handle_ipv6` still covers for every packet it can
+/// `intercept::handle_ipv6_parsed` still covers for every packet it can
 /// attribute. That trade is the wrong way round, so this returns
 /// `None` and says so on disk.
 ///

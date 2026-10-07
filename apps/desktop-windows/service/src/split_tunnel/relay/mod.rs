@@ -44,7 +44,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use super::flows::Nat;
 use super::net::pin::{attach_to_tunnel, TunnelInterface};
 use super::policy::Transport;
-use super::redirect::Stats;
+use super::intercept::Stats;
 
 pub use exits::ExitRelays;
 pub use own::OwnSockets;
@@ -473,7 +473,7 @@ pub struct Relays {
     pub udp_port: u16,
     /// The onward sockets this relay owns, for the redirect loop to
     /// recognise its traffic. Created here because this is the side that
-    /// creates the sockets, and read by `redirect::decide`.
+    /// creates the sockets, and read by `intercept::decide`.
     pub own_sockets: Arc<OwnSockets>,
     stop: Arc<AtomicBool>,
     upstreams: Arc<UdpUpstreams>,

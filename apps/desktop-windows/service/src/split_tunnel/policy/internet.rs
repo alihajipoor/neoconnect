@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 /// somewhere a split tunnel deliberately leaves alone.
 ///
 /// The exclusions are deliberately the *same set* the kernel filter
-/// carries (see `redirect::filter_for`), and keeping them in step is the
+/// carries (see `intercept::filter_for`), and keeping them in step is the
 /// whole point rather than a tidiness argument. The filter decides what
 /// the redirect loop is ever allowed to see; this decides what the audit
 /// is allowed to call an escape. If the two drifted apart the audit
@@ -62,7 +62,7 @@ mod tests {
     #[test]
     fn the_public_test_matches_what_the_kernel_filter_hands_over() {
         // These are the same list seen from opposite ends -- see
-        // is_public_v4. Every address the filter string in redirect.rs
+        // is_public_v4. Every address the filter string in intercept/mod.rs
         // excludes must be excluded here too, or the audit reports
         // escapes for traffic the loop was never given.
         for local in [

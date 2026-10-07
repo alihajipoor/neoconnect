@@ -99,7 +99,7 @@ impl Drop for Registration {
 /// Returns `None` in the fail-open case, where the socket is left
 /// unpinned and unbound and so has no address to be known by until it
 /// connects. That case is unchanged: no tunnel is up, and the image
-/// check in `redirect::decide` is what covers it -- as it always did.
+/// check in `intercept::decide` is what covers it -- as it always did.
 pub(super) fn register(own: &Arc<OwnSockets>, socket: &Socket, transport: Transport) -> Option<Registration> {
     let addr = socket.local_addr().ok()?.as_socket_ipv4()?;
     if addr.ip().is_unspecified() {
@@ -155,7 +155,7 @@ mod tests {
         // The fail-open case: no tunnel, so the socket is left unpinned
         // and has no address until it connects. Registering 0.0.0.0 here
         // would match every application on that port number. That case is
-        // covered by the image check in `redirect::decide`, as it always
+        // covered by the image check in `intercept::decide`, as it always
         // was, and this returns nothing rather than something wrong.
         let own = Arc::new(OwnSockets::default());
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
