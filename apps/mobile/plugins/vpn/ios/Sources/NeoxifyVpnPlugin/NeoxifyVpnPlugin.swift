@@ -442,16 +442,22 @@ class NeoxifyVpnPlugin: Plugin {
     }
 
     /// Tells StoreKit a purchase has been delivered. Only ever called
-    /// after our own API has granted the subscription.
+    /// after our own API has granted the subscription, and only for the
+    /// transaction it granted.
+    ///
+    /// No id finishes nothing. It used to finish every unfinished
+    /// transaction, so a recovery sweep that redeemed the first of two
+    /// also finished the second -- and when the second's redeem failed,
+    /// StoreKit never offered it again: paid for, never granted.
     @objc public func iapFinish(_ invoke: Invoke) {
         struct Args: Decodable { let transactionId: String? }
         let args = try? invoke.parseArgs(Args.self)
+        guard let raw = args?.transactionId, let id = UInt64(raw) else {
+            invoke.reject("iap-finish-needs-transaction-id")
+            return
+        }
         Task {
-            if let raw = args?.transactionId, let id = UInt64(raw) {
-                await StoreKitPurchases.finish(transactionId: id)
-            } else {
-                await StoreKitPurchases.finishAll()
-            }
+            await StoreKitPurchases.finish(transactionId: id)
             invoke.resolve()
         }
     }
