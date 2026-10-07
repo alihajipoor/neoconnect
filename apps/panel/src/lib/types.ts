@@ -506,7 +506,9 @@ export interface IspRecommendationsSummary {
 
 /** One plan's remaining voucher capacity for a reseller. */
 export interface ResellerBalance {
-  plan: { id: string; name: string; priceUsd: string; durationDays: number };
+  /** isActive false: the operator retired the plan, and codes for it can
+   * neither be minted nor redeemed. Absent from an older backend. */
+  plan: { id: string; name: string; priceUsd: string; durationDays: number; isActive?: boolean };
   balance: number;
 }
 

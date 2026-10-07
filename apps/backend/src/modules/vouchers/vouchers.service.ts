@@ -165,7 +165,13 @@ export class VouchersService {
       where: { code: normalise(rawCode) },
       include: { plan: true },
     });
-    if (!voucher || !this.isRedeemable(voucher)) {
+    // A retired plan reads as "not valid" here, as an unknown, spent or
+    // expired code does: this answer is public (GET /vouchers/:code/
+    // preview), and one answer for every refusal keeps it from saying
+    // which codes exist. Only redeem, signed in and after the code
+    // checked out, says the plan is retired -- so the customer knows the
+    // code was not spent.
+    if (!voucher || !this.isRedeemable(voucher) || !voucher.plan.isActive) {
       throw new NotFoundException("That voucher code is not valid");
     }
     return { code: voucher.code, plan: voucher.plan, expiresAt: voucher.expiresAt };
@@ -174,7 +180,10 @@ export class VouchersService {
   /** Spends a voucher for a customer and provisions what it grants. */
   async redeem(customerId: string, rawCode: string) {
     const code = normalise(rawCode);
-    const voucher = await this.prisma.voucher.findUnique({ where: { code } });
+    const voucher = await this.prisma.voucher.findUnique({
+      where: { code },
+      include: { plan: { select: { isActive: true } } },
+    });
     if (!voucher || !this.isRedeemable(voucher)) {
       throw new NotFoundException("That voucher code is not valid");
     }
@@ -184,6 +193,22 @@ export class VouchersService {
     });
     if (already) {
       throw new ConflictException("You have already used this voucher");
+    }
+
+    // Before the claim, not after it. subscriptionsService.create refuses
+    // an inactive plan, and it used to do so after the code had been
+    // counted and the redemption written: a one-use code -- a reseller's,
+    // which they paid a token for -- was spent on a grant that could not
+    // happen, the retry said the code was not valid, and the reseller could
+    // no longer revoke it for a refund. Refused here, the code is
+    // untouched: the operator can reactivate the plan, or the reseller can
+    // revoke the code. A plan retired in the milliseconds between this
+    // read and the create can still slip through; closing that needs the
+    // claim and the create in one transaction.
+    if (!voucher.plan.isActive) {
+      throw new BadRequestException(
+        "This voucher is for a plan that is no longer offered, so it cannot be redeemed. It has not been used up -- ask whoever gave it to you.",
+      );
     }
 
     // The claim is a single conditional update, and that is the whole

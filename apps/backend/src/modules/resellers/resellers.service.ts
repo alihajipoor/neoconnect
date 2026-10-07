@@ -78,7 +78,10 @@ export class ResellersService {
     const [plans, balances] = await Promise.all([
       this.prisma.subscriptionPlan.findMany({
         orderBy: { priceUsd: "asc" },
-        select: { id: true, name: true, priceUsd: true, durationDays: true },
+        // isActive so the workspace can say a retired plan's tokens cannot
+        // be spent -- generate refuses them -- rather than hide a balance
+        // the reseller paid for.
+        select: { id: true, name: true, priceUsd: true, durationDays: true, isActive: true },
       }),
       this.prisma.resellerTokenBalance.findMany({ where: { adminUserId } }),
     ]);
@@ -108,6 +111,14 @@ export class ResellersService {
   async generate(adminUserId: string, planId: string, recipientEmail?: string) {
     const plan = await this.prisma.subscriptionPlan.findUnique({ where: { id: planId } });
     if (!plan) throw new NotFoundException("That plan does not exist");
+    // Before the token is spent. A code for a retired plan cannot be
+    // redeemed, so minting one would cost the reseller a token for
+    // something their customer cannot use.
+    if (!plan.isActive) {
+      throw new BadRequestException(
+        `${plan.name} is no longer offered, so codes for it cannot be redeemed. Your ${plan.name} tokens are unchanged.`,
+      );
+    }
 
     const voucher = await this.prisma.$transaction(async (tx) => {
       const spent = await tx.resellerTokenBalance.updateMany({
