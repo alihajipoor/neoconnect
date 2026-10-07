@@ -42,7 +42,7 @@ use windows_sys::Win32::Networking::WinSock::setsockopt;
 
 use super::flows::Nat;
 use super::socks;
-use super::owner::Transport;
+use super::policy::Transport;
 use super::redirect::Stats;
 
 /// `IPPROTO_IP`, the option level `IP_UNICAST_IF` lives at.
@@ -137,7 +137,7 @@ impl Default for TunnelInterface {
 /// taken from, so the table is written when an engine starts and
 /// cleared when it stops, and never edited in between. Changing a
 /// customer's *preferences* mid-session does not touch it: preferences
-/// live on [`super::owner::Selection`] and say which exit an
+/// live on [`super::policy::Selection`] and say which exit an
 /// application wants, while this says which exits exist. The two are
 /// separately mutable precisely so that the index a flow is holding
 /// cannot come to mean a different node underneath it.

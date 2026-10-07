@@ -52,11 +52,12 @@
 mod flows;
 mod health;
 mod net;
-mod owner;
 mod picker;
+mod policy;
 mod proxy;
 mod redirect;
 mod socks;
+mod tables;
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -72,7 +73,7 @@ use crate::engines::routing::{self, InstalledRoutes};
 // Boundary: `engines::janitor` and `engines::repair` reach `delete_rule`
 // and `RULE` by this path, so it stays where they look for it.
 pub(crate) use net::firewall;
-pub use owner::{Selection, SharedSelection};
+pub use policy::{Selection, SharedSelection};
 pub use picker::running_apps;
 
 /// How long to wait for a tunnel adapter to appear and be given an
@@ -268,7 +269,7 @@ const LOG_FILE: &str = "split-tunnel.log";
 /// for minutes, so a sweep that arrives half a minute late still catches
 /// it. The one thing it is deliberately *not* tuned for is catching an
 /// escape quickly enough to do something about it -- nothing here does
-/// anything about it. See `owner::escaped_connections`.
+/// anything about it. See `tables::escaped_connections`.
 const AUDIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How many escaping connections are named in the log per sweep.
@@ -572,10 +573,10 @@ impl Convergence {
                     // carrying. By the second pass an application has
                     // rebuilt its connections into the tunnel, and
                     // without this the loop closes them again -- see
-                    // `owner::reset_selected_connections`. `has_flow`,
+                    // `tables::reset_selected_connections`. `has_flow`,
                     // not `lookup_flow`, so asking twice a second does
                     // not keep every entry alive.
-                    let outcome = owner::reset_selected_connections(
+                    let outcome = tables::reset_selected_connections(
                         &selection,
                         node,
                         &own_images,
@@ -628,7 +629,7 @@ impl Convergence {
 /// a connection the loop never saw is exactly what a leak is. This walks
 /// the machine's own connection tables instead and asks which of them
 /// ought to be in the tunnel and is not. See
-/// [`owner::escaped_connections`] for what qualifies and what is
+/// [`tables::escaped_connections`] for what qualifies and what is
 /// deliberately excluded.
 ///
 /// It changes nothing. No connection is closed, no packet is dropped and
@@ -663,7 +664,7 @@ impl Audit {
         // this lock on every packet.
         let selection = self.selection.read().unwrap_or_else(|e| e.into_inner()).clone();
         let nat = self.nat.clone();
-        let escapes = owner::escaped_connections(
+        let escapes = tables::escaped_connections(
             &selection,
             &self.own_images,
             self.node,
@@ -1008,7 +1009,7 @@ impl SplitTunnel {
         // clears itself: restart the game and the pid is gone, the
         // warning goes with it, and nobody is left staring at a notice
         // about something they have already done. See
-        // `owner::still_running` for why the pid alone is not enough.
+        // `tables::still_running` for why the pid alone is not enough.
         //
         // Only ever *added* to on a selection change. A list that was
         // replaced would forget an app the customer selected two clicks
@@ -1021,7 +1022,7 @@ impl SplitTunnel {
         // notice that appears when nothing is wrong is how a customer
         // learns to ignore the one that matters.
         if config.enabled {
-            let already_running = owner::pids_running_images(&newly_selected);
+            let already_running = tables::pids_running_images(&newly_selected);
             for entry in already_running {
                 if !self.pre_existing.contains(&entry) {
                     self.pre_existing.push(entry);
@@ -1142,7 +1143,7 @@ impl SplitTunnel {
     pub fn restart_needed(&mut self) -> Vec<String> {
         // Re-checked rather than remembered, so the notice disappears
         // the moment the customer acts on it.
-        self.pre_existing = owner::still_running(&self.pre_existing);
+        self.pre_existing = tables::still_running(&self.pre_existing);
 
         let mut names: Vec<String> = self
             .pre_existing
@@ -1431,7 +1432,7 @@ impl SplitTunnel {
                     // That is the stranded-background-tunnel complaint,
                     // reachable from one unwrap.
                     let selection = self.selection.read().unwrap_or_else(|e| e.into_inner());
-                    owner::reset_selected_connections(
+                    tables::reset_selected_connections(
                         &selection,
                         node,
                         &own_images(),

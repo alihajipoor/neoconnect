@@ -172,7 +172,7 @@
 //! What is left is fire-and-forget senders: a beacon, a one-shot
 //! resolver, a telemetry ping.
 //!
-//! The answer is [`super::owner::Selection::verdict_for_unattributed`],
+//! The answer is [`super::policy::Selection::verdict_for_unattributed`],
 //! which refuses such a datagram instead of passing it through. That
 //! inverts this feature's usual trade -- everywhere else an
 //! unanswerable question fails open, because unprotected traffic beats
@@ -271,9 +271,8 @@ use windivert_sys::{WinDivertFlags, WinDivertLayer};
 
 use super::net::divert::{recalculate_checksums, Handle};
 use super::flows::{Nat, Origin, Verdict};
-use super::owner::{
-    Family, OwnerLookup, Scoped, Selection, SharedSelection, Transport, Unattributed,
-};
+use super::policy::{Family, Scoped, Selection, SharedSelection, Transport, Unattributed};
+use super::tables::OwnerLookup;
 use super::proxy::{ExitRelays, OwnSockets};
 
 /// The largest packet WinDivert will hand over.
@@ -433,7 +432,7 @@ pub struct Stats {
     /// is where the customer is told the same thing.
     pub blocked_icmp: AtomicU64,
     /// Connections found living outside the tunnel that should be
-    /// inside it -- see `owner::escaped_connections`.
+    /// inside it -- see `tables::escaped_connections`.
     ///
     /// The only number here that is not counted from inside the packet
     /// loop, and it exists because every number that *is* counted there
@@ -1419,7 +1418,7 @@ struct Parsed {
 ///
 /// * **Nothing can say which process sent one.** Attribution here is
 ///   `port -> pid`, read from `GetExtendedTcpTable` and
-///   `GetExtendedUdpTable` (see `owner::OwnerLookup`). An ICMP packet
+///   `GetExtendedUdpTable` (see `tables::OwnerLookup`). An ICMP packet
 ///   has no port, and Win32 has no ICMP analogue of those tables -- the
 ///   endpoint tables cover TCP and UDP and nothing else. WFP's ALE
 ///   layers *do* know the process for ICMP, but WinDivert exposes them
@@ -4156,7 +4155,7 @@ mod tests {
 
     /// The kernel filter and the leak audit are the same list seen from
     /// opposite ends: the filter decides what the loop is handed, and
-    /// `owner::is_public_v4` decides what the audit may call an escape.
+    /// `policy::is_public_v4` decides what the audit may call an escape.
     /// If they drift, the audit reports "escapes" the loop never had a
     /// chance to carry -- a number that looks like a leak.
     ///
@@ -4167,7 +4166,7 @@ mod tests {
     /// side alone fails here.
     #[test]
     fn the_filter_and_the_audit_agree_at_every_edge_of_every_range() {
-        use crate::split_tunnel::owner::is_public_v4;
+        use crate::split_tunnel::policy::is_public_v4;
 
         let redirect = sample_redirect();
         let filter = filter_for(&redirect);

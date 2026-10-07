@@ -7,7 +7,7 @@
 //! re-lists every few seconds while it is open.
 //!
 //! What it shares with the packet path is `image_path`, borrowed from
-//! `owner.rs`, so both identify a process by exactly the same string.
+//! `tables`, so both identify a process by exactly the same string.
 //!
 //! The icons are this directory's other module: they are only ever
 //! fetched for this list.
@@ -26,7 +26,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     TH32CS_SNAPPROCESS,
 };
 
-use super::owner::image_path;
+use super::tables::image_path;
 
 /// Whether `pid` runs in Windows session `session`. A process that has
 /// ended, or whose session cannot be read, is not in anyone's.

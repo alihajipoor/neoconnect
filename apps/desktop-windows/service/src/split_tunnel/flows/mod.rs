@@ -31,7 +31,7 @@ use std::net::Ipv4Addr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use super::owner::Transport;
+use super::policy::Transport;
 
 /// Where a redirected packet was really going, plus what has to be put
 /// back on the way home.
