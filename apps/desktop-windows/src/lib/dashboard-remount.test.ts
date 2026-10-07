@@ -109,6 +109,29 @@ describe("the Dashboard's wiring", () => {
     expect(dashboard).not.toMatch(/const baselineIpRef = useRef/);
   });
 
+  it("runs a new state's first health check once the one in flight ends, instead of dropping it", () => {
+    const start = dashboard.indexOf("const check = async ({ catchUp = false } = {}) => {");
+    expect(start).toBeGreaterThan(0);
+    const check = dashboard.slice(start, dashboard.indexOf("\n    };\n", start));
+    // Busy: only the effect's own first check waits; an interval tick is
+    // still dropped, which is what keeps measurements from stacking.
+    expect(check).toContain("if (catchUp) healthCheckWantedRef.current = () => check();");
+    // Released before the waiting one runs, and it runs only if this one
+    // did not hand the tunnel to the ladder.
+    const released = check.indexOf("healthCheckInFlightRef.current = false;");
+    const taken = check.indexOf("const wanted = healthCheckWantedRef.current;");
+    expect(released).toBeGreaterThan(0);
+    expect(taken).toBeGreaterThan(released);
+    expect(check).toContain("if (failover) await runLadder({ automatic: true });\n      else if (wanted) void wanted();");
+    // A run that has ended runs nothing, queued or not.
+    expect(check).toContain("if (!live) return;");
+
+    const effect = dashboard.slice(start);
+    expect(effect).toContain("void check({ catchUp: true });");
+    expect(effect).toContain("const id = setInterval(() => void check(), HEALTH_POLL_MS);");
+    expect(effect.slice(effect.indexOf("return () => {"))).toMatch(/^return \(\) => \{\s+live = false;/);
+  });
+
   it("renews the guard at every rung, right after checking it is still the current pass", () => {
     const loop = dashboard.indexOf("for (const [index, candidate] of candidates.entries()) {");
     expect(loop).toBeGreaterThan(0);

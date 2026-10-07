@@ -294,7 +294,11 @@ describe("measurements that cannot outlive what they serve", () => {
 
   it("caps the health poll's egress walk and runs one measurement at a time", () => {
     expect(dashboard).toContain("verifyEgress(baselineIpRef.current, { totalMs: HEALTH_EGRESS_TOTAL_MS })");
-    expect(dashboard).toContain("if (healthCheckInFlightRef.current) return;");
+    // One at a time; a newer state's first check waits rather than
+    // running beside it (dashboard-remount.test.ts has the rest).
+    expect(dashboard).toMatch(
+      /if \(healthCheckInFlightRef\.current\) \{\s+if \(catchUp\) healthCheckWantedRef\.current = \(\) => check\(\);\s+return;\s+\}\s+healthCheckInFlightRef\.current = true;/,
+    );
   });
 
   it("settles each candidate on an endpoint already known to answer, within a ceiling", () => {

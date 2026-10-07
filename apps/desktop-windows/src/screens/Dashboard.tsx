@@ -580,6 +580,8 @@ export function Dashboard({
   const livenessInFlightRef = useRef(false);
   /** Single-flight for the fifteen-second health poll's measurement. */
   const healthCheckInFlightRef = useRef(false);
+  /** A newer run's first check, waiting for the one in flight to end. */
+  const healthCheckWantedRef = useRef<(() => Promise<void>) | null>(null);
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
   /** What the plan's device limit has to say, when it is why this device
    * is not connected: refused before dialling, taken over by another
@@ -1457,8 +1459,21 @@ export function Dashboard({
     // tunnel waits out every endpoint's timeout, and the interval kept
     // starting new ones on top of it every fifteen seconds -- each
     // holding requests on a link that was already not answering.
-    const check = async () => {
-      if (healthCheckInFlightRef.current) return;
+    //
+    // Shared across runs of this effect, deliberately: two measurements
+    // at once could count two strikes off one failure. But a run's own
+    // first check (`catchUp`) is not simply dropped when one from before
+    // the state changed is still going -- it used to be, and then nothing
+    // measured the new state until the interval came round, up to
+    // fifteen seconds later. It runs as soon as that one finishes, unless
+    // that one handed the tunnel to the ladder, or this run has ended.
+    let live = true;
+    const check = async ({ catchUp = false } = {}) => {
+      if (!live) return;
+      if (healthCheckInFlightRef.current) {
+        if (catchUp) healthCheckWantedRef.current = () => check();
+        return;
+      }
       healthCheckInFlightRef.current = true;
       let failover = false;
       try {
@@ -1466,7 +1481,10 @@ export function Dashboard({
       } finally {
         healthCheckInFlightRef.current = false;
       }
+      const wanted = healthCheckWantedRef.current;
+      healthCheckWantedRef.current = null;
       if (failover) await runLadder({ automatic: true });
+      else if (wanted) void wanted();
     };
 
     // Once straight away, then on the interval.
@@ -1482,10 +1500,11 @@ export function Dashboard({
     // Nothing on screen waits for this: it is fired and forgotten, and
     // every write it makes goes through `publishObserved`, so an answer
     // overtaken by a press is dropped rather than shown.
-    if (Date.now() - lastCheckAtRef.current >= MIN_CHECK_GAP_MS) void check();
+    if (Date.now() - lastCheckAtRef.current >= MIN_CHECK_GAP_MS) void check({ catchUp: true });
     const id = setInterval(() => void check(), HEALTH_POLL_MS);
 
     return () => {
+      live = false;
       clearInterval(id);
       // Any change of state ends the stretch of continuous health being
       // timed -- a disconnect, a reconnect onto the same route, or a dip
