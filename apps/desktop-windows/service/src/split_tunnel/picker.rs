@@ -360,17 +360,27 @@ mod tests {
     /// The listing answers for the caller's own session and nobody
     /// else's. Every pid it returns is in that session; a session with
     /// no processes -- or none established -- lists nothing.
+    ///
+    /// A pid that has exited since the listing has no session left to
+    /// read, and is skipped rather than counted against the filter: with
+    /// other work running beside the test (a `pnpm test` spawning bash),
+    /// a short-lived process listed a moment earlier was measured failing
+    /// the check that way. One whose session can still be read must be
+    /// in this one.
     #[test]
     fn lists_only_the_callers_own_session() {
-        let mut mine = 0u32;
-        // SAFETY: a plain call with a valid out pointer.
-        let ok = unsafe {
-            windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId(std::process::id(), &mut mine)
+        let session_of = |pid: u32| -> Option<u32> {
+            let mut session = 0u32;
+            // SAFETY: a plain call with a valid out pointer.
+            let ok = unsafe { windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId(pid, &mut session) };
+            (ok != 0).then_some(session)
         };
-        assert_ne!(ok, 0, "this test process's session could not be read");
+        let mine = session_of(std::process::id()).expect("this test process's session could not be read");
         for app in running_apps(Some(mine)) {
             for pid in &app.pids {
-                assert!(in_session(*pid, mine), "{} (pid {pid}) is not in session {mine}", app.name);
+                if let Some(theirs) = session_of(*pid) {
+                    assert_eq!(theirs, mine, "{} (pid {pid}) is in session {theirs}, not {mine}", app.name);
+                }
             }
         }
         assert!(running_apps(Some(u32::MAX - 7)).is_empty(), "a session nobody is in listed processes");
