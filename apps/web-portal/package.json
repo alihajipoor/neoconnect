@@ -8,7 +8,7 @@
     "prebuild": "node ../desktop-windows/scripts/ensure-seed-bundle.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "pretest": "NEOXIFY_SKIP_SEED=1 node ../desktop-windows/scripts/ensure-seed-bundle.mjs",
+    "pretest": "node scripts/pretest.mjs",
     "test": "vitest run"
   },
   "dependencies": {
