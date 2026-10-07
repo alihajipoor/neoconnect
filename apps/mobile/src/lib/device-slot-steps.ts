@@ -25,9 +25,12 @@ import { withTimeout } from "@shared/lib/service-call";
  *    said only once the platform confirms it. Until it does, the teardown
  *    stays owed and is tried again on the poll.
  *
- * There is no automatic ladder on the phone to hold back. Its health
- * poll reports and never redials, so a displaced phone disconnects and
- * stays disconnected until the customer presses something.
+ * The phone's only automatic ladder is the reconnect after a drop
+ * (`reconnect-steps.ts`), and the device limit holds it back: a
+ * displaced phone ends any episode (`endForSlot`), a teardown the limit
+ * still owes rules one out, and a refusal on a reconnect's own claim
+ * stops it. So a displaced phone disconnects and stays disconnected
+ * until the customer presses something.
  */
 
 /** Whether the app is in front of the customer. True outside a browser

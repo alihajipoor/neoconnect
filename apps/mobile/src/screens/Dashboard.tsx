@@ -1015,8 +1015,8 @@ export function Dashboard({
    * another device took the slot over, a claim made through the tunnel
    * was refused, or the subscription stopped.
    *
-   * Disconnects and says why. Nothing redials afterwards -- this screen
-   * has no automatic ladder, and must not grow one that runs here: it
+   * Disconnects and says why. Nothing redials afterwards -- the automatic
+   * reconnect is ended here, and the teardown below is not a drop: it
    * would only take the slot back from the device the customer is now
    * using (docs/device-slots.md, obligations 7 and 11). Nothing is
    * recorded either: the dial worked and was reported as it happened;
