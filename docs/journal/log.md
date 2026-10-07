@@ -4148,3 +4148,65 @@ state only), then clients. Making the PKCE challenge required is a
 later step, once desktop 0.9.44 and mobile 0.2.23 are gone; until then
 those clients stay exposed. The Android fixes reach nobody until an APK
 release; the iOS ones ship with the first iOS build.
+
+### The review of these fixes, and what it changed (same day)
+
+An adversarial review of `c451e1a` reproduced the counts and found two
+blocking problems, both in the new egress rules; each was reproduced
+here with the real shared `verifyEgress` and only the network stood in
+for, then fixed.
+
+- **Dual-stack phones rejected every working tunnel but the last**
+  (`566136f`). Mobile left `/health/ip` to tauri-plugin-http, so on a
+  network with IPv6 the baseline was the phone's IPv6 address, while
+  every reading through either platform's tunnel is IPv4. `verifyEgress`
+  refuses to compare families, so every rung was "indeterminate": torn
+  down if another was left, "not confirmed" for the session otherwise,
+  and the poll never proved anything. On `main` the same mismatch read
+  as connected. Fixed the Windows way: `health_ip.rs` compiled into the
+  mobile crate by path, `health_ip_v4` registered, `ipv4OnlyHealthIp`
+  installed in `main.tsx`. An IPv6-only network without CLAT now has no
+  baseline, so it lands "not confirmed".
+- **A self-reporting mirror's baseline made working tunnels leaks**
+  (`60407bc`). A mirror proxying through the CDN answers with its node's
+  address; as the baseline (CDN blocked before connecting), asking it
+  again through a working tunnel gave the same address --
+  `bypassingTunnel`, held against the route, and "NOT protected" on the
+  poll, which asks the baseline's endpoint first. `captureBaselineIp`
+  now takes `nodeAddresses` and passes over such a reading; the mobile
+  dashboard gives it every credential's `connection.host` (the node's
+  `publicIp`). Not covered: a bundle mirror on a node the customer has
+  no credential for. Whether any live mirror reports itself is unknown
+  -- not checked, no node access. **The Windows ladder has the same
+  exposure on its non-last rungs and does not pass the option yet.**
+
+Also: the social exchange retries once without `verifier` when an old
+backend refuses the field by name (`7aef13d`), so a client released
+before `8cd9190` no longer breaks Google/Facebook sign-in -- backend
+first is still the order; an iOS start failure is classified by its
+wrapper, so a system reason saying "timed out" is not filed against the
+route (`96b115c`); the Swift comment on captured IPv6 no longer calls
+Xray's TCP handling a blackhole (`d802ba0`, comment only).
+
+Deferred, from the review's lows: ProviderStart failing on
+`.disconnected` after its 1 s grace even if `.connecting` was never seen
+(Swift, needs a device to know which way is wrong); Android
+`xrayTunnelLive` reporting down when the process list or network state
+cannot be read, and a late "up" from a dying `:xray` (Kotlin, rare, and
+the egress check still catches a dead tunnel); iOS WireGuard resolving
+its endpoint once (needs path monitoring); each rung waiting the full
+12 s through an API outage. Beta users should hear that an adopted
+Android Xray tunnel, and any connect with no baseline, now reads
+"Connected, not confirmed" for the session.
+
+**PROVEN (this PC):** mobile 9 files / 118 tests (+17), `tsc` clean;
+desktop JS 53 files / 800 tests (+8), `tsc` clean; mobile `cargo check
+--all-targets` clean, and `health_ip`'s 7 tests pass inside the mobile
+crate (Windows host). Against the old code 14 of the new tests fail
+(10 mobile, 4 desktop); the rest are controls that reproduce the review
+or pin behaviour that did not change.
+
+**UNVERIFIED:** none of it on a phone. That `health_ip_v4` builds and
+connects on Android and iOS (only the host target was compiled here);
+the dual-stack fix on a real IPv6 network; the retry against a real old
+backend.
