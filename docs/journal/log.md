@@ -4091,17 +4091,22 @@ released.
   verifier, an unbound code with a verifier is refused (injection), an
   unbound code with none is still accepted for released clients.
 
-**Not done:** the low "unreachable control plane rejects working
-tunnels" finding. The verifier showed the desktop does exactly the same
-and pins it in `connection-evidence.test.ts`; it is a shared trade-off
-(our own API answering nothing cannot tell "panel down" from "tunnel
-drops traffic") and changing it on one client would make the two
-diverge. Also not done, because no finding required them and each
+**Partly done:** the low "unreachable control plane rejects working
+tunnels" finding. The merged desktop fixes made the shared
+`verifyEgress` call an error page from our own endpoints (a redeploy's
+502) "indeterminate"; with this branch's rules that now reads
+"unverified" on the poll instead of "NOT protected", lands a ladder
+with no baseline as "unverified", and (`f3b335d`) is no longer
+recorded against the route when a non-last rung moves on. Total
+silence from every endpoint is still "unreachable" -- a dead panel and
+a black-holing tunnel look the same from our own API, and the
+Windows client's second instrument (`probe_ipv4_egress`) has no mobile
+equivalent yet. Not done, because no finding required them and each
 touches live Android users: the optional Xray DNS
 `queryStrategy: "UseIPv4"`, and a mobile IPv6 egress probe.
 
 **PROVEN (unit tests and typecheck, this PC, on the rebased tree):**
-mobile 7 files / 98 tests (72 before, +26), `tsc` clean; desktop JS 52 /
+mobile 7 files / 101 tests (72 before, +29), `tsc` clean; desktop JS 52 /
 792 (+13 new), `tsc` clean; backend 99 suites / 1,200 tests (+8 new),
 `tsc` and eslint clean; web portal `tsc` clean. Failing against the old code:
 5 of the 22 `tunnel-evidence` tests (checked by putting the old rules
