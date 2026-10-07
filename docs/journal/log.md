@@ -4215,3 +4215,74 @@ main's backend, and the new backend fields are optional to the panel.
   (`apps/desktop-windows/src/lib/pow.ts`: about 40 s at 21 bits in Node,
   against 9 s batched). The panel's is batched; the apps' is not changed
   here.
+
+## 2026-10-06 — panel review fixes, second round (same branch)
+
+**Status:** pushed to `claude/review-fixes-panel`; not merged, not
+deployed. Main is merged in (c1a5c56), so the branch merges into main on
+its own; the journal was the only conflict.
+
+The adversarial review of `f4076ca` found one blocking regression and
+six lows. Fixing the blocking one turned up a second regression from the
+same change (01545f4 moved the submit into `onSubmit`), which the review
+had not seen. Neither was ever deployed.
+
+- **Blocking, fixed (0f1bbd5): a submit before hydration put the admin
+  password in the URL.** The server-rendered form had no method and no
+  action, so a native submit was `GET /login?email=…&password=…` -- into
+  nginx's access log. `action={formAction}` is back beside `onSubmit`.
+  Against `next start`: the served form is `method="POST"` with the
+  action's hidden fields; a native submit of that server-rendered form
+  (the reviewer's method: a clone with no React listeners) reached a
+  backend stand-in as a challenge-less sign-in and left no query string;
+  after hydration one submit sent one challenge request and one sign-in
+  carrying the solved challenge -- React did not also run the action.
+- **Found while fixing it, fixed (0f1bbd5): the admin password shown in
+  clear in the code box.** React resets a form only after an action it
+  runs itself; `onSubmit` dispatching by hand lost that, and React reused
+  the password `<input>` for the code step as `type="text"`. Seen in the
+  browser pane against `next start`: the "Authentication code" box held
+  the password. `onSubmit` now calls `requestFormReset` in its
+  transition, as React did, and the steps are keyed. After: the box is
+  empty, and a code submit reaches `/auth/mfa/verify` once.
+- **Low, fixed (fd1f986): the restore script installed "null" as
+  server.key** with a non-SUPERADMIN token (jq prints `null` for a
+  missing key; the non-empty check passed it). Corrected in the first
+  entry above.
+- **Low, fixed (0ae5224):** the 429 and proof-of-work refusals said
+  "from your address" when the panel had no trustworthy address and the
+  backend counted every sign-in in one bucket.
+- **Low, fixed (bad7291):** the panel's solver paused for the page with
+  `setTimeout`, which browsers throttle in hidden tabs; it now yields
+  through a MessageChannel.
+- **Low, fixed (ea7b213):** the web portal's pretest was `VAR=1 node …`,
+  which cmd.exe refuses; reproduced, then fixed with a small script.
+- **Low, fixed (2faa3d1):** the route delete dialog said credentials are
+  revoked "on the node immediately"; they are queued commands, replayed
+  to an offline node when it reconnects.
+- **Low, fixed (c1a5c56):** the first entry's "merge the backend branch
+  first" was out of date; that branch is in main.
+
+### Counts, on the merged tree (this PC)
+
+Backend 103 suites / 1,210 tests (main's additions included), typecheck
+and lint clean. Panel 7 files / 46 tests (was 6 / 39), typecheck clean,
+lint 0 errors and the 2 old warnings, `next build` passes. Web portal 1
+file / 2 tests under both cmd.exe and Git Bash, `tsc -b` clean. Discord
+bot 48 tests, typecheck clean, lint 0 errors. New tests that fail on the
+code before them: `login-form.test.tsx` 3 of 3 (one renders the form
+through react-dom/server with a real server reference; two are source
+checks, the suite having no DOM), `actions.test.ts` 2, `pow.test.ts` 1,
+`delete-warning.test.ts` 1. Desktop and mobile were not touched.
+
+### Unverified
+
+- How often operators really submit before hydration.
+- Hidden-tab timer throttling in a real Chrome. The desktop app's pane
+  does not throttle (50 chained `setTimeout(0)` in a hidden tab took
+  217 ms), so the fix is checked only for working there: a hidden tab
+  solved an 18-bit challenge from the built panel in about 0.55 s.
+- The restore script's change was not run with jq or on a node (no jq on
+  this PC); its check loop, copied out, refused a "null" and an empty
+  server.key and passed real PEM files.
+- Everything the first entry lists as unverified still is.
