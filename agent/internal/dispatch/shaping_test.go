@@ -114,9 +114,12 @@ func TestDisconnectedClientsRulesAreRemoved(t *testing.T) {
 	d.ReconcileShaping(context.Background())
 
 	d.discoverers["OPENVPN"] = &fakeDiscoverer{connected: map[string]string{}}
+	mark := len(rec.calls)
 	d.ReconcileShaping(context.Background())
 
-	if got := rec.count("class del"); got == 0 {
+	// After the mark: Apply removes before it adds, so a class del from
+	// the first pass would satisfy a plain count.
+	if !anyContains(rec.calls[mark:], "class del dev tun0 classid 1:6") {
 		t.Error("expected the disconnected client's rules to be removed")
 	}
 }
@@ -132,12 +135,13 @@ func TestReconnectOnADifferentAddressMovesTheLimit(t *testing.T) {
 	d.ReconcileShaping(context.Background())
 
 	d.discoverers["OPENVPN"] = &fakeDiscoverer{connected: map[string]string{"cn-1": "10.8.0.9"}}
+	mark := len(rec.calls)
 	d.ReconcileShaping(context.Background())
 
 	if got := rec.count("match ip dst 10.8.0.9/32"); got != 1 {
 		t.Errorf("expected the limit to follow the client to its new address, got %d", got)
 	}
-	if got := rec.count("class del"); got == 0 {
+	if !anyContains(rec.calls[mark:], "class del dev tun0 classid 1:6") {
 		t.Error("expected the rule on the old address to be removed")
 	}
 }
