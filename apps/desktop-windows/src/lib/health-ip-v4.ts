@@ -17,6 +17,11 @@ import type { HealthIpAnswer, HealthIpTransport } from "./egress";
  * and needed it more than Windows did: a phone's tunnel is IPv4 only on
  * both platforms, and a dual-stack phone's IPv6 baseline made every
  * rung of every connect "indeterminate".
+ *
+ * Its answer also carries `peer`, the address the request actually
+ * connected to, passed through untouched: it is how the check recognises
+ * an endpoint on the tunnel's own server, which is reached around the
+ * tunnel (`TunnelServer` in egress.ts).
  */
 export const ipv4OnlyHealthIp: HealthIpTransport = (base, timeoutMs) => {
   // The command has its own timeout; this one only guards against an
