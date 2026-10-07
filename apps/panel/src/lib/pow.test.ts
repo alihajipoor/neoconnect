@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 // The backend's own minting and checking, not a copy: a solution this
 // solver finds must pass the code that will judge it.
 import { mint, verify } from "../../../backend/src/modules/login-guard/proof-of-work";
@@ -17,6 +17,25 @@ describe("solve", () => {
     },
     30_000,
   );
+
+  // A hidden tab's timers are throttled; the far end of that is a timer
+  // that does not fire. The search must not be waiting on one. This
+  // challenge's first 12-bit nonce is 12155, past two of the solver's
+  // pauses for the page.
+  it("does not wait on timers, which a hidden tab throttles", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "setImmediate"] });
+    try {
+      const challenge = { id: "i", challenge: "throttled-tab-3", difficulty: 12, expiresAt: 1, signature: "s" };
+      const stalled = new Promise<never>((_, reject) =>
+        realSetTimeout(() => reject(new Error("the solver is waiting on a timer")), 10_000),
+      );
+      const solution = await Promise.race([solve(challenge), stalled]);
+      expect(solution.nonce).toBe("12155");
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30_000);
 
   it("changes nothing the backend signed", async () => {
     const challenge = mint(4);
