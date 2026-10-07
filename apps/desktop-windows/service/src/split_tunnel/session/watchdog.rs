@@ -98,7 +98,7 @@ fn liveness(
 /// off is what gives the machine back.
 ///
 /// Stopped by being dropped, which joins its thread.
-pub(super) struct Watchdog {
+pub(in crate::split_tunnel) struct Watchdog {
     _worker: Worker,
 }
 

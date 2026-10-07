@@ -21,7 +21,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
-pub use connections::{escaped_connections, reset_selected_connections};
+pub use connections::{escaped_connections, reset_selected_connections, ResetOutcome};
 pub use owner::OwnerLookup;
 pub use process::{image_path, pids_running_images, still_running};
 

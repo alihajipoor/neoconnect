@@ -50,7 +50,7 @@ const RESET_RESCAN: std::time::Duration = std::time::Duration::from_millis(250);
 /// the ones that were not closeable yet.
 ///
 /// Stopped by being dropped, which joins its thread.
-pub(super) struct Convergence {
+pub(in crate::split_tunnel) struct Convergence {
     _worker: Worker,
 }
 

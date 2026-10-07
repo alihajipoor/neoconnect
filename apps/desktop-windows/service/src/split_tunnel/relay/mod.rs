@@ -485,6 +485,11 @@ pub struct Relays {
 impl Relays {
     /// Stops the relays now rather than when they go out of scope. The
     /// stop itself is the `Drop` below.
+    ///
+    /// Test-only: the tests stop the relays at the point they mean to
+    /// and say so by name. The product never calls it -- a session lets
+    /// go of its relays in the order its fields are declared in.
+    #[cfg(test)]
     pub fn stop(self) {
         drop(self);
     }

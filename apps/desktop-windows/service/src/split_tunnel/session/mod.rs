@@ -5,29 +5,49 @@
 //! asks it everything it knows about a running session. Everything that
 //! outlives a session -- the customer's selection, the exit table the
 //! engine layer writes, the restart notice -- stays on `SplitTunnel`.
+//!
+//! # Acquisition in order, teardown by drop
+//!
+//! Every part a session holds undoes itself when it is dropped, and the
+//! session is nothing but those parts in the order they are taken down
+//! -- see [`Session`]. So there is no `stop` to keep in step with
+//! `start`: stopping is letting go, and the order is the field order.
+//!
+//! A bring-up that fails part way holds its parts in locals, and those
+//! drop in the reverse of the order they were *declared* in, which is
+//! arranged to be the order the old hand-written unwinds used -- see
+//! [`Session::start`]. A panic anywhere in the bring-up is unwound by
+//! the same drops, where it used to strand whatever had already started
+//! -- interception included.
+//!
+//! The parts themselves come from [`Parts`], so the order can be tested
+//! without Windows; [`Windows`] is the real thing.
 
 mod convergence;
+#[cfg(test)]
+mod fake;
 mod logger;
+mod parts;
 mod tunnel;
 mod watchdog;
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
 use neoconnect_ipc::SplitTunnelMode;
 
-use crate::adapters;
 use crate::engines::ipv6_block;
-use crate::engines::routing::InstalledRoutes;
 use crate::split_tunnel::log_file::{append, LOG_FILE};
-use crate::split_tunnel::{firewall, flows, health, intercept, net, relay, tables, SharedSelection};
+use crate::split_tunnel::net::pin::TunnelInterface;
+use crate::split_tunnel::{flows, health, intercept, relay, SharedSelection};
 
-use convergence::Convergence;
-use logger::{Audit, Logger};
-use tunnel::{default_routes, install_verified_route, wait_for_addressed_adapter};
-use watchdog::Watchdog;
+use logger::Audit;
+use parts::{Intercepting, Parts, Relaying};
+pub(super) use parts::Windows;
+use tunnel::default_routes;
 
 /// The resolver every lookup is sent to while Custom mode is on.
 ///
@@ -38,33 +58,55 @@ use watchdog::Watchdog;
 const CUSTOM_MODE_RESOLVER: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
 
 /// A running Custom-mode session.
-pub(super) struct Session {
-    redirect: intercept::Running,
-    /// The flow tables the redirect loop decides against.
+///
+/// # The field order is the teardown
+///
+/// Rust drops a struct's fields in the order they are declared, and
+/// every part below undoes itself in its `Drop`. So the first eight
+/// fields are not a list of what a session has -- they are `stop`, the
+/// ten-step sequence that used to be written out by hand with a comment
+/// at each step saying why *that* position, now carried by the type.
+/// The comments moved with the steps. Reordering these fields reorders
+/// a disconnect; `a_session_is_taken_down_in_the_order_stop_always_used`
+/// fails if that happens.
+///
+/// Before the first field drops, `ActiveSlot::take` has already cleared
+/// the lock-free running flag, as `stop` always did first.
+///
+/// The parts nothing reads while the session runs are named with a
+/// leading underscore, as this crate names everything held only for its
+/// `Drop`.
+pub(super) struct Session<P: Parts = Windows> {
+    /// The backstop that switches interception off if the tunnel goes
+    /// away without anybody noticing.
     ///
-    /// Held here so a selection change can throw the leave-alone
-    /// verdicts away -- see `set_selection`. It is the same `Arc` the
-    /// loop, the relays and the audit hold; there is one table.
-    nat: Arc<flows::Nat>,
-    relays: relay::Relays,
+    /// First of all, and before the join below can take any time: the
+    /// backstop must not be looking for a vanished adapter while the
+    /// session it would complain about is being taken down on purpose.
+    /// Stopping it is also what keeps the teardown from being joined by
+    /// a thread it is itself joining.
+    _watchdog: P::Watchdog,
+    /// The packet loop.
+    ///
+    /// Interception before the relays. Stopping the relays while
+    /// packets were still being rewritten to them would send a selected
+    /// app's traffic to a port with nothing behind it -- a blackout
+    /// rather than the fail-open this promises.
+    interception: P::Interception,
+    /// The reset loop that keeps closing pre-existing connections for
+    /// the first seconds.
+    ///
+    /// Before the relays, and for the same reason interception is
+    /// stopped before them: this thread closes customers' connections
+    /// on the assumption that a tunnel is there to rebuild them
+    /// through, and that assumption stops being true here.
+    _convergence: P::Convergence,
+    _relays: P::Relays,
     /// Held for its Drop: without it the stack accepts none of the
     /// redirected connections. See the firewall module.
-    allowance: firewall::Allowance,
-    tunnel: Arc<net::pin::TunnelInterface>,
-    route: InstalledRoutes,
-    logger: Logger,
-    /// The reset loop that keeps closing pre-existing connections for
-    /// the first seconds. Held so it is stopped with the session.
-    convergence: Convergence,
-    /// The backstop that switches interception off if the tunnel goes
-    /// away without anybody noticing. Held so it is stopped with the
-    /// session.
-    watchdog: Watchdog,
-    /// Set by the watchdog when it has stopped interception, so the
-    /// status poll can say so instead of reporting a Custom mode that
-    /// looks live and is not. Nothing in this product reports a state
-    /// it has not verified, and "still intercepting" is such a state.
-    watchdog_tripped: Arc<std::sync::atomic::AtomicBool>,
+    _allowance: P::Allowance,
+    _logger: P::Logger,
+    _route: P::Route,
     /// The per-app IPv6 block, when one could be installed.
     ///
     /// `None` is normal and not a fault: "everything except these" does
@@ -72,11 +114,34 @@ pub(super) struct Session {
     /// still gets the redirect loop's own IPv6 block. See
     /// `engines::ipv6_block::SelectedAppsIpv6Block` for what it adds
     /// over that, and for why the same idea is unsound for IPv4.
-    ipv6_apps: Option<ipv6_block::SelectedAppsIpv6Block>,
+    ///
+    /// Last, so that at no point is Custom mode still intercepting
+    /// while a selected app's IPv6 has already been let out again.
+    /// Both blocks come off together as far as the customer is
+    /// concerned; the order only decides which way the overlap falls,
+    /// and the safe way is for the WFP one to outlast the loop.
+    ipv6_apps: Option<P::Ipv6Block>,
+
+    // Nothing below this line does anything when it is dropped.
+    /// The flow tables the redirect loop decides against.
+    ///
+    /// Held here so a selection change can throw the leave-alone
+    /// verdicts away -- see `set_selection`. It is the same `Arc` the
+    /// loop, the relays and the audit hold; there is one table.
+    nat: Arc<flows::Nat>,
+    tunnel: Arc<TunnelInterface>,
+    /// Set by the watchdog when it has stopped interception, so the
+    /// status poll can say so instead of reporting a Custom mode that
+    /// looks live and is not. Nothing in this product reports a state
+    /// it has not verified, and "still intercepting" is such a state.
+    watchdog_tripped: Arc<AtomicBool>,
     log_path: PathBuf,
     /// When interception began, so a warm-up is not mistaken
     /// for a fault. See intercept::stats::WARMUP.
     started: Instant,
+    /// Where the parts came from, for the one that is rebuilt while the
+    /// session runs -- the IPv6 block, on a selection change.
+    parts: P,
 }
 
 /// Installs the per-app IPv6 block for the current selection, or
@@ -196,12 +261,17 @@ fn own_images() -> Vec<String> {
     images
 }
 
-impl Session {
+impl<P: Parts> Session<P> {
     /// Brings a session up against a tunnel that is already running
     /// passively -- the body of `SplitTunnel::start` once it has
     /// decided there is something to intercept.
+    ///
+    /// Each part is acquired in the order it always was, and nothing
+    /// here unwinds by hand: a step that fails returns, and whatever was
+    /// already acquired is released by being dropped on the way out.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn start(
+        parts: P,
         adapter_name: &str,
         node: Ipv4Addr,
         log_dir: &Path,
@@ -214,14 +284,12 @@ impl Session {
         // route writes to it.
         let log_path = log_dir.join(LOG_FILE);
 
-        let tunnel_adapter = wait_for_addressed_adapter(adapter_name, limits)?;
+        let tunnel_adapter = parts.wait_for_tunnel(adapter_name, limits)?;
         let tunnel_address = tunnel_adapter
             .ipv4
             .ok_or_else(|| format!("{adapter_name} came up without an address"))?;
 
-        let uplink = adapters::physical_uplink(&[adapter_name])
-            .map_err(|e| format!("could not enumerate network adapters: {e}"))?
-            .ok_or_else(|| "no physical network connection to send traffic over".to_string())?;
+        let uplink = parts.physical_uplink(adapter_name)?;
         let local_addr = uplink
             .ipv4
             .ok_or_else(|| "the physical network connection has no address".to_string())?;
@@ -248,43 +316,42 @@ impl Session {
         // `mode` in this function at all; the line below is what runs
         // for both. The rewriting, the NAT and the return leg really are
         // identical either way, which is the part that was true.
-        let tunnel =
-            Arc::new(net::pin::TunnelInterface::new(tunnel_adapter.index, tunnel_address));
+        let tunnel = Arc::new(TunnelInterface::new(tunnel_adapter.index, tunnel_address));
 
         // The route is chosen by trying it, not by predicting it. See
         // install_verified_route.
         let route =
-            install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path, limits)?;
+            parts.install_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path, limits)?;
+
+        // Declared here and filled further down, because a local is
+        // dropped in the reverse of the order it was *declared* in, not
+        // the order it was assigned. Declaring these two ahead of the
+        // relays is what makes a bring-up that fails past this point
+        // release what it holds exactly as the unwinds written out here
+        // by hand used to: the relays first, then the IPv6 block, then
+        // the firewall allowance, then the route. A local that was never
+        // assigned is not dropped at all.
+        let allowance;
+        let ipv6_apps;
+
         // Created here rather than inside `intercept::start`, because
         // the relay counts into the same table and the relay is started
         // first -- the firewall allowance and the reachability wait sit
         // between the two.
         let stats = Arc::new(intercept::Stats::default());
-        let relays = match relay::start(nat.clone(), tunnel.clone(), stats.clone(), exits.clone())
-        {
-            Ok(relays) => relays,
-            Err(e) => {
-                // `route` is removed by its Drop on the way out.
-                return Err(format!("could not start the local relay: {e}"));
-            }
-        };
+        let relays = parts
+            .start_relays(nat.clone(), tunnel.clone(), stats.clone(), exits.clone())
+            .map_err(|e| format!("could not start the local relay: {e}"))?;
+        let (tcp_port, udp_port) = relays.ports();
 
         // Before the redirect starts, so that no packet is ever sent
         // to a port the firewall is still dropping.
-        let allowance =
-            match firewall::Allowance::install(
-                local_addr,
-                tunnel_address,
-                relays.tcp_port,
-                relays.udp_port,
-            ) {
-                Ok(allowance) => allowance,
-                Err(e) => {
-                    relays.stop();
-                    // `route` is removed by its Drop on the way out.
-                    return Err(e);
-                }
-            };
+        allowance = parts.allow(local_addr, tunnel_address, tcp_port, udp_port)?;
+
+        // So the relay can report a datagram it had to drop. Set before
+        // the redirect starts, because the first seconds are exactly
+        // when it matters.
+        relay::set_relay_log(log_path.clone());
 
         // The allowance is installed by netsh, and netsh returning is
         // not the same as the rule being effective for new flows. There
@@ -303,25 +370,16 @@ impl Session {
         // So wait for proof instead of assuming. A completed TCP
         // handshake to the relay means the rule is live and the listener
         // is up; nothing is redirected until that succeeds.
-        // So the relay can report a datagram it had to drop. Set before
-        // the redirect starts, because the first seconds are exactly
-        // when it matters.
-        relay::set_relay_log(log_path.clone());
-
-        if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port, limits) {
-            relays.stop();
-            // `route` is removed by its Drop on the way out.
-            return Err(e);
-        }
+        parts.wait_until_reachable(local_addr, tcp_port, limits)?;
 
         let redirect = intercept::Redirect {
             local_addr,
             local_interface: uplink.index,
             node_addr: node,
-            tcp_proxy_port: relays.tcp_port,
-            udp_proxy_port: relays.udp_port,
+            tcp_proxy_port: tcp_port,
+            udp_proxy_port: udp_port,
             own_images: own_images(),
-            own_sockets: relays.own_sockets.clone(),
+            own_sockets: relays.own_sockets(),
             dns_resolver: CUSTOM_MODE_RESOLVER,
             // A full tunnel already resolves through the VPN, so there
             // is nothing to rescue and redirecting lookups would push
@@ -358,8 +416,8 @@ impl Session {
         let header = format!(
             "custom mode ({direction}, {scoping}) on {adapter_name} (index {}, tunnel {tunnel_address})              via {local_addr}, node {node}, proxy tcp {} udp {}",
             tunnel_adapter.index,
-            relays.tcp_port,
-            relays.udp_port,
+            tcp_port,
+            udp_port,
             direction = match mode {
                 SplitTunnelMode::OnlySelected => "only the selected apps are tunnelled",
                 SplitTunnelMode::AllExcept => "everything except the selected apps is tunnelled",
@@ -379,7 +437,7 @@ impl Session {
             selection: selection.clone(),
             own_images: own_images(),
             node,
-            proxy_ports: (relays.tcp_port, relays.udp_port),
+            proxy_ports: (tcp_port, udp_port),
             named: std::collections::HashSet::new(),
             last_run: Instant::now(),
         };
@@ -394,101 +452,86 @@ impl Session {
         // IPv6. Held in a local until the session is assembled: if
         // `intercept::start` fails below, this is dropped on the way out
         // and the filters go with it.
-        let ipv6_apps = install_ipv6_app_block(selection, log_dir, &log_path);
+        ipv6_apps = parts.block_ipv6(selection, log_dir, &log_path);
 
-        let nat_for_active = nat.clone();
-        match intercept::start(redirect, nat, selection.clone(), stats) {
-            Ok(running) => {
-                let logger =
-                    Logger::start(log_path.clone(), running.stats.clone(), header, audit);
+        let interception = parts.intercept(redirect, nat.clone(), selection.clone(), stats)?;
 
-                // Only now, with the redirect actually running, so
-                // that what an application reconnects into is the
-                // tunnel rather than the ordinary route it just
-                // left. Doing it earlier would simply hand it the
-                // same connection back.
-                let outcome = {
-                    // Poison is survived here as it is at the other
-                    // nine read sites, and this is the site where it
-                    // matters most. `intercept::start` has already
-                    // returned by now, so a panic between here and
-                    // `Session` being assembled leaves interception
-                    // live, `RUNNING` false, and nothing in `active`
-                    // for `stop` to take -- a redirect the service no
-                    // longer knows it is running and cannot tear down.
-                    // That is the stranded-background-tunnel complaint,
-                    // reachable from one unwrap.
-                    let selection = selection.read().unwrap_or_else(|e| e.into_inner());
-                    tables::reset_selected_connections(
-                        &selection,
-                        node,
-                        &own_images(),
-                        &|transport, port, destination, destination_port| {
-                            reset_nat.has_flow(transport, port, destination, destination_port)
-                        },
-                    )
-                };
-                append(
-                    &log_path,
-                    &format!(
-                        "closed {} existing connection(s) so they rebuild through the tunnel",
-                        outcome.closed
-                    ),
-                );
-                for failure in &outcome.failures {
-                    append(&log_path, &format!("  reset: {failure}"));
-                }
+        let logger = parts.start_logger(log_path.clone(), interception.stats().clone(), header, audit);
 
-                // One pass cannot close a connection that is still in
-                // SYN_SENT -- SetTcpEntry has no way to -- so keep
-                // rescanning for the length of the redirect's activation
-                // window. See Convergence.
-                let convergence = Convergence::start(
-                    selection.clone(),
-                    log_path.clone(),
-                    node,
-                    own_images(),
-                    reset_nat,
-                    outcome.closed,
-                );
-
-                // Started last, with everything it watches already up,
-                // so it cannot mistake a session still being assembled
-                // for one whose tunnel has failed.
-                let watchdog_tripped =
-                    Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let watchdog = Watchdog::start(
-                    adapter_name.to_string(),
-                    tunnel_adapter.index,
-                    tunnel_address,
-                    tunnel.clone(),
-                    running.stopper(),
-                    log_path.clone(),
-                    watchdog_tripped.clone(),
-                );
-
-                Ok(Session {
-                    redirect: running,
-                    nat: nat_for_active,
-                    relays,
-                    allowance,
-                    tunnel,
-                    route,
-                    logger,
-                    convergence,
-                    watchdog,
-                    watchdog_tripped,
-                    ipv6_apps,
-                    log_path,
-                    started: Instant::now(),
-                })
-            }
-            Err(e) => {
-                relays.stop();
-                // `route` is removed by its Drop on the way out.
-                Err(e)
-            }
+        // Only now, with the redirect actually running, so
+        // that what an application reconnects into is the
+        // tunnel rather than the ordinary route it just
+        // left. Doing it earlier would simply hand it the
+        // same connection back.
+        let outcome = {
+            // Poison is survived here as it is at the other nine read
+            // sites. This was once the site where it mattered most: a
+            // panic between `intercept::start` returning and the
+            // session being assembled left interception live,
+            // `RUNNING` false, and nothing in `active` for `stop` to
+            // take -- the stranded-background-tunnel complaint,
+            // reachable from one unwrap. The unwind now drops the loop
+            // with everything else acquired so far, so a panic here
+            // would cost a failed connect rather than a stranded
+            // machine. That is still a cost, so the read still survives
+            // poison rather than paying it.
+            let selection = selection.read().unwrap_or_else(|e| e.into_inner());
+            parts.reset_connections(&selection, node, &own_images(), &reset_nat)
+        };
+        append(
+            &log_path,
+            &format!(
+                "closed {} existing connection(s) so they rebuild through the tunnel",
+                outcome.closed
+            ),
+        );
+        for failure in &outcome.failures {
+            append(&log_path, &format!("  reset: {failure}"));
         }
+
+        // One pass cannot close a connection that is still in
+        // SYN_SENT -- SetTcpEntry has no way to -- so keep
+        // rescanning for the length of the redirect's activation
+        // window. See Convergence.
+        let convergence = parts.converge(
+            selection.clone(),
+            log_path.clone(),
+            node,
+            own_images(),
+            reset_nat,
+            outcome.closed,
+        );
+
+        // Started last, with everything it watches already up,
+        // so it cannot mistake a session still being assembled
+        // for one whose tunnel has failed.
+        let watchdog_tripped = Arc::new(AtomicBool::new(false));
+        let watchdog = parts.watch(
+            adapter_name.to_string(),
+            tunnel_adapter.index,
+            tunnel_address,
+            tunnel.clone(),
+            &interception,
+            log_path.clone(),
+            watchdog_tripped.clone(),
+        );
+
+        Ok(Session {
+            _watchdog: watchdog,
+            interception,
+            _convergence: convergence,
+            _relays: relays,
+            _allowance: allowance,
+            _logger: logger,
+            _route: route,
+            ipv6_apps,
+            nat,
+            tunnel,
+            watchdog_tripped,
+            log_path,
+            started: Instant::now(),
+            parts,
+        })
     }
 
     /// What the live counters say is wrong, or `None` when nothing is.
@@ -506,7 +549,7 @@ impl Session {
                     .to_string(),
             );
         }
-        self.redirect.stats.complaint(self.started.elapsed())
+        self.interception.stats().complaint(self.started.elapsed())
     }
 
     /// Whether the tunnel is really carrying traffic. See
@@ -516,9 +559,9 @@ impl Session {
         // own packets are already proving the path is broken, say so in
         // their terms instead of opening a socket that tests a different
         // path and may well succeed.
-        if let Some(problem) = self.redirect.stats.complaint(self.started.elapsed()) {
+        if let Some(problem) = self.interception.stats().complaint(self.started.elapsed()) {
             append(&self.log_path, &format!("probe FAILED (counters): {problem}"));
-            append(&self.log_path, &format!("  {}", self.redirect.stats.summary()));
+            append(&self.log_path, &format!("  {}", self.interception.stats().summary()));
             return Err(problem);
         }
 
@@ -580,39 +623,7 @@ impl Session {
         // loop covers it, which is the same fail-open trade the rest of
         // this module makes.
         self.ipv6_apps = None;
-        self.ipv6_apps = install_ipv6_app_block(selection, &log_dir, &self.log_path);
-    }
-
-    /// Takes the session down, in the order each step's comment
-    /// explains. Every part now releases itself when dropped, so each
-    /// step is a drop; what is still written out by hand is the order.
-    pub(super) fn stop(self) {
-        // First of all, and before the join below can take any time:
-        // the backstop must not be looking for a vanished adapter while
-        // the session it would complain about is being taken down on
-        // purpose. Stopping it is also what keeps `stop()` from being
-        // joined by a thread it is itself joining.
-        drop(self.watchdog);
-        // Interception first. Stopping the relays while packets were
-        // still being rewritten to them would send a selected app's
-        // traffic to a port with nothing behind it -- a blackout rather
-        // than the fail-open this promises.
-        drop(self.redirect);
-        // Before the relays, and for the same reason interception is
-        // stopped before them: this thread closes customers' connections
-        // on the assumption that a tunnel is there to rebuild them
-        // through, and that assumption stops being true here.
-        drop(self.convergence);
-        drop(self.relays);
-        drop(self.allowance);
-        drop(self.logger);
-        drop(self.route);
-        // Last, so that at no point is Custom mode still intercepting
-        // while a selected app's IPv6 has already been let out again.
-        // Both blocks come off together as far as the customer is
-        // concerned; the order only decides which way the overlap falls,
-        // and the safe way is for the WFP one to outlast the loop.
-        drop(self.ipv6_apps);
+        self.ipv6_apps = self.parts.block_ipv6(selection, &log_dir, &self.log_path);
     }
 }
 
@@ -627,5 +638,206 @@ mod tests {
         // own upstream connections.
         let image = own_image_path();
         assert!(image.to_lowercase().ends_with(".exe"), "got {image}");
+    }
+
+    use std::net::TcpStream;
+    use std::sync::{Barrier, RwLock};
+    use std::time::Duration;
+
+    use crate::split_tunnel::Selection;
+    use fake::{Fake, Ledger};
+
+    /// The order `stop` took a session down in when it was written out
+    /// by hand, one comment per step. It is `Session`'s field order now,
+    /// and this is what holds it there.
+    const TEARDOWN: [&str; 8] =
+        ["watchdog", "interception", "convergence", "relays", "allowance", "logger", "route", "ipv6"];
+
+    /// The order the bring-up acquires them in, which this rewrite was
+    /// not allowed to change.
+    const BRING_UP: [&str; 8] =
+        ["route", "relays", "allowance", "ipv6", "interception", "logger", "convergence", "watchdog"];
+
+    /// A directory of this test run's own for the logs the real logger
+    /// writes, so nothing lands beside the service's real ones.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("neoxify-session-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// Brings up one stand-in session. The selection names a program no
+    /// machine has, in "only these" mode, so nothing about it can match
+    /// anything real.
+    fn start(ledger: &Arc<Ledger>, session: usize, fail_at: Option<&'static str>, log_dir: &Path) -> Result<Session<Fake>, String> {
+        let selection: SharedSelection = Arc::new(RwLock::new(Selection::new(
+            vec![r"C:\Neoxify-test\not-a-real-game.exe".to_string()],
+            SplitTunnelMode::OnlySelected,
+        )));
+        let limits = crate::lifecycle::budget::Limits::new(
+            crate::lifecycle::cancel::CancelToken::new(),
+            Duration::from_secs(30),
+        );
+        Session::start(
+            Fake { ledger: ledger.clone(), session, fail_at },
+            "Neoxify-test-tunnel",
+            Ipv4Addr::new(203, 0, 113, 1),
+            log_dir,
+            &limits,
+            &selection,
+            &Arc::new(relay::ExitRelays::default()),
+            SplitTunnelMode::OnlySelected,
+        )
+    }
+
+    /// Everything a session acquired, it released -- once each.
+    fn balanced(ledger: &Ledger, session: usize) -> bool {
+        let mut acquired = ledger.acquired(session);
+        let mut released = ledger.released(session);
+        acquired.sort_unstable();
+        released.sort_unstable();
+        acquired == released
+    }
+
+    /// The order a disconnect takes a session down in.
+    ///
+    /// `stop` used to be ten steps written out by hand, four of them with
+    /// a comment explaining why *that* position, and nothing checking any
+    /// of it. Now it is the order `Session`'s fields are declared in, and
+    /// this is the check: moving a field moves a step of every
+    /// disconnect, and fails here.
+    #[test]
+    fn a_session_is_taken_down_in_the_order_stop_always_used() {
+        let ledger = Arc::new(Ledger::default());
+        let dir = scratch("order");
+        let session = start(&ledger, 0, None, &dir).expect("a stand-in bring-up has nothing to fail on");
+        assert_eq!(ledger.acquired(0), BRING_UP, "the bring-up's order moved");
+        assert!(ledger.released(0).is_empty(), "nothing may be released while the session runs");
+
+        drop(session);
+        assert_eq!(ledger.released(0), TEARDOWN);
+        assert!(balanced(&ledger, 0));
+        assert!(ledger.still_held().is_empty(), "a thread outlived its session: {:?}", ledger.still_held());
+
+        // The real logger writes its last line as it is joined, so the
+        // line being there is the join having happened before the drop
+        // returned -- not merely having been asked for.
+        let log = std::fs::read_to_string(dir.join(LOG_FILE)).expect("the logger wrote its file");
+        assert!(log.lines().any(|line| line.starts_with("stopped ")), "the logger was not joined: {log}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bring-up that fails releases what it already holds, in the
+    /// order the unwinds written out by hand at each failure used to.
+    ///
+    /// Those unwinds stopped the relays explicitly and left the rest to
+    /// their `Drop`s, so the relays always went first and the route
+    /// always last. The order now comes from the order the locals are
+    /// declared in, and a declaration moved by somebody tidying up would
+    /// change it without a compiler error -- hence one case per step that
+    /// can fail.
+    #[test]
+    fn a_bring_up_that_fails_releases_what_it_holds_in_the_order_it_always_did() {
+        let ledger = Arc::new(Ledger::default());
+        let dir = scratch("unwind");
+        let cases: [(&str, &[&str]); 5] = [
+            ("route", &[]),
+            ("relays", &["route"]),
+            ("allowance", &["relays", "route"]),
+            ("reachable", &["relays", "allowance", "route"]),
+            ("interception", &["relays", "ipv6", "allowance", "route"]),
+        ];
+        for (n, (fail_at, expected)) in cases.into_iter().enumerate() {
+            let outcome = start(&ledger, n, Some(fail_at), &dir);
+            let Err(error) = outcome else { panic!("{fail_at}: a failing step must fail the bring-up") };
+            assert!(error.contains("refused, as the test asked"), "{fail_at}: {error}");
+            assert_eq!(ledger.released(n), expected, "{fail_at}: released in the wrong order");
+            assert!(balanced(&ledger, n), "{fail_at}: acquired {:?}, released {:?}", ledger.acquired(n), ledger.released(n));
+        }
+        // The relay's error keeps the words it always had.
+        let Err(error) = start(&ledger, 99, Some("relays"), &dir) else { unreachable!() };
+        assert!(error.starts_with("could not start the local relay: "), "{error}");
+        assert!(ledger.still_held().is_empty(), "a failed bring-up left a thread running: {:?}", ledger.still_held());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Many sessions brought up and torn down at once leave nothing
+    /// behind: every stand-in route, rule and block released exactly
+    /// once and in order, every thread finished, every relay closed.
+    ///
+    /// Concurrent on purpose. The relay's stop once passed every
+    /// single-instance test and left a connection open in 8 to 20 of 32
+    /// stops made at once (see `relay::Carried`), so a teardown here is
+    /// asked the question both ways. A quarter of the sessions fail as
+    /// interception would, so their unwind runs among the others'
+    /// teardowns rather than on its own.
+    ///
+    /// "Every thread finished" is measured, not inferred: each session's
+    /// flow table, counters and tunnel record are handed to its relay
+    /// threads, its logger and the stand-ins for its other threads, and
+    /// once the sessions are gone nothing may still hold any of them. A
+    /// thread left running would.
+    #[test]
+    fn many_sessions_started_and_stopped_at_once_leave_nothing_behind() {
+        const N: usize = 32;
+        let ledger = Arc::new(Ledger::default());
+        let dir = scratch("many");
+        let gate = Arc::new(Barrier::new(N));
+        let fails = |n: usize| n % 4 == 3;
+
+        let threads: Vec<_> = (0..N)
+            .map(|n| {
+                let (ledger, gate, dir) = (ledger.clone(), gate.clone(), dir.clone());
+                std::thread::spawn(move || {
+                    gate.wait();
+                    let session = start(&ledger, n, fails(n).then_some("interception"), &dir);
+                    let started = session.is_ok();
+                    // Every session is up, or has finished failing,
+                    // before any of them is taken down.
+                    gate.wait();
+                    drop(session);
+                    started
+                })
+            })
+            .collect();
+        for (n, thread) in threads.into_iter().enumerate() {
+            let started = thread.join().expect("a session thread panicked");
+            assert_eq!(started, !fails(n), "session {n}");
+        }
+
+        for n in 0..N {
+            let expected: &[&str] = if fails(n) { &["relays", "ipv6", "allowance", "route"] } else { &TEARDOWN };
+            assert_eq!(ledger.released(n), expected, "session {n} was taken down out of order");
+            assert!(balanced(&ledger, n), "session {n}: acquired {:?}, released {:?}", ledger.acquired(n), ledger.released(n));
+        }
+
+        let held = ledger.still_held();
+        assert!(
+            held.is_empty(),
+            "{} shared object(s) still held once every session was dropped -- a thread outlived its session: {held:?}",
+            held.len()
+        );
+
+        // A listener on loopback answers a connect at once, so anything
+        // other than a connection inside half a second is a port nobody
+        // is listening on. Knocked on in parallel, because Windows
+        // retries a refused loopback connect for about two seconds before
+        // it says so, and thirty-two of those in a row is a minute.
+        let ports = ledger.relay_ports();
+        assert_eq!(ports.len(), N, "every session started real relays");
+        let knocks: Vec<_> = ports
+            .into_iter()
+            .map(|(n, port)| {
+                std::thread::spawn(move || {
+                    let open = TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, port).into(), Duration::from_millis(500));
+                    (n, port, open.is_ok())
+                })
+            })
+            .collect();
+        for knock in knocks {
+            let (n, port, open) = knock.join().unwrap();
+            assert!(!open, "session {n}'s relay is still accepting on port {port}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

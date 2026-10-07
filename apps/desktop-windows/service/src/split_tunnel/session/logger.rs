@@ -52,7 +52,7 @@ const AUDIT_NAMES_PER_SWEEP: usize = 5;
 ///
 /// Stopped by being dropped: the last line it writes, "stopped ...", is
 /// written as the worker it runs on is joined.
-pub(super) struct Logger {
+pub(in crate::split_tunnel) struct Logger {
     _worker: Worker,
 }
 
@@ -105,7 +105,7 @@ impl Logger {
 /// count and a few names into the log. That restraint is on purpose --
 /// the count has never been read against a packet capture, and this
 /// project does not act on a number nobody has checked against the wire.
-pub(super) struct Audit {
+pub(in crate::split_tunnel) struct Audit {
     pub(super) nat: Arc<flows::Nat>,
     pub(super) selection: SharedSelection,
     pub(super) own_images: Vec<String>,

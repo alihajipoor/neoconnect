@@ -470,6 +470,7 @@ impl SplitTunnel {
         let mode = self.mode();
 
         let session = Session::start(
+            session::Windows,
             adapter_name,
             node,
             log_dir,
@@ -538,8 +539,10 @@ impl SplitTunnel {
         // The invariant under test is about the call being made.
         #[cfg(test)]
         self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let Some(active) = self.active.take() else { return };
-        active.stop();
+        // Taking it out of the slot clears the lock-free flag first, as
+        // this always did; letting go of it is the rest of the teardown,
+        // in the order `Session`'s fields are declared in.
+        drop(self.active.take());
     }
 }
 
