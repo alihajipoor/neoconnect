@@ -240,17 +240,21 @@ impl InstalledRoutes {
     }
 }
 
-/// The backstop, not the mechanism. Every teardown still calls
+/// For a full tunnel, the backstop: the engine teardown still calls
 /// `remove()` where its ordering matters -- routes before the engine is
 /// killed, so nothing points at an adapter that is about to vanish --
 /// and `remove()` drains the list, so this then has nothing to do.
 ///
-/// What it covers is the path nobody wrote: Custom mode's bring-up
-/// unwound by hand at four exits and a panic on any of them, or the
-/// next early return added to it, would leave a `0.0.0.0/0` on our
-/// adapter for the life of the machine's uptime. The rewrite's rule is
-/// that every system mutation reverts in `Drop`; the firewall allowance
-/// and both IPv6 blocks already did, and this was the one that did not.
+/// **For Custom mode it is the mechanism, not a backstop.** A
+/// split-tunnel session never calls `remove()`: it releases its route
+/// by dropping it, at the point `split_tunnel::session::Session`'s field
+/// order puts it, both on a disconnect and on a bring-up that fails or
+/// panics part way. Weakening this -- making it conditional, or deleting
+/// it as a redundant safety net -- leaves a `0.0.0.0/0` on our adapter
+/// after every Custom-mode disconnect, for the life of the machine's
+/// uptime. The session's `Parts` trait bounds its route type by `Drop`
+/// so that deleting this impl does not compile; emptying it would, and
+/// no unit test can see a real route, so it is on the reader.
 ///
 /// It runs `route.exe` at most once per route, which phase one of a
 /// teardown is allowed to do -- see `docs/windows-service-rewrite.md`.

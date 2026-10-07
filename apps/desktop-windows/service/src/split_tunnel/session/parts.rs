@@ -16,6 +16,26 @@
 //!
 //! Every associated type is held by `Session` for its `Drop`, which is
 //! its teardown. None of them has a `stop` for anybody to remember.
+//!
+//! # Why five of them are bound by `Drop`
+//!
+//! A hand-written `stop` called `redirect.stop()`, `allowance.remove()`,
+//! `route.remove()` and `block.remove()` by name, so deleting any of them
+//! broke the build at the call site. A drop calls nothing by name, and
+//! the session tests replace every one of these parts with a stand-in --
+//! so deleting `impl Drop for intercept::Running` would compile, pass
+//! every test, and leave WinDivert holding the machine's DNS after a
+//! disconnect, which is the 2026-08-23 incident.
+//!
+//! `T: Drop` is satisfied only by a type with an `impl Drop` of its own
+//! -- not by one that merely has fields to drop -- which is why rustc
+//! warns about it as a bound (`drop_bounds`): it rarely means what its
+//! author thinks. Here it means exactly that, so the five parts whose
+//! release *is* their own `Drop` are bound by it, and deleting one of
+//! those impls is a compile error again, at `impl Parts for Windows`.
+//! The logger, the convergence and the watchdog are not: each releases
+//! through the `worker::Worker` it holds, whose own `Drop` is tested
+//! directly.
 
 use std::io;
 use std::net::Ipv4Addr;
@@ -37,18 +57,21 @@ use super::tunnel;
 use super::watchdog::Watchdog;
 
 /// The steps of a bring-up, in the order `Session::start` takes them.
+///
+/// The `Drop` bounds are deliberate -- see the module header.
+#[allow(drop_bounds)]
 pub(in crate::split_tunnel) trait Parts {
     /// The passive route through the tunnel. Removed when dropped.
-    type Route;
+    type Route: Drop;
     /// The local relays a redirected connection is handed to. Stopped,
     /// with every connection they carry closed, when dropped.
-    type Relays: Relaying;
+    type Relays: Relaying + Drop;
     /// The inbound firewall rule the relays need. Deleted when dropped.
-    type Allowance;
+    type Allowance: Drop;
     /// The per-app IPv6 block. Removed when dropped.
-    type Ipv6Block;
+    type Ipv6Block: Drop;
     /// The packet loop. Stopped and joined when dropped.
-    type Interception: Intercepting;
+    type Interception: Intercepting + Drop;
     /// The thread writing the counters. Joined when dropped.
     type Logger;
     /// The activation reset's rescans. Joined when dropped.

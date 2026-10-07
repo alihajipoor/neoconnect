@@ -571,6 +571,13 @@ impl Drop for Running {
     /// interception began used to leave the loop running with nothing
     /// left that knew to stop it -- the stranded-background-tunnel
     /// complaint, one unwrap away. Now the unwind stops it.
+    ///
+    /// It is also the *only* way a session stops interception: nothing
+    /// calls a method by name any more. No unit test runs this against
+    /// the driver -- the session tests use a stand-in -- so the session's
+    /// `Parts` trait bounds its interception by `Drop`, and deleting this
+    /// impl does not compile. Emptying it would; it is the line between
+    /// a disconnect and a machine whose DNS WinDivert still holds.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         // The only thing that unblocks a thread sitting in recv. A flag
