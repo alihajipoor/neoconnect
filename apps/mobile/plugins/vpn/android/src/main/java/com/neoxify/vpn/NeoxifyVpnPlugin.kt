@@ -630,10 +630,12 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
      * The apps the customer can choose to route.
      *
      * Only ones holding INTERNET: an app that cannot open a socket is a
-     * row to scroll past rather than a choice to make. This app is
-     * excluded too -- routing the client's own control-plane traffic into
-     * the tunnel it is managing is a loop, and it would make the egress
-     * check measure the wrong path.
+     * row to scroll past rather than a choice to make. This app is left
+     * out of the list because it is not a choice: whenever Custom mode
+     * has an allow-list, both engines add this app to it themselves, so
+     * the egress check measures the tunnel (NeoxifyTunService.start,
+     * buildQuickConfig). Nothing loops -- each engine protects its own
+     * socket to the server.
      */
     @Command
     fun listApps(invoke: Invoke) = offMainThread(invoke, "listApps") { readApps() }
@@ -682,7 +684,15 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             // An empty list would mean "route nothing", which looks
             // exactly like a broken tunnel -- so the caller sends an
             // empty list to mean "everything" and the key is omitted.
-            append("IncludedApplications = ").append(p.allowedApps.joinToString(", ")).append('\n')
+            //
+            // This app is always on the list beside the customer's
+            // choices. An allow-list routes only the apps on it, the
+            // VpnService's owner included, so without it the egress check
+            // measured the plain route and every Custom-mode connect was
+            // judged "not carrying traffic". See NeoxifyTunService.start.
+            // GoBackend protects its own UDP socket, so nothing loops.
+            val apps = (p.allowedApps + activity.packageName).distinct()
+            append("IncludedApplications = ").append(apps.joinToString(", ")).append('\n')
         }
         append("\n[Peer]\n")
         append("PublicKey = ").append(p.serverPublicKey).append('\n')

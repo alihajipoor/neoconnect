@@ -395,9 +395,12 @@ class NeoxifyTunService : VpnService(), Protector {
         // Per-app routing, the platform's own way. This is the whole of
         // Custom mode on Android -- the Windows client needed a packet
         // redirector and a transparent proxy to reach the same place.
+        var added = 0
         for (pkg in allowedApps) {
+            if (pkg == packageName) continue
             try {
                 builder.addAllowedApplication(pkg)
+                added++
             } catch (e: PackageManager.NameNotFoundException) {
                 // An app uninstalled since the customer chose it. Skipping
                 // it is right; throwing would make one stale entry break
@@ -405,9 +408,20 @@ class NeoxifyTunService : VpnService(), Protector {
                 Log.w(TAG, "skipping app that is no longer installed: $pkg", e)
             }
         }
+        // And this app with them, whenever there is an allow-list at all.
+        // Once one app is allowed, Android routes only the listed ones,
+        // and the app that owns the VpnService gets no exception -- so
+        // without this the egress check ran outside the tunnel it was
+        // checking, read the pre-connect address every time, and Custom
+        // mode failed every rung as "up but not carrying traffic". The
+        // same mechanism 7fcc4f8 removed for full-tunnel mode, left in
+        // place here by the allow-list. With nothing added (every chosen
+        // app since uninstalled) there is no allow-list and the tunnel is
+        // the whole device, which already includes this app.
+        if (added > 0) builder.addAllowedApplication(packageName)
 
         // This app's own traffic goes through the tunnel like everything
-        // else, and that is deliberate.
+        // else, in both modes, and that is deliberate.
         //
         // It used to be excluded, to keep the control plane out of the
         // tunnel it manages. The reasoning was backwards for the check
