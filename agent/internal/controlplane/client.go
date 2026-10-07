@@ -30,7 +30,21 @@ const (
 	heartbeatInterval = 20 * time.Second
 	statsInterval     = 30 * time.Second
 	initialBackoff    = time.Second
-	maxBackoff        = 30 * time.Second
+	// maxBackoff is the longest wait between redials, and has to stay well
+	// under the backend's stale-node sweep interval (SWEEP_INTERVAL_MS,
+	// 30 s, in agent-gateway.service.ts). After a backend restart the first
+	// sweep runs 30 s after it starts and marks OFFLINE every node whose
+	// last heartbeat -- from before the restart -- is over 60 s old, which
+	// is every node not yet back once the backend was down for more than
+	// about ten seconds. At 30 s a node could redial just after that sweep:
+	// an OFFLINE alert and a node dropped from the mirror list on a
+	// routine deploy. At 15 s it is back within 15 s of the backend
+	// accepting connections, and a rejected node still redials four times
+	// a minute rather than sixty. Found by the second 2026-10-06 review.
+	maxBackoff = 15 * time.Second
+	// healthyStream is how long a stream has to have stayed up to count as
+	// working, so that its end resets the backoff. See nextBackoff.
+	healthyStream = 30 * time.Second
 
 	// HTTP/2 keepalive. Without it a peer that stops reading is
 	// indistinguishable from an idle one: the socket stays ESTABLISHED,
@@ -118,10 +132,10 @@ func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatche
 // second forever. Testing runStream's error would not have worked either:
 // it never returns nil, even for a stream the server closed cleanly
 // ("receive: EOF"). So the reset is decided by how long the stream
-// stayed up: one that lasted at least maxBackoff was working, and its end
-// is a fresh failure that deserves a quick retry.
+// stayed up: one that lasted at least healthyStream was working, and its
+// end is a fresh failure that deserves a quick retry.
 func nextBackoff(cur, lived time.Duration) (wait, next time.Duration) {
-	if lived >= maxBackoff {
+	if lived >= healthyStream {
 		cur = initialBackoff
 	}
 	next = cur * 2
