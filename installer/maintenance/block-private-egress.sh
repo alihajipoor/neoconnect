@@ -43,7 +43,7 @@ set -euo pipefail
 CONFIG=/usr/local/etc/xray/config.json
 XRAY=$(command -v xray || echo /usr/local/bin/xray)
 NEW=$(mktemp /tmp/xray-config.XXXXXX.json)
-trap 'rm -f "$NEW"' EXIT
+trap 'rm -f "$NEW" "$NEW.notun.json" "$NEW.out"' EXIT
 
 python3 - "$CONFIG" "$NEW" <<'PY'
 import json, sys
@@ -74,7 +74,32 @@ print("domainStrategy:", routing["domainStrategy"])
 PY
 
 echo "--- testing the new config"
-"$XRAY" run -test -config "$NEW" 2>&1 | tail -2
+# On a relay with Xray running, a copy without the tun inbound is tested:
+# -test creates the tun device, which the running Xray holds, and fails
+# with "device or resource busy" whatever the config says (ir1,
+# 2026-08-16, docs/journal/windows.md). Under pipefail that stopped this
+# script on ir1 every time. install_xray's xray_test_config does the same.
+TESTED="$NEW"
+if systemctl is-active --quiet xray && python3 - "$NEW" "$NEW.notun.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+inbounds = j.get("inbounds", [])
+kept = [i for i in inbounds if i.get("protocol") != "tun"]
+if len(kept) == len(inbounds):
+    sys.exit(1)
+j["inbounds"] = kept
+json.dump(j, open(sys.argv[2], "w"), indent=2)
+PY
+then
+  TESTED="$NEW.notun.json"
+  echo "(Xray is running and holds the relay's tun device, so the copy tested leaves the tun inbound out)"
+fi
+if ! "$XRAY" run -test -config "$TESTED" >"$NEW.out" 2>&1; then
+  tail -5 "$NEW.out"
+  echo "Xray refuses the new config; nothing written."
+  exit 1
+fi
+tail -1 "$NEW.out"
 
 if [[ "$APPLY" != "1" ]]; then
   echo "dry run: nothing written (pass --apply to write it and restart xray)"

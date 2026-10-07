@@ -1896,13 +1896,43 @@ XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
 # Runs `xray run -test` against a config file before it is put into
 # service. Prints what Xray objected to, and returns non-zero, when it
 # refuses.
+#
+# On a relay with Xray running, a copy without the tun inbound is what
+# gets tested. -test does not only parse: it creates the inbound's tun
+# device, and while the running Xray holds relay-tun that fails with
+# "device or resource busy" whatever the config says. Measured on ir1 on
+# 2026-08-16 (docs/journal/windows.md): the config running at that moment
+# failed -test the same way, and the new one with its tun inbound deleted
+# returned "Configuration OK". Testing the whole file refused every
+# re-run of install_xray on a live relay -- the old config put back, and
+# the operator told that a good config was bad. Found by the second
+# 2026-10-06 review.
+#
+# What goes untested is the tun inbound alone, which is the template's
+# and not edited per node. With Xray stopped nothing holds the device, so
+# the whole file is tested.
 xray_test_config() {
-  local config_path="$1"
-  if ! "$XRAY_BIN" run -test -config "$config_path" >/dev/null 2>&1; then
-    echo "ERROR: Xray refuses the new config:" >&2
-    "$XRAY_BIN" run -test -config "$config_path" 2>&1 | tail -5 >&2 || true
-    return 1
+  local config_path="$1" tested="$1" scratch="" refused=0
+  if systemctl is-active --quiet xray 2>/dev/null &&
+    jq -e '[.inbounds[]? | select(.protocol == "tun")] | length > 0' "$config_path" >/dev/null 2>&1; then
+    scratch="$(mktemp -d)" || return 1
+    tested="$scratch/config.json"
+    if ! jq '.inbounds |= map(select(.protocol != "tun"))' "$config_path" >"$tested"; then
+      echo "ERROR: could not copy the config without its tun inbound to test it." >&2
+      rm -rf "$scratch"
+      return 1
+    fi
+    echo "  Xray is running and holds the relay's tun device, so the new config is tested without its tun inbound."
   fi
+  if ! "$XRAY_BIN" run -test -config "$tested" >/dev/null 2>&1; then
+    refused=1
+    echo "ERROR: Xray refuses the new config:" >&2
+    "$XRAY_BIN" run -test -config "$tested" 2>&1 | tail -5 >&2 || true
+  fi
+  if [[ -n "$scratch" ]]; then
+    rm -rf "$scratch"
+  fi
+  return "$refused"
 }
 
 # Installs xray-core, generates a REALITY keypair, and writes a config
