@@ -22,9 +22,8 @@ vi.mock("@shared/lib/egress", () => ({
   },
 }));
 
-const { confirmEgress, pollEgress, pollState, rungOutcome, stateFromStatus, tunnelUp } = await import(
-  "./tunnel-evidence"
-);
+const { confirmEgress, pollEgress, pollState, rejectionIsEvidence, rungOutcome, stateFromStatus, tunnelUp } =
+  await import("./tunnel-evidence");
 
 const BASELINE: BaselineIp = { ip: "198.51.100.7", from: "https://api.example.test" };
 const THROUGH: EgressVerdict = { state: "throughTunnel", exitIp: "203.0.113.9" };
@@ -81,6 +80,16 @@ describe("pollState", () => {
   it("keeps a stale handshake degraded whatever egress says", () => {
     expect(pollState("degraded", THROUGH)).toBe("degraded");
   });
+
+  it("does not call a tunnel degraded because our own API is down", () => {
+    // An error page from every endpoint (a backend redeploy) is what the
+    // shared egress check reports as indeterminate with no address. The
+    // review's low finding: this used to read "The tunnel is up but the
+    // server isn't responding. Your traffic is NOT protected."
+    const outage = { state: "indeterminate", exitIp: null } as const;
+    expect(pollState("unverified", outage)).toBe("unverified");
+    expect(pollState("connected", outage)).toBe("connected");
+  });
 });
 
 describe("the stale Android state file, end to end through these rules", () => {
@@ -114,6 +123,20 @@ describe("rungOutcome", () => {
   it("rejects a bypassed or unreachable rung", () => {
     expect(rungOutcome(BYPASS, { baselineTaken: true, isLast: true })).toBe("notCarrying");
     expect(rungOutcome(UNREACHABLE, { baselineTaken: true, isLast: true })).toBe("notCarrying");
+  });
+});
+
+describe("rejectionIsEvidence", () => {
+  it("holds only a measured negative against the route", () => {
+    expect(rejectionIsEvidence(BYPASS)).toBe(true);
+    expect(rejectionIsEvidence(UNREACHABLE)).toBe(true);
+  });
+
+  it("does not hold a reading that compared nothing against it", () => {
+    // Includes our own API answering with an error page during a deploy,
+    // which the shared egress check now reads as indeterminate.
+    expect(rejectionIsEvidence(INDETERMINATE)).toBe(false);
+    expect(rejectionIsEvidence({ state: "indeterminate", exitIp: null })).toBe(false);
   });
 });
 

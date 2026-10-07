@@ -144,6 +144,21 @@ export function rungOutcome(
   }
 }
 
+/** Whether a rung the ladder moved on from is evidence against its
+ * route.
+ *
+ * Only a measured negative is: the old address came back
+ * (`bypassingTunnel`), or nothing answered at all (`unreachable`). An
+ * `indeterminate` rung was set aside because nothing could be compared
+ * -- since the shared egress check learned to call an error page from
+ * our own API "indeterminate", that includes a backend being redeployed
+ * under a tunnel that works. Remembered as a failing route, or reported
+ * to the per-ISP data as one that carried nothing, it would be a claim
+ * about a server that nothing measured. */
+export function rejectionIsEvidence(verdict: EgressVerdict): boolean {
+  return verdict.state === "bypassingTunnel" || verdict.state === "unreachable";
+}
+
 /** The egress reading for a health poll.
  *
  * The baseline's own endpoint first: it is the only one whose answer can

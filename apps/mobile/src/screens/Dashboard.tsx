@@ -115,6 +115,7 @@ import {
   confirmEgress,
   pollEgress,
   pollState,
+  rejectionIsEvidence,
   rungOutcome,
   stateFromStatus,
   tunnelUp,
@@ -1223,9 +1224,16 @@ export function Dashboard({
           return;
         }
 
-        attempts.push(`${label}: up but not carrying traffic`);
-        dials.push({ routeId: candidate.routeId, carried: false });
-        remember(candidate.routeId, candidate.protocol, false);
+        // Moved on from either way, but only a measured negative is held
+        // against the route; see `rejectionIsEvidence`.
+        if (rejectionIsEvidence(verdict)) {
+          attempts.push(`${label}: up but not carrying traffic`);
+          dials.push({ routeId: candidate.routeId, carried: false });
+          remember(candidate.routeId, candidate.protocol, false);
+        } else {
+          attempts.push(`${label}: up, traffic could not be confirmed`);
+          dials.push(null);
+        }
         lastError = {
           kind: "serverUnreachable",
           messageKey:
