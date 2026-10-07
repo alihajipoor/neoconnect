@@ -28,7 +28,7 @@ import { LoginDto } from "../auth/dto/login.dto";
 import { SocialLoginDto } from "./dto/social-login.dto";
 import { SocialExchangeDto } from "./dto/social-exchange.dto";
 import { SocialAuthService } from "./social/social-auth.service";
-import { OauthFlowService, type BrowserProvider } from "./social/oauth-flow.service";
+import { OauthFlowService, PKCE_CHALLENGE, type BrowserProvider } from "./social/oauth-flow.service";
 import { RefreshDto } from "../auth/dto/refresh.dto";
 import { VerifyEmailDto } from "./dto/verify-email.dto";
 import { VerifyEmailCodeDto } from "./dto/verify-email-code.dto";
@@ -119,11 +119,20 @@ export class CustomerAuthController {
   socialStart(
     @Param("provider") providerParam: string,
     @Query("locale") locale: string | undefined,
+    // The app's PKCE challenge; see OauthFlowService.consumeHandoff.
+    // Optional until every released client sends one.
+    @Query("challenge") challenge: string | undefined,
     @Res() res: Response,
   ) {
     const provider = this.browserProvider(providerParam);
+    if (challenge !== undefined && !PKCE_CHALLENGE.test(challenge)) {
+      // Only a broken client sends this. Back to the app with an error
+      // rather than into a flow whose handoff nothing could collect.
+      res.redirect(this.oauthFlow.appCallback({ error: "invalid" }));
+      return;
+    }
     try {
-      res.redirect(this.oauthFlow.start(provider, locale ?? "en"));
+      res.redirect(this.oauthFlow.start(provider, locale ?? "en", challenge));
     } catch {
       // Almost always a provider with no credentials configured. Letting
       // the exception through would render Nest's JSON error page inside
@@ -177,7 +186,9 @@ export class CustomerAuthController {
       const { customer, created } = await this.socialAuth.resolveCustomer(upper, identity, pending.locale);
       if (created) await this.customerAuthService.onSocialSignup(customer.id);
       const tokens = await this.customerAuthService.issueTokenPair(customer);
-      res.redirect(this.oauthFlow.appCallback({ handoff: this.oauthFlow.storeHandoff(tokens) }));
+      res.redirect(
+        this.oauthFlow.appCallback({ handoff: this.oauthFlow.storeHandoff(tokens, pending.challenge) }),
+      );
     } catch (err) {
       // resolveCustomer refuses for reasons the customer can act on --
       // a disabled account, an unverified password account with the
@@ -208,7 +219,7 @@ export class CustomerAuthController {
   @Post("social/exchange")
   @HttpCode(HttpStatus.OK)
   socialExchange(@Body() dto: SocialExchangeDto) {
-    return this.oauthFlow.consumeHandoff(dto.code);
+    return this.oauthFlow.consumeHandoff(dto.code, dto.verifier);
   }
 
   @Throttle({ default: { limit: 5, ttl: 60_000 } })

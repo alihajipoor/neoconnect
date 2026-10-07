@@ -119,24 +119,55 @@ interface RedeemResult {
   alreadyRedeemed: boolean;
 }
 
+/** The StoreKit transaction id inside a signed transaction, or null.
+ *
+ * Read from the JWS payload rather than carried beside it, so the
+ * recovery sweep needs nothing new from the native side. Unverified on
+ * purpose: it only names which local transaction to finish, after our
+ * server -- which does verify the signature -- has accepted this exact
+ * JWS. StoreKit writes the id as a decimal string. */
+export function transactionIdOf(signedTransaction: string): string | null {
+  const payload = signedTransaction.split(".")[1];
+  if (!payload) return null;
+  try {
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const id = (JSON.parse(atob(padded)) as { transactionId?: unknown }).transactionId;
+    if (typeof id === "string" && /^\d+$/.test(id)) return id;
+    if (typeof id === "number" && Number.isSafeInteger(id) && id >= 0) return String(id);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Hands a signed transaction to our server and, if it is accepted,
- * tells StoreKit the purchase has been delivered. */
+ * tells StoreKit that one purchase has been delivered.
+ *
+ * Only the transaction named. A null id finishes nothing: it used to
+ * mean "finish every unfinished transaction", so the recovery sweep,
+ * having redeemed the first of two, finished both -- and if the second
+ * one's redeem then failed, StoreKit never offered it again and the
+ * customer had paid for something nothing would ever grant. Left
+ * unfinished instead, it is redeemed again on the next launch, which
+ * the server answers as a no-op. */
 async function redeemAndFinish(
   signedTransaction: string,
-  transactionId?: string,
+  transactionId: string | null,
 ): Promise<ApiResult<RedeemResult>> {
   const result = await apiRequest<RedeemResult>("/customer/billing/apple/redeem", {
     method: "POST",
     body: JSON.stringify({ signedTransaction }),
   });
   if (!result.ok) return result;
+  if (transactionId === null) return result;
 
   // Only now. If this throws, the transaction stays unfinished and the
   // next launch retries it -- which is the correct failure, because the
   // subscription has already been granted and a second redemption is a
   // no-op on the server.
   try {
-    await invoke("vpn_iap_finish", { transactionId: transactionId ?? null });
+    await invoke("vpn_iap_finish", { transactionId });
   } catch {
     // Nothing to tell the customer: they have what they paid for.
   }
@@ -165,7 +196,10 @@ export async function buyIapPlan(productId: string): Promise<ApiResult<RedeemRes
   }
   if (!purchase.signedTransaction) return null;
 
-  return redeemAndFinish(purchase.signedTransaction, purchase.transactionId);
+  return redeemAndFinish(
+    purchase.signedTransaction,
+    purchase.transactionId ?? transactionIdOf(purchase.signedTransaction),
+  );
 }
 
 /** Grants anything that was paid for but never delivered.
@@ -190,8 +224,8 @@ export async function sweepUnfinishedPurchases(): Promise<number> {
     // Deliberately serial. These are rare, and a burst of parallel
     // redemptions against the same account is exactly the race the
     // server's unique constraint exists to catch -- no reason to
-    // provoke it.
-    const result = await redeemAndFinish(jws);
+    // provoke it. Each finishes only itself; see redeemAndFinish.
+    const result = await redeemAndFinish(jws, transactionIdOf(jws));
     if (result.ok) recovered += 1;
   }
   return recovered;

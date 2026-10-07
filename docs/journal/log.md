@@ -4160,3 +4160,629 @@ built from 0.2.24.
 Shadowsocks on the phone; sign-out while connected; IPv6 (this Wi-Fi
 has none -- the cellular check, expected to show 0.2.23 leaking, is
 still to run); a censored network.
+
+## 2026-10-06 — mobile review fixes (branch `claude/review-fixes-mobile`)
+
+The confirmed mobile findings of the full review, fixed on a branch off
+`main` `1cd85c6` and rebased onto `7533211` (the merged backend, agent
+and desktop review fixes). 15 findings, 11 after removing duplicates (the two
+IPv6 ones, the two Custom-mode ones, the two IAP ones, and the
+stale-state critical with its high twin). Not merged, not deployed, not
+released.
+
+**Done, one commit each:**
+
+- **Critical/high, Android stale `xray-state`** (`a1e876b`). `readStatus`
+  now believes "up" only while the `:xray` process is in
+  `runningAppProcesses` and the system has a VPN network; a dead
+  process's file is deleted. Also cleared in `onRevoke`, and by a
+  service the system starts with no configuration (always-on after a
+  reboot), which now stops instead of sitting in the foreground with a
+  "Connected" notification. The JS half is `21484b3` below: even with a
+  stale file, an adopted tunnel with no baseline can no longer read
+  "You're protected".
+- **High/medium, Android Custom mode never connects** (`2c9ddad`). The
+  app's own package joins the allow-list (Xray when at least one chosen
+  app was added; WireGuard's `IncludedApplications`).
+- **Medium, Android social sign-in cancels itself** (`e0cc4f7`). The
+  Custom Tab opens from the first `onResume`, not `onCreate`.
+- **Medium, indeterminate egress shown as protected** (`21484b3`).
+  Rules moved to `apps/mobile/src/lib/tunnel-evidence.ts`; mobile now
+  has the `unverified` state ("Connected, not confirmed") the Windows
+  client has. Non-last rungs ask only the baseline's endpoint; every
+  rung after the first waits for the last tunnel to be gone before its
+  baseline; the poll asks the baseline's endpoint first.
+- **Medium x2, iOS IAP `finishAll`** (`0d49640`). The sweep finishes
+  each transaction by the id in its JWS; `iapFinish` with no id rejects;
+  `finishAll` is gone.
+- **Medium x2, iOS IPv4-only capture** (`ab6bf85`, issue #48). Both
+  engines set `NEIPv6Settings` (`fd18:6e78:0:1::1/64`, default route).
+- **Medium, iOS WireGuard hostname endpoint** (`12315bd`). Resolved with
+  `getaddrinfo` in `startTunnel`, before the settings are applied.
+- **Medium, iOS connect resolves before the extension starts**
+  (`046aee4`). `ProviderStart.waitUntilConnected`; failures are worded
+  as local so the ladder does not file them against the route.
+- **Low, iOS `.reasserting` read as down** (`046aee4`).
+- **Medium, social handoff not bound to the client** (`8cd9190`
+  backend, `ceaa5c8` clients). PKCE S256: optional `challenge` at
+  `/start`, optional `verifier` at `/exchange`; a bound code needs its
+  verifier, an unbound code with a verifier is refused (injection), an
+  unbound code with none is still accepted for released clients.
+
+**Partly done:** the low "unreachable control plane rejects working
+tunnels" finding. The merged desktop fixes made the shared
+`verifyEgress` call an error page from our own endpoints (a redeploy's
+502) "indeterminate"; with this branch's rules that now reads
+"unverified" on the poll instead of "NOT protected", lands a ladder
+with no baseline as "unverified", and (`f3b335d`) is no longer
+recorded against the route when a non-last rung moves on. Total
+silence from every endpoint is still "unreachable" -- a dead panel and
+a black-holing tunnel look the same from our own API, and the
+Windows client's second instrument (`probe_ipv4_egress`) has no mobile
+equivalent yet. Not done, because no finding required them and each
+touches live Android users: the optional Xray DNS
+`queryStrategy: "UseIPv4"`, and a mobile IPv6 egress probe.
+
+**PROVEN (unit tests and typecheck, this PC, on the rebased tree):**
+mobile 7 files / 101 tests (72 before, +29), `tsc` clean; desktop JS 52 /
+792 (+13 new), `tsc` clean; backend 99 suites / 1,200 tests (+8 new),
+`tsc` and eslint clean; web portal `tsc` clean. Failing against the old code:
+5 of the 22 `tunnel-evidence` tests (checked by putting the old rules
+back), all 7 `iap` tests, and the 8 PKCE specs (the old service does not
+compile against them; behaviourally it gave the session to anyone
+holding the code).
+
+**COMPILED, in CI on `601d467` (compiles, nothing more):** the Kotlin,
+in a `debug-android.yml` run dispatched on this branch (x86_64 debug
+APK, throwaway key, private 7-day artifact; run 37567159371); the Swift,
+in `CI (iOS)` run 37567119411 -- the tunnel extension for the simulator
+and for a device, and the app with the plugin for the simulator, no
+warnings in the touched files. `ci.yml` green on the same commit.
+
+**UNVERIFIED -- not run:**
+- **All Kotlin** (no JVM or Android SDK on this PC). Needs an emulator:
+  Xray up, `adb shell am force-stop`, reopen -> "not protected" and no
+  `files/xray-state`; the same across a reboot. Custom mode with one
+  Xray protocol and Fast: exit IP equals the node, node log shows the
+  session. Social sign-in: logcat order onCreate, onResume (tab),
+  onPause, onNewIntent, and `vpn_open_auth_session` resolving with the
+  handoff URL. That `runningAppProcesses` lists `:xray` is the
+  platform's documented behaviour, not observed on any OEM build.
+- **All Swift** (the Mac builds iOS from `main`). For that session:
+  the extension now waits for nothing new, but the app's Xray and
+  WireGuard connects wait up to 20 s for `.connected`; what
+  `fetchLastDisconnectError` (iOS 16+) says for an extension that
+  failed is unobserved. The IPv6
+  capture needs a real iPhone on an IPv6 network with a capture outside
+  the device -- including whether Xray's local TCP accept makes IPv6
+  connections look open and then fail instead of falling back to IPv4.
+  **iOS still has not carried a packet; gate any iOS release on that
+  test.**
+- The PKCE flow against Google/Facebook and a device. Old backend plus
+  new client is a 400 at `/exchange` (`forbidNonWhitelisted`).
+
+**Deploy order:** backend first (`8cd9190`; no migration, in-memory
+state only), then clients. Making the PKCE challenge required is a
+later step, once desktop 0.9.44 and mobile 0.2.23 are gone; until then
+those clients stay exposed. The Android fixes reach nobody until an APK
+release; the iOS ones ship with the first iOS build.
+
+### The review of these fixes, and what it changed (same day)
+
+An adversarial review of `c451e1a` reproduced the counts and found two
+blocking problems, both in the new egress rules; each was reproduced
+here with the real shared `verifyEgress` and only the network stood in
+for, then fixed.
+
+- **Dual-stack phones rejected every working tunnel but the last**
+  (`566136f`). Mobile left `/health/ip` to tauri-plugin-http, so on a
+  network with IPv6 the baseline was the phone's IPv6 address, while
+  every reading through either platform's tunnel is IPv4. `verifyEgress`
+  refuses to compare families, so every rung was "indeterminate": torn
+  down if another was left, "not confirmed" for the session otherwise,
+  and the poll never proved anything. On `main` the same mismatch read
+  as connected. Fixed the Windows way: `health_ip.rs` compiled into the
+  mobile crate by path, `health_ip_v4` registered, `ipv4OnlyHealthIp`
+  installed in `main.tsx`. An IPv6-only network without CLAT now has no
+  baseline, so it lands "not confirmed".
+- **A self-reporting mirror's baseline made working tunnels leaks**
+  (`60407bc`). A mirror proxying through the CDN answers with its node's
+  address; as the baseline (CDN blocked before connecting), asking it
+  again through a working tunnel gave the same address --
+  `bypassingTunnel`, held against the route, and "NOT protected" on the
+  poll, which asks the baseline's endpoint first. `captureBaselineIp`
+  now takes `nodeAddresses` and passes over such a reading; the mobile
+  dashboard gives it every credential's `connection.host` (the node's
+  `publicIp`). Not covered: a bundle mirror on a node the customer has
+  no credential for. Whether any live mirror reports itself is unknown
+  -- not checked, no node access. **The Windows ladder has the same
+  exposure on its non-last rungs and does not pass the option yet.**
+
+Also: the social exchange retries once without `verifier` when an old
+backend refuses the field by name (`7aef13d`), so a client released
+before `8cd9190` no longer breaks Google/Facebook sign-in -- backend
+first is still the order; an iOS start failure is classified by its
+wrapper, so a system reason saying "timed out" is not filed against the
+route (`96b115c`); the Swift comment on captured IPv6 no longer calls
+Xray's TCP handling a blackhole (`d802ba0`, comment only).
+
+Deferred, from the review's lows: ProviderStart failing on
+`.disconnected` after its 1 s grace even if `.connecting` was never seen
+(Swift, needs a device to know which way is wrong); Android
+`xrayTunnelLive` reporting down when the process list or network state
+cannot be read, and a late "up" from a dying `:xray` (Kotlin, rare, and
+the egress check still catches a dead tunnel); iOS WireGuard resolving
+its endpoint once (needs path monitoring); each rung waiting the full
+12 s through an API outage. Beta users should hear that an adopted
+Android Xray tunnel, and any connect with no baseline, now reads
+"Connected, not confirmed" for the session.
+
+**PROVEN (this PC):** mobile 9 files / 118 tests (+17), `tsc` clean;
+desktop JS 53 files / 800 tests (+8), `tsc` clean; mobile `cargo check
+--all-targets` clean, and `health_ip`'s 7 tests pass inside the mobile
+crate (Windows host). Against the old code 14 of the new tests fail
+(10 mobile, 4 desktop); the rest are controls that reproduce the review
+or pin behaviour that did not change.
+
+**COMPILED, in CI on `6fa282e` (compiles, nothing more):** the mobile
+crate with `health_ip` and reqwest for Android, in a `debug-android.yml`
+run dispatched on this branch (aarch64, throwaway key, private 7-day
+artifact; run 37571589242), and for the iOS simulator in `CI (iOS)` run
+37571567114. `ci.yml` green on the same commit (run 37571567156).
+
+**UNVERIFIED:** none of it on a phone. That `health_ip_v4` connects, and
+asks over IPv4, on a real Android or iOS network stack; the dual-stack
+fix on a real IPv6 network; the retry against a real old backend.
+
+## 2026-10-06 — panel review fixes (branch `claude/review-fixes-panel`)
+
+**Status:** done on the branch and pushed; not merged, not deployed.
+**Based on `claude/review-fixes-backend`**: five of the panel-area
+findings were backend findings that branch already fixes, and the rest
+touch the same backend files. *Since then* that branch reached main
+(5ab1683, 7533211) and main was merged into this one, so this branch now
+merges into main on its own -- see the second-round entry below.
+**Touches:** `apps/panel` (sign-in, infra pages, route and reseller
+screens; gains vitest), `apps/backend` (protocol-config and route reads,
+route list, vouchers, resellers; one comment in `main.ts`),
+`apps/web-portal` (sign-out; gains vitest), `apps/discord-bot` (tickets).
+No migration.
+
+The 17 confirmed panel-area findings come down to 11 problems. Fixed
+here: the admin lockout (01545f4), secrets in admin page payloads
+(c8a2ee6), the route delete dialog (e9bb5cc), retired-plan vouchers
+(2f06d05), the portal's 10 s sign-out (db635c1), the public ticket
+fallback (76b5d07). Already fixed on the base branch, checked present
+and left alone: staff role gates on routes, protocol users and POST
+/subscriptions (35e5ce1), MFA setup while on (4a5e967), the per-admin
+TOTP budget (2eba314), DISABLED revoking access (ebd2520, 85f082b) --
+this branch only adds the panel's hint for the last (767bb04).
+
+### What a deploy does -- read before deploying
+
+Backend and panel go out together (`docker compose ... up -d --build`
+rebuilds both); neither needs the other first -- the panel works against
+main's backend, and the new backend fields are optional to the panel.
+
+- **Production nginx must set both headers on `location /`**, as
+  `installer/assets/nginx-panel.conf.template` does:
+  `X-Real-IP $remote_addr` and `X-Forwarded-For $proxy_add_x_forwarded_for`.
+  The production panel nginx is hand-maintained and was not read.
+  Read-only check on the panel host:
+  `grep -n "X-Real-IP\|X-Forwarded-For" /etc/nginx/sites-enabled/*`.
+  Without them the panel sends no address, sign-ins share one bucket as
+  before, and the panel logs once:
+  `docker compose -f infra/docker-compose.prod.yml logs panel | grep "no trustworthy client address"`.
+- **Behind Cloudflare** the panel takes `CF-Connecting-IP` only when
+  nginx's peer is a published Cloudflare edge (the backend's list,
+  copied; a test fails if the two drift).
+- **`restore-openvpn-from-panel.sh` now needs a SUPERADMIN token.** GET
+  /protocol-configs returns `serverKeyPem` to SUPERADMIN only and
+  `caKeyPem` to nobody. *Corrected in the second round:* as first
+  written, a lesser token did **not** stop the script -- `jq -r` printed
+  "null", which passed its non-empty check and was installed as
+  server.key. From fd1f986 it stops with "no server.key from the panel
+  -- the server key needs a SUPERADMIN token". The installer's own POST
+  is unchanged.
+- **The web portal** is a static build inside the website zip: its fix
+  reaches customers only when the website is rebuilt and uploaded. **The
+  Discord bot** needs its container rebuilt (`--profile discord`).
+- **Existing OpenVPN CA keys** were readable by every staff role until
+  this deploys. Rotating means reissuing every client cert on a node;
+  only worth it if a SUPPORT or BILLING account has ever existed --
+  `SELECT role, count(*) FROM admin_users GROUP BY role;` says.
+
+### Proven, on this PC
+
+- Backend 103 suites / 1,206 tests (base branch: 99 / 1,188), typecheck
+  and lint clean. Panel 6 files / 39 tests, typecheck, lint (two old
+  warnings) and `next build` clean. Portal 1 file / 2 tests, `tsc -b`
+  clean. Bot 48 tests, typecheck and lint clean. Each fix's tests were
+  run against the code before it and failed (counts in the commits).
+- **The sign-in chain, run for real except nginx and Postgres.** The
+  built panel (`next build`, `next start`) in the desktop app's browser
+  pane; the backend's own AuthController, LoginGuard and
+  ClientThrottlerGuard from `dist`, behind `trust proxy 1`, with only the
+  password check stubbed; a small proxy setting the template's two
+  headers, one port per pretend client. A stranger's five wrong
+  passwords: five challenges solved in the browser, five 401s counted
+  against the stranger's address, the sixth refused 429 with "Too many
+  sign-in attempts from your address". The operator, from another
+  address, signed straight in. Then five failures against the admin's
+  email from five addresses: a challenge-less sign-in with the right
+  password got the 400 that locked admins out before; through the panel
+  the browser solved the 15-bit challenge and the operator got in.
+  Forged X-Real-IP, X-Forwarded-For and CF-Connecting-IP sent through
+  the proxy were ignored.
+- Portal: the shared sign-out code under the portal's own shims took
+  10,020 ms before the fix (the review's verifier measured the same) and under a
+  second after.
+
+### Unverified
+
+- Real nginx, real Cloudflare, and the production nginx config (above).
+  The CF-Connecting-IP path is unit-tested only.
+- **The panel believes both headers if a request reaches it without
+  nginx and sets both alike** -- run directly against `next start`, that
+  is what happened. Production publishes the panel on 127.0.0.1:3000, so
+  that needs a foothold on the host.
+- How long a real browser takes at the top difficulty (21 bits, only for
+  an account under sustained attack). Measured in Node only: 244k
+  hashes/s batched, about 9 s expected; a challenge lives 2 minutes.
+- The redacted reads, the route count and the voucher refusal are
+  checked against mocked Prisma, not a database; the restore script was
+  not run; the portal sign-out was not run in a browser; the bot was not
+  run against Discord.
+
+### Not fixed, and why
+
+- **A plan retired between redeem's check and the subscription create**
+  still burns the code. Closing it needs the claim and the create in one
+  transaction (SubscriptionsService.create taking a tx client).
+- **Operators can still create vouchers for an inactive plan** (resellers
+  cannot). Left open on purpose: preparing codes before a launch is
+  plausible, and redeem no longer spends them.
+- **Customer delete stays open to SUPPORT.** The verifier rated it a
+  policy choice, not a defect; the settled-payment check guards it.
+- **publicParamsJson still stores the private keys.** Reads no longer
+  return them; moving them to an encrypted column (2026-08-31 entry) is
+  the durable fix, and a migration.
+- **The panel never refreshes an admin's token**, so operators sign in
+  every 15 minutes -- which is what made the lockout bite so fast. Not a
+  finding here; worth its own change.
+- **The apps' solver awaits one hash at a time**
+  (`apps/desktop-windows/src/lib/pow.ts`: about 40 s at 21 bits in Node,
+  against 9 s batched). The panel's is batched; the apps' is not changed
+  here.
+
+## 2026-10-06 — panel review fixes, second round (same branch)
+
+**Status:** pushed to `claude/review-fixes-panel`; not merged, not
+deployed. Main is merged in (c1a5c56), so the branch merges into main on
+its own; the journal was the only conflict.
+
+The adversarial review of `f4076ca` found one blocking regression and
+six lows. Fixing the blocking one turned up a second regression from the
+same change (01545f4 moved the submit into `onSubmit`), which the review
+had not seen. Neither was ever deployed.
+
+- **Blocking, fixed (0f1bbd5): a submit before hydration put the admin
+  password in the URL.** The server-rendered form had no method and no
+  action, so a native submit was `GET /login?email=…&password=…` -- into
+  nginx's access log. `action={formAction}` is back beside `onSubmit`.
+  Against `next start`: the served form is `method="POST"` with the
+  action's hidden fields; a native submit of that server-rendered form
+  (the reviewer's method: a clone with no React listeners) reached a
+  backend stand-in as a challenge-less sign-in and left no query string;
+  after hydration one submit sent one challenge request and one sign-in
+  carrying the solved challenge -- React did not also run the action.
+- **Found while fixing it, fixed (0f1bbd5): the admin password shown in
+  clear in the code box.** React resets a form only after an action it
+  runs itself; `onSubmit` dispatching by hand lost that, and React reused
+  the password `<input>` for the code step as `type="text"`. Seen in the
+  browser pane against `next start`: the "Authentication code" box held
+  the password. `onSubmit` now calls `requestFormReset` in its
+  transition, as React did, and the steps are keyed. After: the box is
+  empty, and a code submit reaches `/auth/mfa/verify` once.
+- **Low, fixed (fd1f986): the restore script installed "null" as
+  server.key** with a non-SUPERADMIN token (jq prints `null` for a
+  missing key; the non-empty check passed it). Corrected in the first
+  entry above.
+- **Low, fixed (0ae5224):** the 429 and proof-of-work refusals said
+  "from your address" when the panel had no trustworthy address and the
+  backend counted every sign-in in one bucket.
+- **Low, fixed (bad7291):** the panel's solver paused for the page with
+  `setTimeout`, which browsers throttle in hidden tabs; it now yields
+  through a MessageChannel.
+- **Low, fixed (ea7b213):** the web portal's pretest was `VAR=1 node …`,
+  which cmd.exe refuses; reproduced, then fixed with a small script.
+- **Low, fixed (2faa3d1):** the route delete dialog said credentials are
+  revoked "on the node immediately"; they are queued commands, replayed
+  to an offline node when it reconnects.
+- **Low, fixed (c1a5c56):** the first entry's "merge the backend branch
+  first" was out of date; that branch is in main.
+
+### Counts, on the merged tree (this PC)
+
+Backend 103 suites / 1,210 tests (main's additions included), typecheck
+and lint clean. Panel 7 files / 46 tests (was 6 / 39), typecheck clean,
+lint 0 errors and the 2 old warnings, `next build` passes. Web portal 1
+file / 2 tests under both cmd.exe and Git Bash, `tsc -b` clean. Discord
+bot 48 tests, typecheck clean, lint 0 errors. New tests that fail on the
+code before them: `login-form.test.tsx` 3 of 3 (one renders the form
+through react-dom/server with a real server reference; two are source
+checks, the suite having no DOM), `actions.test.ts` 2, `pow.test.ts` 1,
+`delete-warning.test.ts` 1. Desktop and mobile were not touched.
+
+### Unverified
+
+- How often operators really submit before hydration.
+- Hidden-tab timer throttling in a real Chrome. The desktop app's pane
+  does not throttle (50 chained `setTimeout(0)` in a hidden tab took
+  217 ms), so the fix is checked only for working there: a hidden tab
+  solved an 18-bit challenge from the built panel in about 0.55 s.
+- The restore script's change was not run with jq or on a node (no jq on
+  this PC); its check loop, copied out, refused a "null" and an empty
+  server.key and passed real PEM files.
+- Everything the first entry lists as unverified still is.
+
+---
+
+## 2026-10-06 — egress check: the connected node's own mirror (branch `claude/egress-own-mirror`)
+
+**Status:** pushed to `claude/egress-own-mirror`, cut from
+`claude/rc-0.9.45-final` at 3330e95. Not merged, not tagged, not
+released. **Not yet run in the VM** -- the coordinating session owns
+that proof.
+**Touches:** `src-tauri/src/health_ip.rs` (both apps), `src/lib/egress.ts`,
+new `src/lib/tunnel-server.ts`, `src/lib/ladder-pass.ts`, both
+Dashboards, `apps/mobile/src/lib/tunnel-evidence.ts`.
+
+### What was measured (by the coordinating session, not here)
+
+In the VM, on the 0.9.45 candidate, connected on Stealth to finland1 --
+exit FI, tunnel verifiably carrying traffic -- the dashboard said
+"Connected, not confirmed" where 0.9.44 said "You're protected".
+`health_ip_v4` called from the running app for every bundle endpoint,
+through the tunnel: every endpoint (panel and CDN hosts, the other
+nodes' mirrors) answered finland1's address, **except finland1's own
+mirror, which answered the VM's home address**. The client routes the
+node's own address around the tunnel -- the host route that lets the
+tunnel reach its server -- so a request to that node's mirror never
+enters the tunnel. finland1's mirror only started answering `/health/ip`
+that day (its HTTP/1.1 fallback was fixed on the node); the other four
+already did.
+
+What that does to `egress.ts`, which compares only readings from the same
+endpoint and asks in `apiEndpoints()` order (last good first): with the
+baseline from the connected node's own mirror -- likely wherever the
+panel hosts are blocked and that mirror is what works -- either (a) the
+reading comes from another endpoint: `indeterminate`, "not confirmed"
+(what was seen), or (b) from the same mirror: the home address again,
+`bypassingTunnel`, "NOT protected" over a working tunnel, a strike, and
+the automatic ladder tearing it down. (b) is plausibly live today on
+0.9.44 / 0.2.23.
+
+Found while writing the tests, same cause: **a dead tunnel was masked.**
+With the tunnel carrying nothing, that one mirror still answers (around
+it), so the walk had a reading -- `indeterminate`, no strike, no
+failover -- on Windows too, because the public-internet probe is only
+asked when no endpoint gave an address. On the phones its error page
+did the same through the "an error page is a round trip" rule.
+
+### The fix
+
+- `health_ip_v4` returns `peer`: the address the request actually
+  connected to (reqwest's `remote_addr`, TLS included). New command
+  `resolve_ipv4`: a server name to its IPv4 addresses through the system
+  resolver, bounded -- as `engines::xray::resolve_server` does. Both
+  registered in both apps.
+- `egress.ts`: readings carry `peer`. A `TunnelServer` (the connected
+  route's server addresses) can be given to `captureBaselineIp`,
+  `verifyEgress` and `confirmEgressWithin`. An answer whose peer is on it
+  is passed over and the next endpoint asked -- for the baseline (the
+  server of the rung about to be dialled) and for every reading while
+  connected. `fromTunnelServer(reading, server)` is exported.
+- `tunnel-server.ts`: a credential's server addresses --
+  `connection.host` (the node's validated `publicIp`, what Xray dials),
+  `publicParams.endpointHost` (IKEv2 dials the certificate name) and the
+  host of `credentials.endpoint` (WireGuard, OpenVPN). Literals as they
+  are, names through `resolve_ipv4`, just before the rung is dialled.
+- Windows: each rung computes it before settling; the settle never asks
+  a `known` endpoint on it (and gives the walk the longer ceiling, as with
+  nothing known); the rung's check passes it; it is kept in
+  `ladderPass.tunnelServer` for the health poll of whichever Dashboard is
+  mounted.
+- Phones: the same per rung, through `confirmEgress` and `pollEgress`.
+  The pass's first baseline is taken before the rung is known; if it came
+  from the first rung's server it is taken again (nothing is up yet).
+
+**Rules changed, and why.** Kept as they were: same-endpoint
+comparison, IPv4 only, the fixed list order, Windows' public-TLS probe,
+the phones' `nodeAddresses` skip.
+
+1. An answer from the tunnel's server no longer counts as "answered".
+   It never entered the tunnel; counting it kept a dead tunnel at "no
+   verdict" on the phones.
+2. `sameEndpointOnly` with a baseline whose own endpoint is on the
+   tunnel's server walks the list instead: that endpoint cannot answer
+   through the tunnel, and its silence would read "unreachable" on the
+   phones. It can only end `indeterminate` -- never an accusation.
+3. **Added:** an answer naming the very address it was fetched from is
+   passed over, baseline or reading, both apps. That is a mirror
+   proxying through the CDN (installed without NEOXIFY_PANEL_ORIGIN)
+   describing itself. Asked to check that such a mirror is still
+   handled: for the *connected* node's mirror the new skip covers it;
+   for *another* node's, the phones' `nodeAddresses` did, but Windows
+   passes none, and a test showed it taking that mirror's answer as the
+   baseline and then `bypassingTunnel` on a rung that asks the baseline's
+   endpoint. This rule closes that wherever the transport reports the
+   peer (always, with the IPv4 transport both apps install). It does not
+   catch a mirror whose node egresses from a different address than the
+   one it is reached at.
+
+### Proven, on this PC
+
+- Counts: desktop `pnpm test` 55 files / 826 tests (was 53 / 800),
+  `pnpm typecheck` clean; `cargo test --workspace` lib 43 passed / 4
+  ignored (was 40), ipc 58, service 478 / 6 ignored; mobile `pnpm test`
+  10 files / 128 (was 9 / 118), `tsc --noEmit -p .` clean;
+  `apps/mobile/src-tauri` `cargo check` and `--all-targets` clean, and its
+  `health_ip` tests (compiled by path) pass there too.
+- Every behaviour test fails on the code before it: against 3330e95's
+  `egress.ts`, 10 of 14 in `egress-own-mirror.test.ts` fail; the other 4
+  are the controls, and they reproduce (a), (b) and the self-reporting
+  mirror on the old code. Mobile: 9 fail on the old shared `egress.ts` +
+  `tunnel-evidence.ts` + Dashboard -- 6 of the 8 in `own-mirror.test.ts`
+  (the other 2 are controls reproducing (a) and (b)), the 2 new
+  `tunnel-evidence` tests, and 1 existing one whose expected call shape
+  changed. `health-ip-v4.test.ts`'s new test fails on the old
+  `egress.ts`. The Windows wiring assertions: 6 fail on the old Dashboard
+  / `ladder-pass.ts`. The Rust tests do not compile without the new field
+  and command.
+- `peer` over real TLS: `live_health_ip` against a public, non-Neoxify
+  https host returned its address as `peer` (rustls carries reqwest's
+  connection info). No Neoxify host was contacted.
+
+### Unverified
+
+- **The whole fix in the VM.** Owed: connected on Stealth to finland1
+  with finland1's mirror as the last good endpoint, `health_ip_v4` for
+  that mirror reports finland1's address as `peer`; the ladder's baseline
+  comes from the next endpoint; the dashboard says "You're protected" and
+  the health poll keeps it; and a black-holed tunnel is struck.
+- Which engines route their server around the tunnel. Measured for Xray
+  (Stealth) on Windows only. WireGuard, OpenVPN, IKEv2 and both phones
+  are unmeasured. *(Corrected in review, next entry: this said the skip
+  was right either way. It is not. Reached through the tunnel, the
+  server's own mirror is a witness -- it sees the node relaying the
+  request, or a relay's exit -- and the source says that is how the
+  phones' Xray and WireGuard and wireguard.exe reach it. Skipping it
+  there threw away the only proof some customers have.)*
+- The name-resolving path (`endpointHost`) was exercised only against
+  this machine's resolver with `localhost`.
+- A system proxy: reqwest would connect to the proxy, and `peer` would
+  be the proxy's address.
+
+### Left open
+
+- **Censored networks, Windows health poll.** Where the bare network
+  blocks the panel hosts and the connected node's mirror led the list,
+  the baseline now comes from the next endpoint that answers *bare* (say
+  another node's mirror), while the poll -- in list order -- gets its
+  reading from the first that answers *through the tunnel* (the panel
+  host, now reachable): different endpoints, `indeterminate`, "Connected,
+  not confirmed". Honest, and no longer an accusation or a teardown, but
+  not "protected". The ladder's earlier rungs and the phones' poll ask
+  the baseline's endpoint first and do prove it. Fixing it means letting
+  the Windows poll ask the baseline's endpoint first too, which the list
+  order was kept to avoid (a self-reporting mirror as baseline); rule 3
+  removes most of that reason. A decision, not taken here.
+- A tunnel adopted across an app restart has no tunnel server -- and no
+  baseline, so nothing is compared that the skip would have protected.
+- Concurrent exits' servers are not in the set: the service installs one
+  host route, for the primary server (`routing::install_full_tunnel`).
+- When only the target node's own mirror answers on the bare network,
+  the settle now walks for its full ceiling looking for another endpoint
+  and ends with no baseline -- "not confirmed" rather than a false
+  "NOT protected".
+
+## 2026-10-07 — egress own-mirror, review round (same branch)
+
+**Status:** pushed to `claude/egress-own-mirror`. Not merged, not tagged,
+not released, nothing on a node or the panel touched. **Not run in the
+VM**, and the VM run owed is harder than the last entry said (below).
+
+### What the review found, and what was done
+
+- **The first round's premise holds only for Xray on Windows.** The
+  service installs a host route for the server for Xray alone
+  (`routing::install_full_tunnel`). wireguard.exe installs none and binds
+  its own socket; Android's Xray routes `0.0.0.0/0` into the tunnel and
+  protects only xray-core's sockets, with this app deliberately inside;
+  iOS uses a made-up `tunnelRemoteAddress`; GoBackend excludes nothing.
+  So on those the server's own mirror is reached *through* the tunnel,
+  and is a witness: before connecting it names the customer, through a
+  direct tunnel the node relays the request from its own address, through
+  a relay the exit's. Skipping it lost the only proof a customer has
+  where that mirror is all that answers on the bare line (Iran relay
+  during a shutdown). Now `TunnelServer` carries `reachedAround`, from
+  `reachesServerAround(platform, protocol)`: around for Windows Xray,
+  OpenVPN, IKEv2 and phone IKEv2; through for WireGuard everywhere and
+  the phones' Xray; unknown = around (costs "not confirmed", never an
+  accusation). Only an around server is skipped. Through, the baseline's
+  own endpoint may answer with its own address and be believed -- only
+  when that endpoint's baseline answer verifiably named the caller.
+- **Windows on a censored network ended "not confirmed" anyway.** The
+  poll walked the list in order (panel host first through the tunnel,
+  baseline from a mirror), and the settle spent its 12s timing out the
+  filtered panel hosts. Now every rung and the Windows poll ask the
+  baseline's endpoint first (`baselineFirst`), the settle walks hedged
+  (`BASELINE_HEDGE_MS`: the next endpoint asked a second in, or at once
+  when one fails), and Windows passes its nodes' addresses to every
+  baseline as the phones do.
+- **The phones' baselines had no ceiling.** All four go through
+  `takeBaseline` (2 x 6s, hedged). The phones' last rung asks the
+  baseline's endpoint first too.
+- **Lows:** names resolved after the previous rung's tunnel is gone
+  (Windows: the settle uses the literal `connection.host`; phones: after
+  `waitForTeardown`); `resolve_ipv4` has a JS stall guard; `health_ip_v4`
+  uses no proxy at all (reqwest had `system-proxy` on in this tree, so
+  the Windows system proxy applied -- a proxy's exit is the same before
+  and after connecting). Not done: skipping a known-server endpoint
+  without fetching it (one wasted request per walk).
+
+### Proven, on this PC
+
+- Desktop `pnpm test` 55 files / 851 (was 826), `pnpm typecheck` clean;
+  `cargo test --workspace` lib 44 passed / 5 ignored (was 43 / 4), ipc
+  58, service 478 / 6 ignored. Mobile `pnpm test` 10 files / 140 (was
+  128), `tsc --noEmit -p .` clean; `apps/mobile/src-tauri` `cargo check`
+  and `--all-targets` clean, its `health_ip` tests 11 passed / 2 ignored.
+- On the previous head (4ef2f6c) the new tests fail: desktop 44 (27 of
+  32 in `egress-own-mirror.test.ts`, 9 of 13 in `tunnel-server.test.ts`,
+  6 wiring, 2 more), mobile `own-mirror.test.ts` does not load and 2
+  more fail. Many of those fail on the changed `TunnelServer` shape; the
+  behaviour each fix replaces is reproduced on the new code by a
+  control -- the phones' lost proof (`FI_AS_IF_AROUND`), the poll that
+  compared nothing in list order, the settle that spent its ceiling, the
+  phones' unbounded walk. `asks_around_any_proxy` fails without
+  `no_proxy()` (checked by removing it).
+
+### Unverified
+
+- **All of it on a real network.** The VM run owed must block the panel
+  hosts on the guest's physical interface only (a firewall rule scoped to
+  that interface, so the tunnel still carries them); with the panel hosts
+  answering, even the first round would show "protected" there, which
+  proves nothing for Iran. Owed on Stealth (around) and WireGuard
+  (through).
+- **Every routing claim but Windows Xray.** If a "through" engine in fact
+  routes its server around, its own mirror answers the home address and
+  reads `bypassingTunnel` -- what 0.9.44 did for every engine, not new.
+  A phone and a Windows WireGuard capture decide it.
+- **WireGuard to the node's own mirror** is delivered locally on the node
+  without SNAT, so the mirror may see the client's tunnel address (a
+  private one) -- `throughTunnel` with that as the exit IP on screen.
+  From reading; was the same on 0.9.44.
+- A node that refuses to relay to its own address (an Xray routing rule,
+  say) makes a "through" rung that asks only that mirror hear silence:
+  "unreachable", rejected. Also as on 0.9.44.
+- The relayed-answer rule trusts the baseline's proof that the mirror is
+  not self-reporting. A mirror flipped to self-reporting between baseline
+  and reading (its origin name turned CDN-proxied) would read a leaking
+  tunnel as through -- for the tunnel's own mirror on through engines
+  only.
+
+### Left open
+
+- A relay's *exit* node's own mirror names itself through the tunnel and
+  is skipped as a self-report: with the baseline from it, "not confirmed".
+- Adopted tunnels (no server, no baseline) and concurrent exits'
+  servers, as before.
+- **Live, needs a decision:** finland1's mirror answering `/health/ip`
+  since 2026-10-06 plausibly exposes 0.9.44 / 0.2.23 customers on Xray,
+  OpenVPN or IKEv2 to finland1 to (b) -- "NOT protected", a strike, the
+  ladder moving them off a working protocol -- until 0.9.45 ships. Hold
+  or roll back that node change, or keep that mirror off `/health/ip`.
+  A production change; not touched here.

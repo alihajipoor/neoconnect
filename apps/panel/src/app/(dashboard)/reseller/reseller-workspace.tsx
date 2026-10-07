@@ -26,6 +26,7 @@ import {
 import type { ResellerBalance, ResellerVoucher } from "@/lib/types";
 import { Pager } from "@/components/dashboard/pager";
 import { generateVoucher, resendVoucher, revokeVoucher } from "./actions";
+import { balanceLabel, canMintFrom } from "./balance";
 
 export function ResellerWorkspace({
   balances,
@@ -44,7 +45,7 @@ export function ResellerWorkspace({
   take: number;
   skip: number;
 }) {
-  const [planId, setPlanId] = useState<string>(balances.find((b) => b.balance > 0)?.plan.id ?? "");
+  const [planId, setPlanId] = useState<string>(balances.find(canMintFrom)?.plan.id ?? "");
   const [email, setEmail] = useState("");
   const [pending, startTransition] = useTransition();
   const [copied, setCopied] = useState<string | null>(null);
@@ -59,6 +60,10 @@ export function ResellerWorkspace({
     // one that decides, via a conditional update.
     if ((selected?.balance ?? 0) <= 0) {
       toast.error(`No ${selected?.plan.name ?? "plan"} tokens left`);
+      return;
+    }
+    if (selected && !canMintFrom(selected)) {
+      toast.error(`${selected.plan.name} is no longer offered, so codes for it cannot be redeemed`);
       return;
     }
     if (withEmail && !email.trim()) {
@@ -113,6 +118,7 @@ export function ResellerWorkspace({
             </p>
             <p className="text-xs text-muted-foreground">
               {b.balance === 1 ? "code left" : "codes left"}
+              {b.plan.isActive === false ? " · plan no longer offered" : ""}
             </p>
           </Card>
         ))}
@@ -141,8 +147,8 @@ export function ResellerWorkspace({
               </SelectTrigger>
               <SelectContent>
                 {balances.map((b) => (
-                  <SelectItem key={b.plan.id} value={b.plan.id} disabled={b.balance === 0}>
-                    {b.plan.name} — {b.balance} left
+                  <SelectItem key={b.plan.id} value={b.plan.id} disabled={!canMintFrom(b)}>
+                    {balanceLabel(b)}
                   </SelectItem>
                 ))}
               </SelectContent>

@@ -7,7 +7,7 @@ function buildVoucher(overrides: Partial<Record<string, unknown>> = {}) {
     id: "voucher-1",
     code: "ABCD2345EFGH",
     planId: "plan-1",
-    plan: { id: "plan-1", name: "Pro", durationDays: 30 },
+    plan: { id: "plan-1", name: "Pro", durationDays: 30, isActive: true },
     maxRedemptions: 1,
     redeemedCount: 0,
     expiresAt: null,
@@ -40,8 +40,8 @@ describe("PublicVouchersController", () => {
     );
   });
 
-  it("gives one identical answer for unknown, spent, expired and deactivated", async () => {
-    // Four different reasons, one response, on purpose. Distinguishing
+  it("gives one identical answer for unknown, spent, expired, deactivated and retired-plan codes", async () => {
+    // Five different reasons, one response, on purpose. Distinguishing
     // them would turn this into a way to probe which codes were ever
     // issued -- "already used" confirms a real code, "not found" denies
     // one, and a reseller's whole stock could be mapped from the
@@ -51,6 +51,7 @@ describe("PublicVouchersController", () => {
       ["spent", buildVoucher({ redeemedCount: 1, maxRedemptions: 1 })],
       ["expired", buildVoucher({ expiresAt: new Date(Date.now() - 60_000) })],
       ["deactivated", buildVoucher({ isActive: false })],
+      ["for a retired plan", buildVoucher({ plan: { id: "plan-1", name: "Pro", durationDays: 30, isActive: false } })],
     ];
 
     const messages = new Set<string>();

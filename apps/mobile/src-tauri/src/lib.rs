@@ -9,6 +9,22 @@ mod latency;
 #[path = "../../../desktop-windows/src-tauri/src/control_plane_probe.rs"]
 mod control_plane_probe;
 
+/// `/health/ip` over IPv4 only, for the egress check -- the Windows app's
+/// file, compiled here by path like the probe above.
+///
+/// Through tauri-plugin-http the system picks the family. On a dual-stack
+/// network the baseline, taken with no tunnel up, came back over IPv6;
+/// every reading through the tunnel is IPv4 -- Android's VpnService
+/// claims no IPv6 and blocks it for the apps inside, and iOS claims it
+/// so it cannot leave beside the tunnel, but no node carries it.
+/// `verifyEgress` will not compare two families, so
+/// every rung read "indeterminate": each one but the last was torn down
+/// as not carrying, and the one that landed was "not confirmed" for the
+/// whole session. With both readings over IPv4 the comparison means
+/// something again. Installed from `src/main.tsx`.
+#[path = "../../../desktop-windows/src-tauri/src/health_ip.rs"]
+mod health_ip;
+
 /// The OS this binary was compiled for: "android" or "ios" here, as the
 /// platform on attempt reports.
 ///
@@ -64,7 +80,15 @@ pub fn run() {
             build_platform,
             control_plane_probe::probe_control_plane,
             // And its stop, for when a connect starts while it runs.
-            control_plane_probe::cancel_control_plane_probe
+            control_plane_probe::cancel_control_plane_probe,
+            // The egress check's transport; see `mod health_ip` above.
+            // Absent here, every reading would reject as "no answer" and
+            // no connect could ever be proven.
+            health_ip::health_ip_v4,
+            // A tunnel server's name as the engines resolve it, for the
+            // same check. Absent, a server named by hostname (IKEv2's)
+            // would go unrecognised in `health_ip_v4`'s peer address.
+            health_ip::resolve_ipv4
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

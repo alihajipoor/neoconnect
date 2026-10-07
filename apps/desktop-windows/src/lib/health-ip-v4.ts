@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { HealthIpAnswer, HealthIpTransport } from "./egress";
 
-/** `/health/ip` for the Windows client's egress check, asked over IPv4
- * only, by `health_ip::health_ip_v4` in the Rust side.
+/** `/health/ip` for the egress check, asked over IPv4 only, by
+ * `health_ip::health_ip_v4` in the Rust side.
  *
  * Why it exists: through tauri-plugin-http the family was the system's
  * choice, and on a machine with native IPv6 the baseline -- taken on the
@@ -12,8 +12,16 @@ import type { HealthIpAnswer, HealthIpTransport } from "./egress";
  * both readings over IPv4 the comparison means what it says again; IPv6
  * is checked by its own instrument (`checkIpv6`).
  *
- * Windows only: installed from `main.tsx`. The mobile app shares
- * `egress.ts` and keeps the default transport.
+ * Both clients: installed from each app's `main.tsx`. The mobile app
+ * compiles the same Rust file by path (`apps/mobile/src-tauri/src/lib.rs`)
+ * and needed it more than Windows did: a phone's tunnel is IPv4 only on
+ * both platforms, and a dual-stack phone's IPv6 baseline made every
+ * rung of every connect "indeterminate".
+ *
+ * Its answer also carries `peer`, the address the request actually
+ * connected to, passed through untouched: it is how the check recognises
+ * an endpoint on the tunnel's own server, which is reached around the
+ * tunnel (`TunnelServer` in egress.ts).
  */
 export const ipv4OnlyHealthIp: HealthIpTransport = (base, timeoutMs) => {
   // The command has its own timeout; this one only guards against an

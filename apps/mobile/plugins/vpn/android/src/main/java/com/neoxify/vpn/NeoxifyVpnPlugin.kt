@@ -420,7 +420,15 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         JSObject().put("gone", !vpnTransportUp())
     }
 
-    private fun vpnTransportUp(): Boolean = try {
+    // Unknown, not "gone": claiming a teardown we cannot see is the
+    // failure this exists to prevent.
+    private fun vpnTransportUp(): Boolean = vpnTransportState() ?: true
+
+    /** Whether the system has a VPN network up, or null when it could
+     * not be read. Null is answered differently by the two questions
+     * asked of it: a teardown nobody can see is not "gone", and a tunnel
+     * nobody can see is not "up" either. */
+    private fun vpnTransportState(): Boolean? = try {
         val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         @Suppress("DEPRECATION")
         cm.allNetworks.any {
@@ -428,9 +436,62 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
     } catch (e: Exception) {
         Log.w(TAG, "could not read network state", e)
-        // Unknown, not "gone": claiming a teardown we cannot see is the
-        // failure this exists to prevent.
-        true
+        null
+    }
+
+    /** Whether the Xray tunnel the state file describes actually exists.
+     *
+     * The file is a claim, written once by the :xray process when its
+     * engine came up, and nothing deletes it when that process dies
+     * without running onDestroy -- which is how Android ends a process
+     * on a reboot, an app update, a force-stop, a low-memory kill or a
+     * Go panic inside xray-core. Trusted on its own, "up" outlived every
+     * one of those, and a reopened app reported a live tunnel with no
+     * VpnService, no tun and no engine anywhere on the phone. The
+     * dashboard adopted it, had no baseline to compare against, read
+     * every egress check as "indeterminate", and said "You're protected"
+     * for as long as it stayed open while everything left in the clear.
+     *
+     * So the claim is checked against the two things it describes:
+     *  - the :xray process that wrote it is still running. Gone, the
+     *    file is stale by definition and is deleted, so every later read
+     *    agrees. This covers every kill above, and a late "up" published
+     *    by a start thread in the instant before a stop killed the
+     *    process.
+     *  - the system still has a VPN network. A live :xray process with
+     *    no tunnel -- revoked from Android's settings, or started by the
+     *    system with no configuration -- is not a tunnel either.
+     *
+     * Not proven on a device from this machine (no Android toolchain
+     * here); see the 2026-10-06 mobile entry in docs/journal/log.md. */
+    private fun xrayTunnelLive(): Boolean {
+        val published = NeoxifyTunService.readState(activity)?.first == NeoxifyTunService.STATE_UP
+        if (!published) return false
+        when (xrayProcessAlive()) {
+            false -> {
+                Log.i(TAG, "xray state said up, but its process is gone; clearing it")
+                NeoxifyTunService.clearState(activity)
+                return false
+            }
+            // Could not ask. Not up -- nothing confirmed it -- but not
+            // deleted either: a question nobody answered is no evidence
+            // that the tunnel is gone.
+            null -> return false
+            true -> {}
+        }
+        return vpnTransportState() == true
+    }
+
+    /** Whether this app's :xray process is running, or null when the
+     * system could not be asked. An app is always shown its own
+     * processes, and only those, so this needs no permission. */
+    private fun xrayProcessAlive(): Boolean? = try {
+        val am = activity.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val name = activity.packageName + NeoxifyTunService.PROCESS_SUFFIX
+        am.runningAppProcesses?.any { it.processName == name } == true
+    } catch (e: Exception) {
+        Log.w(TAG, "could not list this app's processes", e)
+        null
     }
 
     @Command
@@ -502,7 +563,8 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // the whole thing running that service separately exists to
         // prevent -- and status runs on every dashboard load, so it
         // would happen to customers who never touch a stealth protocol.
-        val xrayUp = NeoxifyTunService.readState(activity)?.first == NeoxifyTunService.STATE_UP
+        // The file alone is not trusted: see xrayTunnelLive.
+        val xrayUp = xrayTunnelLive()
         val wireguardUp = try {
             backend.getState(tunnel) == Tunnel.State.UP
         } catch (e: Exception) {
@@ -568,10 +630,12 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
      * The apps the customer can choose to route.
      *
      * Only ones holding INTERNET: an app that cannot open a socket is a
-     * row to scroll past rather than a choice to make. This app is
-     * excluded too -- routing the client's own control-plane traffic into
-     * the tunnel it is managing is a loop, and it would make the egress
-     * check measure the wrong path.
+     * row to scroll past rather than a choice to make. This app is left
+     * out of the list because it is not a choice: whenever Custom mode
+     * has an allow-list, both engines add this app to it themselves, so
+     * the egress check measures the tunnel (NeoxifyTunService.start,
+     * buildQuickConfig). Nothing loops -- each engine protects its own
+     * socket to the server.
      */
     @Command
     fun listApps(invoke: Invoke) = offMainThread(invoke, "listApps") { readApps() }
@@ -620,7 +684,15 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             // An empty list would mean "route nothing", which looks
             // exactly like a broken tunnel -- so the caller sends an
             // empty list to mean "everything" and the key is omitted.
-            append("IncludedApplications = ").append(p.allowedApps.joinToString(", ")).append('\n')
+            //
+            // This app is always on the list beside the customer's
+            // choices. An allow-list routes only the apps on it, the
+            // VpnService's owner included, so without it the egress check
+            // measured the plain route and every Custom-mode connect was
+            // judged "not carrying traffic". See NeoxifyTunService.start.
+            // GoBackend protects its own UDP socket, so nothing loops.
+            val apps = (p.allowedApps + activity.packageName).distinct()
+            append("IncludedApplications = ").append(apps.joinToString(", ")).append('\n')
         }
         append("\n[Peer]\n")
         append("PublicKey = ").append(p.serverPublicKey).append('\n')

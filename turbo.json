@@ -12,6 +12,11 @@
     "lint": {},
     "typecheck": {},
     "test": {
+      "dependsOn": ["build"],
+      "outputs": ["coverage/**"]
+    },
+    "@neoxify/mobile#test": {
+      "dependsOn": ["build", "@neoxify/desktop-windows#build"],
       "outputs": ["coverage/**"]
     }
   }

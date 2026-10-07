@@ -283,7 +283,8 @@ export function PlanFormDialog({
               created on it, so every trial signup failed silently. */}
           <label className="flex items-center gap-2 text-sm">
             <Checkbox name="isActive" defaultChecked={plan?.isActive ?? true} />
-            Active (the plan works -- subscriptions and trials can use it)
+            Active (the plan works -- subscriptions, trials and voucher codes can use it; unticked, its
+            outstanding codes cannot be redeemed until it is ticked again)
           </label>
           <label className="flex items-center gap-2 text-sm">
             <Checkbox name="isPurchasable" defaultChecked={plan?.isPurchasable ?? true} />

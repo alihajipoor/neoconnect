@@ -164,6 +164,10 @@ pub fn run() {
             // before and after readings are the same family. See
             // health_ip.rs.
             health_ip::health_ip_v4,
+            // A tunnel server's name as the engines resolve it, so the
+            // egress check can tell an endpoint on that server -- routed
+            // around the tunnel -- from one reached through it.
+            health_ip::resolve_ipv4,
             vpn::measure_latency,
             vpn::probe_tcp,
             vpn::network_fingerprint,

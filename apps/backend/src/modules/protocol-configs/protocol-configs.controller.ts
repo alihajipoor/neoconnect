@@ -13,7 +13,9 @@ import {
 } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { AdminRole } from "@prisma/client";
-import { ProtocolConfigsService } from "./protocol-configs.service";
+import { ProtocolConfigsService, readableBy } from "./protocol-configs.service";
+import { CurrentAdmin } from "../../common/decorators/current-admin.decorator";
+import type { AuthenticatedAdmin } from "../auth/types";
 import { CreateProtocolConfigDto } from "./dto/create-protocol-config.dto";
 import { UpdateProtocolConfigDto } from "./dto/update-protocol-config.dto";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -27,14 +29,16 @@ import { Roles } from "../../common/decorators/roles.decorator";
 export class ProtocolConfigsController {
   constructor(private readonly protocolConfigsService: ProtocolConfigsService) {}
 
+  // Every staff role reads these; only SUPERADMIN gets the server key
+  // back, and nobody the CA key. See readableBy.
   @Get()
-  list(@Query("nodeId") nodeId?: string) {
-    return this.protocolConfigsService.list(nodeId);
+  async list(@CurrentAdmin() admin: AuthenticatedAdmin, @Query("nodeId") nodeId?: string) {
+    return (await this.protocolConfigsService.list(nodeId)).map((config) => readableBy(config, admin.role));
   }
 
   @Get(":id")
-  get(@Param("id") id: string) {
-    return this.protocolConfigsService.get(id);
+  async get(@CurrentAdmin() admin: AuthenticatedAdmin, @Param("id") id: string) {
+    return readableBy(await this.protocolConfigsService.get(id), admin.role);
   }
 
   @Post()
@@ -47,8 +51,8 @@ export class ProtocolConfigsController {
   @Patch(":id")
   @UseGuards(RolesGuard)
   @Roles(AdminRole.SUPERADMIN)
-  update(@Param("id") id: string, @Body() dto: UpdateProtocolConfigDto) {
-    return this.protocolConfigsService.update(id, dto);
+  async update(@CurrentAdmin() admin: AuthenticatedAdmin, @Param("id") id: string, @Body() dto: UpdateProtocolConfigDto) {
+    return readableBy(await this.protocolConfigsService.update(id, dto), admin.role);
   }
 
   @Delete(":id")

@@ -2,7 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { apiMutate, type MutationResult } from "@/lib/api";
+import { redactResult, withoutConfigSecrets } from "@/lib/redact";
 import type { ProtocolConfig, Protocol } from "@/lib/types";
+
+// What these return reaches the browser. The backend answers a create
+// with the OpenVPN keys it generated (the installer reads them from that
+// response), so they are taken out here.
 
 export async function createProtocolConfig(input: {
   nodeId: string;
@@ -19,7 +24,7 @@ export async function createProtocolConfig(input: {
     body: JSON.stringify(input),
   });
   if (result.ok) revalidatePath("/protocol-configs");
-  return result;
+  return redactResult(result, withoutConfigSecrets);
 }
 
 export async function updateProtocolConfig(
@@ -44,7 +49,7 @@ export async function updateProtocolConfig(
     body: JSON.stringify(input),
   });
   if (result.ok) revalidatePath("/protocol-configs");
-  return result;
+  return redactResult(result, withoutConfigSecrets);
 }
 
 export async function deleteProtocolConfig(id: string): Promise<MutationResult<void>> {

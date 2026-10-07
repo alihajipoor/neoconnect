@@ -1,6 +1,6 @@
 [package]
 name = "mobile"
-version = "0.2.23"
+version = "0.2.24"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -33,6 +33,12 @@ serde_json = "1"
 # build -- and which would be a C toolchain dependency on every target.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
+# The egress check's `/health/ip`, asked over IPv4 only -- the Windows
+# app's health_ip.rs, compiled here by path (see src/lib.rs). Already in
+# the tree through tauri-plugin-http, at the version in Cargo.lock and
+# with the TLS feature that crate enables, so this names it rather than
+# adding anything.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # Added for the direct-download APK, which reached 141 MB and is the
 # build Iranian customers use -- Play does not serve them, so this is

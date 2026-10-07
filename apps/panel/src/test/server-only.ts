@@ -1,0 +1,2 @@
+// Stand-in for the `server-only` package under vitest; see vitest.config.ts.
+export {};

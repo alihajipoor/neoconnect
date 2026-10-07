@@ -106,6 +106,16 @@ export function CustomerFormDialog({
                   <SelectItem value="DISABLED">Disabled</SelectItem>
                 </SelectContent>
               </Select>
+              {/* What the backend does on save since the DISABLED fix
+                  (CustomersService.update): before it, this only blocked
+                  new sign-ins and a connected customer stayed connected.
+                  Saving a customer who is already Disabled applies it
+                  again -- which is how one disabled before that fix gets
+                  their credentials switched off. */}
+              <p className="text-xs text-muted-foreground">
+                Disabled signs the customer out on every device and switches off their VPN credentials on
+                the nodes; Active turns back on the ones that were on before. Save again to re-apply.
+              </p>
             </div>
           )}
           <DialogFooter>

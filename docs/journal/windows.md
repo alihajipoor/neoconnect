@@ -1075,6 +1075,12 @@ git cat-file -e android-v0.2.9:apps/desktop-windows/src/lib/pow.ts   # fails
 2026-08-11. **No released build contains a solver** — only the panel and
 the web portal do.
 
+*Correction, 2026-10-06:* the panel did not. It never fetched a
+challenge, and it sent every admin sign-in from its own container's
+address, so five failures from anyone refused every operator. It solves
+one from branch `claude/review-fixes-panel` on; see that day's entry in
+`log.md`.
+
 That matters more than it looks, because with the grace closed a missing
 solution is refused on the **first** attempt, not the sixth. Flipping it
 today would refuse every sign-in from every beta tester's app. Running

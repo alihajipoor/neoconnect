@@ -96,16 +96,90 @@ enum WireGuardEngine {
         return (String(address), mask)
     }
 
-    /// Whether a CIDR is IPv6, so the caller can say so rather than
-    /// silently dropping it.
+    /// The profile with its endpoint as a numeric `ip:port`, or nil when
+    /// the name does not resolve.
     ///
-    /// Nothing builds an NEIPv6Route from this yet: the backend allocates
-    /// only an IPv4 address inside the tunnel, and iOS will not accept
-    /// IPv6 routes without IPv6 tunnel settings to attach them to. The
-    /// `::/0` the profile carries is still passed to wireguard-go, where
-    /// it is the peer's allowed source range and is correct.
-    static func isIPv6(_ cidr: String) -> Bool {
-        cidr.contains(":")
+    /// wireguard-go's UAPI takes `endpoint=` only as an address literal,
+    /// and the backend sends whatever the node was installed with -- a
+    /// DNS name is allowed, and a production node has had one. Passed
+    /// through raw, IpcSet rejected it and the extension never started:
+    /// WireGuard on such a node could not work on iOS at all. Android
+    /// resolves in Config.parse; wireguard-apple resolves here, before
+    /// the engine, for the same reason.
+    ///
+    /// Must run before the tunnel's settings are applied. After that,
+    /// `matchDomains = [""]` sends every lookup to the tunnel's DNS
+    /// server, through a tunnel that is not carrying anything yet.
+    ///
+    /// AI_DEFAULT (AI_ADDRCONFIG among it) asks only for families this
+    /// network has, so an IPv6-only NAT64 network gets a synthesized
+    /// address -- for a name or an IPv4 literal alike. IPv4 is preferred
+    /// when both come back, since every node is IPv4-only.
+    static func resolvingEndpoint(of profile: Profile) -> Profile? {
+        guard let endpoint = resolvedEndpoint(profile.endpoint) else { return nil }
+        return Profile(
+            privateKey: profile.privateKey,
+            address: profile.address,
+            dns: profile.dns,
+            serverPublicKey: profile.serverPublicKey,
+            endpoint: endpoint,
+            allowedIPs: profile.allowedIPs
+        )
+    }
+
+    /// Splits `name:port`, `a.b.c.d:port` or `[v6]:port`. A bare IPv6
+    /// address with no brackets is refused: its last colon is not a port
+    /// separator, and guessing would dial the wrong place.
+    static func hostAndPort(_ endpoint: String) -> (host: String, port: String)? {
+        let value = endpoint.trimmingCharacters(in: .whitespaces)
+        if value.hasPrefix("[") {
+            guard let close = value.firstIndex(of: "]") else { return nil }
+            let host = String(value[value.index(after: value.startIndex)..<close])
+            let rest = value[value.index(after: close)...]
+            guard rest.hasPrefix(":") else { return nil }
+            let port = String(rest.dropFirst())
+            guard !host.isEmpty, UInt16(port) != nil else { return nil }
+            return (host, port)
+        }
+        guard let colon = value.lastIndex(of: ":") else { return nil }
+        let host = String(value[..<colon])
+        let port = String(value[value.index(after: colon)...])
+        guard !host.isEmpty, !host.contains(":"), UInt16(port) != nil else { return nil }
+        return (host, port)
+    }
+
+    static func resolvedEndpoint(_ endpoint: String) -> String? {
+        guard let (host, port) = hostAndPort(endpoint) else { return nil }
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_DGRAM
+        hints.ai_protocol = IPPROTO_UDP
+        hints.ai_flags = AI_DEFAULT
+        var list: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, port, &hints, &list) == 0, let first = list else { return nil }
+        defer { freeaddrinfo(first) }
+
+        var ipv4: String?
+        var ipv6: String?
+        var cursor: UnsafeMutablePointer<addrinfo>? = first
+        while let entry = cursor {
+            let info = entry.pointee
+            if let numeric = numericHost(info) {
+                if info.ai_family == AF_INET, ipv4 == nil { ipv4 = numeric }
+                if info.ai_family == AF_INET6, ipv6 == nil { ipv6 = numeric }
+            }
+            cursor = info.ai_next
+        }
+        if let ipv4 { return "\(ipv4):\(port)" }
+        if let ipv6 { return "[\(ipv6)]:\(port)" }
+        return nil
+    }
+
+    private static func numericHost(_ info: addrinfo) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let status = getnameinfo(
+            info.ai_addr, info.ai_addrlen, &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST)
+        return status == 0 ? String(cString: buffer) : nil
     }
 
     static func start(profile: Profile, descriptor: Int32, mtu: Int) throws {

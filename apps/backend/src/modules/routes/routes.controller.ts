@@ -7,6 +7,14 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../../common/guards/roles.guard";
 import { Roles } from "../../common/decorators/roles.decorator";
 
+export function withoutUplinkCredentials<T extends { uplinkCredentialsJson?: unknown }>(
+  route: T,
+): Omit<T, "uplinkCredentialsJson"> {
+  const { uplinkCredentialsJson: _secret, ...rest } = route;
+  void _secret;
+  return rest;
+}
+
 @ApiTags("routes")
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
@@ -14,14 +22,18 @@ import { Roles } from "../../common/decorators/roles.decorator";
 export class RoutesController {
   constructor(private readonly routesService: RoutesService) {}
 
+  // Never with the relay's uplink credential: a working client on the exit
+  // node that no customer owns and no plan meters. The agent gateway reads
+  // it from the database; nothing reads it from here, and this list went
+  // to every staff role's panel page.
   @Get()
-  list() {
-    return this.routesService.list();
+  async list() {
+    return (await this.routesService.list()).map(withoutUplinkCredentials);
   }
 
   @Get(":id")
-  get(@Param("id") id: string) {
-    return this.routesService.get(id);
+  async get(@Param("id") id: string) {
+    return withoutUplinkCredentials(await this.routesService.get(id));
   }
 
   // SUPERADMIN only, as nodes and protocol configs are. The panel hid
@@ -31,8 +43,9 @@ export class RoutesController {
   @Post()
   @UseGuards(RolesGuard)
   @Roles(AdminRole.SUPERADMIN)
-  create(@Body() dto: CreateRouteDto) {
-    return this.routesService.create(dto);
+  async create(@Body() dto: CreateRouteDto) {
+    // The installer reads only `.id` from this.
+    return withoutUplinkCredentials(await this.routesService.create(dto));
   }
 
   @Delete(":id")
