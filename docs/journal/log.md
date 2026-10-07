@@ -3634,3 +3634,91 @@ remote half was run against a fake root with a stub iptables.
   and an older binary rejects an unknown flag.
 - IKEv2 `dpd_delay`/`reauth_time` as a server-side backstop for ending
   revoked sessions: a live config change, owner decision.
+
+## 2026-10-06 — agent review fixes, second round (branch `claude/review-fixes-agent`)
+
+A second, adversarial review of the branch above found three medium
+defects -- one new behaviour the branch caused, two claimed fixes that
+did not work -- and twelve lows. Not merged, not deployed, no agent
+released, no node or production server contacted.
+
+**Blocking, all three fixed.**
+- *Dead IKEv2 sessions counted as devices in use* (8b859b2, on d9c939a).
+  The fixed parser made IKEv2 session counts real, counting every SA
+  strongSwan lists, and nothing on the server ends one (no DPD,
+  rekey_time = 0s). The captured sample's two SAs had had nothing from
+  their clients for about 21 hours. Each would have kept a device slot
+  and fed the backstop. The agent now counts only ESTABLISHED SAs with
+  inbound traffic in the last three minutes (half-open SAs, whose
+  identity is only claimed, drop out too), and the backend puts IKEV2 in
+  COUNTS_IGNORED and goes by bytes -- both, because production runs main
+  and either could ship first.
+- *`xray run -test` could never pass on a running relay* (596813c, on
+  the no-change refactor 544bcbf). -test creates the tun inbound's device,
+  which the live Xray holds ("device or resource busy", measured on ir1
+  2026-08-16), so every install_xray re-run on a live relay put the old
+  config back and blamed the config. A running relay's config is now
+  tested without its tun inbound. block-private-egress.sh (parent branch)
+  had the same test under pipefail and could never apply on ir1; fixed
+  the same way.
+- *Nothing retried a failed IKEv2 terminate* (24f559c). A failed command
+  is marked FAILED and never resent; the re-assert sends only credentials
+  that should be on. The provisioner now ends any SA still listed under
+  an identity it removed or disabled, on every stats poll, until none is.
+  Forgotten across an agent restart.
+
+**Lows.**
+- Fixed: a changed OpenVPN cap forgot where the user was shaped, so a
+  client that left before the next pass left its old cap on that pool
+  address for the next customer (84e2815; two older shaping tests that
+  could not fail were tightened, 10ab7ae). Reconnect backoff capped at
+  15 s, under the backend's 30 s first stale sweep, so a deploy cannot
+  mark nodes OFFLINE (472b054). A WireGuard re-run now defaults to, and
+  insists on, the panel's subnetCidr -- on a rebuilt node Enter used to
+  pick 10.66.0.0/24 whatever the panel said (ef22da0).
+- Owner decision: **billing IKEv2 usage at all.** docs/ikev2-node.md
+  used to call leaving it uncounted deliberate; the parser fix turns it
+  on. Written into that doc. Approve or hold before the agent release.
+- Deploy note, added below.
+- Not a defect: the moved prompts "breaking answer-file installs" --
+  answer files are already recorded as unsupported (windows.md, "do not
+  feed it a here-doc"), and a full install takes the relay role from the
+  role question.
+- Deferred: the backend gating caps on agentVersion "0.2.10" rather than
+  a capability the agent declares in Hello (a proto change, and no Go
+  toolchain here to regenerate it; the deploy note above covers it);
+  every agent restart rebuilding each relay rule once (a brief leak
+  window only on a relay still defaulting to `direct`; the author's
+  known trade-off).
+- Unanswered: who captured the IKEv2 fixture "from a live node" -- the
+  repo does not say. Its redaction looks complete (addresses, ids, SPIs
+  replaced; only NAT source ports and counters left).
+
+**Deploy order, added to the above.** Rolling the agent *back* to any
+build without 6bd4300 -- the installer's rollback to a v0.2.9 backup in
+/root/agent-rollback included -- re-bills every connected customer's
+totals once, as a forward rollout without it would. The backend change
+(IKEV2 ignored in the backstop) is safe before or after the agent.
+
+**Proven.** Every new Go and installer test was run against the code
+before its fix: CI run 37562880092 on a throwaway branch
+(`claude/review-fixes-agent-red`: the old code plus only the two
+no-change prep commits and the new tests) failed exactly the seven new
+Go tests written to fail plus the changed backoff expectation, in
+ikev2, dispatch and controlplane, every other package ok; the installer
+gate test failed 3 of its 12 checks on "device or resource busy" with
+the runner's real jq. (That run's TypeScript job failed in
+apps/mobile's capability-scope test, which this branch does not touch:
+desktop-windows' build fetches the real seed bundle while mobile's
+pretest has already generated its capability file from the placeholder,
+a race inside turbo; the backend branch's run passed it 15 minutes
+earlier.) The backend test fails on the old code locally. Backend:
+1,045 tests, typecheck, lint, on this PC. Go: 90 test functions (81
+before; 9 added, 4 changed) -- still no Go toolchain here, so CI is the
+only place they run.
+
+**Unverified -- needs a node.** That `use-in` moves only with ESP
+traffic; an IKEv2 terminate on a live session, and the retry; install_xray
+on a live relay end to end; block-private-egress.sh's remote half
+(syntax-checked only); the WireGuard subnet guard; a backend restart with
+nodes reconnecting inside the first sweep.
