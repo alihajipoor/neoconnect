@@ -32,6 +32,21 @@ const MESSAGES = [
   `could not start WireGuard: the WireGuard tunnel extension did not start on this device: The WireGuard keys in this profile are not valid. (${trail})`,
 ];
 
+/** The same failures carrying a reason from the system's
+ * `fetchLastDisconnectError`, which is Apple's text or the extension's
+ * own error and is not pinned anywhere. Before the classifier looked at
+ * the wrapper first, a reason saying "timed out" or "handshake" read as
+ * serverUnreachable -- a carried:false rung against a route nothing had
+ * dialled -- and others borrowed a Windows sentence ("expired" as an
+ * inactive subscription, "not running" as the background service). */
+const SYSTEM_REASONS = [
+  "The operation timed out.",
+  "The VPN session failed because an internal error occurred: handshake not completed.",
+  "Connection refused by the system.",
+  "The configuration has expired.",
+  "The VPN app is not running.",
+];
+
 describe("iOS extension start failures", () => {
   for (const message of MESSAGES) {
     it(`is a local fault, not a failed route: ${message.slice(0, 60)}...`, () => {
@@ -40,4 +55,21 @@ describe("iOS extension start failures", () => {
       expect(failedDial("route-1", classified.kind)).toBeNull();
     });
   }
+
+  for (const reason of SYSTEM_REASONS) {
+    it(`stays a local fault whatever the system's reason says: ${reason}`, () => {
+      for (const engine of ["Xray", "WireGuard"]) {
+        const classified = classifyConnectionError(
+          `could not start the tunnel: the ${engine} tunnel extension did not start on this device: ${reason} (${trail})`,
+        );
+        expect(classified.kind).toBe("unknown");
+        expect(failedDial("route-1", classified.kind)).toBeNull();
+      }
+    });
+  }
+
+  it("leaves a server that really timed out where it was", () => {
+    // The wrapper is what is recognised, not the words inside it.
+    expect(classifyConnectionError("connection timed out").kind).toBe("serverUnreachable");
+  });
 });

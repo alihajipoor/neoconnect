@@ -37,6 +37,19 @@ export interface ClassifiedError {
  * matters -- the first match wins, so the specific sit above the vague. */
 const PATTERNS: { kind: ConnectionErrorKind; messageKey: TranslationKey; match: RegExp }[] = [
   {
+    // The iPhone's packet-tunnel extension failing to start (ProviderStart
+    // in the iOS plugin). Nothing was dialled -- neither engine connects
+    // until the first packet -- so this is a fault on the device, and
+    // never a failed route. First, because the message carries the
+    // system's own reason (`fetchLastDisconnectError`), whose wording is
+    // Apple's: one saying "timed out" or "handshake" matched the
+    // serverUnreachable pattern below and was filed against a server
+    // nothing had asked.
+    kind: "unknown",
+    messageKey: "err.unknown",
+    match: /tunnel extension (did not start on this device|had not finished starting)/,
+  },
+  {
     // The helper service is what actually brings tunnels up; without it
     // nothing else can be diagnosed, so this is checked first.
     kind: "serviceUnavailable",
