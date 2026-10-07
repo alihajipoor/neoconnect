@@ -258,8 +258,12 @@ export class PlansService {
   }) {
     const users = await this.prisma.protocolUser.findMany({
       where: {
-        subscription: { planId: plan.id, status: "ACTIVE" },
-        ...liveCredentialWhere(),
+        // AND, never a spread. liveCredentialWhere() has a `subscription`
+        // key of its own (ACTIVE subscription, ACTIVE customer); spread
+        // after `subscription: { planId }` it replaced the plan filter, and
+        // one plan's new cap went to every WireGuard and OpenVPN customer
+        // on every plan -- with nothing to put their own caps back.
+        AND: [liveCredentialWhere(), { subscription: { planId: plan.id } }],
         protocol: { in: SHAPEABLE_PROTOCOLS },
       },
       select: {

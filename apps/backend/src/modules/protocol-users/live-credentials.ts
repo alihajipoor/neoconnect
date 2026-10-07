@@ -30,7 +30,13 @@ import type { Prisma } from "@prisma/client";
  *   and what brings back exactly the ones still ACTIVE once the customer
  *   is ACTIVE again.
  *
- * Shared credentials (no session) are always included unless held. */
+ * Shared credentials (no session) are always included unless held.
+ *
+ * Combine it with other conditions through `AND: [liveCredentialWhere(),
+ * {...}]`, not by spreading it into an object that has the same keys: it
+ * sets `status`, `subscription` and `AND`, and a spread silently replaces
+ * whichever of those the other side also sets. That is how a plan's new
+ * speed cap reached every plan (PlansService.reapplyRateLimits). */
 export function liveCredentialWhere(now = new Date()): Prisma.ProtocolUserWhereInput {
   return {
     status: "ACTIVE",
