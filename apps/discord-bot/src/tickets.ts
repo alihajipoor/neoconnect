@@ -62,6 +62,12 @@ const copy = {
     lang === "fa"
       ? "تیکت شما ساخته شد. لطفاً همان‌جا ادامه دهید."
       : "Your ticket is open. Carry on in the thread.",
+  // Says nothing was posted, because nothing was. Not "staff have been
+  // alerted": the bot has no way to alert anyone.
+  notOpened: (lang: Lang) =>
+    lang === "fa"
+      ? "تیکت خصوصی الان ساخته نشد و چیزی منتشر نشد. لطفاً چند دقیقه بعد دوباره امتحان کنید."
+      : "A private ticket could not be opened right now, and nothing was posted. Please try again in a few minutes.",
   closed: (lang: Lang) =>
     lang === "fa" ? "این تیکت بسته شد." : "This ticket is closed.",
   notAllowed: (lang: Lang) =>
@@ -193,9 +199,14 @@ export async function handleTicketModal(interaction: ModalSubmitInteraction): Pr
   const subject = interaction.fields.getTextInputValue("subject");
   const detail = interaction.fields.getTextInputValue("detail");
 
-  // Private where the guild allows it. Private threads stopped needing a
-  // boost level years ago, but a guild that still refuses must get a
-  // working ticket rather than an error, so fall back to a public thread.
+  // Private, or nothing. This used to fall back to a public thread when
+  // the private one could not be made -- the panel promises a thread only
+  // the member and staff can see, and asks for account, payment and log
+  // details, so the fallback posted exactly those where everyone in the
+  // channel could read them, and told the member "Your ticket is open".
+  // The documented setup (an Administrator bot) cannot be refused private
+  // threads; what is left is a Discord failure that outlasts the client's
+  // retries, and that is answered with a retry, not a public post.
   let thread: ThreadChannel;
   try {
     thread = await channel.threads.create({
@@ -204,11 +215,10 @@ export async function handleTicketModal(interaction: ModalSubmitInteraction): Pr
       type: ChannelType.PrivateThread,
       invitable: false,
     });
-  } catch {
-    thread = await channel.threads.create({
-      name: `🎟 ${interaction.user.username} — ${subject}`.slice(0, 90),
-      autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
-    });
+  } catch (err) {
+    console.error("ticket: private thread creation failed:", err instanceof Error ? err.message : err);
+    await interaction.editReply(copy.notOpened(lang));
+    return;
   }
 
   await thread.members.add(interaction.user.id);
