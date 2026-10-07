@@ -96,18 +96,6 @@ enum WireGuardEngine {
         return (String(address), mask)
     }
 
-    /// Whether a CIDR is IPv6, so the caller can say so rather than
-    /// silently dropping it.
-    ///
-    /// Nothing builds an NEIPv6Route from this yet: the backend allocates
-    /// only an IPv4 address inside the tunnel, and iOS will not accept
-    /// IPv6 routes without IPv6 tunnel settings to attach them to. The
-    /// `::/0` the profile carries is still passed to wireguard-go, where
-    /// it is the peer's allowed source range and is correct.
-    static func isIPv6(_ cidr: String) -> Bool {
-        cidr.contains(":")
-    }
-
     static func start(profile: Profile, descriptor: Int32, mtu: Int) throws {
         var error: NSError?
         let started = NeoxifyxrayWireGuardStart(try uapi(from: profile), Int(descriptor), mtu, &error)

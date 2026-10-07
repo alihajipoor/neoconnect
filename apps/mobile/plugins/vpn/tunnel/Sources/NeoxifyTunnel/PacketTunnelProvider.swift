@@ -45,6 +45,42 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         /// lower than Xray's. Leaving it at 1500 fragments every full-size
         /// packet, which shows up as "slow" rather than as broken.
         static let wireGuardMTU = 1420
+        /// The tunnel's IPv6 address: a unique-local (fd00::/8) one,
+        /// chosen for the reason 198.18.0.1 was -- it collides with
+        /// nothing real. It exists only so the tunnel can claim the IPv6
+        /// default route; see `captureIPv6`.
+        static let ipv6Address = "fd18:6e78:0:1::1"
+        static let ipv6PrefixLength = 64
+    }
+
+    /// Claims IPv6 for the tunnel, so it cannot leave beside it.
+    ///
+    /// Without this the provider set IPv4 settings only, and iOS -- unlike
+    /// Android, whose VpnService blocks a family it was given no address
+    /// for -- kept routing IPv6 out of Wi-Fi or cellular. On a dual-stack
+    /// network every IPv6 connection (AAAA answers, which the tunnel's
+    /// own DNS hands back; IPv6 literals; apps with their own resolvers)
+    /// went to the local network in the clear while the app's IPv4-only
+    /// egress check said "protected".
+    ///
+    /// What happens to the captured packets: every node is IPv4-only, so
+    /// they go nowhere. Xray hands them to a node that cannot dial IPv6;
+    /// WireGuard sends them to a peer whose allowed IPs do not include
+    /// this source. Blackholed, not leaked, and the ULA source makes RFC
+    /// 6724 address selection prefer IPv4 for global destinations.
+    ///
+    /// UNVERIFIED. No iOS build has carried a packet. Whether apps on a
+    /// dual-stack network now fall back to IPv4 cleanly -- or whether
+    /// Xray's local TCP accept makes an IPv6 connection look open and
+    /// then fail -- needs a real iPhone on an IPv6 network with a capture
+    /// taken outside the device. Gate any iOS release on it.
+    private func captureIPv6(_ settings: NEPacketTunnelNetworkSettings) {
+        let ipv6 = NEIPv6Settings(
+            addresses: [Tunnel.ipv6Address],
+            networkPrefixLengths: [NSNumber(value: Tunnel.ipv6PrefixLength)]
+        )
+        ipv6.includedRoutes = [NEIPv6Route.default()]
+        settings.ipv6Settings = ipv6
     }
 
     /// What the app asked for.
@@ -113,6 +149,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // equivalent of the Windows client's per-app redirect here.
         ipv4.includedRoutes = [NEIPv4Route.default()]
         settings.ipv4Settings = ipv4
+        captureIPv6(settings)
         // The client's, not a constant of ours. It hardcoded 1500 while
         // the engine's own tun inbound was configured for the client's
         // 1400, so the system handed xray packets its endpoint would not
@@ -144,22 +181,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // carries. Usually 0.0.0.0/0, but honouring it rather than
         // assuming it is what makes a split profile behave.
         //
-        // IPv4 only. Every profile the backend issues carries
-        // "0.0.0.0/0, ::/0", and there is nowhere to put the IPv6 half:
-        // it allocates a single IPv4 address inside the tunnel, and iOS
-        // rejects IPv6 routes with no IPv6 settings to hang them on. The
-        // ::/0 is still given to wireguard-go, where it means something
-        // different and correct -- the peer's allowed source range.
+        // The IPv4 routes only. Every profile the backend issues carries
+        // "0.0.0.0/0, ::/0", but the backend allocates a single IPv4
+        // address inside the tunnel, so there is no IPv6 address of the
+        // server's to route ::/0 from. IPv6 is claimed anyway, from a
+        // local address, by captureIPv6 below -- whatever the profile's
+        // allowedIPs say -- because the alternative is IPv6 leaving
+        // beside the tunnel. The ::/0 is still given to wireguard-go,
+        // where it is the peer's allowed range.
         let cidrs = WireGuardEngine.split(profile.allowedIPs)
-        for cidr in cidrs where WireGuardEngine.isIPv6(cidr) {
-            log.info("not routing \(cidr, privacy: .public): the tunnel has no IPv6 address")
-        }
         let routes = cidrs.compactMap { cidr -> NEIPv4Route? in
             guard let (network, netmask) = WireGuardEngine.addressAndMask(cidr) else { return nil }
             return NEIPv4Route(destinationAddress: network, subnetMask: netmask)
         }
         ipv4.includedRoutes = routes.isEmpty ? [NEIPv4Route.default()] : routes
         settings.ipv4Settings = ipv4
+        captureIPv6(settings)
         // 1420, not 1500: WireGuard's own overhead is 80 bytes, and a
         // tunnel MTU that ignores it fragments every full-size packet.
         settings.mtu = NSNumber(value: Tunnel.wireGuardMTU)
