@@ -8,6 +8,11 @@
 //!
 //! What it shares with the packet path is `image_path`, borrowed from
 //! `owner.rs`, so both identify a process by exactly the same string.
+//!
+//! The icons are this directory's other module: they are only ever
+//! fetched for this list.
+
+mod icon;
 
 use std::collections::HashMap;
 use std::os::windows::ffi::OsStrExt;
@@ -116,7 +121,7 @@ pub fn running_apps(session: Option<u32>) -> Vec<neoconnect_ipc::RunningApp> {
             let path = pick_primary(&name, &paths)?;
             // Taken from the executable shown, which is the one whose
             // icon a person associates with the product.
-            let icon = super::icon::icon_png_base64(&path);
+            let icon = icon::icon_png_base64(&path);
             Some(neoconnect_ipc::RunningApp { path, name, paths, icon, pids })
         })
         .collect();

@@ -51,7 +51,6 @@
 
 mod flows;
 mod health;
-mod icon;
 mod net;
 mod owner;
 mod picker;
