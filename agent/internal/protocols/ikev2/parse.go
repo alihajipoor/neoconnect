@@ -49,6 +49,8 @@ var (
 	remoteHst = field("remote-host")
 	bytesIn   = field("bytes-in")
 	bytesOut  = field("bytes-out")
+	saState   = field("state")
+	useIn     = field("use-in")
 
 	// One CHILD_SA inside `child-sas {...}`: its name and its body. A
 	// child SA has no sections of its own (traffic selectors are lists,
@@ -62,7 +64,10 @@ type saInfo struct {
 	id         string
 	user       string
 	remoteHost string
-	children   []childInfo
+	// The IKE SA's state. ESTABLISHED only once authentication is complete:
+	// before that, user is whatever identity the client claimed.
+	state    string
+	children []childInfo
 }
 
 // childInfo is one CHILD_SA: where the traffic, and so the counters, are.
@@ -78,6 +83,10 @@ type childInfo struct {
 	bytesIn uint64
 	// Bytes through the outbound SA, to the customer: their download.
 	bytesOut uint64
+	// Seconds since a packet last arrived from the customer on this
+	// CHILD_SA, or -1 when strongSwan printed none -- which it does for a
+	// child that has never received one.
+	useIn int64
 }
 
 // key identifies a child SA across polls.
@@ -114,6 +123,7 @@ func parseSAs(raw string) ([]saInfo, int) {
 		sa := saInfo{
 			id:         first(uniqueID, ike),
 			remoteHost: first(remoteHst, ike),
+			state:      first(saState, ike),
 		}
 		// An SA with no id cannot be attributed or terminated, and
 		// guessing which customer it belongs to would be worse than
@@ -137,6 +147,7 @@ func parseSAs(raw string) ([]saInfo, int) {
 				id:       first(uniqueID, body),
 				bytesIn:  atoi(first(bytesIn, body)),
 				bytesOut: atoi(first(bytesOut, body)),
+				useIn:    seconds(first(useIn, body)),
 			})
 		}
 		out = append(out, sa)
@@ -161,6 +172,16 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// seconds reads a duration swanctl prints in whole seconds, or -1 when
+// there is none.
+func seconds(s string) int64 {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 {
+		return -1
+	}
+	return n
 }
 
 func atoi(s string) uint64 {

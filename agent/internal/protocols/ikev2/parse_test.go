@@ -270,6 +270,22 @@ func TestSessionsCountedByDistinctAddress(t *testing.T) {
 	}
 }
 
+func TestReadsStateAndInboundIdle(t *testing.T) {
+	sas, _ := parseSAs(realSample(t))
+	if len(sas) != 2 {
+		t.Fatalf("expected 2 security associations, got %d", len(sas))
+	}
+	if sas[0].state != "ESTABLISHED" || sas[0].children[0].useIn != 75342 || sas[1].children[0].useIn != 78684 {
+		t.Fatalf("state or use-in not read: %q, %d, %d", sas[0].state, sas[0].children[0].useIn, sas[1].children[0].useIn)
+	}
+	// strongSwan prints no use-in for a child that has never had a packet.
+	never := strings.Replace(realSample(t), "use-in=75342 ", "", 1)
+	sas, _ = parseSAs(never)
+	if sas[0].children[0].useIn != -1 {
+		t.Fatalf("a child with no use-in must read as never used, got %d", sas[0].children[0].useIn)
+	}
+}
+
 func TestPluginLoaderNoiseIsIgnored(t *testing.T) {
 	// Lines strongSwan's loader prints on startup are not SAs and must not
 	// stop the ones after them being read.
