@@ -299,6 +299,16 @@ func counterDelta(prev, cur uint64) uint64 {
 // between wifi and mobile data, or simply rekeying, can briefly hold two
 // SAs from the same place, and charging that against the limit would
 // disconnect somebody who did nothing wrong.
+//
+// And only SAs that are live (see live). Nothing on the server ends a dead
+// one -- the connection sets rekey_time = 0s and no DPD -- so a phone that
+// died, or a PC that slept, on IKEv2 stays listed until charon restarts:
+// the sample captured from a node has two, each about 21 hours old and
+// silent since its first minute. Counted, each would have been a device
+// in use every 30 s for as long as charon ran, keeping its device slot
+// and pushing the customer's next device into a device-limit refusal.
+// Found by the second 2026-10-06 review, before the parser that made the
+// count possible had shipped.
 func (p *Provisioner) SessionCounts() (map[string]int, error) {
 	if p.notServingIkev2() {
 		return nil, nil
@@ -309,7 +319,7 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 	}
 	hosts := map[string]map[string]bool{}
 	for _, sa := range sas {
-		if sa.user == "" || sa.remoteHost == "" {
+		if sa.user == "" || sa.remoteHost == "" || !sa.live() {
 			continue
 		}
 		if hosts[sa.user] == nil {
@@ -322,6 +332,35 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 		counts[user] = len(set)
 	}
 	return counts, nil
+}
+
+// inboundFreshFor is how recently, in seconds, a packet must have
+// arrived from the client for its session to count as a device in use:
+// three minutes, the window WireGuard's session count gives a handshake.
+//
+// It errs towards counting fewer devices. A connected client that sends
+// nothing for three minutes drops out of the count, and its bytes, which
+// the control plane also reads, show it again the moment it does. Its
+// NAT-T keepalives and IKE liveness checks never pass through the
+// CHILD_SA, so they do not keep it counted. (use-in is the kernel SA's
+// last-use time; that ESP alone moves it is reasoned from strongSwan and
+// the kernel, not observed on a node.)
+const inboundFreshFor = 180
+
+// live reports whether this SA is a client connected now: established --
+// so user is the identity EAP proved, not one a half-open SA merely
+// claims -- with a CHILD_SA that has had a packet from the client within
+// inboundFreshFor.
+func (sa saInfo) live() bool {
+	if sa.state != "ESTABLISHED" {
+		return false
+	}
+	for _, child := range sa.children {
+		if child.useIn >= 0 && child.useIn <= inboundFreshFor {
+			return true
+		}
+	}
+	return false
 }
 
 type saBytes struct{ in, out uint64 }

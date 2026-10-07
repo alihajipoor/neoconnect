@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,14 @@ func filled(t *testing.T) string {
 		lines[i] = line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// active is the captured output with both customers sending: each
+// CHILD_SA had a packet in from its client five seconds ago. As captured,
+// neither had for about 21 hours.
+func active(t *testing.T) string {
+	t.Helper()
+	return regexp.MustCompile(`use-in=[0-9]+`).ReplaceAllString(filled(t), "use-in=5")
 }
 
 // fakeSwanctl stands in for strongSwan: it serves canned --list-sas
@@ -237,7 +246,7 @@ func TestAnIkeRekeyDoesNotBillTheSessionAgain(t *testing.T) {
 }
 
 func TestSessionsCountedByDistinctAddress(t *testing.T) {
-	p, f := withFake(t, filled(t))
+	p, f := withFake(t, active(t))
 
 	counts, err := p.SessionCounts()
 	if err != nil {
@@ -249,7 +258,7 @@ func TestSessionsCountedByDistinctAddress(t *testing.T) {
 
 	// The same customer from two addresses: two devices, which is what
 	// the limit is meant to see.
-	f.listSAs = strings.Replace(filled(t), "nx-user2", "nx-user1", 1)
+	f.listSAs = strings.Replace(active(t), "nx-user2", "nx-user1", 1)
 	counts, err = p.SessionCounts()
 	if err != nil {
 		t.Fatalf("SessionCounts: %v", err)
@@ -283,6 +292,50 @@ func TestReadsStateAndInboundIdle(t *testing.T) {
 	sas, _ = parseSAs(never)
 	if sas[0].children[0].useIn != -1 {
 		t.Fatalf("a child with no use-in must read as never used, got %d", sas[0].children[0].useIn)
+	}
+}
+
+func TestDeadSessionsAreNotDevices(t *testing.T) {
+	// The finding, as captured: both SAs established about 21 hours
+	// before, and neither has had a packet from its client since its first
+	// minute. Nothing on the server ends them (rekey_time = 0s, no DPD), so
+	// counted, they would be two devices in use until charon restarted --
+	// holding device slots for phones that had died and PCs that had gone
+	// to sleep.
+	p, _ := withFake(t, filled(t))
+	counts, err := p.SessionCounts()
+	if err != nil {
+		t.Fatalf("SessionCounts: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Fatalf("sessions silent for 21 hours were counted as devices: %v", counts)
+	}
+
+	// Just inside and just outside the window.
+	p, f := withFake(t, strings.Replace(filled(t), "use-in=75342", "use-in=180", 1))
+	if counts, _ := p.SessionCounts(); counts["nx-user1"] != 1 || len(counts) != 1 {
+		t.Fatalf("a packet three minutes ago is a session in use, got %v", counts)
+	}
+	f.listSAs = strings.Replace(filled(t), "use-in=75342", "use-in=181", 1)
+	if counts, _ := p.SessionCounts(); len(counts) != 0 {
+		t.Fatalf("nothing for over three minutes is not, got %v", counts)
+	}
+}
+
+func TestAHalfOpenSAIsNotADevice(t *testing.T) {
+	// Before EAP completes, the identity on an SA is whatever the client
+	// claimed -- remote-id, which the parser falls back to. Anybody can
+	// start an IKE_SA_INIT naming a customer.
+	halfOpen := strings.Replace(active(t), "state=ESTABLISHED", "state=CONNECTING", 1)
+	halfOpen = strings.Replace(halfOpen, "remote-eap-id=nx-user1 ", "", 1)
+	halfOpen = strings.Replace(halfOpen, "remote-id=<id>", "remote-id=nx-user2", 1)
+	p, _ := withFake(t, halfOpen)
+	counts, err := p.SessionCounts()
+	if err != nil {
+		t.Fatalf("SessionCounts: %v", err)
+	}
+	if counts["nx-user2"] != 1 || len(counts) != 1 {
+		t.Fatalf("expected only the established session, got %v", counts)
 	}
 }
 

@@ -273,6 +273,48 @@ describe("ConcurrencyService (device-limit backstop)", () => {
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
+  /** strongSwan keeps an IKEv2 SA until charon restarts: the connection
+   * has rekey_time = 0s and no DPD, so a phone that died on IKEv2 stays
+   * listed. The sample captured from a node has two such SAs, about 21
+   * hours old and silent since their first minute. The agent now counts
+   * only SAs with recent inbound traffic, but one that counted every
+   * listed SA would keep a slot for a phone that is gone -- so the count
+   * is not trusted here, and IKEv2 goes by its bytes like WireGuard. */
+  it("ignores IKEv2's session count and goes by its bytes", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway, warn } = build({
+      limit: 1,
+      rows: [row("pc", { sessionId: PC, protocol: "IKEV2" }), row("phone", { sessionId: PHONE, nodeId: "node-2" })],
+    });
+
+    // The PC went to sleep on IKEv2 hours ago; its SA is still listed.
+    for (let i = 0; i < 6; i++) {
+      await tick(service, {
+        "node-1": [{ ext: "ext-pc", sources: 1, protocol: "IKEV2" }],
+        "node-2": [{ ext: "ext-phone", bytes: 500 }],
+      });
+    }
+
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("still counts an IKEv2 device that carries traffic", async () => {
+    const { service, warn } = build({
+      limit: 1,
+      rows: [row("pc", { sessionId: PC, protocol: "IKEV2" }), row("phone", { sessionId: PHONE, nodeId: "node-2" })],
+    });
+
+    for (let i = 0; i < 4; i++) {
+      await tick(service, {
+        "node-1": [{ ext: "ext-pc", bytes: 500, sources: 1, protocol: "IKEV2" }],
+        "node-2": [{ ext: "ext-phone", bytes: 500 }],
+      });
+    }
+
+    expect(shadowLines(warn)).toHaveLength(1);
+  });
+
   it("ignores credentials already switched off, ids it does not know, and empty deltas", async () => {
     process.env.CONCURRENCY_CUT = "enforce";
     const { service, agentGateway } = build({
