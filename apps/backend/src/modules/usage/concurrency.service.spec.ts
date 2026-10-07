@@ -161,7 +161,8 @@ describe("ConcurrencyService (device-limit backstop)", () => {
   it("counts one device once however many Xray inbounds report it", async () => {
     process.env.CONCURRENCY_CUT = "enforce";
     const { service, agentGateway, warn } = build({ limit: 1, rows: [row("phone", { sessionId: PHONE })] });
-    const fiveCounters = ["XRAY_VLESS_REALITY", "XRAY_TROJAN", "XRAY_VLESS_TLS", "XRAY_VLESS_TLS", "SHADOWSOCKS"].map(
+    // The WebSocket inbound's counter, as agents up to v0.2.9 label it.
+    const fiveCounters = ["XRAY_VLESS_REALITY", "XRAY_TROJAN", "XRAY_VLESS_TLS", "XRAY_VLESS_TLS|WS", "SHADOWSOCKS"].map(
       (protocol) => ({ ext: "ext-phone", sources: 1, protocol }),
     );
 
@@ -207,18 +208,22 @@ describe("ConcurrencyService (device-limit backstop)", () => {
     process.env.CONCURRENCY_CUT = "enforce";
     const { service, agentGateway, warn } = build({ limit: 1, rows: twoDevices() });
 
-    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 900, sources: 1 }] });
+    // Every Xray inbound's counter reads the same access log, the
+    // WebSocket one included -- and v0.2.9 agents label that one
+    // "XRAY_VLESS_TLS|WS", which an exact-name filter let through.
+    const wsTail = { ext: "ext-pc", sources: 1, protocol: "XRAY_VLESS_TLS|WS" };
+    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 900, sources: 1 }, wsTail] });
     // t=30: the PC opened a connection at 20 s and left at 25 s; the
     // phone is on.
     await tick(service, {
-      "node-1": [{ ext: "ext-pc", bytes: 40, sources: 1 }],
+      "node-1": [{ ext: "ext-pc", bytes: 40, sources: 1 }, wsTail],
       "node-2": [{ ext: "ext-phone", bytes: 900, sources: 1 }],
     });
     // t=60 and t=90: no bytes from the PC, but Xray still counts its
     // source from 20 s.
     for (let i = 0; i < 2; i++) {
       await tick(service, {
-        "node-1": [{ ext: "ext-pc", sources: 1 }],
+        "node-1": [{ ext: "ext-pc", sources: 1 }, wsTail],
         "node-2": [{ ext: "ext-phone", bytes: 900, sources: 1 }],
       });
     }
@@ -266,6 +271,66 @@ describe("ConcurrencyService (device-limit backstop)", () => {
     }
 
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+  });
+
+  /** The agent labels a WebSocket inbound's count "<protocol>|<transport>"
+   * (dispatch.go), so the tail-carrying "XRAY_VLESS_TLS|WS" was not in the
+   * ignore set and its 60 s tail counted a WS customer who had left as
+   * still active -- the same false second device the set exists for. */
+  it("ignores an Xray WebSocket inbound's session count too, labelled with its transport", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway } = build({ limit: 1, rows: twoDevices() });
+
+    for (let i = 0; i < 6; i++) {
+      await tick(service, {
+        "node-1": [{ ext: "ext-pc", sources: 1, protocol: "XRAY_VLESS_TLS|WS" }],
+        "node-2": [{ ext: "ext-phone", bytes: 900, sources: 1 }],
+      });
+    }
+
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+  });
+
+  /** strongSwan keeps an IKEv2 SA until charon restarts: the connection
+   * has rekey_time = 0s and no DPD, so a phone that died on IKEv2 stays
+   * listed. The sample captured from a node has two such SAs, about 21
+   * hours old and silent since their first minute. The agent now counts
+   * only SAs with recent inbound traffic, but one that counted every
+   * listed SA would keep a slot for a phone that is gone -- so the count
+   * is not trusted here, and IKEv2 goes by its bytes like WireGuard. */
+  it("ignores IKEv2's session count and goes by its bytes", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway, warn } = build({
+      limit: 1,
+      rows: [row("pc", { sessionId: PC, protocol: "IKEV2" }), row("phone", { sessionId: PHONE, nodeId: "node-2" })],
+    });
+
+    // The PC went to sleep on IKEv2 hours ago; its SA is still listed.
+    for (let i = 0; i < 6; i++) {
+      await tick(service, {
+        "node-1": [{ ext: "ext-pc", sources: 1, protocol: "IKEV2" }],
+        "node-2": [{ ext: "ext-phone", bytes: 500 }],
+      });
+    }
+
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("still counts an IKEv2 device that carries traffic", async () => {
+    const { service, warn } = build({
+      limit: 1,
+      rows: [row("pc", { sessionId: PC, protocol: "IKEV2" }), row("phone", { sessionId: PHONE, nodeId: "node-2" })],
+    });
+
+    for (let i = 0; i < 4; i++) {
+      await tick(service, {
+        "node-1": [{ ext: "ext-pc", bytes: 500, sources: 1, protocol: "IKEV2" }],
+        "node-2": [{ ext: "ext-phone", bytes: 500 }],
+      });
+    }
+
+    expect(shadowLines(warn)).toHaveLength(1);
   });
 
   it("ignores credentials already switched off, ids it does not know, and empty deltas", async () => {

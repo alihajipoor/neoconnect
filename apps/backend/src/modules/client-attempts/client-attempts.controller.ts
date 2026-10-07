@@ -8,6 +8,7 @@ import type { Request } from "express";
 import { ClientAttemptsService } from "./client-attempts.service";
 import { ReportAttemptDto } from "./dto/report-attempt.dto";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
+import { ThrottleVolumePerSession } from "../../common/guards/client-throttler.guard";
 import { clientIpOf } from "../../common/client-ip";
 import type { CustomerAccessTokenPayload } from "../customer-auth/types";
 
@@ -34,14 +35,20 @@ export class ClientAttemptsController {
    * So the token is verified if present and ignored entirely if not.
    * An expired or forged one leaves the report anonymous rather than
    * rejecting it.
+   *
+   * A sign-in token only, as CustomerJwtStrategy accepts: the emailed
+   * verify-email and password-reset tokens are signed with the same
+   * secret, and an account that never verified would otherwise count as
+   * one of the distinct customers the per-ISP tags require.
    */
   private customerIdFrom(req: Request): string | undefined {
     const header = req.headers.authorization;
     if (!header?.startsWith("Bearer ")) return undefined;
     try {
-      const payload = this.jwt.verify<CustomerAccessTokenPayload>(header.slice(7), {
+      const payload = this.jwt.verify<CustomerAccessTokenPayload & { purpose?: unknown }>(header.slice(7), {
         secret: this.config.get<string>("customerJwt.accessSecret"),
       });
+      if (payload.purpose !== undefined) return undefined;
       return payload.sub;
     } catch {
       return undefined;
@@ -61,11 +68,15 @@ export class ClientAttemptsController {
    * short window, and this is throttled harder than the rest of the API.
    * Twenty a minute is far above what a client generates -- one per
    * connect, one per sign-in -- and far below what would fill anything.
+   * Per signed-in session when the report carries a sign-in token, per
+   * address otherwise: there is nothing to guess here, and per address
+   * every customer behind one node mirror shared the twenty.
    *
    * Hidden from the public API docs: it is an internal channel, not
    * something to invite use of.
    */
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @ThrottleVolumePerSession()
   @ApiExcludeEndpoint()
   @HttpCode(204)
   @Post("client-attempts")

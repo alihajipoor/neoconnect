@@ -73,12 +73,25 @@ const SHADOW_LOG_INTERVAL_MS = 10 * 60_000;
  * Xray device shows while it carries traffic, which errs towards
  * counting fewer devices, never more.
  *
- * OpenVPN's and IKEv2's counts are the connections open right now, with
- * no tail, and still count. Every protocol Xray serves on a node is
- * listed (Shadowsocks among them); see XRAY_SERVED_ON_NODE in the agent
+ * IKEv2's count has a tail with no end: strongSwan keeps an SA until
+ * charon restarts (the connection sets rekey_time = 0s and no DPD), so a
+ * phone that died or a PC that slept on IKEv2 stays listed. The sample
+ * captured from a node on 2026-10-06 has two, about 21 hours old and
+ * silent since their first minute. The agent this shipped with counts
+ * only SAs that have had a packet in the last three minutes, but the
+ * count is still not trusted here: an agent that counts every listed SA
+ * would keep a device slot for a phone that is gone, indefinitely. Its bytes are
+ * used instead. (Agents up to v0.2.9 report no IKEv2 sessions or usage at
+ * all -- their parser matched nothing -- so this changes nothing for
+ * them.)
+ *
+ * OpenVPN's count is the connections open right now, with no tail, and
+ * still counts. Every protocol Xray serves on a node is listed
+ * (Shadowsocks among them); see XRAY_SERVED_ON_NODE in the agent
  * gateway. */
 const COUNTS_IGNORED = new Set([
   "WIREGUARD",
+  "IKEV2",
   "XRAY_VLESS_REALITY",
   "XRAY_VLESS_TLS",
   "XRAY_VMESS",
@@ -191,7 +204,11 @@ export class ConcurrencyService {
     // own counter reading the same access log.
     const counted = new Map<string, number>();
     for (const count of sessions) {
-      if (COUNTS_IGNORED.has(count.protocol)) continue;
+      // The protocol part only: the agent labels a non-TCP inbound's
+      // count "<protocol>|<transport>" (dispatch.go), and the WebSocket
+      // VLESS+TLS inbound's "XRAY_VLESS_TLS|WS" used to miss this set and
+      // count its 60 s tail as a device.
+      if (COUNTS_IGNORED.has(count.protocol.split("|")[0])) continue;
       counted.set(count.externalUserId, Math.max(counted.get(count.externalUserId) ?? 0, count.distinctSources));
     }
     const active = new Set([...counted].filter(([, n]) => n > 0).map(([id]) => id));

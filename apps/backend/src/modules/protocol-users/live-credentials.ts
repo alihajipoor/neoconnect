@@ -18,10 +18,36 @@ import type { Prisma } from "@prisma/client";
  *   this skips it. When the hold lapses, the next re-assert restores the
  *   credential as it is then -- never a list captured at the cut.
  *
- * Shared credentials (no session) are always included unless held. */
+ * * A credential of a subscription that is not ACTIVE is not live,
+ *   whatever its own status says. Suspension and expiry switch every
+ *   credential off as they happen, so this changes nothing for them; it
+ *   is for the rows provisionAll used to mint ACTIVE on PENDING,
+ *   CANCELLED, EXPIRED and SUSPENDED subscriptions, which this re-assert
+ *   then kept putting back every minute.
+ * * Nor is a credential of a customer an operator has DISABLED. Disabling
+ *   takes them off the nodes without rewriting their status (see
+ *   ProtocolUsersService.switchOffCustomer); this is what keeps them off,
+ *   and what brings back exactly the ones still ACTIVE once the customer
+ *   is ACTIVE again.
+ *
+ * Shared credentials (no session) are always included unless held.
+ *
+ * Combine it with other conditions through `AND: [liveCredentialWhere(),
+ * {...}]`, not by spreading it into an object that has the same keys: it
+ * sets `status`, `subscription` and `AND`, and a spread silently replaces
+ * whichever of those the other side also sets. That is how a plan's new
+ * speed cap reached every plan (PlansService.reapplyRateLimits). */
 export function liveCredentialWhere(now = new Date()): Prisma.ProtocolUserWhereInput {
+  return { status: "ACTIVE", ...liveOnceActiveWhere(now) };
+}
+
+/** Everything liveCredentialWhere asks except the row's own status: the
+ * credentials that would be live if they were ACTIVE. What re-enabling one
+ * asks before it puts it back on its node (ProtocolUsersService.setEnabled),
+ * so the two cannot disagree about what belongs there. */
+export function liveOnceActiveWhere(now = new Date()): Prisma.ProtocolUserWhereInput {
   return {
-    status: "ACTIVE",
+    subscription: { status: "ACTIVE", customer: { status: "ACTIVE" } },
     AND: [
       { OR: [{ sessionId: null }, { session: { is: { revokedAt: null } } }] },
       { OR: [{ heldUntil: null }, { heldUntil: { lte: now } }] },

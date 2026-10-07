@@ -7,7 +7,7 @@ const endpoints = vi.fn<() => Promise<string[]>>();
  * A base missing from the map is treated as unreachable. `hang` never
  * answers and ends only when the caller aborts -- what a request made in
  * a new adapter's first seconds was measured doing. */
-type Answer = { ip: string } | "unreachable" | "hang";
+type Answer = { ip: string } | { status: number } | { failAt: number } | "unreachable" | "hang";
 const answers = new Map<string, Answer>();
 /** Answers given one per request, in order, before `answers` applies --
  * for an endpoint whose behaviour changes while a tunnel comes up. */
@@ -30,13 +30,37 @@ vi.mock("@tauri-apps/plugin-http", () => ({
     if (answer === undefined || answer === "unreachable") {
       return Promise.reject(new Error(`no route to ${base}`));
     }
-    return Promise.resolve({ ok: true, json: () => Promise.resolve(answer) });
+    // Fails at a given moment (epoch ms) -- a request whose timer fired a
+    // little before the deadline it was set for.
+    if ("failAt" in answer) {
+      return new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Request canceled")), Math.max(0, answer.failAt - Date.now())),
+      );
+    }
+    // An HTTP answer with no address in it: an error page from a mirror
+    // or the CDN while the backend behind them is down.
+    if ("status" in answer) {
+      return Promise.resolve({
+        ok: answer.status >= 200 && answer.status < 300,
+        status: answer.status,
+        json: () => Promise.reject(new Error("not JSON")),
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(answer) });
   },
 }));
 
-// The IPv6 half of the module reaches for a Tauri command it has no
-// business invoking here.
-vi.mock("@tauri-apps/api/core", () => ({ invoke: () => Promise.reject(new Error("not used")) }));
+/** `probe_ipv4_egress`: whether the public internet answers when none of
+ * our endpoints did. Unset, it fails like a command that is not there --
+ * which is what every test written before it existed assumes. */
+const internet = vi.fn<() => Promise<boolean>>();
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (command: string) =>
+    command === "probe_ipv4_egress"
+      ? (internet() ?? Promise.reject(new Error("not set")))
+      : Promise.reject(new Error("not used")),
+}));
 
 const { captureBaselineIp, verifyEgress, confirmEgressWithin } = await import("./egress");
 
@@ -52,6 +76,7 @@ const FI_MIRROR = "https://fi1.neoxify.site:2053/api";
 
 afterEach(() => {
   endpoints.mockReset();
+  internet.mockReset();
   answers.clear();
   scripts.clear();
   asked.length = 0;
@@ -140,6 +165,39 @@ describe("comparing the address the world sees", () => {
     });
   });
 
+  it("never compares an IPv6 baseline with an IPv4 reading", async () => {
+    // A dual-stack machine: the CDN has an AAAA record, so the baseline
+    // on the bare network was the customer's IPv6 address. Connected,
+    // the service blocks IPv6 machine-wide and the next reading comes
+    // back over IPv4 -- here the customer's own IPv4, going round the
+    // tunnel, which is exactly the leak this check exists to catch. The
+    // strings differ, and the old rule called that proof.
+    endpoints.mockResolvedValue([CDN]);
+    const baseline = { ip: "2001:db8::228", from: CDN };
+    answers.set(CDN, { ip: CLIENT });
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "indeterminate", exitIp: CLIENT });
+    // The other way round says nothing either.
+    await expect(verifyEgress({ ip: CLIENT, from: CDN }, { sameEndpointOnly: true })).resolves.toEqual({
+      state: "bypassingTunnel",
+      exitIp: CLIENT,
+    });
+    answers.set(CDN, { ip: "2001:db8::228" });
+    await expect(verifyEgress({ ip: CLIENT, from: CDN })).resolves.toEqual({
+      state: "indeterminate",
+      exitIp: "2001:db8::228",
+    });
+  });
+
+  it("reads an IPv4-mapped address as the IPv4 address it is", async () => {
+    endpoints.mockResolvedValue([CDN]);
+    answers.set(CDN, { ip: CLIENT });
+    await expect(verifyEgress({ ip: `::ffff:${CLIENT}`, from: CDN })).resolves.toEqual({
+      state: "bypassingTunnel",
+      exitIp: CLIENT,
+    });
+  });
+
   it("reports no baseline as no comparison rather than as a verdict", async () => {
     endpoints.mockResolvedValue([CDN]);
     answers.set(CDN, { ip: CLIENT });
@@ -153,6 +211,100 @@ describe("comparing the address the world sees", () => {
     endpoints.mockResolvedValue([CDN, FI_MIRROR]);
     const baseline = { ip: CLIENT, from: CDN };
     await expect(verifyEgress(baseline)).resolves.toEqual({ state: "unreachable" });
+  });
+
+  it("does not call our own API's error pages a dead tunnel where nothing else can be asked", async () => {
+    // The control-plane outage, as it looks from a working tunnel: the
+    // backend container is being rebuilt, and every mirror proxies to it,
+    // so every endpoint answers 502 straight away.
+    //
+    // This is the mobile app's path, which shares this file and has no
+    // `probe_ipv4_egress` (`internet` is left unset, so the command
+    // fails as an unregistered one does). There the error pages are the
+    // only evidence, and they came back over TLS with one of our names:
+    // no verdict, rather than the `unreachable` -- "degraded" -- they
+    // used to be. On Windows the public-internet probe decides; see the
+    // next two tests.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, { status: 502 });
+    answers.set(FI_MIRROR, { status: 502 });
+    const baseline = { ip: CLIENT, from: CDN };
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+    await expect(verifyEgress(baseline, { sameEndpointOnly: true })).resolves.toEqual({
+      state: "indeterminate",
+      exitIp: null,
+    });
+    // And with no baseline at all, the same: nothing to compare and
+    // nothing refuted.
+    await expect(verifyEgress(null)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+  });
+
+  it("lets the public internet decide on Windows when our endpoints only sent error pages", async () => {
+    // The outage of ours, under a working tunnel: the resolvers answer
+    // through it, so there is no verdict and no strike.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, { status: 502 });
+    answers.set(FI_MIRROR, { status: 502 });
+    internet.mockResolvedValue(true);
+    const baseline = { ip: CLIENT, from: CDN };
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+  });
+
+  it("does not let the connected node's own mirror vouch for a dead tunnel", async () => {
+    // The node's mirror is on the node's address, which is routed around
+    // the tunnel so the tunnel's own transport does not loop -- so it
+    // answers (here with a 502) while the tunnel carries nothing, and the
+    // CDN, asked through the tunnel, is silent. The resolvers are silent
+    // too. That is a dead tunnel; the error page used to make it "no
+    // verdict", so it was never struck and never failed over.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, "unreachable");
+    answers.set(FI_MIRROR, { status: 502 });
+    internet.mockResolvedValue(false);
+    const baseline = { ip: CLIENT, from: CDN };
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "unreachable" });
+    await expect(verifyEgress(null)).resolves.toEqual({ state: "unreachable" });
+    expect(internet).toHaveBeenCalled();
+  });
+
+  it("asks the public internet before blaming the tunnel for our silence", async () => {
+    // The panel host down, or our CDN refusing the node's exit address:
+    // not one endpoint answers, and every request times out. From a
+    // working tunnel that is our outage, not the tunnel's -- and the
+    // public internet answering through it is what shows that.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    internet.mockResolvedValue(true);
+    const baseline = { ip: CLIENT, from: CDN };
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+  });
+
+  it("still calls it unreachable when nothing at all answers", async () => {
+    // The case the check exists for: a tunnel black-holing everything.
+    // Ours silent, the internet silent: that is a measured negative.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    internet.mockResolvedValue(false);
+    const baseline = { ip: CLIENT, from: CDN };
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "unreachable" });
+    expect(internet).toHaveBeenCalled();
+  });
+
+  it("does not ask the internet when our own endpoint answered", async () => {
+    endpoints.mockResolvedValue([CDN]);
+    answers.set(CDN, { ip: "203.0.113.10" });
+    internet.mockResolvedValue(true);
+    await verifyEgress({ ip: CLIENT, from: CDN });
+    expect(internet).not.toHaveBeenCalled();
+  });
+
+  it("still takes an address from a later endpoint after an error page", async () => {
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, { status: 503 });
+    answers.set(FI_MIRROR, { ip: NODE });
+    await expect(captureBaselineIp()).resolves.toEqual({ ip: NODE, from: FI_MIRROR });
   });
 
   it("records which endpoint answered, so the pair can be checked at all", async () => {
@@ -268,6 +420,72 @@ describe("the check made while a tunnel is coming up", () => {
     await expect(
       confirmEgressWithin(baseline, 100, { sameEndpointOnly: true, intervalMs: 20 }),
     ).resolves.toEqual({ state: "bypassingTunnel", exitIp: CLIENT });
+  });
+
+  it("puts a ceiling on the whole walk when asked to", async () => {
+    // The health poll through a tunnel that black-holes everything:
+    // every endpoint hangs, and at a full timeout each the list was a
+    // minute before the first strike. With a ceiling the whole walk is
+    // over when it says.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR, FR_MIRROR]);
+    answers.set(CDN, "hang");
+    answers.set(FI_MIRROR, "hang");
+    answers.set(FR_MIRROR, "hang");
+    internet.mockResolvedValue(false);
+
+    const started = Date.now();
+    await expect(verifyEgress({ ip: CLIENT, from: CDN }, { totalMs: 120 })).resolves.toEqual({
+      state: "unreachable",
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("can take a baseline from one known endpoint, within a deadline", async () => {
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, { ip: CLIENT });
+    answers.set(FI_MIRROR, { ip: NODE });
+    await expect(captureBaselineIp({ only: FI_MIRROR })).resolves.toEqual({ ip: NODE, from: FI_MIRROR });
+    expect(asked).toEqual([FI_MIRROR]);
+
+    asked.length = 0;
+    answers.set(CDN, "hang");
+    const started = Date.now();
+    await expect(captureBaselineIp({ deadline: Date.now() + 100 })).resolves.toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // The deadline went to the first endpoint; nothing was left to ask
+    // the second.
+    expect(asked).toEqual([CDN]);
+  });
+
+  it("asks nothing more with only a sliver of the deadline left", async () => {
+    // The flake the test above used to have, made to happen every time:
+    // the first request ends a few milliseconds short of the deadline --
+    // a timer can fire before `Date.now()` reaches the moment it was set
+    // for -- and the next endpoint used to be asked with what was left,
+    // a budget no real request fits in. Here it answers at once, so it
+    // supplied a baseline the deadline had already ruled out.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(FI_MIRROR, { ip: NODE });
+    const deadline = Date.now() + 100;
+    answers.set(CDN, { failAt: deadline - 5 });
+
+    await expect(captureBaselineIp({ deadline })).resolves.toBeNull();
+    expect(asked).toEqual([CDN]);
+  });
+
+  it("does not wait out the budget for proof that cannot come", async () => {
+    // No baseline: our API could not be reached before connecting. Every
+    // answer from here on can only be "no comparison", so the first one
+    // is the verdict, not the thirtieth second.
+    endpoints.mockResolvedValue([CDN]);
+    answers.set(CDN, { status: 502 });
+
+    const started = Date.now();
+    await expect(confirmEgressWithin(null, 5_000, { intervalMs: 20 })).resolves.toEqual({
+      state: "indeterminate",
+      exitIp: null,
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   it("reports unreachable, on time, when every request stalls", async () => {

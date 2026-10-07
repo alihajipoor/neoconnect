@@ -179,6 +179,25 @@ export class PlisioProvider {
     return a.length === b.length && timingSafeEqual(a, b);
   }
 
+  /** The current status of one invoice, by the txn_id createInvoice
+   * returned -- for reconciling a payment whose callback never arrived.
+   * GET /operations/{id}, like every Plisio call a GET with the key in
+   * the query. Feed the result to classify(). */
+  async getOperationStatus(txnId: string): Promise<string> {
+    const query = new URLSearchParams({ api_key: await this.requireApiKey() });
+    const res = await fetch(`${PLISIO_API_BASE}/operations/${encodeURIComponent(txnId)}?${query.toString()}`);
+    const body = (await res.json().catch(() => null)) as {
+      status?: string;
+      data?: { status?: unknown; message?: string };
+    } | null;
+    if (!res.ok || body?.status === "error" || typeof body?.data?.status !== "string") {
+      // Logged, not surfaced, as for createInvoice.
+      this.logger.error(`Plisio operation lookup failed (${res.status}): ${body?.data?.message ?? "no message"}`);
+      throw new ServiceUnavailableException("Could not ask Plisio about this payment");
+    }
+    return body.data.status;
+  }
+
   /**
    * What a status means for the subscription.
    *

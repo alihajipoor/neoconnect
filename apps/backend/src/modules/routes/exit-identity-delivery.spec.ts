@@ -100,6 +100,7 @@ const ROUTES = [
     exitProtocolConfigId: null,
     exitProtocolConfig: null,
     uplinkAssertedAt: null,
+    entryAssertedAt: null,
     entryProtocolConfig: {
       protocol: "WIREGUARD",
       nodeId: GERMANY.id,
@@ -114,6 +115,7 @@ const ROUTES = [
     exitProtocolConfigId: null,
     exitProtocolConfig: null,
     uplinkAssertedAt: null,
+    entryAssertedAt: null,
     entryProtocolConfig: {
       protocol: "XRAY_VLESS_REALITY",
       nodeId: GERMANY.id,
@@ -128,6 +130,7 @@ const ROUTES = [
     exitProtocolConfigId: null,
     exitProtocolConfig: null,
     uplinkAssertedAt: null,
+    entryAssertedAt: null,
     entryProtocolConfig: {
       protocol: "XRAY_VLESS_REALITY",
       nodeId: FINLAND.id,
@@ -144,6 +147,7 @@ const ROUTES = [
     // this whole response that decides what the far end sees.
     exitProtocolConfig: { nodeId: GERMANY.id },
     uplinkAssertedAt: FRESH,
+    entryAssertedAt: FRESH,
     entryProtocolConfig: {
       protocol: "XRAY_VLESS_REALITY",
       nodeId: IRAN_RELAY.id,

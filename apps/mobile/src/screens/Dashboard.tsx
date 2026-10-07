@@ -440,6 +440,8 @@ export function Dashboard({
   }, []);
 
   async function loadAll(preferRouteId?: string) {
+    // Which customer session this load is for; see sessionGeneration.
+    const sessionAtStart = sessionGeneration();
     setLoading(true);
     setError(null);
     const [meResult, subsResult, usersResult] = await Promise.all([
@@ -509,13 +511,22 @@ export function Dashboard({
       }
     }
 
+    // A sign-out landed while the route list was in flight. Nothing below
+    // is for an ended session -- the snapshot least of all, which would
+    // write the signed-out customer's credentials back to disk after the
+    // sign-out cleared them. The same guard as the Windows screen.
+    if (sessionGeneration() !== sessionAtStart) return;
+
     // Only after a wholly successful fetch, so a partial answer cannot
     // overwrite a good cache with a worse one.
-    void saveSnapshot({
-      subscription: sub,
-      protocolUsers: usersResult.data,
-      routes: currentRoutes,
-    });
+    void saveSnapshot(
+      {
+        subscription: sub,
+        protocolUsers: usersResult.data,
+        routes: currentRoutes,
+      },
+      () => sessionGeneration() === sessionAtStart,
+    );
 
     // The tunnel outlives the UI here even more than on Windows: Android
     // keeps a VpnService running with its own notification while the

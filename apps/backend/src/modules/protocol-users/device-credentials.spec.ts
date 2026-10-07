@@ -224,7 +224,10 @@ describe("ProtocolUsersService.listForDevice", () => {
 
     expect(result.map((u) => u.id)).toEqual(["shared-a"]);
     expect(prisma.protocolUser.findMany.mock.calls[0][0].where).toEqual({
-      subscription: { customerId: CUSTOMER },
+      // Never an unpaid checkout's: none should exist, and one minted
+      // before provisionAll learned to refuse must not reach a client.
+      // Nor a disabled account's, whose credentials are off the nodes.
+      subscription: { customerId: CUSTOMER, status: { notIn: ["PENDING", "CANCELLED"] }, customer: { status: "ACTIVE" } },
       sessionId: null,
     });
     expect(create).not.toHaveBeenCalled();
@@ -739,6 +742,8 @@ describe("ProtocolUsersService.provisionAll with device credentials", () => {
       subscription: {
         findUnique: jest.fn().mockResolvedValue({
           id: "sub-1",
+          status: "ACTIVE",
+          customer: { status: "ACTIVE" },
           plan: { name: "Pro", protocolsAllowed: ["XRAY_VLESS_REALITY"], allowedRoutes: allowed.map((id) => ({ id })) },
         }),
       },
@@ -787,6 +792,7 @@ describe("ProtocolUsersService.create for a device", () => {
         findUnique: jest.fn().mockResolvedValue({
           id: "sub-1",
           status: subscriptionStatus,
+          customer: { status: "ACTIVE" },
           plan: { name: "Pro", allowedRoutes: [{ id: "route-wg" }], maxDownloadMbps: null, maxUploadMbps: null },
         }),
       },
@@ -847,6 +853,20 @@ describe("ProtocolUsersService.create for a device", () => {
     expect(prisma.protocolUser.create).not.toHaveBeenCalled();
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
+
+  // The shared credential gets the same rule. Checked for device
+  // credentials only, it let provisionAll and the admin endpoint mint an
+  // ENABLED credential on an unpaid checkout or a lapsed subscription.
+  it.each(["PENDING", "CANCELLED", "EXPIRED", "SUSPENDED"])(
+    "refuses a shared credential for a %s subscription",
+    async (status) => {
+      const { service, prisma, agentGateway } = build(status);
+
+      await expect(service.create({ subscriptionId: "sub-1", routeId: "route-wg" })).rejects.toThrow(/not active/);
+      expect(prisma.protocolUser.create).not.toHaveBeenCalled();
+      expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    },
+  );
 
   it("leaves the shared credential's row without a session", async () => {
     const { service, prisma } = build();

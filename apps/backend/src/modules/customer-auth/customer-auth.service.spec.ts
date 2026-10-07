@@ -34,7 +34,7 @@ function buildCustomer(overrides: Partial<Record<string, unknown>> = {}) {
 describe("CustomerAuthService", () => {
   let service: CustomerAuthService;
   let prisma: {
-    customer: { findUnique: jest.Mock; update: jest.Mock };
+    customer: { findUnique: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
     // The trial grant now refuses anyone who already has a subscription,
     // which is what makes it safe to retry after a failure.
     subscription: { count: jest.Mock };
@@ -65,7 +65,8 @@ describe("CustomerAuthService", () => {
 
   beforeEach(() => {
     prisma = {
-      customer: { findUnique: jest.fn(), update: jest.fn() },
+      // updateMany is how a code is used up: conditionally, once.
+      customer: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       subscription: { count: jest.fn().mockResolvedValue(0) },
       customerSession: {
         create: jest.fn().mockResolvedValue({ id: "session-1" }),
@@ -86,7 +87,9 @@ describe("CustomerAuthService", () => {
       revokeSessionCredentials: jest.fn().mockResolvedValue({ revoked: 0, failed: 0 }),
       endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }),
     };
-    freeTrialSettingsService = { get: jest.fn() };
+    // Trial mode off unless a case says otherwise: sign-in retries a
+    // missing trial now, so every login reads these.
+    freeTrialSettingsService = { get: jest.fn().mockResolvedValue({ enabled: false, trialPlanId: null, trialRouteId: null }) };
     // Resolves to "no referrer" by default, which is what the existing
     // cases here describe. A test that cares supplies its own.
     referralsService = {
@@ -271,6 +274,26 @@ describe("CustomerAuthService", () => {
       expect(result.trial).toBeNull();
     });
 
+    /** The already-verified branch runs before the code is compared, so
+     * its caller has proven nothing. It used to grant a trial there: with
+     * trial mode on, a stranger naming any verified address with no
+     * subscription (every Google or Apple sign-up) made a trial on that
+     * account and was handed its decrypted credentials. */
+    it("grants nothing to an already-verified account, whatever code is sent", async () => {
+      prisma.customer.findUnique.mockResolvedValue(
+        buildCustomer({ emailVerifiedAt: new Date(), emailVerificationCode: null }),
+      );
+      prisma.subscription.count.mockResolvedValue(0);
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: "route-1" });
+      subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
+
+      const result = await service.verifyEmailByCode("customer@example.com", "000000");
+
+      expect(result).toEqual({ alreadyVerified: true, trial: null });
+      expect(subscriptionsService.create).not.toHaveBeenCalled();
+      expect(protocolUsersService.provisionAll).not.toHaveBeenCalled();
+    });
+
     it("marks the customer verified and grants a trial on a correct, unexpired code", async () => {
       prisma.customer.findUnique.mockResolvedValue(
         buildCustomer({
@@ -289,8 +312,14 @@ describe("CustomerAuthService", () => {
 
       const result = await service.verifyEmailByCode("customer@example.com", "111111");
 
-      expect(prisma.customer.update).toHaveBeenCalledWith({
-        where: { id: "customer-1" },
+      // Only if the code is still the one compared: one conditional write.
+      expect(prisma.customer.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: "customer-1",
+          emailVerifiedAt: null,
+          emailVerificationCode: "111111",
+          emailVerificationCodeExpiresAt: { gte: expect.any(Date) },
+        },
         data: { emailVerifiedAt: expect.any(Date), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
       });
       expect(result.trial).toEqual({
@@ -467,10 +496,9 @@ describe("CustomerAuthService", () => {
 
     /**
      * A six-digit code guarded only by a per-IP throttle is guessable by
-     * anyone with a few hundred addresses: 5/minute each, across the
-     * code's thirty-minute life, is six figures of attempts aimed at one
-     * chosen account. Counting misses against the ACCOUNT is what sees
-     * that; the per-IP limit never can.
+     * anyone with a few hundred addresses. The allowance belongs to the
+     * ACCOUNT, over an hour, across every code issued in it -- see
+     * GuessBudget for the two holes the per-code counter left.
      */
     describe("guess budget", () => {
       const wrongGuess = () =>
@@ -478,10 +506,10 @@ describe("CustomerAuthService", () => {
           .resetPasswordByCode("customer@example.com", "000000", "new-password")
           .catch(() => undefined);
 
-      it("burns the code after five wrong guesses, whatever address they come from", async () => {
+      it("burns the code when the account's ten guesses run out, whatever address they come from", async () => {
         prisma.customer.findUnique.mockResolvedValue(withCode());
 
-        for (let i = 0; i < 4; i += 1) await wrongGuess();
+        for (let i = 0; i < 9; i += 1) await wrongGuess();
         expect(prisma.customer.update).not.toHaveBeenCalled();
 
         await wrongGuess();
@@ -491,12 +519,12 @@ describe("CustomerAuthService", () => {
         });
       });
 
-      it("says nothing different on the guess that burns it", async () => {
+      it("says nothing different on the guess that burns it, or after", async () => {
         // An attacker who could tell "wrong" from "wrong, and spent"
-        // would know exactly when to ask for a fresh window.
+        // would know exactly when to stop.
         prisma.customer.findUnique.mockResolvedValue(withCode());
         const messages: string[] = [];
-        for (let i = 0; i < 5; i += 1) {
+        for (let i = 0; i < 12; i += 1) {
           messages.push(
             await service
               .resetPasswordByCode("customer@example.com", "000000", "new-password")
@@ -507,29 +535,154 @@ describe("CustomerAuthService", () => {
         expect(new Set(messages).size).toBe(1);
       });
 
-      it("gives a newly requested code a fresh budget", async () => {
-        // Otherwise a customer who fumbled five times would find the
-        // replacement burned on its first typo, which is a lockout by
-        // another name.
+      /** It used to: every forgot-password reset the count, so an attacker
+       * asked for a new code every five guesses and guessed at the
+       * uncapped rate. A fresh code is exactly as guessable. */
+      it("does not give a newly requested code a fresh allowance", async () => {
         prisma.customer.findUnique.mockResolvedValue(withCode());
-        for (let i = 0; i < 4; i += 1) await wrongGuess();
+        for (let i = 0; i < 10; i += 1) await wrongGuess();
 
         await service.forgotPassword("customer@example.com");
-        prisma.customer.update.mockClear();
+        // The new code, and the right one this time.
+        prisma.customer.findUnique.mockResolvedValue(withCode({ passwordResetCode: "654321" }));
+        prisma.customer.updateMany.mockClear();
 
-        for (let i = 0; i < 4; i += 1) await wrongGuess();
-        expect(prisma.customer.update).not.toHaveBeenCalled();
+        await expect(
+          service.resetPasswordByCode("customer@example.com", "654321", "new-password"),
+        ).rejects.toThrow(BadRequestException);
+        // Refused without being compared at all.
+        expect(prisma.customer.updateMany).not.toHaveBeenCalled();
+      });
+
+      it("gives the allowance back when the hour is up", async () => {
+        jest.useFakeTimers({ now: new Date("2026-10-06T12:00:00Z"), doNotFake: ["setTimeout", "setImmediate", "nextTick"] });
+        try {
+          prisma.customer.findUnique.mockImplementation(() =>
+            Promise.resolve(withCode({ passwordResetCodeExpiresAt: new Date(Date.now() + 60_000) })),
+          );
+          for (let i = 0; i < 10; i += 1) await wrongGuess();
+
+          jest.setSystemTime(new Date("2026-10-06T13:00:01Z"));
+          await expect(
+            service.resetPasswordByCode("customer@example.com", "123456", "new-password"),
+          ).resolves.toBeUndefined();
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      /** Misses used to be counted after the database read, so a burst of
+       * parallel guesses were all compared against the live code before
+       * the burning write landed -- and a right one among them worked. */
+      it("compares no more than ten of a burst of parallel guesses", async () => {
+        prisma.customer.findUnique.mockImplementation(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return withCode();
+        });
+        const guesses = Array.from({ length: 30 }, (_, i) => (i === 25 ? "123456" : String(100000 + i)));
+
+        const outcomes = await Promise.all(
+          guesses.map((g) =>
+            service
+              .resetPasswordByCode("customer@example.com", g, "new-password")
+              .then(() => "reset")
+              .catch(() => "refused"),
+          ),
+        );
+
+        expect(prisma.customer.findUnique).toHaveBeenCalledTimes(10);
+        // The right code, sent as the 26th guess, was never compared.
+        expect(outcomes[25]).toBe("refused");
+        expect(outcomes).not.toContain("reset");
+      });
+
+      /** A request that read the code before another used it, or before a
+       * burn, must not reset the password with it. */
+      it("refuses a right code that was used up between the read and the write", async () => {
+        prisma.customer.findUnique.mockResolvedValue(withCode());
+        prisma.customer.updateMany.mockResolvedValue({ count: 0 });
+
+        await expect(
+          service.resetPasswordByCode("customer@example.com", "123456", "new-password"),
+        ).rejects.toThrow(BadRequestException);
+        expect(prisma.$transaction).not.toHaveBeenCalled();
       });
 
       it("does not count misses for an address with no live code", async () => {
-        // The map would otherwise be growable by anyone naming strangers.
+        // Naming strangers would otherwise spend their allowances, and
+        // fill the map.
         prisma.customer.findUnique.mockResolvedValue(null);
-        for (let i = 0; i < 10; i += 1) {
+        for (let i = 0; i < 20; i += 1) {
           await service
             .resetPasswordByCode("nobody@example.com", "000000", "x")
             .catch(() => undefined);
         }
         expect(prisma.customer.update).not.toHaveBeenCalled();
+        expect((service as unknown as { resetCodeBudget: { spent: (k: string) => boolean } }).resetCodeBudget.spent("nobody@example.com")).toBe(false);
+      });
+    });
+  });
+
+  /** The verification code had no account limit at all: a squatter who
+   * registered someone's address could guess it from enough addresses
+   * within its day, and the "verified" account would later swallow the
+   * real owner's Google or Apple sign-in. */
+  describe("verifyEmailByCode guess budget", () => {
+    const withCode = (overrides = {}) =>
+      buildCustomer({
+        emailVerificationCode: "111111",
+        emailVerificationCodeExpiresAt: new Date(Date.now() + 60_000),
+        ...overrides,
+      });
+    const wrongGuess = () => service.verifyEmailByCode("customer@example.com", "000000").catch(() => undefined);
+
+    it("burns the code when the account's ten guesses run out, and then compares nothing", async () => {
+      prisma.customer.findUnique.mockResolvedValue(withCode());
+
+      for (let i = 0; i < 10; i += 1) await wrongGuess();
+      expect(prisma.customer.update).toHaveBeenCalledWith({
+        where: { id: "customer-1" },
+        data: { emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
+      });
+
+      // Even the right code is refused now, without being compared.
+      await expect(service.verifyEmailByCode("customer@example.com", "111111")).rejects.toThrow(BadRequestException);
+      expect(prisma.customer.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("does not give a resent code a fresh allowance", async () => {
+      prisma.customer.findUnique.mockResolvedValue(withCode());
+      for (let i = 0; i < 10; i += 1) await wrongGuess();
+
+      jwt.signAsync.mockResolvedValue("verify-token");
+      await service.resendVerification("customer@example.com");
+      prisma.customer.findUnique.mockResolvedValue(withCode({ emailVerificationCode: "222222" }));
+
+      await expect(service.verifyEmailByCode("customer@example.com", "222222")).rejects.toThrow(BadRequestException);
+      expect(prisma.customer.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("does not spend the allowance on an already-verified account or one with no code", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      for (let i = 0; i < 20; i += 1) await wrongGuess();
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      for (let i = 0; i < 20; i += 1) await wrongGuess();
+
+      prisma.customer.findUnique.mockResolvedValue(withCode());
+      await expect(service.verifyEmailByCode("customer@example.com", "111111")).resolves.toMatchObject({
+        alreadyVerified: false,
+      });
+    });
+
+    it("reports a race lost to another correct submission as verified", async () => {
+      prisma.customer.findUnique
+        .mockResolvedValueOnce(withCode())
+        .mockResolvedValueOnce({ emailVerifiedAt: new Date() });
+      prisma.customer.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(service.verifyEmailByCode("customer@example.com", "111111")).resolves.toEqual({
+        alreadyVerified: true,
+        trial: null,
       });
     });
   });
@@ -631,9 +784,113 @@ describe("CustomerAuthService", () => {
 
       expect(result).toEqual({ accessToken: "access-token", refreshToken: "refresh-token" });
     });
+
+    /** Where a failed trial grant is retried now: behind the password,
+     * rather than on the unauthenticated code route. */
+    it("grants a verified customer's missing trial at sign-in and still returns only tokens", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      prisma.subscription.count.mockResolvedValue(0);
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: "route-1" });
+      subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
+      jwt.signAsync.mockResolvedValueOnce("access-token").mockResolvedValueOnce("refresh-token");
+
+      const result = await service.login("customer@example.com", PASSWORD);
+
+      expect(subscriptionsService.create).toHaveBeenCalledWith({ customerId: "customer-1", planId: "plan-1" });
+      expect(result).toEqual({ accessToken: "access-token", refreshToken: "refresh-token" });
+    });
+
+    it("does not warn on every sign-in that trial mode is off", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: false, trialPlanId: null, trialRouteId: null });
+      jwt.signAsync.mockResolvedValue("token");
+      const warn = jest.spyOn(service["logger"], "warn").mockImplementation(() => undefined);
+
+      await service.login("customer@example.com", PASSWORD);
+
+      expect(warn).not.toHaveBeenCalled();
+      expect(subscriptionsService.create).not.toHaveBeenCalled();
+    });
+
+    it("still signs in when the trial retry throws", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      freeTrialSettingsService.get.mockRejectedValue(new Error("settings table unreachable"));
+      jwt.signAsync.mockResolvedValue("token");
+      jest.spyOn(service["logger"], "error").mockImplementation(() => undefined);
+
+      await expect(service.login("customer@example.com", PASSWORD)).resolves.toEqual({
+        accessToken: "token",
+        refreshToken: "token",
+      });
+    });
+  });
+
+  describe("onSocialSignup", () => {
+    it("grants a new social account the trial and tells its referrer, as verification does", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date(), passwordHash: null }));
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: "route-1" });
+      subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
+
+      await service.onSocialSignup("customer-1");
+
+      expect(subscriptionsService.create).toHaveBeenCalledWith({ customerId: "customer-1", planId: "plan-1" });
+      expect(protocolUsersService.provisionAll).toHaveBeenCalledWith("sub-1");
+      expect(referralsService.notifyReferrerOfActivation).toHaveBeenCalledWith("customer-1");
+    });
+
+    it("never throws, so a failed grant cannot fail the sign-in", async () => {
+      freeTrialSettingsService.get.mockRejectedValue(new Error("settings unreachable"));
+      jest.spyOn(service["logger"], "error").mockImplementation(() => undefined);
+
+      await expect(service.onSocialSignup("customer-1")).resolves.toBeUndefined();
+    });
+  });
+
+  describe("trial grant", () => {
+    it("makes one trial when two grants for one customer race", async () => {
+      // Count-then-create is two statements: both racers used to see zero.
+      let subscriptions = 0;
+      prisma.subscription.count.mockImplementation(() => Promise.resolve(subscriptions));
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: "route-1" });
+      subscriptionsService.create.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        subscriptions += 1;
+        return { id: `sub-${subscriptions}` };
+      });
+      jwt.signAsync.mockResolvedValue("token");
+
+      await Promise.all([
+        service.login("customer@example.com", PASSWORD),
+        service.login("customer@example.com", PASSWORD),
+      ]);
+
+      expect(subscriptionsService.create).toHaveBeenCalledTimes(1);
+    });
+
+    it("never grants a trial to a disabled account", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", purpose: "verify-email" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: null, status: "DISABLED" }));
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: "route-1" });
+
+      const result = await service.verifyEmail("token");
+
+      expect(result.trial).toBeNull();
+      expect(subscriptionsService.create).not.toHaveBeenCalled();
+    });
   });
 
   describe("refresh", () => {
+    // A disabled account used to go on refreshing for as long as its app
+    // stayed open: nothing here read the status.
+    it("refuses a disabled account even with an unrevoked token", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", tokenVersion: 0, sid: "session-1" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ status: "DISABLED", tokenVersion: 0 }));
+
+      await expect(service.refresh("refresh-token")).rejects.toThrow(/disabled/);
+      expect(jwt.signAsync).not.toHaveBeenCalled();
+    });
+
     it("rejects an invalid refresh token", async () => {
       jwt.verifyAsync.mockRejectedValue(new Error("expired"));
       await expect(service.refresh("garbage")).rejects.toThrow(UnauthorizedException);

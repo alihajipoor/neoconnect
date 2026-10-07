@@ -209,6 +209,45 @@ export function combineEvidence(
   }
 }
 
+/** Whether a full-tunnel rung of the connect ladder that did not prove
+ * itself is judged on the handshake -- and kept, if that stands --
+ * rather than rejected outright.
+ *
+ * Always for the last rung: there is nowhere left to go, and
+ * `combineEvidence` decides what can honestly be said.
+ *
+ * For an earlier rung, only when no baseline could be taken and the
+ * egress check abstained. No baseline means our API could not be reached
+ * even unprotected -- an outage of ours, or a network that filters every
+ * address we have -- and then no candidate can ever produce the
+ * comparison that proves it. Rejecting each one for lacking that proof
+ * walked every working protocol off the ladder, the customer's chosen
+ * one first, and landed wherever the list happened to end; with the old
+ * `unreachable` it failed the lot. The handshake is the evidence there
+ * is, which is what `settleAndCaptureBaseline` always promised to fall
+ * back to.
+ *
+ * `unreachable` is never judged this way: it means our API gave no
+ * address *and* the public internet did not complete a verified TLS
+ * handshake through this tunnel, which is a measured negative and the
+ * next protocol deserves its turn.
+ *
+ * That leans on `indeterminate` meaning traffic really is getting out.
+ * It did not while the public-internet probe was a bare TCP handshake:
+ * Xray's userspace tunnel completes those itself, node or no node, so
+ * with no baseline a dead Xray rung came back `indeterminate`, was
+ * judged on a handshake Xray does not report, and the pass stopped on it
+ * as "unverified". See `vpn::probe_ipv4_egress`.
+ */
+export function rungJudgedByHandshake(
+  egress: EgressVerdict,
+  { isLast, baselineTaken }: { isLast: boolean; baselineTaken: boolean },
+): boolean {
+  if (egress.state === "throughTunnel") return false;
+  if (isLast) return true;
+  return !baselineTaken && egress.state === "indeterminate";
+}
+
 /** The state to show for a *full tunnel* on a routine health poll.
  *
  * Split out from the connect path's `combineEvidence` because the poll
@@ -288,6 +327,26 @@ export function customModePollState(
  */
 export function isTunnelUp(state: ConnectionState): boolean {
   return state === "connected" || state === "degraded" || state === "unverified";
+}
+
+/** Whether to say "Some of your traffic is leaving over IPv6, outside the
+ * VPN" -- the red line under the headline.
+ *
+ * Never in Custom mode. The probe behind it runs in this app's own
+ * process, and in Custom mode this app is deliberately not one of the
+ * selected apps: its IPv6 handshake leaves directly, as Custom mode
+ * intends for everything unselected, so on any network with working
+ * IPv6 the alarm fired on every connect -- next to the line saying the
+ * chosen apps' IPv6 is blocked, and advising a reconnect that cannot
+ * clear it. What it saw says nothing about the selected apps. Checking
+ * those would need a probe on the selected-app path, which the service
+ * does not have.
+ */
+export function showsIpv6Escape(
+  state: ConnectionState,
+  { customMode, escaping }: { customMode: boolean; escaping: boolean },
+): boolean {
+  return isTunnelUp(state) && !customMode && escaping;
 }
 
 /** How often a live tunnel is asked whether its engine is still there.

@@ -47,13 +47,23 @@ describe("CustomersService", () => {
     paymentTransaction: { count: jest.Mock; deleteMany: jest.Mock };
     invoice: { deleteMany: jest.Mock };
     protocolUser: { findMany: jest.Mock; deleteMany: jest.Mock };
-    subscription: { deleteMany: jest.Mock; updateMany: jest.Mock };
+    subscription: { deleteMany: jest.Mock; updateMany: jest.Mock; findMany: jest.Mock };
+    supportTicket: { deleteMany: jest.Mock };
+    voucherRedemption: { deleteMany: jest.Mock };
+    referralReward: { deleteMany: jest.Mock };
+    referralCredit: { deleteMany: jest.Mock };
     usageRecord: { deleteMany: jest.Mock };
     customerSession: { updateMany: jest.Mock };
+    customerIdentity: { deleteMany: jest.Mock };
     $transaction: jest.Mock;
   };
   let agentGateway: { enqueueCommand: jest.Mock };
-  let protocolUsers: { endSessions: jest.Mock; withCustomerLock: jest.Mock };
+  let protocolUsers: {
+    endSessions: jest.Mock;
+    withCustomerLock: jest.Mock;
+    switchOffCustomer: jest.Mock;
+    provisionAll: jest.Mock;
+  };
   let lock: KeyedLock;
   let deviceSlots: ReturnType<typeof deviceSlotsStub>;
 
@@ -72,9 +82,16 @@ describe("CustomersService", () => {
       // updateMany as well as deleteMany: self-deletion cancels
       // subscriptions rather than removing them, because the surviving
       // invoices point at them.
-      subscription: { deleteMany: jest.fn(), updateMany: jest.fn() },
+      subscription: { deleteMany: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+      // What refused an admin delete on a foreign key: all four point at
+      // the customer with no ON DELETE.
+      supportTicket: { deleteMany: jest.fn() },
+      voucherRedemption: { deleteMany: jest.fn() },
+      referralReward: { deleteMany: jest.fn() },
+      referralCredit: { deleteMany: jest.fn() },
       usageRecord: { deleteMany: jest.fn() },
       customerSession: { updateMany: jest.fn() },
+      customerIdentity: { deleteMany: jest.fn() },
       // The real $transaction takes an array of prepared operations; the
       // mocked members above are plain jest.fn()s, so simply resolving is
       // enough to assert which ones were queued.
@@ -87,6 +104,8 @@ describe("CustomersService", () => {
     protocolUsers = {
       endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }),
       withCustomerLock: jest.fn((id: string, work: () => Promise<unknown>) => lock.run(id, work)),
+      switchOffCustomer: jest.fn().mockResolvedValue({ switchedOff: 0, failed: 0 }),
+      provisionAll: jest.fn().mockResolvedValue({ created: [], revoked: [], failed: [] }),
     };
     service = new CustomersService(prisma as any, agentGateway as any, protocolUsers as any, deviceSlots as any);
   });
@@ -199,6 +218,95 @@ describe("CustomersService", () => {
     });
   });
 
+  /** DISABLED is what the panel's Status control sets and what remove()
+   * tells an operator to use to cut someone off. It used to write the
+   * column and nothing else: the app kept refreshing, kept its
+   * credentials, and every one stayed on its node until the subscription
+   * ran out. */
+  describe("update to DISABLED", () => {
+    it("revokes every session and bumps tokenVersion with the status, in one transaction", async () => {
+      const saved = buildCustomer({ status: "DISABLED" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.$transaction.mockResolvedValue([saved, { count: 2 }]);
+
+      await expect(service.update("customer-1", { status: "DISABLED" as any })).resolves.toBe(saved);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.customer.update.mock.calls[0][0].data).toEqual({
+        status: "DISABLED",
+        tokenVersion: { increment: 1 },
+      });
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it("takes the device credentials back, switches the rest off on their nodes, and frees the slots", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.update("customer-1", { status: "DISABLED" as any });
+
+      expect(protocolUsers.endSessions).toHaveBeenCalledWith("customer-1");
+      expect(protocolUsers.switchOffCustomer).toHaveBeenCalledWith("customer-1");
+      expect(deviceSlots.releaseCustomer).toHaveBeenCalledWith("customer-1");
+    });
+
+    it("still disables when the nodes cannot be told yet", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.$transaction.mockResolvedValue([buildCustomer({ status: "DISABLED" }), { count: 0 }]);
+      protocolUsers.endSessions.mockRejectedValue(new Error("database went away"));
+      protocolUsers.switchOffCustomer.mockRejectedValue(new Error("database went away"));
+      jest.spyOn(service["logger"], "error").mockImplementation(() => undefined);
+
+      await expect(service.update("customer-1", { status: "DISABLED" as any })).resolves.toMatchObject({
+        status: "DISABLED",
+      });
+      expect(deviceSlots.releaseCustomer).toHaveBeenCalled();
+    });
+
+    /** An account disabled before disabling revoked anything still has
+     * its credentials on the nodes; saving it as DISABLED again is what
+     * takes them off. Before, this did nothing. */
+    it("switches an already-disabled account off again when it is saved as DISABLED", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ status: "DISABLED" }));
+
+      await service.update("customer-1", { status: "DISABLED" as any });
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(protocolUsers.switchOffCustomer).toHaveBeenCalledWith("customer-1");
+      expect(protocolUsers.endSessions).toHaveBeenCalledWith("customer-1");
+      expect(deviceSlots.releaseCustomer).toHaveBeenCalledWith("customer-1");
+    });
+
+    it("switches nothing off for an edit that does not set the status", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ status: "DISABLED" }));
+      prisma.customer.update.mockResolvedValue(buildCustomer({ status: "DISABLED" }));
+
+      await service.update("customer-1", { telegramId: "12345" } as any);
+
+      expect(protocolUsers.switchOffCustomer).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    /** Its credentials come back with the re-assert; the routes added
+     * while it was off are provisioned now. */
+    it("provisions an account made ACTIVE again, and switches nothing off", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ status: "DISABLED" }));
+      prisma.customer.update.mockResolvedValue(buildCustomer());
+      prisma.subscription.findMany.mockResolvedValue([{ id: "sub-1" }]);
+
+      await service.update("customer-1", { status: "ACTIVE" as any });
+
+      expect(prisma.subscription.findMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", status: "ACTIVE" },
+        select: { id: true },
+      });
+      expect(protocolUsers.provisionAll).toHaveBeenCalledWith("sub-1");
+      expect(protocolUsers.switchOffCustomer).not.toHaveBeenCalled();
+    });
+  });
+
   describe("remove", () => {
     it("throws NotFoundException when the customer doesn't exist", async () => {
       prisma.customer.findUnique.mockResolvedValue(null);
@@ -282,6 +390,47 @@ describe("CustomersService", () => {
         { protocol: "XRAY_VLESS_TLS", transport: "WS", externalUserId: "uuid-ws" },
         { protocol: "XRAY_VLESS_REALITY", transport: "TCP", inboundTag: "vless-in-fr", externalUserId: "uuid-relay" },
       ]);
+    });
+
+    /** Each of these points at the customer with no ON DELETE, so any
+     * customer who had opened a ticket, redeemed a code or taken part in a
+     * referral could never be deleted: the transaction failed on a foreign
+     * key and the panel showed a raw 500. */
+    it("removes the support tickets, voucher redemptions and referral rows that refused the delete", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.supportTicket.deleteMany.mockReturnValue("tickets-op");
+      prisma.voucherRedemption.deleteMany.mockReturnValue("redemptions-op");
+      prisma.referralReward.deleteMany.mockReturnValue("rewards-op");
+      prisma.referralCredit.deleteMany.mockReturnValue("credits-op");
+      prisma.customer.delete.mockReturnValue("customer-op");
+
+      await service.remove("customer-1");
+
+      expect(prisma.supportTicket.deleteMany).toHaveBeenCalledWith({ where: { customerId: "customer-1" } });
+      expect(prisma.voucherRedemption.deleteMany).toHaveBeenCalledWith({ where: { customerId: "customer-1" } });
+      expect(prisma.referralReward.deleteMany).toHaveBeenCalledWith({ where: { referrerId: "customer-1" } });
+      expect(prisma.referralCredit.deleteMany).toHaveBeenCalledWith({ where: { referredCustomerId: "customer-1" } });
+      // In the one transaction, and before the customer row itself.
+      const ops = prisma.$transaction.mock.calls[0][0] as unknown[];
+      for (const op of ["tickets-op", "redemptions-op", "rewards-op", "credits-op"]) {
+        expect(ops.indexOf(op)).toBeGreaterThanOrEqual(0);
+        expect(ops.indexOf(op)).toBeLessThan(ops.indexOf("customer-op"));
+      }
+    });
+
+    /** The slots used to be wiped before a transaction that could fail,
+     * leaving a customer who still existed with every device's slot gone. */
+    it("frees the device slots only once the delete has committed", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.subscription.findMany.mockResolvedValue([{ id: "sub-1" }, { id: "sub-2" }]);
+      prisma.$transaction.mockRejectedValueOnce(new Error("database went away"));
+
+      await expect(service.remove("customer-1")).rejects.toThrow(/database went away/);
+      expect(deviceSlots.releaseSubscription).not.toHaveBeenCalled();
+      expect(deviceSlots.releaseCustomer).not.toHaveBeenCalled();
+
+      await service.remove("customer-1");
+      expect(deviceSlots.releaseSubscription.mock.calls.map((c) => c[0])).toEqual(["sub-1", "sub-2"]);
     });
 
     it("refuses to delete a customer who has completed payments", async () => {
@@ -430,6 +579,31 @@ describe("CustomersService", () => {
       expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
         where: { customerId: "customer-1", revokedAt: null },
         data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    /** The provider links held the subject and the real address the
+     * provider gave, kept past a deletion that promises to remove them --
+     * and every later "Continue with Google" by the same person found the
+     * disabled account by subject and was refused for good. */
+    it("removes the Google, Apple and Facebook links in the same transaction", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customerIdentity.deleteMany.mockReturnValue("identity-delete-op");
+
+      await service.deleteOwnAccount("customer-1");
+
+      expect(prisma.customerIdentity.deleteMany).toHaveBeenCalledWith({ where: { customerId: "customer-1" } });
+      expect(prisma.$transaction.mock.calls[0][0]).toContain("identity-delete-op");
+    });
+
+    it("clears what every device called itself, signed out earlier or now", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.deleteOwnAccount("customer-1");
+
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1" },
+        data: { label: null, platform: null },
       });
     });
   });

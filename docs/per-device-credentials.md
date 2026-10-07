@@ -358,18 +358,31 @@ All on this branch, each with tests:
 
 Low-severity review findings not fixed here, and why:
 
-- **DISABLED accounts keep their credentials.** An admin setting a
-  customer to DISABLED touches no credentials, and `refresh` does not
-  check status. Fixing it means deciding what disabling does to a live
-  tunnel and what re-enabling restores (re-enabling every DISABLED row
-  would also undo per-row admin disables). An owner decision, not a
-  quiet change. Device provisioning already refuses DISABLED accounts.
+- ~~**DISABLED accounts keep their credentials.**~~ Fixed 2026-10-06
+  (claude/review-fixes-backend), in the shape remove()'s own message
+  already promised operators ("set their status to DISABLED instead to
+  revoke access"): disabling revokes every session with the status,
+  takes the device credentials back, sends DISABLE_USER for every shared
+  credential and frees the slots; `refresh` refuses a non-ACTIVE account;
+  switch-route, `create` and provisionAll refuse one. The credential rows
+  keep their own status, and a disabled customer's rows drop out of
+  `liveCredentialWhere` -- so re-enabling restores, at the next
+  re-assert, exactly the rows still ACTIVE, and a per-row admin or quota
+  disable is not undone. Unit-tested only: not yet seen on a node.
 - **OpenVPN revocation lives only in a ccd file.** A node whose ccd
   directory is lost (rebuild, restore) accepts every revoked certificate
   again, with no row behind it. The fix is a revocation table re-asserted
   on reconnect, or `ccd-exclusive` on the nodes (a node change needing
   the owner's approval). Per-device credentials make revocation routine,
-  so this matters more than it did; it is not new.
+  so this matters more than it did; it is not new. Since the 2026-10-06
+  review the agent leaves an empty ccd file for every live CN (CREATE_USER
+  and ENABLE_USER, and so every 60-second re-assert), which is what
+  `ccd-exclusive` needs: once that agent is on every OpenVPN node and a
+  re-assert has run, adding `ccd-exclusive` to `server.conf` (installer
+  and restore script) makes a CN with no file -- revoked, deleted, or on
+  a rebuilt node before its re-assert -- refused. Not switched on: the
+  owner's call, and it must follow the agent rollout, never precede it,
+  or every OpenVPN customer is cut off.
 - **IKEv2 re-assert cost is quadratic, so IKEv2 stays on shared
   credentials.** An agent change (skip the reload for an unchanged user
   within 30 s of the last one) and an agent release; then IKEv2 can join

@@ -197,11 +197,36 @@ describe("PlansService", () => {
 
       await service.update("plan-1", { maxDownloadMbps: 50 } as any);
 
+      // Spelled out rather than rebuilt with a spread: the expected value
+      // used to be `{ subscription: { planId }, ...liveCredentialWhere() }`,
+      // the same expression as the code, so it agreed with the code when
+      // liveCredentialWhere's own `subscription` key replaced the plan.
       expect(prisma.protocolUser.findMany.mock.calls[0][0].where).toEqual({
-        subscription: { planId: "plan-1", status: "ACTIVE" },
-        ...liveCredentialWhere(expect.any(Date) as unknown as Date),
+        AND: [liveCredentialWhere(expect.any(Date) as unknown as Date), { subscription: { planId: "plan-1" } }],
         protocol: { in: ["WIREGUARD", "OPENVPN"] },
       });
+    });
+
+    // An edit to one plan's cap went to every live WireGuard and OpenVPN
+    // credential on every plan: liveCredentialWhere() gained a
+    // `subscription` key of its own, and spread after the plan filter it
+    // replaced it. The agent applies a cap on any CREATE_USER, the
+    // re-assert carries no cap to undo it, and so whichever plan was
+    // edited last set everyone's speed.
+    it("keeps the plan filter whatever the live-credential filter contains", async () => {
+      prisma.subscriptionPlan.findUnique.mockResolvedValue(existing);
+      prisma.subscriptionPlan.update.mockResolvedValue({ ...existing, maxDownloadMbps: 50 });
+
+      await service.update("plan-1", { maxDownloadMbps: 50 } as any);
+
+      const where = prisma.protocolUser.findMany.mock.calls[0][0].where;
+      // Every subscription condition the query carries, wherever it sits.
+      const subscriptionFilters = [where, ...(where.AND ?? [])]
+        .map((clause: { subscription?: unknown }) => clause.subscription)
+        .filter(Boolean);
+      expect(subscriptionFilters).toContainEqual({ planId: "plan-1" });
+      // And still only live credentials: ACTIVE subscription, ACTIVE customer.
+      expect(subscriptionFilters).toContainEqual({ status: "ACTIVE", customer: { status: "ACTIVE" } });
     });
 
     it("does not disturb anyone when the caps did not change", async () => {

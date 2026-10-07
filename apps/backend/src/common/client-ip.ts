@@ -1,4 +1,5 @@
 import type { Request } from "express";
+import { isCloudflareAddress } from "./cloudflare";
 
 /** The address the *caller* came from, across however many proxies.
  *
@@ -22,11 +23,13 @@ import type { Request } from "express";
  * forwarding at all.
  *
  * These headers are client-supplied to anyone who reaches the backend
- * without passing a proxy, so a caller can lie here. For /health/ip that
- * is harmless -- the value is only echoed back to whoever asked. For the
- * attempt log it means an address is *reported*, not proven, which is
- * the right standard for beta diagnostics and the wrong one for anything
- * that authorises, bills or bans.
+ * without passing a proxy -- and the origin answers directly on 443 --
+ * so a caller can lie here. For the address /health/ip echoes that is
+ * harmless: it goes back only to whoever asked. For the attempt log it
+ * means an address is *reported*, not proven, which is the right
+ * standard for beta diagnostics and the wrong one for anything that
+ * authorises, bills, bans or is signed. The network /health/ip signs is
+ * read from verifiedClientIpOf instead.
  *
  * Shared rather than duplicated because there are now two callers and
  * the precedence is the whole substance of it -- a second copy is a
@@ -34,12 +37,33 @@ import type { Request } from "express";
  * it took a live measurement to notice.
  */
 export function clientIpOf(req: Request): string | undefined {
-  const first = (value: string | string[] | undefined) =>
-    (Array.isArray(value) ? value[0] : value)?.split(",")[0]?.trim();
-
   return (
     first(req.headers["cf-connecting-ip"]) ||
     first(req.headers["x-forwarded-for"]) ||
     first(req.headers["x-real-ip"])
   );
+}
+
+/** The caller's address as far as the server can vouch for it, or
+ * undefined.
+ *
+ * `peer` is req.ip: with `trust proxy 1` that is the address nginx saw,
+ * which the caller cannot choose. When that peer is a Cloudflare edge,
+ * the request came through the CDN and Cloudflare's own header -- which
+ * Cloudflare overwrites, whatever the caller sent -- is the client.
+ * Otherwise the peer itself is the answer, and no header is believed.
+ *
+ * Narrower than clientIpOf on purpose. Through a node's API mirror the
+ * peer is the node, so this returns the node's address -- which
+ * NetworkIdentityService then refuses to name -- although the real
+ * client is one entry to the left: tunnel traffic leaves from that same
+ * node address with an X-Forwarded-For the customer wrote, and the two
+ * cannot be told apart here. */
+export function verifiedClientIpOf(req: Request, peer: string | undefined): string | undefined {
+  if (isCloudflareAddress(peer)) return first(req.headers["cf-connecting-ip"]) || undefined;
+  return peer || undefined;
+}
+
+function first(value: string | string[] | undefined): string | undefined {
+  return (Array.isArray(value) ? value[0] : value)?.split(",")[0]?.trim();
 }

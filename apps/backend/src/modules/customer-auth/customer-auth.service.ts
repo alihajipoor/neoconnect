@@ -16,6 +16,8 @@ import { ChangePasswordDto } from "./dto/change-password.dto";
 import { SESSION_IDLE_LIFETIME_MS } from "./session-lifetime";
 import { hasDeviceInfo, type DeviceInfo } from "../../common/device-info";
 import { DeviceSlotsService } from "../device-slots/device-slots.service";
+import { KeyedLock } from "../protocol-users/keyed-lock";
+import { GuessBudget, guessKey } from "../../common/guess-budget";
 import {
   CustomerAccessTokenPayload,
   CustomerRefreshTokenPayload,
@@ -36,23 +38,24 @@ const VERIFY_EMAIL_CODE_TTL_MS = 24 * 60 * 60 * 1000;
 const PASSWORD_RESET_CODE_TTL_MS = 30 * 60 * 1000;
 
 /**
- * Wrong guesses at one account's reset code before the code is burned.
+ * Guesses one account's emailed codes may take per window, across every
+ * code issued in it -- see GuessBudget for why the allowance belongs to
+ * the account and not to each code.
  *
- * Six digits is a million-value space, and the per-IP throttle is the
- * only other thing standing in front of it. Per-IP is exactly the limit
- * that a distributed attacker walks around: 5/minute from each of a
- * thousand addresses is 150,000 guesses inside the code's thirty-minute
- * life, which is a one-in-seven chance at a *chosen* account. Counting
- * the guesses against the ACCOUNT is the only measure that sees that
- * shape -- the same reasoning as LoginGuardService's account counters.
+ * Six digits is a million-value space and the per-IP throttle is the only
+ * other thing in front of it, which a distributed attacker walks around:
+ * 5/minute from each of a thousand addresses is 150,000 guesses in a
+ * reset code's thirty-minute life. Ten an hour bounds a chosen account to
+ * 240 guesses a day, about one chance in four thousand, from any number
+ * of addresses. When the allowance runs out the live code is burned too,
+ * and nothing is compared until the hour is up.
  *
- * Burning the code rather than locking the account is deliberate. A
- * lockout would hand anyone who knows an email address a way to deny
- * the owner their own reset; burning the code costs the real customer
- * one more "email me a code" press and costs the attacker their whole
- * window.
+ * Ten rather than five because a new code no longer brings new guesses:
+ * a customer who fumbles one code and asks for another is drawing on the
+ * same allowance.
  */
-const RESET_CODE_MAX_ATTEMPTS = 5;
+const CODE_GUESSES_PER_WINDOW = 10;
+const CODE_GUESS_WINDOW_MS = 60 * 60 * 1000;
 
 /** The session columns a device's own description sets -- only those it
  * actually sent, so a request without the headers never erases a name. */
@@ -68,18 +71,17 @@ function deviceColumns(device: DeviceInfo | undefined): { label?: string; platfo
 export class CustomerAuthService {
   private readonly logger = new Logger(CustomerAuthService.name);
 
-  /**
-   * Wrong reset-code guesses, keyed by lowercased email.
-   *
-   * Process-local, like LoginGuardService's counters, and for the same
-   * reasons: it holds minutes of bookkeeping rather than records, and
-   * there is one backend instance (infra/docker-compose.prod.yml). A
-   * restart forgets the counter but NOT its effect -- burning a code is
-   * a database write, so nothing an attacker already lost comes back.
-   * Only ever written for an address that has a live code, so it cannot
-   * be grown without bound by naming addresses that do not exist.
-   */
-  private readonly resetCodeAttempts = new Map<string, number>();
+  /** Guesses at password-reset codes, per account. */
+  private readonly resetCodeBudget = new GuessBudget(CODE_GUESSES_PER_WINDOW, CODE_GUESS_WINDOW_MS);
+  /** Guesses at email-verification codes, per account. Its own allowance:
+   * a verification code lives a day, and before this it had no account
+   * limit at all -- a squatter who registered someone's address could
+   * guess the code from enough addresses, and once "verified" the account
+   * would later swallow the real owner's Google or Apple sign-in. */
+  private readonly verifyCodeBudget = new GuessBudget(CODE_GUESSES_PER_WINDOW, CODE_GUESS_WINDOW_MS);
+
+  /** Serialises trial grants per customer; see grantFreeTrialIfEnabled. */
+  private readonly trialLock = new KeyedLock();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -208,6 +210,12 @@ export class CustomerAuthService {
    * the code up by email (not customerId, since the app doesn't have one
    * yet at this point) and checks it hasn't expired. */
   async verifyEmailByCode(email: string, code: string) {
+    const refuse = () => new BadRequestException("Invalid or expired verification code");
+    // Taken before anything is awaited -- see GuessBudget. Given back
+    // below wherever the request turns out not to be a guess at a code.
+    const key = guessKey(email);
+    if (!this.verifyCodeBudget.take(key)) throw refuse();
+
     const customer = await this.prisma.customer.findUnique({ where: { email } });
 
     // Already-verified is checked before the code, because verifying
@@ -217,29 +225,70 @@ export class CustomerAuthService {
     // account is what matters, not which route confirmed it, and saying
     // "expired" sent people off to request codes that would never help.
     if (customer?.emailVerifiedAt) {
-      // Retried here, because this is the path a customer whose grant
-      // failed comes back through. grantFreeTrialIfEnabled refuses if
-      // they already have a subscription, so an ordinary re-verification
-      // still gets nothing.
-      return { alreadyVerified: true, trial: await this.retryTrial(customer.id) };
+      // Nothing is granted here, and nothing is returned but the fact.
+      // This branch is reached before the code is compared -- it has to
+      // be, verifying clears the code -- so the caller has proven nothing:
+      // it is anyone at all who knows a verified address. It used to retry
+      // the trial grant, which let a stranger create a trial on somebody
+      // else's account (every Google or Apple sign-up has no subscription)
+      // and walk away with its decrypted credentials and node addresses.
+      // A failed grant is retried at sign-in now (login), behind the
+      // password.
+      this.verifyCodeBudget.refund(key);
+      return { alreadyVerified: true, trial: null };
     }
 
+    const now = new Date();
     if (
       !customer ||
       !customer.emailVerificationCode ||
-      customer.emailVerificationCode !== code ||
       !customer.emailVerificationCodeExpiresAt ||
-      customer.emailVerificationCodeExpiresAt < new Date()
+      customer.emailVerificationCodeExpiresAt < now
     ) {
-      throw new BadRequestException("Invalid or expired verification code");
+      this.verifyCodeBudget.refund(key);
+      throw refuse();
     }
-    return this.completeVerification(customer.id, customer.emailVerifiedAt);
+    if (customer.emailVerificationCode !== code) {
+      // Out of guesses: the live code goes as well (resend issues a new
+      // one, but no new guesses -- see GuessBudget).
+      if (this.verifyCodeBudget.spent(key)) {
+        await this.prisma.customer.update({
+          where: { id: customer.id },
+          data: { emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
+        });
+      }
+      throw refuse();
+    }
+
+    // Marked verified only if the code is still the one compared, in one
+    // conditional write. A request that lost a race to another correct one
+    // finds the account verified; one that lost it to a burn is refused.
+    const { count } = await this.prisma.customer.updateMany({
+      where: {
+        id: customer.id,
+        emailVerifiedAt: null,
+        emailVerificationCode: code,
+        emailVerificationCodeExpiresAt: { gte: now },
+      },
+      data: { emailVerifiedAt: now, emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
+    });
+    this.verifyCodeBudget.clear(key);
+    if (count === 0) {
+      const after = await this.prisma.customer.findUnique({ where: { id: customer.id }, select: { emailVerifiedAt: true } });
+      if (after?.emailVerifiedAt) return { alreadyVerified: true, trial: null };
+      throw refuse();
+    }
+    return this.afterFirstVerification(customer.id);
   }
 
-  /** Best-effort second chance at a trial that failed its first. */
-  private async retryTrial(customerId: string) {
+  /** Best-effort second chance at a trial that failed its first.
+   * `quiet` drops the "no trial granted" warning, for sign-in: it runs on
+   * every sign-in of a customer with no subscription, and a warning each
+   * time trial mode is off would bury the one at verification that
+   * matters. */
+  private async retryTrial(customerId: string, quiet = false) {
     try {
-      return await this.grantFreeTrialIfEnabled(customerId);
+      return await this.grantFreeTrialIfEnabled(customerId, quiet);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.logger.error(`Trial retry failed for customer ${customerId}: ${reason}`);
@@ -256,11 +305,31 @@ export class CustomerAuthService {
       where: { id: customerId },
       data: { emailVerifiedAt: new Date(), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
     });
+    return this.afterFirstVerification(customerId);
+  }
+
+  /** A new account made by a Google, Apple or Facebook sign-in.
+   *
+   * It is created already verified -- the provider proved the address --
+   * so it never passes through verification, which is where a password
+   * sign-up is granted its trial. With trial mode on, every Google or
+   * Apple sign-up landed on "choose a plan" while a password sign-up got
+   * the trial, and no log line said why. Never throws: the sign-in goes
+   * ahead whatever happens to the trial. */
+  async onSocialSignup(customerId: string): Promise<void> {
+    await this.afterFirstVerification(customerId);
+  }
+
+  /** What follows an account being verified for the first time, by any
+   * route: the trial, and the referrer told. */
+  private async afterFirstVerification(customerId: string) {
     // Caught, not propagated. The account is already marked verified by
     // the update above, so letting this throw returns an error to
     // someone whose email *is* verified -- and leaves them unable to
     // sign in while the trial they cannot see is the reason. The grant
-    // is retried on their next verify attempt or sign-in instead.
+    // is retried at their next password sign-in (login) instead, or by
+    // the emailed link, which proves the mailbox -- never by the code
+    // route's already-verified branch, which proves nothing.
     let trial = null;
     try {
       trial = await this.grantFreeTrialIfEnabled(customerId);
@@ -278,7 +347,15 @@ export class CustomerAuthService {
     return { alreadyVerified: false, trial };
   }
 
-  private async grantFreeTrialIfEnabled(customerId: string) {
+  /** One customer's grant at a time: the "no subscription yet" check and
+   * the create are two statements, and two requests racing between them
+   * (a double-tapped verify, a verify and a sign-in together) each made a
+   * trial. */
+  private grantFreeTrialIfEnabled(customerId: string, quiet = false) {
+    return this.trialLock.run(customerId, () => this.grantFreeTrialUnlocked(customerId, quiet));
+  }
+
+  private async grantFreeTrialUnlocked(customerId: string, quiet: boolean) {
     // Never twice, and safe to call again after a failure. Keyed on the
     // customer having no subscription at all rather than on a flag,
     // because that is the actual question -- a trial is what somebody
@@ -294,6 +371,10 @@ export class CustomerAuthService {
     const existing = await this.prisma.subscription.count({ where: { customerId } });
     if (existing > 0) return null;
 
+    // Never to an account an operator has switched off.
+    const owner = await this.prisma.customer.findUnique({ where: { id: customerId }, select: { status: true } });
+    if (owner?.status !== "ACTIVE") return null;
+
     const settings = await this.freeTrialSettingsService.get();
     // Say which condition stopped it, rather than returning null in
     // silence. A customer who verifies and receives nothing is
@@ -305,6 +386,7 @@ export class CustomerAuthService {
     // Reported at warn because a verified signup getting no trial is a
     // lost customer, not routine bookkeeping.
     if (!settings.enabled || !settings.trialPlanId || !settings.trialRouteId) {
+      if (quiet) return null;
       const missing = [
         settings.enabled ? null : "trial mode is off",
         settings.trialPlanId ? null : "no trial plan is set",
@@ -372,6 +454,12 @@ export class CustomerAuthService {
     if (!customer.emailVerifiedAt) {
       return { requiresVerification: true, email: customer.email };
     }
+    // The second chance at a trial whose grant failed at verification, or
+    // that was never offered because trial mode was off then. Here because
+    // this caller has proven the account is theirs; the app fetches the
+    // credentials itself once signed in, so nothing is returned. A
+    // customer who already has any subscription costs one count query.
+    await this.retryTrial(customer.id, true);
     return this.issueTokenPair(customer, undefined, device);
   }
 
@@ -419,6 +507,12 @@ export class CustomerAuthService {
     const customer = await this.prisma.customer.findUnique({ where: { id: payload.sub } });
     if (!customer || customer.tokenVersion !== payload.tokenVersion) {
       throw new UnauthorizedException("Refresh token has been revoked");
+    }
+    // Disabling bumps tokenVersion too; this is the backstop for an
+    // account disabled any other way. A disabled account kept refreshing
+    // for as long as its app stayed open.
+    if (customer.status !== "ACTIVE") {
+      throw new UnauthorizedException("This account is disabled");
     }
 
     // This device's own session, which signing out on this device -- and
@@ -551,11 +645,11 @@ export class CustomerAuthService {
         passwordResetCodeExpiresAt: new Date(Date.now() + PASSWORD_RESET_CODE_TTL_MS),
       },
     });
-    // A new code gets a fresh budget. Without this a customer who ran
-    // their guesses down would find the replacement burned on its first
-    // wrong keystroke -- and an attacker gains nothing, since asking for
-    // a new code invalidates the one they were guessing at.
-    this.resetCodeAttempts.delete(this.resetCodeKey(customer.email));
+    // A new code does NOT get a fresh allowance of guesses. It used to,
+    // on the reasoning that asking for one retires the code being guessed
+    // at -- but a fresh code is exactly as guessable, so an attacker asked
+    // for one every five guesses and guessed at the uncapped rate. See
+    // GuessBudget.
 
     await this.emailService.sendMail({
       to: customer.email,
@@ -575,54 +669,54 @@ export class CustomerAuthService {
    * as the verification code already in use.
    */
   async resetPasswordByCode(email: string, code: string, newPassword: string): Promise<void> {
-    const customer = await this.prisma.customer.findUnique({ where: { email } });
+    // Every failure below says exactly this. A distinct "no such account"
+    // would turn the route into the account-enumeration oracle
+    // forgotPassword() goes to lengths to avoid, and a distinct "that was
+    // your last guess" would tell an attacker when to stop.
+    const refuse = () => new BadRequestException("Invalid or expired reset code");
 
+    // Taken before anything is awaited, so a burst of parallel guesses
+    // cannot all be compared before any of them is counted.
+    const key = guessKey(email);
+    if (!this.resetCodeBudget.take(key)) throw refuse();
+
+    const customer = await this.prisma.customer.findUnique({ where: { email } });
+    const now = new Date();
     const codeIsLive =
       !!customer &&
       customer.status === "ACTIVE" &&
       !!customer.passwordResetCode &&
       !!customer.passwordResetCodeExpiresAt &&
-      customer.passwordResetCodeExpiresAt >= new Date();
+      customer.passwordResetCodeExpiresAt >= now;
 
-    if (!customer || !codeIsLive || customer.passwordResetCode !== code) {
-      // Count the miss against the account, and burn the code once the
-      // guesses run out -- see RESET_CODE_MAX_ATTEMPTS. Only when a live
-      // code exists: counting misses for addresses with no code running
-      // would let anyone fill this map by naming strangers.
-      if (customer && codeIsLive) {
-        await this.recordResetCodeMiss(customer.id, email);
+    if (!customer || !codeIsLive) {
+      // Not a guess at anything: no live code to compare with.
+      this.resetCodeBudget.refund(key);
+      throw refuse();
+    }
+    if (customer.passwordResetCode !== code) {
+      // The allowance just ran out: the live code goes too, so it is not
+      // waiting to be guessed the moment the window ends.
+      if (this.resetCodeBudget.spent(key)) {
+        await this.prisma.customer.update({
+          where: { id: customer.id },
+          data: { passwordResetCode: null, passwordResetCodeExpiresAt: null },
+        });
       }
-      // Deliberately identical whatever went wrong -- a distinct "no such
-      // account" would turn this into an account-enumeration oracle, which
-      // is the very thing forgotPassword() goes to lengths to avoid. The
-      // burn is silent for the same reason: an attacker must not be able
-      // to tell "wrong code" from "wrong code, and that was your last".
-      throw new BadRequestException("Invalid or expired reset code");
+      throw refuse();
     }
 
-    this.resetCodeAttempts.delete(this.resetCodeKey(email));
-    await this.applyNewPassword(customer.id, newPassword);
-  }
-
-  private resetCodeKey(email: string): string {
-    return email.trim().toLowerCase();
-  }
-
-  /** Tally a wrong guess, and clear the code when the budget is spent. */
-  private async recordResetCodeMiss(customerId: string, email: string): Promise<void> {
-    const key = this.resetCodeKey(email);
-    const attempts = (this.resetCodeAttempts.get(key) ?? 0) + 1;
-
-    if (attempts < RESET_CODE_MAX_ATTEMPTS) {
-      this.resetCodeAttempts.set(key, attempts);
-      return;
-    }
-
-    this.resetCodeAttempts.delete(key);
-    await this.prisma.customer.update({
-      where: { id: customerId },
+    // Used up in one conditional write, so the code works once: a request
+    // that read it before another used it, or before a burn, finds it
+    // gone here rather than resetting the password a second time.
+    const { count } = await this.prisma.customer.updateMany({
+      where: { id: customer.id, passwordResetCode: code, passwordResetCodeExpiresAt: { gte: now } },
       data: { passwordResetCode: null, passwordResetCodeExpiresAt: null },
     });
+    if (count === 0) throw refuse();
+
+    this.resetCodeBudget.clear(key);
+    await this.applyNewPassword(customer.id, newPassword);
   }
 
   async resetPassword(token: string, newPassword: string): Promise<void> {

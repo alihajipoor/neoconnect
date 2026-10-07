@@ -233,6 +233,36 @@ fetch_agent_binary() {
 
 action_install_agent() {
   require_root
+
+  # Not over an enrolled node. This is menu option 1 on every agent box,
+  # and the agent menu only exists on one that is already enrolled -- so
+  # "Install Neoxify Agent", picked to repair a node, used to register a
+  # NEW node in the panel, overwrite agent.json with its identity, and
+  # abandon the old row with every config, credential and route on it:
+  # never re-asserted again, its usage unmetered under an id the panel
+  # does not know, and Xray restarted with no users in it. install.sh
+  # already refused to reach this function that way through the role
+  # question; the menu entry was the way round it. Option 6 keeps
+  # agent.json by default, so this is also how a kept identity comes back.
+  if [[ -f /etc/neoxify/agent.json ]]; then
+    local existing_id keep_identity
+    existing_id="$(jq -r '.nodeId // empty' /etc/neoxify/agent.json 2>/dev/null || true)"
+    echo "This box is already enrolled as node ${existing_id:-<unknown>}."
+    echo "Installing again would register a NEW node in the panel and abandon this one:"
+    echo "its configs, its customers' credentials and its routes."
+    echo "Use 2 to update the agent, 4 to re-enroll, 5 to add or reconfigure an engine."
+    read -r -p "Reinstall only the agent binary and service, keeping this identity? [y/N]: " keep_identity
+    if [[ "${keep_identity,,}" == "y" ]]; then
+      detect_os
+      install_base_deps
+      fetch_agent_binary
+      install_agentd_unit
+      start_agentd
+      echo "Agent reinstalled; still node ${existing_id:-<unknown>}."
+    fi
+    return 0
+  fi
+
   detect_os
   install_base_deps
   fetch_agent_binary
@@ -782,10 +812,12 @@ ensure_fallback_site() {
       "        set \$neoxify_panel ${mirror_host};" \
       "        proxy_pass ${panel_scheme}://\$neoxify_panel\$request_uri;" \
       "        proxy_set_header Host \$neoxify_panel;" \
-      "        # The panel rate-limits per client address, so the real" \
-      "        # one has to survive the hop -- otherwise every customer" \
-      "        # arriving through this node looks like one very busy" \
-      "        # client and they throttle each other." \
+      "        # The real client address has to survive the hop for" \
+      "        # /health/ip, which the apps compare before and after" \
+      "        # connecting. The panel's rate limits cannot use it:" \
+      "        # tunnel traffic leaves from this node's address too," \
+      "        # carrying a header the customer wrote, so they count" \
+      "        # signed-in sessions and otherwise this node's address." \
       "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" \
       "        proxy_set_header X-Forwarded-Proto https;" \
       "        proxy_ssl_server_name on;" \
@@ -1854,6 +1886,52 @@ probe_reality_dest() {
   return 0
 }
 
+# The xray binary install_xray tests a config with. A variable so the
+# gate below can be run against a stand-in: scripts/test-xray-config-gate.sh.
+XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
+
+# Runs `xray run -test` against a config file before it is put into
+# service. Prints what Xray objected to, and returns non-zero, when it
+# refuses.
+#
+# On a relay with Xray running, a copy without the tun inbound is what
+# gets tested. -test does not only parse: it creates the inbound's tun
+# device, and while the running Xray holds relay-tun that fails with
+# "device or resource busy" whatever the config says. Measured on ir1 on
+# 2026-08-16 (docs/journal/windows.md): the config running at that moment
+# failed -test the same way, and the new one with its tun inbound deleted
+# returned "Configuration OK". Testing the whole file refused every
+# re-run of install_xray on a live relay -- the old config put back, and
+# the operator told that a good config was bad. Found by the second
+# 2026-10-06 review.
+#
+# What goes untested is the tun inbound alone, which is the template's
+# and not edited per node. With Xray stopped nothing holds the device, so
+# the whole file is tested.
+xray_test_config() {
+  local config_path="$1" tested="$1" scratch="" refused=0
+  if systemctl is-active --quiet xray 2>/dev/null &&
+    jq -e '[.inbounds[]? | select(.protocol == "tun")] | length > 0' "$config_path" >/dev/null 2>&1; then
+    scratch="$(mktemp -d)" || return 1
+    tested="$scratch/config.json"
+    if ! jq '.inbounds |= map(select(.protocol != "tun"))' "$config_path" >"$tested"; then
+      echo "ERROR: could not copy the config without its tun inbound to test it." >&2
+      rm -rf "$scratch"
+      return 1
+    fi
+    echo "  Xray is running and holds the relay's tun device, so the new config is tested without its tun inbound."
+  fi
+  if ! "$XRAY_BIN" run -test -config "$tested" >/dev/null 2>&1; then
+    refused=1
+    echo "ERROR: Xray refuses the new config:" >&2
+    "$XRAY_BIN" run -test -config "$tested" 2>&1 | tail -5 >&2 || true
+  fi
+  if [[ -n "$scratch" ]]; then
+    rm -rf "$scratch"
+  fi
+  return "$refused"
+}
+
 # Installs xray-core, generates a REALITY keypair, and writes a config
 # with an empty client list -- users are hot-added/removed entirely
 # through the agent's HandlerService calls (see
@@ -2327,18 +2405,47 @@ install_xray() {
   fi
 
   local template="$SCRIPT_DIR/assets/xray-config.json.template"
-  # Worded for the role, not for two of the protocols it affects. The old
-  # wording named WireGuard/OpenVPN only, which reads as "no" to anyone
-  # building an Xray-entry relay -- and that is the common case, since
-  # REALITY is the transport an Iran relay is actually reached on. ir1
-  # was installed that way on 2026-08-13 and could not carry a route.
-  # The base template now carries RoutingService so that answer is no
-  # longer fatal, but the question should still be answerable correctly.
-  echo "A RELAY node is one customers connect to so it can forward them on to an exit node elsewhere (typically an Iran-reachable box fronting servers abroad). This is about the node's role -- answer yes for any relay, whichever protocol customers arrive on."
-  read -r -p "Is this a RELAY node? [y/N]: " is_relay
-  if [[ "${is_relay,,}" == "y" ]]; then
+  # The role decides the template, and when the caller knows the role it
+  # is not asked again. Both entry points know it: action_install_agent
+  # from its role question, action_engines_agent from the panel. Asking
+  # anyway let the two answers disagree, and the question defaulted to No
+  # -- so pressing Enter on a relay wrote the base template, whose default
+  # outbound is freedom, and relayed customers matching no route rule
+  # left from the relay itself. Only a caller that knows nothing is asked,
+  # and then the default follows what this box already runs.
+  local is_relay="${node_is_relay:-}"
+  if [[ -z "$is_relay" ]]; then
+    local relay_default="n" relay_prompt="[y/N]"
+    if [[ -f "$config_path" ]] && jq -e '.inbounds[]? | select(.tag == "relay-tun-in")' "$config_path" >/dev/null 2>&1; then
+      relay_default="y"
+      relay_prompt="[Y/n]"
+    fi
+    # Worded for the role, not for two of the protocols it affects. The
+    # old wording named WireGuard/OpenVPN only, which reads as "no" to
+    # anyone building an Xray-entry relay -- and that is the common case,
+    # since REALITY is the transport an Iran relay is actually reached on.
+    # ir1 was installed that way on 2026-08-13 and could not carry a route.
+    echo "A RELAY node is one customers connect to so it can forward them on to an exit node elsewhere (typically an Iran-reachable box fronting servers abroad). This is about the node's role -- answer yes for any relay, whichever protocol customers arrive on."
+    read -r -p "Is this a RELAY node? $relay_prompt: " is_relay
+    is_relay="${is_relay:-$relay_default}"
+    is_relay="${is_relay,,}"
+  fi
+  if [[ "$is_relay" == "y" ]]; then
     template="$SCRIPT_DIR/assets/xray-relay-config.json.template"
-    echo "Using the relay config variant (adds a dormant tun bridge -- see docs/architecture.md, \"Multi-Hop Relay Chaining\"). Routes are wired up from the panel/API, not here."
+    echo "Using the relay config variant (a dormant tun bridge, and a blackhole as the default outbound -- see docs/architecture.md, \"Multi-Hop Relay Chaining\"). Routes are wired up from the panel/API, not here."
+  fi
+
+  # Kept before it is overwritten. This function is run against nodes
+  # that are serving customers, and the template is not everything a
+  # live config holds: ir1 carries hand-added per-exit inbounds (and,
+  # before the template caught up, its own blackhole), and a plain
+  # re-render deleted them with no copy left. What the template does not
+  # own is carried over from this copy below.
+  local config_backup=""
+  if [[ -f "$config_path" ]]; then
+    config_backup="$config_path.bak-$(date +%Y%m%d-%H%M%S)"
+    cp -a "$config_path" "$config_backup"
+    echo "  Previous config kept at $config_backup"
   fi
 
   sed \
@@ -2435,7 +2542,97 @@ PY
 }
 EOF
 
-  systemctl restart xray
+  # Carry over what the previous config had and the template does not
+  # own: inbounds under any other tag, outbounds under any other tag
+  # (appended, so the template's first outbound stays the default), and
+  # path fallbacks on the template's TLS listeners that lead to one of
+  # those carried-over inbounds. Routing rules are only reported -- one
+  # pointing at something that no longer exists would stop Xray starting.
+  if [[ -n "$config_backup" ]]; then
+    XRAY_BACKUP="$config_backup" XRAY_CONFIG="$config_path" python3 - <<'PY' || echo "WARNING: could not carry the previous config's extra inbounds over -- compare $config_backup with $config_path by hand." >&2
+import json
+import os
+
+TEMPLATE_TAGS = {"vless-in", "trojan-in", "vless-tls-in", "vless-ws-in", "shadowsocks-in", "api-in", "relay-tun-in"}
+with open(os.environ["XRAY_BACKUP"]) as handle:
+    old = json.load(handle)
+path = os.environ["XRAY_CONFIG"]
+with open(path) as handle:
+    new = json.load(handle)
+
+new_inbounds = new.setdefault("inbounds", [])
+present = {i.get("tag") for i in new_inbounds}
+# Not one that would collide on a port with what was just configured:
+# `xray run -test` does not bind, so the collision would first show as an
+# Xray that cannot start.
+taken = {str(i.get("port")) for i in new_inbounds}
+kept, clashing = [], []
+for i in old.get("inbounds", []):
+    if i.get("tag") in TEMPLATE_TAGS or i.get("tag") in present:
+        continue
+    (clashing if str(i.get("port")) in taken else kept).append(i)
+new_inbounds.extend(kept)
+for i in clashing:
+    print("  NOT carried over, its port %s is now taken -- inbound %s (it is in the backup)" % (i.get("port"), i.get("tag")))
+
+new_outbounds = new.setdefault("outbounds", [])
+present_out = {o.get("tag") for o in new_outbounds}
+kept_out = [o for o in old.get("outbounds", []) if o.get("tag") not in present_out]
+new_outbounds.extend(kept_out)
+
+kept_ports = {str(i.get("port")) for i in kept}
+old_by_tag = {i.get("tag"): i for i in old.get("inbounds", [])}
+kept_fallbacks = []
+for inbound in new_inbounds:
+    tag = inbound.get("tag")
+    if tag not in TEMPLATE_TAGS or tag not in old_by_tag:
+        continue
+    fallbacks = inbound.get("settings", {}).get("fallbacks")
+    if fallbacks is None:
+        continue
+    paths = {f.get("path") for f in fallbacks}
+    for f in old_by_tag[tag].get("settings", {}).get("fallbacks") or []:
+        dest = str(f.get("dest", "")).rsplit(":", 1)[-1]
+        if f.get("path") and f.get("path") not in paths and dest in kept_ports:
+            fallbacks.append(f)
+            kept_fallbacks.append("%s %s" % (tag, f.get("path")))
+
+with open(path, "w") as handle:
+    json.dump(new, handle, indent=2)
+
+if kept:
+    print("  Kept from the previous config: inbound(s) %s" % ", ".join(str(i.get("tag")) for i in kept))
+if kept_out:
+    print("  Kept from the previous config: outbound(s) %s" % ", ".join(str(o.get("tag")) for o in kept_out))
+if kept_fallbacks:
+    print("  Kept from the previous config: fallback(s) %s" % ", ".join(kept_fallbacks))
+new_rules = new.get("routing", {}).get("rules", [])
+for rule in old.get("routing", {}).get("rules", []):
+    if rule not in new_rules:
+        print("  NOT carried over, re-add it by hand if it is still wanted -- routing rule: %s" % json.dumps(rule))
+PY
+  fi
+
+  # Tested before the restart, and the previous config put back if it
+  # fails. A config Xray refuses is every protocol on the node down at
+  # once, and a re-run of this function is exactly when one gets written.
+  if ! xray_test_config "$config_path"; then
+    if [[ -n "$config_backup" ]]; then
+      cp -a "$config_backup" "$config_path"
+      echo "  The previous config is back in place and Xray was not restarted." >&2
+    fi
+    return 1
+  fi
+
+  # The verified restart where it exists (installed with the TLS
+  # certificate tooling): it compares the inbounds running before and
+  # after and says which did not come back, which a plain restart never
+  # does.
+  if [[ -x /usr/local/bin/neoxify-xray-restart ]]; then
+    /usr/local/bin/neoxify-xray-restart || echo "WARNING: see above -- an inbound that was running before the restart is not running now." >&2
+  else
+    systemctl restart xray
+  fi
 
   local config_id params
   if [[ "$reality_is_new" == "y" ]]; then
@@ -2666,25 +2863,137 @@ masquerade_client_subnet() {
     iptables -t nat -A POSTROUTING -s "$subnet" -o "$iface" -j MASQUERADE
 }
 
+# Destinations no VPN client is forwarded to through this node: private,
+# carrier-grade NAT and link-local space.
+#
+# Nothing filtered FORWARD, so a customer could reach every other
+# customer's device on this node -- WireGuard, OpenVPN and IKEv2 alike,
+# 10.66/10.77/10.68 are all routed locally -- and the provider's metadata
+# service at 169.254.169.254 and its private network, MASQUERADEd to the
+# node's own address: the provider answered the node. Found by the
+# 2026-10-06 review; the Xray half of it is the private-address rule in
+# the templates.
+#
+# Matched on the client subnet as source, so replies to clients, phantun's
+# DNAT (public source) and relayed traffic into relay-tun (public
+# destination) are untouched, and a client's traffic to this node's own
+# tunnel address is INPUT, not FORWARD. Inserted at the top of FORWARD,
+# above install_ikev2's ACCEPTs. Applied on relays too: unlike the NAT
+# rule, this one fails closed.
+TUNNEL_ISOLATION_RANGES=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16)
+
+isolate_client_subnet() {
+  local subnet="$1" range
+  for range in "${TUNNEL_ISOLATION_RANGES[@]}"; do
+    iptables -C FORWARD -s "$subnet" -d "$range" -j DROP 2>/dev/null || \
+      iptables -I FORWARD -s "$subnet" -d "$range" -j DROP
+  done
+}
+
+# The same rules as wg-quick hooks, for wg0.conf: WireGuard-only nodes
+# keep no saved iptables, so wg0 has to put them back on every start.
+wg_isolation_hooks() {
+  local subnet="$1" range
+  for range in "${TUNNEL_ISOLATION_RANGES[@]}"; do
+    echo "PostUp = iptables -C FORWARD -s ${subnet} -d ${range} -j DROP 2>/dev/null || iptables -I FORWARD -s ${subnet} -d ${range} -j DROP"
+    echo "PostDown = iptables -D FORWARD -s ${subnet} -d ${range} -j DROP 2>/dev/null || true"
+  done
+}
+
+# The panel's Protocol Config of this kind on this node, as one line of
+# JSON, or nothing if there is none. Fails if the panel cannot be asked,
+# which callers must not read as "none": what a re-run does next depends
+# on it, and the panel's copy is what every customer's config was built
+# from.
+registered_protocol_config() {
+  local protocol="$1" token configs
+  token="$(get_admin_bearer_token)" || return 1
+  configs="$(curl -fsSL "$panel_url/protocol-configs" -H "Authorization: Bearer $token")" || return 1
+  echo "$configs" | jq -c --arg node "$node_id" --arg protocol "$protocol" \
+    '[.[]? | select(.nodeId == $node and .protocol == $protocol)][0] // empty'
+}
+
 install_wireguard() {
   echo "Installing WireGuard..."
   apt-get install -y -qq wireguard wireguard-tools
 
+  # The server key is generated once and kept. This function is offered as
+  # "Install/reconfigure" on nodes that are serving customers, and it used
+  # to mint a new key every run: every customer's config carries the old
+  # public key, so every handshake failed, silently, and the panel kept
+  # advertising the old key -- the old private key was gone, so it could
+  # not even be put back. Xray got the same guard in August.
   install -d -m 700 /etc/wireguard
-  ( umask 077 && wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key )
+  if [[ -s /etc/wireguard/server_private.key ]]; then
+    echo "  Keeping this node's WireGuard key: every customer's config is built on it."
+  else
+    ( umask 077 && wg genkey > /etc/wireguard/server_private.key )
+  fi
+  ( umask 077 && wg pubkey < /etc/wireguard/server_private.key > /etc/wireguard/server_public.key )
   local private_key public_key
   private_key="$(cat /etc/wireguard/server_private.key)"
   public_key="$(cat /etc/wireguard/server_public.key)"
 
+  # What the panel already advertises for WireGuard on this node. A
+  # re-run keeps to it: the port it gives clients cannot change from
+  # here, and registering a second config would leave the first one
+  # advertising a port nothing serves.
+  local registered registered_port="" registered_key="" registered_subnet=""
+  if ! registered="$(registered_protocol_config WIREGUARD)"; then
+    echo "ERROR: could not read this node's Protocol Configs from the panel; not touching WireGuard." >&2
+    return 1
+  fi
+  if [[ -n "$registered" ]]; then
+    registered_port="$(echo "$registered" | jq -r '.listenPort')"
+    registered_key="$(echo "$registered" | jq -r '.publicParamsJson.serverPublicKey // empty')"
+    registered_subnet="$(echo "$registered" | jq -r '.publicParamsJson.subnetCidr // empty')"
+    echo "  WireGuard is already registered in the panel for this node, on port $registered_port."
+    if [[ -n "$registered_key" && "$registered_key" != "$public_key" ]]; then
+      echo "  WARNING: the panel advertises server key $registered_key," >&2
+      echo "  but this node's key is $public_key. Every WireGuard customer of this node" >&2
+      echo "  fails to handshake until the two match: set serverPublicKey in this config's" >&2
+      echo "  parameters in the panel." >&2
+    fi
+  fi
+
+  # The interface's own values, when there is one, as the defaults.
+  local existing_port="" existing_address="" existing_subnet=""
+  if [[ -f /etc/wireguard/wg0.conf ]]; then
+    existing_port="$(sed -n 's/^ListenPort *= *//p' /etc/wireguard/wg0.conf | head -n1)"
+    existing_address="$(sed -n 's/^Address *= *//p' /etc/wireguard/wg0.conf | head -n1)"
+    [[ -n "$existing_address" ]] && existing_subnet="${existing_address%.*}.0/24"
+  fi
+
   local suggested_port
-  suggested_port="$(suggest_free_port)"
-  echo "  A random high port is suggested rather than 51820, which identifies"
-  echo "  WireGuard to anyone scanning. Any port works; the clients read it"
-  echo "  from the panel rather than assuming."
+  suggested_port="${registered_port:-${existing_port:-$(suggest_free_port)}}"
+  if [[ -z "$registered_port" && -z "$existing_port" ]]; then
+    echo "  A random high port is suggested rather than 51820, which identifies"
+    echo "  WireGuard to anyone scanning. Any port works; the clients read it"
+    echo "  from the panel rather than assuming."
+  fi
   read -r -p "Listen port for WireGuard [$suggested_port]: " listen_port
   listen_port="${listen_port:-$suggested_port}"
-  read -r -p "Client subnet, /24 only (e.g. 10.66.0.0/24) [10.66.0.0/24]: " subnet
-  subnet="${subnet:-10.66.0.0/24}"
+  if [[ -n "$registered_port" && "$listen_port" != "$registered_port" ]]; then
+    echo "ERROR: the panel gives this node's WireGuard customers port $registered_port." >&2
+    echo "  Moving it here would leave them dialling a port nothing serves. Change the" >&2
+    echo "  port in the panel's Protocol Config first, or keep $registered_port." >&2
+    return 1
+  fi
+  # The panel's subnet first, like the port: the control plane hands every
+  # peer an address out of it, so wg0 on any other /24 routes none of
+  # them and NATs none of their traffic. On a rebuilt node with no
+  # wg0.conf left, the default used to be 10.66.0.0/24 whatever the panel
+  # said, so pressing Enter cut off every WireGuard customer there. Found
+  # by the second 2026-10-06 review.
+  local suggested_subnet="${registered_subnet:-${existing_subnet:-10.66.0.0/24}}"
+  read -r -p "Client subnet, /24 only (e.g. 10.66.0.0/24) [$suggested_subnet]: " subnet
+  subnet="${subnet:-$suggested_subnet}"
+  if [[ -n "$registered_subnet" && "$subnet" != "$registered_subnet" ]]; then
+    echo "ERROR: the panel gives this node's WireGuard customers addresses in $registered_subnet." >&2
+    echo "  wg0 on $subnet would route and NAT none of them. Change subnetCidr in the" >&2
+    echo "  panel's Protocol Config first, or keep $registered_subnet." >&2
+    return 1
+  fi
   local subnet_base="${subnet%.0/24}"
   local server_ip="${subnet_base}.1"
   read -r -p "DNS to hand out to clients [1.1.1.1]: " dns
@@ -2717,17 +3026,53 @@ install_wireguard() {
 PostDown = iptables -t nat -D POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE 2>/dev/null || true"
   fi
 
-  cat > /etc/wireguard/wg0.conf <<EOF
+  # Isolation goes in on every node, relays included -- see
+  # isolate_client_subnet. A private DNS server other than this node's own
+  # tunnel address would be cut off by it.
+  local wg_isolation
+  wg_isolation="$(wg_isolation_hooks "$subnet")"
+  if [[ "$dns" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.) && "$dns" != "$server_ip" ]]; then
+    echo "  WARNING: clients are given DNS $dns, a private address this node does not forward" >&2
+    echo "  tunnel clients to. Use a public resolver, or this node's own $server_ip." >&2
+  fi
+
+  local wg_conf_new
+  wg_conf_new="$(mktemp)"
+  cat > "$wg_conf_new" <<EOF
 [Interface]
 Address = ${server_ip}/24
 ListenPort = ${listen_port}
 PrivateKey = ${private_key}
 ${wg_nat_hooks}
+${wg_isolation}
 EOF
-  chmod 600 /etc/wireguard/wg0.conf
 
-  systemctl enable --now wg-quick@wg0
-  systemctl restart wg-quick@wg0
+  # Restarted only when something changed. A restart drops every peer the
+  # agent added at runtime -- they are not in wg0.conf -- and they come
+  # back only with the control plane's next re-assert, up to a minute
+  # later: a minute of outage for every WireGuard customer, for a re-run
+  # that changed nothing.
+  if [[ -f /etc/wireguard/wg0.conf ]] && cmp -s "$wg_conf_new" /etc/wireguard/wg0.conf &&
+     systemctl is-active --quiet wg-quick@wg0; then
+    rm -f "$wg_conf_new"
+    echo "  wg0 is unchanged and running; not restarting it."
+  else
+    if [[ -f /etc/wireguard/wg0.conf ]]; then
+      cp -a /etc/wireguard/wg0.conf "/etc/wireguard/wg0.conf.bak-$(date +%Y%m%d-%H%M%S)"
+      echo "  Restarting wg0. The peers on it come back with the control plane's next"
+      echo "  re-assert, within about a minute."
+    fi
+    install -m 600 "$wg_conf_new" /etc/wireguard/wg0.conf
+    rm -f "$wg_conf_new"
+    systemctl enable --now wg-quick@wg0
+    systemctl restart wg-quick@wg0
+  fi
+
+  if [[ -n "$registered" ]]; then
+    echo "WireGuard is already registered in the panel -- left untouched there."
+    echo "WireGuard is running on port $listen_port."
+    return 0
+  fi
 
   echo "Registering WireGuard in the panel..."
   local config_id params
@@ -3350,6 +3695,8 @@ CONF
     masquerade_client_subnet "$listen_pool" "$uplink"
     iptables -C FORWARD -s "$listen_pool" -j ACCEPT 2>/dev/null || iptables -I FORWARD -s "$listen_pool" -j ACCEPT
     iptables -C FORWARD -d "$listen_pool" -j ACCEPT 2>/dev/null || iptables -I FORWARD -d "$listen_pool" -j ACCEPT
+    # After the ACCEPTs, so these land above them.
+    isolate_client_subnet "$listen_pool"
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent >/dev/null 2>&1 || true
     netfilter-persistent save >/dev/null 2>&1 || true
   fi
@@ -3439,6 +3786,41 @@ install_openvpn() {
     return 1
   fi
 
+  # Not over a live OpenVPN unless the operator says so in so many words.
+  #
+  # This function registers a NEW Protocol Config, which is what mints a
+  # certificate authority, and then writes that CA, a new port and a new
+  # tls-crypt key over server.conf. Offered as "Install/reconfigure" on
+  # live nodes, with a random free port as the default answer -- which by
+  # construction is not the port in use, so the panel accepted it as a
+  # second config -- pressing Enter cut off every existing OpenVPN
+  # customer: their certificates were signed by a CA the server no longer
+  # trusts, and their configs name a port nothing listens on.
+  # restore-openvpn-from-panel.sh is the tool for putting OpenVPN back as
+  # the panel knows it.
+  local registered_ovpn
+  if ! registered_ovpn="$(registered_protocol_config OPENVPN)"; then
+    echo "ERROR: could not read this node's Protocol Configs from the panel; not touching OpenVPN." >&2
+    return 1
+  fi
+  if [[ -n "$registered_ovpn" || -f /etc/openvpn/server/server.conf ]]; then
+    echo
+    if [[ -n "$registered_ovpn" ]]; then
+      echo "  OpenVPN is already registered in the panel for this node, on port $(echo "$registered_ovpn" | jq -r '.listenPort')."
+    fi
+    [[ -f /etc/openvpn/server/server.conf ]] && echo "  This node already has /etc/openvpn/server/server.conf."
+    echo "  Installing again mints a NEW certificate authority and writes it over this"
+    echo "  server: every existing OpenVPN customer stops working, and their configs"
+    echo "  point at a port nothing listens on. To rebuild OpenVPN as the panel already"
+    echo "  knows it, use installer/maintenance/restore-openvpn-from-panel.sh instead."
+    local replace_confirm
+    read -r -p "Type REPLACE to cut off every existing OpenVPN customer and continue, anything else to stop: " replace_confirm
+    if [[ "$replace_confirm" != "REPLACE" ]]; then
+      echo "  OpenVPN left as it is."
+      return 0
+    fi
+  fi
+
   apt-get install -y -qq openvpn
 
   local suggested_port
@@ -3467,11 +3849,32 @@ install_openvpn() {
   # unroutable -- which is exactly what happened on ir1, 2026-08-14.
   local ovpn_subnet="10.77.0.0/24"
 
+  # tls-crypt encrypts and authenticates the whole TLS control channel,
+  # so a client without this exact key is not rejected -- it is silently
+  # ignored, and the connection simply never completes. It therefore has
+  # to reach clients, which means registering it alongside the rest of
+  # this engine's parameters rather than leaving it node-local like the
+  # WireGuard/Xray server secrets.
+  #
+  # Generated before the registration and sent with it. It used to be
+  # attached afterwards with a PATCH carrying {proto, endpoint,
+  # tlsCryptKey} -- and an update replaces publicParamsJson, so that
+  # PATCH deleted subnetCidr, which a relayed OpenVPN route needs on
+  # every re-assert. Each fresh OpenVPN registration lost it; five of six
+  # configs were found without it and repaired by hand in August, and the
+  # next relay built would have lost it again. Written to a scratch file
+  # and installed only once the panel has accepted the config, so a
+  # refused registration leaves a running server's key alone.
+  local tls_crypt_dir tls_crypt_key
+  tls_crypt_dir="$(mktemp -d)"
+  openvpn --genkey secret "$tls_crypt_dir/tls-crypt.key"
+  tls_crypt_key="$(cat "$tls_crypt_dir/tls-crypt.key")"
+
   config_json="$(curl -sSL -X POST "$panel_url/protocol-configs" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $token" \
-    -d "$(jq -n --arg nodeId "$node_id" --argjson listenPort "$listen_port" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" --arg subnet "$ovpn_subnet" \
-      '{nodeId: $nodeId, protocol: "OPENVPN", listenPort: $listenPort, publicParamsJson: {proto: $proto, endpoint: $endpoint, subnetCidr: $subnet}}')")"
+    -d "$(jq -n --arg nodeId "$node_id" --argjson listenPort "$listen_port" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" --arg subnet "$ovpn_subnet" --arg k "$tls_crypt_key" \
+      '{nodeId: $nodeId, protocol: "OPENVPN", listenPort: $listenPort, publicParamsJson: {proto: $proto, endpoint: $endpoint, subnetCidr: $subnet, tlsCryptKey: $k}}')")"
 
   local ca_cert server_cert server_key config_id
   config_id="$(echo "$config_json" | jq -r '.id // empty')"
@@ -3480,6 +3883,7 @@ install_openvpn() {
   server_key="$(echo "$config_json" | jq -r '.publicParamsJson.serverKeyPem // empty')"
 
   if [[ -z "$ca_cert" ]]; then
+    rm -rf "$tls_crypt_dir"
     echo "ERROR: could not register the OpenVPN Protocol Config." >&2
     echo "  Response: $(echo "$config_json" | jq -r '.message // .' 2>/dev/null || echo "$config_json")" >&2
     exit 1
@@ -3492,26 +3896,8 @@ install_openvpn() {
   printf '%s' "$server_cert" > /etc/openvpn/server/server.crt
   printf '%s' "$server_key" > /etc/openvpn/server/server.key
   chmod 600 /etc/openvpn/server/server.key
-
-  openvpn --genkey secret /etc/openvpn/server/tls-crypt.key
-
-  # tls-crypt encrypts and authenticates the whole TLS control channel,
-  # so a client without this exact key is not rejected -- it is silently
-  # ignored, and the connection simply never completes. It therefore has
-  # to reach clients, which means registering it alongside the rest of
-  # this engine's parameters rather than leaving it node-local like the
-  # WireGuard/Xray server secrets.
-  local tls_crypt_key
-  tls_crypt_key="$(cat /etc/openvpn/server/tls-crypt.key)"
-  local update_payload
-  update_payload="$(jq -n --arg k "$tls_crypt_key" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" \
-    '{publicParamsJson: {proto: $proto, endpoint: $endpoint, tlsCryptKey: $k}}')"
-  if ! curl -sSL -X PATCH "$panel_url/protocol-configs/$config_id" \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer $token" \
-      -d "$update_payload" | jq -e '.id' >/dev/null; then
-    echo "WARNING: could not attach the tls-crypt key to this OpenVPN config -- clients will connect to a server that ignores them." >&2
-  fi
+  install -m 600 "$tls_crypt_dir/tls-crypt.key" /etc/openvpn/server/tls-crypt.key
+  rm -rf "$tls_crypt_dir"
 
   # -dsaparam trades a little cryptographic conservatism for a
   # dramatically faster generation (under a second vs. minutes) --
@@ -3561,8 +3947,9 @@ EOF
   fi
   enable_ip_forwarding
   masquerade_client_subnet "$ovpn_subnet" "$default_iface"
+  isolate_client_subnet "$ovpn_subnet"
   # OpenVPN's systemd unit has no PostUp/PostDown-style hook the way
-  # wg-quick does, so the rule above needs to be persisted separately to
+  # wg-quick does, so the rules above need to be persisted separately to
   # survive a reboot -- iptables-persistent's own systemd unit restores
   # /etc/iptables/rules.v4 on every boot.
   apt-get install -y -qq iptables-persistent
@@ -3659,6 +4046,33 @@ action_engines_agent() {
   local panel_url node_id
   panel_url="$(jq -r '.panelUrl' /etc/neoxify/agent.json)"
   node_id="$(jq -r '.nodeId' /etc/neoxify/agent.json)"
+
+  # Whether this is a relay, from the panel, before anything is installed.
+  #
+  # Every relay guard in this file reads node_is_relay -- no NAT for the
+  # client subnet, no MASQUERADE in wg0's hooks, phantun in front of the
+  # UDP engines, a relayed rather than direct route, the relay Xray
+  # template -- and only action_install_agent ever set it. From this
+  # menu it was unset, every guard read "no", and adding WireGuard,
+  # OpenVPN or IKEv2 to ir1 here would have put back the MASQUERADE rules
+  # removed from it by hand on 2026-08-17 and registered a direct route:
+  # the relay egressing Iranian customers in Iran, the app showing the
+  # exit's country. Found by the 2026-10-06 review.
+  #
+  # The panel holds the authoritative role, and existing relays have no
+  # local marker to read instead. If it cannot be read, nothing is
+  # installed: guessing wrong in one direction is exactly that leak.
+  local token role
+  token="$(get_admin_bearer_token)" || return 1
+  role="$(curl -fsSL "$panel_url/nodes/$node_id" -H "Authorization: Bearer $token" 2>/dev/null | jq -r '.role // empty' 2>/dev/null || true)"
+  if [[ -z "$role" ]]; then
+    echo "ERROR: could not read this node's role from the panel -- refusing to install an engine" >&2
+    echo "  without knowing whether this is a relay." >&2
+    return 1
+  fi
+  local node_is_relay="n"
+  [[ "$role" == "RELAY" ]] && node_is_relay="y"
+  echo "  This node is $role in the panel."
 
   cat <<'EOF'
 

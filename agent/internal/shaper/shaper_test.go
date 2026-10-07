@@ -146,3 +146,25 @@ func mustIP(t *testing.T, s string) []byte {
 	}
 	return ip
 }
+
+// The signal that wg-quick recreated the interface and took every rule
+// with it: EnsureRoot's HTB qdisc is no longer the root.
+func TestRootPresentReadsTcsOutput(t *testing.T) {
+	cases := map[string]bool{
+		"qdisc htb 1: root refcnt 2 r2q 10 default 0xffff direct_packets_stat 0 direct_qlen 1000\nqdisc ingress ffff: parent ffff:fff1 ----------------\n": true,
+		"qdisc noqueue 0: root refcnt 2\n": false,
+		// An HTB somewhere else is not ours.
+		"qdisc noqueue 0: root refcnt 2\nqdisc htb 1: parent 2:1 r2q 10\n": false,
+		"": false,
+	}
+	for out, want := range cases {
+		out := out
+		s := NewWithRunners("wg0", (&recorder{}).run, func(context.Context, string, ...string) ([]byte, error) {
+			return []byte(out), nil
+		})
+		got, err := s.RootPresent(context.Background())
+		if err != nil || got != want {
+			t.Errorf("RootPresent(%q) = %v, %v; want %v", out, got, err, want)
+		}
+	}
+}

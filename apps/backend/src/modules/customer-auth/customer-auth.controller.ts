@@ -39,6 +39,7 @@ import { ResetPasswordDto } from "./dto/reset-password.dto";
 import { ResetPasswordCodeDto } from "./dto/reset-password-code.dto";
 import { ChangePasswordDto } from "./dto/change-password.dto";
 import { deviceInfoFrom } from "../../common/device-info";
+import { ThrottleByRefreshToken } from "../../common/guards/client-throttler.guard";
 
 type HeaderBag = Record<string, string | string[] | undefined>;
 
@@ -93,7 +94,8 @@ export class CustomerAuthController {
   async social(@Body() dto: SocialLoginDto, @Headers() headers: HeaderBag) {
     const provider = dto.provider.toUpperCase() as "GOOGLE" | "APPLE" | "FACEBOOK";
     const identity = await this.socialAuth.verify(provider, dto.token);
-    const customer = await this.socialAuth.resolveCustomer(provider, identity, dto.locale ?? "en");
+    const { customer, created } = await this.socialAuth.resolveCustomer(provider, identity, dto.locale ?? "en");
+    if (created) await this.customerAuthService.onSocialSignup(customer.id);
     return this.customerAuthService.issueTokenPair(customer, undefined, deviceInfoFrom(headers));
   }
 
@@ -172,7 +174,8 @@ export class CustomerAuthController {
       const providerToken = await this.oauthFlow.exchangeCode(provider, code);
       const upper = provider.toUpperCase() as "GOOGLE" | "FACEBOOK";
       const identity = await this.socialAuth.verify(upper, providerToken);
-      const customer = await this.socialAuth.resolveCustomer(upper, identity, pending.locale);
+      const { customer, created } = await this.socialAuth.resolveCustomer(upper, identity, pending.locale);
+      if (created) await this.customerAuthService.onSocialSignup(customer.id);
       const tokens = await this.customerAuthService.issueTokenPair(customer);
       res.redirect(this.oauthFlow.appCallback({ handoff: this.oauthFlow.storeHandoff(tokens) }));
     } catch (err) {
@@ -225,6 +228,11 @@ export class CustomerAuthController {
     }
   }
 
+  // Counted per session once the refresh token verifies, not per address:
+  // every customer behind one node mirror would otherwise share a bucket,
+  // and a hundred junk refreshes a minute through that mirror would cut
+  // them all off from every authenticated call.
+  @ThrottleByRefreshToken()
   @Post("refresh")
   @HttpCode(HttpStatus.OK)
   refresh(@Body() dto: RefreshDto, @Headers() headers: HeaderBag) {

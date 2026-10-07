@@ -1,4 +1,5 @@
 import { X509Certificate, createPublicKey, verify as verifySignature } from "node:crypto";
+import * as forge from "node-forge";
 
 /** Checking that a StoreKit purchase really happened.
  *
@@ -66,18 +67,76 @@ function b64urlToBuffer(value: string): Buffer {
   return Buffer.from(value.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 }
 
+/** Apple's marker on the certificate that signs App Store receipts and
+ * StoreKit transactions -- the leaf. */
+const STOREKIT_SIGNER_OID = "1.2.840.113635.100.6.11.1";
+/** Apple's marker on the Worldwide Developer Relations intermediate that
+ * issues it. */
+const WWDR_INTERMEDIATE_OID = "1.2.840.113635.100.6.2.1";
+
+/** The extension OIDs a certificate carries.
+ *
+ * Node's X509Certificate has no API for arbitrary extensions, so the DER
+ * is walked with node-forge's ASN.1 reader (forge.pki itself cannot load
+ * an EC certificate, but its parser reads any DER): tbsCertificate, then
+ * its explicit [3] extensions, then each Extension's extnID. A substring
+ * search of the raw bytes would also "find" an OID sitting in a subject
+ * name or anywhere else an attacker can put bytes, which is why it is not
+ * done that way. */
+function extensionOids(cert: X509Certificate): Set<string> {
+  const root = forge.asn1.fromDer(forge.util.createBuffer(cert.raw.toString("binary")));
+  const tbs = (root.value as forge.asn1.Asn1[])[0];
+  // [3] in the context-specific class: forge reports the tag number in
+  // `type`, whose declared enum is the universal one, hence the Number().
+  const wrapper = (tbs.value as forge.asn1.Asn1[]).find(
+    (node) => node.tagClass === forge.asn1.Class.CONTEXT_SPECIFIC && Number(node.type) === 3,
+  );
+  const oids = new Set<string>();
+  if (!wrapper) return oids;
+  const extensions = (wrapper.value as forge.asn1.Asn1[])[0];
+  for (const extension of extensions.value as forge.asn1.Asn1[]) {
+    const id = (extension.value as forge.asn1.Asn1[])[0];
+    if (id?.type === forge.asn1.Type.OID && typeof id.value === "string") {
+      oids.add(forge.asn1.derToOid(forge.util.createBuffer(id.value)));
+    }
+  }
+  return oids;
+}
+
 /** Walks the certificate chain from the leaf up to the pinned root.
  *
- * Each certificate must be signed by the next, every one must be inside
- * its validity window, and the last must be Apple's root -- compared by
- * raw bytes, because a certificate that merely *claims* the same
- * subject is trivial to produce and proves nothing.
+ * Signatures and a pinned root are not enough on their own. Apple Root
+ * CA - G3 is Apple's general ECC root, not a StoreKit-only one: under it
+ * sit certificates any paid developer can get for a key they generated
+ * themselves -- an Apple Pay payment-processing certificate, issued by a
+ * WWDR intermediate, is one. A chain [that certificate, its intermediate,
+ * the root] has every signature right and the root byte for byte, and the
+ * leaf's key is the attacker's, so the token signature verifies too. Every
+ * transactionId they invented would have been a paid subscription. Apple's
+ * own verifiers refuse it, and so does this, the same way:
+ *
+ * * exactly three certificates: leaf, intermediate, root;
+ * * the intermediate is a CA and the leaf is not, so a leaf cannot be
+ *   used to sign a further "leaf" of the attacker's choosing;
+ * * each certificate names the next as its issuer and is signed by it;
+ * * every one is inside its validity window;
+ * * the root is Apple's -- compared by raw bytes, because a certificate
+ *   that merely *claims* the same subject is trivial to produce;
+ * * the leaf carries Apple's StoreKit-signer marker and the intermediate
+ *   the WWDR marker. This is the check that stops the Apple Pay route:
+ *   a WWDR intermediate legitimately carries its marker, so the leaf's is
+ *   what proves the key belongs to Apple's StoreKit signer.
+ *
+ * `anchorPem` exists for the tests, which need a root whose private key
+ * they control to build chains that are otherwise exactly Apple-shaped.
+ * Production code never passes it.
  */
-function verifyChain(x5c: string[]): X509Certificate {
-  if (x5c.length < 2) throw new Error("certificate chain too short");
+export function verifyChain(x5c: string[], anchorPem: string = APPLE_ROOT_CA_G3): X509Certificate {
+  if (x5c.length !== 3) throw new Error(`unexpected certificate chain length ${x5c.length}`);
 
   const chain = x5c.map((der) => new X509Certificate(Buffer.from(der, "base64")));
-  const root = new X509Certificate(APPLE_ROOT_CA_G3);
+  const [leaf, intermediate, supplied] = chain;
+  const root = new X509Certificate(anchorPem);
 
   const now = Date.now();
   for (const cert of chain) {
@@ -87,19 +146,29 @@ function verifyChain(x5c: string[]): X509Certificate {
   }
 
   // The chain's own last entry must BE Apple's root, byte for byte.
-  const supplied = chain[chain.length - 1];
   if (!supplied.raw.equals(root.raw)) {
     throw new Error("chain is not anchored in Apple's root certificate");
   }
 
-  // Each link signed by the next one up.
+  if (!intermediate.ca || leaf.ca) {
+    throw new Error("certificate roles in the chain are wrong");
+  }
+
+  // Each link names the next as its issuer and is signed by it.
   for (let i = 0; i < chain.length - 1; i++) {
-    if (!chain[i].verify(chain[i + 1].publicKey)) {
+    if (!chain[i].checkIssued(chain[i + 1]) || !chain[i].verify(chain[i + 1].publicKey)) {
       throw new Error("a certificate in the chain was not signed by its issuer");
     }
   }
 
-  return chain[0];
+  if (!extensionOids(leaf).has(STOREKIT_SIGNER_OID)) {
+    throw new Error("leaf certificate is not Apple's StoreKit signer");
+  }
+  if (!extensionOids(intermediate).has(WWDR_INTERMEDIATE_OID)) {
+    throw new Error("intermediate certificate is not Apple's WWDR intermediate");
+  }
+
+  return leaf;
 }
 
 /** Verifies a StoreKit 2 signed transaction and returns what it says.

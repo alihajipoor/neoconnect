@@ -143,15 +143,34 @@ struct Survey {
 
 fn survey(engines: &mut Engines) -> Survey {
     let exe_dir = engines.exe_dir.clone();
+    // Every count first, and `status()` last. On an empty slot -- the
+    // command-line repair, the case this whole module exists for --
+    // `status()` takes its idle arm, which clears the NRPT rule and runs
+    // the janitor: orphans killed, the firewall rule deleted, our
+    // adapters' routes purged. Asked first, it destroyed exactly the
+    // evidence this survey is for, and four steps then reported "nothing
+    // of ours was there" about residue that had just been removed -- the
+    // report the customer and support read, and which the repair record
+    // in cleanup.log leaves out as clean.
+    let orphaned_engines = janitor::list_orphaned_engines(&exe_dir);
+    let nrpt_rules = dns::rule_count();
+    let routes = our_route_counts();
+    let firewall_rule = split_tunnel_rule_present();
+    let wfp_filters = with_wfp_engine(|engine| our_filter_ids(engine).map(|ids| ids.len())).flatten();
+    let wireguard_tunnel_service = wireguard::tunnel_service_registered();
+    let ras_entry = ikev2::entry_present();
+    // Kept rather than replaced with a look that changes nothing: a
+    // tracked session whose engine has died is reported down by it, not
+    // as "a tunnel was up".
     let (tunnel_up, _, _) = engines.status();
     Survey {
-        orphaned_engines: janitor::list_orphaned_engines(&exe_dir),
-        nrpt_rules: dns::rule_count(),
-        routes: our_route_counts(),
-        firewall_rule: split_tunnel_rule_present(),
-        wfp_filters: with_wfp_engine(|engine| our_filter_ids(engine).map(|ids| ids.len())).flatten(),
-        wireguard_tunnel_service: wireguard::tunnel_service_registered(),
-        ras_entry: ikev2::entry_present(),
+        orphaned_engines,
+        nrpt_rules,
+        routes,
+        firewall_rule,
+        wfp_filters,
+        wireguard_tunnel_service,
+        ras_entry,
         tunnel_up,
     }
 }
@@ -888,8 +907,13 @@ mod tests {
     /// service, a RAS entry present:
     ///
     /// ```text
-    ///   survey         5 helper                     is_connected, 2x Get-NetRoute,
-    ///                                               netsh show rule, entry_present
+    ///   survey        15 helper                     2x Get-NetRoute, netsh show rule,
+    ///                                               entry_present, then status()'s
+    ///                                               idle arm: is_connected,
+    ///                                               dns::clear (2x poke_resolver
+    ///                                               pair, 1 NRPT cmdlet), janitor
+    ///                                               (netsh delete, 2x Get-NetRoute,
+    ///                                               2x Remove-NetRoute)
     ///   step_tunnel   13 helper                     wireguard.exe, rasdial,
     ///                                               Remove-VpnConnection, netsh delete,
     ///                                               2x Get-NetRoute, 2x Remove-NetRoute,
@@ -903,15 +927,19 @@ mod tests {
     ///   step_ras       3 helper
     ///   step_flush     2 helper                     poke_resolver pair
     ///                 --------------------------
-    ///                 36 helper + 1 REPAIR_CMDLET + 3 SCM waits
+    ///                 46 helper + 1 REPAIR_CMDLET + 3 SCM waits
     /// ```
+    ///
+    /// The survey's line used to read 5, which counted its own looks and
+    /// not the teardown `status()` runs on an empty slot. That teardown
+    /// was always there; it was simply never itemised.
     ///
     /// If a budget moves, this fails until `REPAIR_WORST_CASE` is
     /// updated -- and `vpn.rs`'s own test then fails until the app's
     /// deadline is raised to cover it. That chain is the whole point.
     #[test]
     fn the_repair_deadline_is_derived_from_the_budgets_it_claims_to_cover() {
-        const HELPER_SPAWNS: u64 = 36;
+        const HELPER_SPAWNS: u64 = 46;
         const NRPT_CMDLET_SPAWNS: u64 = 1;
         const SERVICE_STOP_WAITS: u64 = 3;
 
@@ -923,15 +951,41 @@ mod tests {
         let blocking = SERVICE_STOP_WAITS * service_stop;
         let worst = process_budget + blocking;
 
-        assert_eq!(process_budget, 600, "the spawn budget moved: {helper}s x {HELPER_SPAWNS} + {nrpt}s");
+        assert_eq!(process_budget, 750, "the spawn budget moved: {helper}s x {HELPER_SPAWNS} + {nrpt}s");
         assert_eq!(blocking, 135, "the service-stop wait moved: {service_stop}s x {SERVICE_STOP_WAITS}");
-        assert_eq!(worst, 735);
+        assert_eq!(worst, 885);
 
         assert!(
             neoconnect_ipc::REPAIR_WORST_CASE.as_secs() >= worst,
             "the shared worst case ({}s) no longer covers what this pass can cost ({worst}s)",
             neoconnect_ipc::REPAIR_WORST_CASE.as_secs()
         );
+    }
+
+    /// The survey counts what is on the machine before `status()` can
+    /// remove it. On an empty slot `status()` clears the NRPT rule and
+    /// runs the janitor, and asked first it made four steps report
+    /// "nothing of ours was there" about residue it had just removed.
+    /// That needs a machine with residue on it to show for real; the
+    /// order it depends on is pinned here from the source.
+    #[test]
+    fn the_survey_counts_before_status_can_clean_up() {
+        let source = include_str!("repair.rs");
+        let start = source.find("fn survey(engines: &mut Engines) -> Survey {").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let status = body.find("engines.status()").expect("the survey still asks status()");
+        for look in [
+            "janitor::list_orphaned_engines(",
+            "dns::rule_count()",
+            "our_route_counts()",
+            "split_tunnel_rule_present()",
+            "our_filter_ids(",
+            "wireguard::tunnel_service_registered()",
+            "ikev2::entry_present()",
+        ] {
+            let at = body.find(look).unwrap_or_else(|| panic!("{look} is no longer in the survey"));
+            assert!(at < status, "{look} is counted after status() has already cleaned up");
+        }
     }
 
     /// Nine steps, and the old comment's arithmetic assumed one bounded

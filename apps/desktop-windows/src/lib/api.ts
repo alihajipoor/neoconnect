@@ -23,6 +23,47 @@ import type { TokenPair } from "./types";
  */
 const ENDPOINT_TIMEOUT_MS = 8_000;
 
+/** Statuses a proxy in front of the backend -- a node mirror's nginx,
+ * the CDN -- uses for "I could not get you an answer": bad gateway,
+ * unavailable, gateway timeout, and the CDN's own origin-unreachable
+ * family. */
+const GATEWAY_STATUSES = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 530]);
+
+/** Of those, the ones where the backend may have received the request,
+ * and acted on it, without its answer getting back. A write is not sent
+ * on to another endpoint after one of these: it may already have
+ * happened, and a second copy of a purchase, a voucher redemption or a
+ * registration is a duplicate row or a false "already done".
+ *
+ * Not only the timeouts (504, 524). A 502 is also what nginx sends when
+ * the upstream closed the connection before answering -- a backend
+ * container restarting mid-request during a deploy, or the hop from a
+ * mirror to the panel reset part-way -- and the CDN's 520 is an origin
+ * that returned something empty or unreadable. Neither says the request
+ * never arrived. The rest (503, 521-523, 525, 526, 530) are refusals
+ * before the backend was reached, and a write moves on after those. */
+const MAY_HAVE_REACHED_BACKEND = new Set([502, 504, 520, 524]);
+
+/** Whether this response is a proxy's own failure page rather than an
+ * answer from the backend.
+ *
+ * The backend's deliberate 503s are JSON (the health check, the
+ * customer endpoints that say "try again"), and they are answers. A
+ * proxy's are HTML or plain text. That difference is what keeps one
+ * broken mirror from speaking for the service: it answers 502 in one
+ * round trip -- faster than a healthy endpoint, because it never reaches
+ * the backend -- and used to win every raced GET, get remembered, and
+ * then lead every write, which stopped on it. */
+export function isGatewayFailure(response: Response): boolean {
+  if (!GATEWAY_STATUSES.has(response.status)) return false;
+  const type = response.headers?.get?.("content-type") ?? "";
+  return !type.toLowerCase().includes("application/json");
+}
+
+/** Thrown inside the race for a gateway failure, so `Promise.any` waits
+ * for a real answer instead of settling on it. */
+class GatewayFailure extends Error {}
+
 /** Walks the endpoints, one at a time, and returns the first that answers.
  *
  * The shape every request had before 0.9.39, kept for the ones that must
@@ -50,6 +91,12 @@ async function fetchOneEndpointAtATime(
   trace?: EndpointTrace,
 ): Promise<Response> {
   let lastError: unknown;
+  // A proxy's own failure page, kept in case nothing better answers. See
+  // `isGatewayFailure`: after one that says the backend was never
+  // reached, the next endpoint is tried -- but not after one where it may
+  // have been (`MAY_HAVE_REACHED_BACKEND`), because a write must not be
+  // sent twice.
+  let gateway: Response | null = null;
   // A caller's own signal, when it brought one. Each endpoint still gets
   // its own controller and timeout; the caller's only ever shortens that,
   // and once it has fired no further endpoint is tried. Without this a
@@ -71,6 +118,12 @@ async function fetchOneEndpointAtATime(
     try {
       const response = await fetch(`${base}${path}`, { ...init, signal: controller.signal });
       settleAttempt(entry, `h${response.status}`);
+      if (isGatewayFailure(response) && !MAY_HAVE_REACHED_BACKEND.has(response.status)) {
+        // Not remembered and not asked for the bundle: it is not the
+        // service. Kept only as the answer of last resort.
+        gateway ??= response;
+        continue;
+      }
       void rememberEndpoint(base);
       void maybeRefreshBundle(base);
       return response;
@@ -82,6 +135,9 @@ async function fetchOneEndpointAtATime(
       outer?.removeEventListener("abort", onOuterAbort);
     }
   }
+  // Something did answer, if only a proxy: the caller gets its status,
+  // never "could not reach Neoxify".
+  if (gateway) return gateway;
   throw lastError ?? new Error(outer?.aborted ? "the request ran out of time" : "no API endpoint answered");
 }
 
@@ -91,7 +147,11 @@ async function fetchOneEndpointAtATime(
  * 500 proves the endpoint is reachable and is the service -- moving on
  * would be wrong, and would turn one rejected password into a walk
  * through every mirror. Only a transport failure, which is what a
- * blocked address looks like, rotates to the next.
+ * blocked address looks like, rotates to the next -- and a proxy's own
+ * failure page (`isGatewayFailure`), which is a mirror or the CDN saying
+ * the backend could not be reached through it, not the backend saying
+ * anything. That one is kept as the answer only if nothing better
+ * replies.
  *
  * Throws if none answered, so the callers below keep their existing
  * "could not reach Neoxify" handling unchanged.
@@ -188,15 +248,25 @@ async function fetchAnyEndpoint(path: string, init: RequestInit, trace?: Endpoin
   if (outer?.aborted) onOuterAbort();
   outer?.addEventListener("abort", onOuterAbort);
 
+  // Proxies' own failure pages, in the order they arrived. None of them
+  // may win the race -- see `isGatewayFailure` -- but if nothing better
+  // answers, the first is what the caller gets.
+  const gateway: { i: number; response: Response }[] = [];
   const attempts = endpoints.map(async (base, i) => {
     try {
       const response = await fetch(`${base}${path}`, { ...init, signal: controllers[i].signal });
       settleAttempt(entries[i], `h${response.status}`);
+      if (isGatewayFailure(response)) {
+        gateway.push({ i, response });
+        throw new GatewayFailure(`gateway ${response.status}`);
+      }
       // Only a real answer counts as a win. A request that fails rejects,
       // and Promise.any moves on to whichever endpoint actually replied.
       return { base, response };
     } catch (err) {
-      settleAttempt(entries[i], timedOut[i] ? "timeout" : failureOutcome(err));
+      if (!(err instanceof GatewayFailure)) {
+        settleAttempt(entries[i], timedOut[i] ? "timeout" : failureOutcome(err));
+      }
       throw err;
     }
   });
@@ -224,6 +294,17 @@ async function fetchAnyEndpoint(path: string, init: RequestInit, trace?: Endpoin
     void maybeRefreshBundle(base);
     return response;
   } catch (err) {
+    // Nothing but proxies answered. The first of their failure pages is
+    // the answer -- the caller sees "Request failed (502)" with a status,
+    // because something did reply -- and it is neither remembered nor
+    // asked for the bundle: it is not the service.
+    const kept = gateway[0];
+    if (kept !== undefined) {
+      controllers.forEach((c, i) => {
+        if (i !== kept.i) c.abort();
+      });
+      return kept.response;
+    }
     // Nothing won, so there is no body anyone is still reading and
     // every straggler can be cut loose here.
     controllers.forEach((c) => c.abort());

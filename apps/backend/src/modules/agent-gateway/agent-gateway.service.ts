@@ -3,7 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { existsSync, readFileSync } from "node:fs";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
-import { AgentCommandType, Prisma } from "@prisma/client";
+import { AgentCommandType, Prisma, Protocol } from "@prisma/client";
 import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
@@ -11,6 +11,7 @@ import { UsageService } from "../usage/usage.service";
 import { ConcurrencyService } from "../usage/concurrency.service";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
 import { liveCredentialWhere } from "../protocol-users/live-credentials";
+import { rateLimitFor } from "../protocol-users/rate-limit";
 import { AgentConnectionRegistry } from "./agent-connection-registry";
 import { resolveProtoPath } from "./proto-path";
 import { verifyEd25519 } from "./ed25519";
@@ -81,6 +82,12 @@ const ROUTE_REASSERT_INTERVAL_MS = 60_000;
  * outcome back onto the Route. Exported for the spec that proves the
  * restart-then-reassert cycle restores the uplink. */
 export const UPLINK_ACK_PREFIX = "reassert-uplink:";
+
+/** Command-id prefix for a route's ENTRY re-assert (the CONFIGURE_ROUTE
+ * the sweep writes to the relay). Its ack is the entry half of the
+ * route's health, written to Route.entryAssertedAt as the uplink's is to
+ * uplinkAssertedAt. */
+export const ROUTE_ACK_PREFIX = "reassert-route:";
 
 /** Command-id prefix for re-asserting a credential no node has confirmed
  * yet (ProtocolUser.provisionedAt is null). Its ack is what records the
@@ -404,15 +411,49 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
 
   private handleAgentSync(call: AgentDuplexCall) {
     let nodeId: string | null = null;
+    // Set from the moment a Hello arrives until its signature has been
+    // checked. A message that lands in that short window comes from an
+    // agent that has said who it is and is waiting for the answer, so it
+    // is dropped rather than taken as a reason to close the stream.
+    let helloInFlight = false;
+    let closed = false;
+
+    /** No node behind this stream (yet). Drops the message while a Hello
+     * is being checked, and otherwise closes the stream. */
+    const refuseUnauthenticated = (what: string) => {
+      if (!helloInFlight) call.destroy(new Error(`${what} received before a valid Hello`));
+    };
 
     call.on("data", (msg: AgentMessageEnvelope) => {
       void (async () => {
         try {
           if (msg.payload === "hello") {
-            nodeId = await this.handleHello(call, msg.hello!);
+            helloInFlight = true;
+            let node: { id: string; name: string };
+            try {
+              node = await this.authenticateHello(call, msg.hello!);
+            } finally {
+              helloInFlight = false;
+            }
+            // The node is known from here, before anything slow. It used to
+            // be assigned only once the whole Hello had been handled --
+            // replaying the outbox and re-asserting every credential and
+            // route, which on a busy relay back after days takes longer
+            // than the agent's 20 s heartbeat. That heartbeat then closed a
+            // correctly authenticated stream as "before a valid Hello",
+            // the close found no node to unregister, and each retry had a
+            // longer backlog than the last.
+            nodeId = node.id;
+            await this.nodesService.setStatus(node.id, "ONLINE", { agentVersion: msg.hello!.agentVersion });
+            // Closed while the status was being written: nothing to
+            // register, and handleStreamClosed has already run.
+            if (closed) return;
+            this.registry.set(node.id, call);
+            this.logger.log(`Node ${node.id} (${node.name}) authenticated and connected`);
+            await this.syncAfterHello(node.id);
           } else if (msg.payload === "heartbeat") {
             if (!nodeId) {
-              call.destroy(new Error("heartbeat received before a valid Hello"));
+              refuseUnauthenticated("heartbeat");
               return;
             }
             await this.nodesService.touchHeartbeat(nodeId);
@@ -427,10 +468,21 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               );
             }
           } else if (msg.payload === "commandAck") {
-            await this.handleCommandAck(msg.commandAck!);
+            // An ack is a write to control-plane state -- a route's uplink
+            // health, a credential confirmed on a node, a stored command's
+            // outcome -- so it needs a node behind it like everything else.
+            // It used to be the one message handled before any Hello, from
+            // anyone who could reach the port: a relay route id, which
+            // every relay-plan customer is given, was enough to keep a dead
+            // relay route showing as up.
+            if (!nodeId) {
+              refuseUnauthenticated("commandAck");
+              return;
+            }
+            await this.handleCommandAck(nodeId, msg.commandAck!);
           } else if (msg.payload === "statsBatch") {
             if (!nodeId) {
-              call.destroy(new Error("statsBatch received before a valid Hello"));
+              refuseUnauthenticated("statsBatch");
               return;
             }
             await this.usageService.recordDeltas(nodeId, msg.statsBatch?.deltas ?? []);
@@ -454,6 +506,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     });
 
     const onClose = () => {
+      closed = true;
       if (nodeId) this.handleStreamClosed(nodeId, call);
     };
     call.on("end", () => {
@@ -463,7 +516,11 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     call.on("error", onClose);
   }
 
-  private async handleHello(call: AgentDuplexCall, hello: HelloMessage): Promise<string> {
+  /** Checks a Hello: the node exists and is claimed, the timestamp is
+   * fresh, and the signature is its key's. Closes the stream and throws
+   * on any failure. Nothing is written and nothing registered here; see
+   * handleAgentSync for what follows and why it is split. */
+  private async authenticateHello(call: AgentDuplexCall, hello: HelloMessage): Promise<{ id: string; name: string }> {
     const node = await this.prisma.node.findUnique({ where: { id: hello.nodeId } });
     if (!node || !node.agentPubKey) {
       call.destroy(new Error(`unknown or unclaimed node: ${hello.nodeId}`));
@@ -486,14 +543,17 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       throw new Error("rejected");
     }
 
-    await this.nodesService.setStatus(node.id, "ONLINE", { agentVersion: hello.agentVersion });
-    this.registry.set(node.id, call);
-    this.logger.log(`Node ${node.id} (${node.name}) authenticated and connected`);
+    return { id: node.id, name: node.name };
+  }
 
-    await this.replayQueuedCommands(node.id);
-    await this.reassertProvisionedUsers(node.id);
-    await this.reassertConfiguredRoutes(node.id);
-    return node.id;
+  /** What a freshly connected node is sent: the outbox it missed, then
+   * every credential it should hold, then its relay routes. Runs with the
+   * node already known to the stream, so its heartbeats, stats and acks
+   * are handled while this works through a backlog. */
+  private async syncAfterHello(nodeId: string) {
+    await this.replayQueuedCommands(nodeId);
+    await this.reassertProvisionedUsers(nodeId);
+    await this.reassertConfiguredRoutes(nodeId);
   }
 
   /** Re-sends a CREATE_USER for every customer who should exist on this
@@ -598,7 +658,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       if (opts.persist) {
         await this.enqueueCommand(nodeId, "CONFIGURE_ROUTE", payload);
       } else {
-        this.writeCommand(nodeId, `reassert-route:${route.id}`, "CONFIGURE_ROUTE", payload);
+        this.writeCommand(nodeId, `${ROUTE_ACK_PREFIX}${route.id}`, "CONFIGURE_ROUTE", payload);
       }
     }
     this.logger.log(`Re-asserted ${routes.length} relay route(s) on node ${nodeId}`);
@@ -645,12 +705,28 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * This is the only thing standing between the panel and a green row
    * over a dead route, so it stores the failure text rather than logging
    * and dropping it. */
-  private async recordUplinkResult(routeId: string, ok: boolean, error?: string) {
+  private async recordUplinkResult(routeId: string, ok: boolean, error?: string, fromNodeId?: string) {
     await this.prisma.route.updateMany({
-      where: { id: routeId },
+      // From an ack, only the route's own exit node may say how its uplink
+      // is (see handleCommandAck).
+      where: { id: routeId, ...(fromNodeId ? { exitProtocolConfig: { is: { nodeId: fromNodeId } } } : {}) },
       data: ok
         ? { uplinkAssertedAt: new Date(), uplinkLastError: null }
         : { uplinkLastError: (error ?? "unknown error").slice(0, 500) },
+    });
+  }
+
+  /** The same for the entry half: what the route's ENTRY node said about
+   * a CONFIGURE_ROUTE for it. Only that node may say -- the command is
+   * only ever written to it. A failure leaves entryAssertedAt alone, so
+   * one slow or failed ack does not flap the route; three missed sweeps
+   * (UPLINK_FRESH_MS) report it down. */
+  private async recordEntryResult(routeId: string, ok: boolean, error: string | undefined, fromNodeId: string) {
+    await this.prisma.route.updateMany({
+      where: { id: routeId, entryProtocolConfig: { is: { nodeId: fromNodeId } } },
+      data: ok
+        ? { entryAssertedAt: new Date(), entryLastError: null }
+        : { entryLastError: (error || "unknown error").slice(0, 500) },
     });
   }
 
@@ -693,7 +769,10 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       // restart on ir1, all five France routes returned "invalid request
       // user id" while Finland kept working, because the re-assert had
       // put every France customer on the default inbounds.
-          include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
+      //
+      // node and subscription: for the plan's speed caps, which go along
+      // to agents that can take them (see reassertPayload).
+          include: REASSERT_INCLUDE,
           orderBy: { id: "asc" },
           take,
         });
@@ -750,7 +829,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       const readAt = Date.now();
       const users = await this.prisma.protocolUser.findMany({
         where: { id: { in: ids }, ...liveCredentialWhere() },
-        include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
+        include: REASSERT_INCLUDE,
       });
       for (const user of users) {
         // Put back on purpose: the hold's own DISABLE_USER, seconds ago,
@@ -779,7 +858,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * Per-device sign-out makes such deletes routine. Returns whether the
    * CREATE_USER was sent. */
   private async guardedReassert(
-    user: { nodeId: string; protocol: string; externalUserId: string; credentialsJson: string; protocolConfig: { transport: string | null; inboundTag: string | null } },
+    user: ReassertUser,
     readAt: number,
     send: (payload: object) => unknown,
   ): Promise<boolean> {
@@ -841,17 +920,38 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * updateMany rather than update because periodic re-asserts are written
    * without a stored command (see reassertProvisionedUsers), so their acks
    * legitimately match nothing. `update` throws on a missing row, which
-   * would turn every one of those acks into a stream error. */
-  private async handleCommandAck(ack: { commandId: string; success: boolean; error: string }) {
+   * would turn every one of those acks into a stream error.
+   *
+   * Every write is scoped to `nodeId`, the node authenticated on the
+   * stream the ack arrived on. Before, an ack updated whatever its id
+   * named: one node could mark another's stored command acked (so it was
+   * never replayed), or record another node's route as healthy. Each
+   * command is only ever written to one node, so a genuine ack always
+   * matches. */
+  private async handleCommandAck(nodeId: string, ack: { commandId: string; success: boolean; error: string }) {
     // A route's uplink is the one re-assert whose outcome is worth
     // storing rather than only logging: it is what decides whether the
     // route can carry anything, and nothing else on the route reports it.
+    // Only its exit node can speak for it: the uplink CREATE_USER is
+    // written to the exit alone.
     if (ack.commandId.startsWith(UPLINK_ACK_PREFIX)) {
       const routeId = ack.commandId.slice(UPLINK_ACK_PREFIX.length);
       if (!ack.success) {
         this.logger.error(`Route ${routeId} uplink re-assert REJECTED by its exit node: ${ack.error}`);
       }
-      await this.recordUplinkResult(routeId, ack.success, ack.error);
+      await this.recordUplinkResult(routeId, ack.success, ack.error, nodeId);
+      return;
+    }
+
+    // And the entry half, from the relay. Before, a rejected one was only
+    // logged (below), and the route kept reporting ONLINE on the strength
+    // of the exit's uplink alone.
+    if (ack.commandId.startsWith(ROUTE_ACK_PREFIX)) {
+      const routeId = ack.commandId.slice(ROUTE_ACK_PREFIX.length);
+      if (!ack.success) {
+        this.logger.error(`Route ${routeId} entry re-assert REJECTED by node ${nodeId}: ${ack.error}`);
+      }
+      await this.recordEntryResult(routeId, ack.success, ack.error, nodeId);
       return;
     }
 
@@ -863,11 +963,11 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     // discarded in total silence. A relay whose outbound could not be
     // rebuilt looked exactly like one that had been rebuilt fine.
     if (ack.commandId.startsWith("reassert")) {
-      this.unackedReasserts.delete(ack.commandId);
+      if (this.unackedReasserts.get(ack.commandId)?.nodeId === nodeId) this.unackedReasserts.delete(ack.commandId);
       if (!ack.success) {
-        this.logger.warn(`Re-assert of ${ack.commandId} failed on the node: ${ack.error}`);
+        this.logger.warn(`Re-assert of ${ack.commandId} failed on node ${nodeId}: ${ack.error}`);
       } else if (ack.commandId.startsWith(CONFIRM_ACK_PREFIX)) {
-        await this.markProvisioned({ id: ack.commandId.slice(CONFIRM_ACK_PREFIX.length) });
+        await this.markProvisioned({ id: ack.commandId.slice(CONFIRM_ACK_PREFIX.length), nodeId });
       }
       // Synthetic: there is no AgentCommand row to update, so nothing
       // more to do. (This used to run the updateMany below anyway, one
@@ -875,10 +975,25 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const command = await this.prisma.agentCommand.findUnique({
-      where: { id: ack.commandId },
+    const command = await this.prisma.agentCommand.findFirst({
+      where: { id: ack.commandId, nodeId },
       select: { nodeId: true, type: true, payloadJson: true },
     });
+    if (!command) {
+      // Not this node's command, or none at all. Nothing to record.
+      return;
+    }
+
+    // A stored CONFIGURE_ROUTE -- from creating the route, or the persisted
+    // re-assert on reconnect -- says as much about the entry half as the
+    // sweep's does.
+    const configuredRouteId = (command.payloadJson as { routeId?: unknown } | null)?.routeId;
+    if (command.type === "CONFIGURE_ROUTE" && typeof configuredRouteId === "string") {
+      if (!ack.success) {
+        this.logger.error(`Route ${configuredRouteId} entry configuration REJECTED by node ${nodeId}: ${ack.error}`);
+      }
+      await this.recordEntryResult(configuredRouteId, ack.success, ack.error, nodeId);
+    }
 
     // A stored CREATE_USER or ENABLE_USER the node carried out means the
     // credential it names now exists there.
@@ -899,9 +1014,9 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     // database read or dump (the pre-deploy pg_dump among them) had every
     // credential ever provisioned. Replay reads QUEUED and SENT rows only,
     // so an acked or failed command never needs its credentials again.
-    const stripped = withoutCredentials(command?.payloadJson);
+    const stripped = withoutCredentials(command.payloadJson);
     await this.prisma.agentCommand.updateMany({
-      where: { id: ack.commandId },
+      where: { id: ack.commandId, nodeId },
       data: {
         status: ack.success ? "ACKED" : "FAILED",
         ackedAt: new Date(),
@@ -983,15 +1098,57 @@ function userCommandKey(nodeId: string, protocol: string, externalUserId: string
   return `${nodeId}\u0000${protocol}\u0000${externalUserId}`;
 }
 
-/** The CREATE_USER a re-assert sends for one credential: its protocol,
- * transport and inbound, so it is rebuilt where it was created, and its
- * credentials decrypted, since the agent cannot use the stored form. */
-function reassertPayload(user: {
+/** What a re-assert reads with each credential. */
+const REASSERT_INCLUDE = {
+  protocolConfig: { select: { transport: true, inboundTag: true } },
+  node: { select: { agentVersion: true } },
+  subscription: { select: { plan: { select: { maxDownloadMbps: true, maxUploadMbps: true } } } },
+} satisfies Prisma.ProtocolUserInclude;
+
+type ReassertUser = {
+  nodeId: string;
   protocol: string;
   externalUserId: string;
   credentialsJson: string;
   protocolConfig: { transport: string | null; inboundTag: string | null };
-}) {
+  node?: { agentVersion: string | null } | null;
+  subscription?: { plan: { maxDownloadMbps: number | null; maxUploadMbps: number | null } | null } | null;
+};
+
+/** The first agent release that can be sent a plan's speed caps on every
+ * re-assert: its applyRateLimit records a cap and applies only what
+ * changed. Earlier agents rebuild a user's whole tc setup on every
+ * CREATE_USER that carries caps -- a moment uncapped and a dozen tc
+ * processes per capped WireGuard user, every 60 s -- so they are sent
+ * none, as before.
+ *
+ * Caps used to arrive only at first provisioning and on a plan edit, and
+ * the agent kept them in memory: after any agent restart (every rollout)
+ * no OpenVPN customer who reconnected was shaped again, and after a
+ * `wg-quick` restart or a reboot no WireGuard customer, until an admin
+ * happened to edit the plan. Found by the 2026-10-06 review.
+ *
+ * If the agent release carrying that change is cut under another number,
+ * this has to move with it. */
+export const REASSERT_CAPS_FROM_AGENT = "0.2.10";
+
+/** Whether an agent reporting this version takes caps on every re-assert.
+ * Anything that is not a plain release number -- "dev", a missing
+ * version -- is treated as too old. */
+export function agentTakesReassertedCaps(agentVersion: string | null | undefined): boolean {
+  const parse = (v: string) => /^v?(\d+)\.(\d+)\.(\d+)$/.exec(v)?.slice(1).map(Number);
+  const have = agentVersion ? parse(agentVersion) : undefined;
+  const need = parse(REASSERT_CAPS_FROM_AGENT)!;
+  if (!have) return false;
+  for (let i = 0; i < 3; i++) if (have[i] !== need[i]) return have[i] > need[i];
+  return true;
+}
+
+/** The CREATE_USER a re-assert sends for one credential: its protocol,
+ * transport and inbound, so it is rebuilt where it was created, and its
+ * credentials decrypted, since the agent cannot use the stored form --
+ * and the plan's speed caps, for an agent that can take them. */
+function reassertPayload(user: ReassertUser) {
   return {
     protocol: user.protocol,
     transport: user.protocolConfig.transport,
@@ -1000,6 +1157,11 @@ function reassertPayload(user: {
     ...(user.protocolConfig.inboundTag ? { inboundTag: user.protocolConfig.inboundTag } : {}),
     externalUserId: user.externalUserId,
     credentials: decryptCredentials(user.credentialsJson),
+    // Nothing at all for an uncapped plan or an unshapeable protocol, the
+    // same as at first provisioning (rateLimitFor).
+    ...(agentTakesReassertedCaps(user.node?.agentVersion)
+      ? rateLimitFor(user.subscription?.plan, user.protocol as Protocol)
+      : {}),
   };
 }
 

@@ -3554,3 +3554,491 @@ signed-in device of one account); anything on a phone (Android 0.2.23
 and the iOS build); a censored network. The VM froze twice under guest
 control (2026-10-05 and 2026-10-06, both as a WireGuard or IKEv2 test
 began) and needed a hard reset; cause unknown, no product effect seen.
+
+## 2026-10-06 — backend review fixes (branch `claude/review-fixes-backend`)
+
+**Status:** done on the branch and pushed; not merged, not deployed.
+**Touches:** `apps/backend` (billing, customer-auth, customers,
+protocol-users, subscriptions, auth, agent-gateway, routes, health,
+client-attempts, the global throttle guard), migrations
+`20261009_admin_mfa_last_step` and `20261010_route_entry_health`, one
+comment in `installer/lib/agent.sh`.
+
+The 31 confirmed backend findings of the full review, which come down
+to 20 distinct problems, plus M33 (WebSocket session counts). One commit
+per problem; the commit messages say why. The ones touching money and
+live access: `provisionAll` minting working credentials for
+PENDING/CANCELLED/EXPIRED/SUSPENDED subscriptions (da575bb); a declined
+Stripe attempt writing off the PaymentIntent so the later success was
+dropped (771a0d4); StoreKit JWS accepted on any chain to Apple Root
+CA - G3 (90332ed); the unauthenticated verify-email-code branch granting
+a trial and returning decrypted credentials (a974423).
+
+### What a deploy does -- read before deploying
+
+Backend only. No client or agent release depends on it, and no client
+needs it first. Both migrations are two nullable columns between them,
+and `migration-safety.spec.ts` checks both; their SQL matches what
+`prisma migrate diff` generates from main's schema.
+
+- **First boot switches off unpaid access.** The backfill removes the
+  ACTIVE credentials of PENDING and CANCELLED subscriptions and disables
+  those of EXPIRED and SUSPENDED ones, and logs the counts at warn. Anyone
+  using one loses that tunnel at deploy, which is the fix. Count first,
+  read-only:
+  `SELECT s.status, count(*) FROM protocol_users pu JOIN subscriptions s ON s.id = pu."subscriptionId" WHERE pu.status = 'ACTIVE' AND s.status <> 'ACTIVE' GROUP BY s.status;`
+- **Customers disabled before this deploy keep their node credentials**
+  until each is saved as DISABLED again in the panel (85f082b). Their
+  refresh is refused from the deploy, so their apps lose the API within
+  15 minutes, but a connected tunnel keeps working. Which ones:
+  `SELECT c.id FROM customers c WHERE c.status = 'DISABLED' AND EXISTS (SELECT 1 FROM protocol_users pu JOIN subscriptions s ON s.id = pu."subscriptionId" WHERE s."customerId" = c.id AND pu.status = 'ACTIVE');`
+- **Relay routes read OFFLINE** in the route list until their entry node
+  acks a CONFIGURE_ROUTE. How long that takes is not measured, and "at
+  most a minute" (said here before) is not proven: on reconnect the
+  route goes out only after the outbox replay and the full user
+  re-assert, and the agent works through commands one at a time, so a
+  relay with many users -- IKEv2 ones reload every secret per user --
+  can take longer. The status is display and a tiebreak in the apps
+  (desktop 0.9.44 also labels a custom exit on that route as down); it
+  blocks no connection.
+- **Rolling back re-enables everyone disabled after the deploy.**
+  Disabling leaves credential rows ACTIVE on purpose (switchOffCustomer);
+  main's re-assert has no customer filter, so within a minute of a
+  rollback it puts every such customer's credentials back on the nodes.
+  No worse than main today, but after a rollback re-disable them by hand.
+- **Stripe must send two events it may not be subscribed to.** A Stripe
+  payment is now marked FAILED only on `checkout.session.expired` or
+  `payment_intent.canceled` (771a0d4); `payment_intent.payment_failed`
+  leaves it PENDING because Checkout retries on the same PaymentIntent.
+  Check the endpoint in the Stripe dashboard lists both. If not, no
+  Stripe row is marked FAILED again -- harmless (they stay PENDING), but
+  the payments list stops showing failures.
+- **iOS purchases:** before `APPLE_BUNDLE_ID` is given to the production
+  container, redeem one sandbox purchase from a real iPhone. The new chain
+  check was only run against Apple-shaped chains under a throwaway root.
+
+### Proven, on this PC
+
+Backend 99 suites / 1,182 tests, typecheck and lint clean. Each fix
+has a test that fails on the code before it; the commit message says how
+many. `bash -n installer/lib/agent.sh`; shellcheck is not installed here.
+After the review fixes below: 99 suites / 1,188 tests, typecheck and
+lint clean; each of the three new fixes' tests was run against the code
+before it and failed.
+
+### Unverified
+
+- Nothing ran against production, a node, Stripe, Apple, Plisio or
+  NowPayments. The Stripe retry-on-one-PaymentIntent fix is unit-tested
+  on the webhook handler, not replayed from Stripe's test mode; the
+  Plisio reconcile follows the documented API and was never called.
+- That `req.ip` is the node's address for mirror and tunnel traffic is
+  from reading the code and the panel nginx template, plus the
+  reviewer's local proxy-addr run. The production panel nginx is
+  hand-maintained and was not read.
+- `/health/ip` now signs a network only for the address nginx saw, or
+  Cloudflare's header when that address is a Cloudflare edge. A
+  customer whose baseline goes through a node mirror pointed at the
+  origin (`NEOXIFY_PANEL_ORIGIN`) gets no token now. Whether any
+  production mirror is set up that way is not known.
+- The relay entry health assumes every agent acks CONFIGURE_ROUTE
+  success. Read from the code: every command is acked, and re-asserts
+  have been idempotent since b267f5f (in v0.2.9). The nodes' versions
+  were not checked.
+- No query here has met a real Postgres. The unit tests mock Prisma, and
+  CI's Postgres only applies the migrations. So the new `where` filters
+  (the live-credential and plan filters among them) are checked as
+  objects, not as rows they select, and admin delete's handling of the
+  foreign keys is checked against the schema, not against a database.
+
+### Not fixed, and why
+
+- **Sign-in, sign-up, password reset, the sign-in challenge and
+  LoginGuard's per-source counters still count per address.** Customers
+  behind one node mirror still share those buckets, and anyone can empty
+  them. Signed-in requests and refresh no longer share (00b27cc), nor do
+  signed-in attempt reports and App Store redemptions (ab0a942); an
+  anonymous attempt report still counts per address. The real
+  client is in X-Forwarded-For, but tunnel traffic arrives from the same
+  node address with a header the customer wrote. Trusting it would give
+  every connected customer a fresh sign-in budget per forged header. The
+  fix is for the mirror to authenticate its hop (a per-node secret header
+  or a client certificate). That is an installer change and a rollout to
+  every node: an owner decision.
+- grpc-js `call.destroy()` sends the agent no status on any close path
+  (noted in c289e79); its own change.
+- Re-signing up with the same Apple ID after deleting an account needs
+  Apple's token revocation (noted in d240bbe).
+- The relay Xray template's default outbound is still `direct`, so a new
+  relay would not fail closed the way ir1 does by hand. That is a node
+  config question, not a backend one.
+- **A password sign-in grants a trial to any verified account with no
+  subscription.** Eligibility is "has no subscription at all", so if an
+  operator deletes a customer's trial subscription, the next sign-in
+  grants a new one. Main already did this through the unauthenticated
+  verify-code branch (a974423 closed that route, and sign-in is where the
+  retry lives now), so it is not a regression. Making a trial once per
+  account needs a persisted marker -- a product call, not made here.
+
+### After the adversarial review
+
+The review of `ec83104` found one blocking defect and eight lows.
+
+- **Fixed, blocking (8045019): one plan's speed cap went to every
+  plan.** `reapplyRateLimits` spread `liveCredentialWhere()` after
+  `subscription: { planId }`; da575bb gave that helper a `subscription`
+  key of its own, which replaced the plan filter. An admin editing
+  Starter's cap would have shaped every live WireGuard and OpenVPN
+  customer on every plan to Starter's speed, with nothing to undo it.
+  Never deployed. The spec had built its expected value with the same
+  spread, so it asserted the bug.
+- **Fixed (1aec444): re-enabling a credential put a disabled customer
+  back on the nodes.** A renewal or a reactivation called
+  `setEnabled(true)`, which sent ENABLE_USER whatever the account's
+  status. It now asks liveCredentialWhere (minus the row's own status)
+  first and leaves the row off its node until it is live.
+- **Fixed (ab0a942):** attempt reports and App Store redemptions count
+  per signed-in session (above).
+- **Documented:** rollback re-enables disabled customers; the relay
+  OFFLINE window is not bounded; the Stripe event subscription (all in
+  the deploy notes above). The trial-on-sign-in note (above).
+- **Not real:** "switch-route can return a PENDING or CANCELLED
+  subscription's leftover credential". Its only caller,
+  `POST /customer/subscriptions/:id/route`, refuses any subscription
+  that is not ACTIVE before calling it.
+
+## 2026-10-06 — agent and installer review fixes (branch `claude/review-fixes-agent`)
+
+Built on `claude/node-private-egress` (181fe0d: customers reaching a
+node's loopback -- the Xray API, OpenVPN management -- through their own
+tunnel; not redone here). Not merged, not deployed, no agent released.
+Each commit message carries its finding; this is the state around them.
+
+**Must land before the next agent rollout -- and is in this branch:**
+the usage baseline (6bd4300). Every agent restart billed every WireGuard
+peer's lifetime counter, and every connected OpenVPN/IKEv2 session's
+total, a second time; 27 subscriptions have data caps. Rolling out
+*any* agent build without it re-bills on every node at once.
+
+**Deploy order.**
+- Backend (8919b62, 37ea43c) can go before or after the agent release.
+  37ea43c sends plan speed caps on every re-assert only to nodes
+  reporting agentVersion >= `REASSERT_CAPS_FROM_AGENT` = "0.2.10"
+  (agent-gateway.service.ts). **If the agent release carrying 381de16
+  is not v0.2.10, change that constant first** -- an older agent
+  rebuilds a capped WireGuard user's tc rules every 60 s.
+- Agent release (next `v*` tag) after merge: everything under
+  `agent/`. Caps come back on a node only once it runs it.
+- Installer changes take effect on the next installer run; nothing on
+  live nodes changes by itself.
+- Node-side, each needing the owner's go-ahead, none done:
+  `installer/maintenance/isolate-tunnel-clients.sh` (dry run by default)
+  on each WireGuard/OpenVPN/IKEv2 node; `block-private-egress.sh` from
+  the parent branch; and, only after the new agent is on every OpenVPN
+  node and a re-assert has run, `ccd-exclusive` in server.conf
+  (installer + restore script) -- before that it cuts off every OpenVPN
+  customer.
+- Panel host: production is deployed with git pull + compose, so the
+  certbot deploy hook (now restarting the backend, 814ed0b) has to be
+  regenerated there by hand once; and `APPLE_BUNDLE_ID` set in
+  `infra/.env` when App Store purchases go live (cf50278 passes it).
+
+**Proven.** Go agent: CI on 37ea43c green (vet, build, `go test ./...`,
+every package ok) -- there is no Go toolchain on this PC, so CI is the
+only place it ran; the branch head was pushed for the same. 81 Go test
+functions (55 before; 4 replaced, 30 added). The IKEv2 parser now reads
+`swanctl --list-sas --raw` output captured from a live node today
+(redacted, `agent/internal/protocols/ikev2/testdata/`), which the old
+parser returned nothing for. Backend: 1,043 tests, typecheck, lint, on
+this PC. Installer: `bash -n`; shellcheck in CI. The isolation script's
+remote half was run against a fake root with a stub iptables.
+
+**Unverified -- needs a node, labelled so in the commits:**
+- A usage row appearing after a real IKEv2 dial on the new agent; the
+  IKE-rekey case (per-CHILD_SA keying is reasoned from how strongSwan
+  rekeys).
+- DISABLE_USER ending a live IKEv2 session (`swanctl --terminate
+  --ike-id N --force`); the old `--eap-id` failing is from strongSwan's
+  source, not a run.
+- That no rollout double-bills: watch dataUsedBytes across the first
+  agent restart on a node with active WireGuard peers.
+- Caps returning after a wg-quick restart and after an agent restart
+  with OpenVPN clients connected.
+- Every installer path: the Xray carry-over and `xray run -test`
+  rollback, the role lookup from menu 5, the WireGuard/OpenVPN re-run
+  guards, the cert hook restart, the FORWARD isolation (nothing should
+  change for customers; a client pinging another client's 10.66.x
+  address should now get nothing).
+
+**Not fixed, and why.**
+- Mirror rate-limit buckets (one client exhausting sign-in for everyone
+  behind a node mirror): needs the hop authenticated -- a secret the
+  mirror sends and the backend checks -- which is backend design work
+  (in the backend review's list) plus a node nginx change after it.
+  Only the false nginx comment was corrected (e8ed802).
+- `ccd-exclusive` itself: owner decision and ordering, above. Hard-
+  deleted OpenVPN rows on a rebuilt node stay accepted until it is on.
+- Requiring `subnetCidr` for OPENVPN in the backend: a stale installer
+  checkout on a node would then fail its tls-crypt PATCH, which is
+  worse than what it guards.
+- `agentd --enroll-init` refusing to overwrite without `--force`: the
+  installer (from main) and the binary (from the latest release) skew,
+  and an older binary rejects an unknown flag.
+- IKEv2 `dpd_delay`/`reauth_time` as a server-side backstop for ending
+  revoked sessions: a live config change, owner decision.
+
+## 2026-10-06 — agent review fixes, second round (branch `claude/review-fixes-agent`)
+
+A second, adversarial review of the branch above found three medium
+defects -- one new behaviour the branch caused, two claimed fixes that
+did not work -- and twelve lows. Not merged, not deployed, no agent
+released, no node or production server contacted.
+
+**Blocking, all three fixed.**
+- *Dead IKEv2 sessions counted as devices in use* (8b859b2, on d9c939a).
+  The fixed parser made IKEv2 session counts real, counting every SA
+  strongSwan lists, and nothing on the server ends one (no DPD,
+  rekey_time = 0s). The captured sample's two SAs had had nothing from
+  their clients for about 21 hours. Each would have kept a device slot
+  and fed the backstop. The agent now counts only ESTABLISHED SAs with
+  inbound traffic in the last three minutes (half-open SAs, whose
+  identity is only claimed, drop out too), and the backend puts IKEV2 in
+  COUNTS_IGNORED and goes by bytes -- both, because production runs main
+  and either could ship first.
+- *`xray run -test` could never pass on a running relay* (596813c, on
+  the no-change refactor 544bcbf). -test creates the tun inbound's device,
+  which the live Xray holds ("device or resource busy", measured on ir1
+  2026-08-16), so every install_xray re-run on a live relay put the old
+  config back and blamed the config. A running relay's config is now
+  tested without its tun inbound. block-private-egress.sh (parent branch)
+  had the same test under pipefail and could never apply on ir1; fixed
+  the same way.
+- *Nothing retried a failed IKEv2 terminate* (24f559c). A failed command
+  is marked FAILED and never resent; the re-assert sends only credentials
+  that should be on. The provisioner now ends any SA still listed under
+  an identity it removed or disabled, on every stats poll, until none is.
+  Forgotten across an agent restart.
+
+**Lows.**
+- Fixed: a changed OpenVPN cap forgot where the user was shaped, so a
+  client that left before the next pass left its old cap on that pool
+  address for the next customer (84e2815; two older shaping tests that
+  could not fail were tightened, 10ab7ae). Reconnect backoff capped at
+  15 s, under the backend's 30 s first stale sweep, so a deploy cannot
+  mark nodes OFFLINE (472b054). A WireGuard re-run now defaults to, and
+  insists on, the panel's subnetCidr -- on a rebuilt node Enter used to
+  pick 10.66.0.0/24 whatever the panel said (ef22da0).
+- Owner decision: **billing IKEv2 usage at all.** docs/ikev2-node.md
+  used to call leaving it uncounted deliberate; the parser fix turns it
+  on. Written into that doc. Approve or hold before the agent release.
+- Deploy note, added below.
+- Not a defect: the moved prompts "breaking answer-file installs" --
+  answer files are already recorded as unsupported (windows.md, "do not
+  feed it a here-doc"), and a full install takes the relay role from the
+  role question.
+- Deferred: the backend gating caps on agentVersion "0.2.10" rather than
+  a capability the agent declares in Hello (a proto change, and no Go
+  toolchain here to regenerate it; the deploy note above covers it);
+  every agent restart rebuilding each relay rule once (a brief leak
+  window only on a relay still defaulting to `direct`; the author's
+  known trade-off).
+- Unanswered: who captured the IKEv2 fixture "from a live node" -- the
+  repo does not say. Its redaction looks complete (addresses, ids, SPIs
+  replaced; only NAT source ports and counters left).
+
+**Deploy order, added to the above.** Rolling the agent *back* to any
+build without 6bd4300 -- the installer's rollback to a v0.2.9 backup in
+/root/agent-rollback included -- re-bills every connected customer's
+totals once, as a forward rollout without it would. The backend change
+(IKEV2 ignored in the backstop) is safe before or after the agent.
+
+**Proven.** Every new Go and installer test was run against the code
+before its fix: CI run 37562880092 on a throwaway branch
+(`claude/review-fixes-agent-red`: the old code plus only the two
+no-change prep commits and the new tests) failed exactly the seven new
+Go tests written to fail plus the changed backoff expectation, in
+ikev2, dispatch and controlplane, every other package ok; the installer
+gate test failed 3 of its 12 checks on "device or resource busy" with
+the runner's real jq. (That run's TypeScript job failed in
+apps/mobile's capability-scope test, which this branch does not touch:
+desktop-windows' build fetches the real seed bundle while mobile's
+pretest has already generated its capability file from the placeholder,
+a race inside turbo; the backend branch's run passed it 15 minutes
+earlier.) The backend test fails on the old code locally. Backend:
+1,045 tests, typecheck, lint, on this PC. Go: 90 test functions (81
+before; 9 added, 4 changed) -- still no Go toolchain here, so CI is the
+only place they run.
+
+**Unverified -- needs a node.** That `use-in` moves only with ESP
+traffic; an IKEv2 terminate on a live session, and the retry; install_xray
+on a live relay end to end; block-private-egress.sh's remote half
+(syntax-checked only); the WireGuard subnet guard; a backend restart with
+nodes reconnecting inside the first sweep.
+
+## 2026-10-06 — desktop review fixes (branch `claude/review-fixes-desktop`, off `main` `1cd85c6`)
+
+**Status:** pushed, not merged, not released. Fourteen confirmed
+findings from the full review of the desktop area; thirteen fixed, one
+partly. Commit messages carry the detail; this records what is proven
+and what is not.
+
+### Fixed
+
+- **Control-plane outage tore down working tunnels** (high). The egress
+  check now tells an HTTP answer of any status from our own endpoints
+  (`00e9ffe`) and, when nothing of ours answers at all, a TCP handshake
+  with 1.1.1.1 / 8.8.8.8:443 through the tunnel (`4189cc4`, new
+  `probe_ipv4_egress`) apart from a dead tunnel: both are now
+  `indeterminate`, so the poll falls back to the handshake, counts no
+  strike and runs no ladder. With no baseline, every rung is judged on
+  its handshake rather than rejected, and the wait for proof that cannot
+  come ends at once (`4f2123a`). **The TCP probe was wrong for every
+  Xray protocol** -- xray's tun answers the handshake itself -- and is
+  now a verified TLS handshake; see the follow-up entry below.
+- **"You're protected" on a dual-stack machine while IPv4 bypassed**
+  (medium). `/health/ip` is asked over IPv4 only on Windows (new
+  `health_ip_v4` command, reqwest bound to `0.0.0.0`, installed from
+  `main.tsx`), and two readings of different families are never
+  compared (`9ad2458`). The mobile app keeps the plugin's fetch and gets
+  only the family guard.
+- Remount over a live tunnel showed "not protected" (high) and a pass
+  outliving the screen (medium): `44dfcd5` (`lib/ladder-pass`, sync
+  before loading ends). Unbounded egress walks (medium): `e226923`.
+  Snapshot written after sign-out (low, both clients): `90393c7`.
+  IPv6 alarm in Custom mode (medium): `25d148c`. Mirror 502 winning the
+  race (medium, shared with mobile): `b2167a7`. Verify-email deep link
+  (low): `33135db`. Repair survey order (low): `8fafe35`, which also
+  raises `REPAIR_WORST_CASE` 735s → 885s and the app's deadline to 900s
+  (ten idle-arm spawns were never itemised), and fixes the JS repair
+  wrapper, left at 205s when the Rust deadline went to 750s. Stop vs
+  app watch (low): `07754b1`. Disconnect vs a queued Connect (low):
+  `e14de8b`. Pipe: ArmGaming refused, running-app list limited to the
+  caller's session (low): `a738dc8`.
+
+### Partly fixed
+
+- **Capability scope fixed at build time** (medium), `d82b640`: a domain
+  the seed uses for two or more hosts now gets a wildcard, so a node
+  added later on an existing mirror domain is in scope for builds from
+  now on; `bundle.mjs sign --previous <last signed bundle>` warns about
+  hosts installed clients will refuse. **Not done:** extending the scope
+  at runtime from a signature-verified bundle in Rust. A new domain or a
+  bare IP still needs a client release, and every build up to desktop
+  0.9.44 / mobile 0.2.23 still scopes exact hosts only.
+
+### Proven, on this PC
+
+Desktop `pnpm test` 770 passed in 50 files (725 in 44 before), `pnpm
+typecheck` clean; mobile vitest 72 passed, `tsc --noEmit` clean;
+`cargo test --workspace` Tauri 35 passed (2 ignored), ipc 58, service
+477 (6 ignored); `cargo check --workspace --all-targets` with no new
+warnings. Every fix has a test shown to fail on the old code, except
+the pure-source orderings, which assert the wiring. Two are
+measurements rather than models: `health_ip.rs` shows on this machine's
+loopback that the pinned request makes no IPv6 connection where an
+unpinned client answers over `[::1]`; and the queued-Connect test
+drives the real pipe and fails without the fix (the connect ran and
+reported the missing wireguard.exe). `apply-capability-scope.mjs` and
+`bundle.mjs sign --previous` were run end to end on a synthetic,
+documentation-names-only seed.
+
+### Unverified
+
+- Everything about real traffic: no VM run of this branch. The outage
+  case (backend down under a live tunnel), the remount/adopt flow, the
+  repair CLI on a machine with residue, and a service stop with the app
+  open all need the rig.
+- Dual-stack behaviour against the real CDN: this PC has no IPv6. Also
+  whether the CDN treats `health_ip_v4`'s requests as it treats the
+  plugin's (same User-Agent string on purpose; not observed).
+- Whether 1.1.1.1 / 8.8.8.8:443 answer through every protocol from a
+  censored network.
+
+### Deploy order
+
+None of it needs the backend, an agent release or a node change. The
+app and the service ship in one installer and must: `REPAIR_WORST_CASE`
+is compiled into both. The operator should start passing `--previous`
+when signing the next endpoint bundle.
+
+## 2026-10-06 — review of the desktop fixes: the IPv4 probe and the lows (same branch)
+
+**Status:** pushed to `claude/review-fixes-desktop`, not merged, not
+released. An adversarial review of the entry above found one blocking
+defect and eleven lows. The blocking one is fixed and measured; seven
+lows are fixed, two are recorded as deferred, two needed no code.
+
+### The blocking finding, measured
+
+`probe_ipv4_egress` asked for a TCP handshake with 1.1.1.1 / 8.8.8.8 on
+443. Under VLESS-REALITY, VLESS-TLS, Trojan and Shadowsocks that is
+answered by xray.exe itself: its `tun` inbound is a gVisor stack that
+completes the three-way handshake before handing the connection to the
+outbound (`proxy/tun/stack_gvisor.go` in the bundled v26.1.23). So the
+probe said yes whenever xray.exe ran, and a node blocked mid-session --
+the common failure in Iran -- read as "our API is down": no strike, no
+failover, "Connected, not confirmed" over a dead tunnel; with no
+baseline the ladder stopped on a dead Xray rung.
+
+Measured on `Neoxify-Test` with the bundled xray.exe, a `tun` inbound on
+its own adapter and host routes for both resolvers into it (the app was
+not involved; the probe ran as the Tauri crate's test binary):
+
+| xray outbound | TCP handshake (old probe) | verified TLS (new probe) |
+|---|---|---|
+| none (no tunnel) | yes | yes |
+| VLESS to a working relay (xray on the host, loopback) | yes | yes, 20ms |
+| VLESS to 192.0.2.1 (never answers) | **yes** | no, at the 5s limit |
+
+The relay's own log showed both probes' connections arriving and dialled
+out. A first attempt with a `freedom` outbound looped back into the tun
+(its dial to 1.1.1.1 followed the host route) and is not evidence of
+anything. The probe is now a TLS handshake whose certificate verifies
+for `one.one.one.one` / `dns.google`, using the control-plane probe's
+handshake and roots (`16c8050`). It also decides whenever no endpoint
+gave an address, not only when none answered: the connected node's own
+mirror is on the node's address, routed around the tunnel, so its 502
+said nothing about the tunnel. Where the command does not exist (mobile)
+an error page from ours still counts as traffic flowing.
+
+### The lows
+
+- Writes stop at an HTML 502 or 520 as at 504/524 (`5b43d08`): nginx's
+  502 also means the upstream closed mid-request, and 520 an unreadable
+  origin answer, so a resent purchase or redemption could run twice.
+- App watch: a thread the OS would not start is `Unwatchable` and tears
+  down, instead of sharing `WatchAbandoned` with the service stop
+  (`057e4e9`).
+- The egress baseline lives in the ladder-pass store, so a screen
+  remounted mid-connect compares against the pass's baseline; the guard
+  is renewed at every rung, so a long ladder no longer outlives
+  `LADDER_MAX_MS` (`66362a2`).
+- A new state's first health check runs once the one in flight ends,
+  instead of waiting up to fifteen seconds (`ffdfe9f`).
+- `health_ip_v4` refuses every loopback host in a release build; its
+  HTTPS path was run against two public HTTPS hosts that are not ours
+  (404 in 49ms and 323ms) (`f0bc90c`).
+- A flaky test from `e226923` (1 failure in 5 runs) was a real edge: a
+  timer firing a millisecond early let the walk ask the next endpoint
+  with a 1ms budget (`2c6d322`).
+- Mobile, through the shared code: an error page from every endpoint is
+  "no verdict", which mobile shows as "Connected" (it was "degraded"),
+  and on a dual-stack phone an IPv6 baseline against an IPv4 reading is
+  no longer proof, so `saveLastGood` does not save on it. Both are the
+  intended rules; neither has a mobile-side test.
+- Deferred: the baseline walk capped at two endpoint timeouts (a bare
+  network that black-holes the first two endpoints in order gets no
+  baseline, so bypass is undetectable for that session; unverified how
+  often), and `bundle.mjs --previous` standing in for what shipped
+  clients allow (a host first added in that bundle is not warned about;
+  knowing each build's seed needs the release to record it, or #11's
+  runtime scope).
+
+### Unverified
+
+Everything in the entry above still is, and: the new probe through
+WireGuard, OpenVPN and IKEv2 (kernel tunnels, so a TCP handshake did
+cross them, but the TLS one has not been run through them); the 5s limit
+on a slow censored path; whether a node's network reaches 1.1.1.1 and
+8.8.8.8 on 443 (both are also the tunnel's DNS, so a node that cannot is
+already broken for customers).
