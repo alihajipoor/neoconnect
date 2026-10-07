@@ -15,6 +15,7 @@ import {
   reconnectingView,
   reconnectLost,
   reconnectOutcomeOf,
+  vouching,
   type ReconnectAttempt,
   type ReconnectOutcome,
 } from "./auto-reconnect";
@@ -673,6 +674,33 @@ describe("a ladder pass, as an attempt's outcome", () => {
     for (const kind of ["concurrentLimit", "quotaExhausted", "subscriptionInactive"]) {
       expect(reconnectOutcomeOf("failed", { errorKind: kind })).toEqual({ kind: "stop", why: "notEntitled" });
     }
+  });
+});
+
+describe("whether the app is vouching for a tunnel", () => {
+  it("is, for an armed tunnel of the session in force", async () => {
+    const h = harness();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    expect(vouching(h.rc.current(), 1)).toBe(true);
+  });
+
+  it("is not for one armed under a session that has since ended", () => {
+    // An expired session ends from a screen that never says so, and can
+    // leave a tunnel armed. Signed in again, the first screen must not
+    // take the sign-out's own teardown for a drop.
+    const h = harness();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    expect(vouching(h.rc.current(), 2)).toBe(false);
+  });
+
+  it("is not during an episode, nor when idle", async () => {
+    const h = harness();
+    h.bind();
+    expect(vouching(h.rc.current(), 1)).toBe(false);
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    expect(vouching(h.rc.current(), 1)).toBe(false);
   });
 });
 

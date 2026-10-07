@@ -31,7 +31,7 @@ describe("where an episode begins", () => {
     // the service, and a tunnel the app was vouching for that is now
     // verifiably gone is a drop -- through the same rule as the polls.
     const adopt = body("async function adoptServiceState(sub: Subscription | null): Promise<ConnectionState | null> {");
-    const vouched = adopt.indexOf("const vouched = vouching(autoReconnect.current());");
+    const vouched = adopt.indexOf("const vouched = vouching(autoReconnect.current(), sessionGeneration());");
     const mark = adopt.indexOf("const mark = statusDisturbances.mark();");
     const asked = adopt.indexOf("const adopted = await syncFromService();");
     expect(vouched).toBeGreaterThan(0);

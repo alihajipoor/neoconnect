@@ -1129,7 +1129,7 @@ export function Dashboard({
     // the screen came back to a plain "You're not protected", and the
     // reconnect never began. Stamped and marked before asking, as every
     // drop check is.
-    const vouched = vouching(autoReconnect.current());
+    const vouched = vouching(autoReconnect.current(), sessionGeneration());
     const generation = intentRef.current.generation;
     const mark = statusDisturbances.mark();
     const adopted = await syncFromService();
@@ -1819,21 +1819,6 @@ export function Dashboard({
     return () => clearInterval(id);
   }, [connectionState]);
 
-  /** Every press does something, and no press can leave the app worse
-   * off than it found it.
-   *
-   * The action is not worked out here. It is computed in the render that
-   * drew the label -- see `pressFor` -- and handed in with the press, so
-   * the button cannot dispatch the opposite of what it promised. That
-   * was not a theoretical hazard: the label came from one chain of
-   * ternaries and the press from another, over a `connectionState` that
-   * three asynchronous writers could overwrite between the render and
-   * the click, and the customer-visible result was Connect running a
-   * teardown.
-   *
-   * Every branch finishes by asking the service what is true, so the
-   * worst a redundant press can do is refresh the screen with the truth.
-   */
   /** Stops a ladder pass in flight and takes down whatever it left.
    *
    * The ladder checks `cancelRef` between steps and unwinds itself; the
@@ -1877,6 +1862,21 @@ export function Dashboard({
     void deviceSlot.release();
   }
 
+  /** Every press does something, and no press can leave the app worse
+   * off than it found it.
+   *
+   * The action is not worked out here. It is computed in the render that
+   * drew the label -- see `pressFor` -- and handed in with the press, so
+   * the button cannot dispatch the opposite of what it promised. That
+   * was not a theoretical hazard: the label came from one chain of
+   * ternaries and the press from another, over a `connectionState` that
+   * three asynchronous writers could overwrite between the render and
+   * the click, and the customer-visible result was Connect running a
+   * teardown.
+   *
+   * Every branch finishes by asking the service what is true, so the
+   * worst a redundant press can do is refresh the screen with the truth.
+   */
   async function handleConnectToggle(action: PressAction) {
     if (!protocolUser) return;
     setConnectionError(null);

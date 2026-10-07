@@ -330,9 +330,14 @@ export function reconnectLost(phase: ReconnectPhase): boolean {
 
 /** Whether the app is vouching for a tunnel that, if it dropped, would be
  * reconnected: what a screen mounting with nothing on it yet uses in
- * place of "what it was showing" -- see `droppedUnseen`. */
-export function vouching(phase: ReconnectPhase): boolean {
-  return phase.kind === "armed";
+ * place of "what it was showing" -- see `droppedUnseen`.
+ *
+ * Only for the session in force. A session that ended by expiring, from
+ * a screen that never got to say so, can leave a tunnel armed; signing in
+ * again, the first screen would otherwise find it gone -- the sign-out
+ * took it down -- and greet the customer with "VPN connection lost". */
+export function vouching(phase: ReconnectPhase, session: number): boolean {
+  return phase.kind === "armed" && phase.session === session;
 }
 
 export class AutoReconnect {

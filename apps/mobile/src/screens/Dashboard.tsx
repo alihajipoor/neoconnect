@@ -549,7 +549,7 @@ export function Dashboard({
     // Whether the app was vouching for a tunnel before asking: a screen
     // away in Settings had no poll running, so a tunnel that dropped
     // meanwhile is found here or nowhere. See `droppedWhileAway`.
-    const vouched = vouching(autoReconnect.current());
+    const vouched = vouching(autoReconnect.current(), sessionAtStart);
     let answered = false;
     try {
       adopted = stateFromStatus(await vpnStatus());

@@ -126,7 +126,7 @@ describe("the phone dashboard's wiring", () => {
 
   it("notices a drop on a screen that was away, through the tested rule", () => {
     expect(dashboard).toContain("droppedWhileAway({");
-    expect(dashboard).toContain("const vouched = vouching(autoReconnect.current());");
+    expect(dashboard).toContain("const vouched = vouching(autoReconnect.current(), sessionAtStart);");
   });
 
   it("asks the phone's questions, then runs an ordinary pass", () => {
