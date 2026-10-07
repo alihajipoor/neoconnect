@@ -115,9 +115,10 @@ describe("relay uplink survives an exit-node engine restart", () => {
       for (const ack of pending) {
         await (
           service as unknown as {
-            handleCommandAck(a: { commandId: string; success: boolean; error: string }): Promise<void>;
+            handleCommandAck(n: string, a: { commandId: string; success: boolean; error: string }): Promise<void>;
           }
-        ).handleCommandAck(ack);
+          // Only the exit node is ever written the uplink, so only it acks.
+        ).handleCommandAck("france-1", ack);
       }
     };
 
@@ -177,9 +178,9 @@ describe("relay uplink survives an exit-node engine restart", () => {
 
     await (
       service as unknown as {
-        handleCommandAck(a: { commandId: string; success: boolean; error: string }): Promise<void>;
+        handleCommandAck(n: string, a: { commandId: string; success: boolean; error: string }): Promise<void>;
       }
-    ).handleCommandAck({
+    ).handleCommandAck("france-1", {
       commandId: `${UPLINK_ACK_PREFIX}route-fr`,
       success: false,
       error: "xray AlterInbound (add user route:route-fr): inbound not found",

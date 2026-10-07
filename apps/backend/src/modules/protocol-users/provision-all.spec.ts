@@ -7,11 +7,13 @@ import { deviceSlotsStub } from "../../../test/device-slots-stub";
 describe("ProtocolUsersService.provisionAll", () => {
   const ROUTES = [{ id: "route-reality" }, { id: "route-tls" }, { id: "route-wg" }];
 
-  function build(existingRouteIds: string[] = []) {
+  function build(existingRouteIds: string[] = [], status = "ACTIVE") {
     const prisma = {
       subscription: {
         findUnique: jest.fn().mockResolvedValue({
           id: "sub-1",
+          status,
+          customer: { status: "ACTIVE" },
           plan: { protocolsAllowed: ["XRAY_VLESS_REALITY", "XRAY_VLESS_TLS", "WIREGUARD"], allowedRoutes: [] },
         }),
       },
@@ -120,5 +122,36 @@ describe("ProtocolUsersService.provisionAll", () => {
     await service.provisionAll("sub-1");
 
     expect(overlapped).toBe(false);
+  });
+
+  /** A plan route edit, a plan change and the boot backfill all reach
+   * subscriptions that are not ACTIVE -- every abandoned checkout ever
+   * made on the plan, among others. A missing route there used to become
+   * an ENABLED credential nobody paid for, which expiry and quota never
+   * switched off because they only act on ACTIVE subscriptions. */
+  it.each(["PENDING", "CANCELLED", "EXPIRED", "SUSPENDED"])(
+    "creates nothing for a %s subscription",
+    async (status) => {
+      const { service, create } = build([], status);
+
+      await expect(service.provisionAll("sub-1")).resolves.toEqual({ created: [], revoked: [], failed: [] });
+      expect(create).not.toHaveBeenCalled();
+    },
+  );
+
+  /** Taking away is still right whatever the status: a route the plan no
+   * longer allows must not survive on a suspended subscription until its
+   * renewal. */
+  it("still revokes what the plan no longer allows from a subscription that is not ACTIVE", async () => {
+    const { service, prisma, create } = build([], "SUSPENDED");
+    prisma.protocolUser.findMany.mockResolvedValue([{ id: "pu-old", routeId: "route-gone", sessionId: null }]);
+    const remove = jest.spyOn(service, "remove").mockResolvedValue(undefined);
+    jest.spyOn(service["logger"], "warn").mockImplementation(() => undefined);
+
+    const result = await service.provisionAll("sub-1");
+
+    expect(remove).toHaveBeenCalledWith("pu-old");
+    expect(result).toEqual({ created: [], revoked: ["pu-old"], failed: [] });
+    expect(create).not.toHaveBeenCalled();
   });
 });

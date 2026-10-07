@@ -122,7 +122,7 @@ export class CustomersService {
    * defeat the reset entirely. Same reason the self-serve reset bumps it.
    */
   async update(id: string, dto: UpdateCustomerDto) {
-    await this.get(id);
+    const current = await this.get(id);
 
     const { password, ...rest } = dto;
     const data: Prisma.CustomerUpdateInput = { ...rest };
@@ -131,8 +131,19 @@ export class CustomersService {
       data.tokenVersion = { increment: 1 };
     }
 
+    // Every save as DISABLED, not only the change to it: an account
+    // disabled before setting the status revoked anything still has its
+    // credentials on the nodes (the re-assert no longer puts them back,
+    // but nothing took them off), and saving it again is how an operator
+    // finishes that. Every step of disable() is safe to repeat.
+    const disabling = rest.status === CustomerStatus.DISABLED;
+    const enabling = rest.status === CustomerStatus.ACTIVE && current.status !== CustomerStatus.ACTIVE;
+    if (disabling) return this.disable(id, data);
+
     if (!password) {
-      return this.prisma.customer.update({ where: { id }, data, select: SAFE_SELECT });
+      const updated = await this.prisma.customer.update({ where: { id }, data, select: SAFE_SELECT });
+      if (enabling) await this.catchUpRoutes(id);
+      return updated;
     }
 
     // The sessions are revoked in the same transaction as the password,
@@ -166,7 +177,89 @@ export class CustomersService {
     // use" to the next device that connects. Every device here -- the
     // admin's request is none of them. Never throws.
     await this.deviceSlots.releaseOtherSessions(id);
+    if (enabling) await this.catchUpRoutes(id);
     return updated;
+  }
+
+  /** Setting a customer to DISABLED, which is what the panel's Status
+   * control and remove()'s refusal both tell an operator to do to cut
+   * someone off.
+   *
+   * It used to write the column and nothing else. The app kept
+   * refreshing its tokens, kept fetching its credentials, could still
+   * switch route and be given new ones, and every credential stayed on its
+   * node -- the 60 s re-assert kept them there -- until the subscription
+   * ran out. Only a new password or social sign-in was refused, so the
+   * panel showed an account as Disabled that still had a working tunnel.
+   *
+   * Now, as a password reset does, every session is revoked with the
+   * status in one transaction (refresh also refuses a non-ACTIVE account),
+   * the device credentials are taken back, every shared credential is
+   * switched off on its node, and the device slots go.
+   *
+   * The credential rows keep their status (see switchOffCustomer). A
+   * disabled customer's rows are not live (liveCredentialWhere), so
+   * setting the account ACTIVE again brings back exactly the ones still
+   * ACTIVE at the next re-assert, within a minute, and a credential the
+   * quota or an operator switched off on its own stays off. */
+  private async disable(id: string, data: Prisma.CustomerUpdateInput) {
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.customer.update({
+        where: { id },
+        data: { ...data, tokenVersion: { increment: 1 } },
+        select: SAFE_SELECT,
+      }),
+      this.prisma.customerSession.updateMany({
+        where: { customerId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+    // Best effort from here, each step on its own: the account is already
+    // disabled and signed out, and what the nodes are not told now the
+    // re-assert no longer puts back -- an engine restart drops it.
+    try {
+      await this.protocolUsers.endSessions(id);
+    } catch (err) {
+      this.logger.error(
+        `Customer ${id} disabled, but their device credentials could not be taken back yet: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    try {
+      const { failed } = await this.protocolUsers.switchOffCustomer(id);
+      if (failed > 0) {
+        this.logger.error(`Customer ${id} disabled, but ${failed} credential(s) could not be switched off yet`);
+      }
+    } catch (err) {
+      this.logger.error(
+        `Customer ${id} disabled, but their credentials could not be switched off: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    await this.deviceSlots.releaseCustomer(id);
+    return updated;
+  }
+
+  /** A customer made ACTIVE again picks up the routes added while it was
+   * disabled (provisionAll adds nothing to a disabled account). Its
+   * existing credentials need nothing: the re-assert restores them. Never
+   * throws -- the status is already written. */
+  private async catchUpRoutes(id: string) {
+    const subscriptions = await this.prisma.subscription.findMany({
+      where: { customerId: id, status: SubscriptionStatus.ACTIVE },
+      select: { id: true },
+    });
+    for (const subscription of subscriptions) {
+      await this.protocolUsers.provisionAll(subscription.id).catch((err: unknown) => {
+        this.logger.error(
+          `Customer ${id} re-enabled, but subscription ${subscription.id} could not be provisioned: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    }
   }
 
   /** Deletes a customer along with everything that exists solely to serve
@@ -204,14 +297,25 @@ export class CustomersService {
     if (settledCount > 0) {
       throw new BadRequestException(
         `Cannot delete this customer -- they have ${settledCount} completed payment(s), which are financial records and must be kept. ` +
-          "Set their status to DISABLED instead to revoke access.",
+          "Set their status to DISABLED instead: that signs them out everywhere and switches off their VPN access.",
       );
     }
 
-    // Their device slots, while the subscriptions they are keyed on still
-    // exist to be found. Never throws.
-    await this.deviceSlots.releaseCustomer(id);
-
+    // DELETE_USER went to every node, and the device slots were wiped,
+    // before a transaction that then always failed on a foreign key for a
+    // customer with a support ticket, a voucher redemption or a referral
+    // row: the panel got a raw 500, the database still had the customer,
+    // and their devices were cut off until a re-assert put the
+    // credentials back. The transaction now removes those rows too, and
+    // the slots go only once it has committed.
+    //
+    // The DELETE_USERs still go first, deliberately (the same order as
+    // SubscriptionsService.remove): if the transaction fails for some
+    // other reason, the rows survive and the re-assert restores the
+    // credentials within a minute or two. The other way round, a command
+    // that failed after the commit would leave a working credential on a
+    // node with no row anywhere to say so.
+    //
     // Under the customer lock, so no device of this customer is minting
     // credentials of its own between the read below and the transaction
     // -- a row created in that window would be deleted without any
@@ -219,17 +323,19 @@ export class CustomersService {
     // fetch queued behind this finds its session gone (cascaded with the
     // customer) and is refused.
     await this.protocolUsers.withCustomerLock(id, async () => {
-      const protocolUsers = await this.prisma.protocolUser.findMany({
-        where: { subscription: { customerId: id } },
-        select: DELETION_SELECT,
-      });
+      const [protocolUsers, subscriptions] = await Promise.all([
+        this.prisma.protocolUser.findMany({
+          where: { subscription: { customerId: id } },
+          select: DELETION_SELECT,
+        }),
+        this.prisma.subscription.findMany({ where: { customerId: id }, select: { id: true } }),
+      ]);
 
-      // Tell each node to drop the user before the row disappears --
-      // otherwise the credential keeps working on the engine while the
-      // panel believes the customer is gone. Aimed at the user's own
-      // inbound (see command-target.ts): untargeted, a WebSocket or relay
-      // customer's delete landed on the default inbound and was acked
-      // while their credential went on working.
+      // Tell each node to drop the user before the row disappears.
+      // Aimed at the user's own inbound (see command-target.ts):
+      // untargeted, a WebSocket or relay customer's delete landed on the
+      // default inbound and was acked while their credential went on
+      // working.
       for (const user of protocolUsers) {
         await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
       }
@@ -248,10 +354,28 @@ export class CustomersService {
         // Before the transactions they reference.
         this.prisma.invoice.deleteMany({ where: { customerId: id } }),
         this.prisma.paymentTransaction.deleteMany({ where: { customerId: id } }),
+        // The rows that point at the customer with no ON DELETE, and so
+        // refused the delete. Each exists to serve this customer: their
+        // support conversations (messages cascade), the codes they
+        // redeemed (Voucher.redeemedCount is its own counter, so a code
+        // does not get a use back), the rewards they earned as a referrer,
+        // and the record of what their own payments credited whoever
+        // referred them.
+        this.prisma.supportTicket.deleteMany({ where: { customerId: id } }),
+        this.prisma.voucherRedemption.deleteMany({ where: { customerId: id } }),
+        this.prisma.referralReward.deleteMany({ where: { referrerId: id } }),
+        this.prisma.referralCredit.deleteMany({ where: { referredCustomerId: id } }),
         this.prisma.protocolUser.deleteMany({ where: { subscription: { customerId: id } } }),
         this.prisma.subscription.deleteMany({ where: { customerId: id } }),
         this.prisma.customer.delete({ where: { id } }),
       ]);
+
+      // Their device slots, once the delete has committed, by the
+      // subscription ids read above: the rows they would be found by are
+      // gone. Never throws.
+      for (const subscription of subscriptions) {
+        await this.deviceSlots.releaseSubscription(subscription.id);
+      }
     });
   }
 
@@ -326,11 +450,26 @@ export class CustomersService {
         // Every signed-in device. tokenVersion below stops the refresh
         // tokens; this stops the access tokens still in their fifteen
         // minutes from fetching or minting anything (both check the
-        // session), and lets the sweep prune the rows.
+        // session). The rows stay -- that check reads them -- and nothing
+        // prunes them afterwards (the sweep only visits sessions still
+        // holding credentials, and these have just lost theirs), so what a
+        // device called itself goes, from every session the account ever
+        // had: a label can be the customer's own name for their device.
         this.prisma.customerSession.updateMany({
           where: { customerId: id, revokedAt: null },
           data: { revokedAt: new Date() },
         }),
+        this.prisma.customerSession.updateMany({
+          where: { customerId: id },
+          data: { label: null, platform: null },
+        }),
+        // The Google, Apple and Facebook links: the provider's subject and
+        // the real address it gave. Left behind, they were personal data
+        // kept past a deletion the app promises removes it, and every
+        // later "Continue with Google" by the same person found this
+        // disabled row by subject and was refused for ever -- they could
+        // never sign up again with that account.
+        this.prisma.customerIdentity.deleteMany({ where: { customerId: id } }),
         // Ends the subscription without deleting it -- the invoices below
         // point at it, and an invoice for a subscription that no longer
         // exists is worse than useless to an accountant.

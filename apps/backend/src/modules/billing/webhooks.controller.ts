@@ -56,17 +56,32 @@ export class WebhooksController {
     }
 
     const event = await this.stripe.constructEvent(req.rawBody, signature);
+    // Every object below carries our transaction id in its metadata: the
+    // PaymentIntent through payment_intent_data.metadata, the Checkout
+    // Session through its own (see StripeProvider.createCheckoutSession).
+    const transactionId = (event.data.object as { metadata?: { paymentTransactionId?: string } }).metadata
+      ?.paymentTransactionId;
+    if (!transactionId) return { received: true };
 
-    if (event.type === "payment_intent.succeeded" || event.type === "payment_intent.payment_failed") {
-      const intent = event.data.object as { metadata?: { paymentTransactionId?: string } };
-      const transactionId = intent.metadata?.paymentTransactionId;
-      if (transactionId) {
-        if (event.type === "payment_intent.succeeded") {
-          await this.billingService.confirmPayment(transactionId, event);
-        } else {
-          await this.billingService.markFailed(transactionId, event);
-        }
-      }
+    switch (event.type) {
+      case "payment_intent.succeeded":
+        await this.billingService.confirmPayment(transactionId, event);
+        break;
+      case "payment_intent.payment_failed":
+        // One attempt failed, not the payment. A declined card or a
+        // failed 3-D Secure check puts the PaymentIntent back to
+        // requires_payment_method, and hosted Checkout lets the customer
+        // try another card on the same page -- on the same PaymentIntent.
+        // Marking the transaction FAILED here made the success that
+        // followed a no-op: the customer was charged and got nothing.
+        // The row stays PENDING; only the outcomes below end it.
+        this.logger.log(`Stripe payment attempt failed for transaction ${transactionId}; it can still be retried`);
+        break;
+      case "payment_intent.canceled":
+      case "checkout.session.expired":
+        // Terminal: nothing can be paid on these any more.
+        await this.billingService.markFailed(transactionId, event);
+        break;
     }
 
     return { received: true };

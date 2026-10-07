@@ -138,11 +138,82 @@ describe("SubscriptionsService.createOrReusePending", () => {
 
     expect(count).toBe(3);
     const { where } = prisma.subscription.updateMany.mock.calls[0][0] as {
-      where: { status: SubscriptionStatus; createdAt: { lt: Date } };
+      where: { status: SubscriptionStatus; updatedAt: { lt: Date } };
     };
     expect(where.status).toBe(SubscriptionStatus.PENDING);
     // Crypto can sit unconfirmed a long time; cancelling one still in
     // flight is far worse than leaving a dead row an extra hour.
-    expect(where.createdAt.lt.getTime()).toBeLessThan(Date.now());
+    expect(where.updatedAt.lt.getTime()).toBeLessThan(Date.now());
+  });
+
+  /** Reuse refreshes the row for a new attempt but keeps its createdAt.
+   * Aged by createdAt, an attempt minutes old on a row first made five
+   * hours earlier was cancelled with its payment in flight. */
+  it("ages an attempt by its last reuse, not by when the row was first made", async () => {
+    const { service, prisma } = build(null);
+
+    await service.cancelStalePending(6 * 60 * 60 * 1000);
+
+    const { where } = prisma.subscription.updateMany.mock.calls[0][0] as { where: Record<string, unknown> };
+    expect(where).toHaveProperty("updatedAt");
+    expect(where).not.toHaveProperty("createdAt");
+  });
+
+  /** A payment can still confirm on a cancelled attempt. Left a term in
+   * the future, its provisional expiry was then extended by renewal as if
+   * owned: two terms for one payment. */
+  it("pulls a cancelled attempt's provisional expiry in to now", async () => {
+    const { service, prisma } = build(null);
+    const before = Date.now();
+
+    await service.cancelStalePending(6 * 60 * 60 * 1000);
+
+    const { data } = prisma.subscription.updateMany.mock.calls[0][0] as {
+      data: { status: SubscriptionStatus; expireAt: Date };
+    };
+    expect(data.status).toBe(SubscriptionStatus.CANCELLED);
+    expect(data.expireAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(data.expireAt.getTime()).toBeLessThanOrEqual(Date.now());
+  });
+});
+
+/** provisionAll adds nothing to a subscription that is not ACTIVE, so
+ * reactivating one is the moment it catches up on the routes added while
+ * it was off -- as a renewal does. */
+describe("SubscriptionsService.setStatus", () => {
+  function build(provisionAll = jest.fn().mockResolvedValue({ created: [], revoked: [], failed: [] })) {
+    const prisma = {
+      subscription: {
+        findUnique: jest.fn().mockResolvedValue({ id: "sub-1", status: SubscriptionStatus.SUSPENDED }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      protocolUser: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const protocolUsers = { setEnabled: jest.fn(), remove: jest.fn(), provisionAll } as unknown as ProtocolUsersService;
+    return { prisma, provisionAll, service: new SubscriptionsService(prisma as unknown as PrismaService, protocolUsers) };
+  }
+
+  it("provisions the missing routes when a subscription is made ACTIVE", async () => {
+    const { service, provisionAll } = build();
+
+    await service.setStatus("sub-1", SubscriptionStatus.ACTIVE);
+
+    expect(provisionAll).toHaveBeenCalledWith("sub-1");
+  });
+
+  it("provisions nothing when a subscription is switched off", async () => {
+    const { service, provisionAll } = build();
+
+    await service.setStatus("sub-1", SubscriptionStatus.SUSPENDED);
+
+    expect(provisionAll).not.toHaveBeenCalled();
+  });
+
+  it("still reactivates when provisioning throws", async () => {
+    const { service, prisma } = build(jest.fn().mockRejectedValue(new Error("all routes down")));
+    jest.spyOn(service["logger"], "error").mockImplementation(() => undefined);
+
+    await expect(service.setStatus("sub-1", SubscriptionStatus.ACTIVE)).resolves.toBeDefined();
+    expect(prisma.subscription.update).toHaveBeenCalledWith({ where: { id: "sub-1" }, data: { status: "ACTIVE" } });
   });
 });

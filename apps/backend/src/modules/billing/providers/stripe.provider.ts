@@ -110,6 +110,14 @@ export class StripeProvider {
     return (await this.requireClient()).paymentIntents.retrieve(providerRef);
   }
 
+  /** A Checkout Session, for reconciling a card payment made through it:
+   * what createCheckoutSession records is normally the session id
+   * (`cs_...`), because the PaymentIntent does not exist yet when the
+   * session is made. */
+  async retrieveCheckoutSession(sessionId: string): Promise<Stripe.Checkout.Session> {
+    return (await this.requireClient()).checkout.sessions.retrieve(sessionId);
+  }
+
   /** Verifies the webhook signature and parses the event. Throws on a
    * bad signature -- that's what actually protects this intentionally-
    * unauthenticated endpoint (see webhooks.controller.ts), not a guard. */

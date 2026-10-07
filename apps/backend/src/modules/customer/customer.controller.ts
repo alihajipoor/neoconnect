@@ -45,6 +45,7 @@ import { OpenTicketDto } from "../support/dto/open-ticket.dto";
 import { ReplyTicketDto } from "../support/dto/reply-ticket.dto";
 import { RedeemVoucherDto } from "../vouchers/dto/redeem-voucher.dto";
 import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
+import { ThrottleVolumePerSession } from "../../common/guards/client-throttler.guard";
 import { CurrentCustomer } from "../../common/decorators/current-customer.decorator";
 import { GamingService } from "../gaming/gaming.service";
 import { AuthenticatedCustomer } from "../customer-auth/types";
@@ -438,13 +439,16 @@ export class CustomerController {
    * guess, since a transaction either carries Apple's signature or it
    * does not. It is here because verification does real cryptographic
    * work on unauthenticated-in-practice input, and a device in a retry
-   * loop should not be able to spend the server's CPU on it.
+   * loop should not be able to spend the server's CPU on it. So it counts
+   * per signed-in session, not per address: per address, every customer
+   * behind one node mirror shared the ten.
    *
    * Safe to call more than once with the same transaction: that is the
    * restore path, and it returns the subscription the first call made
    * rather than issuing a second.
    */
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ThrottleVolumePerSession()
   @Post("billing/apple/redeem")
   @HttpCode(HttpStatus.OK)
   async redeemApplePurchase(

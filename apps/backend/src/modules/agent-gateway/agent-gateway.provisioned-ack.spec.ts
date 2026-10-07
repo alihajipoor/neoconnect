@@ -12,7 +12,7 @@ describe("AgentGatewayService records which credentials a node has confirmed", (
   function build(opts: { command?: { nodeId: string; type: string; payloadJson: unknown } | null; rows?: unknown[] } = {}) {
     const prisma = {
       agentCommand: {
-        findUnique: jest.fn().mockResolvedValue(opts.command ?? null),
+        findFirst: jest.fn().mockResolvedValue(opts.command ?? null),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       protocolUser: {
@@ -30,8 +30,8 @@ describe("AgentGatewayService records which credentials a node has confirmed", (
       {} as never,
       {} as never,
     );
-    const ack = (a: Ack) =>
-      (service as unknown as { handleCommandAck(a: Ack): Promise<void> }).handleCommandAck(a);
+    const ack = (a: Ack, from = "node-1") =>
+      (service as unknown as { handleCommandAck(n: string, a: Ack): Promise<void> }).handleCommandAck(from, a);
     const reassert = () =>
       (
         service as unknown as { reassertProvisionedUsers(id: string, o: { persist: boolean }): Promise<void> }
@@ -106,7 +106,7 @@ describe("AgentGatewayService records which credentials a node has confirmed", (
 
     await ack({ commandId: `${CONFIRM_ACK_PREFIX}pu-new`, success: true, error: "" });
     expect(prisma.protocolUser.updateMany).toHaveBeenCalledWith({
-      where: { id: "pu-new", provisionedAt: null },
+      where: { id: "pu-new", nodeId: "node-1", provisionedAt: null },
       data: { provisionedAt: expect.any(Date) },
     });
   });
@@ -129,7 +129,7 @@ describe("AgentGatewayService records which credentials a node has confirmed", (
     await ack({ commandId: "cmd-1", success, error: success ? "" : "boom" });
 
     expect(prisma.agentCommand.updateMany).toHaveBeenCalledWith({
-      where: { id: "cmd-1" },
+      where: { id: "cmd-1", nodeId: "node-1" },
       data: expect.objectContaining({ payloadJson: { protocol: "WIREGUARD", externalUserId: "ext-1" } }),
     });
   });
@@ -152,6 +152,32 @@ describe("AgentGatewayService records which credentials a node has confirmed", (
 
     expect(prisma.protocolUser.updateMany).not.toHaveBeenCalled();
     expect(prisma.agentCommand.updateMany).not.toHaveBeenCalled();
-    expect(prisma.agentCommand.findUnique).not.toHaveBeenCalled();
+    expect(prisma.agentCommand.findFirst).not.toHaveBeenCalled();
+  });
+
+  /** An ack used to update whatever its id named, whichever stream it came
+   * in on: one node could mark another's queued DELETE_USER acked, and it
+   * would never be replayed. */
+  it("looks a stored command up on the acking node only, and records nothing for another node's", async () => {
+    const { prisma, ack } = build({ command: null });
+
+    await ack({ commandId: "cmd-of-node-2", success: true, error: "" }, "node-1");
+
+    expect(prisma.agentCommand.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "cmd-of-node-2", nodeId: "node-1" } }),
+    );
+    expect(prisma.agentCommand.updateMany).not.toHaveBeenCalled();
+    expect(prisma.protocolUser.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("confirms a credential only on the node that acked it", async () => {
+    const { prisma, ack } = build();
+
+    await ack({ commandId: `${CONFIRM_ACK_PREFIX}pu-1`, success: true, error: "" }, "node-2");
+
+    expect(prisma.protocolUser.updateMany).toHaveBeenCalledWith({
+      where: { id: "pu-1", nodeId: "node-2", provisionedAt: null },
+      data: { provisionedAt: expect.any(Date) },
+    });
   });
 });

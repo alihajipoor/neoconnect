@@ -4,7 +4,10 @@ import type { Response } from "express";
 import { ProtocolUsersService } from "./protocol-users.service";
 import { CreateProtocolUserDto } from "./dto/create-protocol-user.dto";
 import { SetEnabledDto } from "./dto/set-enabled.dto";
+import { AdminRole } from "@prisma/client";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
+import { RolesGuard } from "../../common/guards/roles.guard";
+import { Roles } from "../../common/decorators/roles.decorator";
 import { listWindow, sendPage } from "../../common/pagination";
 
 @ApiTags("protocol-users")
@@ -38,17 +41,29 @@ export class ProtocolUsersController {
     return this.protocolUsersService.get(id);
   }
 
+  // The three mutations decide whether somebody can use the VPN, which is
+  // billing work: setStatus, assign and extend on subscriptions are
+  // SUPERADMIN/BILLING for the same reason. Ungated, a SUPPORT login could
+  // mint a credential on an unpaid or suspended subscription, or switch
+  // back on one the quota sweep had switched off. The panel uses none of
+  // them.
   @Post()
+  @UseGuards(RolesGuard)
+  @Roles(AdminRole.SUPERADMIN, AdminRole.BILLING)
   create(@Body() dto: CreateProtocolUserDto) {
     return this.protocolUsersService.create(dto);
   }
 
   @Patch(":id/enabled")
+  @UseGuards(RolesGuard)
+  @Roles(AdminRole.SUPERADMIN, AdminRole.BILLING)
   setEnabled(@Param("id") id: string, @Body() dto: SetEnabledDto) {
     return this.protocolUsersService.setEnabled(id, dto.enabled);
   }
 
   @Delete(":id")
+  @UseGuards(RolesGuard)
+  @Roles(AdminRole.SUPERADMIN, AdminRole.BILLING)
   @HttpCode(HttpStatus.NO_CONTENT)
   async remove(@Param("id") id: string) {
     await this.protocolUsersService.remove(id);

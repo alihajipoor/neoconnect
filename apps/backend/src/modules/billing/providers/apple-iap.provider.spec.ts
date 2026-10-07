@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { verifyAppleTransaction } from "./apple-iap.provider";
+import { verifyAppleTransaction, verifyChain } from "./apple-iap.provider";
 
 /** Verifying a StoreKit purchase.
  *
@@ -90,5 +90,72 @@ describe("verifyAppleTransaction", () => {
     expect(() => verifyAppleTransaction(rogue, "com.someone.else")).toThrow(
       /not anchored in Apple's root/,
     );
+  });
+});
+
+/** The chain checks a pinned root does not make on its own.
+ *
+ * Apple Root CA - G3 is Apple's general ECC root. Under it, through a
+ * WWDR intermediate, sit certificates any paid developer can get for a
+ * key they generated -- an Apple Pay payment-processing certificate is
+ * one. [that certificate, its intermediate, the root] has every signature
+ * right and the root byte for byte, and the leaf's key is the attacker's.
+ * Before these checks it was accepted, and every transactionId the
+ * attacker made up was a paid subscription.
+ *
+ * Tested against a root of our own (apple-iap.chain-fixtures.json),
+ * because the property is the shape of the chain under the root and
+ * Apple's root's key is not ours to sign with. The chains are otherwise
+ * Apple-shaped: an intermediate CA marked 6.2.1, a leaf marked 6.11.1.
+ */
+describe("verifyChain", () => {
+  const f = JSON.parse(readFileSync(join(__dirname, "apple-iap.chain-fixtures.json"), "utf8")) as Record<
+    string,
+    string
+  >;
+  const rootPem = `-----BEGIN CERTIFICATE-----\n${f.root}\n-----END CERTIFICATE-----`;
+
+  it("accepts a StoreKit-shaped chain: marked leaf, marked intermediate CA, the pinned root", () => {
+    // The control. Without it every refusal below could be the chain
+    // failing for some reason nobody intended.
+    const leaf = verifyChain([f.leaf, f.intermediate, f.root], rootPem);
+    expect(leaf.subject).toContain("Test StoreKit Leaf");
+  });
+
+  it("refuses a leaf without Apple's StoreKit-signer marker -- the Apple Pay route", () => {
+    expect(() => verifyChain([f.leafWithoutMarker, f.intermediate, f.root], rootPem)).toThrow(
+      /not Apple's StoreKit signer/,
+    );
+  });
+
+  it("refuses an intermediate without Apple's WWDR marker", () => {
+    expect(() => verifyChain([f.leafUnderUnmarkedIntermediate, f.intermediateWithoutMarker, f.root], rootPem)).toThrow(
+      /not Apple's WWDR intermediate/,
+    );
+  });
+
+  it("refuses a leaf used as an issuer", () => {
+    // A certificate the attacker holds the key to, used to sign one more
+    // "leaf" carrying whatever extensions they like.
+    expect(() => verifyChain([f.leafSignedByLeaf, f.leaf, f.root], rootPem)).toThrow(/roles in the chain are wrong/);
+  });
+
+  it("refuses a chain that is not exactly leaf, intermediate, root", () => {
+    expect(() => verifyChain([f.intermediate, f.root], rootPem)).toThrow(/chain length 2/);
+    expect(() => verifyChain([f.leafSignedByLeaf, f.leaf, f.intermediate, f.root], rootPem)).toThrow(
+      /chain length 4/,
+    );
+  });
+
+  it("refuses a link whose issuer is not the certificate after it", () => {
+    // The leaf was issued by the marked intermediate, not the unmarked
+    // one; both are CAs under the same root.
+    expect(() => verifyChain([f.leaf, f.intermediateWithoutMarker, f.root], rootPem)).toThrow(
+      /not signed by its issuer/,
+    );
+  });
+
+  it("still refuses all of it against Apple's real root", () => {
+    expect(() => verifyChain([f.leaf, f.intermediate, f.root])).toThrow(/not anchored in Apple's root/);
   });
 });

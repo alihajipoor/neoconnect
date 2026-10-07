@@ -1,8 +1,9 @@
 import { Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
 import { ConfigModule } from "@nestjs/config";
-import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
+import { ThrottlerModule } from "@nestjs/throttler";
 import configuration from "./config/configuration";
+import { ClientThrottlerGuard } from "./common/guards/client-throttler.guard";
 import { PrismaModule } from "./prisma/prisma.module";
 import { HealthModule } from "./modules/health/health.module";
 import { AuthModule } from "./modules/auth/auth.module";
@@ -50,7 +51,9 @@ import { DeviceSlotsModule } from "./modules/device-slots/device-slots.module";
       load: [configuration],
     }),
     // Global default: generous enough for normal panel/API use, applied
-    // per-IP via APP_GUARD below. Individual routes (login, enrollment
+    // per signed-in session where the request carries a token that
+    // verifies, and per address otherwise, via APP_GUARD below (see
+    // ClientThrottlerGuard). Individual routes (login, enrollment
     // claim) override this with a tighter limit -- see their
     // controllers. Webhook endpoints skip throttling entirely (signature
     // verification is what protects them, and a legitimate provider
@@ -100,6 +103,6 @@ import { DeviceSlotsModule } from "./modules/device-slots/device-slots.module";
     // controller does not depend on one of them pulling it in.
     DeviceSlotsModule,
   ],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [{ provide: APP_GUARD, useClass: ClientThrottlerGuard }],
 })
 export class AppModule {}

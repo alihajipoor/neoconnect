@@ -258,25 +258,41 @@ export class BillingService {
     };
   }
 
-  /** Called from both webhook handlers once a provider confirms payment.
-   * Idempotent (no-ops if the transaction isn't still PENDING) since
-   * webhooks legitimately arrive more than once for the same event --
-   * both Stripe and NowPayments document and expect this. */
+  /** Called from every webhook handler once a provider confirms payment.
+   *
+   * Idempotent, since webhooks legitimately arrive more than once for the
+   * same event -- both Stripe and NowPayments document and expect this.
+   * The transition is one conditional write, not a read and then an
+   * update: two deliveries of the same success racing each other used to
+   * both read PENDING and both renew, a second term for one payment. Only
+   * the delivery whose write lands goes on to renew and invoice.
+   *
+   * FAILED is confirmable as well as PENDING. The provider has just said
+   * the money arrived, and that outranks anything we concluded earlier: a
+   * Stripe PaymentIntent whose first card was declined can still succeed
+   * on a second, and a crypto invoice marked expired can still be paid.
+   * Refusing those left a customer charged with nothing to show for it. */
   async confirmPayment(transactionId: string, rawPayload: unknown) {
     const transaction = await this.prisma.paymentTransaction.findUnique({ where: { id: transactionId } });
     if (!transaction) {
       this.logger.warn(`Webhook confirmed unknown payment transaction ${transactionId}`);
       return;
     }
-    if (transaction.status !== "PENDING") return;
+    if (transaction.status !== "PENDING" && transaction.status !== "FAILED") return;
 
-    await this.prisma.paymentTransaction.update({
-      where: { id: transactionId },
+    const { count } = await this.prisma.paymentTransaction.updateMany({
+      where: { id: transactionId, status: { in: ["PENDING", "FAILED"] } },
       data: { status: "CONFIRMED", rawWebhookPayload: rawPayload as Prisma.InputJsonValue },
     });
+    if (count === 0) return;
+    if (transaction.status === "FAILED") {
+      this.logger.warn(
+        `Payment ${transactionId} (${transaction.provider}) was marked FAILED and has now been confirmed by the provider`,
+      );
+    }
 
     if (transaction.subscriptionId) {
-      await this.renewSubscription(transaction.subscriptionId);
+      await this.renewSubscription(transaction.subscriptionId, transactionId);
     }
 
     // Issued here, in the same flow that activates the subscription,
@@ -306,12 +322,11 @@ export class BillingService {
     }
   }
 
+  /** Conditional for the same reason confirmPayment is: a failure that
+   * lands just after a confirmation must not overwrite it. */
   async markFailed(transactionId: string, rawPayload: unknown) {
-    const transaction = await this.prisma.paymentTransaction.findUnique({ where: { id: transactionId } });
-    if (!transaction || transaction.status !== "PENDING") return;
-
-    await this.prisma.paymentTransaction.update({
-      where: { id: transactionId },
+    await this.prisma.paymentTransaction.updateMany({
+      where: { id: transactionId, status: "PENDING" },
       data: { status: "FAILED", rawWebhookPayload: rawPayload as Prisma.InputJsonValue },
     });
   }
@@ -333,7 +348,7 @@ export class BillingService {
    *   a prior quota/expiry suspension): re-enables it -- the exact
    *   reverse of `UsageService.disableProtocolUsers`, reusing
    *   `ProtocolUsersService.setEnabled(true)`. */
-  private async renewSubscription(subscriptionId: string) {
+  private async renewSubscription(subscriptionId: string, transactionId: string) {
     const subscription = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
       include: { plan: true },
@@ -351,7 +366,22 @@ export class BillingService {
     // Status is the discriminator rather than the date, because the date
     // cannot distinguish "provisional, never paid for" from "genuinely
     // owned".
-    const firstActivation = subscription.status === SubscriptionStatus.PENDING;
+    //
+    // CANCELLED needs one more question. The stale-pending sweep cancels
+    // unpaid attempts, and a payment can still confirm on one afterwards
+    // (a Checkout page is payable for 24 hours; crypto confirms when it
+    // confirms). Its expiry is the same provisional date, so it is a first
+    // activation too -- unless the subscription was ever paid for, which
+    // is what distinguishes it from one an operator or an account deletion
+    // cancelled. The sweep now also pulls the expiry in, so this matters
+    // for the rows it cancelled before it did. This payment is already
+    // CONFIRMED by now, hence excluded.
+    const firstActivation =
+      subscription.status === SubscriptionStatus.PENDING ||
+      (subscription.status === SubscriptionStatus.CANCELLED &&
+        (await this.prisma.paymentTransaction.count({
+          where: { subscriptionId, status: "CONFIRMED", id: { not: transactionId } },
+        })) === 0);
     const base =
       !firstActivation && subscription.expireAt > new Date() ? subscription.expireAt : new Date();
     const newExpireAt = new Date(base.getTime() + subscription.plan.durationDays * 24 * 60 * 60 * 1000);
@@ -415,22 +445,63 @@ export class BillingService {
    * plan calls for. */
   async reconcile(id: string) {
     const transaction = await this.get(id);
-    if (transaction.status !== "PENDING") return transaction;
+    // FAILED too: a row written off by a declined attempt or an expired
+    // invoice can still have been paid (see confirmPayment), and this is
+    // how one already stuck that way is put right.
+    if (transaction.status !== "PENDING" && transaction.status !== "FAILED") return transaction;
 
-    if (transaction.provider === "STRIPE") {
-      const intent = await this.stripe.retrievePaymentIntent(transaction.providerRef);
-      if (intent.status === "succeeded") {
-        await this.confirmPayment(transaction.id, intent);
-      } else if (intent.status === "canceled") {
-        await this.markFailed(transaction.id, intent);
+    // One branch per provider. This used to be Stripe and "everything
+    // else", and everything else went to NowPayments -- so a Plisio row
+    // asked NowPayments about a Plisio id and could never be reconciled.
+    switch (transaction.provider) {
+      case "STRIPE": {
+        // Card payments from the apps go through Checkout, and what they
+        // record is the session id: the PaymentIntent does not exist when
+        // the session is created. paymentIntents.retrieve("cs_...") failed
+        // with "No such payment_intent", every time.
+        if (transaction.providerRef.startsWith("cs_")) {
+          const session = await this.stripe.retrieveCheckoutSession(transaction.providerRef);
+          if (session.payment_status === "paid" || session.payment_status === "no_payment_required") {
+            await this.confirmPayment(transaction.id, session);
+          } else if (session.status === "expired") {
+            await this.markFailed(transaction.id, session);
+          }
+          break;
+        }
+        const intent = await this.stripe.retrievePaymentIntent(transaction.providerRef);
+        if (intent.status === "succeeded") {
+          await this.confirmPayment(transaction.id, intent);
+        } else if (intent.status === "canceled") {
+          await this.markFailed(transaction.id, intent);
+        }
+        break;
       }
-    } else {
-      const { paymentStatus } = await this.nowpayments.getPaymentStatus(transaction.providerRef);
-      if (paymentStatus === "finished" || paymentStatus === "confirmed") {
-        await this.confirmPayment(transaction.id, { paymentStatus });
-      } else if (paymentStatus === "failed" || paymentStatus === "expired") {
-        await this.markFailed(transaction.id, { paymentStatus });
+      case "PLISIO": {
+        const status = await this.plisio.getOperationStatus(transaction.providerRef);
+        // The same reading of a status as the callback (see
+        // WebhooksController.plisioWebhook): a mismatch is left for a
+        // human, never confirmed and never failed.
+        const outcome = this.plisio.classify(status);
+        if (outcome === "paid") {
+          await this.confirmPayment(transaction.id, { status });
+        } else if (outcome === "failed") {
+          await this.markFailed(transaction.id, { status });
+        }
+        break;
       }
+      case "NOWPAYMENTS": {
+        const { paymentStatus } = await this.nowpayments.getPaymentStatus(transaction.providerRef);
+        if (paymentStatus === "finished" || paymentStatus === "confirmed") {
+          await this.confirmPayment(transaction.id, { paymentStatus });
+        } else if (paymentStatus === "failed" || paymentStatus === "expired") {
+          await this.markFailed(transaction.id, { paymentStatus });
+        }
+        break;
+      }
+      default:
+        // An App Store purchase is verified when it is redeemed and has
+        // nothing to look up afterwards.
+        throw new BadRequestException(`A ${transaction.provider} payment cannot be reconciled`);
     }
 
     return this.get(id);

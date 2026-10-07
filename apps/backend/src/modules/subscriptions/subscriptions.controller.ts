@@ -104,7 +104,12 @@ export class SubscriptionsController {
     return this.subscriptionsService.remove(id);
   }
 
+  // Billing work, like assign: an ACTIVE subscription is a paid plan that
+  // the customer's next fetch provisions. It had no roles, so a SUPPORT
+  // login could hand out plans.
   @Post()
+  @UseGuards(RolesGuard)
+  @Roles(AdminRole.SUPERADMIN, AdminRole.BILLING)
   create(@Body() dto: CreateSubscriptionDto) {
     return this.subscriptionsService.create(dto);
   }

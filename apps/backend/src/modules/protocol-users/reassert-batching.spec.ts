@@ -96,7 +96,8 @@ describe("ProvisioningBackfillService covers every live subscription", () => {
     const findMany = cursoredFindMany(rowIds(OVER_ONE_BATCH, "sub").map((id) => ({ id })));
     const provisionAll = jest.fn().mockResolvedValue({ created: [{ id: "a" }], revoked: [] });
     const service = new ProvisioningBackfillService(
-      { subscription: { findMany } } as never,
+      // No credentials of unpaid subscriptions to switch off here.
+      { subscription: { findMany }, protocolUser: { findMany: cursoredFindMany([]) } } as never,
       { provisionAll } as never,
     );
     jest.spyOn(service["logger"], "log").mockImplementation(() => undefined);
