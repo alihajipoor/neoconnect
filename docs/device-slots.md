@@ -396,12 +396,15 @@ poll).
 Slots only bind apps that claim. The backstop is for the rest -- an old
 release, credentials copied into a third-party client -- and runs on
 what nodes already report every ~30 s: usage bytes per credential, and
-session counts from OpenVPN and IKEv2 only. Xray's and WireGuard's
-session counts are ignored: both carry a tail (60 s after the last
-accepted connection, three minutes after the last handshake) that made
-a clean switch from the PC to the phone look like two devices for long
-enough to hold the phone. For those engines a device is active while
-its usage shows bytes.
+session counts from OpenVPN only. Xray's and WireGuard's session counts
+are ignored: both carry a tail (60 s after the last accepted
+connection, three minutes after the last handshake) that made a clean
+switch from the PC to the phone look like two devices for long enough
+to hold the phone. IKEv2's is ignored too: strongSwan lists an SA until
+charon restarts (no DPD, rekey_time = 0s), so a phone that died on
+IKEv2 would count as a device in use indefinitely -- the sample captured
+from a node had two such SAs, 21 hours old. For those engines a device
+is active while its usage shows bytes.
 
 - **Per device.** Every credential of one signed-in device is that
   device, on any route or node. All shared credentials of a subscription
@@ -454,8 +457,10 @@ backend boots and maps the three routes. **Unverified:**
 - The backstop has never seen a real node's report. Whether presence
   from usage deltas is as clean as reasoned (keepalives every 25 s,
   pings every 10 s) is inferred from the agent and client code, not
-  measured. IKEv2 session counts may be empty until its parser is
-  verified.
+  measured. IKEv2 usage was always empty before the 2026-10-06 parser
+  fix (it matched nothing swanctl prints); the fixed parser reads output
+  captured from a node, but usage reaching the backend from a real dial
+  has not been seen.
 - Xray connections already open when a hold starts may keep working
   (Xray cannot close a user's connections). Unmeasured.
 - An iPhone, an Android phone with the screen off, and an Iranian

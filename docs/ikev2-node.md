@@ -96,10 +96,47 @@ chain, so the initiator has no ISRG root and reports `no trusted RSA
 public key found`, which reads exactly like an identity mismatch. Real
 clients carry a full trust store and do not hit it. Use a phone.
 
-## What is deliberately missing
+## Usage and session counts
 
-`StatsSince` in the agent provisioner returns nothing, so IKEv2 traffic
-is not counted against a customer's quota. strongSwan exposes per-SA
-byte counts, but a delta needs a per-user key stable across rekeys and
-reconnects; getting it wrong bills somebody for traffic they never used.
-Uncounted is visible and safe. Worth closing if IKEv2 becomes popular.
+This section used to say `StatsSince` returns nothing. It did, though
+not on purpose: the provisioner had grown a parser for
+`swanctl --list-sas --raw`, but the parser looked for a shape strongSwan
+never prints, so until the 2026-10-06 review it matched nothing and
+IKEv2 traffic counted against no quota and no device limit, silently.
+
+The parser now reads swanctl's real `--raw` output -- one
+`list-sa event {...}` line per IKE SA, captured from a live node and
+kept as `agent/internal/protocols/ikev2/testdata/swanctl-list-sas-raw.txt`.
+Counters are tracked per CHILD_SA, which is the key that stays stable
+across an IKE rekey (strongSwan moves the children, counters and all, to
+the new IKE SA); `bytes-in` is the customer's upload. When swanctl lists
+SAs and none can be read, the poll errors instead of reporting nobody.
+
+**Billing IKEv2 is a product change, and needs the owner's approval
+before the agent release that carries it.** This section used to call
+leaving IKEv2 uncounted deliberate ("Uncounted is visible and safe"),
+for fear of billing someone for traffic they never used. The parser
+fix turns counting on. The concern it named -- a per-user key that
+survives rekeys and reconnects -- is what the per-CHILD_SA keying and
+the first-poll baseline address, but by reasoning, not on a node. The
+alternative is an unmetered path around every data cap.
+
+Session counts are not usage. strongSwan keeps an SA until charon
+restarts (no DPD, rekey_time = 0s), so a phone that died on IKEv2 stays
+listed indefinitely: the captured sample's two SAs had had nothing from
+their clients for about 21 hours. The agent counts only ESTABLISHED SAs
+with a CHILD_SA that had a packet in from the client in the last three
+minutes, and the backend ignores IKEv2 session counts anyway and goes by
+bytes, as it does for WireGuard and Xray.
+
+A revoked customer's session is ended with `swanctl --terminate --ike-id
+N --force`. If that fails, the DISABLE_USER/DELETE_USER command fails
+and is never resent, so the agent itself ends any SA still listed under
+that identity on every stats poll until none is. An agent restart in
+between forgets it.
+
+**Unverified:** that a usage row appears in the panel after a real
+IKEv2 dial on a node running the fixed agent, and the IKE-rekey case
+(reasoned from how strongSwan rekeys, not observed on a node); that
+`--terminate --ike-id N --force` ends a live session; that `use-in`
+moves only with ESP traffic.

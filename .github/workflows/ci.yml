@@ -134,6 +134,13 @@ jobs:
       - name: Installer covers every backend env var
         run: bash scripts/check-installer-drift.sh
 
+      # install_xray tests a new config before restarting Xray. On a relay
+      # whose Xray is running, testing the whole file can never pass (the
+      # tun device is held), which refused every re-run on a live relay.
+      # Stand-ins for xray and systemctl; jq is the runner's own.
+      - name: Xray config gate passes a good config on a running relay
+        run: bash scripts/test-xray-config-gate.sh
+
       # Same class of silence, different pair of files. Shadowsocks and
       # IKEv2 were both live on real nodes while the panel could offer
       # neither, so a plan created there quietly granted a narrower set

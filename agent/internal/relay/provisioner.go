@@ -90,6 +90,21 @@ type Provisioner struct {
 	// Convergence is the safe direction to err in.
 	mu           sync.Mutex
 	appliedProxy map[string]string
+	// The same, for the routing rule: a fingerprint of what the rule
+	// installed under each tag matches (the entry inbound, or the tun
+	// inbound plus the client subnet).
+	//
+	// Xray's AddRule refuses a duplicate ruleTag and has no update either,
+	// and the duplicate was treated as "already applied". So when an
+	// admin changed a relay entry's inbound tag -- the documented repair
+	// for a wrong tag -- or a WireGuard/OpenVPN/IKEv2 entry's subnet, the
+	// live rule kept matching the old one, every re-assert was acked, and
+	// the customers moved to the new inbound matched no rule at all: out
+	// through the relay's default outbound, or into its blackhole, until
+	// something happened to restart Xray. Found by the 2026-10-06 review.
+	// Same convergence trade-off as appliedProxy: an agent restart
+	// rebuilds each rule once.
+	appliedRule map[string]string
 }
 
 // New wraps the given connection -- callers should pass the same
@@ -107,6 +122,7 @@ func New(conn *grpc.ClientConn, tunInboundTag, tunInterfaceName string) *Provisi
 		tunInboundTag:    tunInboundTag,
 		tunInterfaceName: tunInterfaceName,
 		appliedProxy:     map[string]string{},
+		appliedRule:      map[string]string{},
 	}
 }
 
@@ -131,6 +147,13 @@ func exitFingerprint(exit ExitParams) string {
 		return ""
 	}
 	sum := sha256.Sum256(blob)
+	return hex.EncodeToString(sum[:])
+}
+
+// ruleFingerprint covers everything the routing rule matches on. The
+// rule's outbound is its own tag and never changes.
+func ruleFingerprint(payload ConfigureRoutePayload, tunInboundTag string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{payload.EntryInboundTag, payload.EntrySubnetCidr, tunInboundTag}, "\x00")))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -198,13 +221,16 @@ func (p *Provisioner) finishRoute(ctx context.Context, payload ConfigureRoutePay
 	if err != nil {
 		return fmt.Errorf("build routing rule: %w", err)
 	}
+	tag := outboundTag(payload.RouteID)
+	want := ruleFingerprint(payload, p.tunInboundTag)
 	// AddRule's TypedMessage must unmarshal to *router.Config (the rule
 	// list wrapper Router.AddRule expects), not a bare *router.RoutingRule
 	// -- confirmed against app/router/router.go's AddRule/ReloadRules.
-	if _, err := p.routingConn.AddRule(ctx, &rcommand.AddRuleRequest{
+	addRule := &rcommand.AddRuleRequest{
 		Config:       serial.ToTypedMessage(&router.Config{Rule: []*router.RoutingRule{rule}}),
 		ShouldAppend: true,
-	}); err != nil {
+	}
+	if _, err := p.routingConn.AddRule(ctx, addRule); err != nil {
 		// Same idempotency contract as AddOutbound above, which was
 		// already tolerant of its duplicate. This half was not, so
 		// re-sending a CONFIGURE_ROUTE for a route that is already wired
@@ -218,7 +244,27 @@ func (p *Provisioner) finishRoute(ctx context.Context, payload ConfigureRoutePay
 		if !strings.Contains(err.Error(), "duplicate ruleTag") {
 			return fmt.Errorf("AddRule: %w", err)
 		}
+
+		// The tag is taken, which is only a no-op if the installed rule
+		// matches what was asked for -- see appliedRule. Never removed
+		// and re-added unconditionally: the sweep re-asserts every 60s,
+		// and each rebuild is a moment in which new connections on that
+		// inbound match no rule.
+		if p.lastRule(tag) != want || want == "" {
+			log.Printf("relay: rule %s may match a different inbound or subnet than asked; rebuilding it", tag)
+			if _, err := p.routingConn.RemoveRule(ctx, &rcommand.RemoveRuleRequest{RuleTag: tag}); err != nil {
+				p.forgetRule(tag)
+				return fmt.Errorf("RemoveRule (stale %s): %w", tag, err)
+			}
+			if _, err := p.routingConn.AddRule(ctx, addRule); err != nil {
+				// Removed and not re-added: the route matches nothing.
+				// Reported, never acked.
+				p.forgetRule(tag)
+				return fmt.Errorf("AddRule (rebuilding %s): %w", tag, err)
+			}
+		}
 	}
+	p.recordRule(tag, want)
 
 	// Only WireGuard/OpenVPN entries need OS-level help -- an Xray-based
 	// entry's traffic reaches the outbound purely through the routing
@@ -253,6 +299,27 @@ func (p *Provisioner) forgetApplied(tag string) {
 	delete(p.appliedProxy, tag)
 }
 
+func (p *Provisioner) lastRule(tag string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.appliedRule[tag]
+}
+
+func (p *Provisioner) recordRule(tag, fingerprint string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.appliedRule == nil {
+		p.appliedRule = map[string]string{}
+	}
+	p.appliedRule[tag] = fingerprint
+}
+
+func (p *Provisioner) forgetRule(tag string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.appliedRule, tag)
+}
+
 // RemoveRoute reverses ConfigureRoute's Xray-side wiring. Xray's own
 // RemoveRule/RemoveOutbound (confirmed against app/router/router.go and
 // app/proxyman/outbound/outbound.go) never error for an already-missing
@@ -265,9 +332,11 @@ func (p *Provisioner) RemoveRoute(ctx context.Context, routeID string) error {
 	if _, err := p.routingConn.RemoveRule(ctx, &rcommand.RemoveRuleRequest{RuleTag: tag}); err != nil {
 		return fmt.Errorf("RemoveRule: %w", err)
 	}
+	p.forgetRule(tag)
 	if _, err := p.handlerConn.RemoveOutbound(ctx, &hcommand.RemoveOutboundRequest{Tag: tag}); err != nil {
 		return fmt.Errorf("RemoveOutbound: %w", err)
 	}
+	p.forgetApplied(tag)
 	// Deliberately does not remove the `ip route` added for a
 	// WireGuard/OpenVPN bridge -- another route on the same entry
 	// protocol's subnet may still depend on it, and re-adding it is a

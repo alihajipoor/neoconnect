@@ -209,3 +209,48 @@ func TestEmptyOverrideDoesNotBlankTheServerName(t *testing.T) {
 		t.Fatal("server name was blanked")
 	}
 }
+
+// A stream that fails straight away -- a rejected Hello, a panel that is
+// down -- backs off to maxBackoff. The old loop waited one second every
+// time, forever.
+func TestImmediateFailuresBackOff(t *testing.T) {
+	want := []time.Duration{1, 2, 4, 8, 15, 15, 15}
+	backoff := initialBackoff
+	for i, w := range want {
+		var wait time.Duration
+		wait, backoff = nextBackoff(backoff, 200*time.Millisecond)
+		if wait != w*time.Second {
+			t.Fatalf("failure %d: waited %s, want %s", i+1, wait, w*time.Second)
+		}
+	}
+}
+
+// After a backend restart -- every deploy, and the certbot hook's restart
+// -- the first stale-node sweep runs 30 s after the backend starts
+// (SWEEP_INTERVAL_MS in agent-gateway.service.ts) and marks OFFLINE any
+// node whose last heartbeat, from before the restart, is over 60 s old:
+// any node not yet back, once the backend was down more than about ten
+// seconds. OFFLINE alerts, and drops the node from the mirror list. So
+// however long the backend was down, a node has to redial well before
+// that sweep. With waits of up to 30 s it could redial just after it.
+func TestRedialsBeforeTheBackendsFirstStaleSweep(t *testing.T) {
+	const firstSweep = 30 * time.Second
+	backoff := initialBackoff
+	for i := 0; i < 20; i++ {
+		var wait time.Duration
+		wait, backoff = nextBackoff(backoff, 200*time.Millisecond)
+		// Half the interval, leaving the rest for the dial itself.
+		if wait > firstSweep/2 {
+			t.Fatalf("failure %d: waited %s, which can land after the backend's first stale sweep", i+1, wait)
+		}
+	}
+}
+
+// A stream that stayed up was working; when it drops, the agent comes
+// back quickly rather than paying for failures from long ago.
+func TestAStreamThatLivedResetsTheBackoff(t *testing.T) {
+	wait, next := nextBackoff(maxBackoff, 10*time.Minute)
+	if wait != initialBackoff || next != 2*initialBackoff {
+		t.Fatalf("after a long-lived stream: waited %s then %s, want %s then %s", wait, next, initialBackoff, 2*initialBackoff)
+	}
+}

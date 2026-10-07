@@ -88,6 +88,17 @@ could not be recovered.
 The in-app purchases are `com.neoxify.mobile.{starter,pro,ultimate}.30d`,
 non-renewing, mapped to plans through `SubscriptionPlan.appleProductId`.
 
+Redeeming them needs `APPLE_BUNDLE_ID=com.neoxify.mobile` in
+`infra/.env` and the backend container recreated. Unset, every purchase
+and every restore is refused with "Purchases are not available right
+now" -- after Apple has charged the customer; the app replays the
+unfinished transaction on its next launch, so it is recovered once the
+variable is set. Until 2026-10-06 the compose file did not pass it
+through at all. `APPLE_ALLOW_SANDBOX=true` also accepts sandbox and
+TestFlight transactions, which anyone with a beta build can mint for
+free: leave it unset in production unless the owner decides App
+Review's sandbox purchases must be honoured.
+
 
 The `APPLE_ID_AUTH` capability is already enabled on the App ID
 `com.neoxify.mobile`, and `com.apple.developer.applesignin` is in

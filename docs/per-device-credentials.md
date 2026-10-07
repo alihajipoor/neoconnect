@@ -374,7 +374,15 @@ Low-severity review findings not fixed here, and why:
   again, with no row behind it. The fix is a revocation table re-asserted
   on reconnect, or `ccd-exclusive` on the nodes (a node change needing
   the owner's approval). Per-device credentials make revocation routine,
-  so this matters more than it did; it is not new.
+  so this matters more than it did; it is not new. Since the 2026-10-06
+  review the agent leaves an empty ccd file for every live CN (CREATE_USER
+  and ENABLE_USER, and so every 60-second re-assert), which is what
+  `ccd-exclusive` needs: once that agent is on every OpenVPN node and a
+  re-assert has run, adding `ccd-exclusive` to `server.conf` (installer
+  and restore script) makes a CN with no file -- revoked, deleted, or on
+  a rebuilt node before its re-assert -- refused. Not switched on: the
+  owner's call, and it must follow the agent rollout, never precede it,
+  or every OpenVPN customer is cut off.
 - **IKEv2 re-assert cost is quadratic, so IKEv2 stays on shared
   credentials.** An agent change (skip the reload for an unchanged user
   within 30 s of the last one) and an agent release; then IKEv2 can join

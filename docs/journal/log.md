@@ -3706,3 +3706,171 @@ The review of `ec83104` found one blocking defect and eight lows.
   subscription's leftover credential". Its only caller,
   `POST /customer/subscriptions/:id/route`, refuses any subscription
   that is not ACTIVE before calling it.
+
+## 2026-10-06 — agent and installer review fixes (branch `claude/review-fixes-agent`)
+
+Built on `claude/node-private-egress` (181fe0d: customers reaching a
+node's loopback -- the Xray API, OpenVPN management -- through their own
+tunnel; not redone here). Not merged, not deployed, no agent released.
+Each commit message carries its finding; this is the state around them.
+
+**Must land before the next agent rollout -- and is in this branch:**
+the usage baseline (6bd4300). Every agent restart billed every WireGuard
+peer's lifetime counter, and every connected OpenVPN/IKEv2 session's
+total, a second time; 27 subscriptions have data caps. Rolling out
+*any* agent build without it re-bills on every node at once.
+
+**Deploy order.**
+- Backend (8919b62, 37ea43c) can go before or after the agent release.
+  37ea43c sends plan speed caps on every re-assert only to nodes
+  reporting agentVersion >= `REASSERT_CAPS_FROM_AGENT` = "0.2.10"
+  (agent-gateway.service.ts). **If the agent release carrying 381de16
+  is not v0.2.10, change that constant first** -- an older agent
+  rebuilds a capped WireGuard user's tc rules every 60 s.
+- Agent release (next `v*` tag) after merge: everything under
+  `agent/`. Caps come back on a node only once it runs it.
+- Installer changes take effect on the next installer run; nothing on
+  live nodes changes by itself.
+- Node-side, each needing the owner's go-ahead, none done:
+  `installer/maintenance/isolate-tunnel-clients.sh` (dry run by default)
+  on each WireGuard/OpenVPN/IKEv2 node; `block-private-egress.sh` from
+  the parent branch; and, only after the new agent is on every OpenVPN
+  node and a re-assert has run, `ccd-exclusive` in server.conf
+  (installer + restore script) -- before that it cuts off every OpenVPN
+  customer.
+- Panel host: production is deployed with git pull + compose, so the
+  certbot deploy hook (now restarting the backend, 814ed0b) has to be
+  regenerated there by hand once; and `APPLE_BUNDLE_ID` set in
+  `infra/.env` when App Store purchases go live (cf50278 passes it).
+
+**Proven.** Go agent: CI on 37ea43c green (vet, build, `go test ./...`,
+every package ok) -- there is no Go toolchain on this PC, so CI is the
+only place it ran; the branch head was pushed for the same. 81 Go test
+functions (55 before; 4 replaced, 30 added). The IKEv2 parser now reads
+`swanctl --list-sas --raw` output captured from a live node today
+(redacted, `agent/internal/protocols/ikev2/testdata/`), which the old
+parser returned nothing for. Backend: 1,043 tests, typecheck, lint, on
+this PC. Installer: `bash -n`; shellcheck in CI. The isolation script's
+remote half was run against a fake root with a stub iptables.
+
+**Unverified -- needs a node, labelled so in the commits:**
+- A usage row appearing after a real IKEv2 dial on the new agent; the
+  IKE-rekey case (per-CHILD_SA keying is reasoned from how strongSwan
+  rekeys).
+- DISABLE_USER ending a live IKEv2 session (`swanctl --terminate
+  --ike-id N --force`); the old `--eap-id` failing is from strongSwan's
+  source, not a run.
+- That no rollout double-bills: watch dataUsedBytes across the first
+  agent restart on a node with active WireGuard peers.
+- Caps returning after a wg-quick restart and after an agent restart
+  with OpenVPN clients connected.
+- Every installer path: the Xray carry-over and `xray run -test`
+  rollback, the role lookup from menu 5, the WireGuard/OpenVPN re-run
+  guards, the cert hook restart, the FORWARD isolation (nothing should
+  change for customers; a client pinging another client's 10.66.x
+  address should now get nothing).
+
+**Not fixed, and why.**
+- Mirror rate-limit buckets (one client exhausting sign-in for everyone
+  behind a node mirror): needs the hop authenticated -- a secret the
+  mirror sends and the backend checks -- which is backend design work
+  (in the backend review's list) plus a node nginx change after it.
+  Only the false nginx comment was corrected (e8ed802).
+- `ccd-exclusive` itself: owner decision and ordering, above. Hard-
+  deleted OpenVPN rows on a rebuilt node stay accepted until it is on.
+- Requiring `subnetCidr` for OPENVPN in the backend: a stale installer
+  checkout on a node would then fail its tls-crypt PATCH, which is
+  worse than what it guards.
+- `agentd --enroll-init` refusing to overwrite without `--force`: the
+  installer (from main) and the binary (from the latest release) skew,
+  and an older binary rejects an unknown flag.
+- IKEv2 `dpd_delay`/`reauth_time` as a server-side backstop for ending
+  revoked sessions: a live config change, owner decision.
+
+## 2026-10-06 — agent review fixes, second round (branch `claude/review-fixes-agent`)
+
+A second, adversarial review of the branch above found three medium
+defects -- one new behaviour the branch caused, two claimed fixes that
+did not work -- and twelve lows. Not merged, not deployed, no agent
+released, no node or production server contacted.
+
+**Blocking, all three fixed.**
+- *Dead IKEv2 sessions counted as devices in use* (8b859b2, on d9c939a).
+  The fixed parser made IKEv2 session counts real, counting every SA
+  strongSwan lists, and nothing on the server ends one (no DPD,
+  rekey_time = 0s). The captured sample's two SAs had had nothing from
+  their clients for about 21 hours. Each would have kept a device slot
+  and fed the backstop. The agent now counts only ESTABLISHED SAs with
+  inbound traffic in the last three minutes (half-open SAs, whose
+  identity is only claimed, drop out too), and the backend puts IKEV2 in
+  COUNTS_IGNORED and goes by bytes -- both, because production runs main
+  and either could ship first.
+- *`xray run -test` could never pass on a running relay* (596813c, on
+  the no-change refactor 544bcbf). -test creates the tun inbound's device,
+  which the live Xray holds ("device or resource busy", measured on ir1
+  2026-08-16), so every install_xray re-run on a live relay put the old
+  config back and blamed the config. A running relay's config is now
+  tested without its tun inbound. block-private-egress.sh (parent branch)
+  had the same test under pipefail and could never apply on ir1; fixed
+  the same way.
+- *Nothing retried a failed IKEv2 terminate* (24f559c). A failed command
+  is marked FAILED and never resent; the re-assert sends only credentials
+  that should be on. The provisioner now ends any SA still listed under
+  an identity it removed or disabled, on every stats poll, until none is.
+  Forgotten across an agent restart.
+
+**Lows.**
+- Fixed: a changed OpenVPN cap forgot where the user was shaped, so a
+  client that left before the next pass left its old cap on that pool
+  address for the next customer (84e2815; two older shaping tests that
+  could not fail were tightened, 10ab7ae). Reconnect backoff capped at
+  15 s, under the backend's 30 s first stale sweep, so a deploy cannot
+  mark nodes OFFLINE (472b054). A WireGuard re-run now defaults to, and
+  insists on, the panel's subnetCidr -- on a rebuilt node Enter used to
+  pick 10.66.0.0/24 whatever the panel said (ef22da0).
+- Owner decision: **billing IKEv2 usage at all.** docs/ikev2-node.md
+  used to call leaving it uncounted deliberate; the parser fix turns it
+  on. Written into that doc. Approve or hold before the agent release.
+- Deploy note, added below.
+- Not a defect: the moved prompts "breaking answer-file installs" --
+  answer files are already recorded as unsupported (windows.md, "do not
+  feed it a here-doc"), and a full install takes the relay role from the
+  role question.
+- Deferred: the backend gating caps on agentVersion "0.2.10" rather than
+  a capability the agent declares in Hello (a proto change, and no Go
+  toolchain here to regenerate it; the deploy note above covers it);
+  every agent restart rebuilding each relay rule once (a brief leak
+  window only on a relay still defaulting to `direct`; the author's
+  known trade-off).
+- Unanswered: who captured the IKEv2 fixture "from a live node" -- the
+  repo does not say. Its redaction looks complete (addresses, ids, SPIs
+  replaced; only NAT source ports and counters left).
+
+**Deploy order, added to the above.** Rolling the agent *back* to any
+build without 6bd4300 -- the installer's rollback to a v0.2.9 backup in
+/root/agent-rollback included -- re-bills every connected customer's
+totals once, as a forward rollout without it would. The backend change
+(IKEV2 ignored in the backstop) is safe before or after the agent.
+
+**Proven.** Every new Go and installer test was run against the code
+before its fix: CI run 37562880092 on a throwaway branch
+(`claude/review-fixes-agent-red`: the old code plus only the two
+no-change prep commits and the new tests) failed exactly the seven new
+Go tests written to fail plus the changed backoff expectation, in
+ikev2, dispatch and controlplane, every other package ok; the installer
+gate test failed 3 of its 12 checks on "device or resource busy" with
+the runner's real jq. (That run's TypeScript job failed in
+apps/mobile's capability-scope test, which this branch does not touch:
+desktop-windows' build fetches the real seed bundle while mobile's
+pretest has already generated its capability file from the placeholder,
+a race inside turbo; the backend branch's run passed it 15 minutes
+earlier.) The backend test fails on the old code locally. Backend:
+1,045 tests, typecheck, lint, on this PC. Go: 90 test functions (81
+before; 9 added, 4 changed) -- still no Go toolchain here, so CI is the
+only place they run.
+
+**Unverified -- needs a node.** That `use-in` moves only with ESP
+traffic; an IKEv2 terminate on a live session, and the retry; install_xray
+on a live relay end to end; block-private-egress.sh's remote half
+(syntax-checked only); the WireGuard subnet guard; a backend restart with
+nodes reconnecting inside the first sweep.
