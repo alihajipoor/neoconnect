@@ -338,6 +338,24 @@ describe("no network, or no foreground", () => {
     expect(h.asked).toHaveLength(0);
   });
 
+  it("still gives up when the clock jumped past the ceiling with no timer firing", async () => {
+    // A laptop asleep, or a phone app frozen in the background: timers do
+    // not run, and the first thing that happens on waking is the network
+    // (or the app) coming back. Hours later is not a blip to reconnect.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    await h.advance(10 * 60_000);
+    h.state.online = false;
+    h.rc.dropped();
+    h.state.now += BLOCKED_WAIT_MAX_MS + 60_000;
+    h.state.online = true;
+    h.rc.conditionsChanged();
+    await h.flush();
+    expect(h.asked).toHaveLength(0);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "waitedTooLong" });
+  });
+
   it("on a phone, waits for the app to be in front", async () => {
     const h = harness({ requiresForeground: true });
     h.bind();
