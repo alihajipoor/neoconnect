@@ -8,6 +8,7 @@ import type { Request } from "express";
 import { ClientAttemptsService } from "./client-attempts.service";
 import { ReportAttemptDto } from "./dto/report-attempt.dto";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
+import { ThrottleVolumePerSession } from "../../common/guards/client-throttler.guard";
 import { clientIpOf } from "../../common/client-ip";
 import type { CustomerAccessTokenPayload } from "../customer-auth/types";
 
@@ -67,11 +68,15 @@ export class ClientAttemptsController {
    * short window, and this is throttled harder than the rest of the API.
    * Twenty a minute is far above what a client generates -- one per
    * connect, one per sign-in -- and far below what would fill anything.
+   * Per signed-in session when the report carries a sign-in token, per
+   * address otherwise: there is nothing to guess here, and per address
+   * every customer behind one node mirror shared the twenty.
    *
    * Hidden from the public API docs: it is an internal channel, not
    * something to invite use of.
    */
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @ThrottleVolumePerSession()
   @ApiExcludeEndpoint()
   @HttpCode(204)
   @Post("client-attempts")

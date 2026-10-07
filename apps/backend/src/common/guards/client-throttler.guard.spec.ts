@@ -5,7 +5,15 @@ import { JwtService } from "@nestjs/jwt";
 import { Test } from "@nestjs/testing";
 import { Throttle, ThrottlerModule } from "@nestjs/throttler";
 import type { AddressInfo, Server } from "node:net";
-import { ClientThrottlerGuard, ThrottleByRefreshToken } from "./client-throttler.guard";
+import { Reflector } from "@nestjs/core";
+import {
+  ClientThrottlerGuard,
+  THROTTLE_VOLUME_PER_SESSION,
+  ThrottleByRefreshToken,
+  ThrottleVolumePerSession,
+} from "./client-throttler.guard";
+import { ClientAttemptsController } from "../../modules/client-attempts/client-attempts.controller";
+import { CustomerController } from "../../modules/customer/customer.controller";
 
 /** Every request here comes from 127.0.0.1 -- which is the point: it
  * stands for a node's mirror, or its tunnel egress, with many customers
@@ -37,6 +45,14 @@ class ProbeController {
   @HttpCode(200)
   @Throttle({ default: { limit: GUESS_LIMIT, ttl: 60_000 } })
   guess() {
+    return { ok: true };
+  }
+
+  @Post("volume")
+  @HttpCode(200)
+  @Throttle({ default: { limit: GUESS_LIMIT, ttl: 60_000 } })
+  @ThrottleVolumePerSession()
+  volume() {
     return { ok: true };
   }
 }
@@ -142,6 +158,16 @@ describe("ClientThrottlerGuard", () => {
     expect(await post("guess", {}, bob)).toBe(429);
   });
 
+  it("counts a route's own volume cap per session when the route says that is what it is", async () => {
+    const alice = customer("alice", "alice-pc");
+    const bob = customer("bob", "bob-phone");
+    expect(await times(GUESS_LIMIT + 1, () => post("volume", {}, alice))).toEqual([200, 200, 429]);
+    // Bob is behind the same address and has his own budget.
+    expect(await post("volume", {}, bob)).toBe(200);
+    // Without a session it is the address, shared, exactly as before.
+    expect(await times(GUESS_LIMIT + 1, () => post("volume", {}))).toEqual([200, 200, 429]);
+  });
+
   it("counts a refresh against the session in its refresh token, once that verifies", async () => {
     const refreshOf = (sub: string, sid: string) =>
       sign({ sub, sid, tokenVersion: 0 }, "customerJwt.refreshSecret");
@@ -154,5 +180,23 @@ describe("ClientThrottlerGuard", () => {
     const notRefresh = customer("carol", "carol-pc");
     expect(await times(DEFAULT_LIMIT, () => post("refresh", { refreshToken: notRefresh }))).toEqual([200, 200, 200]);
     expect(await post("refresh", { refreshToken: "junk" })).toBe(429);
+  });
+});
+
+/** The routes whose own limit caps volume rather than guesses. Left on the
+ * address, every signed-in customer behind one node shared twenty attempt
+ * reports and ten App Store redemptions a minute. */
+describe("routes counted per session despite their own limit", () => {
+  const reflector = new Reflector();
+  // By name: the handler is the metadata's target, never called here.
+  const perSession = (controller: { prototype: object }, method: string) =>
+    reflector.get<boolean>(
+      THROTTLE_VOLUME_PER_SESSION,
+      (controller.prototype as Record<string, () => unknown>)[method],
+    );
+
+  it("include attempt reports and App Store redemption", () => {
+    expect(perSession(ClientAttemptsController, "report")).toBe(true);
+    expect(perSession(CustomerController, "redeemApplePurchase")).toBe(true);
   });
 });

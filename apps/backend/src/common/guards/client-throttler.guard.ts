@@ -19,6 +19,16 @@ export const THROTTLE_BY_REFRESH_TOKEN = "neoxify:throttle-by-refresh-token";
  * rather than per address, once that token verifies. */
 export const ThrottleByRefreshToken = () => SetMetadata(THROTTLE_BY_REFRESH_TOKEN, true);
 
+/** Metadata naming a route whose own `@Throttle` caps volume, not guesses.
+ * See ClientThrottlerGuard. */
+export const THROTTLE_VOLUME_PER_SESSION = "neoxify:throttle-volume-per-session";
+
+/** This route's own `@Throttle` limit bounds how much it is used, and has
+ * nothing to guess (an attempt report, an Apple-signed transaction): count
+ * it per signed-in session like the default limit, not per address. Never
+ * on a route whose limit stops guessing -- see ClientThrottlerGuard. */
+export const ThrottleVolumePerSession = () => SetMetadata(THROTTLE_VOLUME_PER_SESSION, true);
+
 /** The key @nestjs/throttler stores a route's own `@Throttle` limit under,
  * per named throttler. Not exported by the package; its spec pins it, so
  * a library upgrade that renames it fails a test instead of quietly
@@ -48,11 +58,15 @@ const THROTTLER_LIMIT = "THROTTLER:LIMIT";
  * verify is counted against the address exactly as before -- and is
  * refused by the route's own guard anyway.
  *
- * Only on routes that use the global default limit. A route that sets
- * its own `@Throttle` is limiting guesses (change-password's current
- * password, a purchase being redeemed, a sign-in), and there the
- * address stays the key: a session is something an attacker with one
- * account can mint more of.
+ * Only on routes that use the global default limit, unless a route marks
+ * its own limit @ThrottleVolumePerSession(). A route that sets its own
+ * `@Throttle` is usually limiting guesses (change-password's current
+ * password, a voucher code, a sign-in), and there the address stays the
+ * key: a session is something an attacker with one account can mint more
+ * of. The marked ones have nothing to guess -- `/client-attempts` and
+ * `billing/apple/redeem` cap volume -- and left on the address they made
+ * every signed-in customer behind one node share 20 reports and 10
+ * redemptions a minute.
  *
  * What this does not fix, and why. The unauthenticated routes --
  * sign-in, sign-up, password reset, the sign-in challenge -- and
@@ -83,8 +97,13 @@ export class ClientThrottlerGuard extends ThrottlerGuard {
   // names only the first.
   protected override async getTracker(req: Record<string, unknown>, context?: ExecutionContext): Promise<string> {
     const address = await super.getTracker(req);
-    if (!context || this.routeSetsItsOwnLimit(context)) return address;
+    if (!context) return address;
+    if (this.routeSetsItsOwnLimit(context) && !this.marked(context, THROTTLE_VOLUME_PER_SESSION)) return address;
     return this.sessionOf(req, context) ?? address;
+  }
+
+  private marked(context: ExecutionContext, key: string): boolean {
+    return this.reflector.getAllAndOverride<boolean>(key, [context.getHandler(), context.getClass()]) === true;
   }
 
   private routeSetsItsOwnLimit(context: ExecutionContext): boolean {
@@ -105,7 +124,7 @@ export class ClientThrottlerGuard extends ThrottlerGuard {
       if (admin) return `admin:${admin.sub}`;
     }
 
-    if (this.reflector.getAllAndOverride<boolean>(THROTTLE_BY_REFRESH_TOKEN, [context.getHandler(), context.getClass()])) {
+    if (this.marked(context, THROTTLE_BY_REFRESH_TOKEN)) {
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (typeof body.refreshToken === "string") {
         const customer = this.verified(body.refreshToken, "customerJwt.refreshSecret");
