@@ -501,10 +501,17 @@ impl Drop for Relays {
     /// The TCP acceptor is woken by connecting to it: `accept` blocks,
     /// and a flag it never gets round to reading is not a stop.
     ///
-    /// Carried connections are closed, not waited for. Their copy threads
-    /// unblock when their sockets shut and finish on their own; joining
-    /// them here would put "wait for something to disappear" on the
-    /// disconnect path, which is the one thing it may not do.
+    /// Carried connections are closed, not waited for. Both ends see the
+    /// close at once. Their copy threads do not: on Windows they stayed in
+    /// their reads after the shutdown until each far end answered by
+    /// closing -- 16 of 16 still there twenty seconds on with both ends
+    /// held open, gone within milliseconds once the ends let go (the
+    /// many-sessions test in `session`). An application and a server
+    /// answer a close by closing, so ordinarily that is one round trip;
+    /// one that never does would keep a thread and its sockets, and for
+    /// how long -- with the tunnel the upstream was pinned to already gone
+    /// -- is unmeasured. Joining them here would put "wait for the far
+    /// end" on the disconnect path, which is the one thing it may not do.
     ///
     /// A `Drop` rather than only a method, so that a bring-up which fails
     /// after the relays started, or panics, stops them on the way out

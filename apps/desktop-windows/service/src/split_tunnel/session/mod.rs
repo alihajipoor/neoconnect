@@ -656,10 +656,14 @@ mod tests {
         assert!(image.to_lowercase().ends_with(".exe"), "got {image}");
     }
 
-    use std::net::TcpStream;
+    use std::io::{self, Read, Write};
+    use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
     use std::sync::{Barrier, RwLock};
     use std::time::Duration;
 
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    use crate::split_tunnel::policy::Transport;
     use crate::split_tunnel::Selection;
     use fake::{Fake, Ledger};
 
@@ -812,22 +816,169 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// One TCP connection and one UDP flow carried through a session's
+    /// real relays, to far ends on this machine that never hang up.
+    struct Carrying {
+        /// Both sides of the TCP connection. Each must see it end when
+        /// the session is dropped: nothing else would ever end it.
+        app: TcpStream,
+        far_end: TcpStream,
+        /// The relay's onward UDP socket, as the far end saw it.
+        upstream: SocketAddr,
+    }
+
+    /// Records a flow in a session's table, as the packet loop would,
+    /// and returns the synthetic port it was given.
+    fn record_flow(nat: &flows::Nat, transport: Transport, destination: SocketAddrV4) -> io::Result<u16> {
+        let origin = flows::Origin {
+            addr: *destination.ip(),
+            port: destination.port(),
+            client: Ipv4Addr::LOCALHOST,
+            client_port: 40000,
+            interface_id: 1,
+            upstream: None,
+            exit: None,
+        };
+        nat.redirect(transport, origin).ok_or_else(|| io::Error::other("the flow table is full"))
+    }
+
+    fn v4(address: io::Result<SocketAddr>) -> io::Result<SocketAddrV4> {
+        match address? {
+            SocketAddr::V4(v4) => Ok(v4),
+            SocketAddr::V6(v6) => Err(io::Error::other(format!("bound to {v6}"))),
+        }
+    }
+
+    fn because<T>(what: &str, result: io::Result<T>) -> io::Result<T> {
+        result.map_err(|e| io::Error::new(e.kind(), format!("{what}: {e}")))
+    }
+
+    /// Carries one connection and one flow through `session`'s relays,
+    /// standing in for the packet loop the way the relay's own tests do:
+    /// the flow is recorded by hand and the application's socket is bound
+    /// to the synthetic port the loop would have rewritten it to.
+    fn carry(session: &Session<Fake>) -> io::Result<Carrying> {
+        let (tcp_port, udp_port) = session._relays.ports();
+        let patient = Some(Duration::from_secs(10));
+
+        // TCP, to a far end that reads and never answers or hangs up.
+        let quiet = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let quiet_at = v4(quiet.local_addr())?;
+        let (accepted, far_end) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = quiet.accept() {
+                let _ = accepted.send(stream);
+            }
+        });
+        let nat_port = record_flow(&session.nat, Transport::Tcp, quiet_at)?;
+        let source = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        // Shared, as in the relay's tests: every session's table hands
+        // out the same first port, and each connects to its own relay.
+        source.set_reuse_address(true)?;
+        source.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, nat_port)).into())?;
+        because("connect to the relay", source.connect(&SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port)).into()))?;
+        let mut app: TcpStream = source.into();
+        app.write_all(b"hello")?;
+        let mut far_end = far_end
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| io::Error::other("the relay never dialled the far end"))?;
+        far_end.set_read_timeout(patient)?;
+        because("the far end hearing the application", far_end.read_exact(&mut [0u8; 5]))?;
+
+        // UDP, to a far end that answers once and remembers who asked.
+        let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+        echo.set_read_timeout(patient)?;
+        let echo_at = v4(echo.local_addr())?;
+        // Bound without sharing, and retried on a new flow when that
+        // fails: a shared UDP port would deliver each reply to whichever
+        // session's socket Windows liked. See the relay's `udp_flow`.
+        let mut app_udp = None;
+        for _ in 0..64 {
+            let nat_port = record_flow(&session.nat, Transport::Udp, echo_at)?;
+            if let Ok(socket) = UdpSocket::bind((Ipv4Addr::LOCALHOST, nat_port)) {
+                app_udp = Some(socket);
+                break;
+            }
+        }
+        let app_udp = app_udp.ok_or_else(|| io::Error::other("no synthetic port could be bound for a UDP flow"))?;
+        app_udp.set_read_timeout(patient)?;
+        app_udp.send_to(b"ping", (Ipv4Addr::LOCALHOST, udp_port))?;
+        let mut buffer = [0u8; 16];
+        let (len, upstream) = because("the far end hearing the datagram", echo.recv_from(&mut buffer))?;
+        echo.send_to(&buffer[..len], upstream)?;
+        let (len, _) = because("the reply coming back", app_udp.recv_from(&mut buffer))?;
+        if &buffer[..len] != b"ping" {
+            return Err(io::Error::other(format!("the reply came back as {:?}", &buffer[..len])));
+        }
+        Ok(Carrying { app, far_end, upstream })
+    }
+
+    /// Whether a connection has ended, rather than merely gone quiet.
+    fn ended(stream: &mut TcpStream) -> bool {
+        if stream.set_read_timeout(Some(Duration::from_secs(3))).is_err() {
+            return true;
+        }
+        match stream.read(&mut [0u8; 1]) {
+            Ok(n) => n == 0,
+            Err(e) => !matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock),
+        }
+    }
+
+    /// Whether a UDP port is free for the taking within `within`: the
+    /// socket that held it has been closed.
+    fn released(port: SocketAddr, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        loop {
+            if UdpSocket::bind(port).is_ok() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// What one session in `many_sessions_...` still holds, if anything.
+    fn held_by(ledger: &Ledger, session: usize) -> Vec<&'static str> {
+        ledger.still_held().into_iter().filter(|(n, _)| *n == session).map(|(_, what)| what).collect()
+    }
+
     /// Many sessions brought up and torn down at once leave nothing
     /// behind: every stand-in route, rule and block released exactly
-    /// once and in order, every thread finished, every relay closed.
+    /// once and in order, every thread finished, every connection a
+    /// relay carried closed, and every relay port -- TCP and UDP --
+    /// closed.
     ///
     /// Concurrent on purpose. The relay's stop once passed every
     /// single-instance test and left a connection open in 8 to 20 of 32
     /// stops made at once (see `relay::Carried`), so a teardown here is
-    /// asked the question both ways. A quarter of the sessions fail as
-    /// interception would, so their unwind runs among the others'
-    /// teardowns rather than on its own.
+    /// asked the question both ways -- and half the sessions are carrying
+    /// a TCP connection and a UDP flow through their real relays when
+    /// they are dropped, so the closing that hazard was about happens
+    /// here, from a session's drop, rather than only in the relay's own
+    /// tests. A quarter fail as interception would, and begin their
+    /// bring-ups only once the others start coming down, so their unwinds
+    /// run among the others' teardowns rather than on their own.
     ///
     /// "Every thread finished" is measured, not inferred: each session's
     /// flow table, counters and tunnel record are handed to its relay
     /// threads, its logger and the stand-ins for its other threads, and
-    /// once the sessions are gone nothing may still hold any of them. A
-    /// thread left running would.
+    /// once a session is gone nothing may still hold any of them. A thread
+    /// left running would. For a session that carried nothing that is
+    /// checked the moment its drop returns, which is what catches a thread
+    /// that was signalled and not joined.
+    ///
+    /// A carrying session is not held to that, because the relay does not
+    /// join a carried connection's threads -- see `Relays`' `Drop`. What it
+    /// is held to: both ends of the TCP connection see it end the moment
+    /// the session is dropped, the relay's onward UDP socket is gone
+    /// within three seconds (a UDP reader notices within one read
+    /// timeout), and once the two ends have closed their sockets in turn,
+    /// as an application and a server answer a close, every thread is
+    /// gone within three seconds more. Not sooner: the copy threads stay
+    /// in their reads until the far ends close -- measured, 16 of 16 still
+    /// there twenty seconds after the drop with both ends held open.
     #[test]
     fn many_sessions_started_and_stopped_at_once_leave_nothing_behind() {
         const N: usize = 32;
@@ -835,26 +986,67 @@ mod tests {
         let dir = scratch("many");
         let gate = Arc::new(Barrier::new(N));
         let fails = |n: usize| n % 4 == 3;
+        let carries = |n: usize| n % 4 == 1 || n % 4 == 2;
+        let grace = Duration::from_secs(3);
 
         let threads: Vec<_> = (0..N)
             .map(|n| {
                 let (ledger, gate, dir) = (ledger.clone(), gate.clone(), dir.clone());
-                std::thread::spawn(move || {
+                std::thread::spawn(move || -> Result<(), String> {
                     gate.wait();
-                    let session = start(&ledger, n, fails(n).then_some("interception"), &dir);
-                    let started = session.is_ok();
-                    // Every session is up, or has finished failing,
-                    // before any of them is taken down.
+                    let up = (!fails(n)).then(|| start(&ledger, n, None, &dir));
+                    let carrying = match &up {
+                        Some(Ok(session)) if carries(n) => Some(carry(session)),
+                        _ => None,
+                    };
+                    // Every session that comes up is up, and carrying
+                    // what it carries, before any of them is taken down.
+                    // Nothing above returns early, or the others would
+                    // wait here for good.
                     gate.wait();
-                    drop(session);
-                    started
+                    let failed = fails(n).then(|| start(&ledger, n, Some("interception"), &dir).map(drop));
+                    let up = up.map(|outcome| outcome.map(drop));
+                    match (&up, &failed) {
+                        (Some(Ok(())), None) | (None, Some(Err(_))) => {}
+                        _ => return Err(format!("session {n}: brought up {up:?}, failing bring-up {failed:?}")),
+                    }
+
+                    let Some(carrying) = carrying else {
+                        let held = held_by(&ledger, n);
+                        if !held.is_empty() {
+                            return Err(format!("session {n}: a thread outlived its drop, still holding {held:?}"));
+                        }
+                        return Ok(());
+                    };
+                    let mut carrying = carrying.map_err(|e| format!("session {n} could not carry a connection: {e}"))?;
+                    if !ended(&mut carrying.app) {
+                        return Err(format!("session {n}: the application's side of a carried connection outlived it"));
+                    }
+                    if !ended(&mut carrying.far_end) {
+                        return Err(format!("session {n}: the upstream side of a carried connection outlived it"));
+                    }
+                    if !released(carrying.upstream, grace) {
+                        return Err(format!("session {n}: the relay's onward UDP socket {} outlived it", carrying.upstream));
+                    }
+                    // Each side answers the close by closing, as an
+                    // application and a server do. Not before: the
+                    // relay's copy threads wait for exactly that.
+                    drop(carrying);
+                    let deadline = Instant::now() + grace;
+                    while !held_by(&ledger, n).is_empty() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    let held = held_by(&ledger, n);
+                    if !held.is_empty() {
+                        return Err(format!("session {n}: a carried connection's thread never finished, still holding {held:?}"));
+                    }
+                    Ok(())
                 })
             })
             .collect();
-        for (n, thread) in threads.into_iter().enumerate() {
-            let started = thread.join().expect("a session thread panicked");
-            assert_eq!(started, !fails(n), "session {n}");
-        }
+        let failures: Vec<String> =
+            threads.into_iter().filter_map(|thread| thread.join().expect("a session thread panicked").err()).collect();
+        assert!(failures.is_empty(), "{} of {N} sessions left something behind: {failures:#?}", failures.len());
 
         for n in 0..N {
             let expected: &[&str] = if fails(n) { &["relays", "ipv6", "allowance", "route"] } else { &TEARDOWN };
@@ -862,32 +1054,30 @@ mod tests {
             assert!(balanced(&ledger, n), "session {n}: acquired {:?}, released {:?}", ledger.acquired(n), ledger.released(n));
         }
 
-        let held = ledger.still_held();
-        assert!(
-            held.is_empty(),
-            "{} shared object(s) still held once every session was dropped -- a thread outlived its session: {held:?}",
-            held.len()
-        );
-
         // A listener on loopback answers a connect at once, so anything
         // other than a connection inside half a second is a port nobody
         // is listening on. Knocked on in parallel, because Windows
         // retries a refused loopback connect for about two seconds before
         // it says so, and thirty-two of those in a row is a minute.
+        //
+        // The UDP port is tried by binding it. A carried flow's reader
+        // holds the relay's UDP socket to send replies on, and lets go
+        // within one read timeout of the stop, hence the grace.
         let ports = ledger.relay_ports();
         assert_eq!(ports.len(), N, "every session started real relays");
         let knocks: Vec<_> = ports
             .into_iter()
-            .map(|(n, port)| {
+            .map(|(n, tcp, udp)| {
                 std::thread::spawn(move || {
-                    let open = TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, port).into(), Duration::from_millis(500));
-                    (n, port, open.is_ok())
+                    let open = TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, tcp).into(), Duration::from_millis(500));
+                    (n, tcp, open.is_ok(), udp, released(SocketAddr::from((Ipv4Addr::UNSPECIFIED, udp)), grace))
                 })
             })
             .collect();
         for knock in knocks {
-            let (n, port, open) = knock.join().unwrap();
-            assert!(!open, "session {n}'s relay is still accepting on port {port}");
+            let (n, tcp, open, udp, udp_released) = knock.join().unwrap();
+            assert!(!open, "session {n}'s relay is still accepting on TCP port {tcp}");
+            assert!(udp_released, "session {n}'s relay still holds UDP port {udp}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

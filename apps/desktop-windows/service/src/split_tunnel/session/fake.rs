@@ -10,6 +10,10 @@
 //! every stand-in thread runs on, so the stop-and-join being exercised is
 //! the production one.
 //!
+//! The "tunnel" is loopback: a real interface, so the relays pin their
+//! onward sockets to it exactly as they would to a VPN adapter, and a
+//! connection carried through them reaches a listener on this machine.
+//!
 //! Standing in: the route, the firewall allowance, the IPv6 block and
 //! the packet loop, each of which needs administrator rights, the
 //! WinDivert driver or the filtering engine; and the activation reset,
@@ -53,8 +57,9 @@ pub(super) struct Ledger {
     /// Every shared object a session handed to a part, as a check that
     /// answers whether anything still holds it.
     handed: Mutex<Vec<(usize, &'static str, Box<dyn Fn() -> bool + Send>)>>,
-    /// The relays' TCP ports, to knock on once they are meant to be shut.
-    relay_ports: Mutex<Vec<(usize, u16)>>,
+    /// The relays' TCP and UDP ports, to try once they are meant to be
+    /// shut.
+    relay_ports: Mutex<Vec<(usize, u16, u16)>>,
 }
 
 impl Ledger {
@@ -94,7 +99,7 @@ impl Ledger {
             .collect()
     }
 
-    pub(super) fn relay_ports(&self) -> Vec<(usize, u16)> {
+    pub(super) fn relay_ports(&self) -> Vec<(usize, u16, u16)> {
         self.relay_ports.lock().unwrap().clone()
     }
 
@@ -209,12 +214,17 @@ impl Parts for Fake {
     type Watchdog = Held<Worker>;
 
     fn wait_for_tunnel(&self, adapter_name: &str, _limits: &Limits) -> Result<Adapter, String> {
-        let n = self.session as u32;
+        // Loopback, interface 1 on every Windows machine -- the same
+        // stand-in `net::pin`'s test pins to. The relays attach their
+        // onward sockets to it the way they attach them to a real
+        // tunnel, so what they carry goes the production path and
+        // arrives at a listener here. An address no adapter holds would
+        // make every carried connection fail its bind instead.
         Ok(Adapter {
-            index: 50_000 + n,
+            index: 1,
             name: adapter_name.to_string(),
             gateway: None,
-            ipv4: Some(Ipv4Addr::new(10, 99, (n >> 8) as u8, (n & 0xff) as u8)),
+            ipv4: Some(Ipv4Addr::LOCALHOST),
             is_up: true,
             description: "stand-in tunnel".to_string(),
         })
@@ -261,7 +271,7 @@ impl Parts for Fake {
             return Err(io::Error::other(e));
         }
         let relays = relay::start(nat, tunnel, stats, exits)?;
-        self.ledger.relay_ports.lock().unwrap().push((self.session, relays.tcp_port));
+        self.ledger.relay_ports.lock().unwrap().push((self.session, relays.tcp_port, relays.udp_port));
         Ok(self.held("relays", relays))
     }
 
