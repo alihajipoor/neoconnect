@@ -4114,7 +4114,14 @@ back), all 7 `iap` tests, and the 8 PKCE specs (the old service does not
 compile against them; behaviourally it gave the session to anyone
 holding the code).
 
-**UNVERIFIED -- not compiled, not run:**
+**COMPILED, in CI on `601d467` (compiles, nothing more):** the Kotlin,
+in a `debug-android.yml` run dispatched on this branch (x86_64 debug
+APK, throwaway key, private 7-day artifact; run 37567159371); the Swift,
+in `CI (iOS)` run 37567119411 -- the tunnel extension for the simulator
+and for a device, and the app with the plugin for the simulator, no
+warnings in the touched files. `ci.yml` green on the same commit.
+
+**UNVERIFIED -- not run:**
 - **All Kotlin** (no JVM or Android SDK on this PC). Needs an emulator:
   Xray up, `adb shell am force-stop`, reopen -> "not protected" and no
   `files/xray-state`; the same across a reboot. Custom mode with one
@@ -4124,9 +4131,10 @@ holding the code).
   handoff URL. That `runningAppProcesses` lists `:xray` is the
   platform's documented behaviour, not observed on any OEM build.
 - **All Swift** (the Mac builds iOS from `main`). For that session:
-  `AI_DEFAULT` must import as a Swift constant (else
-  `AI_V4MAPPED_CFG | AI_ADDRCONFIG`); `fetchLastDisconnectError` is
-  iOS 16+ and guarded; `Ikev2Engine.trail` is now internal. The IPv6
+  the extension now waits for nothing new, but the app's Xray and
+  WireGuard connects wait up to 20 s for `.connected`; what
+  `fetchLastDisconnectError` (iOS 16+) says for an extension that
+  failed is unobserved. The IPv6
   capture needs a real iPhone on an IPv6 network with a capture outside
   the device -- including whether Xray's local TCP accept makes IPv6
   connections look open and then fail instead of falling back to IPv4.
