@@ -109,6 +109,9 @@ class NeoxifyVpnPlugin: Plugin {
                     "dns": args.dns as NSString,
                     "mtu": args.mtu as NSNumber,
                 ])
+                // Not resolved until the extension says how it went; see
+                // ProviderStart.
+                try await ProviderStart.waitUntilConnected(manager.connection, engine: "Xray")
                 invoke.resolve()
             } catch {
                 invoke.reject("could not start the tunnel: \(error.localizedDescription)")
@@ -158,6 +161,7 @@ class NeoxifyVpnPlugin: Plugin {
                 try await manager.saveToPreferences()
                 try await manager.loadFromPreferences()
                 try manager.connection.startVPNTunnel(options: ["wireguard": json as NSString])
+                try await ProviderStart.waitUntilConnected(manager.connection, engine: "WireGuard")
                 invoke.resolve()
             } catch {
                 invoke.reject("could not start WireGuard: \(error.localizedDescription)")
@@ -467,13 +471,104 @@ class NeoxifyVpnPlugin: Plugin {
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
             let tunnel = managers.first?.connection.status ?? .invalid
             let ikev2 = await Ikev2Engine.status()
+            // .reasserting is up: the system is re-establishing a session
+            // that survives -- IKEv2 does it on every Wi-Fi to cellular
+            // move -- and traffic stays held in the tunnel meanwhile.
+            // Reported as down, one health poll landing in that window
+            // flipped the screen to "You're not protected", gave the
+            // device slot back and stopped polling while the tunnel went
+            // on carrying traffic. The poll's egress check still decides
+            // whether it is carrying; tunnelGone already counts it as not
+            // gone.
+            let up: (NEVPNStatus) -> Bool = { $0 == .connected || $0 == .reasserting }
             // Whichever is actually up. Only one can be at a time, so
-            // preferring the connected one cannot mask the other; taking
-            // the tunnel-provider state unconditionally would report a
-            // live IKEv2 session as disconnected.
-            let state = tunnel == .connected ? tunnel : (ikev2 == .connected ? ikev2 : tunnel)
-            invoke.resolve(["connected": state == .connected, "state": String(describing: state)])
+            // preferring the live one cannot mask the other; taking the
+            // tunnel-provider state unconditionally would report a live
+            // IKEv2 session as disconnected.
+            let state = up(tunnel) ? tunnel : (up(ikev2) ? ikev2 : tunnel)
+            invoke.resolve(["connected": up(state), "state": String(describing: state)])
         }
+    }
+}
+
+/// Waiting for the packet-tunnel extension to say how its start went.
+///
+/// `startVPNTunnel` only queues the request; the extension's own result
+/// goes to the system through `startTunnel`'s completion handler and
+/// never reaches this process. Xray and WireGuard used to resolve the
+/// moment the request was accepted, so a start that failed in the
+/// extension -- no configuration, a bad key, an endpoint that did not
+/// resolve, xray-core refusing its config, a jetsam kill at the ~50MB
+/// ceiling -- reached the ladder as a tunnel that was up and carried
+/// nothing. It then spent twelve seconds verifying, told the customer the
+/// server carried no traffic, remembered the route as failing on this
+/// network and reported it to the per-ISP data: a fault on this phone,
+/// filed against a server nothing had dialled. The extension's real
+/// error was lost. IKEv2 already waited (`Ikev2Engine.waitUntilConnected`);
+/// this is that contract for the other two, and Android's.
+///
+/// The wording is deliberately about this device. Neither engine dials
+/// the server while starting -- xray-core and wireguard-go connect on the
+/// first packet -- so nothing here may say a server refused, timed out
+/// or was unreachable, words the ladder reads as a failed route.
+enum ProviderStart {
+    static func waitUntilConnected(_ connection: NEVPNConnection, engine: String) async throws {
+        let start = Date()
+        var seen: [NEVPNStatus] = []
+        // As for IKEv2: the status has not left .disconnected when
+        // startVPNTunnel returns, so a "down" in the first second is not
+        // yet an answer.
+        let grace: TimeInterval = 1
+        // Starting involves no server, only settings, a lookup for a
+        // WireGuard endpoint name, and the engine; twenty seconds is far
+        // past what that takes on a healthy phone.
+        let limit: TimeInterval = 20
+
+        while true {
+            let elapsed = Date().timeIntervalSince(start)
+            let status = connection.status
+            if seen.last != status && seen.count < 32 { seen.append(status) }
+            switch status {
+            case .connected:
+                return
+            // Spelled out per item, for the reason Ikev2Engine gives: a
+            // `where` binds to the pattern it follows, not to the list.
+            case .invalid where elapsed > grace, .disconnected where elapsed > grace:
+                let reason = await lastDisconnectReason(connection)
+                throw NSError(
+                    domain: "NeoxifyTunnel", code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "the \(engine) tunnel extension did not start on this device: \(reason) (\(Ikev2Engine.trail(seen)))",
+                    ])
+            default:
+                break
+            }
+            if elapsed > limit { break }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+
+        connection.stopVPNTunnel()
+        throw NSError(
+            domain: "NeoxifyTunnel", code: 2,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "the \(engine) tunnel extension had not finished starting after \(Int(limit)) seconds (\(Ikev2Engine.trail(seen)))",
+            ])
+    }
+
+    /// What the system recorded about the last stop, which on iOS 16 and
+    /// later is the closest the app can get to the extension's own error.
+    /// Earlier systems keep it to themselves; the status trail is then
+    /// all there is.
+    private static func lastDisconnectReason(_ connection: NEVPNConnection) async -> String {
+        if #available(iOS 16.0, *) {
+            let error: Error? = await withCheckedContinuation { continuation in
+                connection.fetchLastDisconnectError { continuation.resume(returning: $0) }
+            }
+            if let error { return error.localizedDescription }
+        }
+        return "the system gave no reason"
     }
 }
 
