@@ -4042,3 +4042,96 @@ cross them, but the TLS one has not been run through them); the 5s limit
 on a slow censored path; whether a node's network reaches 1.1.1.1 and
 8.8.8.8 on 443 (both are also the tunnel's DNS, so a node that cannot is
 already broken for customers).
+
+## 2026-10-06 — mobile review fixes (branch `claude/review-fixes-mobile`)
+
+The confirmed mobile findings of the full review, fixed on a branch off
+`main` `1cd85c6` and rebased onto `7533211` (the merged backend, agent
+and desktop review fixes). 15 findings, 11 after removing duplicates (the two
+IPv6 ones, the two Custom-mode ones, the two IAP ones, and the
+stale-state critical with its high twin). Not merged, not deployed, not
+released.
+
+**Done, one commit each:**
+
+- **Critical/high, Android stale `xray-state`** (`a1e876b`). `readStatus`
+  now believes "up" only while the `:xray` process is in
+  `runningAppProcesses` and the system has a VPN network; a dead
+  process's file is deleted. Also cleared in `onRevoke`, and by a
+  service the system starts with no configuration (always-on after a
+  reboot), which now stops instead of sitting in the foreground with a
+  "Connected" notification. The JS half is `21484b3` below: even with a
+  stale file, an adopted tunnel with no baseline can no longer read
+  "You're protected".
+- **High/medium, Android Custom mode never connects** (`2c9ddad`). The
+  app's own package joins the allow-list (Xray when at least one chosen
+  app was added; WireGuard's `IncludedApplications`).
+- **Medium, Android social sign-in cancels itself** (`e0cc4f7`). The
+  Custom Tab opens from the first `onResume`, not `onCreate`.
+- **Medium, indeterminate egress shown as protected** (`21484b3`).
+  Rules moved to `apps/mobile/src/lib/tunnel-evidence.ts`; mobile now
+  has the `unverified` state ("Connected, not confirmed") the Windows
+  client has. Non-last rungs ask only the baseline's endpoint; every
+  rung after the first waits for the last tunnel to be gone before its
+  baseline; the poll asks the baseline's endpoint first.
+- **Medium x2, iOS IAP `finishAll`** (`0d49640`). The sweep finishes
+  each transaction by the id in its JWS; `iapFinish` with no id rejects;
+  `finishAll` is gone.
+- **Medium x2, iOS IPv4-only capture** (`ab6bf85`, issue #48). Both
+  engines set `NEIPv6Settings` (`fd18:6e78:0:1::1/64`, default route).
+- **Medium, iOS WireGuard hostname endpoint** (`12315bd`). Resolved with
+  `getaddrinfo` in `startTunnel`, before the settings are applied.
+- **Medium, iOS connect resolves before the extension starts**
+  (`046aee4`). `ProviderStart.waitUntilConnected`; failures are worded
+  as local so the ladder does not file them against the route.
+- **Low, iOS `.reasserting` read as down** (`046aee4`).
+- **Medium, social handoff not bound to the client** (`8cd9190`
+  backend, `ceaa5c8` clients). PKCE S256: optional `challenge` at
+  `/start`, optional `verifier` at `/exchange`; a bound code needs its
+  verifier, an unbound code with a verifier is refused (injection), an
+  unbound code with none is still accepted for released clients.
+
+**Not done:** the low "unreachable control plane rejects working
+tunnels" finding. The verifier showed the desktop does exactly the same
+and pins it in `connection-evidence.test.ts`; it is a shared trade-off
+(our own API answering nothing cannot tell "panel down" from "tunnel
+drops traffic") and changing it on one client would make the two
+diverge. Also not done, because no finding required them and each
+touches live Android users: the optional Xray DNS
+`queryStrategy: "UseIPv4"`, and a mobile IPv6 egress probe.
+
+**PROVEN (unit tests and typecheck, this PC, on the rebased tree):**
+mobile 7 files / 98 tests (72 before, +26), `tsc` clean; desktop JS 52 /
+792 (+13 new), `tsc` clean; backend 99 suites / 1,200 tests (+8 new),
+`tsc` and eslint clean; web portal `tsc` clean. Failing against the old code:
+5 of the 22 `tunnel-evidence` tests (checked by putting the old rules
+back), all 7 `iap` tests, and the 8 PKCE specs (the old service does not
+compile against them; behaviourally it gave the session to anyone
+holding the code).
+
+**UNVERIFIED -- not compiled, not run:**
+- **All Kotlin** (no JVM or Android SDK on this PC). Needs an emulator:
+  Xray up, `adb shell am force-stop`, reopen -> "not protected" and no
+  `files/xray-state`; the same across a reboot. Custom mode with one
+  Xray protocol and Fast: exit IP equals the node, node log shows the
+  session. Social sign-in: logcat order onCreate, onResume (tab),
+  onPause, onNewIntent, and `vpn_open_auth_session` resolving with the
+  handoff URL. That `runningAppProcesses` lists `:xray` is the
+  platform's documented behaviour, not observed on any OEM build.
+- **All Swift** (the Mac builds iOS from `main`). For that session:
+  `AI_DEFAULT` must import as a Swift constant (else
+  `AI_V4MAPPED_CFG | AI_ADDRCONFIG`); `fetchLastDisconnectError` is
+  iOS 16+ and guarded; `Ikev2Engine.trail` is now internal. The IPv6
+  capture needs a real iPhone on an IPv6 network with a capture outside
+  the device -- including whether Xray's local TCP accept makes IPv6
+  connections look open and then fail instead of falling back to IPv4.
+  **iOS still has not carried a packet; gate any iOS release on that
+  test.**
+- The PKCE flow against Google/Facebook and a device. Old backend plus
+  new client is a 400 at `/exchange` (`forbidNonWhitelisted`).
+
+**Deploy order:** backend first (`8cd9190`; no migration, in-memory
+state only), then clients. Making the PKCE challenge required is a
+later step, once desktop 0.9.44 and mobile 0.2.23 are gone; until then
+those clients stay exposed. The Android fixes reach nobody until an APK
+release; the iOS ones ship with the first iOS build.
