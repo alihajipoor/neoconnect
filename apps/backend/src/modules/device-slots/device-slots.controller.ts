@@ -18,8 +18,9 @@ export const SLOT_REQUESTS_PER_MINUTE = 60;
 /** Whose bucket a request counts against: the device's access token,
  * hashed -- never the address.
  *
- * The app's global limit is per address (req.ip), and here that is the
- * wrong key. Requests that come through a node's API mirror (the usual
+ * The address (req.ip) is the wrong key here. (The app's global guard,
+ * ClientThrottlerGuard, now counts verified sessions too, but these
+ * routes set their own limit and keep this tracker.) Requests that come through a node's API mirror (the usual
  * path when the panel's domain is filtered in Iran) all carry the
  * mirror's address, and requests sent through the tunnel carry the
  * node's egress address, so hundreds of customers share one bucket; so

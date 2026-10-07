@@ -782,10 +782,12 @@ ensure_fallback_site() {
       "        set \$neoxify_panel ${mirror_host};" \
       "        proxy_pass ${panel_scheme}://\$neoxify_panel\$request_uri;" \
       "        proxy_set_header Host \$neoxify_panel;" \
-      "        # The panel rate-limits per client address, so the real" \
-      "        # one has to survive the hop -- otherwise every customer" \
-      "        # arriving through this node looks like one very busy" \
-      "        # client and they throttle each other." \
+      "        # The real client address has to survive the hop for" \
+      "        # /health/ip, which the apps compare before and after" \
+      "        # connecting. The panel's rate limits cannot use it:" \
+      "        # tunnel traffic leaves from this node's address too," \
+      "        # carrying a header the customer wrote, so they count" \
+      "        # signed-in sessions and otherwise this node's address." \
       "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" \
       "        proxy_set_header X-Forwarded-Proto https;" \
       "        proxy_ssl_server_name on;" \

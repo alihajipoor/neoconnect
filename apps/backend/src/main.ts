@@ -58,6 +58,15 @@ async function bootstrap() {
   // Safe because the backend is published as 127.0.0.1:4000 in
   // infra/docker-compose.prod.yml, so nginx is the only way in and the hop
   // count is always exactly one.
+  //
+  // What this does NOT give is the customer's own address for anything
+  // that arrives through a node -- its API mirror, or a live tunnel. Then
+  // the last hop is the node, and every customer on it shares that one
+  // address. The entry to its left is the real client for the mirror, but
+  // for tunnel traffic it is whatever the customer wrote, and the two
+  // cannot be told apart here, so it is not trusted. ClientThrottlerGuard
+  // counts signed-in requests per session instead; see it for what that
+  // leaves shared.
   app.set("trust proxy", 1);
 
   // gzip, because the largest thing this API serves is the game catalogue

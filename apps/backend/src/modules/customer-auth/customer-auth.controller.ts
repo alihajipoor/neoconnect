@@ -39,6 +39,7 @@ import { ResetPasswordDto } from "./dto/reset-password.dto";
 import { ResetPasswordCodeDto } from "./dto/reset-password-code.dto";
 import { ChangePasswordDto } from "./dto/change-password.dto";
 import { deviceInfoFrom } from "../../common/device-info";
+import { ThrottleByRefreshToken } from "../../common/guards/client-throttler.guard";
 
 type HeaderBag = Record<string, string | string[] | undefined>;
 
@@ -227,6 +228,11 @@ export class CustomerAuthController {
     }
   }
 
+  // Counted per session once the refresh token verifies, not per address:
+  // every customer behind one node mirror would otherwise share a bucket,
+  // and a hundred junk refreshes a minute through that mirror would cut
+  // them all off from every authenticated call.
+  @ThrottleByRefreshToken()
   @Post("refresh")
   @HttpCode(HttpStatus.OK)
   refresh(@Body() dto: RefreshDto, @Headers() headers: HeaderBag) {
