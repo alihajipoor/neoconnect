@@ -280,6 +280,18 @@ export function Dashboard({
 }) {
   const { t } = useI18n();
   const [loading, setLoading] = useState(true);
+  /** Whether `loadAll` has finished, every step of it. Not `loading`,
+   * which ends as soon as the credentials are in so the screen can be
+   * drawn: the route list, the platform's state and a baseline are still
+   * to come then, and each lands over a pass started meanwhile --
+   * "disconnected" written over its "connecting", its baseline and exit
+   * address replaced. What an automatic reconnect's attempt waits for;
+   * see its runner. */
+  const [loaded, setLoaded] = useState(false);
+  /** The latest `loadAll`, so one that a newer load has replaced (a new
+   * location, the retry button) cannot say the screen has loaded while
+   * the newer one is still running. */
+  const loadRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [me, setMe] = useState<Customer | null>(null);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
@@ -448,7 +460,20 @@ export function Dashboard({
     return () => clearInterval(id);
   }, []);
 
+  /** Loads the screen, and says when it is done (`loaded`) -- whichever
+   * way it ended, a throw included, so an attempt held for it is never
+   * held for good. */
   async function loadAll(preferRouteId?: string) {
+    const load = ++loadRef.current;
+    setLoaded(false);
+    try {
+      await loadScreen(preferRouteId);
+    } finally {
+      if (loadRef.current === load) setLoaded(true);
+    }
+  }
+
+  async function loadScreen(preferRouteId?: string) {
     // Which customer session this load is for; see sessionGeneration.
     const sessionAtStart = sessionGeneration();
     setLoading(true);
@@ -741,23 +766,32 @@ export function Dashboard({
   // led by the route that was up, claiming the slot as any pass does and
   // judged by the same egress evidence before anything is called
   // connected.
+  //
+  // Bound only once `loadAll` has finished, and again after every load.
+  // The dashboard unmounts whenever Settings opens, so an attempt can fall
+  // due with no screen bound; the episode holds it, unspent, and runs it
+  // the moment one binds. Bound at mount, that was a screen with no
+  // credential yet: the pass set "connecting", threw on the missing
+  // credential, and was counted as a failed attempt -- and on the cached
+  // path, which never reads the platform, "Checking connection..." stayed
+  // up with nothing running. A screen that loads with nothing to dial
+  // ends the episode instead (`runLadder`'s first line).
   const runLadderRef = useRef(runLadder);
   runLadderRef.current = runLadder;
-  useEffect(
-    () =>
-      autoReconnect.bind(async (attempt) => {
-        const blocked = await reconnectPreflight({
-          exclusion: reconnectExclusion,
-          vpnGone: waitForTeardown,
-          hasPermission: hasVpnPermission,
-        });
-        if (blocked !== null) return blocked;
-        passResultRef.current = { routeId: null, errorKind: null };
-        const outcome = await runLadderRef.current({ reconnect: attempt });
-        return reconnectOutcomeOf(outcome, passResultRef.current);
-      }),
-    [],
-  );
+  useEffect(() => {
+    if (!loaded) return;
+    return autoReconnect.bind(async (attempt) => {
+      const blocked = await reconnectPreflight({
+        exclusion: reconnectExclusion,
+        vpnGone: waitForTeardown,
+        hasPermission: hasVpnPermission,
+      });
+      if (blocked !== null) return blocked;
+      passResultRef.current = { routeId: null, errorKind: null };
+      const outcome = await runLadderRef.current({ reconnect: attempt });
+      return reconnectOutcomeOf(outcome, passResultRef.current);
+    });
+  }, [loaded]);
 
   // The device limit's teardown, tried again while it has not finished.
   //
@@ -1069,6 +1103,13 @@ export function Dashboard({
       reconnect?: ReconnectAttempt;
     } = {},
   ): Promise<LadderOutcome> {
+    // Nothing to dial with. The presses check this before they get here;
+    // an automatic reconnect on a screen that loaded no credential (none
+    // on the account, or no answer and nothing cached) does not, and it is
+    // turned away before anything on screen moves. Setting "connecting"
+    // first and then giving up left "Checking connection..." showing with
+    // nothing running.
+    if (!protocolUser) return "unusable";
     setFailedOverTo(null);
     setUnsupportedChoice(null);
     cancelRef.current = false;

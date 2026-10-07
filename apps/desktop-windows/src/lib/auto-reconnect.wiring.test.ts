@@ -79,9 +79,19 @@ describe("where an episode begins", () => {
   });
 });
 
+/** The runner the dashboard binds, from `autoReconnect.bind(` to the line
+ * that closes it. */
+function boundRunner(): string {
+  const start = dashboard.indexOf("autoReconnect.bind(async (attempt) => {");
+  expect(start).toBeGreaterThan(0);
+  const end = dashboard.indexOf("\n    });\n", start);
+  expect(end).toBeGreaterThan(start);
+  return dashboard.slice(start, end);
+}
+
 describe("what an attempt is", () => {
   const start = dashboard.indexOf("autoReconnect.bind(async (attempt) => {");
-  const runner = dashboard.slice(start, dashboard.indexOf("}),", start));
+  const runner = boundRunner();
   const ladder = dashboard.slice(dashboard.indexOf("async function runLadder("));
 
   it("is an ordinary automatic ladder pass, judged by its own evidence", () => {
@@ -116,6 +126,32 @@ describe("what an attempt is", () => {
   it("arms a tunnel adopted from the service", () => {
     const adopt = body("async function adoptServiceState(sub: Subscription | null): Promise<ConnectionState | null> {");
     expect(adopt).toContain("autoReconnect.tunnelUp({ routeId: null });");
+  });
+});
+
+describe("which screen runs an attempt", () => {
+  // An attempt that fell due while Settings was open is held, unspent,
+  // until a screen binds -- and `bind` starts it there and then (see
+  // "holds an overdue attempt through a screen's load" in
+  // auto-reconnect.test.ts). Bound at mount, the screen had no
+  // credential yet, and the attempt was declined and counted as failed.
+  const runner = boundRunner();
+  const start = dashboard.indexOf("autoReconnect.bind(async (attempt) => {");
+  const effect = dashboard.slice(dashboard.lastIndexOf("useEffect(", start), dashboard.indexOf("\n  }, [", start));
+
+  it("is one that has loaded, bound again after every load", () => {
+    expect(effect).toMatch(/^useEffect\(\(\) => \{\n\s+if \(loading\) return;\n\s+return autoReconnect\.bind\(async \(attempt\) => \{/);
+    expect(dashboard.slice(dashboard.indexOf("\n  }, [", start), dashboard.indexOf("\n  }, [", start) + 20)).toContain(
+      "}, [loading]);",
+    );
+  });
+
+  it("on a screen that loaded nothing to dial, ends the episode rather than spending its attempts", () => {
+    const check = runner.indexOf('if (protocolUserRef.current === null) return { kind: "stop", why: "excluded" };');
+    expect(check).toBeGreaterThan(runner.indexOf("const excluded = reconnectExclusion();"));
+    expect(check).toBeLessThan(runner.indexOf("runLadderRef.current("));
+    // The credential the screen has now, not the one it had when bound.
+    expect(dashboard).toContain("protocolUserRef.current = protocolUser;");
   });
 });
 

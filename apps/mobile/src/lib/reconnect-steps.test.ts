@@ -129,10 +129,12 @@ describe("the phone dashboard's wiring", () => {
     expect(dashboard).toContain("const vouched = vouching(autoReconnect.current(), sessionAtStart);");
   });
 
+  const bindAt = dashboard.indexOf("autoReconnect.bind(async (attempt) => {");
+  /** The runner the dashboard binds, to the line that closes it. */
+  const runner = dashboard.slice(bindAt, dashboard.indexOf("\n    });\n", bindAt));
+
   it("asks the phone's questions, then runs an ordinary pass", () => {
-    const start = dashboard.indexOf("autoReconnect.bind(async (attempt) => {");
-    expect(start).toBeGreaterThan(0);
-    const runner = dashboard.slice(start, dashboard.indexOf("}),", start));
+    expect(bindAt).toBeGreaterThan(0);
     expect(runner).toContain("await reconnectPreflight({");
     expect(runner).toContain("vpnGone: waitForTeardown,");
     expect(runner).toContain("hasPermission: hasVpnPermission,");
@@ -141,6 +143,37 @@ describe("the phone dashboard's wiring", () => {
     expect(runner).toContain("runLadderRef.current({ reconnect: attempt })");
     expect(runner).toContain("reconnectOutcomeOf(outcome, passResultRef.current)");
     expect(runner).not.toContain("setConnectionState(");
+  });
+
+  it("binds the runner only once loadAll has finished, every step of it", () => {
+    // An attempt that fell due while Settings was open runs the moment a
+    // screen binds. Bound at mount, the screen had no credential yet: the
+    // pass set "connecting", threw, and was spent -- and on the cached
+    // path "Checking connection..." stayed up with nothing running.
+    const effect = dashboard.slice(dashboard.lastIndexOf("useEffect(", bindAt), dashboard.indexOf("\n  }, [", bindAt));
+    expect(effect).toMatch(/^useEffect\(\(\) => \{\n\s+if \(!loaded\) return;\n\s+return autoReconnect\.bind\(async \(attempt\) => \{/);
+    expect(dashboard.slice(dashboard.indexOf("\n  }, [", bindAt)).startsWith("\n  }, [loaded]);")).toBe(true);
+    // Not `loading`, which ends before the route list, the platform's
+    // state and the baseline: loaded only when the whole load is done,
+    // whichever way it ended, and never by a load a newer one replaced.
+    const load = dashboard.slice(
+      dashboard.indexOf("async function loadAll(preferRouteId?: string) {"),
+      dashboard.indexOf("async function loadScreen(preferRouteId?: string) {"),
+    );
+    expect(load).toContain("const load = ++loadRef.current;");
+    expect(load.indexOf("setLoaded(false);")).toBeLessThan(load.indexOf("await loadScreen(preferRouteId);"));
+    expect(load).toMatch(/\} finally \{\n\s+if \(loadRef\.current === load\) setLoaded\(true\);/);
+    expect(dashboard.split("setLoaded(true)").length - 1).toBe(1);
+  });
+
+  it("turns a pass away before anything on screen moves when there is nothing to dial", () => {
+    const ladder = dashboard.slice(dashboard.indexOf("async function runLadder("));
+    const guard = ladder.indexOf('if (!protocolUser) return "unusable";');
+    expect(guard).toBeGreaterThan(0);
+    // Before the first state the pass touches -- "connecting" above all.
+    expect(guard).toBeLessThan(ladder.indexOf("setFailedOverTo(null);"));
+    expect(guard).toBeLessThan(ladder.indexOf('setConnectionState("connecting");'));
+    expect(guard).toBeLessThan(ladder.indexOf("cancelRef.current = false;"));
   });
 
   it("leads with the route that was up, and reports the pass as automatic", () => {

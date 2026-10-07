@@ -373,8 +373,11 @@ export class AutoReconnect {
     this.requiresForeground = requires;
   }
 
-  /** The pass the mounted screen knows how to run. A due attempt with no
-   * screen bound waits for one. Returns the unbind. */
+  /** The pass the mounted screen knows how to run, bound once the screen
+   * can run one -- its load finished, not merely mounted. A due attempt
+   * with no screen bound waits for one, unspent, and starts the moment one
+   * binds, so a screen that bound before it had its credentials would have
+   * that attempt at once and could only waste it. Returns the unbind. */
   bind(runner: ReconnectRunner): () => void {
     this.runner = runner;
     this.kick();

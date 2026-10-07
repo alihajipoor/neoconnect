@@ -1343,19 +1343,39 @@ export function Dashboard({
   // up), the same device-limit claim, and the same evidence before
   // anything is called connected. What is checked here first is only
   // what rules the attempt out altogether.
+  //
+  // Bound only once the screen has loaded, and again after every load.
+  // The dashboard unmounts whenever Settings opens, so an attempt can fall
+  // due with no screen bound; the episode holds it, unspent, and runs it
+  // the moment one binds. Bound at mount, that was before `loadAll` had
+  // answered: the first render's `runLadder` has no credential, so the
+  // held attempt was declined at once and counted as failed -- an attempt
+  // and its backoff spent without a dial, and on the last one "VPN
+  // connection lost" with a row counting a dial that never happened.
+  // `loading` ends once the credentials are in and the service's state is
+  // on screen; what `loadAll` does after that stands aside for a pass
+  // (`captureBaselinesWhileDown`).
+  //
+  // A screen that has loaded and still has nothing to dial with -- no
+  // credential on the account, or no answer and nothing cached -- ends
+  // the episode instead. Held, it would say "Reconnecting..." over a
+  // screen that never will; declined, every attempt would be spent on
+  // nothing.
   const runLadderRef = useRef(runLadder);
   runLadderRef.current = runLadder;
-  useEffect(
-    () =>
-      autoReconnect.bind(async (attempt) => {
-        const excluded = reconnectExclusion();
-        if (excluded !== null) return { kind: "stop", why: excluded };
-        passResultRef.current = { routeId: null, errorKind: null };
-        const outcome = await runLadderRef.current({ automatic: true, reconnect: attempt });
-        return reconnectOutcomeOf(outcome, passResultRef.current);
-      }),
-    [],
-  );
+  const protocolUserRef = useRef(protocolUser);
+  protocolUserRef.current = protocolUser;
+  useEffect(() => {
+    if (loading) return;
+    return autoReconnect.bind(async (attempt) => {
+      const excluded = reconnectExclusion();
+      if (excluded !== null) return { kind: "stop", why: excluded };
+      if (protocolUserRef.current === null) return { kind: "stop", why: "excluded" };
+      passResultRef.current = { routeId: null, errorKind: null };
+      const outcome = await runLadderRef.current({ automatic: true, reconnect: attempt });
+      return reconnectOutcomeOf(outcome, passResultRef.current);
+    });
+  }, [loading]);
 
   // Asks the one question the IPv4 egress check cannot: is IPv6 still
   // reaching the internet while we are connected?

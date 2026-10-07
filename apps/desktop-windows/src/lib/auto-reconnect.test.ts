@@ -606,6 +606,35 @@ describe("a screen that is not there", () => {
     expect(h.asked).toHaveLength(1);
   });
 
+  it("holds an overdue attempt through a screen's load, and runs it as the same attempt", async () => {
+    // The dashboard unmounts for Settings mid-episode; the next backoff
+    // falls due while it is away, and the screen mounted on return takes
+    // seconds to load (8 s per endpoint on a filtered API) before it
+    // binds. Nothing is spent meanwhile: the attempt it then runs is the
+    // one that was due, and the episode carries on from there.
+    const h = harness();
+    const unbind = h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(0);
+    expect(h.asked).toHaveLength(1);
+    unbind();
+    await h.advance(RECONNECT_BACKOFF_MS[1]! + 20_000);
+    expect(h.asked).toHaveLength(1);
+    expect(h.rc.current()).toMatchObject({ kind: "waiting", attempt: 1 });
+    h.bind();
+    await h.advance(0);
+    expect(h.asked).toHaveLength(2);
+    expect(h.asked[1]!.attempt).toBe(2);
+    // The next one after its own backoff, as though nobody had left.
+    await h.advance(RECONNECT_BACKOFF_MS[2]! - 1);
+    expect(h.asked).toHaveLength(2);
+    await h.advance(1);
+    expect(h.asked).toHaveLength(3);
+    expect(h.asked[2]!.attempt).toBe(3);
+  });
+
   it("stands down if a tunnel is up again before the next attempt", async () => {
     const h = harness();
     h.bind();
