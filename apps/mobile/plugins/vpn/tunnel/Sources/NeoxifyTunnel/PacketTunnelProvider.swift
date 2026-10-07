@@ -100,7 +100,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
-        let request: Request
+        var request: Request
         do {
             guard let parsed = try self.request(from: options) else {
                 log.error("no configuration was passed to the tunnel")
@@ -112,6 +112,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             log.error("the configuration passed to the tunnel could not be read: \(error.localizedDescription)")
             completionHandler(error)
             return
+        }
+
+        // The WireGuard endpoint as an address, looked up now: wireguard-go
+        // accepts nothing else, and once the settings below are applied
+        // every lookup goes to a tunnel that is not up yet. See
+        // WireGuardEngine.resolvingEndpoint.
+        if case .wireGuard(let profile) = request {
+            guard let resolved = WireGuardEngine.resolvingEndpoint(of: profile) else {
+                log.error("the WireGuard endpoint did not resolve: \(profile.endpoint, privacy: .private)")
+                completionHandler(TunnelError.endpointUnresolved)
+                return
+            }
+            request = .wireGuard(resolved)
         }
 
         let settings: NEPacketTunnelNetworkSettings
@@ -320,6 +333,7 @@ enum TunnelError: LocalizedError {
     case engineFailed
     case badWireGuardKey
     case badWireGuardAddress
+    case endpointUnresolved
 
     var errorDescription: String? {
         switch self {
@@ -328,6 +342,9 @@ enum TunnelError: LocalizedError {
         case .engineFailed: "The VPN engine failed to start."
         case .badWireGuardKey: "The WireGuard keys in this profile are not valid."
         case .badWireGuardAddress: "The WireGuard profile did not carry a usable address."
+        // Worded as a lookup on this device, not as the server failing:
+        // nothing was dialled.
+        case .endpointUnresolved: "This server's WireGuard address could not be looked up on this network."
         }
     }
 }
