@@ -16,8 +16,9 @@
 # script fetches those and puts the node back with the SAME CA, so
 # existing client certs keep working.
 #
-# Requires: an admin bearer token at /root/.nx-admin-token, and an
-# already-enrolled agent (/etc/neoxify/agent.json).
+# Requires: a SUPERADMIN bearer token at /root/.nx-admin-token (no other
+# role is given the server key back), and an already-enrolled agent
+# (/etc/neoxify/agent.json).
 #
 # Ports/proto are pinned to what the panel already advertises for the
 # node -- change them here only if you also change them in the panel,
@@ -39,13 +40,23 @@ cfg="$(curl -sSL "$panel_url/protocol-configs" -H "Authorization: Bearer $token"
 echo "using panel config $(echo "$cfg" | jq -r .id)"
 
 install -d -m 755 /etc/openvpn/server /etc/openvpn/ccd
-echo "$cfg" | jq -r '.publicParamsJson.caCertPem'     > /etc/openvpn/server/ca.crt
-echo "$cfg" | jq -r '.publicParamsJson.serverCertPem' > /etc/openvpn/server/server.crt
-echo "$cfg" | jq -r '.publicParamsJson.serverKeyPem'  > /etc/openvpn/server/server.key
-echo "$cfg" | jq -r '.publicParamsJson.tlsCryptKey'   > /etc/openvpn/server/tls-crypt.key
+# `// empty`, because a missing key is not an empty file to jq -r: it
+# prints the word "null", which passed the old non-empty check and was
+# installed as the server key. GET /protocol-configs returns serverKeyPem
+# to a SUPERADMIN token only, so with any other token that is exactly
+# what happened -- and openvpn was then restarted with it.
+echo "$cfg" | jq -r '.publicParamsJson.caCertPem     // empty' > /etc/openvpn/server/ca.crt
+echo "$cfg" | jq -r '.publicParamsJson.serverCertPem // empty' > /etc/openvpn/server/server.crt
+echo "$cfg" | jq -r '.publicParamsJson.serverKeyPem  // empty' > /etc/openvpn/server/server.key
+echo "$cfg" | jq -r '.publicParamsJson.tlsCryptKey   // empty' > /etc/openvpn/server/tls-crypt.key
 chmod 600 /etc/openvpn/server/server.key /etc/openvpn/server/tls-crypt.key
+# Each of the four is PEM-armoured (the tls-crypt key as "OpenVPN Static
+# key V1"); anything else is not key material, whatever jq printed.
 for f in ca.crt server.crt server.key tls-crypt.key; do
-  [[ -s /etc/openvpn/server/$f ]] || { echo "empty $f -- panel did not hold it"; exit 1; }
+  grep -q -- '-----BEGIN ' "/etc/openvpn/server/$f" || {
+    echo "no $f from the panel -- the server key needs a SUPERADMIN token in /root/.nx-admin-token; otherwise the panel did not hold it"
+    exit 1
+  }
 done
 openssl dhparam -dsaparam -out /etc/openvpn/server/dh.pem 2048 2>/dev/null
 
