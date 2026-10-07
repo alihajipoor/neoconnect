@@ -116,9 +116,7 @@ pub fn cancel_control_plane_probe() {
 
 /// Probes every target at once, and answers in the order asked.
 pub fn probe_all(targets: Vec<ProbeTarget>, limits: Limits, cancelled: Cancelled) -> Vec<ProbeResult> {
-    // Built once per process: it copies every root certificate.
-    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-    let config = CONFIG.get_or_init(|| Arc::new(tls_config()));
+    let config = &shared_tls_config();
     let handles: Vec<_> = targets
         .into_iter()
         .take(MAX_TARGETS)
@@ -137,6 +135,14 @@ pub fn probe_all(targets: Vec<ProbeTarget>, limits: Limits, cancelled: Cancelled
             })
         })
         .collect()
+}
+
+/// `tls_config`, built once per process: it copies every root
+/// certificate. Also what the Windows egress check's public-internet
+/// probe verifies against (`vpn::probe_ipv4_egress`).
+pub fn shared_tls_config() -> Arc<ClientConfig> {
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    Arc::clone(CONFIG.get_or_init(|| Arc::new(tls_config())))
 }
 
 /// The certificates the app's own requests trust: tauri-plugin-http's
@@ -275,7 +281,11 @@ fn is_timeout(err: &io::Error) -> bool {
 
 /// A TLS handshake to `host` -- the same name the request presents, so an
 /// SNI filter sees exactly what it saw then. Nothing is sent after it.
-fn handshake(
+///
+/// `Ok` only once the server's certificate has verified for `host`, which
+/// nothing on this machine can produce: also why the egress check's
+/// public-internet probe uses it (`vpn::probe_ipv4_egress`).
+pub fn handshake(
     mut stream: TcpStream,
     host: &str,
     config: &Arc<ClientConfig>,

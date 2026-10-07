@@ -206,16 +206,18 @@ describe("comparing the address the world sees", () => {
     await expect(verifyEgress(baseline)).resolves.toEqual({ state: "unreachable" });
   });
 
-  it("does not call our own API's error pages a dead tunnel", async () => {
+  it("does not call our own API's error pages a dead tunnel where nothing else can be asked", async () => {
     // The control-plane outage, as it looks from a working tunnel: the
     // backend container is being rebuilt, and every mirror proxies to it,
-    // so every endpoint answers 502 straight away. Those answers came
-    // back through the tunnel; nothing about the tunnel is in question.
+    // so every endpoint answers 502 straight away.
     //
-    // This used to be `unreachable`, which `combineEvidence` turns into
-    // "degraded" -- and two of those ran the automatic ladder, which tore
-    // the working tunnel down and then rejected every protocol against
-    // the same 502s.
+    // This is the mobile app's path, which shares this file and has no
+    // `probe_ipv4_egress` (`internet` is left unset, so the command
+    // fails as an unregistered one does). There the error pages are the
+    // only evidence, and they came back over TLS with one of our names:
+    // no verdict, rather than the `unreachable` -- "degraded" -- they
+    // used to be. On Windows the public-internet probe decides; see the
+    // next two tests.
     endpoints.mockResolvedValue([CDN, FI_MIRROR]);
     answers.set(CDN, { status: 502 });
     answers.set(FI_MIRROR, { status: 502 });
@@ -229,6 +231,35 @@ describe("comparing the address the world sees", () => {
     // And with no baseline at all, the same: nothing to compare and
     // nothing refuted.
     await expect(verifyEgress(null)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+  });
+
+  it("lets the public internet decide on Windows when our endpoints only sent error pages", async () => {
+    // The outage of ours, under a working tunnel: the resolvers answer
+    // through it, so there is no verdict and no strike.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, { status: 502 });
+    answers.set(FI_MIRROR, { status: 502 });
+    internet.mockResolvedValue(true);
+    const baseline = { ip: CLIENT, from: CDN };
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "indeterminate", exitIp: null });
+  });
+
+  it("does not let the connected node's own mirror vouch for a dead tunnel", async () => {
+    // The node's mirror is on the node's address, which is routed around
+    // the tunnel so the tunnel's own transport does not loop -- so it
+    // answers (here with a 502) while the tunnel carries nothing, and the
+    // CDN, asked through the tunnel, is silent. The resolvers are silent
+    // too. That is a dead tunnel; the error page used to make it "no
+    // verdict", so it was never struck and never failed over.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, "unreachable");
+    answers.set(FI_MIRROR, { status: 502 });
+    internet.mockResolvedValue(false);
+    const baseline = { ip: CLIENT, from: CDN };
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "unreachable" });
+    await expect(verifyEgress(null)).resolves.toEqual({ state: "unreachable" });
+    expect(internet).toHaveBeenCalled();
   });
 
   it("asks the public internet before blaming the tunnel for our silence", async () => {

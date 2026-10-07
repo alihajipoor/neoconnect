@@ -784,41 +784,118 @@ pub async fn probe_ipv6_egress() -> bool {
 }
 
 /// Public IPv4 addresses used to ask whether this machine reaches the
-/// internet at all, independently of our own API.
+/// internet at all, independently of our own API, each with the name it
+/// serves a certificate for.
 ///
 /// The same two operators as `IPV6_PROBES`, for the same reasons:
-/// literal addresses, so the family is not up to the resolver, and two
-/// of them, so one filtered anycast address does not decide the answer.
-const IPV4_PROBES: [(&str, u16); 2] = [("1.1.1.1", 443), ("8.8.8.8", 443)];
+/// literal addresses, so the family is not up to the resolver (and no
+/// lookup has to work through the tunnel first), and two of them, so one
+/// filtered anycast address does not decide the answer. Both are
+/// DNS-over-HTTPS resolvers, so each completes a TLS handshake for its
+/// name on 443 from essentially everywhere.
+const IPV4_PROBES: [(std::net::Ipv4Addr, &str); 2] = [
+    (std::net::Ipv4Addr::new(1, 1, 1, 1), "one.one.one.one"),
+    (std::net::Ipv4Addr::new(8, 8, 8, 8), "dns.google"),
+];
 
-/// A little longer than the IPv6 probe: this one is asked through a
-/// tunnel, from Iran to a node and out again, and a slow-but-working
-/// path must not read as a dead one.
-const IPV4_PROBE_TIMEOUT: Duration = Duration::from_millis(3000);
+/// For the TCP handshake and the TLS one together. Longer than the IPv6
+/// probe: this one is asked through a tunnel, from Iran to a node and out
+/// again, and it needs two round trips to the far end where that one
+/// needs one. A slow-but-working path must not read as a dead one.
+const IPV4_PROBE_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Whether the public IPv4 internet answers from here, right now.
 ///
-/// Asked only when none of our own endpoints answered `/health/ip` at
-/// all -- see `egress.ts`. That silence has two very different causes.
-/// The tunnel may be black-holing everything, which is the case the
-/// egress check exists to catch; or our control plane may be down or
-/// unreachable from the node while the tunnel carries everything else
-/// perfectly well. Read as the first, the second used to mark every
-/// connected customer "degraded" at once and send the automatic ladder
-/// round to tear their working tunnels down.
+/// Asked only when none of our own endpoints gave `/health/ip` an
+/// address -- see `egress.ts`. That has two very different causes. The
+/// tunnel may be black-holing everything, which is the case the egress
+/// check exists to catch; or our control plane may be down or unreachable
+/// from the node while the tunnel carries everything else perfectly well.
+/// Read as the first, the second used to mark every connected customer
+/// "degraded" at once and send the automatic ladder round to tear their
+/// working tunnels down.
 ///
-/// A completed handshake here says traffic is flowing. It does not say
-/// it flowed *through the tunnel* -- the address comparison is the only
-/// thing that says that -- so the frontend treats a yes as "no verdict",
-/// never as proof.
+/// **A completed TLS handshake, with the certificate verified -- not a
+/// TCP handshake.** The first version of this asked for a TCP handshake,
+/// and under every Xray protocol that answers itself: xray.exe's `tun`
+/// inbound is a userspace TCP stack (gVisor) that completes the
+/// three-way handshake locally and only then hands the connection to the
+/// outbound (xray-core v26.1.23, `proxy/tun/stack_gvisor.go`). So the
+/// probe said yes whenever xray.exe was running, node reachable or not,
+/// and a node blocked mid-session -- the commonest failure in Iran --
+/// read as "our API is down" instead of a dead tunnel: no strike, no
+/// failover, "Connected, not confirmed" over a measured negative. The
+/// service's Custom-mode check learned the same lesson
+/// (`split_tunnel::health::prove_carries`). A verified certificate for
+/// `one.one.one.one` or `dns.google` is something only the real far end
+/// can produce, so a yes now means bytes made the round trip.
+///
+/// A yes still does not say traffic flowed *through the tunnel* -- the
+/// address comparison is the only thing that says that -- so the
+/// frontend treats it as "no verdict", never as proof.
 #[tauri::command]
 pub async fn probe_ipv4_egress() -> bool {
-    any_reaches(IPV4_PROBES, IPV4_PROBE_TIMEOUT).await
+    let targets = IPV4_PROBES.map(|(address, name)| (std::net::SocketAddr::from((address, 443)), name));
+    let config = crate::control_plane_probe::shared_tls_config();
+    // Blocking sockets on a blocking thread, as the control-plane probe
+    // does: a handshake that hangs to its limit must not hold Tauri's
+    // runtime.
+    tauri::async_runtime::spawn_blocking(move || any_answers_tls(&targets, IPV4_PROBE_TIMEOUT, &config))
+        .await
+        .unwrap_or(false)
+}
+
+/// Whether any of `targets` completes a TLS handshake, certificate
+/// verified for the name paired with it, within `limit`. All at once, so
+/// the whole check costs one limit rather than one per target, and the
+/// first yes answers without waiting for the rest.
+pub(crate) fn any_answers_tls(
+    targets: &[(std::net::SocketAddr, &'static str)],
+    limit: Duration,
+    config: &std::sync::Arc<rustls::ClientConfig>,
+) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for &(address, name) in targets {
+        let tx = tx.clone();
+        let config = std::sync::Arc::clone(config);
+        // A thread that cannot be started is one target with no answer,
+        // not a failed check.
+        let _ = std::thread::Builder::new()
+            .name("neoxify-egress-probe".into())
+            .spawn(move || {
+                let _ = tx.send(answers_tls(address, name, &config, limit));
+            });
+    }
+    drop(tx);
+    // Ends at the first yes, or once every thread has said no -- each is
+    // bounded by `limit`. The threads still running after a yes finish
+    // on their own within it.
+    rx.iter().any(|answered| answered)
+}
+
+/// One target: a TCP handshake, then a TLS one with whatever is left.
+fn answers_tls(
+    address: std::net::SocketAddr,
+    name: &str,
+    config: &std::sync::Arc<rustls::ClientConfig>,
+    limit: Duration,
+) -> bool {
+    let started = std::time::Instant::now();
+    let Ok(stream) = std::net::TcpStream::connect_timeout(&address, limit) else {
+        return false;
+    };
+    let remaining = limit.saturating_sub(started.elapsed());
+    !remaining.is_zero() && crate::control_plane_probe::handshake(stream, name, config, remaining).is_ok()
 }
 
 /// Whether either of two literal addresses completes a TCP handshake in
 /// time. Concurrently, so the whole check costs one timeout rather than
 /// two.
+///
+/// Used by the IPv6 probe only. A completed TCP handshake says nothing
+/// about the far end once a userspace stack can answer it -- see
+/// `probe_ipv4_egress` for Xray's -- so this is not a test of whether
+/// traffic gets through a tunnel.
 async fn any_reaches(probes: [(&'static str, u16); 2], timeout: Duration) -> bool {
     use tokio::net::TcpStream;
 
@@ -1648,4 +1725,119 @@ fn pids_with_windows() -> std::collections::HashSet<u32> {
     // SAFETY: `set` outlives this synchronous enumeration.
     unsafe { EnumWindows(Some(collect), &mut set as *mut _ as isize) };
     set
+}
+
+#[cfg(test)]
+mod ipv4_egress_probe_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+    use std::time::Instant;
+
+    const LIMIT: Duration = Duration::from_millis(1_000);
+
+    fn config() -> std::sync::Arc<rustls::ClientConfig> {
+        crate::control_plane_probe::shared_tls_config()
+    }
+
+    /// A listener on loopback, and what its one accepted connection does.
+    fn peer(behaviour: impl FnOnce(TcpStream) + Send + 'static) -> (SocketAddr, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                behaviour(stream);
+            }
+        });
+        (address, server)
+    }
+
+    /// What xray.exe's `tun` inbound does when the node cannot be
+    /// reached: its userspace stack has already completed the TCP
+    /// handshake, the outbound never connects, and nothing comes back.
+    /// The probe this replaced asked only for that handshake, so it said
+    /// yes -- and a dead Xray tunnel read as "our API is down".
+    #[test]
+    fn a_handshake_answered_and_then_silent_is_not_the_internet() {
+        let (address, server) = peer(|mut stream| {
+            // Takes the ClientHello and says nothing, until the probe
+            // gives up and closes.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut sink = [0u8; 2048];
+            while matches!(std::io::Read::read(&mut stream, &mut sink), Ok(n) if n > 0) {}
+        });
+
+        let started = Instant::now();
+        assert!(!any_answers_tls(&[(address, "one.one.one.one")], LIMIT, &config()));
+        assert!(started.elapsed() < LIMIT + Duration::from_millis(1_500), "bounded by its limit");
+        server.join().unwrap();
+
+        // Control: the question the old probe asked, of the same kind of
+        // peer, is answered yes. That is the false "the internet works".
+        let (address, server) = peer(|stream| {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(stream);
+        });
+        let port = address.port();
+        let old = tauri::async_runtime::block_on(any_reaches([("127.0.0.1", port), ("127.0.0.1", port)], LIMIT));
+        assert!(old, "a bare TCP handshake passes against a peer that never answers");
+        server.join().unwrap();
+    }
+
+    /// The outbound failing fast instead: the connection is closed with
+    /// nothing sent.
+    #[test]
+    fn a_peer_that_hangs_up_is_not_the_internet() {
+        let (address, server) = peer(drop);
+        assert!(!any_answers_tls(&[(address, "one.one.one.one")], LIMIT, &config()));
+        server.join().unwrap();
+    }
+
+    /// Bytes came back, but not from the named server: a captive portal,
+    /// a block page, a decoy site. Only a certificate that verifies for
+    /// the name counts.
+    #[test]
+    fn an_answer_that_is_not_the_named_server_is_not_the_internet() {
+        let (address, server) = peer(|mut stream| {
+            let mut hello = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut hello);
+            let _ = std::io::Write::write_all(&mut stream, b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+        });
+        assert!(!any_answers_tls(&[(address, "dns.google")], LIMIT, &config()));
+        server.join().unwrap();
+    }
+
+    /// Nothing listening at all.
+    #[test]
+    fn a_refused_connection_is_not_the_internet() {
+        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        assert!(!any_answers_tls(&[(address, "one.one.one.one")], LIMIT, &config()));
+    }
+
+    /// Against the real resolvers, by hand:
+    ///
+    /// ```text
+    /// cargo test -p neoconnect-desktop --lib live_ipv4_egress_probe -- --ignored --nocapture
+    /// ```
+    ///
+    /// Prints, per target, what the old criterion (a TCP handshake) and
+    /// the new one (a verified TLS handshake) say from wherever it runs.
+    /// On a working network both are yes. Through a tunnel whose far end
+    /// is dead, the second must be no. Ignored because its answer
+    /// depends on the network it runs on.
+    #[test]
+    #[ignore]
+    fn live_ipv4_egress_probe() {
+        let config = config();
+        for (address, name) in IPV4_PROBES {
+            let target = SocketAddr::from((address, 443));
+            let tcp = TcpStream::connect_timeout(&target, IPV4_PROBE_TIMEOUT).is_ok();
+            let started = Instant::now();
+            let tls = any_answers_tls(&[(target, name)], IPV4_PROBE_TIMEOUT, &config);
+            println!("{target} ({name}): tcp handshake {tcp}, verified tls {tls} in {}ms", started.elapsed().as_millis());
+        }
+        let started = Instant::now();
+        let verdict = tauri::async_runtime::block_on(probe_ipv4_egress());
+        println!("probe_ipv4_egress: {verdict} in {}ms", started.elapsed().as_millis());
+    }
 }

@@ -238,10 +238,10 @@ export type EgressVerdict =
   | { state: "unreachable" }
   /** No comparison was possible: either there is no baseline at all, the
    * two readings did not come from the same endpoint and so are not
-   * measuring the same thing, or our API answered but with no address
-   * to compare (an outage of ours, not of the tunnel). Reported rather
-   * than guessed, so the UI can withhold a verdict instead of inventing
-   * one in either direction. */
+   * measuring the same thing, or our API gave no address while traffic
+   * is plainly getting out (an outage of ours, not of the tunnel).
+   * Reported rather than guessed, so the UI can withhold a verdict
+   * instead of inventing one in either direction. */
   | { state: "indeterminate"; exitIp: string | null };
 
 export type VerifyOptions = {
@@ -313,25 +313,32 @@ export async function verifyEgress(
     sameEndpointOnly && baseline !== null ? [baseline.from] : await apiEndpoints();
   const { reading, answered } = await readFrom(bases, attemptMs, { deadline });
 
-  // Our API answered -- with a 502 while the backend is being redeployed,
-  // a 503 from a mirror whose upstream is gone -- and said nothing about
-  // addresses. That is an outage of ours, and the round trip itself
-  // shows packets are getting through. Calling it `unreachable` turned
-  // it into "degraded" on every connected customer at once, and two of
-  // those in a row ran the automatic ladder: a working tunnel torn down,
-  // every protocol then rejected against the same 502, the customer left
-  // disconnected and failing open. The tunnel's health is not ours to
-  // borrow from the control plane's.
-  if (reading === null && answered) return { state: "indeterminate", exitIp: null };
-  // Nothing of ours answered at all: every request timed out or was
-  // refused. That is what a black-holing tunnel looks like -- and also
-  // what our panel host being down, or our CDN refusing the node's exit
-  // address, looks like from a tunnel that is fine. A second, independent
-  // instrument tells them apart: if the public internet answers, traffic
-  // is flowing and the silence is ours, so there is no verdict. Only
-  // when that fails too is it the tunnel.
+  // No address from any of ours. Two very different things look like
+  // that from here: a tunnel black-holing everything, which is what this
+  // check exists to catch, and an outage of ours under a tunnel that is
+  // fine -- our panel host down, the CDN refusing the node's exit, or a
+  // 502 from every mirror while the backend is being redeployed. Read as
+  // the first, the second turned every connected customer "degraded" at
+  // once, and two of those in a row ran the automatic ladder: a working
+  // tunnel torn down, every protocol then rejected against the same
+  // outage, the customer left disconnected and failing open.
+  //
+  // A second, independent instrument tells them apart where there is
+  // one (the Windows client): a verified TLS handshake with a public
+  // resolver. If that answers, traffic is getting out and the silence is
+  // ours -- no verdict. If it does not, it is the tunnel, error pages or
+  // not: the connected node's own mirror is on the node's address, which
+  // is routed around the tunnel, so its 502 says nothing about whether
+  // the tunnel carries anything.
+  //
+  // Where there is no such instrument (the mobile app, which shares this
+  // file), an error page from one of ours is the evidence there is: it
+  // came back over TLS with one of our names, so packets made a round
+  // trip, and that is "no verdict". Silence is still unreachable there.
   if (reading === null) {
-    return (await ipv4Reaches()) ? { state: "indeterminate", exitIp: null } : { state: "unreachable" };
+    const internet = await ipv4Reaches();
+    const flowing = internet ?? answered;
+    return flowing ? { state: "indeterminate", exitIp: null } : { state: "unreachable" };
   }
   if (baseline === null) return { state: "indeterminate", exitIp: reading.ip };
   if (reading.from !== baseline.from) return { state: "indeterminate", exitIp: reading.ip };
@@ -352,19 +359,21 @@ export async function verifyEgress(
 }
 
 /** Whether the public IPv4 internet answers from here, asked only when
- * none of our own endpoints did. See `vpn::probe_ipv4_egress`.
+ * none of our own endpoints gave an address. See `vpn::probe_ipv4_egress`:
+ * a TLS handshake whose certificate verified, never a bare TCP one, which
+ * Xray's tunnel answers locally whether or not the node is there.
  *
- * A socket in the Rust side, for the reason `ipv6Reaches` gives: the
- * HTTP permission would refuse any address that is not ours.
+ * In the Rust side, for the reason `ipv6Reaches` gives: the HTTP
+ * permission would refuse any address that is not ours.
  *
- * Never throws. A command that could not be reached -- the mobile app,
- * which shares this file and does not register it -- is no evidence, and
- * leaves the verdict exactly where it was before this existed. */
-async function ipv4Reaches(): Promise<boolean> {
+ * Never throws. Null when the command could not be asked -- the mobile
+ * app, which shares this file and does not register it -- which is no
+ * evidence either way, and the caller falls back to what it had. */
+async function ipv4Reaches(): Promise<boolean | null> {
   try {
     return (await invoke<boolean>("probe_ipv4_egress")) === true;
   } catch {
-    return false;
+    return null;
   }
 }
 

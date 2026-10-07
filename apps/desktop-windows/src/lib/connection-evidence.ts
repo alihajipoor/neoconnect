@@ -227,9 +227,17 @@ export function combineEvidence(
  * is, which is what `settleAndCaptureBaseline` always promised to fall
  * back to.
  *
- * `unreachable` is never judged this way: it means our API *and* the
- * public internet were silent through this tunnel, which is a measured
- * negative and the next protocol deserves its turn.
+ * `unreachable` is never judged this way: it means our API gave no
+ * address *and* the public internet did not complete a verified TLS
+ * handshake through this tunnel, which is a measured negative and the
+ * next protocol deserves its turn.
+ *
+ * That leans on `indeterminate` meaning traffic really is getting out.
+ * It did not while the public-internet probe was a bare TCP handshake:
+ * Xray's userspace tunnel completes those itself, node or no node, so
+ * with no baseline a dead Xray rung came back `indeterminate`, was
+ * judged on a handshake Xray does not report, and the pass stopped on it
+ * as "unverified". See `vpn::probe_ipv4_egress`.
  */
 export function rungJudgedByHandshake(
   egress: EgressVerdict,
