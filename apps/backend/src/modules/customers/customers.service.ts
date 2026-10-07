@@ -131,7 +131,12 @@ export class CustomersService {
       data.tokenVersion = { increment: 1 };
     }
 
-    const disabling = rest.status === CustomerStatus.DISABLED && current.status !== CustomerStatus.DISABLED;
+    // Every save as DISABLED, not only the change to it: an account
+    // disabled before setting the status revoked anything still has its
+    // credentials on the nodes (the re-assert no longer puts them back,
+    // but nothing took them off), and saving it again is how an operator
+    // finishes that. Every step of disable() is safe to repeat.
+    const disabling = rest.status === CustomerStatus.DISABLED;
     const enabling = rest.status === CustomerStatus.ACTIVE && current.status !== CustomerStatus.ACTIVE;
     if (disabling) return this.disable(id, data);
 

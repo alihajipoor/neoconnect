@@ -265,10 +265,25 @@ describe("CustomersService", () => {
       expect(deviceSlots.releaseCustomer).toHaveBeenCalled();
     });
 
-    it("does nothing more for an account that is already disabled", async () => {
+    /** An account disabled before disabling revoked anything still has
+     * its credentials on the nodes; saving it as DISABLED again is what
+     * takes them off. Before, this did nothing. */
+    it("switches an already-disabled account off again when it is saved as DISABLED", async () => {
       prisma.customer.findUnique.mockResolvedValue(buildCustomer({ status: "DISABLED" }));
 
       await service.update("customer-1", { status: "DISABLED" as any });
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(protocolUsers.switchOffCustomer).toHaveBeenCalledWith("customer-1");
+      expect(protocolUsers.endSessions).toHaveBeenCalledWith("customer-1");
+      expect(deviceSlots.releaseCustomer).toHaveBeenCalledWith("customer-1");
+    });
+
+    it("switches nothing off for an edit that does not set the status", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ status: "DISABLED" }));
+      prisma.customer.update.mockResolvedValue(buildCustomer({ status: "DISABLED" }));
+
+      await service.update("customer-1", { telegramId: "12345" } as any);
 
       expect(protocolUsers.switchOffCustomer).not.toHaveBeenCalled();
       expect(prisma.$transaction).not.toHaveBeenCalled();
