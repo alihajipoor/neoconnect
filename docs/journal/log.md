@@ -3706,3 +3706,120 @@ The review of `ec83104` found one blocking defect and eight lows.
   subscription's leftover credential". Its only caller,
   `POST /customer/subscriptions/:id/route`, refuses any subscription
   that is not ACTIVE before calling it.
+
+## 2026-10-06 — panel review fixes (branch `claude/review-fixes-panel`)
+
+**Status:** done on the branch and pushed; not merged, not deployed.
+**Based on `claude/review-fixes-backend`**, not main: five of the
+panel-area findings were backend findings that branch already fixes, and
+the rest touch the same backend files. Merge that branch first, or the
+two together.
+**Touches:** `apps/panel` (sign-in, infra pages, route and reseller
+screens; gains vitest), `apps/backend` (protocol-config and route reads,
+route list, vouchers, resellers; one comment in `main.ts`),
+`apps/web-portal` (sign-out; gains vitest), `apps/discord-bot` (tickets).
+No migration.
+
+The 17 confirmed panel-area findings come down to 11 problems. Fixed
+here: the admin lockout (01545f4), secrets in admin page payloads
+(c8a2ee6), the route delete dialog (e9bb5cc), retired-plan vouchers
+(2f06d05), the portal's 10 s sign-out (db635c1), the public ticket
+fallback (76b5d07). Already fixed on the base branch, checked present
+and left alone: staff role gates on routes, protocol users and POST
+/subscriptions (35e5ce1), MFA setup while on (4a5e967), the per-admin
+TOTP budget (2eba314), DISABLED revoking access (ebd2520, 85f082b) --
+this branch only adds the panel's hint for the last (767bb04).
+
+### What a deploy does -- read before deploying
+
+Backend and panel go out together (`docker compose ... up -d --build`
+rebuilds both); neither needs the other first -- the panel works against
+main's backend, and the new backend fields are optional to the panel.
+
+- **Production nginx must set both headers on `location /`**, as
+  `installer/assets/nginx-panel.conf.template` does:
+  `X-Real-IP $remote_addr` and `X-Forwarded-For $proxy_add_x_forwarded_for`.
+  The production panel nginx is hand-maintained and was not read.
+  Read-only check on the panel host:
+  `grep -n "X-Real-IP\|X-Forwarded-For" /etc/nginx/sites-enabled/*`.
+  Without them the panel sends no address, sign-ins share one bucket as
+  before, and the panel logs once:
+  `docker compose -f infra/docker-compose.prod.yml logs panel | grep "no trustworthy client address"`.
+- **Behind Cloudflare** the panel takes `CF-Connecting-IP` only when
+  nginx's peer is a published Cloudflare edge (the backend's list,
+  copied; a test fails if the two drift).
+- **`restore-openvpn-from-panel.sh` now needs a SUPERADMIN token.** GET
+  /protocol-configs returns `serverKeyPem` to SUPERADMIN only and
+  `caKeyPem` to nobody. With a lesser token the script stops at "empty
+  server.key -- panel did not hold it". The installer's own POST is
+  unchanged.
+- **The web portal** is a static build inside the website zip: its fix
+  reaches customers only when the website is rebuilt and uploaded. **The
+  Discord bot** needs its container rebuilt (`--profile discord`).
+- **Existing OpenVPN CA keys** were readable by every staff role until
+  this deploys. Rotating means reissuing every client cert on a node;
+  only worth it if a SUPPORT or BILLING account has ever existed --
+  `SELECT role, count(*) FROM admin_users GROUP BY role;` says.
+
+### Proven, on this PC
+
+- Backend 103 suites / 1,206 tests (base branch: 99 / 1,188), typecheck
+  and lint clean. Panel 6 files / 39 tests, typecheck, lint (two old
+  warnings) and `next build` clean. Portal 1 file / 2 tests, `tsc -b`
+  clean. Bot 48 tests, typecheck and lint clean. Each fix's tests were
+  run against the code before it and failed (counts in the commits).
+- **The sign-in chain, run for real except nginx and Postgres.** The
+  built panel (`next build`, `next start`) in the desktop app's browser
+  pane; the backend's own AuthController, LoginGuard and
+  ClientThrottlerGuard from `dist`, behind `trust proxy 1`, with only the
+  password check stubbed; a small proxy setting the template's two
+  headers, one port per pretend client. A stranger's five wrong
+  passwords: five challenges solved in the browser, five 401s counted
+  against the stranger's address, the sixth refused 429 with "Too many
+  sign-in attempts from your address". The operator, from another
+  address, signed straight in. Then five failures against the admin's
+  email from five addresses: a challenge-less sign-in with the right
+  password got the 400 that locked admins out before; through the panel
+  the browser solved the 15-bit challenge and the operator got in.
+  Forged X-Real-IP, X-Forwarded-For and CF-Connecting-IP sent through
+  the proxy were ignored.
+- Portal: the shared sign-out code under the portal's own shims took
+  10,020 ms before the fix (the review's verifier measured the same) and under a
+  second after.
+
+### Unverified
+
+- Real nginx, real Cloudflare, and the production nginx config (above).
+  The CF-Connecting-IP path is unit-tested only.
+- **The panel believes both headers if a request reaches it without
+  nginx and sets both alike** -- run directly against `next start`, that
+  is what happened. Production publishes the panel on 127.0.0.1:3000, so
+  that needs a foothold on the host.
+- How long a real browser takes at the top difficulty (21 bits, only for
+  an account under sustained attack). Measured in Node only: 244k
+  hashes/s batched, about 9 s expected; a challenge lives 2 minutes.
+- The redacted reads, the route count and the voucher refusal are
+  checked against mocked Prisma, not a database; the restore script was
+  not run; the portal sign-out was not run in a browser; the bot was not
+  run against Discord.
+
+### Not fixed, and why
+
+- **A plan retired between redeem's check and the subscription create**
+  still burns the code. Closing it needs the claim and the create in one
+  transaction (SubscriptionsService.create taking a tx client).
+- **Operators can still create vouchers for an inactive plan** (resellers
+  cannot). Left open on purpose: preparing codes before a launch is
+  plausible, and redeem no longer spends them.
+- **Customer delete stays open to SUPPORT.** The verifier rated it a
+  policy choice, not a defect; the settled-payment check guards it.
+- **publicParamsJson still stores the private keys.** Reads no longer
+  return them; moving them to an encrypted column (2026-08-31 entry) is
+  the durable fix, and a migration.
+- **The panel never refreshes an admin's token**, so operators sign in
+  every 15 minutes -- which is what made the lockout bite so fast. Not a
+  finding here; worth its own change.
+- **The apps' solver awaits one hash at a time**
+  (`apps/desktop-windows/src/lib/pow.ts`: about 40 s at 21 bits in Node,
+  against 9 s batched). The panel's is batched; the apps' is not changed
+  here.
