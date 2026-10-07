@@ -175,12 +175,18 @@ export async function socialSignIn(
           trace,
         )
       : // Google and Facebook finished on the server; this only collects
-        // the session it is already holding.
+        // the session it is already holding -- with the verifier for the
+        // PKCE challenge the flow started with, without which the server
+        // will not hand over a session bound to it (social-auth.ts).
         await publicRequest<TokenPair>(
           "/customer-auth/social/exchange",
           {
             method: "POST",
-            body: JSON.stringify({ code: outcome.code }),
+            body: JSON.stringify(
+              outcome.verifier
+                ? { code: outcome.code, verifier: outcome.verifier }
+                : { code: outcome.code },
+            ),
           },
           trace,
         );
