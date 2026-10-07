@@ -36,10 +36,19 @@
 //! to (`HealthIpAnswer::peer`), and `resolve_ipv4` turns a server's name
 //! into addresses the way the engines do. Together they let the egress
 //! check recognise an endpoint that sits on the tunnel's own server:
-//! the client routes that address around the tunnel, so such an
+//! where the client routes that address around the tunnel, such an
 //! endpoint is asked over the customer's own line and answers with
 //! their home address through a tunnel that works. Measured on
-//! 2026-10-06; see `src/lib/egress.ts`.
+//! 2026-10-06 for Xray on Windows; which engines do it is
+//! `reachesServerAround` in `src/lib/tunnel-server.ts`.
+//!
+//! No proxy, ever: neither `HTTPS_PROXY` nor the system's, which reqwest
+//! reads on Windows. Through one, the reading is the proxy's exit rather
+//! than this machine's route -- the same address before and after
+//! connecting, "NOT protected" over a working tunnel -- and `peer` is the
+//! proxy's address, so the tunnel's own server cannot be recognised
+//! either. The question asked is where this machine's routing sends a
+//! request, and a proxy answers a different one.
 
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::time::Duration;
@@ -141,6 +150,8 @@ pub async fn health_ip_v4(base: String, timeout_ms: u64) -> Result<HealthIpAnswe
         // The whole point. An IPv4 local address makes the connector
         // drop every IPv6 address the name resolves to.
         .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+        // This machine's route, not a proxy's; see the module note.
+        .no_proxy()
         // A redirect would hand the reading to a different endpoint than
         // the one it is recorded against. Its status is the answer.
         .redirect(reqwest::redirect::Policy::none())
@@ -376,6 +387,57 @@ mod tests {
         // how a server named by hostname is recognised.
         let resolved = tauri::async_runtime::block_on(resolve_ipv4("localhost".to_string(), 3_000)).unwrap();
         assert!(resolved.contains(&"127.0.0.1".to_string()), "{resolved:?}");
+    }
+
+    /// The child half of [`asks_around_any_proxy`]: run only in a process
+    /// of its own, whose environment names a proxy. Ignored, and a no-op
+    /// without its marker, so a plain `--ignored` run passes it by.
+    #[test]
+    #[ignore]
+    fn proxied_child() {
+        if std::env::var_os("NEOXIFY_PROXIED_CHILD").is_none() {
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = serve_once(listener, OK_JSON);
+        let answer = tauri::async_runtime::block_on(health_ip_v4(
+            format!("http://localhost:{port}/api"),
+            3_000,
+        ));
+        assert_eq!(
+            answer.map(|a| a.peer),
+            Ok(Some("127.0.0.1".to_string())),
+            "the request went to the proxy, not to the endpoint",
+        );
+        server.join().unwrap();
+        println!("NEOXIFY_PROXIED_CHILD reached the endpoint");
+    }
+
+    /// A proxy in the environment is not used: the request still goes
+    /// straight to the endpoint, and `peer` is the endpoint's address.
+    /// In a child process, because the environment is the whole process's
+    /// and the other tests here run beside this one. The proxy named is a
+    /// port nothing listens on, so a request that went to it gets no
+    /// answer at all.
+    #[test]
+    fn asks_around_any_proxy() {
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = format!("http://127.0.0.1:{}", dead.local_addr().unwrap().port());
+        drop(dead);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "health_ip::tests::proxied_child", "--nocapture"])
+            .env("NEOXIFY_PROXIED_CHILD", "1")
+            .env("HTTP_PROXY", &proxy)
+            .env("HTTPS_PROXY", &proxy)
+            .env("ALL_PROXY", &proxy)
+            .env_remove("NO_PROXY")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        // And the child really ran it, rather than matching nothing.
+        assert!(stdout.contains("NEOXIFY_PROXIED_CHILD reached the endpoint"), "{stdout}");
     }
 
     #[test]
