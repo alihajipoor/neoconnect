@@ -61,6 +61,11 @@ if [[ -f /etc/openvpn/server/server.conf ]]; then
 fi
 if [[ -f /etc/swanctl/conf.d/neoxify.conf ]]; then
   pool="$(awk '$1 == "addrs" {print $3; exit}' /etc/swanctl/conf.d/neoxify.conf)"
+  # The pool may be a CIDR or a range ("10.68.0.2-10.68.0.254", as on
+  # france-1); iptables -s takes no range syntax, so a range is widened to
+  # its /24. Found applying this to the fleet on 2026-10-06, where the
+  # range aborted the run after the WireGuard and OpenVPN rules.
+  if [[ "$pool" == *-* ]]; then pool="${pool%%-*}"; pool="${pool%.*}.0/24"; fi
   [[ -n "$pool" ]] && subnets="$subnets $pool"
 fi
 
