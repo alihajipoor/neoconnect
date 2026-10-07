@@ -29,10 +29,20 @@ const ENDPOINT_TIMEOUT_MS = 8_000;
  * family. */
 const GATEWAY_STATUSES = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 530]);
 
-/** Of those, the ones where the backend may have received the request
- * and simply not answered in time. A write is not sent on to another
- * endpoint after one of these: it may already have happened. */
-const GATEWAY_TIMEOUTS = new Set([504, 524]);
+/** Of those, the ones where the backend may have received the request,
+ * and acted on it, without its answer getting back. A write is not sent
+ * on to another endpoint after one of these: it may already have
+ * happened, and a second copy of a purchase, a voucher redemption or a
+ * registration is a duplicate row or a false "already done".
+ *
+ * Not only the timeouts (504, 524). A 502 is also what nginx sends when
+ * the upstream closed the connection before answering -- a backend
+ * container restarting mid-request during a deploy, or the hop from a
+ * mirror to the panel reset part-way -- and the CDN's 520 is an origin
+ * that returned something empty or unreadable. Neither says the request
+ * never arrived. The rest (503, 521-523, 525, 526, 530) are refusals
+ * before the backend was reached, and a write moves on after those. */
+const MAY_HAVE_REACHED_BACKEND = new Set([502, 504, 520, 524]);
 
 /** Whether this response is a proxy's own failure page rather than an
  * answer from the backend.
@@ -82,9 +92,10 @@ async function fetchOneEndpointAtATime(
 ): Promise<Response> {
   let lastError: unknown;
   // A proxy's own failure page, kept in case nothing better answers. See
-  // `isGatewayFailure`: the backend never saw the request, so the next
-  // endpoint is tried -- except after a gateway *timeout*, where it may
-  // have, and a write must not be sent twice.
+  // `isGatewayFailure`: after one that says the backend was never
+  // reached, the next endpoint is tried -- but not after one where it may
+  // have been (`MAY_HAVE_REACHED_BACKEND`), because a write must not be
+  // sent twice.
   let gateway: Response | null = null;
   // A caller's own signal, when it brought one. Each endpoint still gets
   // its own controller and timeout; the caller's only ever shortens that,
@@ -107,7 +118,7 @@ async function fetchOneEndpointAtATime(
     try {
       const response = await fetch(`${base}${path}`, { ...init, signal: controller.signal });
       settleAttempt(entry, `h${response.status}`);
-      if (isGatewayFailure(response) && !GATEWAY_TIMEOUTS.has(response.status)) {
+      if (isGatewayFailure(response) && !MAY_HAVE_REACHED_BACKEND.has(response.status)) {
         // Not remembered and not asked for the bundle: it is not the
         // service. Kept only as the answer of last resort.
         gateway ??= response;

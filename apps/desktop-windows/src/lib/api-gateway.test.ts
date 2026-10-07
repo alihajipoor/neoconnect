@@ -57,6 +57,7 @@ const gatewayPage = (status = 502) =>
   });
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const origin = (url: string) => new URL(url).origin;
 
 /** Answers per origin, after a delay per origin. */
 function serve(routes: Record<string, { after: number; reply: () => Response } | "unreachable">) {
@@ -108,30 +109,44 @@ describe("a raced read", () => {
 });
 
 describe("a write, sent one endpoint at a time", () => {
-  it("steps past a gateway page to the next endpoint and does not remember it", async () => {
-    const seen: string[] = [];
-    tauriFetch.mockImplementation(async (url: string) => {
-      const origin = new URL(url).origin;
-      seen.push(origin);
-      return origin === MIRROR ? gatewayPage(502) : json({ token: "ok" });
-    });
-    await expect(publicRequest("/customer-auth/login", { method: "POST", body: "{}" })).resolves.toEqual({
-      ok: true,
-      data: { token: "ok" },
-    });
-    expect(seen).toEqual([MIRROR, CDN]);
-    expect(remembered).toEqual([CDN]);
+  it("steps past a page that says the backend was never reached, and does not remember it", async () => {
+    // 503 from nginx with no live upstream; the CDN's 521-523 (origin
+    // down, refused, timed out connecting), 525/526 (TLS to the origin)
+    // and 530: the request never got as far as the backend.
+    for (const status of [503, 521, 522, 523, 525, 526, 530]) {
+      const seen: string[] = [];
+      remembered.length = 0;
+      tauriFetch.mockImplementation(async (url: string) => {
+        const origin = new URL(url).origin;
+        seen.push(origin);
+        return origin === MIRROR ? gatewayPage(status) : json({ token: "ok" });
+      });
+      await expect(publicRequest("/customer-auth/login", { method: "POST", body: "{}" })).resolves.toEqual({
+        ok: true,
+        data: { token: "ok" },
+      });
+      expect(seen, `after ${status}`).toEqual([MIRROR, CDN]);
+      expect(remembered, `after ${status}`).toEqual([CDN]);
+    }
   });
 
-  it("stops at a gateway timeout, where the backend may already have acted", async () => {
-    const seen: string[] = [];
-    tauriFetch.mockImplementation(async (url: string) => {
-      seen.push(new URL(url).origin);
-      return gatewayPage(504);
-    });
-    const result = await publicRequest("/orders", { method: "POST", body: "{}" });
-    expect(result).toMatchObject({ ok: false, status: 504 });
-    expect(seen).toEqual([MIRROR]);
+  it("stops where the backend may already have acted", async () => {
+    // 504 and 524 are timeouts after the request went upstream. 502 is
+    // also an upstream that closed the connection before answering -- a
+    // backend restarting mid-request during a deploy -- and 520 an
+    // origin whose answer the CDN could not read. Sending a purchase or
+    // a voucher redemption on to the next endpoint after any of them can
+    // run it twice.
+    for (const status of [502, 504, 520, 524]) {
+      const seen: string[] = [];
+      tauriFetch.mockImplementation(async (url: string) => {
+        seen.push(new URL(url).origin);
+        return origin(url) === MIRROR ? gatewayPage(status) : json({ id: "second copy" }, 201);
+      });
+      const result = await publicRequest("/orders", { method: "POST", body: "{}" });
+      expect(result, `after ${status}`).toMatchObject({ ok: false, status });
+      expect(seen, `after ${status}`).toEqual([MIRROR]);
+    }
   });
 
   it("stops at the backend's own refusal exactly as before", async () => {
