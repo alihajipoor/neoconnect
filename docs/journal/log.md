@@ -4094,3 +4094,176 @@ their old Pro subscription's credentials and have an ACTIVE one).
 **Still open:** turkey-1's exposed root password (needs the owner: they
 may log in with it); the HTTP/1.1 vs h2 question for the other nodes'
 mirrors was checked only from one uncensored client.
+
+## 2026-10-06 — mobile review fixes (branch `claude/review-fixes-mobile`)
+
+The confirmed mobile findings of the full review, fixed on a branch off
+`main` `1cd85c6` and rebased onto `7533211` (the merged backend, agent
+and desktop review fixes). 15 findings, 11 after removing duplicates (the two
+IPv6 ones, the two Custom-mode ones, the two IAP ones, and the
+stale-state critical with its high twin). Not merged, not deployed, not
+released.
+
+**Done, one commit each:**
+
+- **Critical/high, Android stale `xray-state`** (`a1e876b`). `readStatus`
+  now believes "up" only while the `:xray` process is in
+  `runningAppProcesses` and the system has a VPN network; a dead
+  process's file is deleted. Also cleared in `onRevoke`, and by a
+  service the system starts with no configuration (always-on after a
+  reboot), which now stops instead of sitting in the foreground with a
+  "Connected" notification. The JS half is `21484b3` below: even with a
+  stale file, an adopted tunnel with no baseline can no longer read
+  "You're protected".
+- **High/medium, Android Custom mode never connects** (`2c9ddad`). The
+  app's own package joins the allow-list (Xray when at least one chosen
+  app was added; WireGuard's `IncludedApplications`).
+- **Medium, Android social sign-in cancels itself** (`e0cc4f7`). The
+  Custom Tab opens from the first `onResume`, not `onCreate`.
+- **Medium, indeterminate egress shown as protected** (`21484b3`).
+  Rules moved to `apps/mobile/src/lib/tunnel-evidence.ts`; mobile now
+  has the `unverified` state ("Connected, not confirmed") the Windows
+  client has. Non-last rungs ask only the baseline's endpoint; every
+  rung after the first waits for the last tunnel to be gone before its
+  baseline; the poll asks the baseline's endpoint first.
+- **Medium x2, iOS IAP `finishAll`** (`0d49640`). The sweep finishes
+  each transaction by the id in its JWS; `iapFinish` with no id rejects;
+  `finishAll` is gone.
+- **Medium x2, iOS IPv4-only capture** (`ab6bf85`, issue #48). Both
+  engines set `NEIPv6Settings` (`fd18:6e78:0:1::1/64`, default route).
+- **Medium, iOS WireGuard hostname endpoint** (`12315bd`). Resolved with
+  `getaddrinfo` in `startTunnel`, before the settings are applied.
+- **Medium, iOS connect resolves before the extension starts**
+  (`046aee4`). `ProviderStart.waitUntilConnected`; failures are worded
+  as local so the ladder does not file them against the route.
+- **Low, iOS `.reasserting` read as down** (`046aee4`).
+- **Medium, social handoff not bound to the client** (`8cd9190`
+  backend, `ceaa5c8` clients). PKCE S256: optional `challenge` at
+  `/start`, optional `verifier` at `/exchange`; a bound code needs its
+  verifier, an unbound code with a verifier is refused (injection), an
+  unbound code with none is still accepted for released clients.
+
+**Partly done:** the low "unreachable control plane rejects working
+tunnels" finding. The merged desktop fixes made the shared
+`verifyEgress` call an error page from our own endpoints (a redeploy's
+502) "indeterminate"; with this branch's rules that now reads
+"unverified" on the poll instead of "NOT protected", lands a ladder
+with no baseline as "unverified", and (`f3b335d`) is no longer
+recorded against the route when a non-last rung moves on. Total
+silence from every endpoint is still "unreachable" -- a dead panel and
+a black-holing tunnel look the same from our own API, and the
+Windows client's second instrument (`probe_ipv4_egress`) has no mobile
+equivalent yet. Not done, because no finding required them and each
+touches live Android users: the optional Xray DNS
+`queryStrategy: "UseIPv4"`, and a mobile IPv6 egress probe.
+
+**PROVEN (unit tests and typecheck, this PC, on the rebased tree):**
+mobile 7 files / 101 tests (72 before, +29), `tsc` clean; desktop JS 52 /
+792 (+13 new), `tsc` clean; backend 99 suites / 1,200 tests (+8 new),
+`tsc` and eslint clean; web portal `tsc` clean. Failing against the old code:
+5 of the 22 `tunnel-evidence` tests (checked by putting the old rules
+back), all 7 `iap` tests, and the 8 PKCE specs (the old service does not
+compile against them; behaviourally it gave the session to anyone
+holding the code).
+
+**COMPILED, in CI on `601d467` (compiles, nothing more):** the Kotlin,
+in a `debug-android.yml` run dispatched on this branch (x86_64 debug
+APK, throwaway key, private 7-day artifact; run 37567159371); the Swift,
+in `CI (iOS)` run 37567119411 -- the tunnel extension for the simulator
+and for a device, and the app with the plugin for the simulator, no
+warnings in the touched files. `ci.yml` green on the same commit.
+
+**UNVERIFIED -- not run:**
+- **All Kotlin** (no JVM or Android SDK on this PC). Needs an emulator:
+  Xray up, `adb shell am force-stop`, reopen -> "not protected" and no
+  `files/xray-state`; the same across a reboot. Custom mode with one
+  Xray protocol and Fast: exit IP equals the node, node log shows the
+  session. Social sign-in: logcat order onCreate, onResume (tab),
+  onPause, onNewIntent, and `vpn_open_auth_session` resolving with the
+  handoff URL. That `runningAppProcesses` lists `:xray` is the
+  platform's documented behaviour, not observed on any OEM build.
+- **All Swift** (the Mac builds iOS from `main`). For that session:
+  the extension now waits for nothing new, but the app's Xray and
+  WireGuard connects wait up to 20 s for `.connected`; what
+  `fetchLastDisconnectError` (iOS 16+) says for an extension that
+  failed is unobserved. The IPv6
+  capture needs a real iPhone on an IPv6 network with a capture outside
+  the device -- including whether Xray's local TCP accept makes IPv6
+  connections look open and then fail instead of falling back to IPv4.
+  **iOS still has not carried a packet; gate any iOS release on that
+  test.**
+- The PKCE flow against Google/Facebook and a device. Old backend plus
+  new client is a 400 at `/exchange` (`forbidNonWhitelisted`).
+
+**Deploy order:** backend first (`8cd9190`; no migration, in-memory
+state only), then clients. Making the PKCE challenge required is a
+later step, once desktop 0.9.44 and mobile 0.2.23 are gone; until then
+those clients stay exposed. The Android fixes reach nobody until an APK
+release; the iOS ones ship with the first iOS build.
+
+### The review of these fixes, and what it changed (same day)
+
+An adversarial review of `c451e1a` reproduced the counts and found two
+blocking problems, both in the new egress rules; each was reproduced
+here with the real shared `verifyEgress` and only the network stood in
+for, then fixed.
+
+- **Dual-stack phones rejected every working tunnel but the last**
+  (`566136f`). Mobile left `/health/ip` to tauri-plugin-http, so on a
+  network with IPv6 the baseline was the phone's IPv6 address, while
+  every reading through either platform's tunnel is IPv4. `verifyEgress`
+  refuses to compare families, so every rung was "indeterminate": torn
+  down if another was left, "not confirmed" for the session otherwise,
+  and the poll never proved anything. On `main` the same mismatch read
+  as connected. Fixed the Windows way: `health_ip.rs` compiled into the
+  mobile crate by path, `health_ip_v4` registered, `ipv4OnlyHealthIp`
+  installed in `main.tsx`. An IPv6-only network without CLAT now has no
+  baseline, so it lands "not confirmed".
+- **A self-reporting mirror's baseline made working tunnels leaks**
+  (`60407bc`). A mirror proxying through the CDN answers with its node's
+  address; as the baseline (CDN blocked before connecting), asking it
+  again through a working tunnel gave the same address --
+  `bypassingTunnel`, held against the route, and "NOT protected" on the
+  poll, which asks the baseline's endpoint first. `captureBaselineIp`
+  now takes `nodeAddresses` and passes over such a reading; the mobile
+  dashboard gives it every credential's `connection.host` (the node's
+  `publicIp`). Not covered: a bundle mirror on a node the customer has
+  no credential for. Whether any live mirror reports itself is unknown
+  -- not checked, no node access. **The Windows ladder has the same
+  exposure on its non-last rungs and does not pass the option yet.**
+
+Also: the social exchange retries once without `verifier` when an old
+backend refuses the field by name (`7aef13d`), so a client released
+before `8cd9190` no longer breaks Google/Facebook sign-in -- backend
+first is still the order; an iOS start failure is classified by its
+wrapper, so a system reason saying "timed out" is not filed against the
+route (`96b115c`); the Swift comment on captured IPv6 no longer calls
+Xray's TCP handling a blackhole (`d802ba0`, comment only).
+
+Deferred, from the review's lows: ProviderStart failing on
+`.disconnected` after its 1 s grace even if `.connecting` was never seen
+(Swift, needs a device to know which way is wrong); Android
+`xrayTunnelLive` reporting down when the process list or network state
+cannot be read, and a late "up" from a dying `:xray` (Kotlin, rare, and
+the egress check still catches a dead tunnel); iOS WireGuard resolving
+its endpoint once (needs path monitoring); each rung waiting the full
+12 s through an API outage. Beta users should hear that an adopted
+Android Xray tunnel, and any connect with no baseline, now reads
+"Connected, not confirmed" for the session.
+
+**PROVEN (this PC):** mobile 9 files / 118 tests (+17), `tsc` clean;
+desktop JS 53 files / 800 tests (+8), `tsc` clean; mobile `cargo check
+--all-targets` clean, and `health_ip`'s 7 tests pass inside the mobile
+crate (Windows host). Against the old code 14 of the new tests fail
+(10 mobile, 4 desktop); the rest are controls that reproduce the review
+or pin behaviour that did not change.
+
+**COMPILED, in CI on `6fa282e` (compiles, nothing more):** the mobile
+crate with `health_ip` and reqwest for Android, in a `debug-android.yml`
+run dispatched on this branch (aarch64, throwaway key, private 7-day
+artifact; run 37571589242), and for the iOS simulator in `CI (iOS)` run
+37571567114. `ci.yml` green on the same commit (run 37571567156).
+
+**UNVERIFIED:** none of it on a phone. That `health_ip_v4` connects, and
+asks over IPv4, on a real Android or iOS network stack; the dual-stack
+fix on a real IPv6 network; the retry against a real old backend.

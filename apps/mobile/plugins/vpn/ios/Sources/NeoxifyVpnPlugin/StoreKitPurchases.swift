@@ -110,17 +110,11 @@ enum StoreKitPurchases {
         }
     }
 
-    /// Finishes every transaction the server has already granted.
-    ///
-    /// Used after the recovery sweep: the ids come back from our own
-    /// API, so finishing them is safe by definition.
-    static func finishAll() async {
-        for await result in Transaction.unfinished {
-            if case .verified(let transaction) = result {
-                await transaction.finish()
-            }
-        }
-    }
+    // There is deliberately no "finish everything". The one that existed
+    // was called after the recovery sweep redeemed its first transaction,
+    // and finished the others before their own redeems had run; one of
+    // those failing then lost a paid purchase for good. Every finish
+    // names the transaction the server granted.
 
     enum PurchaseError: LocalizedError {
         case unknownProduct

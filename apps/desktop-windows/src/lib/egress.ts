@@ -38,9 +38,12 @@ import { rememberNetwork } from "./network-identity";
  * record is reached over IPv6 first, so the baseline was the customer's
  * IPv6 address. Against that, any IPv4 reading differs, and the check
  * said "throughTunnel" whatever IPv4 was doing -- including going round
- * the tunnel in the clear. Two things now stop that: the Windows client
- * asks over IPv4 only (`setHealthIpTransport`, `health-ip-v4.ts`), and a
- * pair of different families is never compared (`verifyEgress`).
+ * the tunnel in the clear. Two things now stop that: both clients ask
+ * over IPv4 only (`setHealthIpTransport`, `health-ip-v4.ts`), and a pair
+ * of different families is never compared (`verifyEgress`). The phones
+ * got the first later than Windows, and the second alone was not enough
+ * there: it turned the false "throughTunnel" into an "indeterminate" on
+ * every rung of a dual-stack phone's connect, which the ladder rejects.
  */
 
 /** Short: this runs while the customer is watching a spinner, and a
@@ -73,7 +76,7 @@ type IpReading = { ip: string; from: string };
 
 async function publicIp(
   onBody: (body: Record<string, unknown>) => void,
-  { only, deadline }: BaselineOptions,
+  { only, deadline, nodeAddresses }: BaselineOptions,
 ): Promise<IpReading | null> {
   // The same endpoint list the rest of the app uses, and for a sharper
   // reason here: this check decides whether the customer is told they
@@ -81,7 +84,10 @@ async function publicIp(
   // report a perfectly working tunnel as carrying nothing -- turning a
   // reachability problem into a false accusation against the VPN.
   const bases = only !== undefined ? [only] : await apiEndpoints();
-  return (await readFrom(bases, EGRESS_TIMEOUT_MS, { onBody, deadline })).reading;
+  const nodes =
+    nodeAddresses === undefined ? null : new Set([...nodeAddresses].map((ip) => comparable(ip)));
+  const skip = nodes === null ? undefined : (ip: string) => nodes.has(comparable(ip));
+  return (await readFrom(bases, EGRESS_TIMEOUT_MS, { onBody, deadline, skip })).reading;
 }
 
 /** How a baseline is taken, when the caller has reason to narrow it. */
@@ -94,7 +100,31 @@ export type BaselineOptions = {
    * and no request outlives. Without one, each endpoint gets its own
    * full timeout and the list can take many of them. */
   deadline?: number;
+  /** Our own nodes' public addresses, as far as the caller knows them.
+   *
+   * A baseline is taken with no tunnel up, so it should be this device's
+   * own address -- and one of our nodes' addresses never is. Two things
+   * produce one: a node mirror whose nginx proxies through the CDN rather
+   * than to the origin, which then answers `/health/ip` with the node's
+   * address to everyone who asks (five of six mirrors were in that state
+   * on 2026-08-31, and the installer still builds one that way without
+   * NEOXIFY_PANEL_ORIGIN); and a tunnel not yet gone. Kept as the
+   * "before", either one turned a working tunnel into a leak: asked again
+   * through that mirror the same address comes back, which reads as
+   * `bypassingTunnel` -- held against the route, and on a health poll
+   * "Your traffic is NOT protected".
+   *
+   * Such a reading is passed over and the next endpoint asked, so a
+   * mirror that does report the caller can still supply the baseline.
+   * None at all, and there is no baseline, which the caller already
+   * handles as "nothing can be proven". */
+  nodeAddresses?: Iterable<string>;
 };
+
+/** An address as compared against a set of them. */
+function comparable(ip: string): string {
+  return plainAddress(ip.trim()).toLowerCase();
+}
 
 /** What asking the list produced: a reading, and -- whether or not there
  * was one -- whether anything answered at all.
@@ -119,7 +149,9 @@ export type HealthIpAnswer = { status: number; body: unknown };
 export type HealthIpTransport = (base: string, timeoutMs: number) => Promise<HealthIpAnswer>;
 
 /** The default: tauri-plugin-http's fetch, which lets the system choose
- * the address family. What the mobile app, which shares this file, uses. */
+ * the address family. Neither app uses it once started -- both install
+ * the IPv4-only transport from their `main.tsx` -- so it is what runs
+ * before that, and in tests that install nothing. */
 const fetchTransport: HealthIpTransport = async (base, timeoutMs) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -134,9 +166,9 @@ const fetchTransport: HealthIpTransport = async (base, timeoutMs) => {
 
 let transport: HealthIpTransport = fetchTransport;
 
-/** Replaces how `/health/ip` is asked. The Windows client installs an
- * IPv4-only transport at startup (`health-ip-v4.ts`, from `main.tsx`), so
- * the baseline and every later reading are the same family. */
+/** Replaces how `/health/ip` is asked. Both clients install an IPv4-only
+ * transport at startup (`health-ip-v4.ts`, from each app's `main.tsx`),
+ * so the baseline and every later reading are the same family. */
 export function setHealthIpTransport(next: HealthIpTransport): void {
   transport = next;
 }
@@ -171,6 +203,7 @@ async function readFrom(
   {
     onBody,
     deadline,
+    skip,
   }: {
     onBody?: (body: Record<string, unknown>) => void;
     /** Epoch ms. The walk stops there, and the request in flight is
@@ -178,6 +211,10 @@ async function readFrom(
      * through a tunnel that black-holes everything, a walk at six
      * seconds each was a minute before the health poll could say so. */
     deadline?: number;
+    /** An address that is not an answer to the question asked; the
+     * endpoint that gave it is passed over like one with no address.
+     * See `BaselineOptions.nodeAddresses`. */
+    skip?: (ip: string) => boolean;
   } = {},
 ): Promise<ReadResult> {
   let answered = false;
@@ -204,7 +241,9 @@ async function readFrom(
       const body = res.body;
       if (body !== null && typeof body === "object" && typeof (body as { ip?: unknown }).ip === "string") {
         const ip = (body as { ip: string }).ip;
-        if (ip) {
+        // Before `onBody`, too: what such an endpoint says about the
+        // network is about the node's, not the customer's.
+        if (ip && !skip?.(ip)) {
           onBody?.(body as Record<string, unknown>);
           return { reading: { ip, from: base }, answered };
         }
@@ -357,9 +396,12 @@ export async function verifyEgress(
   // AAAA record before connecting -- against the IPv4 reading every full
   // tunnel produces differs whatever IPv4 did, and called that
   // "throughTunnel" with the customer's own IPv4 address on screen as
-  // the exit. The Windows client now asks over IPv4 only, so this does
-  // not fire there; it is what keeps the mobile app, and anything that
-  // ever skips that, from reading a non-comparison as proof.
+  // the exit. Both clients now ask over IPv4 only, so this should not
+  // fire; it is what keeps anything that ever skips that from reading a
+  // non-comparison as proof. It is no substitute for the transport,
+  // though: on the phones, before they had it, this fired on every
+  // reading of a dual-stack connect, and each rung with another to try
+  // was torn down for it.
   if (familyOf(reading.ip) !== familyOf(baseline.ip)) {
     return { state: "indeterminate", exitIp: reading.ip };
   }

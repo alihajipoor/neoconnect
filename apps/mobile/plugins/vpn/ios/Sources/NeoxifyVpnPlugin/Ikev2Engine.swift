@@ -208,8 +208,9 @@ enum Ikev2Engine {
     /// Spelled out rather than `String(describing:)` over the raw enum:
     /// NEVPNStatus is an ObjC enum and describes itself as a number, so
     /// the trail would read "0, 1, 0" in the one place it exists to be
-    /// read by somebody trying to explain a failure.
-    private static func trail(_ statuses: [NEVPNStatus]) -> String {
+    /// read by somebody trying to explain a failure. Shared with the
+    /// packet-tunnel connects in NeoxifyVpnPlugin (`ProviderStart`).
+    static func trail(_ statuses: [NEVPNStatus]) -> String {
         let name: (NEVPNStatus) -> String = {
             switch $0 {
             case .invalid: return "invalid"

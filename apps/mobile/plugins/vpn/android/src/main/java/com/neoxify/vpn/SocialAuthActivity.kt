@@ -47,10 +47,24 @@ class SocialAuthActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         launched = savedInstanceState?.getBoolean("launched") ?: false
-        if (launched) return
+        // The tab is NOT opened here, and that is the fix for a sign-in
+        // that cancelled itself every time. Android resumes an activity
+        // it has just created even when onCreate started another one:
+        // the launch runs to RESUMED and the pause the tab causes comes
+        // afterwards. Opened here, the first onResume below already saw
+        // `launched` with no redirect, took it for the customer backing
+        // out, and finished -- so the waiting call resolved "dismissed",
+        // and the redirect later found no instance to come back to.
+        // AppAuth opens its tab from the first onResume for this reason.
+    }
 
+    /** Opens the provider's page in a Custom Tab. */
+    private fun launchTab() {
         val url = intent.getStringExtra(EXTRA_URL)
         if (url == null) {
+            // Started by the redirect itself with nobody waiting -- the
+            // instance that opened the tab is gone -- or by anything else
+            // that is not a sign-in this app began.
             setResult(RESULT_CANCELED)
             finish()
             return
@@ -96,12 +110,13 @@ class SocialAuthActivity : Activity() {
     }
 
     /**
-     * Back from the tab without a redirect.
+     * The first resume opens the tab; any later one is the customer back
+     * from it without a redirect.
      *
-     * The customer pressed Back or swiped the tab away. There is no
-     * event for that -- the only evidence is this activity becoming
-     * visible again with nothing having arrived -- so being resumed
-     * after the tab was opened is what a cancellation looks like.
+     * They pressed Back or swiped the tab away. There is no event for
+     * that -- the only evidence is this activity becoming visible again
+     * with nothing having arrived -- so being resumed after the tab was
+     * opened is what a cancellation looks like.
      *
      * Safe against the success path because that one calls finish() in
      * onNewIntent, which runs before onResume; isFinishing is then
@@ -109,9 +124,12 @@ class SocialAuthActivity : Activity() {
      */
     override fun onResume() {
         super.onResume()
-        if (launched && !isFinishing) {
-            setResult(RESULT_CANCELED)
-            finish()
+        if (isFinishing) return
+        if (!launched) {
+            launchTab()
+            return
         }
+        setResult(RESULT_CANCELED)
+        finish()
     }
 }

@@ -24,7 +24,10 @@ export type SocialProvider = "google" | "apple" | "facebook";
 
 export type SocialOutcome =
   | { kind: "apple-token"; token: string }
-  | { kind: "handoff"; code: string };
+  /** `verifier` is the PKCE secret this flow was started with, which
+   * the server requires to collect a handoff bound to it. Absent only
+   * when this runtime could not make one; see `pkcePair`. */
+  | { kind: "handoff"; code: string; verifier?: string };
 
 /** Which platform this build is running on.
  *
@@ -97,9 +100,42 @@ const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
  * to, so a client on a mirror does not send the customer to an endpoint
  * its network cannot reach.
  */
-function startUrl(provider: "google" | "facebook", locale: string): string {
+export function startUrl(provider: "google" | "facebook", locale: string, challenge?: string): string {
   const base = API_BASE_URL.replace(/\/$/, "");
-  return `${base}/customer-auth/social/${provider}/start?locale=${encodeURIComponent(locale)}`;
+  const url = `${base}/customer-auth/social/${provider}/start?locale=${encodeURIComponent(locale)}`;
+  return challenge ? `${url}&challenge=${encodeURIComponent(challenge)}` : url;
+}
+
+function base64url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** A PKCE pair (RFC 7636, S256) for one browser sign-in.
+ *
+ * The handoff code comes back through `neoconnect://social-callback`,
+ * and on Android any installed app can claim that scheme -- so the
+ * redirect can reach another app, which could trade the code for this
+ * customer's session. The challenge goes out with the start URL, the
+ * server binds the handoff to it, and only this flow's verifier, which
+ * never leaves this process until the exchange, collects it. It also
+ * stops the reverse: a handoff from somebody else's flow, pushed into
+ * this app, carries no binding this verifier matches.
+ *
+ * Null when this runtime has no WebCrypto, so the flow still works --
+ * as an unbound handoff, the way every older client signs in. pow.ts
+ * already relies on `crypto.subtle` in the same webviews. */
+export async function pkcePair(): Promise<{ verifier: string; challenge: string } | null> {
+  try {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    const verifier = base64url(bytes);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+    return { verifier, challenge: base64url(new Uint8Array(digest)) };
+  } catch {
+    return null;
+  }
 }
 
 /** Translation outside a component.
@@ -257,12 +293,14 @@ export async function startSocialSignIn(
     return { kind: "apple-token", token: result.identityToken };
   }
 
+  const pkce = await pkcePair();
   let callback: string | null;
   try {
-    callback = await openAuthSession(startUrl(provider, locale));
+    callback = await openAuthSession(startUrl(provider, locale, pkce?.challenge));
   } catch (err) {
     throw nativeError(err);
   }
   if (callback === null) return null;
-  return readCallback(callback);
+  const outcome = readCallback(callback);
+  return outcome?.kind === "handoff" && pkce ? { ...outcome, verifier: pkce.verifier } : outcome;
 }

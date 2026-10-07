@@ -138,6 +138,84 @@ describe("OauthFlowService", () => {
     });
   });
 
+  /** The handoff bound to the app that started the flow (RFC 7636).
+   *
+   * On Android any app can claim `neoconnect://social-callback`, so the
+   * redirect -- and the handoff code in it -- can land in a malicious
+   * app, which then reaches this API as easily as ours does. Before the
+   * binding the code alone was the session: these are the account
+   * takeover and the account injection that made it a finding. */
+  describe("handoff bound to a PKCE challenge", () => {
+    const tokens = { accessToken: "access", refreshToken: "refresh" };
+    // RFC 7636, Appendix B.
+    const VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    const CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+    it("carries the challenge from start through the state", () => {
+      const svc = service();
+      const state = new URL(svc.start("google", "en", CHALLENGE)).searchParams.get("state")!;
+      expect(svc.consumeState(state).challenge).toBe(CHALLENGE);
+    });
+
+    it("refuses a malformed challenge at start", () => {
+      expect(() => service().start("google", "en", "not-a-challenge")).toThrow(BadRequestException);
+      expect(() => service().start("google", "en", `${CHALLENGE}=`)).toThrow(BadRequestException);
+    });
+
+    it("hands the session to the app holding the verifier", () => {
+      const svc = service();
+      expect(svc.consumeHandoff(svc.storeHandoff(tokens, CHALLENGE), VERIFIER)).toEqual(tokens);
+    });
+
+    it("refuses an intercepted code presented without the verifier", () => {
+      const svc = service();
+      const code = svc.storeHandoff(tokens, CHALLENGE);
+      expect(() => svc.consumeHandoff(code)).toThrow(BadRequestException);
+    });
+
+    it("refuses the wrong verifier, and burns the code doing it", () => {
+      const svc = service();
+      const code = svc.storeHandoff(tokens, CHALLENGE);
+      const wrong = "x".repeat(43);
+      expect(() => svc.consumeHandoff(code, wrong)).toThrow(BadRequestException);
+      // No second guess for anyone.
+      expect(() => svc.consumeHandoff(code, VERIFIER)).toThrow(BadRequestException);
+    });
+
+    it("refuses an unbound code presented with a verifier: a flow this app did not start", () => {
+      // The injection: an attacker's own sign-in, started without a
+      // challenge, delivered to the victim's app, which sends its
+      // verifier for a flow it believes is its own.
+      const svc = service();
+      const code = svc.storeHandoff(tokens);
+      expect(() => svc.consumeHandoff(code, VERIFIER)).toThrow(BadRequestException);
+    });
+
+    it("still accepts an unbound code with no verifier, for clients released before the binding", () => {
+      const svc = service();
+      expect(svc.consumeHandoff(svc.storeHandoff(tokens))).toEqual(tokens);
+    });
+
+    it("says the same thing for every refusal", () => {
+      const svc = service();
+      const messages = [
+        () => svc.consumeHandoff("never-issued", VERIFIER),
+        () => svc.consumeHandoff(svc.storeHandoff(tokens, CHALLENGE)),
+        () => svc.consumeHandoff(svc.storeHandoff(tokens, CHALLENGE), "y".repeat(43)),
+        () => svc.consumeHandoff(svc.storeHandoff(tokens), VERIFIER),
+      ].map((attempt) => {
+        try {
+          attempt();
+          return "accepted";
+        } catch (err) {
+          return (err as BadRequestException).message;
+        }
+      });
+      expect(new Set(messages).size).toBe(1);
+      expect(messages[0]).not.toBe("accepted");
+    });
+  });
+
   describe("appCallback", () => {
     it("sends the app to the one scheme every client registers", () => {
       expect(service().appCallback({ handoff: "abc" })).toBe(`${APP_CALLBACK_URL}?handoff=abc`);

@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsString, MaxLength } from "class-validator";
+import { IsNotEmpty, IsOptional, IsString, Length, Matches, MaxLength } from "class-validator";
 
 export class SocialExchangeDto {
   /** The one-time code the browser flow handed back through the app's
@@ -13,4 +13,14 @@ export class SocialExchangeDto {
   @IsNotEmpty()
   @MaxLength(512)
   code!: string;
+
+  /** The PKCE verifier (RFC 7636) whose challenge the app sent to
+   * `/social/:provider/start`. Optional only for clients released before
+   * the binding; see OauthFlowService.consumeHandoff. 43 to 128
+   * unreserved characters, as the RFC defines it. */
+  @IsOptional()
+  @IsString()
+  @Length(43, 128)
+  @Matches(/^[A-Za-z0-9._~-]+$/)
+  verifier?: string;
 }
