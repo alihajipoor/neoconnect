@@ -21,7 +21,7 @@
 mod internet;
 mod scope;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 
@@ -54,14 +54,6 @@ pub enum Family {
     V6,
 }
 
-/// The applications the customer chose to route through the tunnel.
-///
-/// Held as full paths, lowercased once at construction so matching is a
-/// plain comparison rather than a case-insensitive scan per packet.
-/// Paths, never process ids: the spike watched `chrome.exe` appear under
-/// two different pids inside twenty seconds, and a customer who picks an
-/// app means every process from that image, including ones that do not
-/// exist yet.
 /// A selection the redirect loop can be handed once and still see
 /// later edits through.
 ///
@@ -70,9 +62,31 @@ pub enum Family {
 /// the hot path and they do not contend with each other.
 pub type SharedSelection = Arc<RwLock<Selection>>;
 
+/// The applications the customer chose to route through the tunnel.
+///
+/// Held as full paths, lowercased once at construction and kept in a
+/// set, so asking whether a packet's owner was chosen is one hash lookup
+/// rather than a case-insensitive scan of the list -- see [`lowered`]
+/// for how the question is lowercased without allocating. This comment
+/// said "a plain comparison" for a long time while `matches` lowercased
+/// into a fresh `String` and walked a `Vec`; it is true now.
+///
+/// Paths, never process ids: the spike watched `chrome.exe` appear under
+/// two different pids inside twenty seconds, and a customer who picks an
+/// app means every process from that image, including ones that do not
+/// exist yet.
 #[derive(Debug, Default, Clone)]
 pub struct Selection {
+    /// The customer's list, lowercased, in the order and with the
+    /// repetitions it arrived with.
+    ///
+    /// Kept beside the set because two readers want the list rather than
+    /// the question: the per-app IPv6 filters, which are installed per
+    /// entry, and the placement report, which answers in the customer's
+    /// own order. Neither is on the packet path.
     paths: Vec<String>,
+    /// The same paths as a set. What [`Self::matches`] asks, per packet.
+    selected: HashSet<String>,
     /// Which way the list reads. Held here because `matches` is the hot
     /// path and the answer must not depend on a second lookup somewhere
     /// else that could disagree with it.
@@ -103,21 +117,38 @@ pub struct Selection {
     exits: HashMap<String, String>,
 }
 
-/// Whether `image_path`, lowercased, is exactly `lowered` -- without
-/// building the lowercased copy.
+/// The longest path [`lowered`] folds on the stack.
 ///
-/// ASCII only, and the callers check that first. For an ASCII string
-/// `to_lowercase` is byte-for-byte `to_ascii_lowercase`, so comparing
-/// byte by byte with the case folded on the fly gives exactly the answer
-/// the allocating version gave. A path with anything else in it -- a
-/// customer's user folder named in their own script -- takes the
-/// allocating route unchanged, because Unicode lowercasing is not a
-/// per-byte operation and a cheaper answer that differs from it would
-/// change which applications are carried.
-fn same_ascii_path(lowered: &str, image_path: &str) -> bool {
-    debug_assert!(image_path.is_ascii());
-    lowered.len() == image_path.len()
-        && lowered.bytes().zip(image_path.bytes()).all(|(l, i)| l == i.to_ascii_lowercase())
+/// Comfortably above `MAX_PATH`, which is what every executable path a
+/// process reports is held to unless it was started through a `\\?\`
+/// long path -- and those still work, through the allocating route.
+const STACK_PATH: usize = 512;
+
+/// Hands `with` the path lowercased exactly as construction lowercased
+/// the customer's list, so a set built from one answers for the other.
+///
+/// An ASCII path is folded into a buffer on the stack: for ASCII,
+/// `to_lowercase` is byte-for-byte `to_ascii_lowercase`, so the bytes
+/// are the ones the allocating version produced and the set lookup gives
+/// the answer it gave. A path with anything else in it -- a customer's
+/// user folder named in their own script -- takes the allocating route
+/// unchanged, because Unicode lowercasing is not a per-byte operation
+/// and a cheaper answer that differed from it would change which
+/// applications are carried.
+fn lowered<R>(image_path: &str, with: impl FnOnce(&str) -> R) -> R {
+    if image_path.is_ascii() && image_path.len() <= STACK_PATH {
+        let mut buffer = [0u8; STACK_PATH];
+        let folded = &mut buffer[..image_path.len()];
+        folded.copy_from_slice(image_path.as_bytes());
+        folded.make_ascii_lowercase();
+        // ASCII in, ASCII out, so this cannot fail; the fallback below is
+        // there so that a mistake about that costs an allocation rather
+        // than a wrong answer.
+        if let Ok(path) = std::str::from_utf8(folded) {
+            return with(path);
+        }
+    }
+    with(&image_path.to_lowercase())
 }
 
 impl Selection {
@@ -222,12 +253,13 @@ impl Selection {
         E: IntoIterator<Item = neoconnect_ipc::AppExit>,
     {
         let paths: Vec<String> = paths.into_iter().map(|p| p.to_lowercase()).collect();
+        let selected: HashSet<String> = paths.iter().cloned().collect();
         let mut built = HashMap::new();
         let mut chosen = HashMap::new();
         if matches!(mode, SplitTunnelMode::OnlySelected) {
             for scope in scopes {
                 let app = scope.app.to_lowercase();
-                if !paths.contains(&app) {
+                if !selected.contains(&app) {
                     continue;
                 }
                 if let Some(built_scope) = Scope::new(&scope.destinations) {
@@ -247,7 +279,7 @@ impl Selection {
                 // A member that was not selected is not carried, so
                 // where it goes is not ours to say -- and the rest of
                 // the group must not be placed on the strength of it.
-                if !paths.contains(&exit.app.to_lowercase()) {
+                if !selected.contains(&exit.app.to_lowercase()) {
                     broken.push(group.to_string());
                     continue;
                 }
@@ -285,7 +317,7 @@ impl Selection {
             // above makes.
             let mut distinct: Vec<&str> = Vec::new();
             for exit in &exits {
-                if !paths.contains(&exit.app.to_lowercase()) {
+                if !selected.contains(&exit.app.to_lowercase()) {
                     continue;
                 }
                 if exit.group.as_deref().is_some_and(|g| broken.iter().any(|b| b == g)) {
@@ -302,7 +334,7 @@ impl Selection {
                     break;
                 }
                 let app = exit.app.to_lowercase();
-                if !paths.contains(&app) {
+                if !selected.contains(&app) {
                     continue;
                 }
                 if exit.group.as_deref().is_some_and(|g| broken.iter().any(|b| b == g)) {
@@ -311,7 +343,7 @@ impl Selection {
                 chosen.insert(app, exit.exit);
             }
         }
-        Self { paths, mode, scopes: built, exits: chosen }
+        Self { paths, selected, mode, scopes: built, exits: chosen }
     }
 
     pub fn mode(&self) -> SplitTunnelMode {
@@ -339,14 +371,11 @@ impl Selection {
     ///
     /// Asked on every packet, so it must not allocate -- and it did: the
     /// type's own doc promised "a plain comparison" while this lowercased
-    /// the whole path into a fresh `String` each time. See
-    /// [`same_ascii_path`] for how the comparison is now made without one.
+    /// the whole path into a fresh `String` each time. Then it stopped
+    /// allocating and walked the list instead. Now it is one lookup in
+    /// the set, with the path folded on the stack -- see [`lowered`].
     pub fn matches(&self, image_path: &str) -> bool {
-        if image_path.is_ascii() {
-            return self.paths.iter().any(|p| same_ascii_path(p, image_path));
-        }
-        let lowered = image_path.to_lowercase();
-        self.paths.iter().any(|p| *p == lowered)
+        lowered(image_path, |path| self.selected.contains(path))
     }
 
     /// Whether this application's traffic belongs in the tunnel.
@@ -428,20 +457,14 @@ impl Selection {
     /// those the caller was already doing, which is why this returns
     /// three answers rather than a bool.
     pub fn destination_scope(&self, image_path: &str, destination: IpAddr) -> Scoped {
-        // Before the lowercase, so the ordinary machine allocates
-        // nothing here.
+        // Before the lowercase, so the ordinary machine does not even
+        // fold the path here.
         if self.scopes.is_empty() {
             return Scoped::Unscoped;
         }
-        // A walk rather than a hash lookup for the same reason `matches`
-        // is: the key would have to be lowercased into a new `String`
-        // first, per packet. Scopes are a handful of games at most.
-        let found = if image_path.is_ascii() {
-            self.scopes.iter().find(|(p, _)| same_ascii_path(p, image_path)).map(|(_, s)| s)
-        } else {
-            self.scopes.get(&image_path.to_lowercase())
-        };
-        let Some(scope) = found else {
+        // A hash lookup, keyed the way `matches` is: folded on the
+        // stack, so the key costs no `String` per packet.
+        let Some(scope) = lowered(image_path, |path| self.scopes.get(path)) else {
             return Scoped::Unscoped;
         };
         match scope.contains(destination) {
@@ -500,7 +523,10 @@ impl Selection {
         if self.exits.is_empty() {
             return None;
         }
-        self.exits.get(&image_path.to_lowercase()).map(String::as_str)
+        // Keyed like the other two. `exit_for` asks this for every new
+        // carried flow of a session with concurrent exits, and that
+        // should cost a lookup, not a `String`.
+        lowered(image_path, |path| self.exits.get(path)).map(String::as_str)
     }
 
     /// Where one application's traffic is leaving from, against where
@@ -1004,6 +1030,47 @@ mod tests {
         let selection = Selection::default();
         assert!(selection.is_empty());
         assert!(!selection.matches(r"C:\Windows\explorer.exe"));
+    }
+
+    /// The stack buffer has an edge, and both sides of it must give the
+    /// answer lowercasing first gave.
+    ///
+    /// A path at the buffer's length is folded on the stack; one past it
+    /// takes the allocating route. Neither may differ from the oracle,
+    /// and neither may match a path one byte away -- a fold that kept a
+    /// stale byte from a longer path, or stopped short, would show here
+    /// and nowhere a customer could see it.
+    #[test]
+    fn a_path_on_either_side_of_the_stack_buffer_matches_the_same_way() {
+        let path_of = |len: usize| {
+            let stem = r"C:\Games\";
+            format!("{stem}{}.exe", "A".repeat(len - stem.len() - 4))
+        };
+        for len in [STACK_PATH - 1, STACK_PATH, STACK_PATH + 1, STACK_PATH * 4] {
+            let chosen = path_of(len);
+            assert_eq!(chosen.len(), len);
+            let selection = Selection::with_exits(
+                [chosen.clone()],
+                SplitTunnelMode::OnlySelected,
+                [scope_of(&chosen, &["203.0.113.0/24"])],
+                [neoconnect_ipc::AppExit { app: chosen.clone(), exit: "germany-1".into(), group: None }],
+            );
+            let inside: IpAddr = "203.0.113.7".parse().unwrap();
+
+            for asked in [chosen.clone(), chosen.to_lowercase(), chosen.to_uppercase()] {
+                assert!(selection.matches(&asked), "{len}: {asked} is the chosen path");
+                assert_eq!(selection.destination_scope(&asked, inside), Scoped::InScope, "{len}");
+                assert_eq!(selection.preferred_exit(&asked), Some("germany-1"), "{len}");
+            }
+
+            let mut near = chosen.clone();
+            near.replace_range(len - 5..len - 4, "B");
+            assert_eq!(near.len(), len);
+            assert!(!selection.matches(&near), "{len}: one byte away is another program");
+            assert_eq!(selection.destination_scope(&near, inside), Scoped::Unscoped, "{len}");
+            assert_eq!(selection.preferred_exit(&near), None, "{len}");
+            assert!(!selection.matches(&chosen[..len - 1]), "{len}: a prefix is another program");
+        }
     }
 
     /// What "pure" means here, written down where it can fail.
