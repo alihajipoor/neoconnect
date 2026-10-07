@@ -104,10 +104,10 @@ pub(super) const DNS_PORT: u16 = 53;
 /// and `Selection::destination_scope` do, and that is load-bearing
 /// rather than convenient. An exit preference belongs to an
 /// application. A packet nobody can be shown to have sent has no
-/// application, so in [`decide`] the only call is behind
-/// `owner_image.and_then(..)` -- there is no image to pass, so there is
-/// no exit to acquire, and giving one to an unattributed datagram would
-/// mean first writing a call that does not typecheck today.
+/// application, so the only call is behind `carry.owner_image()?` --
+/// there is no image to pass, so there is no exit to acquire, and giving
+/// one to an unattributed datagram would mean first writing a call that
+/// does not typecheck today.
 ///
 /// That matters more here than anywhere else in this feature.
 /// `docs/design/per-game-exits.md` §4.1 names it as *the* trap in the
@@ -120,8 +120,9 @@ pub(super) const DNS_PORT: u16 = 53;
 ///
 /// The other half of the ordering used to be positional, held by
 /// layout and one test. It is now this function's argument: it takes a
-/// [`carry::Carry`], which only [`carry::settle`] can make, after both
-/// refusals in [`decide`] have run.
+/// [`ladder::Carry`], which only [`ladder::settle`] can make, after both
+/// refusals in [`decide`] have run -- and `settle` in turn takes the
+/// proof that every rung before it ran. See [`ladder`].
 ///
 /// # Fail-open, on both of its two axes
 ///
@@ -132,7 +133,7 @@ pub(super) const DNS_PORT: u16 = 53;
 ///   the session's adapter. `ExitPlacement::Fallback` reports it, and a
 ///   game that keeps working from the wrong address beats a game that
 ///   stops.
-fn exit_for(carry: &carry::Carry, selection: &Selection, exits: &ExitRelays) -> Option<u8> {
+fn exit_for(carry: &ladder::Carry, selection: &Selection, exits: &ExitRelays) -> Option<u8> {
     // Checked first so a session with no concurrent exits -- which is
     // every WireGuard, OpenVPN and IKEv2 session, and most Xray ones --
     // never lowercases a path or touches the preference map.
@@ -144,6 +145,13 @@ fn exit_for(carry: &carry::Carry, selection: &Selection, exits: &ExitRelays) -> 
     exits.index_of(selection.preferred_exit(carry.owner_image()?)?)
 }
 
+/// What one outbound IPv4 packet is: carried, left alone, or refused.
+///
+/// A ladder of seven rungs, climbed in order until one of them decides.
+/// The order is the safety property -- see [`ladder`] -- and it is held
+/// by the types each rung takes and returns rather than by where its
+/// code sits, so `climb` below cannot be written in a different order
+/// and still compile.
 pub(super) fn decide(
     parsed: &Parsed,
     nat: &Nat,
@@ -153,320 +161,27 @@ pub(super) fn decide(
     interface_id: u32,
     stats: &Stats,
 ) -> Verdict {
-    // A SYN without an ACK is a new connection, so any leave-alone
-    // verdict recorded against this port belongs to whatever held it
-    // before and must not be inherited. The flow table is still
-    // consulted, so a retransmitted SYN keeps its existing port.
-    let is_new_connection = matches!(parsed.transport, Transport::Tcp)
-        && parsed.tcp_flags & TCP_FLAG_SYN != 0
-        && parsed.tcp_flags & TCP_FLAG_ACK == 0;
-
-    let known = if is_new_connection {
-        nat.lookup_flow(
-            parsed.transport,
-            parsed.source_port,
-            parsed.destination,
-            parsed.destination_port,
-        )
-        .map_or(Verdict::Unknown, |nat_port| Verdict::Redirect { nat_port })
-    } else {
-        nat.lookup(
-            parsed.transport,
-            parsed.source_port,
-            parsed.destination,
-            parsed.destination_port,
-        )
-    };
-    if known != Verdict::Unknown {
-        return known;
-    }
-
-    // The relay's own onward socket, carrying a flow that has already
-    // been decided. Answered from what the relay recorded when it
-    // created the socket, before the owner tables are consulted at all.
-    //
-    // This has to come first, and not merely as an optimisation. The
-    // image-based check below cannot see a socket this young -- the
-    // owner lookup will not rebuild more than once every 20ms -- so a
-    // lookup made while another was in flight fell through to the DNS
-    // branch and was posted back into the relay it came from. It never
-    // reached a resolver, and the answer never came. Two lookups fired
-    // less than 20ms apart lost both; 25ms apart lost neither.
-    //
-    // A browser opening a page resolves every asset host at once, which
-    // is why this presented as text arriving while images and
-    // stylesheets did not.
-    if redirect.own_sockets.contains(parsed.transport, parsed.source, parsed.source_port) {
-        return Verdict::Direct;
-    }
-
-    // Anything mid-connection that nothing is known about started before
-    // Custom mode did, or before its app was selected. Moving it now
-    // would break it: the app holds a socket to the real destination,
-    // and rewriting half a live connection is not a redirect.
-    //
-    // That is right in general and wrong for the first seconds of a
-    // session, and the difference is what this branch now makes.
-    // Activation closes a selected app's existing connections so they
-    // are rebuilt through the tunnel -- but `SetTcpEntry` cannot close a
-    // connection that is still in `SYN_SENT`, and one that was half-open
-    // at that instant completes a moment later against the real
-    // destination. It then arrives here as an ordinary mid-connection
-    // packet, is exempted, and lives outside the tunnel for as long as
-    // the application keeps it -- which for a browser is minutes.
-    //
-    // Inside the window, refuse it instead. The application sees the
-    // connection fail, which is a thing every application handles, and
-    // opens a new one that this loop is on time for. Outside the window
-    // the old behaviour returns unchanged. See `drop_while_converging`
-    // for why each clause of the test is there.
-    if matches!(parsed.transport, Transport::Tcp) && !is_new_connection {
-        if redirect.within_activation_grace() {
-            // Not `image_for_new_connection`: this packet is not opening
-            // a connection, and forcing a table rebuild for every
-            // mid-connection packet on the machine for three seconds
-            // would be a table walk per packet at the busiest moment a
-            // session has.
-            let image = owner.image_for_port(Family::V4, parsed.transport, parsed.source_port);
-            let is_own = image
-                .map(|image| {
-                    redirect
-                        .own_images
-                        .iter()
-                        .any(|own| image.eq_ignore_ascii_case(own))
-                })
-                .unwrap_or(false);
-            if drop_while_converging(true, selection, image, is_own) {
-                stats.grace_dropped.fetch_add(1, Ordering::Relaxed);
-                return Verdict::Drop;
-            }
-        }
-        // Recorded against this flow, not this port. For TCP the two
-        // are almost the same thing -- a port changes destination by
-        // sending a SYN, and a SYN skips this cache -- so this call is
-        // the one of the three whose meaning barely moves.
-        nat.record_direct(
-            parsed.transport,
-            parsed.source_port,
-            parsed.destination,
-            parsed.destination_port,
-        );
-        return Verdict::Direct;
-    }
-
-    // A SYN asks the more insistent question -- see
-    // `image_for_new_connection`. This is the one packet whose answer
-    // decides where a whole connection lives, and the one whose miss
-    // cannot be taken back afterwards.
-    //
-    // A UDP datagram that has reached this line asks exactly the same
-    // question, and until now it was not being asked. `is_new_connection`
-    // is SYN-only, because UDP has no SYN -- but the flow table and the
-    // leave-alone cache between them say the same thing a SYN says: both
-    // were consulted above, and reaching here means this datagram belongs
-    // to a flow nothing is carrying and nothing has decided about. For
-    // UDP that *is* the new-flow signal, and it is available without any
-    // help from the protocol.
-    //
-    // What it costs to keep missing it is the 0.9.25 bug arriving over
-    // UDP. A socket is microseconds old when it sends its first
-    // datagram, which puts that datagram inside `MIN_REFRESH_INTERVAL`,
-    // where the owner lookup will not rebuild and answers "nobody". In
-    // `OnlySelected` that means leave it alone, so a selected app's very
-    // first datagram goes out direct -- and for a browser that datagram
-    // is the QUIC Initial. Twenty milliseconds later the snapshot is
-    // stale enough to rebuild, datagram two is attributed correctly and
-    // redirected, and the handshake is now split across two paths with
-    // two source addresses. It does not fail fast: the browser waits out
-    // its whole QUIC timeout before falling back to TCP.
-    //
-    // The residual cost is one extra pair of table walks per UDP flow
-    // whose owner cannot be resolved at all, since those record nothing
-    // and so ask again on the next datagram. That is the same trade
-    // `image_for_new_connection` already accepted for SYNs, and it is
-    // bounded by how rare an unattributable UDP source port is -- a live
-    // socket is in the table from the moment it is created. It has not
-    // been measured under load; see the rig note.
-    let opens_a_flow = is_new_connection || matches!(parsed.transport, Transport::Udp);
-    let owner_image = if opens_a_flow {
-        owner.image_for_new_connection(Family::V4, parsed.transport, parsed.source_port)
-    } else {
-        owner.image_for_port(Family::V4, parsed.transport, parsed.source_port)
-    };
-    let known_owner = owner_image.is_some();
-    // This service, resolving for itself. Checked separately because it
-    // has to be excluded from the DNS rule below as well as from the
-    // selection: the proxy's upstream lookups must not be routed into
-    // the proxy. Getting this wrong took DNS out for the whole machine
-    // the moment Custom mode came on -- the first version of this rule
-    // did exactly that.
-    let is_own = owner_image
-        .map(|image| {
-            redirect
-                .own_images
-                .iter()
-                .any(|own| image.eq_ignore_ascii_case(own))
-        })
-        .unwrap_or(false);
-    // A port with no owner this can see, which is the case the rest of
-    // this function used to get wrong -- see
-    // `Selection::verdict_for_unattributed` for the measurement and for
-    // why the answer for a datagram is now "refuse" rather than "leave
-    // it alone".
-    //
-    // Worked out here and acted on further down rather than returned on
-    // the spot, because the DNS branch below has to run first: a lookup
-    // is carried whoever made it, and carrying an unattributable one is
-    // strictly better than swallowing it. Refusing here would have
-    // turned a carried query into a dropped one, which is a slower page
-    // in exchange for nothing.
-    let unattributed = match owner_image {
-        Some(_) => None,
-        None => Some(selection.verdict_for_unattributed(
-            parsed.transport,
-            IpAddr::V4(parsed.destination),
-        )),
-    };
-    let selected = match owner_image {
-        // Two questions, in this order: is this application's traffic
-        // ours, and is this packet of it going somewhere we carry.
-        //
-        // The second can only ever narrow the first, which is what
-        // makes it safe to bolt onto a decision this load-bearing. An
-        // application the customer did not select cannot be pulled into
-        // the tunnel by a scope, because `should_tunnel` has already
-        // said no and `&&` never revisits that.
-        //
-        // `Scoped::Unscoped` -- no scope, an unusable one, or one with
-        // nothing to say about IPv4 -- leaves the answer exactly as it
-        // was before scopes existed. See `Selection::destination_scope`
-        // for why every uncertainty lands there and not on a refusal.
-        Some(image) => {
-            !is_own
-                && selection.should_tunnel(image)
-                && !matches!(
-                    selection.destination_scope(image, IpAddr::V4(parsed.destination)),
-                    Scoped::OutOfScope
-                )
-        }
-        // A port with no owner this loop can see. In `OnlySelected`
-        // that used to mean "leave it alone", and leaving it alone was
-        // the leak: 15 datagrams from 15 short-lived sockets, 13 out in
-        // the clear on one rig run and 14 on the next, from a selected
-        // application, with the app reporting Custom mode on. The
-        // module header carries the mechanism, why a WFP
-        // `ALE_APP_ID` filter cannot take this job instead, and what
-        // the refusal costs.
-        //
-        // Only `Carry` means "into the tunnel". `Refuse` is deliberately
-        // not acted on here -- see where `unattributed` is worked out
-        // above for why it has to wait for the DNS branch.
-        None => matches!(unattributed, Some(Unattributed::Carry)),
-    };
-
-    // A lookup is carried whoever made it -- see `is_dns` -- except this
-    // service's own.
-    if redirect.carry_dns && is_dns(parsed) && !is_own {
-        let origin = Origin {
-            addr: parsed.destination,
-            port: parsed.destination_port,
-            client: parsed.source,
-            client_port: parsed.source_port,
-            interface_id,
-            // Answered by a resolver reached through the tunnel, not by
-            // the one the network handed out.
-            upstream: Some(std::net::SocketAddrV4::new(redirect.dns_resolver, DNS_PORT)),
-            // A lookup is carried whoever made it -- including a
-            // datagram with no owner this loop can see, which is the
-            // one case in this function where a packet is carried
-            // without an application behind it. That is exactly the
-            // packet that must never acquire an exit: a preference
-            // belongs to an application, and inventing one for a
-            // datagram nobody can be shown to have sent is the
-            // fire-and-forget leak with a destination attached.
-            //
-            // So every lookup takes the session's own exit, including
-            // one made by a game that named a different one. That is a
-            // real limit and it is the honest side of it: a resolver
-            // reached through the session's exit answers with what that
-            // exit's network sees, which is the same answer this
-            // client has always given. A per-game resolver would be a
-            // second feature with its own evidence problem -- see
-            // `docs/design/per-game-exits.md` §4.1.
-            exit: None,
-        };
-        return match nat.redirect(parsed.transport, origin) {
-            Some(nat_port) => {
-                stats.matched.fetch_add(1, Ordering::Relaxed);
-                Verdict::Redirect { nat_port }
-            }
-            // Dropped, not sent out in the clear.
-            //
-            // This used to fall back to Direct, which handed the lookup
-            // to whichever resolver the network supplied -- for somebody
-            // in Iran, their ISP. That is precisely what carrying DNS
-            // through the tunnel exists to prevent, and it happened
-            // silently at the one moment the table was under pressure.
-            //
-            // A lookup that does not answer is a page that does not
-            // load, which the customer sees and can act on. A lookup
-            // answered by their ISP is a record of where they went,
-            // which they never learn about. The retry costs a moment;
-            // the leak cannot be taken back.
-            None => Verdict::Drop,
-        };
-    }
-
-    // The two refusals, and the only way past them. `settle` is the one
-    // thing that makes a `Carry`, and an exit can only be read through a
-    // `Carry` -- see `carry`.
-    let carry = match carry::settle(owner_image, unattributed, selected, known_owner, parsed, nat, stats) {
-        Ok(carry) => carry,
-        Err(verdict) => return verdict,
-    };
-
-    // Past both refusals, so this is reached only for a packet already
-    // decided to be carried -- and that is now a property of the types
-    // rather than of where this line sits.
-    let origin = Origin {
-        addr: parsed.destination,
-        port: parsed.destination_port,
-        client: parsed.source,
-        client_port: parsed.source_port,
-        interface_id,
-        upstream: None,
-        exit: exit_for(&carry, selection, &redirect.exits),
-    };
-    match nat.redirect(parsed.transport, origin) {
-        Some(nat_port) => {
-            stats.matched.fetch_add(1, Ordering::Relaxed);
-            Verdict::Redirect { nat_port }
-        }
-        // Out of synthetic ports. Fail open, consistent with the rest of
-        // the feature: unprotected traffic beats a stalled game.
-        //
-        // This is a *selected* application, so what is recorded here has
-        // to be as narrow as the failure that caused it. Keyed on the
-        // port it was not: one exhausted moment handed the whole port a
-        // five-second exemption covering every destination it reached
-        // next, and because UDP has no SYN to re-decide, nothing took it
-        // back early -- a selected app kept egressing in the clear long
-        // after `expire_idle` had freed the ports that would have
-        // carried it. Keyed on the flow it says only what is true: this
-        // one flow could not be carried.
-        None => {
-            nat.record_direct(
-                parsed.transport,
-                parsed.source_port,
-                parsed.destination,
-                parsed.destination_port,
-            );
-            Verdict::Direct
-        }
+    let packet = ladder::Packet { parsed, nat, selection, redirect, interface_id, stats };
+    match climb(&packet, owner) {
+        Ok(verdict) | Err(verdict) => verdict,
     }
 }
 
-/// The end of [`decide`]'s ladder, as a type.
+/// The rungs, in the only order their types allow. Each one either ends
+/// the climb with a verdict -- the `Err` side, so `?` stops here -- or
+/// hands the next rung what it needs to run.
+fn climb(packet: &ladder::Packet, owner: &mut OwnerLookup) -> Result<Verdict, Verdict> {
+    let undecided = ladder::undecided(packet)?;
+    let foreign = ladder::not_the_relays_own(packet, undecided)?;
+    let opening = ladder::opens_a_flow(packet, foreign, owner)?;
+    let attributed = ladder::attribute(packet, opening, owner);
+    let not_a_lookup = ladder::carry_lookups(packet, attributed)?;
+    let carry = ladder::settle(packet, not_a_lookup)?;
+    Ok(ladder::carry(packet, carry))
+}
+
+/// [`decide`]'s ladder, one rung per function, with the order carried by
+/// types.
 ///
 /// The ladder's safety property is an ordering: every refusal must come
 /// before the only place a carried flow can acquire a concurrent exit,
@@ -474,41 +189,386 @@ pub(super) fn decide(
 /// to carry it -- and giving an exit to a datagram that should have been
 /// refused is the fire-and-forget leak with a destination attached. That
 /// ordering used to be held by layout, eight early returns and one test.
+/// [`exit_for`] was the first part of it put into a type: it takes a
+/// [`Carry`], which only [`settle`] can make.
 ///
-/// Now [`exit_for`] takes a [`carry::Carry`], and this module is the only
-/// thing that can make one -- its field is private to it, so not even
-/// `decide` can build one by hand. A future branch that wants an exit has
-/// to come through [`carry::settle`], and `settle` runs both refusals
-/// first. The rule is enforced by the compiler instead of by position.
-mod carry {
+/// The rest of the ladder is now the same shape. Each rung takes, by
+/// value, the token the rung before it returns, and returns the token
+/// the next rung needs: [`Undecided`], [`Foreign`], [`Opening`],
+/// [`Attributed`], [`NotALookup`], [`Carry`]. Every token's fields are
+/// private to this module and each is built in exactly one place -- the
+/// rung that returns it -- so nothing outside can forge one and skip a
+/// rung, and running a rung ahead of the one before it is a type error
+/// rather than a leak. The two places a flow is handed to the relay are
+/// rungs too: [`carry_lookups`], which cannot give a lookup an exit, and
+/// [`carry`], which needs a `Carry`.
+///
+/// The rungs themselves are the ladder `decide` always was, line for
+/// line and comment for comment; only the joints between them changed.
+/// The comments still say "above" for what runs earlier and "below" for
+/// what runs later, as they did when this was one function read top to
+/// bottom.
+mod ladder {
     use super::*;
 
-    /// A packet that has passed every refusal and is to be carried.
-    pub(super) struct Carry<'a> {
+    /// What every rung reads, so each signature says what it consumes
+    /// and returns and nothing else.
+    pub(super) struct Packet<'a> {
+        pub(super) parsed: &'a Parsed,
+        pub(super) nat: &'a Nat,
+        pub(super) selection: &'a Selection,
+        pub(super) redirect: &'a Redirect,
+        pub(super) interface_id: u32,
+        pub(super) stats: &'a Stats,
+    }
+
+    /// Past rung 1: no flow-table entry and no leave-alone verdict
+    /// already answers for this packet.
+    pub(super) struct Undecided {
+        is_new_connection: bool,
+    }
+
+    /// Past rung 2: not one of the relay's own onward sockets.
+    pub(super) struct Foreign {
+        is_new_connection: bool,
+    }
+
+    /// Past rung 3: a packet that opens a flow -- a SYN, or a UDP
+    /// datagram nothing has decided about. Every mid-connection TCP
+    /// packet has been answered by then, which is what lets rung 4 ask
+    /// for the owner the insistent way unconditionally.
+    pub(super) struct Opening(());
+
+    /// Rung 4's answer: who sent it, and what the selection says about
+    /// that. Computes everything and decides nothing.
+    pub(super) struct Attributed<'o> {
+        owner_image: Option<&'o str>,
+        known_owner: bool,
+        is_own: bool,
+        unattributed: Option<Unattributed>,
+        selected: bool,
+    }
+
+    /// Past rung 5: not a lookup carried whoever sent it.
+    pub(super) struct NotALookup<'o> {
+        attributed: Attributed<'o>,
+    }
+
+    /// Past rung 6: a packet that has passed every refusal and is to be
+    /// carried.
+    pub(super) struct Carry<'o> {
         /// The application behind it, when there is one. `None` is a
         /// datagram carried without attribution -- `AllExcept`'s answer
         /// for an owner nobody can see -- which has no preference and so
         /// can never reach an exit.
-        owner_image: Option<&'a str>,
+        owner_image: Option<&'o str>,
     }
 
-    impl<'a> Carry<'a> {
-        pub(super) fn owner_image(&self) -> Option<&'a str> {
+    impl<'o> Carry<'o> {
+        pub(super) fn owner_image(&self) -> Option<&'o str> {
             self.owner_image
         }
     }
 
-    /// The two refusals, in order, and the only constructor of [`Carry`].
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn settle<'a>(
-        owner_image: Option<&'a str>,
-        unattributed: Option<Unattributed>,
-        selected: bool,
-        known_owner: bool,
-        parsed: &Parsed,
-        nat: &Nat,
-        stats: &Stats,
-    ) -> Result<Carry<'a>, Verdict> {
+    /// Rung 1: a flow somebody already decided about.
+    pub(super) fn undecided(packet: &Packet) -> Result<Undecided, Verdict> {
+        let Packet { parsed, nat, .. } = *packet;
+        // A SYN without an ACK is a new connection, so any leave-alone
+        // verdict recorded against this port belongs to whatever held it
+        // before and must not be inherited. The flow table is still
+        // consulted, so a retransmitted SYN keeps its existing port.
+        let is_new_connection = matches!(parsed.transport, Transport::Tcp)
+            && parsed.tcp_flags & TCP_FLAG_SYN != 0
+            && parsed.tcp_flags & TCP_FLAG_ACK == 0;
+
+        let known = if is_new_connection {
+            nat.lookup_flow(
+                parsed.transport,
+                parsed.source_port,
+                parsed.destination,
+                parsed.destination_port,
+            )
+            .map_or(Verdict::Unknown, |nat_port| Verdict::Redirect { nat_port })
+        } else {
+            nat.lookup(
+                parsed.transport,
+                parsed.source_port,
+                parsed.destination,
+                parsed.destination_port,
+            )
+        };
+        if known != Verdict::Unknown {
+            return Err(known);
+        }
+        Ok(Undecided { is_new_connection })
+    }
+
+    /// Rung 2: the relay's own onward socket.
+    pub(super) fn not_the_relays_own(packet: &Packet, undecided: Undecided) -> Result<Foreign, Verdict> {
+        let Packet { parsed, redirect, .. } = *packet;
+        // The relay's own onward socket, carrying a flow that has already
+        // been decided. Answered from what the relay recorded when it
+        // created the socket, before the owner tables are consulted at all.
+        //
+        // This has to come first, and not merely as an optimisation. The
+        // image-based check below cannot see a socket this young -- the
+        // owner lookup will not rebuild more than once every 20ms -- so a
+        // lookup made while another was in flight fell through to the DNS
+        // branch and was posted back into the relay it came from. It never
+        // reached a resolver, and the answer never came. Two lookups fired
+        // less than 20ms apart lost both; 25ms apart lost neither.
+        //
+        // A browser opening a page resolves every asset host at once, which
+        // is why this presented as text arriving while images and
+        // stylesheets did not.
+        if redirect.own_sockets.contains(parsed.transport, parsed.source, parsed.source_port) {
+            return Err(Verdict::Direct);
+        }
+        Ok(Foreign { is_new_connection: undecided.is_new_connection })
+    }
+
+    /// Rung 3: a connection already under way when nothing knew about it.
+    pub(super) fn opens_a_flow(packet: &Packet, foreign: Foreign, owner: &mut OwnerLookup) -> Result<Opening, Verdict> {
+        let Packet { parsed, nat, selection, redirect, stats, .. } = *packet;
+        // Anything mid-connection that nothing is known about started before
+        // Custom mode did, or before its app was selected. Moving it now
+        // would break it: the app holds a socket to the real destination,
+        // and rewriting half a live connection is not a redirect.
+        //
+        // That is right in general and wrong for the first seconds of a
+        // session, and the difference is what this branch now makes.
+        // Activation closes a selected app's existing connections so they
+        // are rebuilt through the tunnel -- but `SetTcpEntry` cannot close a
+        // connection that is still in `SYN_SENT`, and one that was half-open
+        // at that instant completes a moment later against the real
+        // destination. It then arrives here as an ordinary mid-connection
+        // packet, is exempted, and lives outside the tunnel for as long as
+        // the application keeps it -- which for a browser is minutes.
+        //
+        // Inside the window, refuse it instead. The application sees the
+        // connection fail, which is a thing every application handles, and
+        // opens a new one that this loop is on time for. Outside the window
+        // the old behaviour returns unchanged. See `drop_while_converging`
+        // for why each clause of the test is there.
+        if matches!(parsed.transport, Transport::Tcp) && !foreign.is_new_connection {
+            if redirect.within_activation_grace() {
+                // Not `image_for_new_connection`: this packet is not opening
+                // a connection, and forcing a table rebuild for every
+                // mid-connection packet on the machine for three seconds
+                // would be a table walk per packet at the busiest moment a
+                // session has.
+                let image = owner.image_for_port(Family::V4, parsed.transport, parsed.source_port);
+                let is_own = image
+                    .map(|image| {
+                        redirect
+                            .own_images
+                            .iter()
+                            .any(|own| image.eq_ignore_ascii_case(own))
+                    })
+                    .unwrap_or(false);
+                if drop_while_converging(true, selection, image, is_own) {
+                    stats.grace_dropped.fetch_add(1, Ordering::Relaxed);
+                    return Err(Verdict::Drop);
+                }
+            }
+            // Recorded against this flow, not this port. For TCP the two
+            // are almost the same thing -- a port changes destination by
+            // sending a SYN, and a SYN skips this cache -- so this call is
+            // the one of the three whose meaning barely moves.
+            nat.record_direct(
+                parsed.transport,
+                parsed.source_port,
+                parsed.destination,
+                parsed.destination_port,
+            );
+            return Err(Verdict::Direct);
+        }
+        Ok(Opening(()))
+    }
+
+    /// Rung 4: who sent it. Decides nothing; every answer it works out is
+    /// acted on by a later rung.
+    pub(super) fn attribute<'o>(packet: &Packet, _opening: Opening, owner: &'o mut OwnerLookup) -> Attributed<'o> {
+        let Packet { parsed, selection, redirect, .. } = *packet;
+        // A SYN asks the more insistent question -- see
+        // `image_for_new_connection`. This is the one packet whose answer
+        // decides where a whole connection lives, and the one whose miss
+        // cannot be taken back afterwards.
+        //
+        // A UDP datagram that has reached this line asks exactly the same
+        // question, and until now it was not being asked. `is_new_connection`
+        // is SYN-only, because UDP has no SYN -- but the flow table and the
+        // leave-alone cache between them say the same thing a SYN says: both
+        // were consulted above, and reaching here means this datagram belongs
+        // to a flow nothing is carrying and nothing has decided about. For
+        // UDP that *is* the new-flow signal, and it is available without any
+        // help from the protocol.
+        //
+        // What it costs to keep missing it is the 0.9.25 bug arriving over
+        // UDP. A socket is microseconds old when it sends its first
+        // datagram, which puts that datagram inside `MIN_REFRESH_INTERVAL`,
+        // where the owner lookup will not rebuild and answers "nobody". In
+        // `OnlySelected` that means leave it alone, so a selected app's very
+        // first datagram goes out direct -- and for a browser that datagram
+        // is the QUIC Initial. Twenty milliseconds later the snapshot is
+        // stale enough to rebuild, datagram two is attributed correctly and
+        // redirected, and the handshake is now split across two paths with
+        // two source addresses. It does not fail fast: the browser waits out
+        // its whole QUIC timeout before falling back to TCP.
+        //
+        // The residual cost is one extra pair of table walks per UDP flow
+        // whose owner cannot be resolved at all, since those record nothing
+        // and so ask again on the next datagram. That is the same trade
+        // `image_for_new_connection` already accepted for SYNs, and it is
+        // bounded by how rare an unattributable UDP source port is -- a live
+        // socket is in the table from the moment it is created. It has not
+        // been measured under load; see the rig note.
+        //
+        // The insistent question unconditionally, and that is not a
+        // change: this used to choose between the two lookups on
+        // "a SYN, or UDP", and every packet that was neither -- a TCP
+        // packet mid-connection -- had already been answered by the
+        // mid-connection rule above. The `Opening` that rule returns is
+        // what says so now.
+        let owner_image = owner.image_for_new_connection(Family::V4, parsed.transport, parsed.source_port);
+        let known_owner = owner_image.is_some();
+        // This service, resolving for itself. Checked separately because it
+        // has to be excluded from the DNS rule below as well as from the
+        // selection: the proxy's upstream lookups must not be routed into
+        // the proxy. Getting this wrong took DNS out for the whole machine
+        // the moment Custom mode came on -- the first version of this rule
+        // did exactly that.
+        let is_own = owner_image
+            .map(|image| {
+                redirect
+                    .own_images
+                    .iter()
+                    .any(|own| image.eq_ignore_ascii_case(own))
+            })
+            .unwrap_or(false);
+        // A port with no owner this can see, which is the case the rest of
+        // this function used to get wrong -- see
+        // `Selection::verdict_for_unattributed` for the measurement and for
+        // why the answer for a datagram is now "refuse" rather than "leave
+        // it alone".
+        //
+        // Worked out here and acted on further down rather than returned on
+        // the spot, because the DNS branch below has to run first: a lookup
+        // is carried whoever made it, and carrying an unattributable one is
+        // strictly better than swallowing it. Refusing here would have
+        // turned a carried query into a dropped one, which is a slower page
+        // in exchange for nothing.
+        let unattributed = match owner_image {
+            Some(_) => None,
+            None => Some(selection.verdict_for_unattributed(
+                parsed.transport,
+                IpAddr::V4(parsed.destination),
+            )),
+        };
+        let selected = match owner_image {
+            // Two questions, in this order: is this application's traffic
+            // ours, and is this packet of it going somewhere we carry.
+            //
+            // The second can only ever narrow the first, which is what
+            // makes it safe to bolt onto a decision this load-bearing. An
+            // application the customer did not select cannot be pulled into
+            // the tunnel by a scope, because `should_tunnel` has already
+            // said no and `&&` never revisits that.
+            //
+            // `Scoped::Unscoped` -- no scope, an unusable one, or one with
+            // nothing to say about IPv4 -- leaves the answer exactly as it
+            // was before scopes existed. See `Selection::destination_scope`
+            // for why every uncertainty lands there and not on a refusal.
+            Some(image) => {
+                !is_own
+                    && selection.should_tunnel(image)
+                    && !matches!(
+                        selection.destination_scope(image, IpAddr::V4(parsed.destination)),
+                        Scoped::OutOfScope
+                    )
+            }
+            // A port with no owner this loop can see. In `OnlySelected`
+            // that used to mean "leave it alone", and leaving it alone was
+            // the leak: 15 datagrams from 15 short-lived sockets, 13 out in
+            // the clear on one rig run and 14 on the next, from a selected
+            // application, with the app reporting Custom mode on. The
+            // module header carries the mechanism, why a WFP
+            // `ALE_APP_ID` filter cannot take this job instead, and what
+            // the refusal costs.
+            //
+            // Only `Carry` means "into the tunnel". `Refuse` is deliberately
+            // not acted on here -- see where `unattributed` is worked out
+            // above for why it has to wait for the DNS branch.
+            None => matches!(unattributed, Some(Unattributed::Carry)),
+        };
+        Attributed { owner_image, known_owner, is_own, unattributed, selected }
+    }
+
+    /// Rung 5: a name lookup, carried whoever sent it -- and never given
+    /// an exit, which this rung cannot do: the `Origin` it builds is
+    /// written with `exit: None` and it holds no `Carry` to ask for one.
+    pub(super) fn carry_lookups<'o>(packet: &Packet, attributed: Attributed<'o>) -> Result<NotALookup<'o>, Verdict> {
+        let Packet { parsed, nat, redirect, interface_id, stats, .. } = *packet;
+        // A lookup is carried whoever made it -- see `is_dns` -- except this
+        // service's own.
+        if redirect.carry_dns && is_dns(parsed) && !attributed.is_own {
+            let origin = Origin {
+                addr: parsed.destination,
+                port: parsed.destination_port,
+                client: parsed.source,
+                client_port: parsed.source_port,
+                interface_id,
+                // Answered by a resolver reached through the tunnel, not by
+                // the one the network handed out.
+                upstream: Some(std::net::SocketAddrV4::new(redirect.dns_resolver, DNS_PORT)),
+                // A lookup is carried whoever made it -- including a
+                // datagram with no owner this loop can see, which is the
+                // one case in this function where a packet is carried
+                // without an application behind it. That is exactly the
+                // packet that must never acquire an exit: a preference
+                // belongs to an application, and inventing one for a
+                // datagram nobody can be shown to have sent is the
+                // fire-and-forget leak with a destination attached.
+                //
+                // So every lookup takes the session's own exit, including
+                // one made by a game that named a different one. That is a
+                // real limit and it is the honest side of it: a resolver
+                // reached through the session's exit answers with what that
+                // exit's network sees, which is the same answer this
+                // client has always given. A per-game resolver would be a
+                // second feature with its own evidence problem -- see
+                // `docs/design/per-game-exits.md` §4.1.
+                exit: None,
+            };
+            return Err(match nat.redirect(parsed.transport, origin) {
+                Some(nat_port) => {
+                    stats.matched.fetch_add(1, Ordering::Relaxed);
+                    Verdict::Redirect { nat_port }
+                }
+                // Dropped, not sent out in the clear.
+                //
+                // This used to fall back to Direct, which handed the lookup
+                // to whichever resolver the network supplied -- for somebody
+                // in Iran, their ISP. That is precisely what carrying DNS
+                // through the tunnel exists to prevent, and it happened
+                // silently at the one moment the table was under pressure.
+                //
+                // A lookup that does not answer is a page that does not
+                // load, which the customer sees and can act on. A lookup
+                // answered by their ISP is a record of where they went,
+                // which they never learn about. The retry costs a moment;
+                // the leak cannot be taken back.
+                None => Verdict::Drop,
+            });
+        }
+        Ok(NotALookup { attributed })
+    }
+
+    /// Rung 6: the two refusals, in order, and the only constructor of
+    /// [`Carry`].
+    pub(super) fn settle<'o>(packet: &Packet, not_a_lookup: NotALookup<'o>) -> Result<Carry<'o>, Verdict> {
+        let Packet { parsed, nat, stats, .. } = *packet;
+        let Attributed { owner_image, known_owner, unattributed, selected, .. } = not_a_lookup.attributed;
         // Nothing on this machine can say who sent this datagram, and in
         // `OnlySelected` the honest answer is to refuse it rather than to
         // let it out in the clear on the chance it was not the selected
@@ -589,5 +649,51 @@ mod carry {
         }
 
         Ok(Carry { owner_image })
+    }
+
+    /// Rung 7: carried, from whichever exit [`exit_for`] says -- the only
+    /// `Origin` in this ladder that can name one, built only from a
+    /// [`Carry`].
+    pub(super) fn carry(packet: &Packet, carry: Carry) -> Verdict {
+        let Packet { parsed, nat, selection, redirect, interface_id, stats } = *packet;
+        // Past both refusals, so this is reached only for a packet already
+        // decided to be carried -- and that is now a property of the types
+        // rather than of where this line sits.
+        let origin = Origin {
+            addr: parsed.destination,
+            port: parsed.destination_port,
+            client: parsed.source,
+            client_port: parsed.source_port,
+            interface_id,
+            upstream: None,
+            exit: exit_for(&carry, selection, &redirect.exits),
+        };
+        match nat.redirect(parsed.transport, origin) {
+            Some(nat_port) => {
+                stats.matched.fetch_add(1, Ordering::Relaxed);
+                Verdict::Redirect { nat_port }
+            }
+            // Out of synthetic ports. Fail open, consistent with the rest of
+            // the feature: unprotected traffic beats a stalled game.
+            //
+            // This is a *selected* application, so what is recorded here has
+            // to be as narrow as the failure that caused it. Keyed on the
+            // port it was not: one exhausted moment handed the whole port a
+            // five-second exemption covering every destination it reached
+            // next, and because UDP has no SYN to re-decide, nothing took it
+            // back early -- a selected app kept egressing in the clear long
+            // after `expire_idle` had freed the ports that would have
+            // carried it. Keyed on the flow it says only what is true: this
+            // one flow could not be carried.
+            None => {
+                nat.record_direct(
+                    parsed.transport,
+                    parsed.source_port,
+                    parsed.destination,
+                    parsed.destination_port,
+                );
+                Verdict::Direct
+            }
+        }
     }
 }
