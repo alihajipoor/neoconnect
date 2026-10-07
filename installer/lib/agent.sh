@@ -2941,7 +2941,7 @@ install_wireguard() {
   # re-run keeps to it: the port it gives clients cannot change from
   # here, and registering a second config would leave the first one
   # advertising a port nothing serves.
-  local registered registered_port="" registered_key=""
+  local registered registered_port="" registered_key="" registered_subnet=""
   if ! registered="$(registered_protocol_config WIREGUARD)"; then
     echo "ERROR: could not read this node's Protocol Configs from the panel; not touching WireGuard." >&2
     return 1
@@ -2949,6 +2949,7 @@ install_wireguard() {
   if [[ -n "$registered" ]]; then
     registered_port="$(echo "$registered" | jq -r '.listenPort')"
     registered_key="$(echo "$registered" | jq -r '.publicParamsJson.serverPublicKey // empty')"
+    registered_subnet="$(echo "$registered" | jq -r '.publicParamsJson.subnetCidr // empty')"
     echo "  WireGuard is already registered in the panel for this node, on port $registered_port."
     if [[ -n "$registered_key" && "$registered_key" != "$public_key" ]]; then
       echo "  WARNING: the panel advertises server key $registered_key," >&2
@@ -2981,8 +2982,21 @@ install_wireguard() {
     echo "  port in the panel's Protocol Config first, or keep $registered_port." >&2
     return 1
   fi
-  read -r -p "Client subnet, /24 only (e.g. 10.66.0.0/24) [${existing_subnet:-10.66.0.0/24}]: " subnet
-  subnet="${subnet:-${existing_subnet:-10.66.0.0/24}}"
+  # The panel's subnet first, like the port: the control plane hands every
+  # peer an address out of it, so wg0 on any other /24 routes none of
+  # them and NATs none of their traffic. On a rebuilt node with no
+  # wg0.conf left, the default used to be 10.66.0.0/24 whatever the panel
+  # said, so pressing Enter cut off every WireGuard customer there. Found
+  # by the second 2026-10-06 review.
+  local suggested_subnet="${registered_subnet:-${existing_subnet:-10.66.0.0/24}}"
+  read -r -p "Client subnet, /24 only (e.g. 10.66.0.0/24) [$suggested_subnet]: " subnet
+  subnet="${subnet:-$suggested_subnet}"
+  if [[ -n "$registered_subnet" && "$subnet" != "$registered_subnet" ]]; then
+    echo "ERROR: the panel gives this node's WireGuard customers addresses in $registered_subnet." >&2
+    echo "  wg0 on $subnet would route and NAT none of them. Change subnetCidr in the" >&2
+    echo "  panel's Protocol Config first, or keep $registered_subnet." >&2
+    return 1
+  fi
   local subnet_base="${subnet%.0/24}"
   local server_ip="${subnet_base}.1"
   read -r -p "DNS to hand out to clients [1.1.1.1]: " dns
