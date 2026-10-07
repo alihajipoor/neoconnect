@@ -172,7 +172,7 @@
 //! What is left is fire-and-forget senders: a beacon, a one-shot
 //! resolver, a telemetry ping.
 //!
-//! The answer is [`super::owner::Selection::verdict_for_unattributed`],
+//! The answer is [`super::policy::Selection::verdict_for_unattributed`],
 //! which refuses such a datagram instead of passing it through. That
 //! inverts this feature's usual trade -- everywhere else an
 //! unanswerable question fails open, because unprotected traffic beats
@@ -258,23 +258,43 @@
 //! filters could not be installed for -- still arrives here and is
 //! decided by `handle_ipv6`, refusal of the unattributable included.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+mod decide;
+mod packet;
+mod stats;
+
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use neoconnect_ipc::SplitTunnelMode;
-
 use windivert_sys::address::WINDIVERT_ADDRESS;
 use windivert_sys::{WinDivertFlags, WinDivertLayer};
 
-use super::divert::{recalculate_checksums, Handle};
-use super::flows::{Nat, Origin, Verdict};
-use super::owner::{
-    Family, OwnerLookup, Scoped, Selection, SharedSelection, Transport, Unattributed,
+use super::flows::{Nat, Verdict};
+use super::net::divert::{recalculate_checksums, Handle};
+use super::policy::{Family, Scoped, Selection, SharedSelection, Transport, Unattributed};
+use super::relay::{ExitRelays, OwnSockets};
+use super::tables::OwnerLookup;
+
+// The loop's parts, gathered here so the loop reads as one piece -- and so
+// the tests at the bottom, which ask about the parts by name, ask about
+// exactly the names the loop uses.
+use decide::*;
+use packet::*;
+pub use stats::Stats;
+
+// Names only those tests use. Imported here rather than in the test
+// module so that every test in it is exactly as it was written against
+// `redirect.rs`, before the loop was split into this directory.
+#[cfg(test)]
+use {
+    super::flows::Origin,
+    neoconnect_ipc::SplitTunnelMode,
+    stats::{SILENT_AFTER, WARMUP},
+    std::net::Ipv6Addr,
+    std::sync::atomic::AtomicU64,
 };
-use super::proxy::{ExitRelays, OwnSockets};
 
 /// The largest packet WinDivert will hand over.
 const MAX_PACKET: usize = 65_575;
@@ -336,346 +356,6 @@ const QUEUE_DEPTH: usize = 512;
 /// app simply could not use a connection it already had, with nothing
 /// arranging for it to get a better one.
 pub const ACTIVATION_GRACE: Duration = Duration::from_secs(3);
-
-const IPPROTO_TCP: u8 = 6;
-const IPPROTO_UDP: u8 = 17;
-
-/// ICMP, on both families.
-///
-/// Named here despite nothing in this loop ever *carrying* an ICMP
-/// packet, because the loop now has to recognise one in order to refuse
-/// it. See [`icmp_echo_request`] for why refusing is the only available
-/// answer.
-const IPPROTO_ICMP: u8 = 1;
-const IPPROTO_ICMPV6: u8 = 58;
-
-/// The first byte of an ICMP header is its type. These are the two that
-/// mean "ping", one per family; they are numbered differently and there
-/// is no relationship between the numbers.
-const ICMP_ECHO_REQUEST: u8 = 8;
-const ICMPV6_ECHO_REQUEST: u8 = 128;
-const TCP_FLAG_SYN: u8 = 0x02;
-const TCP_FLAG_ACK: u8 = 0x10;
-const TCP_FLAG_FIN: u8 = 0x01;
-const TCP_FLAG_RST: u8 = 0x04;
-
-/// The hop limit put on a synthesised reset.
-///
-/// It never crosses a router -- the packet is injected straight into
-/// this machine's receive path -- so the value only has to be something
-/// no stack objects to. 64 is what everything else uses.
-const RESET_HOP_LIMIT: u8 = 64;
-
-/// What the loop has actually done, for diagnosis.
-///
-/// Not telemetry and not sent anywhere -- it is written to a log file
-/// beside the engine logs. Custom mode has three plausible ways to fail
-/// silently (nothing intercepted, intercepted but nothing matched the
-/// selection, matched but the proxy never connected) and they look
-/// identical from the outside. These four numbers separate them in one
-/// reading, which is worth more than the guesses it replaces.
-#[derive(Default)]
-pub struct Stats {
-    /// Packets the filter handed over. Zero means the driver is not
-    /// intercepting at all.
-    pub seen: AtomicU64,
-    /// Flows attributed to a selected application. Zero with `seen`
-    /// high means the selection matches nothing that is running.
-    pub matched: AtomicU64,
-    /// Packets rewritten towards the proxy *and accepted by the driver*.
-    ///
-    /// Counted after the injection, not after the rewrite. The first
-    /// version counted intent, which made a run where every packet was
-    /// rewritten and every injection refused look identical to one that
-    /// worked -- the single most useful distinction there is here.
-    pub redirected: AtomicU64,
-    /// Replies rewritten back. Zero with `redirected` high means the
-    /// proxy is not getting answers -- so the tunnel, not the redirect.
-    pub returned: AtomicU64,
-    /// Injections the driver refused. Should be zero; anything else
-    /// means the packets are not going where the counters imply.
-    pub rejected: AtomicU64,
-    /// IPv6 packets dropped because the tunnel cannot carry them.
-    ///
-    /// Counted separately from everything above because it is the one
-    /// number here that reports a *deliberate* refusal rather than a
-    /// fault, and reading it as a fault would be wrong in both
-    /// directions: high is normal on a dual-stack network, and zero
-    /// says only that nothing tried. Before this was written it read
-    /// zero because there was nothing to count -- the packets were
-    /// leaving unexamined.
-    ///
-    /// **It now reads lower than it used to, and that is not a
-    /// regression.** `engines::ipv6_block::SelectedAppsIpv6Block`
-    /// refuses a selected application's IPv6 at `connect()`, before a
-    /// packet is built, so a session where those filters installed
-    /// cleanly produces nothing here for a selected app's new TCP
-    /// connections at all -- the refusal happened a layer up. What
-    /// still lands here is what that block does not cover: connections
-    /// that were already open, and applications the filters could not
-    /// be installed for. Read the two together, from
-    /// `ipv6-block-custom.log` and this line, or read neither.
-    pub blocked_v6: AtomicU64,
-    /// ICMP echo requests refused because the tunnel cannot carry one.
-    ///
-    /// The second *deliberate* refusal in this struct, and it needs the
-    /// same reading as `blocked_v6`: high is normal for anything that
-    /// pings, and zero says only that nothing tried. Before the filter
-    /// was opened to ICMP this could not have read anything but zero --
-    /// the driver never handed the loop a ping, and 174 of them were
-    /// measured leaving in the clear while the same application's TCP
-    /// was fully tunnelled.
-    ///
-    /// **Not per-application, and that is the honest name for it.**
-    /// Nothing can attribute an ICMP packet to a process here, so this
-    /// counts every ping the machine attempts while Custom mode is on,
-    /// not only a selected application's. `settings.customIcmpBody`
-    /// is where the customer is told the same thing.
-    pub blocked_icmp: AtomicU64,
-    /// Connections found living outside the tunnel that should be
-    /// inside it -- see `owner::escaped_connections`.
-    ///
-    /// The only number here that is not counted from inside the packet
-    /// loop, and it exists because every number that *is* counted there
-    /// is blind in the same direction. The loop can only describe
-    /// packets it was handed; a connection that escaped -- a SYN that
-    /// raced the owner lookup, a socket established before Custom mode
-    /// came on, an IPv6 connection blocked rather than carried --
-    /// produces no packet the loop will ever see. Every counter above
-    /// reads healthy while it carries the customer's traffic out in the
-    /// clear, which is precisely how this failed in 0.9.20, 0.9.25 and
-    /// 0.9.27. This is read from the machine's own connection tables
-    /// instead, every thirty seconds.
-    ///
-    /// A **gauge, not a total**: it holds what the most recent sweep
-    /// found. The same connection is one escape for as long as it lives,
-    /// so adding each sweep up would report a number that grows with how
-    /// long Custom mode has been on rather than with how much has got
-    /// away -- and a number that only ever climbs is one nobody can read
-    /// a trend out of.
-    ///
-    /// Deliberately not consulted by [`Stats::complaint`] in this
-    /// version. It has never been read against a packet capture, and
-    /// this project does not let the app tell a customer something is
-    /// wrong on the strength of a number nobody has checked against the
-    /// wire yet.
-    pub escaped: AtomicU64,
-    /// Mid-connection packets refused during the activation window --
-    /// see [`ACTIVATION_GRACE`].
-    ///
-    /// Counted, like `blocked_v6`, because it reports a *deliberate*
-    /// refusal rather than a fault, and because a drop that nothing
-    /// records is the one kind of change to this loop that cannot be
-    /// argued about afterwards. Non-zero here is normal for the first
-    /// three seconds of a session in which a selected application was
-    /// already running, and means nothing at all after that.
-    pub grace_dropped: AtomicU64,
-    /// Resets injected back to an application whose IPv6 was blocked,
-    /// and accepted by the driver.
-    ///
-    /// Counted after the injection rather than after the build, for the
-    /// reason `redirected` is: a run where every reset was constructed
-    /// and every injection refused would otherwise be indistinguishable
-    /// from one that worked, and the whole point of the reset is that
-    /// the application finds out.
-    ///
-    /// A refused injection is deliberately *not* folded into `rejected`.
-    /// `complaint` treats `rejected` as evidence that redirected traffic
-    /// is not arriving, and a dual-stack network produces resets
-    /// continuously -- so a failure here would light a warning about
-    /// something else entirely.
-    pub reset_v6: AtomicU64,
-    /// Datagrams swallowed because nothing could say who sent them --
-    /// see `Selection::verdict_for_unattributed`.
-    ///
-    /// The one counter here that reports the *inversion* of this
-    /// feature's usual trade. Everywhere else an unanswerable question
-    /// fails open, because unprotected traffic beats a stalled app; for
-    /// this one shape failing open **is** the leak, so it fails closed
-    /// and this is what says how often that happened.
-    ///
-    /// It has to be counted for a reason the other refusals do not: a
-    /// drop nobody records is a change to this loop that cannot be
-    /// argued about afterwards, and this is the only drop that can hit
-    /// an application the customer did not choose. If it is large on a
-    /// customer's machine, something is sending one-shot UDP hard and
-    /// the number is where that conversation starts.
-    ///
-    /// Both families. An IPv6 refusal is also counted in `blocked_v6`,
-    /// which is a count of v6 packets dropped whatever the reason;
-    /// overlapping is better here than a `blocked_v6` that silently
-    /// stops being the total.
-    ///
-    /// Deliberately not read by [`Stats::complaint`], for the reason
-    /// `blocked_v6` is not: it counts a refusal working as designed. A
-    /// machine with chatty one-shot senders would light that warning
-    /// permanently, and this project has already decided a warning that
-    /// is always on is one nobody reads when it matters.
-    pub refused_unattributed: AtomicU64,
-    /// Datagrams the relay could not hand on towards their destination.
-    ///
-    /// The relay used to discard the result of that send entirely
-    /// (`let _ = upstream.send_to(..)`), which made it a silent loss
-    /// point on the exact path voice and gaming depend on -- and an
-    /// invisible one from every angle, because a datagram that never
-    /// leaves the relay is still counted `redirected` by the loop that
-    /// handed it over. `returned` staying at zero was the only trace,
-    /// and that reads identically to a tunnel that is not carrying
-    /// traffic, which is a different fault with a different fix.
-    ///
-    /// The behaviour on failure is unchanged -- the datagram is dropped
-    /// and the next one is served. UDP has no retransmission to hook
-    /// into and the application above has its own; retrying here would
-    /// duplicate a datagram the application may already have resent.
-    pub udp_send_failed: AtomicU64,
-    /// Replies the relay could not hand back to the application.
-    ///
-    /// Counted apart from `udp_send_failed` because the two point at
-    /// opposite halves of the machine. A failure sending upstream says
-    /// something about the tunnel; a failure sending back to the
-    /// application over loopback says something about this host. Folded
-    /// together they would be one number that cannot answer either
-    /// question.
-    pub udp_reply_failed: AtomicU64,
-    /// Datagrams dropped because their flow never got an upstream
-    /// socket -- see `proxy::PendingFlows`.
-    ///
-    /// Either the bind was still failing after the full retry, or the
-    /// flow held its cap of datagrams while it waited. Both are the
-    /// tentative-address window of 0.9.20 outlasting the patience the
-    /// relay has for it, and both used to be a `continue`.
-    pub udp_unbound: AtomicU64,
-}
-
-/// How many packets must have gone out before silence means anything.
-///
-/// One unanswered packet is normal -- a retransmit, a probe to a host
-/// that is down, a UDP send nobody was ever going to reply to. Twenty
-/// with nothing at all coming back is not something a working path does.
-/// The threshold is deliberately well above a single stalled connection
-/// so that one dead host cannot condemn a healthy tunnel.
-const SILENT_AFTER: u64 = 20;
-
-/// How long a session must have been running before silence is allowed
-/// to mean anything.
-///
-/// Measured, not chosen: a healthy start reaches `redirected=48,
-/// returned=0` before the first reply arrives, because the firewall
-/// allowance takes a moment to become effective for new flows. Judged on
-/// the count alone, this check called a perfectly good connection broken
-/// during its first seconds -- which is worse than saying nothing, since
-/// a false alarm here teaches customers to ignore the true ones.
-const WARMUP: Duration = Duration::from_secs(12);
-
-impl Stats {
-    pub fn summary(&self) -> String {
-        format!(
-            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} \
-             blocked_icmp={} escaped={} \
-             grace_dropped={} reset_v6={} refused_unattributed={} udp_send_failed={} \
-             udp_reply_failed={} udp_unbound={}",
-            self.seen.load(Ordering::Relaxed),
-            self.matched.load(Ordering::Relaxed),
-            self.redirected.load(Ordering::Relaxed),
-            self.returned.load(Ordering::Relaxed),
-            self.rejected.load(Ordering::Relaxed),
-            self.blocked_v6.load(Ordering::Relaxed),
-            self.blocked_icmp.load(Ordering::Relaxed),
-            self.escaped.load(Ordering::Relaxed),
-            self.grace_dropped.load(Ordering::Relaxed),
-            self.reset_v6.load(Ordering::Relaxed),
-            self.refused_unattributed.load(Ordering::Relaxed),
-            self.udp_send_failed.load(Ordering::Relaxed),
-            self.udp_reply_failed.load(Ordering::Relaxed),
-            self.udp_unbound.load(Ordering::Relaxed),
-        )
-    }
-
-    /// What these numbers say about whether Custom mode is working, in
-    /// words a customer can act on -- or `None` when nothing is wrong.
-    ///
-    /// This exists because the app had no way to notice the failure its
-    /// own service was already recording. A tester's log read
-    /// `redirected=90 returned=0` -- ninety packets pushed into the
-    /// tunnel for his browser, not one answer -- while the app showed
-    /// Connected and Custom mode on. He reported the feature as broken,
-    /// which was the only conclusion available to him.
-    ///
-    /// The existing probe cannot catch this. It opens its own socket,
-    /// pinned to the tunnel, and connects out: that proves the tunnel is
-    /// alive and touches none of the interception, matching, rewriting
-    /// or relaying that a selected application's packets go through. It
-    /// is also read at connect time, when these counters are still zero.
-    /// These are the only numbers taken from the real path under real
-    /// traffic.
-    ///
-    /// `blocked_v6` is deliberately not consulted here, and that was a
-    /// decision rather than an oversight. It counts a refusal working as
-    /// designed, not a fault: on any dual-stack network it climbs from
-    /// the first second and never stops, so a complaint keyed on it
-    /// would be permanently lit. This whole function exists to be
-    /// believed -- see `WARMUP`, which is here because one false alarm
-    /// during a healthy start was judged worse than saying nothing -- and
-    /// a warning that is always on is one nobody reads by the time it
-    /// matters. What a customer needs to know about IPv6 is true of
-    /// Custom mode always, not of this session, so it is stated in the
-    /// Custom-mode line on the dashboard (`dash.customActive`) where it
-    /// sits beside "on" instead of pretending to be news.
-    ///
-    /// The three `udp_*` counters are not consulted here either, for the
-    /// reason `escaped` is not: they have never been read against a
-    /// packet capture. They exist so that a loss which used to leave no
-    /// trace at all shows up in the log the moment somebody looks; what
-    /// threshold on them means "tell the customer something is wrong" is
-    /// a question the rig has to answer first. Until it has, this
-    /// function does not speak on their behalf.
-    pub fn complaint(&self, session_age: Duration) -> Option<String> {
-        // Nothing is wrong yet, by definition: the redirect has not
-        // had time to be wrong. See WARMUP.
-        if session_age < WARMUP {
-            return None;
-        }
-        let seen = self.seen.load(Ordering::Relaxed);
-        let matched = self.matched.load(Ordering::Relaxed);
-        let redirected = self.redirected.load(Ordering::Relaxed);
-        let returned = self.returned.load(Ordering::Relaxed);
-        let rejected = self.rejected.load(Ordering::Relaxed);
-
-        // Injections the driver refused. The packets are not going where
-        // every other counter implies, so say that before anything else.
-        if rejected > 0 && rejected >= redirected {
-            return Some(
-                "Windows is refusing the redirected packets, so your chosen apps are not \
-                 reaching the VPN. Restarting the app usually clears this."
-                    .into(),
-            );
-        }
-
-        // The tester's exact signature: traffic going out, nothing back.
-        if redirected >= SILENT_AFTER && returned == 0 {
-            return Some(
-                "Your chosen apps are being sent through the VPN but nothing is coming back, \
-                 so their connections will hang. The tunnel is not carrying their traffic."
-                    .into(),
-            );
-        }
-
-        // Intercepting the machine's traffic and recognising none of it.
-        // Usually the wrong executable was picked -- a launcher rather
-        // than the program, or a browser that was not running when the
-        // list was taken.
-        if seen >= 500 && matched == 0 {
-            return Some(
-                "None of the apps you chose have sent any traffic. If one of them is running, \
-                 the wrong program may have been picked -- some apps launch under a different \
-                 executable."
-                    .into(),
-            );
-        }
-
-        None
-    }
-}
 
 /// Everything the loop needs that does not change while it runs.
 pub struct Redirect {
@@ -795,82 +475,6 @@ impl Activation {
     }
 }
 
-/// Whether a mid-connection packet should be dropped rather than
-/// permanently exempted, because the activation reset has not finished
-/// yet.
-///
-/// Split out from [`decide`] because it is the whole of the new
-/// behaviour and every one of its clauses is load-bearing:
-///
-/// * **Only inside the window.** Outside it, the mid-connection rule is
-///   right and has been for a long time: a connection that predates
-///   Custom mode holds a socket to the real destination, and rewriting
-///   half of a live connection is not a redirect, it is breaking it.
-/// * **Only `OnlySelected`.** In `AllExcept` an unknown owner means
-///   "carry it", so the same rule there would refuse traffic belonging to
-///   programs nobody has identified -- including, for the first seconds
-///   of a session, most of the machine. Changing that direction needs its
-///   own evidence and is not part of this wave.
-/// * **Only a known owner.** A miss must never cause a drop. Attributing
-///   a packet is exactly the thing this file has been wrong about
-///   before, and the cost of being wrong here lands on an application the
-///   customer never selected.
-/// * **Never this service's own.** The proxy's upstream sockets look
-///   like any other application's, and refusing them would take out the
-///   relay carrying everything else.
-fn drop_while_converging(
-    within_grace: bool,
-    selection: &Selection,
-    owner_image: Option<&str>,
-    is_own: bool,
-) -> bool {
-    within_grace
-        && matches!(selection.mode(), SplitTunnelMode::OnlySelected)
-        && !is_own
-        && owner_image.map(|image| selection.should_tunnel(image)).unwrap_or(false)
-}
-
-/// Whether this packet is a name lookup.
-///
-/// Custom mode used to leave DNS alone, and that was a leak with teeth.
-/// Measured on the test rig, one run, same moment:
-///
-/// ```text
-/// CUSTOM  tcp egress: 203.0.113.10    (the node)
-/// CUSTOM  dns egress: 192.0.2.228     (the customer's own line)
-/// ```
-///
-/// Both addresses above are redacted to documentation ranges. The
-/// real ones were a node exit and a beta tester's home line; what
-/// the capture showed is that the two differ. See
-/// docs/node-address-hygiene.md.
-///
-/// So a selected application's traffic went through the tunnel while
-/// the name it looked up was resolved by the network the customer was
-/// trying to escape. On an ordinary connection that is merely a privacy
-/// leak. On a censored one it is the whole feature failing: the
-/// resolver answers blocked domains with a lie, so the browser cannot
-/// open the site while an unblocked address check still shows the
-/// tunnel's IP. That is exactly how it was reported -- "the IP changes
-/// but the site will not open", from Iran, with Telegram working
-/// because it never asks that resolver.
-///
-/// It cannot be done per-application: Windows resolves through its own
-/// DNS Client service, so the query leaves under svchost's name rather
-/// than the selected app's. Catching only the applications that resolve
-/// for themselves would fix some browsers and leave the rest broken.
-/// So while Custom mode is on, every lookup goes through the tunnel.
-/// Nothing else about an unselected application changes -- its
-/// connections still leave directly; only the name it asked about is
-/// resolved somewhere honest.
-fn is_dns(parsed: &Parsed) -> bool {
-    parsed.destination_port == DNS_PORT
-}
-
-/// The well-known port, named because `== 53` in the middle of a
-/// verdict reads like a magic number.
-const DNS_PORT: u16 = 53;
-
 /// The filter string, built from the addresses and ports in use.
 ///
 /// Written out rather than assembled from parts because it is the one
@@ -938,7 +542,8 @@ pub fn filter_for(redirect: &Redirect) -> String {
     )
 }
 
-/// A running redirect loop.
+/// A running redirect loop. Dropping it stops it -- see the `Drop`
+/// below.
 pub struct Running {
     handle: Arc<Handle>,
     stop: Arc<AtomicBool>,
@@ -947,21 +552,10 @@ pub struct Running {
 }
 
 impl Running {
-    pub fn stop(self) {
-        self.stop.store(true, Ordering::SeqCst);
-        // The only thing that unblocks a thread sitting in recv. A flag
-        // alone would leave them there for as long as the filter matched
-        // nothing, which on a quiet machine is indefinitely.
-        self.handle.shutdown();
-        for thread in self.threads {
-            let _ = thread.join();
-        }
-    }
-
     /// A handle that can stop interception from another thread, without
     /// owning the session or being able to join it.
     ///
-    /// This exists for the backstop in `split_tunnel::Watchdog`, which
+    /// This exists for the backstop in `session::watchdog::Watchdog`, which
     /// runs *inside* the session and therefore cannot take the session
     /// apart. What it can do is the one thing that matters to somebody
     /// whose machine has stopped working: close the driver's grip on it.
@@ -970,12 +564,38 @@ impl Running {
     }
 }
 
+impl Drop for Running {
+    /// Closes the driver's grip and joins the dispatcher and workers.
+    ///
+    /// A `Drop` rather than only a method: a bring-up that panicked after
+    /// interception began used to leave the loop running with nothing
+    /// left that knew to stop it -- the stranded-background-tunnel
+    /// complaint, one unwrap away. Now the unwind stops it.
+    ///
+    /// It is also the *only* way a session stops interception: nothing
+    /// calls a method by name any more. No unit test runs this against
+    /// the driver -- the session tests use a stand-in -- so the session's
+    /// `Parts` trait bounds its interception by `Drop`, and deleting this
+    /// impl does not compile. Emptying it would; it is the line between
+    /// a disconnect and a machine whose DNS WinDivert still holds.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // The only thing that unblocks a thread sitting in recv. A flag
+        // alone would leave them there for as long as the filter matched
+        // nothing, which on a quiet machine is indefinitely.
+        self.handle.shutdown();
+        for thread in std::mem::take(&mut self.threads) {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// The half of a running redirect that can switch it off.
 ///
 /// Deliberately cannot join the workers. Joining from a thread that the
 /// session owns would deadlock the teardown that is trying to join *it*,
 /// and the whole point of this type is to be safe to hold from the
-/// inside. `Running::stop` still joins afterwards; the flag and the
+/// inside. Dropping the `Running` still joins afterwards; the flag and the
 /// shutdown are both idempotent, so the two cannot get in each other's
 /// way whichever order they arrive in.
 #[derive(Clone)]
@@ -1017,7 +637,7 @@ pub fn start(
     // Checked before opening so a filter problem is reported as one.
     // WinDivertOpen fails with a generic error for a bad expression,
     // which is indistinguishable from the driver refusing to load.
-    super::divert::compile_filter(&filter)
+    super::net::divert::compile_filter(&filter)
         .map_err(|e| format!("internal error: the packet filter is invalid ({e})"))?;
 
     let handle = Handle::open(&filter, WinDivertLayer::Network, WinDivertFlags::new())
@@ -1045,7 +665,7 @@ pub fn start(
         }));
     }
 
-    // At the front, because `Running::stop` joins in order and a worker
+    // At the front, because `Running`'s drop joins in order and a worker
     // ends only when the dispatcher drops its end of the queue. Joined
     // the other way round, the teardown would wait on a worker that is
     // still waiting on a thread nobody has joined yet.
@@ -1390,384 +1010,6 @@ enum Leg {
     Swallowed,
 }
 
-/// The fields the decision needs, or `None` if this is not an IPv4
-/// TCP/UDP packet with a complete header.
-struct Parsed {
-    transport: Transport,
-    header_len: usize,
-    source: Ipv4Addr,
-    destination: Ipv4Addr,
-    source_port: u16,
-    destination_port: u16,
-    tcp_flags: u8,
-}
-
-/// Whether this is an outbound ICMP echo request -- a ping -- on either
-/// family.
-///
-/// # Why this loop refuses ping rather than carrying it
-///
-/// A real game measured on the rig had its TCP fully tunnelled while
-/// **174 ICMP echo requests left in the clear** to roughly 170 of its
-/// world servers, one per world, every time its server browser
-/// refreshed. So a correctly-routed player still handed their real
-/// address to every one of those hosts, and the latency numbers the
-/// game displayed described the direct path rather than the tunnel.
-///
-/// Carrying them instead is not available, for two independent reasons,
-/// either of which alone would settle it:
-///
-/// * **Nothing can say which process sent one.** Attribution here is
-///   `port -> pid`, read from `GetExtendedTcpTable` and
-///   `GetExtendedUdpTable` (see `owner::OwnerLookup`). An ICMP packet
-///   has no port, and Win32 has no ICMP analogue of those tables -- the
-///   endpoint tables cover TCP and UDP and nothing else. WFP's ALE
-///   layers *do* know the process for ICMP, but WinDivert exposes them
-///   only as a receive-only observation layer that cannot block or
-///   inject, and the flow event that carries the process id is raised by
-///   the same first packet we would have to hold. For a sweep that pings
-///   170 hosts once each, *every* packet is a first packet, so there is
-///   nothing to correlate against in time.
-/// * **The relay could not carry one if we knew.** `proxy.rs` is a
-///   transparent NAT relay with no wire protocol: the loop rewrites the
-///   destination to the relay's port and the source to a synthetic NAT
-///   port, and the relay recovers the real destination *from that source
-///   port alone*. The whole mechanism is keyed on ports. An ICMP packet
-///   has none, so there is nothing to rewrite and nothing to look the
-///   origin up by.
-///
-/// That leaves refusing. It is deliberately the narrowest refusal that
-/// closes the disclosure: **echo requests only**, and only to the public
-/// destinations the filter already selects, so pinging the LAN and the
-/// default gateway keeps working and ICMP error messages are untouched.
-///
-/// No state and no key. The decision is a pure function of the bytes in
-/// front of it, which is why it needs no cache and cannot grow
-/// `FlowKey` -- and why it sits *above* every selection and exit
-/// question rather than beside them.
-///
-/// **The cost, which the app tells the customer about rather than
-/// hiding:** this cannot be narrowed to the selected applications,
-/// because narrowing it would need exactly the attribution that does not
-/// exist. While Custom mode is on, ping stops working for everything on
-/// the machine. The alternative was an address disclosure the customer
-/// could not see, and a visible broken feature beats an invisible leak.
-///
-/// An ICMPv6 echo request behind an extension-header chain is recognised
-/// too: the IPv6 arms read the same chain walk as `parse_v6`. That used
-/// to be a stated gap -- only the fixed header was looked at, so a ping
-/// behind a hop-by-hop or destination-options header went out in the
-/// clear. Windows' own ICMP helper was never seen to emit one; it was a
-/// hole rather than a proof, and now it is neither.
-/// Whether this is ICMP at all, on either family.
-///
-/// Separate from [`icmp_echo_request`] because the two answers are used
-/// for opposite purposes: an echo request is refused, and everything
-/// else ICMP is passed through untouched rather than handed to code
-/// that expects ports to exist.
-fn is_icmp(packet: &[u8]) -> bool {
-    match packet.first().map(|first| first >> 4) {
-        Some(4) => packet.get(9) == Some(&IPPROTO_ICMP),
-        Some(6) => v6_upper_layer(packet).is_some_and(|(next, _)| next == IPPROTO_ICMPV6),
-        _ => false,
-    }
-}
-
-fn icmp_echo_request(packet: &[u8]) -> bool {
-    match packet.first().map(|first| first >> 4) {
-        Some(4) => {
-            if *packet.get(9).unwrap_or(&0) != IPPROTO_ICMP {
-                return false;
-            }
-            // Options may sit between the fixed header and the ICMP one,
-            // so the type byte is not at a fixed offset.
-            let header_len = ((packet[0] & 0x0F) as usize) * 4;
-            if header_len < 20 {
-                return false;
-            }
-            packet.get(header_len) == Some(&ICMP_ECHO_REQUEST)
-        }
-        Some(6) => v6_upper_layer(packet).is_some_and(|(next, offset)| {
-            next == IPPROTO_ICMPV6 && packet.get(offset) == Some(&ICMPV6_ECHO_REQUEST)
-        }),
-        _ => false,
-    }
-}
-
-fn parse(packet: &[u8]) -> Option<Parsed> {
-    // Version and header length share the first byte; the length is in
-    // 32-bit words and may be larger than the minimum when options are
-    // present, so the transport header is not at a fixed offset.
-    let first = *packet.first()?;
-    if first >> 4 != 4 {
-        return None;
-    }
-    let header_len = ((first & 0x0F) as usize) * 4;
-    if header_len < 20 {
-        return None;
-    }
-
-    let transport = match *packet.get(9)? {
-        IPPROTO_TCP => Transport::Tcp,
-        IPPROTO_UDP => Transport::Udp,
-        _ => return None,
-    };
-
-    // A TCP header is 20 bytes and a UDP one is 8, but the flags byte
-    // this reads sits at offset 13, so 14 covers both reads below.
-    let ports = packet.get(header_len..header_len + 14)?;
-    let tcp_flags = if matches!(transport, Transport::Tcp) { ports[13] } else { 0 };
-
-    Some(Parsed {
-        transport,
-        header_len,
-        source: Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]),
-        destination: Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]),
-        source_port: u16::from_be_bytes([ports[0], ports[1]]),
-        destination_port: u16::from_be_bytes([ports[2], ports[3]]),
-        tcp_flags,
-    })
-}
-
-/// The header offsets an IPv6 decision needs.
-///
-/// Deliberately much less than [`Parsed`] carries. An IPv6 packet here
-/// is only ever passed through or dropped, never rewritten, so the
-/// addresses are not needed -- and not reading them keeps this from
-/// looking like the beginning of a v6 rewrite that does not exist.
-struct ParsedV6 {
-    transport: Transport,
-    /// Where the packet is going, read for the same reason the IPv4
-    /// parser reads it: the decision about a packet nobody can
-    /// attribute turns on whether the destination is the internet or
-    /// the local network, and asking the packet is what stops that rule
-    /// and the kernel filter drifting into disagreement.
-    destination: Ipv6Addr,
-    source_port: u16,
-    destination_port: u16,
-    tcp_flags: u8,
-    /// Where the transport header begins, after however many extension
-    /// headers this packet carried.
-    ///
-    /// Added when the block gained a reset. Everything above can be
-    /// decided from the ports alone, but building a reset the
-    /// application's own stack will accept means reading the sequence
-    /// numbers out of the segment being refused -- and those are not at
-    /// a fixed offset for exactly the reason `parse_v6` exists.
-    transport_offset: usize,
-}
-
-/// Extension headers, which sit between the IPv6 header and the
-/// transport one and must be walked rather than assumed away.
-const IPPROTO_HOPOPTS: u8 = 0;
-const IPPROTO_ROUTING: u8 = 43;
-const IPPROTO_FRAGMENT: u8 = 44;
-const IPPROTO_AH: u8 = 51;
-const IPPROTO_DSTOPTS: u8 = 60;
-
-/// The fixed IPv6 header, before any extension header.
-const IPV6_HEADER: usize = 40;
-
-/// How many extension headers are walked before giving up.
-///
-/// A real packet has none or one. A long chain is either malformed or
-/// built to be, and either way the answer is to stop rather than to keep
-/// following a next-header field around a packet an attacker supplied.
-const MAX_EXTENSION_HEADERS: usize = 8;
-
-/// Reads the ports out of an IPv6 packet, or `None` when they cannot be
-/// found.
-///
-/// `None` is not "this is not TCP or UDP" -- the filter already settled
-/// that, since WinDivert walks the chain itself to decide `tcp or udp`.
-/// It means *this code* could not follow the chain: an extension header
-/// it does not know, or a fragment after the first, which carries no
-/// transport header at all. The caller must treat that as an unknown
-/// owner rather than as permission to pass the packet on.
-fn parse_v6(packet: &[u8]) -> Option<ParsedV6> {
-    let (next, offset) = v6_upper_layer(packet)?;
-    let transport = match next {
-        IPPROTO_TCP => Transport::Tcp,
-        IPPROTO_UDP => Transport::Udp,
-        _ => return None,
-    };
-
-    // Bytes 24..40 of the fixed header, which `v6_upper_layer` has
-    // already required to be there.
-    let mut destination = [0u8; 16];
-    destination.copy_from_slice(&packet[24..40]);
-    let destination = Ipv6Addr::from(destination);
-
-    // Flags sit at offset 13 of a TCP header, so 14 bytes covers
-    // both reads -- the same reasoning as the IPv4 parser.
-    let ports = packet.get(offset..offset + 14)?;
-    Some(ParsedV6 {
-        transport,
-        destination,
-        source_port: u16::from_be_bytes([ports[0], ports[1]]),
-        destination_port: u16::from_be_bytes([ports[2], ports[3]]),
-        tcp_flags: if matches!(transport, Transport::Tcp) { ports[13] } else { 0 },
-        transport_offset: offset,
-    })
-}
-
-/// Walks an IPv6 packet's extension headers to the protocol after them,
-/// returning that protocol and where its header begins -- or `None` when
-/// the chain cannot be followed: an unknown extension header, a fragment
-/// after the first, or more headers than [`MAX_EXTENSION_HEADERS`].
-///
-/// Split out of `parse_v6` so the ICMPv6 checks read the same walk. They
-/// used to look only at the fixed header's Next Header and at byte 40,
-/// so an echo request behind any extension header was not recognised
-/// and went out in the clear -- the gap the old note on
-/// `icmp_echo_request` stated rather than closed.
-fn v6_upper_layer(packet: &[u8]) -> Option<(u8, usize)> {
-    if packet.len() < IPV6_HEADER || packet.first()? >> 4 != 6 {
-        return None;
-    }
-    let mut next = packet[6];
-    let mut offset = IPV6_HEADER;
-
-    for _ in 0..MAX_EXTENSION_HEADERS {
-        match next {
-            // Header length is in 8-byte units, not counting the first.
-            IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS => {
-                let header = packet.get(offset..offset + 2)?;
-                next = header[0];
-                offset += (header[1] as usize + 1) * 8;
-            }
-            // Authentication headers count in 4-byte units and subtract
-            // two rather than one, which is the sort of detail that
-            // makes a hand-rolled walk worth writing down.
-            IPPROTO_AH => {
-                let header = packet.get(offset..offset + 2)?;
-                next = header[0];
-                offset += (header[1] as usize + 2) * 4;
-            }
-            IPPROTO_FRAGMENT => {
-                let header = packet.get(offset..offset + 8)?;
-                // Only the first fragment carries the upper-layer
-                // header; the rest have nothing to read and no owner to
-                // find.
-                if u16::from_be_bytes([header[2], header[3]]) & 0xFFF8 != 0 {
-                    return None;
-                }
-                next = header[0];
-                offset += 8;
-            }
-            upper => return Some((upper, offset)),
-        }
-    }
-    None
-}
-
-/// A TCP reset addressed back to the application, built from the packet
-/// being refused.
-///
-/// # Why a blocked connection is told rather than left hanging
-///
-/// Blocking a selected application's IPv6 is the right answer -- see the
-/// module comment -- but *silently* blocking it is not the same thing.
-/// A new connection recovers on its own: the SYN is swallowed, no answer
-/// comes, and every browser and every resolver falls back to the A
-/// record within a fraction of a second. Measured at 385ms on the rig.
-///
-/// A connection that already existed does not recover. The application
-/// holds a socket it believes is fine, its segments vanish, and TCP does
-/// what TCP does about a black hole: it retransmits, backs off, and
-/// keeps the socket for minutes before giving up. Nothing tells it there
-/// is a perfectly good IPv4 path to the same host. So Custom mode coming
-/// on turned a working page into a hang, and the counters read
-/// `blocked_v6` climbing, which looks exactly like the feature working.
-///
-/// A reset converts that into the case that already recovers. The
-/// application is told its connection is gone -- which it is -- and
-/// opens a new one, which fails over to IPv4 in milliseconds.
-///
-/// # Why it is built from the packet in hand
-///
-/// A stack does not accept any reset addressed at it; a reset outside
-/// the receive window is discarded, which is the whole reason blind
-/// reset attacks are hard. The one already in the window is the one
-/// derived from a segment the socket just sent: its acknowledgement
-/// number is, by definition, the sequence number the peer would next
-/// send from. So the reset is sent with `seq` equal to that
-/// acknowledgement, and acknowledges everything the segment consumed.
-/// A pure SYN carries no acknowledgement to borrow, so a reset for one
-/// starts at zero and acknowledges the initial sequence number, which is
-/// what a refusing host sends.
-///
-/// UDP gets no equivalent, and cannot: there is no in-band way to tell a
-/// datagram socket that its peer is unreachable, so a selected
-/// application's IPv6 UDP stays silently swallowed. That is a gap, and
-/// this comment is where it is stated rather than a decision hidden in
-/// the shape of the code.
-fn build_v6_reset(packet: &[u8], parsed: &ParsedV6) -> Option<Vec<u8>> {
-    if !matches!(parsed.transport, Transport::Tcp) {
-        return None;
-    }
-    // Never answer a reset with a reset. The connection is already gone
-    // and the two ends would otherwise have something to say to each
-    // other about it.
-    if parsed.tcp_flags & TCP_FLAG_RST != 0 {
-        return None;
-    }
-
-    let tcp = packet.get(parsed.transport_offset..parsed.transport_offset + 14)?;
-    let their_seq = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
-    let their_ack = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
-    // The data offset is in 32-bit words and cannot legally be under
-    // five; a malformed one is clamped rather than trusted, because it
-    // is subtracted below and an under-count would acknowledge bytes
-    // that were never sent.
-    let data_offset = (((tcp[12] >> 4) as usize) * 4).max(20);
-
-    // How much sequence space the segment being refused consumed, which
-    // is what the reset has to acknowledge. `payload_length` counts
-    // everything after the fixed header; the captured packet may be
-    // shorter than it claims, so the smaller of the two is used.
-    let declared = IPV6_HEADER + u16::from_be_bytes([*packet.get(4)?, *packet.get(5)?]) as usize;
-    let segment = declared.min(packet.len()).checked_sub(parsed.transport_offset)?;
-    let consumed = segment.saturating_sub(data_offset) as u32
-        + u32::from(parsed.tcp_flags & TCP_FLAG_SYN != 0)
-        + u32::from(parsed.tcp_flags & TCP_FLAG_FIN != 0);
-
-    let (seq, ack) = if parsed.tcp_flags & TCP_FLAG_ACK != 0 {
-        (their_ack, their_seq.wrapping_add(consumed))
-    } else {
-        // A first SYN. Nothing has been acknowledged yet, so there is
-        // no number to borrow and the reset starts where a refusing
-        // host starts.
-        (0, their_seq.wrapping_add(consumed))
-    };
-
-    let source = packet.get(8..24)?;
-    let destination = packet.get(24..40)?;
-
-    let mut reset = vec![0u8; IPV6_HEADER + 20];
-    reset[0] = 0x60;
-    reset[4..6].copy_from_slice(&20u16.to_be_bytes());
-    reset[6] = IPPROTO_TCP;
-    reset[7] = RESET_HOP_LIMIT;
-    // Both ends swapped: this has to look like the remote answering.
-    reset[8..24].copy_from_slice(destination);
-    reset[24..40].copy_from_slice(source);
-
-    let tcp = IPV6_HEADER;
-    reset[tcp..tcp + 2].copy_from_slice(&parsed.destination_port.to_be_bytes());
-    reset[tcp + 2..tcp + 4].copy_from_slice(&parsed.source_port.to_be_bytes());
-    reset[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
-    reset[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
-    reset[tcp + 12] = 0x50; // data offset: five words, no options
-    reset[tcp + 13] = TCP_FLAG_RST | TCP_FLAG_ACK;
-    // Window, checksum and urgent pointer stay zero. The checksum is
-    // computed by the driver's own helper at injection, because a
-    // hand-rolled one that is wrong is discarded by the receiving stack
-    // without a word -- which would put this straight back to the silent
-    // black hole it exists to remove.
-    Some(reset)
-}
-
 /// Hands a synthesised reset to the driver, addressed the way the
 /// application expects to receive it.
 ///
@@ -2038,503 +1280,6 @@ fn handle_parsed(
             );
             Some(Leg::Outbound)
         }
-    }
-}
-
-/// Which concurrent exit a flow leaves from, once it is already being
-/// carried.
-///
-/// # The signature is the enforcement
-///
-/// This takes an `image_path`, exactly as `Selection::preferred_exit`
-/// and `Selection::destination_scope` do, and that is load-bearing
-/// rather than convenient. An exit preference belongs to an
-/// application. A packet nobody can be shown to have sent has no
-/// application, so in [`decide`] the only call is behind
-/// `owner_image.and_then(..)` -- there is no image to pass, so there is
-/// no exit to acquire, and giving one to an unattributed datagram would
-/// mean first writing a call that does not typecheck today.
-///
-/// That matters more here than anywhere else in this feature.
-/// `docs/design/per-game-exits.md` §4.1 names it as *the* trap in the
-/// concurrent version: the temptation is to give an ownerless datagram
-/// a default exit and send it there, and **deciding where to send a
-/// packet requires having already decided to carry it**. That decision
-/// is the fire-and-forget UDP leak `verdict_for_unattributed` exists to
-/// refuse -- 13 of 15 datagrams in the clear on one rig run, 14 on the
-/// next.
-///
-/// The other half of the ordering used to be positional, held by
-/// layout and one test. It is now this function's argument: it takes a
-/// [`carry::Carry`], which only [`carry::settle`] can make, after both
-/// refusals in [`decide`] have run.
-///
-/// # Fail-open, on both of its two axes
-///
-/// * **No exits live.** The ordinary case, and the one the length
-///   check makes free: every flow takes the session's tunnel adapter,
-///   which is what every flow did before this existed.
-/// * **A preference naming an exit this engine did not bring up.** Also
-///   the session's adapter. `ExitPlacement::Fallback` reports it, and a
-///   game that keeps working from the wrong address beats a game that
-///   stops.
-fn exit_for(carry: &carry::Carry, selection: &Selection, exits: &ExitRelays) -> Option<u8> {
-    // Checked first so a session with no concurrent exits -- which is
-    // every WireGuard, OpenVPN and IKEv2 session, and most Xray ones --
-    // never lowercases a path or touches the preference map.
-    if exits.is_empty() {
-        return None;
-    }
-    // A carried datagram with no application behind it has no
-    // preference to look up, so it takes the session's exit.
-    exits.index_of(selection.preferred_exit(carry.owner_image()?)?)
-}
-
-fn decide(
-    parsed: &Parsed,
-    nat: &Nat,
-    selection: &Selection,
-    owner: &mut OwnerLookup,
-    redirect: &Redirect,
-    interface_id: u32,
-    stats: &Stats,
-) -> Verdict {
-    // A SYN without an ACK is a new connection, so any leave-alone
-    // verdict recorded against this port belongs to whatever held it
-    // before and must not be inherited. The flow table is still
-    // consulted, so a retransmitted SYN keeps its existing port.
-    let is_new_connection = matches!(parsed.transport, Transport::Tcp)
-        && parsed.tcp_flags & TCP_FLAG_SYN != 0
-        && parsed.tcp_flags & TCP_FLAG_ACK == 0;
-
-    let known = if is_new_connection {
-        nat.lookup_flow(
-            parsed.transport,
-            parsed.source_port,
-            parsed.destination,
-            parsed.destination_port,
-        )
-        .map_or(Verdict::Unknown, |nat_port| Verdict::Redirect { nat_port })
-    } else {
-        nat.lookup(
-            parsed.transport,
-            parsed.source_port,
-            parsed.destination,
-            parsed.destination_port,
-        )
-    };
-    if known != Verdict::Unknown {
-        return known;
-    }
-
-    // The relay's own onward socket, carrying a flow that has already
-    // been decided. Answered from what the relay recorded when it
-    // created the socket, before the owner tables are consulted at all.
-    //
-    // This has to come first, and not merely as an optimisation. The
-    // image-based check below cannot see a socket this young -- the
-    // owner lookup will not rebuild more than once every 20ms -- so a
-    // lookup made while another was in flight fell through to the DNS
-    // branch and was posted back into the relay it came from. It never
-    // reached a resolver, and the answer never came. Two lookups fired
-    // less than 20ms apart lost both; 25ms apart lost neither.
-    //
-    // A browser opening a page resolves every asset host at once, which
-    // is why this presented as text arriving while images and
-    // stylesheets did not.
-    if redirect.own_sockets.contains(parsed.transport, parsed.source, parsed.source_port) {
-        return Verdict::Direct;
-    }
-
-    // Anything mid-connection that nothing is known about started before
-    // Custom mode did, or before its app was selected. Moving it now
-    // would break it: the app holds a socket to the real destination,
-    // and rewriting half a live connection is not a redirect.
-    //
-    // That is right in general and wrong for the first seconds of a
-    // session, and the difference is what this branch now makes.
-    // Activation closes a selected app's existing connections so they
-    // are rebuilt through the tunnel -- but `SetTcpEntry` cannot close a
-    // connection that is still in `SYN_SENT`, and one that was half-open
-    // at that instant completes a moment later against the real
-    // destination. It then arrives here as an ordinary mid-connection
-    // packet, is exempted, and lives outside the tunnel for as long as
-    // the application keeps it -- which for a browser is minutes.
-    //
-    // Inside the window, refuse it instead. The application sees the
-    // connection fail, which is a thing every application handles, and
-    // opens a new one that this loop is on time for. Outside the window
-    // the old behaviour returns unchanged. See `drop_while_converging`
-    // for why each clause of the test is there.
-    if matches!(parsed.transport, Transport::Tcp) && !is_new_connection {
-        if redirect.within_activation_grace() {
-            // Not `image_for_new_connection`: this packet is not opening
-            // a connection, and forcing a table rebuild for every
-            // mid-connection packet on the machine for three seconds
-            // would be a table walk per packet at the busiest moment a
-            // session has.
-            let image = owner.image_for_port(Family::V4, parsed.transport, parsed.source_port);
-            let is_own = image
-                .map(|image| {
-                    redirect
-                        .own_images
-                        .iter()
-                        .any(|own| image.eq_ignore_ascii_case(own))
-                })
-                .unwrap_or(false);
-            if drop_while_converging(true, selection, image, is_own) {
-                stats.grace_dropped.fetch_add(1, Ordering::Relaxed);
-                return Verdict::Drop;
-            }
-        }
-        // Recorded against this flow, not this port. For TCP the two
-        // are almost the same thing -- a port changes destination by
-        // sending a SYN, and a SYN skips this cache -- so this call is
-        // the one of the three whose meaning barely moves.
-        nat.record_direct(
-            parsed.transport,
-            parsed.source_port,
-            parsed.destination,
-            parsed.destination_port,
-        );
-        return Verdict::Direct;
-    }
-
-    // A SYN asks the more insistent question -- see
-    // `image_for_new_connection`. This is the one packet whose answer
-    // decides where a whole connection lives, and the one whose miss
-    // cannot be taken back afterwards.
-    //
-    // A UDP datagram that has reached this line asks exactly the same
-    // question, and until now it was not being asked. `is_new_connection`
-    // is SYN-only, because UDP has no SYN -- but the flow table and the
-    // leave-alone cache between them say the same thing a SYN says: both
-    // were consulted above, and reaching here means this datagram belongs
-    // to a flow nothing is carrying and nothing has decided about. For
-    // UDP that *is* the new-flow signal, and it is available without any
-    // help from the protocol.
-    //
-    // What it costs to keep missing it is the 0.9.25 bug arriving over
-    // UDP. A socket is microseconds old when it sends its first
-    // datagram, which puts that datagram inside `MIN_REFRESH_INTERVAL`,
-    // where the owner lookup will not rebuild and answers "nobody". In
-    // `OnlySelected` that means leave it alone, so a selected app's very
-    // first datagram goes out direct -- and for a browser that datagram
-    // is the QUIC Initial. Twenty milliseconds later the snapshot is
-    // stale enough to rebuild, datagram two is attributed correctly and
-    // redirected, and the handshake is now split across two paths with
-    // two source addresses. It does not fail fast: the browser waits out
-    // its whole QUIC timeout before falling back to TCP.
-    //
-    // The residual cost is one extra pair of table walks per UDP flow
-    // whose owner cannot be resolved at all, since those record nothing
-    // and so ask again on the next datagram. That is the same trade
-    // `image_for_new_connection` already accepted for SYNs, and it is
-    // bounded by how rare an unattributable UDP source port is -- a live
-    // socket is in the table from the moment it is created. It has not
-    // been measured under load; see the rig note.
-    let opens_a_flow = is_new_connection || matches!(parsed.transport, Transport::Udp);
-    let owner_image = if opens_a_flow {
-        owner.image_for_new_connection(Family::V4, parsed.transport, parsed.source_port)
-    } else {
-        owner.image_for_port(Family::V4, parsed.transport, parsed.source_port)
-    };
-    let known_owner = owner_image.is_some();
-    // This service, resolving for itself. Checked separately because it
-    // has to be excluded from the DNS rule below as well as from the
-    // selection: the proxy's upstream lookups must not be routed into
-    // the proxy. Getting this wrong took DNS out for the whole machine
-    // the moment Custom mode came on -- the first version of this rule
-    // did exactly that.
-    let is_own = owner_image
-        .map(|image| {
-            redirect
-                .own_images
-                .iter()
-                .any(|own| image.eq_ignore_ascii_case(own))
-        })
-        .unwrap_or(false);
-    // A port with no owner this can see, which is the case the rest of
-    // this function used to get wrong -- see
-    // `Selection::verdict_for_unattributed` for the measurement and for
-    // why the answer for a datagram is now "refuse" rather than "leave
-    // it alone".
-    //
-    // Worked out here and acted on further down rather than returned on
-    // the spot, because the DNS branch below has to run first: a lookup
-    // is carried whoever made it, and carrying an unattributable one is
-    // strictly better than swallowing it. Refusing here would have
-    // turned a carried query into a dropped one, which is a slower page
-    // in exchange for nothing.
-    let unattributed = match owner_image {
-        Some(_) => None,
-        None => Some(selection.verdict_for_unattributed(
-            parsed.transport,
-            IpAddr::V4(parsed.destination),
-        )),
-    };
-    let selected = match owner_image {
-        // Two questions, in this order: is this application's traffic
-        // ours, and is this packet of it going somewhere we carry.
-        //
-        // The second can only ever narrow the first, which is what
-        // makes it safe to bolt onto a decision this load-bearing. An
-        // application the customer did not select cannot be pulled into
-        // the tunnel by a scope, because `should_tunnel` has already
-        // said no and `&&` never revisits that.
-        //
-        // `Scoped::Unscoped` -- no scope, an unusable one, or one with
-        // nothing to say about IPv4 -- leaves the answer exactly as it
-        // was before scopes existed. See `Selection::destination_scope`
-        // for why every uncertainty lands there and not on a refusal.
-        Some(image) => {
-            !is_own
-                && selection.should_tunnel(image)
-                && !matches!(
-                    selection.destination_scope(image, IpAddr::V4(parsed.destination)),
-                    Scoped::OutOfScope
-                )
-        }
-        // A port with no owner this loop can see. In `OnlySelected`
-        // that used to mean "leave it alone", and leaving it alone was
-        // the leak: 15 datagrams from 15 short-lived sockets, 13 out in
-        // the clear on one rig run and 14 on the next, from a selected
-        // application, with the app reporting Custom mode on. The
-        // module header carries the mechanism, why a WFP
-        // `ALE_APP_ID` filter cannot take this job instead, and what
-        // the refusal costs.
-        //
-        // Only `Carry` means "into the tunnel". `Refuse` is deliberately
-        // not acted on here -- see where `unattributed` is worked out
-        // above for why it has to wait for the DNS branch.
-        None => matches!(unattributed, Some(Unattributed::Carry)),
-    };
-
-    // A lookup is carried whoever made it -- see `is_dns` -- except this
-    // service's own.
-    if redirect.carry_dns && is_dns(parsed) && !is_own {
-        let origin = Origin {
-            addr: parsed.destination,
-            port: parsed.destination_port,
-            client: parsed.source,
-            client_port: parsed.source_port,
-            interface_id,
-            // Answered by a resolver reached through the tunnel, not by
-            // the one the network handed out.
-            upstream: Some(std::net::SocketAddrV4::new(redirect.dns_resolver, DNS_PORT)),
-            // A lookup is carried whoever made it -- including a
-            // datagram with no owner this loop can see, which is the
-            // one case in this function where a packet is carried
-            // without an application behind it. That is exactly the
-            // packet that must never acquire an exit: a preference
-            // belongs to an application, and inventing one for a
-            // datagram nobody can be shown to have sent is the
-            // fire-and-forget leak with a destination attached.
-            //
-            // So every lookup takes the session's own exit, including
-            // one made by a game that named a different one. That is a
-            // real limit and it is the honest side of it: a resolver
-            // reached through the session's exit answers with what that
-            // exit's network sees, which is the same answer this
-            // client has always given. A per-game resolver would be a
-            // second feature with its own evidence problem -- see
-            // `docs/design/per-game-exits.md` §4.1.
-            exit: None,
-        };
-        return match nat.redirect(parsed.transport, origin) {
-            Some(nat_port) => {
-                stats.matched.fetch_add(1, Ordering::Relaxed);
-                Verdict::Redirect { nat_port }
-            }
-            // Dropped, not sent out in the clear.
-            //
-            // This used to fall back to Direct, which handed the lookup
-            // to whichever resolver the network supplied -- for somebody
-            // in Iran, their ISP. That is precisely what carrying DNS
-            // through the tunnel exists to prevent, and it happened
-            // silently at the one moment the table was under pressure.
-            //
-            // A lookup that does not answer is a page that does not
-            // load, which the customer sees and can act on. A lookup
-            // answered by their ISP is a record of where they went,
-            // which they never learn about. The retry costs a moment;
-            // the leak cannot be taken back.
-            None => Verdict::Drop,
-        };
-    }
-
-    // The two refusals, and the only way past them. `settle` is the one
-    // thing that makes a `Carry`, and an exit can only be read through a
-    // `Carry` -- see `carry`.
-    let carry = match carry::settle(owner_image, unattributed, selected, known_owner, parsed, nat, stats) {
-        Ok(carry) => carry,
-        Err(verdict) => return verdict,
-    };
-
-    // Past both refusals, so this is reached only for a packet already
-    // decided to be carried -- and that is now a property of the types
-    // rather than of where this line sits.
-    let origin = Origin {
-        addr: parsed.destination,
-        port: parsed.destination_port,
-        client: parsed.source,
-        client_port: parsed.source_port,
-        interface_id,
-        upstream: None,
-        exit: exit_for(&carry, selection, &redirect.exits),
-    };
-    match nat.redirect(parsed.transport, origin) {
-        Some(nat_port) => {
-            stats.matched.fetch_add(1, Ordering::Relaxed);
-            Verdict::Redirect { nat_port }
-        }
-        // Out of synthetic ports. Fail open, consistent with the rest of
-        // the feature: unprotected traffic beats a stalled game.
-        //
-        // This is a *selected* application, so what is recorded here has
-        // to be as narrow as the failure that caused it. Keyed on the
-        // port it was not: one exhausted moment handed the whole port a
-        // five-second exemption covering every destination it reached
-        // next, and because UDP has no SYN to re-decide, nothing took it
-        // back early -- a selected app kept egressing in the clear long
-        // after `expire_idle` had freed the ports that would have
-        // carried it. Keyed on the flow it says only what is true: this
-        // one flow could not be carried.
-        None => {
-            nat.record_direct(
-                parsed.transport,
-                parsed.source_port,
-                parsed.destination,
-                parsed.destination_port,
-            );
-            Verdict::Direct
-        }
-    }
-}
-
-/// The end of [`decide`]'s ladder, as a type.
-///
-/// The ladder's safety property is an ordering: every refusal must come
-/// before the only place a carried flow can acquire a concurrent exit,
-/// because deciding *where* to send a packet presupposes having decided
-/// to carry it -- and giving an exit to a datagram that should have been
-/// refused is the fire-and-forget leak with a destination attached. That
-/// ordering used to be held by layout, eight early returns and one test.
-///
-/// Now [`exit_for`] takes a [`carry::Carry`], and this module is the only
-/// thing that can make one -- its field is private to it, so not even
-/// `decide` can build one by hand. A future branch that wants an exit has
-/// to come through [`carry::settle`], and `settle` runs both refusals
-/// first. The rule is enforced by the compiler instead of by position.
-mod carry {
-    use super::*;
-
-    /// A packet that has passed every refusal and is to be carried.
-    pub(super) struct Carry<'a> {
-        /// The application behind it, when there is one. `None` is a
-        /// datagram carried without attribution -- `AllExcept`'s answer
-        /// for an owner nobody can see -- which has no preference and so
-        /// can never reach an exit.
-        owner_image: Option<&'a str>,
-    }
-
-    impl<'a> Carry<'a> {
-        pub(super) fn owner_image(&self) -> Option<&'a str> {
-            self.owner_image
-        }
-    }
-
-    /// The two refusals, in order, and the only constructor of [`Carry`].
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn settle<'a>(
-        owner_image: Option<&'a str>,
-        unattributed: Option<Unattributed>,
-        selected: bool,
-        known_owner: bool,
-        parsed: &Parsed,
-        nat: &Nat,
-        stats: &Stats,
-    ) -> Result<Carry<'a>, Verdict> {
-        // Nothing on this machine can say who sent this datagram, and in
-        // `OnlySelected` the honest answer is to refuse it rather than to
-        // let it out in the clear on the chance it was not the selected
-        // app's. See `Selection::verdict_for_unattributed`.
-        //
-        // Nothing is recorded against the port. A leave-alone verdict here
-        // would exempt whatever opens that port next, and the whole point
-        // of this branch is that the port is not evidence of anything -- it
-        // had no owner a moment ago and may have a perfectly ordinary one
-        // by the next datagram, which then gets decided on its merits.
-        if matches!(unattributed, Some(Unattributed::Refuse)) {
-            stats.refused_unattributed.fetch_add(1, Ordering::Relaxed);
-            return Err(Verdict::Drop);
-        }
-
-        if !selected {
-            // Only remember the decision when the owner was actually known.
-            //
-            // Recording it on a miss was a real, reported bug: a TCP SYN can
-            // reach here in the moment between the socket being created and
-            // the connection table showing it, and pinning that connection
-            // to Direct meant it stayed unprotected for its whole life --
-            // however many times a lookup would have succeeded afterwards.
-            // Browsers keep connections alive and reuse them, so one lost
-            // race left Chrome showing the real IP until enough reloads
-            // happened to open a fresh connection that won it. Reported
-            // exactly that way: "had to refresh a few times until I see the
-            // VPN ip".
-            //
-            // This is the same poisoning that OwnerLookup's image cache had
-            // and it survived here, one layer up, because the cache fix
-            // only stopped the *lookup* from going permanently wrong.
-            //
-            // Not recording it was only ever half the answer, and the half
-            // that was written down here was wrong: it said the cost was a
-            // repeat lookup on the SYN retransmit a second later. There is
-            // no retransmit. A SYN that reaches here unredirected is sent
-            // to the real destination, **which answers it**, so the
-            // connection is established outside the tunnel and there is
-            // never a second packet to decide about. That is why the miss
-            // itself had to stop happening -- see
-            // `OwnerLookup::image_for_new_connection`, which is what the
-            // lookup above uses for a SYN.
-            //
-            // Recorded against this flow rather than this port, and for UDP
-            // that is the difference between remembering an answer and
-            // inventing one. The old key covered every destination the port
-            // reached for five seconds, on the strength of one decision
-            // about one peer -- so a port that had been left alone once
-            // short-circuited `Nat::lookup` for a name lookup sent from it
-            // afterwards, and the DNS branch above, which carries a lookup
-            // whoever makes it, never ran. The query went to whichever
-            // resolver the network supplied. See `Tables::direct`.
-            //
-            // That flow key is also what lets a *scoped* application reach
-            // this line at all. `docs/design/gaming-mode.md` §5.3 lists it
-            // as a trap -- "a per-destination policy must not call
-            // `record_direct`" -- and that was true when it was written,
-            // because the cache was keyed on `(transport, source port)`.
-            // One out-of-scope packet would then have exempted the whole
-            // port for five seconds, game-server traffic included, and a
-            // game scoped to its servers would have been carried for
-            // whichever destination it happened to reach first. Keyed on
-            // the flow, "this app does not send *here* through the tunnel"
-            // is all it says, and the same port's next packet to a
-            // destination that *is* in scope is decided on its own merits.
-            // The trap is spent; the note stays because the shape of this
-            // key is now load-bearing for two features rather than one.
-            if known_owner {
-                nat.record_direct(
-                    parsed.transport,
-                    parsed.source_port,
-                    parsed.destination,
-                    parsed.destination_port,
-                );
-            }
-            return Err(Verdict::Direct);
-        }
-
-        Ok(Carry { owner_image })
     }
 }
 
@@ -4156,7 +2901,7 @@ mod tests {
 
     /// The kernel filter and the leak audit are the same list seen from
     /// opposite ends: the filter decides what the loop is handed, and
-    /// `owner::is_public_v4` decides what the audit may call an escape.
+    /// `policy::is_public_v4` decides what the audit may call an escape.
     /// If they drift, the audit reports "escapes" the loop never had a
     /// chance to carry -- a number that looks like a leak.
     ///
@@ -4167,7 +2912,7 @@ mod tests {
     /// side alone fails here.
     #[test]
     fn the_filter_and_the_audit_agree_at_every_edge_of_every_range() {
-        use crate::split_tunnel::owner::is_public_v4;
+        use crate::split_tunnel::policy::is_public_v4;
 
         let redirect = sample_redirect();
         let filter = filter_for(&redirect);
@@ -4317,11 +3062,11 @@ mod tests {
         let real_google_v6 = ipv6_packet("2607:f8b0:400a:809::200e", 443, &[]);
 
         assert!(
-            super::super::divert::eval_filter(&filter, &real_google_v6, &outbound_address(true)),
+            super::super::net::divert::eval_filter(&filter, &real_google_v6, &outbound_address(true)),
             "an IPv6 connection to the internet must reach the loop"
         );
         assert!(
-            super::super::divert::eval_filter(
+            super::super::net::divert::eval_filter(
                 &filter,
                 &ipv4_syn(Ipv4Addr::new(142, 250, 74, 78), 443),
                 &outbound_address(false)
@@ -4345,7 +3090,7 @@ mod tests {
             ("::ffff:8.8.8.8", "IPv4-mapped, which the IPv4 half handles"),
         ] {
             assert!(
-                !super::super::divert::eval_filter(
+                !super::super::net::divert::eval_filter(
                     &filter,
                     &ipv6_packet(address, 443, &[]),
                     &outbound_address(true)
@@ -4569,7 +3314,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_custom_mode_blocks_ipv6_and_keeps_carrying_ipv4() {
-        use super::super::{firewall, proxy};
+        use super::super::{net::{firewall, pin}, relay};
         use neoconnect_ipc::SplitTunnelMode;
         use std::process::Command;
         use std::sync::RwLock;
@@ -4582,13 +3327,13 @@ mod tests {
         let nat = Arc::new(Nat::new());
         // Index zero is the fail-open signal, so this is a relay with no
         // tunnel under it rather than one pointed at a broken tunnel.
-        let tunnel = Arc::new(proxy::TunnelInterface::new(0, Ipv4Addr::UNSPECIFIED));
+        let tunnel = Arc::new(pin::TunnelInterface::new(0, Ipv4Addr::UNSPECIFIED));
         // One table for both halves, as production wires it: the relay
         // counts its own UDP losses into the same counters the loop
         // fills.
         let stats = Arc::new(Stats::default());
         let relays =
-            proxy::start(nat.clone(), tunnel, stats.clone(), Arc::new(ExitRelays::default())).expect("relays must start");
+            relay::start(nat.clone(), tunnel, stats.clone(), Arc::new(ExitRelays::default())).expect("relays must start");
         // Both sources are the local address here, and that is not a
         // shortcut. The relay's upstream socket is normally bound to the
         // tunnel's address, which is what makes the second allowance
@@ -4659,7 +3404,7 @@ mod tests {
 
         let summary = running.stats.summary();
         let blocked = running.stats.blocked_v6.load(Ordering::Relaxed);
-        running.stop();
+        drop(running);
         relays.stop();
         allowance.remove();
 
@@ -4692,7 +3437,7 @@ mod tests {
             activated: Activation::begun_now(),
             exits: Arc::new(ExitRelays::default()),
         });
-        super::super::divert::compile_filter(&filter).expect("the filter must compile");
+        super::super::net::divert::compile_filter(&filter).expect("the filter must compile");
     }
 
     /// The half of "select a game that is already running" that already
@@ -5106,15 +3851,15 @@ mod tests {
         // real evaluator, because that is the only thing whose opinion
         // counts.
         let filter = filter_for(&sample_redirect());
-        super::super::divert::compile_filter(&filter).expect("the filter must compile");
+        super::super::net::divert::compile_filter(&filter).expect("the filter must compile");
         let lan = icmp_packet(Ipv4Addr::new(192, 168, 1, 1), ICMP_ECHO_REQUEST);
         assert!(
-            !super::super::divert::eval_filter(&filter, &lan, &outbound_address(false)),
+            !super::super::net::divert::eval_filter(&filter, &lan, &outbound_address(false)),
             "a ping to the LAN must not even reach the loop"
         );
         let internet = icmp_packet(Ipv4Addr::new(203, 0, 113, 9), ICMP_ECHO_REQUEST);
         assert!(
-            super::super::divert::eval_filter(&filter, &internet, &outbound_address(false)),
+            super::super::net::divert::eval_filter(&filter, &internet, &outbound_address(false)),
             "a ping to the internet must reach the loop, or it cannot be refused"
         );
     }

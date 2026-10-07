@@ -135,7 +135,8 @@ the starting condition of the next.
 ### The live split-tunnel test
 
 `live_custom_mode_blocks_ipv6_and_keeps_carrying_ipv4` in
-`split_tunnel/redirect.rs` is `#[ignore]`d and has never run. It is the
+`split_tunnel/intercept/mod.rs` (`redirect.rs` until the 2026-10-07
+restructure) is `#[ignore]`d and has never run. It is the
 only end-to-end proof Custom mode has — everything else is a unit test
 over buffers. It needs administrator, real IPv6, and five variables:
 
@@ -148,12 +149,19 @@ $env:NEOX_DUAL_URL   = "<a dual-stack URL>"
 cargo test -p neoconnect-service live_custom_mode -- --ignored --nocapture
 ```
 
-Two other tests in `proxy.rs` are `#[ignore]`d with a documented wrong
-premise — the comment says the same assumption has now been written
-against Windows twice and been wrong both times. **Do not treat those
-two names as coverage.** The property Custom mode's honesty rests on,
-that a pinned socket does not fall back to the ordinary route, still has
-no running test anywhere.
+Two other tests are `#[ignore]`d with a documented wrong premise --
+`the_probe_fails_rather_than_falling_back_to_the_normal_route` in
+`split_tunnel/health.rs` and
+`a_socket_pinned_to_a_nonexistent_interface_cannot_connect` in
+`split_tunnel/net/pin.rs` (both in `proxy.rs` once). The comment says
+the same assumption has been written against Windows twice and been
+wrong both times. **Do not treat those two names as coverage.** The
+property Custom mode's honesty rests on, that a pinned socket does not
+fall back to the ordinary route, has had one running test since
+2026-10-04 -- `a_socket_pinned_to_an_interface_with_no_route_fails_instead_of_falling_back`
+in `net/pin.rs`, pinned to loopback. It proves the stack honours a pin;
+it is not a capture of a tunnel going away under a live application,
+which is still unverified.
 
 ## Building on the rig
 

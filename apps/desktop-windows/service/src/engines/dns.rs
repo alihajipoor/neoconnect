@@ -149,7 +149,7 @@ pub(super) fn tunnel_dns() -> TunnelDns {
 /// captures DNS machine-wide by design already.**
 ///
 /// `split_tunnel` sets `carry_dns: true` unconditionally and says why
-/// at `redirect::is_dns`: Windows resolves through its own DNS Client
+/// at `split_tunnel::intercept::decide::is_dns`: Windows resolves through its own DNS Client
 /// service, so a query leaves under `svchost`'s name rather than the
 /// asking application's, and there is no way to carry only the selected
 /// applications' lookups. The alternative -- catching only the browsers
@@ -161,7 +161,7 @@ pub(super) fn tunnel_dns() -> TunnelDns {
 /// So the machine-wide rule does not *add* a machine-wide DNS capture
 /// to Custom mode. It is what makes the one Custom mode already
 /// performs reachable. The redirect only ever sees packets the
-/// WinDivert filter admits, and `redirect::filter_for` excludes every
+/// WinDivert filter admits, and `split_tunnel::intercept::filter_for` excludes every
 /// RFC1918 range -- so on the ordinary home network, whose resolver is
 /// the router at `192.168.1.1`, the query is dropped by the kernel
 /// filter before `decide` runs and leaves in the clear. Pointing the
@@ -1525,7 +1525,7 @@ mod tests {
     ///
     /// The NRPT rule steers the machine's lookups at this address, and
     /// Custom mode's redirect carries them only because it is a public
-    /// address its filter admits. `split_tunnel::CUSTOM_MODE_RESOLVER`
+    /// address its filter admits. `split_tunnel::session::CUSTOM_MODE_RESOLVER`
     /// is the third copy of it and is what actually answers. If an
     /// engine pointed the rule somewhere else, Custom mode would send
     /// every lookup to an address the tunnel does not carry -- which
@@ -1538,7 +1538,7 @@ mod tests {
             "the two engines must name one resolver"
         );
         // Kept as a literal on purpose: this is the value
-        // split_tunnel::CUSTOM_MODE_RESOLVER holds, and the point of the
+        // split_tunnel::session::CUSTOM_MODE_RESOLVER holds, and the point of the
         // assertion is to fail if either side is edited alone.
         assert_eq!(super::super::xray::TUN_DNS, "1.1.1.1");
     }

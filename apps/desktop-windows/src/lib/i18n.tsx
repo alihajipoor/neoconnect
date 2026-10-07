@@ -774,6 +774,7 @@ const en = {
   "dash.modeVpnHint": "Everything on this computer goes through Neoxify.",
   // The line above is false in Custom mode, and was shown there anyway.
   "dash.modeCustomHint": "Custom mode: only the apps you chose go through Neoxify.",
+  "dash.modeCustomExceptHint": "Custom mode: everything goes through Neoxify except the apps you chose.",
   // "on the shortest path" was a speed claim, and this app has never
   // measured one. From Tehran the direct path to a Blizzard EU game
   // server was 72.0 ms and the best route through our fleet 72.8 ms --
@@ -1370,6 +1371,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.modeGaming": "بازی",
   "dash.modeVpnHint": "همه‌ی ترافیک این رایانه از نئوکسیفای عبور می‌کند.",
   "dash.modeCustomHint": "حالت سفارشی: فقط برنامه‌هایی که انتخاب کرده‌اید از نئوکسیفای عبور می‌کنند.",
+  "dash.modeCustomExceptHint": "حالت سفارشی: همه‌چیز به‌جز برنامه‌هایی که انتخاب کرده‌اید از نئوکسیفای عبور می‌کند.",
   "dash.modeGamingHint":
     "فقط سرویس‌های بازی‌ای که انتخاب می‌کنید از نئوکسیفای عبور می‌کنند: لانچر، ورود و به‌روزرسانی‌ها. اتصال خودِ بازی از تونل عبور داده نمی‌شود و این حالت آن را سریع‌تر نمی‌کند.",
 

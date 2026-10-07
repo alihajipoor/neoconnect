@@ -211,8 +211,8 @@ afterwards, on a machine with none of our adapters.
 Audited rather than assumed, by listing every deadline in `engines/`
 and `split_tunnel/` and checking each against the reply path. Every
 engine wait clamps. Two that look like gaps are not: `BIND_RETRY_FOR`
-(6s) is in `proxy::bind_pending`, which is per-flow on the data path,
-and `redirect::ACTIVATION_GRACE` (3s) runs inside a spawned thread, so
+(6s) is in `relay::bind_pending`, which is per-flow on the data path,
+and `intercept::ACTIVATION_GRACE` (3s) runs inside a spawned thread, so
 the constructor returns before it.
 
 `HELPER_BUDGET` was the one real residual and is now closed. Helper

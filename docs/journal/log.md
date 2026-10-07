@@ -4842,3 +4842,116 @@ owner's call.
 **Unverified:** anything on a phone (Android 0.2.24, iOS); the iOS
 "Xray reaches its own server through the tunnel" premise; a real
 censored network.
+
+## 2026-10-07 — split tunnel restructured: one job per module, teardown by drop order, the ladder in types (branch `claude/split-tunnel-restructure`)
+
+**Status:** pushed to `claude/split-tunnel-restructure`, off the 0.9.45
+release candidate (`claude/rc-0.9.45-final` at `bb3679a`). Not merged,
+not tagged, not released. **Not run in the VM** -- that is owed before
+it merges, and the coordinating session is running it.
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/**`;
+`scripts/check-exit-groups.sh`, which reads `Selection::with_exits` and
+had to follow it to `policy/mod.rs` (the CI step failed on 6c99d13 to
+ed31fc8, fixed at e6e8362); comments only in
+`engines/{dns,routing,xray}.rs`, `gaming/stub.rs` and
+`src-tauri/nsis-hooks.nsh`.
+
+`docs/split-tunnel-rewrite.md` "Where it stands" has the commit-by-commit
+table and the new module map. In one line each: the moves (`net/`,
+`picker/`, `flows/`, `policy/` + `tables/`, `relay/`, `intercept/`,
+`session/`) changed no behaviour; `Selection` matches by hash lookup;
+every session part releases itself in `Drop`, `Session`'s field order is
+the old `stop` sequence and `stop` is a drop; `decide` is seven typed
+rungs. The frozen boundary did not move.
+
+A local branch of the same name exists in worktree
+`.claude/worktrees/wf_4927f2cf-256-1`: an earlier attempt, off older
+`main`, never pushed, abandoned mid-way through `session/`. Its first
+seven commits were re-applied here and re-verified; the branch itself
+was left alone. Do not push it over this one.
+
+### Proven -- unit tests on Windows, this PC
+
+- `cargo check --workspace --all-targets` clean after every commit, with
+  the baseline's warnings and no new ones. `cargo test --workspace`
+  green after every commit: service 478 passed / 6 ignored before, 485 /
+  6 after; ipc 58; desktop 44 / 5. No test deleted; every baseline test
+  name present at every commit; the `decide` tests byte-identical.
+- The moves are moves: each checked as a multiset of lines against the
+  file it came from.
+- Teardown order on stop and on each failing bring-up step, against
+  stand-in parts with the real relays, logger and `Worker`: unchanged
+  from the hand-written order, and now tested. 32 sessions up and down
+  at once leave no part unreleased, no thread running and no relay port
+  open. Each of those tests was shown to fail on the mistake it guards
+  against before it was trusted. The session tests passed 25 runs in a
+  row, the whole service suite 5.
+
+### Unverified -- needs real packets
+
+- **Custom mode in the VM**, both directions of the list: a selected
+  app's exit IP is the node's, an unselected app's is the line's, DNS
+  goes through the tunnel, a selected app's IPv6 is refused, and the
+  capture (`pktmon --comp nics`) shows nothing of a selected app leaving
+  outside the tunnel. Then Disconnect: routes, the firewall rule, the
+  WFP filters and the relay listeners all gone, in the order the
+  session's fields now give.
+- **Gaming mode in the VM.** Its code is untouched apart from one
+  comment; the check is owed with Custom mode's all the same, since the
+  release this goes into carries both.
+- **The bring-up against a real adapter**: route probing, the firewall
+  wait, the IPv6 block install, WinDivert opening -- none of it runs in
+  a unit test, stand-ins included.
+- **The one behaviour change**: a panic after interception began now
+  stops it on the unwind instead of stranding it. No test makes that
+  panic happen against the real driver.
+
+## 2026-10-07 — split tunnel restructure, review round (same branch)
+
+**Status:** pushed to `claude/split-tunnel-restructure`. Not merged, not
+tagged, not released. **Still not run in the VM** -- the restructure
+entry above lists what is owed, and nothing here reduces it.
+**Touches:** `split_tunnel/{session,relay,intercept}`,
+`engines/routing.rs` (comment), and comments and docs that still named
+`owner.rs`, `proxy.rs` and `redirect.rs` paths.
+
+Two adversarial reviews, no high or medium findings. The lows and their
+commits are in `docs/split-tunnel-rewrite.md`, "The review round". In
+short: `Parts` bounds five part types by `Drop` so deleting one of those
+impls no longer compiles silently; `relay::start` no longer leaks its
+acceptor when the OS refuses a thread; the panic release order is
+documented and tested; the 32-session test now carries a TCP connection
+and a UDP flow through half its sessions and checks the UDP ports too.
+
+**Left for the merge:** commits 6c99d13 to ed31fc8 fail the
+`check-exit-groups.sh` CI step (fixed at e6e8362). Squash, or fold
+e6e8362 into 6c99d13 -- rewriting the pushed branch now would
+invalidate every hash the design doc cites.
+
+**A gotcha found on the way, not changed:** after the relays stop, both
+ends of a carried TCP connection see it close at once, but the relay's
+copy threads stay in their reads until each end closes in answer --
+measured, 16 of 16 still there twenty seconds on with both ends held
+open. A test that checks "no thread left" right after a drop will fail
+on any session that carried a connection; give it the far ends' close
+first. Pre-existing since eb181a7. How long a thread lingers when the
+far end never answers is unmeasured.
+
+### Proven -- unit tests on Windows, this PC
+
+- `cargo check --workspace --all-targets` clean after every commit with
+  the baseline's warnings and no new ones; `cargo test --workspace` green
+  after every commit: service 485 / 6 ignored before, 487 / 6 after;
+  ipc 58; desktop 44 / 5. Split-tunnel tests 248 (245 / 3).
+- Each new check was made to fail by the mistake it guards against:
+  each of the five `Drop` impls deleted (compile error); a partial relay
+  left unstopped, and a wake-up connect with no listener (2.00s); the
+  interception local declared beside `allowance`; `Carried::close_all`
+  removed (16 of 32 sessions, 3 of 3 runs); `Worker`'s join removed (8
+  of 32, 3 of 3). The session tests passed 25 runs in a row.
+
+### Unverified
+
+- Everything the restructure entry lists, unchanged.
+- The real `intercept::Running` drop: still reached only by the ignored
+  live test. The `Drop` bound stops its deletion, not its emptying.

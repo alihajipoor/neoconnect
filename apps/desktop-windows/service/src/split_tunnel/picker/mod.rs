@@ -7,7 +7,12 @@
 //! re-lists every few seconds while it is open.
 //!
 //! What it shares with the packet path is `image_path`, borrowed from
-//! `owner.rs`, so both identify a process by exactly the same string.
+//! `tables`, so both identify a process by exactly the same string.
+//!
+//! The icons are this directory's other module: they are only ever
+//! fetched for this list.
+
+mod icon;
 
 use std::collections::HashMap;
 use std::os::windows::ffi::OsStrExt;
@@ -21,7 +26,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     TH32CS_SNAPPROCESS,
 };
 
-use super::owner::image_path;
+use super::tables::image_path;
 
 /// Whether `pid` runs in Windows session `session`. A process that has
 /// ended, or whose session cannot be read, is not in anyone's.
@@ -116,7 +121,7 @@ pub fn running_apps(session: Option<u32>) -> Vec<neoconnect_ipc::RunningApp> {
             let path = pick_primary(&name, &paths)?;
             // Taken from the executable shown, which is the one whose
             // icon a person associates with the product.
-            let icon = super::icon::icon_png_base64(&path);
+            let icon = icon::icon_png_base64(&path);
             Some(neoconnect_ipc::RunningApp { path, name, paths, icon, pids })
         })
         .collect();

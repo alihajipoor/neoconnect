@@ -15,7 +15,7 @@
 //!
 //! # What was measured
 //!
-//! `split_tunnel/redirect.rs` fixed this for Custom mode in 0.9.27 and
+//! `split_tunnel/intercept` (then `redirect.rs`) fixed this for Custom mode in 0.9.27 and
 //! said, in its header, that the fix covered only the redirect loop. It
 //! was right to say so. Measured afterwards on client 0.9.25 against
 //! germany-1 from a dual-stack Windows guest, with a packet capture
@@ -60,7 +60,7 @@
 //!
 //! # Why blocking and not carrying
 //!
-//! The same answer `redirect.rs` gives, for the same reason, and it is
+//! The same answer `split_tunnel::intercept` gives, for the same reason, and it is
 //! still not a client-side choice. **Every node is IPv4-only**: the
 //! server configs carry no IPv6 addressing at all, no engine's tunnel
 //! adapter is given a v6 address, and every route this client installs
@@ -938,7 +938,7 @@ impl Drop for AppId {
 /// It blocks the same traffic, and it is not redundant, because the two
 /// answer the question "who sent this?" in ways that fail differently.
 ///
-/// `redirect::handle_ipv6` is handed a packet and has to work backwards
+/// `intercept::handle_ipv6_parsed` is handed a packet and has to work backwards
 /// to the program that sent it, through the machine's UDP and TCP
 /// endpoint tables. That lookup can come back empty. Two measured ways
 /// to get there:
@@ -1001,7 +1001,7 @@ impl Drop for AppId {
 /// rewrites the **local** address at connect time, so their block filters
 /// can key on local address (Mullvad) or local interface LUID
 /// (Windscribe) instead of on the remote one. This client's redirect
-/// leaves the source address alone by design -- see `redirect.rs` -- so
+/// leaves the source address alone by design -- see `split_tunnel::intercept` -- so
 /// even that discriminator does not exist here.
 ///
 /// IPv6 is the one case with no such ambiguity, and that is the entire
@@ -1011,7 +1011,7 @@ impl Drop for AppId {
 ///
 /// # What is deliberately left to the loop
 ///
-/// The scope mirrors `redirect::filter_for`'s IPv6 half exactly, rather
+/// The scope mirrors `intercept::filter_for`'s IPv6 half exactly, rather
 /// than being an independently reasoned set. Two blocks disagreeing
 /// about what counts as "the LAN" would be worse than either alone.
 ///
@@ -1169,7 +1169,7 @@ unsafe fn build_split(engine: HANDLE, app_ids: &[AppId]) -> Result<usize, String
 
 /// What each selected application is permitted, above its block.
 ///
-/// Read straight off `redirect::filter_for`'s IPv6 clause, which hands
+/// Read straight off `intercept::filter_for`'s IPv6 clause, which hands
 /// the loop only what lies strictly between `::ffff:ffff:ffff:ffff` and
 /// `fc00::`, and blocks only within that. Everything outside it is what
 /// the loop passes through untouched:
@@ -1515,7 +1515,7 @@ mod tests {
         })
     }
 
-    /// The one address range `redirect::filter_for` hands to the loop,
+    /// The one address range `intercept::filter_for` hands to the loop,
     /// as it writes it:
     ///
     /// ```text

@@ -680,9 +680,17 @@ export function Dashboard({
    * connect will do. Used only while no tunnel is up, for the line under
    * the mode switch; once one is, `splitTunnelActive` is the truth. */
   const [customConfigured, setCustomConfigured] = useState(false);
+  /** Which way the saved Custom mode cuts: only the chosen apps through
+   * the VPN, or everything except them. The line under the mode switch
+   * said "only the apps you chose go through Neoxify" for both, which
+   * in "All except these" is the opposite of what is happening. */
+  const [customExcept, setCustomExcept] = useState(false);
   useEffect(() => {
     loadSplitTunnel()
-      .then((settings) => setCustomConfigured(isEffective(settings)))
+      .then((settings) => {
+        setCustomConfigured(isEffective(settings));
+        setCustomExcept(settings.mode === "allExcept");
+      })
       .catch(() => undefined);
   }, []);
   const [splitTunnelProblem, setSplitTunnelProblem] = useState<string | null>(null);
@@ -2833,7 +2841,7 @@ export function Dashboard({
               {appMode === "gaming"
                 ? t("dash.modeGamingHint")
                 : (isTunnelUp(connectionState) ? splitTunnelActive : customConfigured)
-                  ? t("dash.modeCustomHint")
+                  ? t(customExcept ? "dash.modeCustomExceptHint" : "dash.modeCustomHint")
                   : t("dash.modeVpnHint")}
             </p>
           </div>
