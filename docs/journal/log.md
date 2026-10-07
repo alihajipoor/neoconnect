@@ -4991,3 +4991,53 @@ plan has no gaming).
 repair once ("couldn't be repaired"), which booted on Continue. The VM
 now runs with 2 vCPUs instead of 4, under which the 0.9.46 install
 completed; whether that helps is not established.
+
+## 2026-10-07 — creating credentials does not disturb connected users
+
+The owner asked whether issuing a credential per device ever drops the
+users already connected -- "even for one second", for gamers. It does
+not, on any engine, measured.
+
+**What the code does.** No provisioner restarts or signals an engine to
+add a user. Xray: `AlterInbound` AddUser on the running process, and
+"already exists" is success, so the backend's once-a-minute re-assert of
+every credential changes nothing. WireGuard: `wg set wg0 peer`. OpenVPN:
+an empty ccd file; the server is not contacted. IKEv2: the secrets file
+rewritten and `swanctl --load-creds --clear`; established SAs are not
+re-authenticated. Only removing or updating a user touches a live
+connection, and only that user's own.
+
+**Proven in the VM** (finland1, exit address checked to be finland1 on
+every run). Inside the tunnel, for 150s: one UDP socket sending a query
+to 1.1.1.1:53 every 0.5s with a 400ms answer deadline -- the shape of
+game traffic -- plus one rate-limited TCP download held open throughout.
+Meanwhile on the node, the same calls the agent makes: 20 throwaway
+users added, held 40s, removed, then 5 more for 10s (Xray: `xray api
+adu`/`rmu` on `vless-in`; WireGuard: `wg set` with TEST-NET-1
+allowed-ips, which no real peer can own; OpenVPN: ccd files; IKEv2: five
+`--load-creds --clear`). Each window also spans two or three of the
+backend's per-minute re-asserts (317 credentials on finland1).
+
+| Engine | UDP answered | Downloads | Engine PID |
+|---|---|---|---|
+| Stealth (Xray) | 295 / 296 | 12.9 MB, exit 0 | unchanged |
+| Fast (WireGuard) | 294 / 294 | 12.9 MB, exit 0 | -- |
+| Compatible (OpenVPN) | 295 / 295 | 12.9 MB, exit 0 | unchanged |
+| Built-in (IKEv2) | 294 / 294 | 12.9 MB, exit 0 | unchanged, IKE SAs 1 -> 1 |
+
+Stealth's one miss, in this run and in two earlier ones, is always the
+first query of the window, before anything ran on the node: Xray's
+first packet of a new UDP flow takes longer than 400ms to set up. Two
+earlier 3-4 minute holds (a 21 MB download each on Stealth and on
+WireGuard, re-asserts only) also finished unbroken. Every probe user was
+removed; Xray, OpenVPN and strongSwan kept their start times.
+
+**Not measured:** ICMP -- the Xray engines do not carry it, and on
+WireGuard 1.1.1.1 dropped a third of pings while UDP lost nothing, so
+ping is no gauge here. Real games, other nodes, and Android/iOS clients
+(the node side is the same for them).
+
+Tools, outside the repo: `udp-flow.ps1` (guest) and
+`create-burst-test.ps1` (host). Cloudflare's speed test began answering
+403 to the node's address after a few long downloads; the download now
+fetches a byte range from Hetzner's speed-test file instead.
