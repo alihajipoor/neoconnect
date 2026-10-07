@@ -43,7 +43,7 @@
 #      `validate` still refuses a config that puts one game on two
 #      exits. That is the trust boundary, and it must refuse rather
 #      than assume the sender is us.
-#   5. owner.rs         -- `Selection::with_exits` still drops a group
+#   5. policy/mod.rs    -- `Selection::with_exits` still drops a group
 #      whose members are not all selected. The service holds the rule
 #      independently of the client.
 #   6. curated.json     -- the multi-binary games still list both halves
@@ -59,7 +59,7 @@ CLIENT_WIRE="apps/desktop-windows/src/lib/split-tunnel.ts"
 ASSERTIONS="apps/desktop-windows/src/lib/split-tunnel.invariants.ts"
 CLIENT_PKG="apps/desktop-windows/package.json"
 IPC="apps/desktop-windows/ipc/src/lib.rs"
-SERVICE="apps/desktop-windows/service/src/split_tunnel/owner.rs"
+SERVICE="apps/desktop-windows/service/src/split_tunnel/policy/mod.rs"
 CATALOGUE="apps/backend/prisma/catalogue/curated.json"
 
 for f in "$CLIENT_RULE" "$CLIENT_WIRE" "$CLIENT_PKG" "$IPC" "$SERVICE" "$CATALOGUE"; do
@@ -248,7 +248,9 @@ else
       "not carried, so when it starts it leaves from the customer's own" \
       "address while its siblings leave from the exit."
   fi
-  if ! grep -q 'paths.contains(&exit.app.to_lowercase())' <<< "$with_exits"; then
+  # `selected` is the same lowercased paths as a set (f7c1233); the check
+  # is the membership test, whichever collection answers it.
+  if ! grep -q 'selected.contains(&exit.app.to_lowercase())' <<< "$with_exits"; then
     fail "Selection::with_exits in $SERVICE no longer checks a group" \
       "member against the selection." \
       "" \

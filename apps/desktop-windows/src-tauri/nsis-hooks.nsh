@@ -324,7 +324,7 @@
   Pop $0
 
   ; Custom mode's inbound allowance. Named identically by the service
-  ; (see split_tunnel/firewall.rs), so one delete removes both the TCP
+  ; (see split_tunnel/net/firewall.rs), so one delete removes both the TCP
   ; and the UDP entry -- including a pair left by a service that was
   ; killed while Custom mode was on, which would otherwise sit in the
   ; customer's firewall allowing traffic to ports nothing listens on,
