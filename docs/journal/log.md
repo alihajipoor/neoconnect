@@ -4042,3 +4042,55 @@ cross them, but the TLS one has not been run through them); the 5s limit
 on a slow censored path; whether a node's network reaches 1.1.1.1 and
 8.8.8.8 on 443 (both are also the tunnel's DNS, so a node that cannot is
 already broken for customers).
+
+## 2026-10-07 — node fixes from the full review, applied to the fleet
+
+All on the five live nodes (finland1, france-1, germany-1, singapore-1,
+turkey-1), one node at a time, finland1 first with the VM checking real
+traffic through it after every change. The owner approved restarts.
+
+- **Customers could reach a node's own loopback through their tunnel**
+  (the review's critical: the Xray API on 127.0.0.1:10085 and OpenVPN
+  management on 127.0.0.1:7505). `installer/maintenance/block-private-egress.sh`
+  applied: private and loopback destinations go to a blackhole, routing
+  `IPIfNonMatch`. Xray restarted on each node; the 60 s re-assert put all
+  343 credentials per node back. Through finland1 afterwards: all five
+  Xray protocols connect, exit FI, 0 DNS at the NIC.
+- **Tunnel clients could reach each other and private ranges.**
+  `isolate-tunnel-clients.sh` applied (FORWARD DROP from each tunnel
+  subnet to private ranges, saved, wg0 hooks). No restarts. france-1's
+  IKEv2 pool is a range, which aborted the first run; fixed (c484d0d)
+  and re-run. Fast, Compatible and Built-in through finland1 afterwards:
+  exit FI, 0 DNS at the NIC.
+- **Agent v0.2.10** rolled out to all five; every engine's MainPID
+  unchanged. On finland1 first: WireGuard usage after the restart was
+  0.01 MB in total (no re-billing), and a 10 MB download over Built-in
+  produced IKEv2 usage rows of 10.01 MB down / 0.20 MB up -- the first
+  IKEv2 usage ever recorded (the parser never matched before, and had
+  the directions swapped). IKEv2 is therefore now billed against caps.
+- **OpenVPN revocation enforced.** Every live OpenVPN credential (40 per
+  node) had its ccd file and every other file (23-34 per node) carries
+  `disable`; then `ccd-exclusive` added and OpenVPN restarted. Compatible
+  through finland1 afterwards: exit FI.
+- **finland1's API mirror answered HTTP/1.1 clients with 404**: its
+  vless-tls-in default fallback pointed at the WebSocket inbound
+  (127.0.0.1:10086) instead of nginx (127.0.0.1:8080). Corrected; all
+  five mirrors now answer `/api/health/ip` 200 on :2053 with a verified
+  certificate (germany-1's old 502 was already gone). Stealth Web and
+  Stealth HTTPS through finland1 afterwards: exit FI.
+- **Panel host**: the certbot deploy hook now restarts the backend, so
+  the agent gateway picks up a renewed certificate (current one expires
+  2026-12-01).
+- **singapore-1's agent key rotated** (it had been shown in a terminal):
+  a new Ed25519 pair generated on the node, only the public half written
+  to `nodes.agentPubKey`; the agent authenticated with it. The old key no
+  longer authenticates.
+
+Backend `main` `7533211` deployed first (dump
+`pre-review-fixes-20261007-031145.sql.gz`): it removed the credentials
+of 5 CANCELLED subscriptions (200 rows; 2 customers were still using
+their old Pro subscription's credentials and have an ACTIVE one).
+
+**Still open:** turkey-1's exposed root password (needs the owner: they
+may log in with it); the HTTP/1.1 vs h2 question for the other nodes'
+mirrors was checked only from one uncensored client.
