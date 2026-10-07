@@ -49,6 +49,15 @@ func contains(haystack, needle string) bool {
 	})()
 }
 
+func anyContains(calls []string, substr string) bool {
+	for _, c := range calls {
+		if contains(c, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 func newHarness(connected map[string]string) (*Dispatcher, *tcRecorder) {
 	rec := &tcRecorder{}
 	d := New()
@@ -105,9 +114,12 @@ func TestDisconnectedClientsRulesAreRemoved(t *testing.T) {
 	d.ReconcileShaping(context.Background())
 
 	d.discoverers["OPENVPN"] = &fakeDiscoverer{connected: map[string]string{}}
+	mark := len(rec.calls)
 	d.ReconcileShaping(context.Background())
 
-	if got := rec.count("class del"); got == 0 {
+	// After the mark: Apply removes before it adds, so a class del from
+	// the first pass would satisfy a plain count.
+	if !anyContains(rec.calls[mark:], "class del dev tun0 classid 1:6") {
 		t.Error("expected the disconnected client's rules to be removed")
 	}
 }
@@ -123,12 +135,13 @@ func TestReconnectOnADifferentAddressMovesTheLimit(t *testing.T) {
 	d.ReconcileShaping(context.Background())
 
 	d.discoverers["OPENVPN"] = &fakeDiscoverer{connected: map[string]string{"cn-1": "10.8.0.9"}}
+	mark := len(rec.calls)
 	d.ReconcileShaping(context.Background())
 
 	if got := rec.count("match ip dst 10.8.0.9/32"); got != 1 {
 		t.Errorf("expected the limit to follow the client to its new address, got %d", got)
 	}
-	if got := rec.count("class del"); got == 0 {
+	if !anyContains(rec.calls[mark:], "class del dev tun0 classid 1:6") {
 		t.Error("expected the rule on the old address to be removed")
 	}
 }
@@ -216,6 +229,54 @@ func TestAChangedCapReachesAConnectedOpenVPNClient(t *testing.T) {
 	d.ReconcileShaping(context.Background())
 	if got := rec.count("rate 20mbit"); got != 1 {
 		t.Fatalf("the changed cap never reached the connected client: %d", got)
+	}
+}
+
+func TestAChangedCapLeavesNoRuleBehindWhenTheClientLeaves(t *testing.T) {
+	// A plan edit used to forget where the user was shaped, so that the
+	// next pass would re-apply. A client that disconnected before that
+	// pass then left the old rule on its pool address -- the cleanup only
+	// removes what it remembers -- and the next customer handed that
+	// address inherited it, for good if they were uncapped.
+	d, rec := newHarness(map[string]string{"cn-1": "10.8.0.6"})
+	d.applyRateLimit(context.Background(), commandPayload{Protocol: "OPENVPN", ExternalUserID: "cn-1", DownloadMbps: 50})
+	d.ReconcileShaping(context.Background())
+
+	d.applyRateLimit(context.Background(), commandPayload{Protocol: "OPENVPN", ExternalUserID: "cn-1", DownloadMbps: 20})
+	d.discoverers["OPENVPN"] = &fakeDiscoverer{connected: map[string]string{}}
+	mark := len(rec.calls)
+	d.ReconcileShaping(context.Background())
+
+	// 1:6 is 10.8.0.6's class (shaper.classID).
+	if !anyContains(rec.calls[mark:], "class del dev tun0 classid 1:6") {
+		t.Fatalf("the rule on the address the client left was not removed: %v", rec.calls[mark:])
+	}
+}
+
+func TestAChangedCapFollowsAClientThatMovedAddress(t *testing.T) {
+	// The cap changes, and the client reconnects on another address before
+	// the next pass: the rule on the old one has to go, not only the new
+	// one go on.
+	d, rec := newHarness(map[string]string{"cn-1": "10.8.0.6"})
+	d.applyRateLimit(context.Background(), commandPayload{Protocol: "OPENVPN", ExternalUserID: "cn-1", DownloadMbps: 50})
+	d.ReconcileShaping(context.Background())
+
+	d.applyRateLimit(context.Background(), commandPayload{Protocol: "OPENVPN", ExternalUserID: "cn-1", DownloadMbps: 20})
+	d.discoverers["OPENVPN"] = &fakeDiscoverer{connected: map[string]string{"cn-1": "10.8.0.9"}}
+	mark := len(rec.calls)
+	d.ReconcileShaping(context.Background())
+
+	if !anyContains(rec.calls[mark:], "match ip dst 10.8.0.9/32") || !anyContains(rec.calls[mark:], "rate 20mbit") {
+		t.Fatalf("expected the new cap on the new address: %v", rec.calls[mark:])
+	}
+	if !anyContains(rec.calls[mark:], "class del dev tun0 classid 1:6") {
+		t.Fatalf("the rule on the old address was left behind: %v", rec.calls[mark:])
+	}
+	// And it settles: nothing more on the next pass.
+	calls := len(rec.calls)
+	d.ReconcileShaping(context.Background())
+	if len(rec.calls) != calls {
+		t.Fatalf("the reconcile kept re-applying: %v", rec.calls[calls:])
 	}
 }
 
