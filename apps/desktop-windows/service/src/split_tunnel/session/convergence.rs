@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::split_tunnel::worker::sleep_unless_stopped;
+use crate::split_tunnel::worker::{sleep_unless_stopped, Worker};
 use crate::split_tunnel::{flows, intercept, tables, SharedSelection};
 
 use crate::split_tunnel::log_file::append;
@@ -48,9 +48,10 @@ const RESET_RESCAN: std::time::Duration = std::time::Duration::from_millis(250);
 /// before. The first pass still runs inline, which is what keeps the
 /// existing behaviour and the existing log line intact; this only adds
 /// the ones that were not closeable yet.
+///
+/// Stopped by being dropped, which joins its thread.
 pub(super) struct Convergence {
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    _worker: Worker,
 }
 
 impl Convergence {
@@ -62,77 +63,66 @@ impl Convergence {
         nat: Arc<flows::Nat>,
         closed_already: usize,
     ) -> Self {
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread = {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                let deadline = Instant::now() + intercept::ACTIVATION_GRACE;
-                let mut closed = closed_already;
-                let mut passes = 0usize;
-                // Overwritten by each pass, so it holds the LAST pass's
-                // figure -- earlier passes seeing half-open rows is the
-                // rescan working, not a fault.
-                let mut still_handshaking = 0usize;
+        let worker = Worker::spawn(move |stop| {
+            let deadline = Instant::now() + intercept::ACTIVATION_GRACE;
+            let mut closed = closed_already;
+            let mut passes = 0usize;
+            // Overwritten by each pass, so it holds the LAST pass's
+            // figure -- earlier passes seeing half-open rows is the
+            // rescan working, not a fault.
+            let mut still_handshaking = 0usize;
 
-                while Instant::now() < deadline {
-                    // Interruptible, because Custom mode can be stopped
-                    // inside this window -- a failover does exactly that
-                    // -- and closing a customer's connections on behalf
-                    // of a session that no longer exists is pure harm.
-                    if !sleep_unless_stopped(&stop, RESET_RESCAN) {
-                        return;
-                    }
-                    let selection =
-                        selection.read().unwrap_or_else(|e| e.into_inner()).clone();
-                    // Skipping whatever the redirect is already
-                    // carrying. By the second pass an application has
-                    // rebuilt its connections into the tunnel, and
-                    // without this the loop closes them again -- see
-                    // `tables::reset_selected_connections`. `has_flow`,
-                    // not `lookup_flow`, so asking twice a second does
-                    // not keep every entry alive.
-                    let outcome = tables::reset_selected_connections(
-                        &selection,
-                        node,
-                        &own_images,
-                        &|transport, port, destination, destination_port| {
-                            nat.has_flow(transport, port, destination, destination_port)
-                        },
-                    );
-                    closed += outcome.closed;
-                    still_handshaking = outcome.skipped_handshaking;
-                    passes += 1;
-                    for failure in outcome.failures {
-                        append(&path, &format!("  reset: {failure}"));
-                    }
+            while Instant::now() < deadline {
+                // Interruptible, because Custom mode can be stopped
+                // inside this window -- a failover does exactly that
+                // -- and closing a customer's connections on behalf
+                // of a session that no longer exists is pure harm.
+                if !sleep_unless_stopped(&stop, RESET_RESCAN) {
+                    return;
                 }
+                let selection =
+                    selection.read().unwrap_or_else(|e| e.into_inner()).clone();
+                // Skipping whatever the redirect is already
+                // carrying. By the second pass an application has
+                // rebuilt its connections into the tunnel, and
+                // without this the loop closes them again -- see
+                // `tables::reset_selected_connections`. `has_flow`,
+                // not `lookup_flow`, so asking twice a second does
+                // not keep every entry alive.
+                let outcome = tables::reset_selected_connections(
+                    &selection,
+                    node,
+                    &own_images,
+                    &|transport, port, destination, destination_port| {
+                        nat.has_flow(transport, port, destination, destination_port)
+                    },
+                );
+                closed += outcome.closed;
+                still_handshaking = outcome.skipped_handshaking;
+                passes += 1;
+                for failure in outcome.failures {
+                    append(&path, &format!("  reset: {failure}"));
+                }
+            }
 
+            append(
+                &path,
+                &format!(
+                    "activation reset settled after {passes} rescan(s): {closed} connection(s) closed in total"
+                ),
+            );
+            if still_handshaking > 0 {
+                // The open item from 2026-08-22, observed rather than
+                // reasoned about: these finished their handshake
+                // outside the tunnel and the window closed first.
                 append(
                     &path,
                     &format!(
-                        "activation reset settled after {passes} rescan(s): {closed} connection(s) closed in total"
+                        "  reset: {still_handshaking} connection(s) were still mid-handshake when the window closed -- they completed outside the tunnel"
                     ),
                 );
-                if still_handshaking > 0 {
-                    // The open item from 2026-08-22, observed rather than
-                    // reasoned about: these finished their handshake
-                    // outside the tunnel and the window closed first.
-                    append(
-                        &path,
-                        &format!(
-                            "  reset: {still_handshaking} connection(s) were still mid-handshake when the window closed -- they completed outside the tunnel"
-                        ),
-                    );
-                }
-            })
-        };
-        Self { stop, thread: Some(thread) }
-    }
-
-    pub(super) fn stop(mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+            }
+        });
+        Self { _worker: worker }
     }
 }

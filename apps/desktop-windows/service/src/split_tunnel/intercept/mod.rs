@@ -542,7 +542,8 @@ pub fn filter_for(redirect: &Redirect) -> String {
     )
 }
 
-/// A running redirect loop.
+/// A running redirect loop. Dropping it stops it -- see the `Drop`
+/// below.
 pub struct Running {
     handle: Arc<Handle>,
     stop: Arc<AtomicBool>,
@@ -551,21 +552,10 @@ pub struct Running {
 }
 
 impl Running {
-    pub fn stop(self) {
-        self.stop.store(true, Ordering::SeqCst);
-        // The only thing that unblocks a thread sitting in recv. A flag
-        // alone would leave them there for as long as the filter matched
-        // nothing, which on a quiet machine is indefinitely.
-        self.handle.shutdown();
-        for thread in self.threads {
-            let _ = thread.join();
-        }
-    }
-
     /// A handle that can stop interception from another thread, without
     /// owning the session or being able to join it.
     ///
-    /// This exists for the backstop in `split_tunnel::Watchdog`, which
+    /// This exists for the backstop in `session::watchdog::Watchdog`, which
     /// runs *inside* the session and therefore cannot take the session
     /// apart. What it can do is the one thing that matters to somebody
     /// whose machine has stopped working: close the driver's grip on it.
@@ -574,12 +564,31 @@ impl Running {
     }
 }
 
+impl Drop for Running {
+    /// Closes the driver's grip and joins the dispatcher and workers.
+    ///
+    /// A `Drop` rather than only a method: a bring-up that panicked after
+    /// interception began used to leave the loop running with nothing
+    /// left that knew to stop it -- the stranded-background-tunnel
+    /// complaint, one unwrap away. Now the unwind stops it.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // The only thing that unblocks a thread sitting in recv. A flag
+        // alone would leave them there for as long as the filter matched
+        // nothing, which on a quiet machine is indefinitely.
+        self.handle.shutdown();
+        for thread in std::mem::take(&mut self.threads) {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// The half of a running redirect that can switch it off.
 ///
 /// Deliberately cannot join the workers. Joining from a thread that the
 /// session owns would deadlock the teardown that is trying to join *it*,
 /// and the whole point of this type is to be safe to hold from the
-/// inside. `Running::stop` still joins afterwards; the flag and the
+/// inside. Dropping the `Running` still joins afterwards; the flag and the
 /// shutdown are both idempotent, so the two cannot get in each other's
 /// way whichever order they arrive in.
 #[derive(Clone)]
@@ -649,7 +658,7 @@ pub fn start(
         }));
     }
 
-    // At the front, because `Running::stop` joins in order and a worker
+    // At the front, because `Running`'s drop joins in order and a worker
     // ends only when the dispatcher drops its end of the queue. Joined
     // the other way round, the teardown would wait on a worker that is
     // still waiting on a thread nobody has joined yet.
@@ -3388,7 +3397,7 @@ mod tests {
 
         let summary = running.stats.summary();
         let blocked = running.stats.blocked_v6.load(Ordering::Relaxed);
-        running.stop();
+        drop(running);
         relays.stop();
         allowance.remove();
 

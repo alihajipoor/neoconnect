@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::split_tunnel::log_file::{append, trim_if_large};
-use crate::split_tunnel::worker::sleep_unless_stopped;
+use crate::split_tunnel::worker::{sleep_unless_stopped, Worker};
 use crate::split_tunnel::{flows, intercept, tables, SharedSelection};
 
 /// How often the counters are written out.
@@ -49,9 +49,11 @@ const AUDIT_NAMES_PER_SWEEP: usize = 5;
 /// The same lesson applies to a feature nobody can capture on a
 /// customer's machine -- four numbers written down beat any number of
 /// guesses about which stage failed.
+///
+/// Stopped by being dropped: the last line it writes, "stopped ...", is
+/// written as the worker it runs on is joined.
 pub(super) struct Logger {
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    _worker: Worker,
 }
 
 impl Logger {
@@ -61,41 +63,30 @@ impl Logger {
         header: String,
         mut audit: Audit,
     ) -> Self {
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread = {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                // Appended, not truncated. Truncating lost exactly the
-                // session worth reading: when a protocol fails, the
-                // ladder starts the next one immediately, and that
-                // second session's header wiped the first. The customer
-                // was then asked for a log that could only ever show
-                // the attempt which worked.
-                trim_if_large(&path);
-                append(&path, &format!("--- {header}"));
-                while sleep_unless_stopped(&stop, LOG_INTERVAL) {
-                    // The audit rides this thread rather than bringing
-                    // its own. It is periodic housekeeping on the same
-                    // cadence order as the counters, it is torn down by
-                    // the same stop flag, and a second thread would be a
-                    // second thing to join on a Disconnect that
-                    // customers have already reported as slow.
-                    if audit.due() {
-                        audit.run(&path, &stats);
-                    }
-                    append(&path, &stats.summary());
+        let worker = Worker::spawn(move |stop| {
+            // Appended, not truncated. Truncating lost exactly the
+            // session worth reading: when a protocol fails, the
+            // ladder starts the next one immediately, and that
+            // second session's header wiped the first. The customer
+            // was then asked for a log that could only ever show
+            // the attempt which worked.
+            trim_if_large(&path);
+            append(&path, &format!("--- {header}"));
+            while sleep_unless_stopped(&stop, LOG_INTERVAL) {
+                // The audit rides this thread rather than bringing
+                // its own. It is periodic housekeeping on the same
+                // cadence order as the counters, it is torn down by
+                // the same stop flag, and a second thread would be a
+                // second thing to join on a Disconnect that
+                // customers have already reported as slow.
+                if audit.due() {
+                    audit.run(&path, &stats);
                 }
-                append(&path, &format!("stopped {}", stats.summary()));
-            })
-        };
-        Self { stop, thread: Some(thread) }
-    }
-
-    pub(super) fn stop(mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+                append(&path, &stats.summary());
+            }
+            append(&path, &format!("stopped {}", stats.summary()));
+        });
+        Self { _worker: worker }
     }
 }
 

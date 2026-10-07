@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::adapters;
-use crate::split_tunnel::worker::sleep_unless_stopped;
+use crate::split_tunnel::worker::{sleep_unless_stopped, Worker};
 use crate::split_tunnel::{intercept, net};
 
 use crate::split_tunnel::log_file::append;
@@ -79,7 +79,7 @@ fn liveness(
 
 /// Stops interception if the tunnel underneath it disappears.
 ///
-/// The belt to `session::Slot`'s braces. `Slot` makes it impossible for
+/// The belt to `engines::session::Slot`'s braces. `Slot` makes it impossible for
 /// the engine layer to end a session without stopping Custom mode; this
 /// covers the case where nobody up there noticed at all -- an adapter
 /// pulled out from under a process that is still running, a driver
@@ -96,9 +96,10 @@ fn liveness(
 /// joining the redirect's workers from a thread the session owns would
 /// deadlock the teardown that is trying to join this one. Switching it
 /// off is what gives the machine back.
+///
+/// Stopped by being dropped, which joins its thread.
 pub(super) struct Watchdog {
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    _worker: Worker,
 }
 
 impl Watchdog {
@@ -112,57 +113,46 @@ impl Watchdog {
         log_path: PathBuf,
         tripped: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread = {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                let mut strikes = 0;
-                while sleep_unless_stopped(&stop, WATCHDOG_INTERVAL) {
-                    match liveness(index, address, &adapters::find_by_name(&adapter_name)) {
-                        Liveness::Alive => strikes = 0,
-                        Liveness::NoEvidence => {}
-                        Liveness::Gone => {
-                            strikes += 1;
-                            if strikes < WATCHDOG_STRIKES {
-                                continue;
-                            }
-                            let detail = format!(
-                                "the tunnel adapter {adapter_name} (interface {index}, {address}) \
-                                 is gone, but Custom mode was still intercepting this machine's \
-                                 packets -- interception has been stopped so traffic can flow \
-                                 normally again"
-                            );
-                            // Both files on purpose. cleanup.log is the
-                            // one a support conversation asks for, and
-                            // split-tunnel.log is where the counters
-                            // that stop moving are, so the two halves of
-                            // the story are readable together.
-                            crate::cleanup_log::note(
-                                "stop Custom mode after its tunnel disappeared",
-                                &detail,
-                            );
-                            append(&log_path, &format!("WATCHDOG {detail}"));
-                            tripped.store(true, std::sync::atomic::Ordering::SeqCst);
-                            // Cleared as well as shut down: any relay
-                            // thread already past the redirect sees no
-                            // tunnel and takes the ordinary route rather
-                            // than retrying a bind that cannot succeed.
-                            tunnel.clear();
-                            stopper.stop_intercepting();
-                            return;
+        let worker = Worker::spawn(move |stop| {
+            let mut strikes = 0;
+            while sleep_unless_stopped(&stop, WATCHDOG_INTERVAL) {
+                match liveness(index, address, &adapters::find_by_name(&adapter_name)) {
+                    Liveness::Alive => strikes = 0,
+                    Liveness::NoEvidence => {}
+                    Liveness::Gone => {
+                        strikes += 1;
+                        if strikes < WATCHDOG_STRIKES {
+                            continue;
                         }
+                        let detail = format!(
+                            "the tunnel adapter {adapter_name} (interface {index}, {address}) \
+                             is gone, but Custom mode was still intercepting this machine's \
+                             packets -- interception has been stopped so traffic can flow \
+                             normally again"
+                        );
+                        // Both files on purpose. cleanup.log is the
+                        // one a support conversation asks for, and
+                        // split-tunnel.log is where the counters
+                        // that stop moving are, so the two halves of
+                        // the story are readable together.
+                        crate::cleanup_log::note(
+                            "stop Custom mode after its tunnel disappeared",
+                            &detail,
+                        );
+                        append(&log_path, &format!("WATCHDOG {detail}"));
+                        tripped.store(true, std::sync::atomic::Ordering::SeqCst);
+                        // Cleared as well as shut down: any relay
+                        // thread already past the redirect sees no
+                        // tunnel and takes the ordinary route rather
+                        // than retrying a bind that cannot succeed.
+                        tunnel.clear();
+                        stopper.stop_intercepting();
+                        return;
                     }
                 }
-            })
-        };
-        Self { stop, thread: Some(thread) }
-    }
-
-    pub(super) fn stop(mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+            }
+        });
+        Self { _worker: worker }
     }
 }
 

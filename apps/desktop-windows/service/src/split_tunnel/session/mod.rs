@@ -584,38 +584,35 @@ impl Session {
     }
 
     /// Takes the session down, in the order each step's comment
-    /// explains.
+    /// explains. Every part now releases itself when dropped, so each
+    /// step is a drop; what is still written out by hand is the order.
     pub(super) fn stop(self) {
         // First of all, and before the join below can take any time:
         // the backstop must not be looking for a vanished adapter while
         // the session it would complain about is being taken down on
         // purpose. Stopping it is also what keeps `stop()` from being
         // joined by a thread it is itself joining.
-        self.watchdog.stop();
+        drop(self.watchdog);
         // Interception first. Stopping the relays while packets were
         // still being rewritten to them would send a selected app's
         // traffic to a port with nothing behind it -- a blackout rather
         // than the fail-open this promises.
-        self.redirect.stop();
+        drop(self.redirect);
         // Before the relays, and for the same reason interception is
         // stopped before them: this thread closes customers' connections
         // on the assumption that a tunnel is there to rebuild them
         // through, and that assumption stops being true here.
-        self.convergence.stop();
-        self.relays.stop();
-        let mut allowance = self.allowance;
-        allowance.remove();
-        self.logger.stop();
-        let mut route = self.route;
-        route.remove();
+        drop(self.convergence);
+        drop(self.relays);
+        drop(self.allowance);
+        drop(self.logger);
+        drop(self.route);
         // Last, so that at no point is Custom mode still intercepting
         // while a selected app's IPv6 has already been let out again.
         // Both blocks come off together as far as the customer is
         // concerned; the order only decides which way the overlap falls,
         // and the safe way is for the WFP one to outlast the loop.
-        if let Some(mut block) = self.ipv6_apps {
-            block.remove();
-        }
+        drop(self.ipv6_apps);
     }
 }
 

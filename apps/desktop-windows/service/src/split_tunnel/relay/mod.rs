@@ -467,7 +467,8 @@ fn bind_upstream(
     Ok((UpstreamUdp::Pinned(socket.into()), registration))
 }
 
-/// Handles on the running relays, so the controller can stop them.
+/// Handles on the running relays. Dropping them stops them -- see the
+/// `Drop` below -- so a session that holds them cannot forget to.
 pub struct Relays {
     pub tcp_port: u16,
     pub udp_port: u16,
@@ -482,6 +483,14 @@ pub struct Relays {
 }
 
 impl Relays {
+    /// Stops the relays now rather than when they go out of scope. The
+    /// stop itself is the `Drop` below.
+    pub fn stop(self) {
+        drop(self);
+    }
+}
+
+impl Drop for Relays {
     /// Signals every relay thread and waits for them.
     ///
     /// The TCP acceptor is woken by connecting to it: `accept` blocks,
@@ -491,7 +500,12 @@ impl Relays {
     /// unblock when their sockets shut and finish on their own; joining
     /// them here would put "wait for something to disappear" on the
     /// disconnect path, which is the one thing it may not do.
-    pub fn stop(self) {
+    ///
+    /// A `Drop` rather than only a method, so that a bring-up which fails
+    /// after the relays started, or panics, stops them on the way out
+    /// instead of leaving three threads and two listeners behind for
+    /// whoever remembered to call `stop`.
+    fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.tcp_port));
         // The UDP receive is woken the same way, by being given
@@ -504,7 +518,7 @@ impl Relays {
         }
         self.carried.close_all();
         self.upstreams.close_all();
-        for thread in self.threads {
+        for thread in std::mem::take(&mut self.threads) {
             let _ = thread.join();
         }
     }
