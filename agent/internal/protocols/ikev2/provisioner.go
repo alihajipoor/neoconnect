@@ -60,6 +60,21 @@ type Provisioner struct {
 	// story. Only a read takes the baseline: not a failed one, and not the
 	// early return where IKEv2 is not served here.
 	primed bool
+	// Identities whose sessions must end: removed or disabled, and still
+	// listed the last time anything looked. The control plane sends
+	// DISABLE_USER and DELETE_USER once. A command that fails is recorded
+	// as FAILED and never sent again -- replayQueuedCommands re-sends only
+	// QUEUED and SENT rows, and the re-assert sweep sends only the
+	// credentials that should be on -- so a terminate that failed would
+	// leave a revoked customer connected for as long as their client chose
+	// to stay, with nothing on the server to end it (rekey_time = 0s, no
+	// DPD). Every stats poll ends what is still listed here, until a
+	// listing shows none of it. Found by the second 2026-10-06 review.
+	//
+	// In memory only: an agent restart between a failed terminate and the
+	// next poll forgets it, the one gap left. Re-provisioning the identity
+	// takes it off.
+	ending map[string]bool
 }
 
 // swanctlRunner runs swanctl with the given arguments and returns what it
@@ -77,6 +92,7 @@ func New(secretsPath, swanctlPath string) *Provisioner {
 		swanctl:     swanctlPath,
 		users:       map[string]string{},
 		lastBytes:   map[string]saBytes{},
+		ending:      map[string]bool{},
 	}
 	p.runSwanctl = p.execSwanctl
 	return p
@@ -94,6 +110,8 @@ func (p *Provisioner) CreateUser(ctx context.Context, user common.ProtocolUser) 
 	// reconnect, and re-adding a user with the same credentials must be
 	// a no-op rather than an error.
 	p.users[username] = password
+	// Back on: whatever was still due to be ended is this customer's again.
+	delete(p.ending, username)
 	return p.flushLocked(ctx)
 }
 
@@ -113,6 +131,8 @@ func (p *Provisioner) RemoveUser(ctx context.Context, externalUserID string) err
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.users, externalUserID)
+	// Before anything that can fail, so a failure here is still retried.
+	p.ending[externalUserID] = true
 	if err := p.flushLocked(ctx); err != nil {
 		return err
 	}
@@ -137,6 +157,7 @@ func (p *Provisioner) SetEnabled(ctx context.Context, externalUserID string, ena
 		return p.flushLocked(ctx)
 	}
 	delete(p.users, externalUserID)
+	p.ending[externalUserID] = true
 	if err := p.flushLocked(ctx); err != nil {
 		return err
 	}
@@ -271,7 +292,34 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 		}
 		deltas = append(deltas, *d)
 	}
+
+	// After the usage is taken: what a revoked session carried up to now
+	// is still theirs.
+	p.endRevokedLocked(ctx, sas)
 	return deltas, nil
+}
+
+// endRevokedLocked ends the sessions of every identity in ending that sas
+// still lists, and forgets each one sas shows none of. See ending.
+// Failures are logged rather than returned: the usage this poll read is
+// good, and the next poll tries again.
+func (p *Provisioner) endRevokedLocked(ctx context.Context, sas []saInfo) {
+	for username := range p.ending {
+		listed := false
+		for _, sa := range sas {
+			if sa.user == username {
+				listed = true
+				break
+			}
+		}
+		if !listed {
+			delete(p.ending, username)
+			continue
+		}
+		if err := p.endSessions(ctx, username, sas); err != nil {
+			log.Printf("%v; trying again on the next poll", err)
+		}
+	}
 }
 
 // counterDelta is the growth of a cumulative counter since the last
@@ -467,14 +515,21 @@ func (p *Provisioner) flushLocked(ctx context.Context) error {
 // Never `--ike neoxify-ikev2` on its own: that is every customer on the
 // node.
 //
-// A failure is returned, not swallowed, so the outbox retries. A retry is
-// safe: the secret is already gone, and the list finds only what is still
-// up.
+// A failure is returned, not swallowed, so the command is recorded as
+// FAILED with the reason. Nothing in the control plane sends a failed
+// command again, though: the retry is this provisioner's own, on every
+// stats poll, for as long as the identity is in ending. A retry is safe:
+// the secret is already gone, and the list finds only what is still up.
 func (p *Provisioner) terminate(ctx context.Context, username string) error {
 	sas, err := p.listSAs(ctx)
 	if err != nil {
 		return fmt.Errorf("ikev2: removed %q but could not list its sessions to end them: %w", username, err)
 	}
+	return p.endSessions(ctx, username, sas)
+}
+
+// endSessions ends each of sas that belongs to username, by its IKE SA id.
+func (p *Provisioner) endSessions(ctx context.Context, username string, sas []saInfo) error {
 	for _, sa := range sas {
 		if sa.user != username {
 			continue
