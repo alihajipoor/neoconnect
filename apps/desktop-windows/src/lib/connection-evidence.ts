@@ -43,6 +43,7 @@
  */
 
 import type { ConnectionState } from "../components/ConnectOrb";
+import type { ReconnectingView } from "./auto-reconnect";
 import type { Intent } from "./connect-intent";
 import type { EgressVerdict } from "./egress";
 import type { TranslationKey } from "./i18n";
@@ -446,11 +447,33 @@ export interface Headline {
  * IP" -- describe somebody who has not connected yet. Somebody whose
  * tunnel just closed under them needs to be told that it closed and
  * that their traffic is going out unprotected now, in the warning
- * colour rather than the neutral one. */
+ * colour rather than the neutral one.
+ *
+ * `reconnecting` is the automatic reconnect after such a drop
+ * (`auto-reconnect.ts`), and it outranks `dropped` while it runs: the
+ * tunnel is gone and the app is bringing it back by itself, which is
+ * neither "connect again" nor "checking connection" -- the second of
+ * which describes a connect the customer is waiting on, and says nothing
+ * of their traffic meanwhile going out in the clear. It never touches a
+ * tunnel that is up: "You're protected" after a reconnect comes from the
+ * same evidence as after a press of Connect, and nothing here can
+ * promote or withhold it. Nor "unknown": a service that will not answer
+ * is not known to be down. */
 export function headlineFor(
   state: ConnectionState,
-  { dropped, customMode }: { dropped: boolean; customMode: boolean },
+  {
+    dropped,
+    customMode,
+    reconnecting = null,
+  }: { dropped: boolean; customMode: boolean; reconnecting?: ReconnectingView | null },
 ): Headline {
+  if (reconnecting !== null && !isTunnelUp(state) && state !== "unknown") {
+    return {
+      title: "dash.reconnecting",
+      hint: reconnecting.offline ? "dash.reconnectingOfflineHint" : "dash.reconnectingHint",
+      tone: "warning",
+    };
+  }
   switch (state) {
     case "connected":
       return { title: "dash.protected", hint: "dash.protectedHint", tone: "success" };

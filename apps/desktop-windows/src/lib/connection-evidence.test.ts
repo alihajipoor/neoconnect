@@ -527,6 +527,65 @@ describe("the headline", () => {
     expect(headlineFor("unverified", { dropped: false, customMode: true }).hint).toBe("dash.unverifiedCustomHint");
     expect(headlineFor("unverified", { dropped: false, customMode: false }).hint).toBe("dash.unverifiedHint");
   });
+
+  describe("while the app reconnects by itself", () => {
+    const TRYING = { offline: false, waiting: true };
+    const OFFLINE = { offline: true, waiting: true };
+    const PASS = { offline: false, waiting: false };
+
+    it("says so, and that traffic is unprotected meanwhile, over every state with no tunnel", () => {
+      // Between attempts the screen is "disconnected"; during one the
+      // ladder publishes "connecting" and "verifying", and its teardown
+      // can show "disconnecting". None of those may read as "connect to
+      // be protected" or as an ordinary "checking connection" -- the
+      // customer has not pressed anything, and their traffic is in the
+      // clear until it is back.
+      for (const state of ["disconnected", "connecting", "verifying", "disconnecting"] as ConnectionState[]) {
+        for (const reconnecting of [TRYING, PASS]) {
+          expect(headlineFor(state, { dropped: true, customMode: false, reconnecting }), state).toEqual({
+            title: "dash.reconnecting",
+            hint: "dash.reconnectingHint",
+            tone: "warning",
+          });
+        }
+      }
+      // Control: the same states without an episode keep their words.
+      expect(headlineFor("disconnected", { dropped: true, customMode: false }).title).toBe("dash.dropped");
+      expect(headlineFor("connecting", { dropped: false, customMode: false }).title).toBe("dash.verifying");
+    });
+
+    it("says it is waiting for a network when there is none", () => {
+      expect(headlineFor("disconnected", { dropped: true, customMode: false, reconnecting: OFFLINE }).hint).toBe(
+        "dash.reconnectingOfflineHint",
+      );
+    });
+
+    it("never stands in for evidence about a tunnel that is up", () => {
+      // The pass that lands publishes its verdict before the episode is
+      // told it landed. "You're protected" then is the pass's own proof,
+      // and "unverified" or "degraded" its own doubt; the episode can
+      // neither withhold the first nor paper over the others.
+      for (const state of ["connected", "unverified", "degraded"] as ConnectionState[]) {
+        expect(headlineFor(state, { dropped: false, customMode: false, reconnecting: PASS }), state).toEqual(
+          headlineFor(state, { dropped: false, customMode: false }),
+        );
+      }
+      // Nor for a service that will not answer.
+      expect(headlineFor("unknown", { dropped: false, customMode: false, reconnecting: TRYING }).title).toBe(
+        "dash.unknown",
+      );
+    });
+
+    it("still says 'protected' for one state only", () => {
+      for (const state of EVERY) {
+        for (const reconnecting of [null, TRYING, OFFLINE, PASS]) {
+          const { title, hint } = headlineFor(state, { dropped: true, customMode: false, reconnecting });
+          const claims = title === "dash.protected" || hint === "dash.protectedHint";
+          expect(claims, `${state} ${JSON.stringify(reconnecting)}`).toBe(state === "connected");
+        }
+      }
+    });
+  });
 });
 
 describe("the liveness wiring the pure functions cannot check", () => {

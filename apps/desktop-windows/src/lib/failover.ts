@@ -75,6 +75,13 @@ function rank(protocol: Protocol): number {
 export function orderCandidates(
   users: ProtocolUser[],
   opts: {
+    /** The route a tunnel was on when it dropped, for an automatic
+     * reconnect (`auto-reconnect.ts`): tried first, ahead even of the
+     * pin. It is where the last ladder pass -- which already honoured
+     * the pin -- actually landed, so it is the best evidence there is of
+     * what works here right now. Everything else follows in the order it
+     * always would. */
+    resumeRouteId?: string | null;
     pinnedRouteId?: string | null;
     lastGoodRouteId?: string | null;
     preferredRouteId?: string | null;
@@ -91,8 +98,17 @@ export function orderCandidates(
     ispTags?: Record<string, IspTagCode | undefined>;
   } = {},
 ): ProtocolUser[] {
-  const { pinnedRouteId, lastGoodRouteId, preferredRouteId, history, network, now, reachability, ispTags } =
-    opts;
+  const {
+    resumeRouteId,
+    pinnedRouteId,
+    lastGoodRouteId,
+    preferredRouteId,
+    history,
+    network,
+    now,
+    reachability,
+    ispTags,
+  } = opts;
 
   // A chosen route leads; it does not exclude the others.
   //
@@ -107,6 +123,7 @@ export function orderCandidates(
   // should be an explicit setting, not a side effect of browsing the
   // server list.
   const priority = (u: ProtocolUser): number => {
+    if (resumeRouteId && u.routeId === resumeRouteId) return -4;
     if (pinnedRouteId && u.routeId === pinnedRouteId) return -3;
     if (lastGoodRouteId && u.routeId === lastGoodRouteId) return -2;
     if (preferredRouteId && u.routeId === preferredRouteId) return -1;

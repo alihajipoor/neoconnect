@@ -173,6 +173,30 @@ describe("what the strings are allowed to claim", () => {
     expect(fa["dash.tunnelDnsUnforced"]).not.toMatch(/تو/);
   });
 
+  /** The automatic reconnect's words (auto-reconnect.ts).
+   *
+   * Fail open is unchanged: while the tunnel is down nothing is blocked,
+   * so a customer who reads "Reconnecting..." and nothing else could
+   * believe they are still covered. Both hints have to say, in both
+   * languages, that traffic is not protected until the tunnel is back --
+   * and neither may carry a reassurance. */
+  it("says traffic is unprotected while it reconnects, in both languages", () => {
+    for (const key of ["dash.reconnectingHint", "dash.reconnectingOfflineHint"] as const) {
+      expect(en[key], key).toMatch(/not protected/);
+      expect(fa[key], key).toContain("محافظت نمی‌شود");
+      expect(en[key], key).not.toMatch(/\b(secure|safe|you're protected)\b/i);
+      // Formal «شما», like the rest of the dictionary.
+      expect(fa[key], key).toContain("شما");
+    }
+    // The one that is about a tunnel gone but the network up says where
+    // the traffic is going: around Neoxify.
+    expect(en["dash.reconnectingHint"]).toMatch(/without Neoxify/);
+    expect(fa["dash.reconnectingHint"]).toContain("بدون نئوکسیفای");
+    // And the headline claims nothing about the outcome.
+    expect(en["dash.reconnecting"]).not.toMatch(/protect|connected/i);
+    expect(fa["dash.reconnecting"]).not.toContain("محافظت");
+  });
+
   it("tells the customer what a catalogue entry actually is", () => {
     // The catalogue runs to 1,480 entries and nothing in it has been tested
     // against a running game. A long list reads as a compatibility list
