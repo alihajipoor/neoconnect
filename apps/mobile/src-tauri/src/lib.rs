@@ -84,7 +84,11 @@ pub fn run() {
             // The egress check's transport; see `mod health_ip` above.
             // Absent here, every reading would reject as "no answer" and
             // no connect could ever be proven.
-            health_ip::health_ip_v4
+            health_ip::health_ip_v4,
+            // A tunnel server's name as the engines resolve it, for the
+            // same check. Absent, a server named by hostname (IKEv2's)
+            // would go unrecognised in `health_ip_v4`'s peer address.
+            health_ip::resolve_ipv4
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

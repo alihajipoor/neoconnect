@@ -31,8 +31,17 @@
 //! given, and iOS claims IPv6 only so it cannot leave beside the tunnel
 //! -- so the same mismatch turned every reading of a dual-stack phone's
 //! connect into a non-comparison. Changes here ship in both apps.
+//!
+//! Each answer also says which address the request actually connected
+//! to (`HealthIpAnswer::peer`), and `resolve_ipv4` turns a server's name
+//! into addresses the way the engines do. Together they let the egress
+//! check recognise an endpoint that sits on the tunnel's own server:
+//! the client routes that address around the tunnel, so such an
+//! endpoint is asked over the customer's own line and answers with
+//! their home address through a tunnel that works. Measured on
+//! 2026-10-06; see `src/lib/egress.ts`.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::time::Duration;
 
 /// What one `/health/ip` request came back with.
@@ -43,6 +52,15 @@ pub struct HealthIpAnswer {
     /// The body, when it was JSON and small enough to be what this
     /// endpoint returns. `null` otherwise -- an error page, say.
     pub body: Option<serde_json::Value>,
+    /// The address the request was actually made to, as connected --
+    /// not as the name was expected to resolve. `null` only if the HTTP
+    /// stack did not record it, which reqwest does for every connection
+    /// it makes itself, TLS included.
+    ///
+    /// What the egress check needs it for: a `/health/ip` answer from the
+    /// tunnel's own server was asked around the tunnel, not through it,
+    /// and says nothing about where the tunnel's traffic leaves.
+    pub peer: Option<String>,
 }
 
 /// Far more than `/health/ip` returns (an address, a country code, a
@@ -139,6 +157,8 @@ pub async fn health_ip_v4(base: String, timeout_ms: u64) -> Result<HealthIpAnswe
         .await
         .map_err(|_| "no answer".to_string())?;
     let status = response.status().as_u16();
+    // Read before the body: `chunk` borrows the response mutably.
+    let peer = response.remote_addr().map(|address| address.ip().to_canonical().to_string());
 
     let mut bytes = Vec::new();
     let mut whole = true;
@@ -159,7 +179,67 @@ pub async fn health_ip_v4(base: String, timeout_ms: u64) -> Result<HealthIpAnswe
         }
     }
     let body = if whole { serde_json::from_slice(&bytes).ok() } else { None };
-    Ok(HealthIpAnswer { status, body })
+    Ok(HealthIpAnswer { status, body, peer })
+}
+
+/// The longest a hostname is allowed to be (RFC 1035's 253 in text).
+const MAX_HOSTNAME: usize = 253;
+
+/// Whether `host` is something a resolver should be asked about at all:
+/// letters, digits, dots and hyphens, of a sane length. Nothing else a
+/// server name in a credential can be.
+fn plain_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= MAX_HOSTNAME
+        && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+}
+
+/// The IPv4 addresses a server name resolves to, the way the engines
+/// resolve it: an address literal is itself, and a name goes to the
+/// system resolver, keeping IPv4 only -- every node is IPv4-only, and
+/// the route the client installs around the tunnel for its server is an
+/// IPv4 one (`engines::xray::resolve_server` in the service; Windows'
+/// own IKEv2 client and the phones resolve through the same system
+/// resolver).
+///
+/// For the egress check, which has to recognise the tunnel's own server
+/// in `HealthIpAnswer::peer`. Credentials name their server by address
+/// today -- `connection.host` is a node's validated `publicIp` -- so this
+/// mostly answers for IKEv2, which dials the node's certificate name.
+///
+/// Bounded: the system resolver cannot be interrupted, so it runs on a
+/// thread of its own and is abandoned, not waited for, past the timeout.
+#[tauri::command]
+pub async fn resolve_ipv4(host: String, timeout_ms: u64) -> Result<Vec<String>, String> {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']').to_string();
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return Ok(vec![address.to_canonical().to_string()]);
+    }
+    if !plain_hostname(&host) {
+        return Err("not a hostname".to_string());
+    }
+    let timeout = Duration::from_millis(timeout_ms.max(1)).min(MAX_TIMEOUT);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let found = (host.as_str(), 0).to_socket_addrs().map(|found| found.collect::<Vec<_>>());
+        // Nobody listening any more is the timeout below, already answered.
+        let _ = sender.send(found);
+    });
+    let found = tauri::async_runtime::spawn_blocking(move || receiver.recv_timeout(timeout))
+        .await
+        .map_err(|_| "could not resolve".to_string())?
+        .map_err(|_| "no answer in time".to_string())?
+        .map_err(|_| "could not resolve".to_string())?;
+    let mut addresses: Vec<String> = Vec::new();
+    for address in found {
+        if let IpAddr::V4(v4) = address.ip() {
+            let text = v4.to_string();
+            if !addresses.contains(&text) {
+                addresses.push(text);
+            }
+        }
+    }
+    Ok(addresses)
 }
 
 #[cfg(test)]
@@ -275,6 +355,51 @@ mod tests {
         assert!(request_line.starts_with("GET /api/health/ip "), "{request_line}");
     }
 
+    /// The address actually connected to, not the name asked for: the
+    /// base says `localhost`, the connection went to 127.0.0.1, and that
+    /// is what the egress check compares with the tunnel's server.
+    #[test]
+    fn reports_the_address_it_connected_to() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = serve_once(listener, OK_JSON);
+
+        let answer = tauri::async_runtime::block_on(health_ip_v4(
+            format!("http://localhost:{port}/api"),
+            3_000,
+        ))
+        .expect("an IPv4 listener answers");
+        assert_eq!(answer.peer.as_deref(), Some("127.0.0.1"));
+        server.join().unwrap();
+
+        // And it is one of the addresses the name resolves to, which is
+        // how a server named by hostname is recognised.
+        let resolved = tauri::async_runtime::block_on(resolve_ipv4("localhost".to_string(), 3_000)).unwrap();
+        assert!(resolved.contains(&"127.0.0.1".to_string()), "{resolved:?}");
+    }
+
+    #[test]
+    fn resolves_a_literal_to_itself_and_a_name_to_ipv4_only() {
+        let resolve = |host: &str| tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 3_000));
+        assert_eq!(resolve("192.0.2.1"), Ok(vec!["192.0.2.1".to_string()]));
+        assert_eq!(resolve(" 192.0.2.1 "), Ok(vec!["192.0.2.1".to_string()]));
+        // An IPv4-mapped literal is the IPv4 address it carries.
+        assert_eq!(resolve("::ffff:192.0.2.1"), Ok(vec!["192.0.2.1".to_string()]));
+        // `localhost` has an IPv6 answer on Windows too; only IPv4 is kept.
+        let local = resolve("localhost").unwrap();
+        assert!(!local.is_empty() && local.iter().all(|a| a.parse::<Ipv4Addr>().is_ok()), "{local:?}");
+    }
+
+    #[test]
+    fn asks_the_resolver_nothing_that_is_not_a_hostname() {
+        for host in ["", "a b", "x/y", "http://example.com", "example.com:443", "exa_mple.com"] {
+            let answer = tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 1_000));
+            assert_eq!(answer, Err("not a hostname".to_string()), "{host:?}");
+        }
+        let long = "a".repeat(MAX_HOSTNAME + 1);
+        assert!(tauri::async_runtime::block_on(resolve_ipv4(long, 1_000)).is_err());
+    }
+
     #[test]
     fn reports_an_error_page_as_an_answer_with_no_body() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -286,7 +411,10 @@ mod tests {
             3_000,
         ))
         .expect("a 502 is still an answer");
-        assert_eq!(answer, HealthIpAnswer { status: 502, body: None });
+        assert_eq!(
+            answer,
+            HealthIpAnswer { status: 502, body: None, peer: Some("127.0.0.1".to_string()) },
+        );
         server.join().unwrap();
     }
 
