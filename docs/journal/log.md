@@ -5041,3 +5041,39 @@ Tools, outside the repo: `udp-flow.ps1` (guest) and
 `create-burst-test.ps1` (host). Cloudflare's speed test began answering
 403 to the node's address after a few long downloads; the download now
 fetches a byte range from Hetzner's speed-test file instead.
+
+## 2026-10-07 (evening) — the Stripe webhook had never been deliverable
+
+Adding `checkout.session.expired` and `payment_intent.canceled` to the
+Stripe endpoint (owner's request) turned up a worse problem: the
+endpoint was `https://connect.neoxify.com/api/billing/webhooks/stripe`.
+`connect.neoxify.com` resolves to the panel host, but the certificate
+there covers `connect.neoxify.site` and not `.com` -- the `.com` name
+was taken off it deliberately (the 2026-08 censorship entry: `.com` is
+the hosting product's domain). Stripe will not deliver to a hostname
+whose certificate does not match, and the endpoint's delivery history
+was empty: no event had ever reached the backend through it.
+
+No customer was charged without being activated: Stripe's own event
+history since 2026-07-28 holds only `checkout.session.expired` events,
+one exactly 24 hours after each of the five checkouts still PENDING in
+`payment_transactions` (2026-08-13 x2, 08-17, 10-01, 10-05), and no
+`payment_intent.succeeded`.
+
+Changed, with the owner's OK, in the Stripe dashboard (live mode):
+- endpoint URL -> `https://connect.neoxify.site/api/billing/webhooks/stripe`
+  (`PUBLIC_API_URL`; answers an unsigned POST with the handler's own
+  400). The signing secret is unchanged.
+- events: `payment_intent.succeeded`, `payment_intent.payment_failed`,
+  `payment_intent.canceled`, `checkout.session.expired`.
+- the `panel.neoxify.com` endpoint on the same account is the hosting
+  product's and was not touched.
+
+The five PENDING rows were set to FAILED -- what `markFailed` would have
+done had the events arrived -- with a note in `rawWebhookPayload`; the
+rows as they were are in `/root/db-backups/pre-stripe-expired-reconcile-*.csv`.
+
+**Unverified:** a delivery. The dashboard offers no resend for an event
+never sent to the endpoint, and live mode's shell is read-only, so the
+first proof is the next real checkout that completes or expires: its
+delivery should show 200 under the endpoint, and the row should change.
