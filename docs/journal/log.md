@@ -5829,3 +5829,22 @@ checkers, none showing protection without proof:
 - Phone: a failed attempt's error line, carried onto a remounted screen,
   stays under "You're protected" after a later attempt lands (Windows
   clears it as each automatic pass begins; the phone does not yet).
+
+**Released 2026-10-08** from `e12acb4`: `desktop-v0.9.47` (Neoxify-Setup.exe,
+the NSIS setup and its updater signature) and `android-v0.2.25` (APK, AAB),
+both in `alihajipoor/neoxify-releases`. The updates API offered 0.9.47 to a
+0.9.46 client within the 5-minute cache. The released Neoxify-Setup.exe
+(checksum matched `sha256sums.txt`) installed in the VM as 0.9.47, its
+frontend bundle the one tested above, and one Stealth engine kill
+reconnected to "You're protected" with 0 direct packets after, exit
+finland1. No backend change, so no deploy. iOS 0.2.25 is not built.
+
+One slip on the way, recorded so it is not repeated: the release commit
+first staged `apps/desktop-windows/src-tauri/tauri.conf.json` with the
+updater mirror hostnames the desktop pretest hook writes there in a
+checkout holding the real seed, not only the version line. It was public
+on `claude/rc-0.9.47` for about a minute, then amended to the version line
+alone and force-pushed; the CI runs on the dropped commit were cancelled.
+The hostnames are in every shipped installer, but the repo is meant not to
+list them. When bumping: test first, `git checkout --` the file, apply only
+`"version"`, and read `git diff --cached` of it before committing.
