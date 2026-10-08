@@ -5063,11 +5063,15 @@ the repair, and its teardown -- a Disconnect -- cancel the repair mid-step.
 
 **Backoff.** Immediate, then 2 s, 5 s, 10 s, 20 s, 30 s -- six passes at
 most. No new pass starts once 120 s have gone on backoff and passes (a
-running pass is never interrupted); a pass that never returns counts as
-failed after 180 s. Three deaths in a row within 60 s of coming up stop
-it without another attempt. No network (`navigator.onLine` false), or a
-phone app in the background, pauses the episode without spending
-attempts or budget, for 30 minutes at most -- then "VPN connection lost".
+running pass is never interrupted); a pass that shows no sign of life --
+no new rung -- for 180 s counts as failed, measured as the ladder's own
+150 s guard is, so a long ladder still dialling is waited for. Three
+deaths in a row within 60 s of coming up stop it without another
+attempt. No network (`navigator.onLine` false), or a phone app in the
+background -- between attempts, or during one, whose pass the OS freezes
+-- pauses the episode without spending attempts or budget, for 30
+minutes at most -- then "VPN connection lost". A backoff is over when its
+timer fires; the wall clock, which can be set back, is not asked.
 
 ### What is shared and what is per platform
 
@@ -5126,8 +5130,11 @@ sign-out files nothing. The panel does not yet filter on the prefix.
   winning over a pass that reports later, sign-out at the drop and
   between attempts, the device-limit refusal, a wedged pass, a second
   drop during an episode, no re-arming of a tunnel the customer asked to
-  be rid of, no vouching across sessions. The wiring in both dashboards
-  by source assertion, as for the liveness poll.
+  be rid of, no vouching across sessions. Added after review: a backoff
+  timer firing with the wall clock set back, a pass still dialling at
+  five minutes, and a phone app away during a pass (budget, ceiling, the
+  half-hour end, frozen or not). The wiring in both dashboards by source
+  assertion, as for the liveness poll.
 - 22 mutations of the shared logic and 10 of the phone's, each removing
   one rule; every one fails a test. One survived at first (the ceiling
   check on waking) and got its test.
@@ -5176,3 +5183,15 @@ still works, and telemetry rows with the `auto-reconnect` reason. Then:
 - Mobile on a network where the API is unreachable takes the cached
   path in `loadAll`, which never adopts the platform's state (unchanged
   from before), so nothing is armed for a tunnel adopted that way.
+- The quick-death stop counts from when a drop is *noticed*. If a
+  minimized window's timers are throttled to one a minute (unproven: wry
+  does not mark a minimized WebView2 hidden), a tunnel dying in roughly
+  the last P seconds of its first minute (P, the pass's length) is
+  noticed after the minute, resets the count, and is reconnected every
+  minute or two until the window is restored -- each landing proven, as
+  for one that dies at 61 s. Left so after review: the app's polls cannot
+  place a death inside a minute-long gap, and counting from the last poll
+  that saw the tunnel alive only moves the error onto tunnels that lived
+  well past a minute -- stopped as quick deaths, on phones after every
+  "connect, then leave the app". Only the service saying when the engine
+  exited would settle it.
