@@ -5123,7 +5123,8 @@ timer fires; the wall clock, which can be set back, is not asked.
   *and* read this network's route memory (`loadRouteMemory`), which the
   pass orders by and its landing writes back whole -- run as loading
   ended, it dialled without the memory and its landing replaced every
-  network's remembered route and history with its one entry. A pass a
+  network's remembered route and history with its one entry (and, since
+  the third round, the route list). A pass a
   newer one replaced no longer forgets the newer one's armed tunnel, and
   a failover note compares against the server the tile showed
   (`displayedRouteId`), not the credential the screen holds.
@@ -5214,14 +5215,89 @@ refused refresh, from App) ends as `signedOut` with no row whatever its
 pass reports -- it read to the pass as overtaken and was filed as "the
 customer pressed something".
 
+### Third review round
+
+- **A session that ends ends its episode** (`onSessionEnd` in
+  `session-end.ts`, told as the generation moves; the controller
+  registers itself). A sign-out from Settings, an account deleted there
+  or a refused refresh reach no dashboard, and an attempt held for a
+  screen had no timer left: the next sign-in's dashboard said
+  "Reconnecting..." until it had loaded. `reconnectingView` now takes the
+  session too, as `reconnectLost` and `vouching` do.
+- **Windows: a held attempt waits for the route list** as well as the
+  route memory (`routeListLoaded`, answered or not). The pass runs on the
+  `runLadder` of the render it starts in; started before the list
+  arrived, it landed with no concurrent extra exits and every game's
+  placement Unknown until the next connect.
+- **A location chosen while idle overrules nothing.** Idle, the only pass
+  running is the customer's own connect, which the choice does not stop
+  -- the list answers when its switch request does, possibly after the
+  customer closed it and pressed Connect -- and counting it as an
+  overrule left that connect's landing unarmed. Chosen over a tunnel kept
+  up, the episode no longer leads with the route that tunnel is on: the
+  automatic pass dialled the server just left, under a tile naming the
+  new one. It takes the ordinary order, the choice first.
+- **The ceiling's time in front is measured on a clock that only goes
+  forward** (`ReconnectDeps.elapsed`, `performance.now()`). A forward step
+  of the wall clock -- a phone's network time on the network change that
+  dropped the tunnel -- ate the ceiling in a five-second trip away and gave
+  up a live pass. The half hour away stays on the wall clock, which has to
+  count a device asleep.
+- **Phones, what a pass leaves** (`passTunnel` in `phone-pass.ts`): the
+  credential it landed on, or `"unproven"` -- an engine it dialled and did
+  not land on, still up past its eight-second wait. A screen adopting the
+  platform's word names and credits the landed credential (the per-ISP
+  session success went to the screen's route, the one that had failed
+  over), proves it against the pass's baseline only then, and shows an
+  unproven engine as the pass's own screen does -- nothing up -- with
+  nothing armed or claimed (it read "You're protected" over a rung the
+  pass had rejected, and arming it ended the episode's remaining
+  attempts). Arming quotes a stamp taken before the platform is asked.
+- **Phones, a pass's end on a screen still loading is the load's to
+  read**, now on the cached path too (it never read the platform; the
+  gap below is closed). Read from the listener with nothing loaded, the
+  slot was told the phone had no subscription: its standing wiped, the
+  landing's claim through the tunnel thrown away, and -- on the cached
+  path -- never claimed or renewed again that session.
+- **Phones, the device limit's teardown begun on a screen now gone** (a
+  late refusal of a landed pass's claim) is shown on the one mounted:
+  still disconnecting while owed, down once not. It said "You're
+  protected" beside the card, and over nothing after.
+- **Phones, presses.** Connect over the customer's own pass that has
+  been stopped and is still unwinding, or "Use on this device instead"
+  over any pass, takes it over and dials (`pressOverPass`); followed, the
+  press did nothing at all. Connect's waits ask the session as well as the
+  press count: a sign-out from Settings during the twenty-second wait for
+  a pass to let go was followed by a dial of the old account's credential.
+  A stop during the failed walk's last wait owns the screen (the error
+  line and a failed-connect row followed it). A stopped pass is filed as
+  the customer's only when a press stopped it (`pass.pressed`); its
+  attempt ending by itself filed "cancelled by the customer". A session
+  ended during the egress check takes its tunnel down silently, as after
+  the connect.
+- **Declined: iOS holding back only the rungs of the kind chosen
+  elsewhere.** Reported: an IKEv2 profile left disabled by another app's
+  personal VPN long ago stops every later automatic reconnect of an Xray
+  tunnel as `otherVpn`, with no other VPN up. True, and it errs the safe
+  way ("VPN connection lost", a press dials as before). The proposed fix
+  -- skip IKEv2's rungs and dial Xray -- is unsafe in a case the flag
+  cannot tell apart: that same other app, whose configuration is already
+  its kind's enabled one, connecting and kicking our Xray tunnel off.
+  Enabling nothing changes then (different kinds), so the stale flag is
+  the drop's only sign; iOS runs one VPN at a time (believed, not
+  observed), so dialling Xray would switch the device off the other
+  app's VPN -- the harm the check exists for. Telling the two apart needs
+  a native signal (why our tunnel stopped, `fetchLastDisconnectError`)
+  that the plugin does not carry.
+
 ### Proven -- tests on this PC
 
-- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **985
-  passed, 58 files** after the second review round (978 after the first,
-  853 / 56 on `main`); `pnpm typecheck` clean.
-- `apps/mobile`: `pnpm test` **197 passed, 12 files** after the second
-  review round (192 after the first, 140 / 10 on `main`);
-  `npx tsc --noEmit -p .` clean.
+- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **992
+  passed, 58 files** after the third review round (985 after the second,
+  978 after the first, 853 / 56 on `main`); `pnpm typecheck` clean.
+- `apps/mobile`: `pnpm test` **207 passed, 12 files** after the third
+  review round (197 after the second, 192 after the first, 140 / 10 on
+  `main`); `npx tsc --noEmit -p .` clean.
 - No desktop Rust touched, so `cargo test --workspace` was not run. The
   mobile plugin's `Granted` was: `cargo test -p tauri-plugin-neoxify-vpn`
   (from `apps/mobile/src-tauri`) **6 passed**, two new -- iOS's
@@ -5269,7 +5345,21 @@ customer pressed something".
   or without its ownership check, the failed walk not waiting for its
   engine, readiness after the baseline walk, the status read unbounded,
   the skip not marked, and the iOS check across both kinds (a source
-  assertion on the Swift, which is not compiled here).
+  assertion on the Swift, which is not compiled here). For the third
+  review round, 33 more, each reverted alone against its test: the view
+  across sessions (the controller, either dashboard), the session's end
+  not told or not registered, the bind or the flag without the route
+  list, the idle choice overruling, the kept tunnel's route kept, the
+  ceiling on the wall clock; and on the phone the listener adopting while
+  loading, the cached path not adopting, readiness not said over a pass
+  or not set at once, the slot teardown not shown either way, any stop
+  filed as the customer's, `pressed` as `stopped` or without ownership,
+  no session check after the egress check, the landing not recorded, its
+  credential not named, the baseline kept for an unknown tunnel, no
+  `"unproven"` mark, an unproven engine shown or armed, the adoption
+  unstamped, the engine's departure not recorded, a stopped pass followed,
+  a takeover followed (in `pressOverPass` and in the dashboard), Connect
+  not asking the session, and no stop check after the last wait.
 
 ### Unverified -- needs the VM, or a phone
 
@@ -5326,6 +5416,15 @@ screen back from Settings to show "Reconnecting..." and then the next
 attempt or "VPN connection lost" -- never "Connected, not confirmed" as
 the failed rung's `:xray` comes down. Unobserved.
 
+Added in the third review round, all unobserved on a phone: Connect
+pressed, stopped during its baseline walk, and pressed again -- expected
+a connect, not a dead orb; a pass landing while the screen back from
+Settings is still loading on a network where only the tunnel reaches the
+API -- expected the slot claimed through the tunnel and renewed after; on
+a plan of one device, a landed pass's claim refused late while that
+screen is mounted -- expected "Disconnecting..." and then the card, never
+"You're protected" beside it.
+
 **Known gaps, not decided here:**
 
 - A disconnect made outside the app is indistinguishable from a drop and
@@ -5360,9 +5459,24 @@ the failed rung's `:xray` comes down. Unobserved.
   and comes back with nothing running is *not* reconnected: by the drop
   rule the screen was not claiming a tunnel then, and the armed tunnel is
   forgotten.
-- Mobile on a network where the API is unreachable takes the cached
-  path in `loadAll`, which never adopts the platform's state (unchanged
-  from before), so nothing is armed for a tunnel adopted that way.
+- ~~Mobile on a network where the API is unreachable takes the cached
+  path in `loadAll`, which never adopts the platform's state~~ -- closed in
+  the third review round: the cached path reads the platform as the other
+  path does.
+- The attempt budget is still charged on the wall clock, as it always
+  was: a forward step of the clock during a pass spends it. Since the third
+  round the pass goes on (its ceiling is on the clock that only goes
+  forward), but if it fails no further attempt starts -- "VPN connection
+  lost". Moving the budget off the wall clock would also stop a laptop
+  asleep mid-pass from spending it, a change to Windows' behaviour not
+  made here.
+- Phones: a tunnel no pass of this process landed -- a fresh app over
+  one the platform kept -- is adopted with no credential and no baseline,
+  so the poll reads it "Connected, not confirmed" unless a fresh handshake
+  vouches for it, and credits nothing to any route. As before the second
+  round; that round's baseline now goes only with a landed credential.
+  A tunnel brought up outside the app (the iOS Settings toggle on our
+  IKEv2 profile) after a landing is still named as that landing's.
 - The quick-death stop counts from when a drop is *noticed*. If a
   minimized window's timers are throttled to one a minute (unproven: wry
   does not mark a minimized WebView2 hidden), a tunnel dying in roughly
