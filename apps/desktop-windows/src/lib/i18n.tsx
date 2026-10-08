@@ -621,6 +621,11 @@ const en = {
   "err.serverUnreachable": "Couldn't reach this server. Your network may be blocking it — try another location.",
   "err.notCarryingTraffic": "Connected, but no traffic got through.",
   "err.allProtocolsFailed": "Tried every available protocol — none of them carried traffic.",
+  // The phone's automatic reconnect passes over a protocol it may not dial
+  // without the customer -- iOS's IKEv2, whose configuration asks before it
+  // is installed -- so "every available protocol" would not be true.
+  "err.someProtocolsNotTried":
+    "None of the protocols tried carried traffic. Some are tried only when you press Connect.",
   "err.concurrentLimit": "Your plan's device limit is already in use. Disconnect another device and try again.",
   "err.quotaExhausted": "You've used all the data on your plan. Upgrade or wait for it to renew.",
   "err.subscriptionInactive": "Your subscription isn't active right now. Check its status on the dashboard.",
@@ -1291,6 +1296,8 @@ const fa: Record<TranslationKey, string> = {
   "err.serverUnreachable": "این سرور در دسترس نیست. موقعیت دیگری را امتحان کنید.",
   "err.notCarryingTraffic": "اتصال برقرار شد اما ترافیکی عبور نکرد.",
   "err.allProtocolsFailed": "همه پروتکل‌های موجود امتحان شدند — هیچ‌کدام ترافیک را عبور ندادند.",
+  "err.someProtocolsNotTried":
+    "هیچ‌کدام از پروتکل‌هایی که امتحان شدند ترافیک را عبور ندادند. بعضی پروتکل‌ها فقط وقتی «اتصال» را بزنید امتحان می‌شوند.",
   "err.concurrentLimit": "سقف دستگاه‌های پلن شما پر شده است. یک دستگاه دیگر را قطع کنید.",
   "err.quotaExhausted": "حجم پلن شما تمام شده است.",
   "err.subscriptionInactive": "اشتراک شما فعال نیست.",

@@ -29,13 +29,15 @@ import type { VpnAccess } from "./vpn";
  *
  *    iOS shows an app only its own connections, so there the wait sees
  *    nothing of another app's VPN. What iOS does show is which
- *    configuration is enabled: one at a time, and enabling another --
- *    another VPN app connecting, or a pick in Settings -- turns ours off.
- *    None of ours enabled (`VpnAccess.chosenElsewhere`, which comes with
- *    the permission's answer -- asking it on iOS changes nothing) stops
- *    the attempt the same way: dialling would switch ours back on, and
- *    the device off the other app's VPN. Read from Apple's documentation
- *    of `isEnabled`, not observed on a device.
+ *    configuration is enabled: one of each kind at a time -- tunnel
+ *    providers one kind, NEVPNManager profiles such as our IKEv2 another
+ *    -- and enabling another of a kind (another VPN app connecting, or a
+ *    pick in Settings) turns ours of that kind off. One of ours turned off
+ *    (`VpnAccess.chosenElsewhere`, which comes with the permission's
+ *    answer -- asking it on iOS changes nothing) stops the attempt the
+ *    same way: dialling would switch ours back on, and the device off the
+ *    other app's VPN. Asked per kind, since our own code turns nothing
+ *    off; read from Apple's documentation, not observed on a device.
  *  - **The permission is gone.** A system that took the VPN away, or an
  *    iOS profile the customer deleted, leaves this app without one. An
  *    automatic attempt never raises the consent dialog -- that is a

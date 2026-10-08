@@ -147,8 +147,15 @@ export async function repairNetwork(): Promise<RepairReport> {
  * The longest stretch a pass goes without checking its stop is its last
  * rung's egress check (thirty seconds) and reachability check (eight),
  * and on its way out it takes its own tunnel down and waits for the
- * service to confirm it (six and six). Past that the pass is wedged, and
- * the repair runs regardless. */
+ * service to confirm it (six and six). Before a rung's connect it is the
+ * settle (about twelve at most), its server's names (three) and the IPv6
+ * baseline (two and a half) -- shorter, but only because the pass asks
+ * again right before it connects. It did not, at first: a repair pressed
+ * in that stretch was followed by the pass's connect anyway, queued behind
+ * the repair's own teardown and given up on only at the app's 45-second
+ * reply timeout, so the wait ran out while it still held the guard -- and
+ * its teardown, a Disconnect, then cancelled the repair mid-step. Past
+ * this the pass is wedged, and the repair runs regardless. */
 export const REPAIR_PASS_WAIT_MS = 60_000;
 
 /** Stops a ladder pass still dialling -- an automatic reconnect's attempt,

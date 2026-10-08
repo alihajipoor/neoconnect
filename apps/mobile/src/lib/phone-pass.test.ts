@@ -205,9 +205,13 @@ describe("the phone dashboard's wiring", () => {
     return dashboard.slice(start, dashboard.indexOf(`\n${indent}}\n`, start));
   }
 
-  it("keeps the stop flag, and what the pass measured, with the app", () => {
+  it("keeps the stop flag, the count of presses, and what the pass measured, with the app", () => {
     expect(dashboard).toContain("const cancelRef = ladderPass.cancel;");
     expect(dashboard).not.toMatch(/const cancelRef = useRef\(/);
+    // A Connect left waiting on a screen that unmounted never heard the
+    // stop pressed on the one mounted on return, and dialled after it.
+    expect(dashboard).toContain("const pressRef = presses;");
+    expect(dashboard).not.toMatch(/const pressRef = useRef\(/);
     expect(dashboard).toContain("const tunnelServerRef = ladderPass.tunnelServer;");
     expect(dashboard).not.toMatch(/const tunnelServerRef = useRef/);
     const keep = body("function keepBaseline(baseline: BaselineIp | null) {");
@@ -254,9 +258,52 @@ describe("the phone dashboard's wiring", () => {
     const start = walk.indexOf("const standDown = async (engineUp: boolean) => {");
     const standDown = walk.slice(start, walk.indexOf("\n    };\n", start));
     expect(standDown).toContain("if (!pass.owns()) return;");
-    expect(standDown.indexOf("if (engineUp) await disconnect()")).toBeLessThan(standDown.indexOf("cancelRef.current"));
+    expect(standDown.indexOf("await disconnect()")).toBeLessThan(standDown.indexOf("cancelRef.current"));
     expect(standDown).toContain("void deviceSlot.release();");
     expect(standDown).toContain("await settleUndialled();");
+  });
+
+  it("stands down only once its engine is gone, and only while it is still the pass", () => {
+    // Back from a stop, `disconnect` had returned with Android's :xray still
+    // on its way down: a screen reading the platform as the pass ended took
+    // it for a tunnel. And a pass replaced during those waits -- a press
+    // began a newer one, clearing the flag -- gave back the newer pass's
+    // slot.
+    const walk = body("async function walkLadder(pass: PhonePass, options: LadderOptions): Promise<LadderOutcome> {");
+    const start = walk.indexOf("const standDown = async (engineUp: boolean) => {");
+    const standDown = walk.slice(start, walk.indexOf("\n    };\n", start));
+    const down = standDown.indexOf("await disconnect().catch(() => undefined);");
+    const gone = standDown.indexOf("await waitForTeardown();");
+    const pressed = standDown.indexOf("if (cancelRef.current || sessionGeneration() !== sessionAtStart) return;");
+    expect(down).toBeGreaterThan(0);
+    // Waited for whoever stopped it: before the check for a press.
+    expect(gone).toBeGreaterThan(down);
+    expect(gone).toBeLessThan(pressed);
+    // Ownership asked again after the waits, before anything is touched.
+    const owned = standDown.lastIndexOf("if (!pass.owns()) return;");
+    expect(owned).toBeGreaterThan(gone);
+    expect(owned).toBeLessThan(standDown.indexOf("void deviceSlot.release();"));
+  });
+
+  it("ends a pass that failed only once its last engine is gone, and only while it is still the pass", () => {
+    // The screen mounted since the pass began reads the platform the moment
+    // it ends; a failed Xray rung still coming down read as "Connected, not
+    // confirmed", and armed the reconnect over nothing.
+    const walk = body("async function walkLadder(pass: PhonePass, options: LadderOptions): Promise<LadderOutcome> {");
+    const loopEnd = walk.lastIndexOf("await disconnect().catch(() => undefined);\n    }\n");
+    expect(loopEnd).toBeGreaterThan(0);
+    const tail = walk.slice(loopEnd);
+    const gone = tail.indexOf("if (dialled) await waitForTeardown();");
+    const owned = tail.indexOf('if (!pass.owns() || sessionGeneration() !== sessionAtStart) return "failed";');
+    expect(gone).toBeGreaterThan(0);
+    expect(owned).toBeGreaterThan(gone);
+    // Before the screen, the slot or the report hears anything of it.
+    for (const said of ["setConnectionError(lastError);", "void deviceSlot.release();", "void reportAttempt("]) {
+      expect(tail.indexOf(said), said).toBeGreaterThan(owned);
+    }
+    // Set only where a rung is about to be dialled.
+    expect(walk.split("dialled = true;").length - 1).toBe(1);
+    expect(walk.indexOf("dialled = true;")).toBeLessThan(walk.indexOf("await connectIkev2({"));
   });
 
   it("reads what a pass it did not start left, when it ends", () => {
@@ -270,17 +317,17 @@ describe("the phone dashboard's wiring", () => {
 
   it("shows a pass under way as one, on mounting and on loading, and never reads the platform under it", () => {
     expect(dashboard).toMatch(/useState<ConnectionState>\(\(\) =>\s+passInFlight\(\) \? "connecting" : "disconnected",?\s+\)/);
-    const adopt = body("async function adoptPlatform(sessionAtStart: number, users: ProtocolUser[], sub: Subscription | null) {");
+    const adopt = body("async function adoptPlatform(\n    sessionAtStart: number,");
     const inFlight = adopt.indexOf("if (passInFlight()) {");
     expect(inFlight).toBeGreaterThan(0);
-    expect(inFlight).toBeLessThan(adopt.indexOf("await vpnStatus()"));
+    expect(inFlight).toBeLessThan(adopt.indexOf("await withTimeout(vpnStatus()"));
     expect(adopt.slice(inFlight, adopt.indexOf("}", inFlight))).toContain('setConnectionState("connecting")');
     // An answer overtaken while it was asked is not written.
     expect(adopt.split("if (overtaken()) return;").length - 1).toBe(3);
     // The adopted tunnel keeps the pass's baseline, so it can be proven.
     expect(adopt).toContain("setBaselineIp(ladderPass.baseline.current);");
-    expect(body("async function loadScreen(preferRouteId?: string) {")).toContain(
-      "await adoptPlatform(sessionAtStart, usersResult.data, sub);",
+    expect(body("async function loadScreen(preferRouteId: string | undefined, ready: () => void) {")).toContain(
+      "await adoptPlatform(sessionAtStart, usersResult.data, sub, ready);",
     );
   });
 
@@ -290,8 +337,19 @@ describe("the phone dashboard's wiring", () => {
     expect(check).toBeGreaterThan(0);
     expect(check).toBeLessThan(connect.indexOf("await runLadder({ takeover })"));
     expect(connect).toContain("const letGo = await stopPassInFlight();");
-    // A later press wins over this one, still waiting.
+    // A later press wins over this one, still waiting -- after every await
+    // before the ladder.
     expect(connect).toContain("if (pressRef.current !== press) return;");
+    const checks: number[] = [];
+    for (let at = connect.indexOf("if (pressRef.current !== press) return;"); at >= 0; ) {
+      checks.push(at);
+      at = connect.indexOf("if (pressRef.current !== press) return;", at + 1);
+    }
+    expect(checks).toHaveLength(3);
+    expect(checks[0]).toBeGreaterThan(connect.indexOf("const letGo = await stopPassInFlight();"));
+    expect(checks[1]).toBeGreaterThan(connect.indexOf("settleTeardown(result);"));
+    expect(checks[2]).toBeGreaterThan(connect.indexOf("await requestVpnPermission()"));
+    expect(checks[2]).toBeLessThan(connect.indexOf("await runLadder({ takeover })"));
     // One that does not let go in time: said, and not dialled.
     expect(connect).toMatch(/if \(!letGo\) \{[^]*?messageKey: "err\.connectBusy"[^]*?return;\n\s+\}/);
     // The customer's own connect already running is followed, not doubled.

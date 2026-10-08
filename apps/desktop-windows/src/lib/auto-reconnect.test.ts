@@ -454,8 +454,9 @@ describe("no network, or no foreground", () => {
     expect(h.rc.current().kind).toBe("attempting");
     h.state.foreground = true;
     h.rc.conditionsChanged();
-    // A whole ceiling again from the moment it is back.
-    await h.advance(ATTEMPT_MAX_MS - 1_000);
+    // What was left of the ceiling when it went, from the moment it is
+    // back: three seconds of it were spent in front.
+    await h.advance(ATTEMPT_MAX_MS - 3_000 - 1_000);
     expect(h.asked[0]!.live()).toBe(true);
     h.settle({ kind: "connected", routeId: "r" });
     await h.advance(0);
@@ -467,6 +468,54 @@ describe("no network, or no foreground", () => {
     h.rc.dropped();
     await h.advance(ATTEMPT_MAX_MS + 1_000);
     expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "budget" });
+  });
+
+  it("on a phone, goes on from what was left of the ceiling each time the app is back, not afresh", async () => {
+    // A customer who kept leaving and coming back -- ten seconds away every
+    // 170 s in front -- had the whole ceiling started again at each return,
+    // so a wedged pass was never given up on: "Reconnecting..." for as long
+    // as they kept it up, with nothing going to dial again.
+    const h = harness({ requiresForeground: true });
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(0);
+    const wedged = h.asked[0]!;
+    for (let i = 0; i < 10 && h.rc.current().kind === "attempting"; i++) {
+      await h.advance(170_000);
+      h.state.foreground = false;
+      h.rc.conditionsChanged();
+      await h.advance(10_000);
+      h.state.foreground = true;
+      h.rc.conditionsChanged();
+    }
+    // Given up on once 180 s in front had gone without a sign of life --
+    // the second return had ten seconds of it left -- and that far in, the
+    // budget is spent with it.
+    expect(wedged.live()).toBe(false);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "budget" });
+
+    // Control: a pass that shows a sign of life in each stretch in front is
+    // waited for however often the customer comes and goes.
+    const l = harness({ requiresForeground: true });
+    l.bind();
+    l.rc.tunnelUp({ routeId: "r", fresh: true, stamp: l.rc.stamp() });
+    await l.advance(10 * 60_000);
+    l.script(["pending"]);
+    l.rc.dropped();
+    await l.advance(0);
+    for (let i = 0; i < 10; i++) {
+      await l.advance(170_000);
+      l.asked[0]!.progress();
+      l.state.foreground = false;
+      l.rc.conditionsChanged();
+      await l.advance(10_000);
+      l.state.foreground = true;
+      l.rc.conditionsChanged();
+    }
+    expect(l.asked[0]!.live()).toBe(true);
   });
 
   it("on a phone, holds it too when the ceiling falls due before the move to the background was heard", async () => {
@@ -652,7 +701,7 @@ describe("the customer outranks it", () => {
     // asks the attempt too.
     const ends: [string, (h: ReturnType<typeof harness>) => void][] = [
       ["a repair, or a change of mode", (h) => h.rc.cancel("customer")],
-      ["a new location", (h) => void h.rc.chose()],
+      ["a new location", (h) => void h.rc.chose({ tunnelShown: false })],
       ["Stop reconnecting", (h) => h.rc.cancel("stopped")],
       ["a session that ended out of sight", (h) => (h.state.session += 1)],
     ];
@@ -682,7 +731,7 @@ describe("the customer outranks it", () => {
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(0); // attempt 1 failed; attempt 2 is due in 2s
-    expect(h.rc.chose()).toBeNull();
+    expect(h.rc.chose({ tunnelShown: false })).toBeNull();
     await h.advance(10 * 60_000);
     expect(h.asked).toHaveLength(1);
     expect(h.rc.current()).toEqual({ kind: "idle", lost: false, stopped: "customer", session: null });
@@ -698,7 +747,7 @@ describe("the customer outranks it", () => {
     h.script(["pending"]);
     h.rc.dropped();
     await h.advance(0);
-    expect(h.rc.chose()).toBe("stopPass");
+    expect(h.rc.chose({ tunnelShown: false })).toBe("stopPass");
     expect(h.asked[0]!.live()).toBe(false);
     h.settle({ kind: "connected", routeId: "r" });
     await h.advance(10 * 60_000);
@@ -716,7 +765,7 @@ describe("the customer outranks it", () => {
     h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     const asked = h.rc.stamp();
-    expect(h.rc.chose()).toBe("keepTunnel");
+    expect(h.rc.chose({ tunnelShown: true })).toBe("keepTunnel");
     expect(vouching(h.rc.current(), 1)).toBe(true);
     // Nothing was overruled: an answer asked for before it still arms.
     h.rc.tunnelUp({ routeId: null, stamp: asked });
@@ -724,6 +773,25 @@ describe("the customer outranks it", () => {
     expect(h.rc.dropped()).toBe("reconnecting");
     await h.advance(0);
     expect(h.asked).toHaveLength(1);
+    expect(h.reports).toHaveLength(0);
+  });
+
+  it("one chosen while armed beneath a screen that shows nothing up takes over, and nothing redials", async () => {
+    // Armed while the screen says "disconnected": a Windows health-poll
+    // reading that was not a drop, or a phone screen that could not ask the
+    // platform. Kept armed, the choice's own reload found the tunnel gone,
+    // took it for a drop it had missed, and reconnected -- the old route
+    // first -- right after the customer chose a new server.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    expect(h.rc.chose({ tunnelShown: false })).toBeNull();
+    expect(vouching(h.rc.current(), 1)).toBe(false);
+    // What the reload then does with "nothing is running".
+    expect(h.rc.dropped()).toBe("lost");
+    await h.advance(10 * 60_000);
+    expect(h.asked).toHaveLength(0);
     expect(h.reports).toHaveLength(0);
   });
 
@@ -871,6 +939,30 @@ describe("what rules a reconnect out", () => {
     await h.advance(60_000);
     expect(h.asked).toHaveLength(1);
     expect(h.rc.current()).toMatchObject({ kind: "idle", lost: false, stopped: "signedOut" });
+  });
+
+  it("ends an attempt whose session ended out of sight as a sign-out, filing nothing, whatever its pass made of that", async () => {
+    // A 401 whose refresh was refused ends the session from App, which no
+    // press reaches. The attempt is no longer live, and a pass reads that as
+    // a press having overtaken it -- the phone's preflight answers "the
+    // customer", a ladder "cancelled" -- which was then filed as "the
+    // customer pressed something", about somebody who had pressed nothing.
+    const outcomes: ReconnectOutcome[] = [{ kind: "stop", why: "customer" }, { kind: "failed" }];
+    for (const outcome of outcomes) {
+      const h = harness();
+      h.bind();
+      h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+      await h.advance(10 * 60_000);
+      h.script(["pending"]);
+      h.rc.dropped();
+      await h.advance(0);
+      h.state.session += 1;
+      h.settle(outcome);
+      await h.advance(60_000);
+      expect(h.rc.current(), outcome.kind).toMatchObject({ kind: "idle", lost: false, stopped: "signedOut" });
+      expect(h.reports, outcome.kind).toHaveLength(0);
+      expect(h.asked).toHaveLength(1);
+    }
   });
 
   it("arms nothing for a pass that lands after its session ended", () => {

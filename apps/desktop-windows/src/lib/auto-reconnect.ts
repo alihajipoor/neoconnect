@@ -141,7 +141,7 @@ export type ReconnectStop =
   | "permission"
   /** A phone is still routed through a VPN that is not ours -- or, on an
    * iPhone, which cannot see another app's VPN, another VPN configuration
-   * has been chosen over every one of ours. */
+   * has been chosen over one of ours, of its kind. */
   | "otherVpn"
   /** No network, or the app in the background, for longer than
    * `BLOCKED_WAIT_MAX_MS`. */
@@ -324,6 +324,11 @@ interface RunningAttempt {
   giveUp: () => void;
   /** The ceiling's timer. Null while the app is away. */
   watchdog: unknown;
+  /** What is left of the ceiling, as of `ceilingFrom`: all of it from the
+   * last sign of life, less the time in front since -- see `awayChanged`. */
+  ceilingLeft: number;
+  /** When the watchdog was last started. */
+  ceilingFrom: number;
   /** When a phone app went to the background during the attempt, while
    * it is there. */
   awaySince: number | null;
@@ -698,14 +703,24 @@ export class AutoReconnect {
    *  - During one it ends the episode, and the screen is to stop the pass
    *    as a press of the orb does. Ended here alone, the pass went on
    *    dialling the old order and landed on the old server.
-   *  - Over a tunnel the app vouches for it changes nothing about that
-   *    tunnel: the choice is for the next connect, the tunnel is still
-   *    reconnected if it drops, and the screen goes on naming its route.
-   *    Treated as a press that takes over, it disarmed the tunnel, and its
-   *    next drop said "VPN connection lost" for the rest of its life.
+   *  - Over a tunnel the app vouches for, and the screen shows
+   *    (`tunnelShown`), it changes nothing about that tunnel: the choice is
+   *    for the next connect, the tunnel is still reconnected if it drops,
+   *    and the screen goes on naming its route. Treated as a press that
+   *    takes over, it disarmed the tunnel, and its next drop said "VPN
+   *    connection lost" for the rest of its life.
+   *  - Armed beneath a screen that shows nothing up, as a press that takes
+   *    over. The two can disagree: the Windows health poll's readings that
+   *    are not a drop (the service's guess while busy, a read a teardown
+   *    disturbed) publish "disconnected" and forget nothing, and a phone
+   *    screen that could not ask the platform, or loaded from the cache,
+   *    never adopts what is up. Kept armed there, the choice's own reload
+   *    found the tunnel gone, took it for a drop it had missed, and
+   *    reconnected -- the old route first -- straight after the customer
+   *    chose a new server.
    *  - Idle, as any press: an old "VPN connection lost" is retired. */
-  chose(): LocationChoice {
-    if (this.phase.kind === "armed") return "keepTunnel";
+  chose({ tunnelShown }: { tunnelShown: boolean }): LocationChoice {
+    if (this.phase.kind === "armed" && tunnelShown) return "keepTunnel";
     const dialling = this.phase.kind === "attempting";
     this.cancel("customer");
     return dialling ? "stopPass" : null;
@@ -771,16 +786,29 @@ export class AutoReconnect {
    * beneath a pass about to go on dialling, whose tunnel then came up
    * armed by nothing.
    *
-   * So while the app is away the ceiling is held, and starts again in
-   * full when it is back -- the pass has had no time to show a sign of
-   * life -- and the budget is charged only for the time in front. Away for
-   * `BLOCKED_WAIT_MAX_MS`, the attempt ends there as a blocked wait would,
-   * its pass with it: a tunnel coming back on its own half an hour after
-   * the customer last saw "Reconnecting..." is not a reconnect any more.
+   * So while the app is away the ceiling is held, and goes on from where
+   * it was when the app is back, and the budget is charged only for the
+   * time in front. Away for `BLOCKED_WAIT_MAX_MS`, the attempt ends there
+   * as a blocked wait would, its pass with it: a tunnel coming back on its
+   * own half an hour after the customer last saw "Reconnecting..." is not
+   * a reconnect any more.
+   *
+   * From where it was, and not afresh. Started again in full at every
+   * return, the ceiling never fell due for a customer who kept leaving and
+   * coming back -- away for ten seconds every two and a half minutes in
+   * front -- and a wedged pass said "Reconnecting..." for as long as they
+   * did, the episode never moving on to its next attempt or to "VPN
+   * connection lost". The time in front is the pass's to account for: it
+   * showed no sign of life in it. Read on the same clock the budget is
+   * charged on.
+   *
+   * `heard` is false when the ceiling fell due in the background before
+   * the move there was heard (see `watch`): how much of that stretch was
+   * spent in front cannot be told, so none of it is charged.
    *
    * Not on Windows, where a minimised window is still a running app and
    * its pass goes on dialling. */
-  private awayChanged(): void {
+  private awayChanged(heard = true): void {
     const running = this.running;
     if (!this.requiresForeground || running === null || running.token !== this.token) return;
     if (this.phase.kind !== "attempting") return;
@@ -788,6 +816,7 @@ export class AutoReconnect {
     const away = !this.deps.foreground();
     if (away && running.awaySince === null) {
       running.awaySince = now;
+      if (heard) running.ceilingLeft -= Math.min(running.ceilingLeft, Math.max(0, now - running.ceilingFrom));
       this.watch(running);
       if (this.capTimer !== null) this.deps.clearTimer(this.capTimer);
       this.capTimer = this.deps.setTimer(() => {
@@ -816,26 +845,30 @@ export class AutoReconnect {
     }
   }
 
-  /** Starts an attempt's ceiling again -- as it begins, at every sign of
-   * life, and as a phone app comes back to the front -- or holds it while
-   * the app is away. On the timer's clock alone, which only goes forward.
+  /** Starts an attempt's ceiling -- in full (`fresh`) as it begins and at
+   * every sign of life, or what is left of it as a phone app comes back to
+   * the front -- or holds it while the app is away. Falls due on the
+   * timer's clock alone, which only goes forward.
    *
    * Falling due while the app is away means its going there was never
    * heard (a phone can freeze the app first): that is taken as the moment
    * it went, rather than as a pass that gave no sign of life. */
-  private watch(running: RunningAttempt): void {
+  private watch(running: RunningAttempt, fresh = false): void {
+    if (fresh) running.ceilingLeft = ATTEMPT_MAX_MS;
     if (running.watchdog !== null) this.deps.clearTimer(running.watchdog);
-    running.watchdog =
-      running.awaySince !== null
-        ? null
-        : this.deps.setTimer(() => {
-            running.watchdog = null;
-            if (running.token === this.token && this.requiresForeground && !this.deps.foreground()) {
-              this.awayChanged();
-              return;
-            }
-            running.giveUp();
-          }, ATTEMPT_MAX_MS);
+    if (running.awaySince !== null) {
+      running.watchdog = null;
+      return;
+    }
+    running.ceilingFrom = this.deps.now();
+    running.watchdog = this.deps.setTimer(() => {
+      running.watchdog = null;
+      if (running.token === this.token && this.requiresForeground && !this.deps.foreground()) {
+        this.awayChanged(false);
+        return;
+      }
+      running.giveUp();
+    }, running.ceilingLeft);
   }
 
   private blocker(): "network" | "foreground" | null {
@@ -958,21 +991,29 @@ export class AutoReconnect {
     // expired session, from App) still ends what this attempt may do.
     const live = () =>
       token === this.token && this.phase.kind === "attempting" && this.deps.session() === episode.session;
-    const running: RunningAttempt = { token, giveUp: () => undefined, watchdog: null, awaySince: null, awayMs: 0 };
+    const running: RunningAttempt = {
+      token,
+      giveUp: () => undefined,
+      watchdog: null,
+      ceilingLeft: ATTEMPT_MAX_MS,
+      ceilingFrom: startedAt,
+      awaySince: null,
+      awayMs: 0,
+    };
     this.running = running;
     let outcome: ReconnectOutcome;
     try {
       outcome = await new Promise<ReconnectOutcome>((resolve, reject) => {
         running.giveUp = () => resolve({ kind: "failed" });
         // The ceiling, started now and again at every sign of life.
-        this.watch(running);
+        this.watch(running, true);
         runner({
           attempt: attempt + 1,
           maxAttempts: RECONNECT_MAX_ATTEMPTS,
           resumeRouteId: episode.routeId,
           live,
           progress: () => {
-            if (live()) this.watch(running);
+            if (live()) this.watch(running, true);
           },
         }).then(resolve, reject);
       });
@@ -986,6 +1027,16 @@ export class AutoReconnect {
     // Ended or superseded while it ran -- a press, a sign-out. Whatever
     // that did stands.
     if (token !== this.token || this.phase.kind !== "attempting") return;
+    // The session ended while it ran, where no press reached the episode:
+    // an expired session whose refresh was refused, from App. Ended as the
+    // sign-out it is, with nothing filed, whatever the pass made of it. An
+    // attempt no longer live reads to the pass as one a press overtook, so
+    // it came back as the customer's stop and was filed as "the customer
+    // pressed something" -- about somebody who had pressed nothing.
+    if (this.deps.session() !== episode.session) {
+      this.stop("signedOut", attempt + 1);
+      return;
+    }
     const now = this.deps.now();
     // Time a phone app spent in the background is the customer's, not the
     // pass's (`awayChanged`).

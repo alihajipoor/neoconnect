@@ -47,21 +47,33 @@ class NeoxifyVpnPlugin: Plugin {
                 // passcode and all; an automatic reconnect, which nobody
                 // pressed, passes over IKEv2 instead.
                 let ikev2 = await Ikev2Engine.loadedIfOurs()
-                // Whether another configuration has been chosen over ours.
-                // iOS enables one VPN configuration at a time, and
-                // enabling another -- another VPN app connecting, or a
-                // pick in Settings -- sets ours to not enabled. It is the
-                // one sign of another app's VPN iOS gives an app
+                // Whether another configuration has been chosen over one
+                // of ours. iOS enables one configuration of each kind at a
+                // time -- tunnel providers are one kind ("enterprise"),
+                // NEVPNManager profiles such as our IKEv2 another
+                // ("personal") -- and enabling another of a kind (another
+                // VPN app connecting, or a pick in Settings) sets ours of
+                // that kind to not enabled, leaving the other kind alone.
+                // It is the one sign of another app's VPN iOS gives an app
                 // (`tunnelGone` cannot see one), and a reconnect that
-                // dialled over it would switch ours back on and the
-                // device off that VPN. Read from Apple's documentation of
-                // `isEnabled`, not observed on a device.
-                var enabled = managers.map { $0.isEnabled }
-                if let ikev2 { enabled.append(ikev2.isEnabled) }
+                // dialled over it would switch ours back on and the device
+                // off that VPN.
+                //
+                // So asked per kind. Asked across both -- none of ours
+                // enabled -- an iPhone that had ever landed on IKEv2 kept
+                // that profile enabled when another app's tunnel took the
+                // tunnel kind, and its reconnect went ahead and switched
+                // the device off the other app's VPN. Our own code never
+                // sets `isEnabled` false, so one of ours not enabled is
+                // somebody else's choice. Read from Apple's documentation
+                // of NETunnelProviderManager and `isEnabled`, not observed
+                // on a device.
+                let tunnelChosenElsewhere = !managers.isEmpty && !managers.contains(where: { $0.isEnabled })
+                let ikev2ChosenElsewhere = ikev2.map { !$0.isEnabled } ?? false
                 invoke.resolve([
                     "granted": !managers.isEmpty,
                     "ikev2": ikev2 != nil,
-                    "chosenElsewhere": !enabled.isEmpty && !enabled.contains(true),
+                    "chosenElsewhere": tunnelChosenElsewhere || ikev2ChosenElsewhere,
                 ])
             } catch {
                 invoke.reject("could not read the VPN configuration: \(error.localizedDescription)")

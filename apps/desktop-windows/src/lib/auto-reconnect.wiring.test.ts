@@ -47,10 +47,15 @@ describe("where an episode begins", () => {
     const ladder = dashboard.slice(dashboard.indexOf("async function runLadder("));
     // The mid-session failover's teardown is the app's own: a pass that
     // landed nothing forgets the armed tunnel -- before it announces its
-    // end, so no adopting screen can take it for a drop.
-    const forget = ladder.indexOf("if (!landed && !options.reconnect) autoReconnect.forget();");
+    // end, so no adopting screen can take it for a drop. Only while it is
+    // still the current pass: one a newer pass replaced forgot the tunnel
+    // that pass had landed and armed.
+    const forget = ladder.indexOf(
+      "if (!landed && !options.reconnect && ladderGenerationRef.current === generation) autoReconnect.forget();",
+    );
     expect(forget).toBeGreaterThan(0);
     expect(forget).toBeLessThan(ladder.indexOf("ladderPass.ended();"));
+    expect(ladder.split("autoReconnect.forget();").length - 1).toBe(1);
     // "Nothing is running", found by a recheck, was not a drop either.
     expect(dashboard).toContain('if (settled === "disconnected") autoReconnect.forget();');
     expect(dashboard).toContain('if ((await syncFromService()) === "disconnected") autoReconnect.forget();');
@@ -228,10 +233,31 @@ describe("which screen runs an attempt", () => {
   const effect = dashboard.slice(dashboard.lastIndexOf("useEffect(", start), dashboard.indexOf("\n  }, [", start));
 
   it("is one that has loaded, bound again after every load", () => {
-    expect(effect).toMatch(/^useEffect\(\(\) => \{\n\s+if \(loading\) return;\n\s+return autoReconnect\.bind\(async \(attempt\) => \{/);
-    expect(dashboard.slice(dashboard.indexOf("\n  }, [", start), dashboard.indexOf("\n  }, [", start) + 20)).toContain(
-      "}, [loading]);",
+    expect(effect).toMatch(
+      /^useEffect\(\(\) => \{\n\s+if \(loading \|\| !routeMemoryLoaded\) return;\n\s+return autoReconnect\.bind\(async \(attempt\) => \{/,
     );
+    expect(dashboard.slice(dashboard.indexOf("\n  }, [", start), dashboard.indexOf("\n  }, [", start) + 40)).toContain(
+      "}, [loading, routeMemoryLoaded]);",
+    );
+  });
+
+  it("and has this network's route memory, which the pass orders by and its landing writes back whole", () => {
+    // Bound as loading ended, a held attempt ran with the empty
+    // placeholders: led by protocols already refused here, and its landing
+    // saved its one entry over every network's remembered route and history.
+    const memory = body("function loadRouteMemory(): void {");
+    expect(memory).toContain('invoke<string | null>("network_fingerprint")');
+    expect(memory).toContain("loadLastGood().then(setLastGood),");
+    expect(memory).toContain("loadConnectHistory().then(setHistory),");
+    expect(memory).toContain(".finally(() => setRouteMemoryLoaded(true));");
+    expect(dashboard.split("setRouteMemoryLoaded(true)").length - 1).toBe(1);
+    // Read nowhere else, and on every way a load ends but a sign-out --
+    // the screen with nothing to dial included, or a held attempt waited
+    // on it for good.
+    expect(dashboard.split("loadLastGood()").length - 1).toBe(1);
+    expect(dashboard.split("loadConnectHistory()").length - 1).toBe(1);
+    const load = body("async function loadAll(preferRouteId?: string) {");
+    expect(load.split("loadRouteMemory();").length - 1).toBe(3);
   });
 
   it("on a screen that loaded nothing to dial, ends the episode rather than spending its attempts", () => {
@@ -311,9 +337,51 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     expect(check).toBeLessThan(ladder.indexOf('publishObserved(intent, "verifying");', connected));
   });
 
+  it("a pass stopped while it settled, or looked up its server, dials nothing more", () => {
+    // Heard only after the rung's connect, a stop in those seventeen
+    // seconds dialled the old route once more; a repair's Disconnect had
+    // nothing to cancel then, so the connect queued behind the repair's
+    // teardown, the pass outlasted the repair's wait for it, and its own
+    // teardown cancelled the repair mid-step.
+    const rung = ladder.slice(ladder.indexOf("for (const [index, candidate] of candidates.entries()) {"));
+    const settled = rung.indexOf("baselineIpRef.current = await settleAndCaptureBaseline(");
+    const named = rung.indexOf('const tunnelServer = await tunnelServerOf(candidate, "windows");');
+    const ipv6 = rung.indexOf("ipv6BaselineRef.current = await captureIpv6Baseline();");
+    const check = rung.indexOf(
+      "if (stopped() || sessionGeneration() !== sessionAtStart || ladderGenerationRef.current !== generation) break;",
+    );
+    const connect = rung.indexOf('await invoke("vpn_connect", {');
+    expect(Math.min(settled, named, ipv6)).toBeGreaterThan(0);
+    expect(check).toBeGreaterThan(Math.max(settled, named, ipv6));
+    expect(connect).toBeGreaterThan(check);
+    // Nothing awaited between the check and the connect.
+    expect(rung.slice(check, connect)).not.toContain("await ");
+  });
+
+  it("a failover note compares against the server the tile showed, not the credential the screen holds", () => {
+    // A location chosen over a tunnel that stays up leaves the credential
+    // on the tunnel's route; once that tunnel is gone, the tile names the
+    // choice. The next Connect, landing on the chosen server, was told it
+    // had moved off the old one.
+    expect(ladder).toContain(
+      "const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);",
+    );
+    expect(ladder).not.toContain("const shownRouteId = protocolUser?.routeId ?? null;");
+    // The tile's own rule, with the same arguments.
+    expect(dashboard).toContain(
+      "displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId)",
+    );
+  });
+
   it("a location chosen during an attempt stops its pass as Stop reconnecting does; over a tunnel, keeps it", () => {
     const choose = body("function chooseLocation(routeId: string | null): string | null {");
-    expect(choose).toContain("const choice = autoReconnect.chose();");
+    // Kept up only over a tunnel the screen shows: armed beneath a screen
+    // saying "disconnected", the choice's reload took the tunnel's absence
+    // for a drop it had missed, and redialled the old route.
+    expect(choose).toContain(
+      'const choice = autoReconnect.chose({ tunnelShown: connectionStateRef.current !== "disconnected" });',
+    );
+    expect(dashboard).toContain("connectionStateRef.current = connectionState;");
     expect(choose).toContain('if (choice === "stopPass") void stopPass();');
     // Over a tunnel that stays up the screen goes on naming its route, read
     // as it is now rather than as it was when the list was pressed.

@@ -36,6 +36,17 @@ import { ladderPass } from "@shared/lib/ladder-pass";
 /** Whether the pass holding the guard is an automatic reconnect's. */
 const reconnecting = { current: false };
 
+/** Counts the customer's presses, from whichever screen: a press still
+ * waiting on something -- Connect waiting for an automatic pass to let go,
+ * then for a teardown -- can tell that a later one has taken over from it.
+ *
+ * One per app, like the stop flag. It was the screen's own `useRef`, so a
+ * Connect left waiting on a screen that unmounted (Settings opened and
+ * closed during the wait) never heard the stop pressed on the screen
+ * mounted on return: it went on once the pass let go, cleared the stop as
+ * its own pass began, and dialled after the customer had said stop. */
+export const presses = { current: 0 };
+
 /** A pass that holds the guard. */
 export interface PhonePass {
   readonly generation: number;
@@ -111,8 +122,10 @@ export function reconnectPassInFlight(now = Date.now()): boolean {
 /** How long a press of Connect waits for an automatic reconnect's pass to
  * let go. That pass checks its stop after every step, and the longest step
  * between two checks is a baseline walk (`BASELINE_WALK_MS`, twelve
- * seconds) or the platform starting an engine; past this, the press says
- * an attempt is still running rather than dial beside it. */
+ * seconds) or the platform starting an engine -- after which a pass with
+ * an engine up waits for it to be gone (eight seconds at most, usually
+ * under one); past this, the press says an attempt is still running
+ * rather than dial beside it. */
 export const TAKEOVER_WAIT_MS = 20_000;
 
 /** Tells the pass in flight to stop and waits, bounded, for it to let go
@@ -127,4 +140,5 @@ export function stopPassInFlight(ms = TAKEOVER_WAIT_MS): Promise<boolean> {
 export function resetPhonePass(): void {
   ladderPass.reset();
   reconnecting.current = false;
+  presses.current = 0;
 }

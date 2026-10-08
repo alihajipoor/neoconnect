@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronRight, Clock, Gamepad2, Globe, MapPin, Settings as SettingsIcon, Shield, Sparkles, Tag } from "lucide-react";
-import { displayedRoute, showsAutomatic } from "../lib/displayed-route";
+import { displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
@@ -551,6 +551,10 @@ export function Dashboard({
   /** Per route and protocol, how recent attempts went on this network.
    * Richer than `lastGood`, which holds one route and no outcome. */
   const [history, setHistory] = useState<ConnectHistory>({});
+  /** Whether the three above have been read for this screen -- see
+   * `loadRouteMemory`. Until then they are empty placeholders, not this
+   * network's memory. */
+  const [routeMemoryLoaded, setRouteMemoryLoaded] = useState(false);
   /** Names the protocol we ended up on when it is not the one we
    * started with. Landing somewhere else without saying so is the same
    * dishonesty as a false "Connected". */
@@ -633,6 +637,10 @@ export function Dashboard({
   const intentRef = useRef<IntentState>(IDLE_INTENT);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
+  /** The same, for a press reported after an await: the server list says
+   * which location was chosen only once its switch request has answered. */
+  const connectionStateRef = useRef<ConnectionState>("disconnected");
+  connectionStateRef.current = connectionState;
   /** Whether the tunnel the screen was vouching for closed without anyone
    * asking. Only ever true alongside "disconnected", and it changes the
    * words from "connect to be protected" to "your connection was lost".
@@ -1198,6 +1206,31 @@ export function Dashboard({
     setExitIp(null);
   }
 
+  /** This network's route memory: which network this is, the route that
+   * last carried traffic on it, and how each route and protocol has done.
+   *
+   * Best-effort, and deliberately not awaited by `loadAll`: a machine
+   * whose gateway cannot be identified simply shares one memory bucket,
+   * which is worse than per-network but not broken.
+   *
+   * An automatic reconnect's attempt does wait for it (the runner's
+   * effect). The ladder orders by it, and a landing writes it back whole --
+   * `rememberLastGood` and `recordAttempt` over what the screen holds,
+   * then saved over what is stored. An attempt held while Settings was open
+   * ran the moment the screen left loading, with the empty placeholders
+   * still in its closure: it led with protocols this network had already
+   * refused, and its landing replaced every network's remembered route and
+   * history with its own single entry. */
+  function loadRouteMemory(): void {
+    void Promise.all([
+      invoke<string | null>("network_fingerprint")
+        .then(setNetworkId)
+        .catch(() => setNetworkId(null)),
+      loadLastGood().then(setLastGood),
+      loadConnectHistory().then(setHistory),
+    ]).finally(() => setRouteMemoryLoaded(true));
+  }
+
   async function loadAll(preferRouteId?: string) {
     // Which customer session this load is for. See sessionGeneration: a
     // sign-out bumps it before it clears anything.
@@ -1237,17 +1270,16 @@ export function Dashboard({
         // state of a censored network, tunnel or no tunnel.
         const adopted = await adoptServiceState(cached.subscription);
         setLoading(false);
-        void invoke<string | null>("network_fingerprint")
-          .then(setNetworkId)
-          .catch(() => setNetworkId(null));
-        void loadLastGood().then(setLastGood);
-        void loadConnectHistory().then(setHistory);
+        loadRouteMemory();
         if (adopted === "disconnected") await captureBaselinesWhileDown(cached.protocolUsers);
         return;
       }
 
       setError(!meResult.ok ? meResult.error : !subsResult.ok ? subsResult.error : t("dash.loadFailed"));
       setLoading(false);
+      // Nothing here to dial with, but an attempt held for this screen
+      // waits for the memory too, and is ended by the runner once it runs.
+      loadRouteMemory();
       return;
     }
 
@@ -1275,15 +1307,7 @@ export function Dashboard({
     // the screen is drawn, not after the route list below has answered.
     const adopted = await adoptServiceState(sub);
     setLoading(false);
-
-    // Best-effort, and deliberately not awaited together with the rest:
-    // a machine whose gateway cannot be identified simply shares one
-    // memory bucket, which is worse than per-network but not broken.
-    void invoke<string | null>("network_fingerprint")
-      .then(setNetworkId)
-      .catch(() => setNetworkId(null));
-    void loadLastGood().then(setLastGood);
-    void loadConnectHistory().then(setHistory);
+    loadRouteMemory();
 
     // Purely to name the server the customer is actually on -- the
     // protocol-user row carries a routeId but no human-readable
@@ -1363,7 +1387,9 @@ export function Dashboard({
   // connection lost" with a row counting a dial that never happened.
   // `loading` ends once the credentials are in and the service's state is
   // on screen; what `loadAll` does after that stands aside for a pass
-  // (`captureBaselinesWhileDown`).
+  // (`captureBaselinesWhileDown`) -- except the route memory, which the
+  // pass orders by and writes back, and which is waited for too
+  // (`loadRouteMemory`).
   //
   // A screen that has loaded and still has nothing to dial with -- no
   // credential on the account, or no answer and nothing cached -- ends
@@ -1375,7 +1401,7 @@ export function Dashboard({
   const protocolUserRef = useRef(protocolUser);
   protocolUserRef.current = protocolUser;
   useEffect(() => {
-    if (loading) return;
+    if (loading || !routeMemoryLoaded) return;
     return autoReconnect.bind(async (attempt) => {
       const excluded = reconnectExclusion();
       if (excluded !== null) return { kind: "stop", why: excluded };
@@ -1391,7 +1417,7 @@ export function Dashboard({
       const outcome = await runLadderRef.current({ automatic: true, reconnect: attempt });
       return reconnectOutcomeOf(outcome, passResultRef.current);
     });
-  }, [loading]);
+  }, [loading, routeMemoryLoaded]);
 
   // Asks the one question the IPv4 egress check cannot: is IPv6 still
   // reaching the internet while we are connected?
@@ -1902,15 +1928,16 @@ export function Dashboard({
    * only while nothing is up, but stays open while a reconnect moves on
    * beneath it. Between attempts that ends the episode; during one it
    * ends it and stops the pass, as "Stop reconnecting" does; over a tunnel
-   * the app vouches for it changes nothing about that tunnel. See
-   * `autoReconnect.chose`.
+   * the app vouches for, and the screen shows, it changes nothing about
+   * that tunnel. Armed beneath a screen that shows nothing up, it takes
+   * over as any press does. See `autoReconnect.chose`.
    *
    * Returns the route the screen goes on naming: the tunnel's, while one
-   * stays up, and otherwise the choice. Read through the ref: the list
+   * stays up, and otherwise the choice. Read through the refs: the list
    * reports a server only once the switch request has answered, and the
    * render it was pressed in can predate the pass that landed meanwhile. */
   function chooseLocation(routeId: string | null): string | null {
-    const choice = autoReconnect.chose();
+    const choice = autoReconnect.chose({ tunnelShown: connectionStateRef.current !== "disconnected" });
     if (choice === "stopPass") void stopPass();
     return choice === "keepTunnel" ? (protocolUserRef.current?.routeId ?? routeId) : routeId;
   }
@@ -2414,7 +2441,16 @@ export function Dashboard({
       // orders by speed, so the app could show sg-singapore, connect to
       // France, and say nothing -- index was still 0, so by the old
       // test nothing had failed over.
-      const shownRouteId = protocolUser?.routeId ?? null;
+      //
+      // What the SERVER tile showed (`displayedRouteId`), which is not
+      // always the credential the screen holds. A location chosen over a
+      // tunnel that stays up (`chooseLocation`) leaves the credential on
+      // the tunnel's route while the pin moves; once that tunnel is gone the
+      // tile names the pin. Compared against the credential, the next
+      // Connect -- landing on the very server just chosen -- was told it had
+      // moved off the old one: "Your usual protocol didn't get through"
+      // about a route it never dialled.
+      const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
 
       // Whether the route on screen was actually dialled before we
       // settled somewhere else.
@@ -2525,6 +2561,17 @@ export function Dashboard({
                 splitTunnelSettings.apps,
               )
             : [];
+          // Asked again right before the connect. The settle, the names and
+          // the IPv6 baseline above run to seventeen seconds or so, and a
+          // stop that landed in them -- "Stop reconnecting", a location
+          // chosen, a repair -- used to be heard only after this rung's
+          // connect: the old route dialled once more after the press. A
+          // repair's own Disconnect, sent before that connect, had nothing
+          // to cancel, so the connect waited behind the repair's teardown
+          // and ran to the app's reply timeout, the pass held the guard past
+          // the repair's wait for it (`REPAIR_PASS_WAIT_MS`), and its
+          // teardown then cancelled the repair mid-step.
+          if (stopped() || sessionGeneration() !== sessionAtStart || ladderGenerationRef.current !== generation) break;
           // From here a tunnel to this server may be up, and the health
           // poll -- from whichever Dashboard is mounted -- needs to know
           // which endpoints it reaches around it.
@@ -2949,8 +2996,12 @@ export function Dashboard({
       if (ladderGenerationRef.current === generation) ladderRunningRef.current = false;
       // Before the pass is announced as ended, so a screen adopting what
       // it left cannot take its teardown for a drop it missed. A
-      // reconnect's own pass is the episode's to account for.
-      if (!landed && !options.reconnect) autoReconnect.forget();
+      // reconnect's own pass is the episode's to account for. And only a
+      // pass still current: one a newer pass replaced after its guard
+      // lapsed -- a step wedged past it -- forgot the tunnel that newer
+      // pass had landed and armed, and its next drop then reconnected
+      // nothing.
+      if (!landed && !options.reconnect && ladderGenerationRef.current === generation) autoReconnect.forget();
       // A screen mounted while this pass ran -- Settings opened and closed
       // mid-connect -- adopted it and is waiting to ask the service what
       // it left. This screen, if it is still the one mounted, ignores it.

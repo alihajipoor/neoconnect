@@ -227,7 +227,7 @@ describe("the phone dashboard's wiring", () => {
     expect(runner).not.toContain("setConnectionState(");
   });
 
-  it("binds the runner only once loadAll has finished, every step of it", () => {
+  it("binds the runner only once loadAll has the screen ready", () => {
     // An attempt that fell due while Settings was open runs the moment a
     // screen binds. Bound at mount, the screen had no credential yet: the
     // pass set "connecting", threw, and was spent -- and on the cached
@@ -235,17 +235,73 @@ describe("the phone dashboard's wiring", () => {
     const effect = dashboard.slice(dashboard.lastIndexOf("useEffect(", bindAt), dashboard.indexOf("\n  }, [", bindAt));
     expect(effect).toMatch(/^useEffect\(\(\) => \{\n\s+if \(!loaded\) return;\n\s+return autoReconnect\.bind\(async \(attempt\) => \{/);
     expect(dashboard.slice(dashboard.indexOf("\n  }, [", bindAt)).startsWith("\n  }, [loaded]);")).toBe(true);
-    // Not `loading`, which ends before the route list, the platform's
-    // state and the baseline: loaded only when the whole load is done,
-    // whichever way it ended, and never by a load a newer one replaced.
+    // Not `loading`, which ends before the route list and the platform's
+    // state: ready once those are in, or the load is over whichever way it
+    // ended, and never by a load a newer one replaced.
     const load = dashboard.slice(
       dashboard.indexOf("async function loadAll(preferRouteId?: string) {"),
-      dashboard.indexOf("async function loadScreen(preferRouteId?: string) {"),
+      dashboard.indexOf("async function loadScreen(preferRouteId: string | undefined, ready: () => void) {"),
     );
     expect(load).toContain("const load = ++loadRef.current;");
-    expect(load.indexOf("setLoaded(false);")).toBeLessThan(load.indexOf("await loadScreen(preferRouteId);"));
-    expect(load).toMatch(/\} finally \{\n\s+if \(loadRef\.current === load\) setLoaded\(true\);/);
+    expect(load.indexOf("setLoaded(false);")).toBeLessThan(load.indexOf("await loadScreen(preferRouteId, ready);"));
+    expect(load).toMatch(/const ready = \(\) => \{\n\s+if \(loadRef\.current === load\) setLoaded\(true\);\n\s+\};/);
+    expect(load).toMatch(/\} finally \{\n\s+ready\(\);/);
     expect(dashboard.split("setLoaded(true)").length - 1).toBe(1);
+  });
+
+  it("is ready once the platform's state is on screen, not after the baseline walk, and that state is asked within a bound", () => {
+    // Held for the walk too, a drop found on return from Settings waited up
+    // to twelve more seconds of traffic in the clear before its attempt;
+    // and a status call that never answered held it -- "Reconnecting...",
+    // nothing dialling -- for good.
+    const start = dashboard.indexOf("async function adoptPlatform(");
+    const adopt = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
+    const read = adopt.indexOf('adopted = stateFromStatus(await withTimeout(vpnStatus(), "vpn_status"));');
+    const ready = adopt.indexOf("ready();");
+    const walk = adopt.indexOf("await takeBaseline(");
+    expect(read).toBeGreaterThan(0);
+    expect(ready).toBeGreaterThan(read);
+    // After the drop is reported and the tunnel armed, so the attempt runs
+    // on what the platform said.
+    expect(ready).toBeGreaterThan(adopt.indexOf("reportDrop();"));
+    expect(ready).toBeGreaterThan(adopt.indexOf("autoReconnect.tunnelUp({ routeId: null });"));
+    expect(walk).toBeGreaterThan(ready);
+    // The walk stands aside for a pass begun meanwhile.
+    expect(adopt.slice(walk)).toContain("if (overtaken()) return;");
+    expect(dashboard).toContain("await adoptPlatform(sessionAtStart, usersResult.data, sub, ready);");
+  });
+
+  it("does not say every protocol was tried when one was passed over that a press would dial", () => {
+    // An iPhone's automatic pass without IKEv2's configuration passes IKEv2
+    // over; "Tried every available protocol" then told the customer there
+    // was nothing left, when a press of Connect would try it.
+    const walk = dashboard.slice(dashboard.indexOf("async function walkLadder("));
+    const skip = walk.indexOf('if (candidate.protocol === "IKEV2" && options.skipIkev2) {');
+    expect(walk.slice(skip, walk.indexOf("continue;", skip))).toContain("passedOver = true;");
+    const said = walk.indexOf(
+      'if (passedOver && lastError?.messageKey === "err.allProtocolsFailed") {\n      lastError = { ...lastError, messageKey: "err.someProtocolsNotTried" };',
+    );
+    expect(said).toBeGreaterThan(0);
+    expect(said).toBeLessThan(walk.indexOf("setConnectionError(lastError);"));
+  });
+
+  it("asks an iPhone whether another configuration was chosen over ours one kind at a time", () => {
+    // iOS keeps one enabled configuration per kind: tunnel providers, and
+    // NEVPNManager profiles such as our IKEv2. Asked across both, an iPhone
+    // that had ever landed on IKEv2 kept that profile enabled when another
+    // app's tunnel took the tunnel kind, and its reconnect switched the
+    // device off that app's VPN. The Swift is not compiled here; this pins
+    // what it asks.
+    const swift = readFileSync(
+      new URL("../../plugins/vpn/ios/Sources/NeoxifyVpnPlugin/NeoxifyVpnPlugin.swift", import.meta.url),
+      "utf8",
+    );
+    expect(swift).toContain(
+      "let tunnelChosenElsewhere = !managers.isEmpty && !managers.contains(where: { $0.isEnabled })",
+    );
+    expect(swift).toContain("let ikev2ChosenElsewhere = ikev2.map { !$0.isEnabled } ?? false");
+    expect(swift).toContain('"chosenElsewhere": tunnelChosenElsewhere || ikev2ChosenElsewhere,');
+    expect(swift).not.toContain("!enabled.contains(true)");
   });
 
   it("turns a pass away before anything on screen moves when there is nothing to dial", () => {
@@ -357,7 +413,14 @@ describe("the phone dashboard's wiring", () => {
     expect(start).toBeGreaterThan(0);
     const choose = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
     expect(choose).toContain("pressRef.current += 1;");
-    expect(choose).toContain("const choice = autoReconnect.chose();");
+    // Kept up only over a tunnel the screen shows: armed beneath a screen
+    // saying "disconnected" -- the platform unasked, or the cached load --
+    // the choice's reload took the tunnel's absence for a drop it had
+    // missed, and redialled the old route.
+    expect(choose).toContain(
+      'const choice = autoReconnect.chose({ tunnelShown: connectionStateRef.current !== "disconnected" });',
+    );
+    expect(dashboard).toContain("connectionStateRef.current = connectionState;");
     expect(choose).toContain('if (choice === "stopPass") void stopPass();');
     expect(choose).toContain('choice === "keepTunnel" ? (protocolUserRef.current?.routeId ?? routeId) : routeId');
     expect(dashboard).toContain("protocolUserRef.current = protocolUser;");

@@ -646,6 +646,14 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       // freed by it as soon as it landed.
       if (releasing) await releasing;
       if (subscriptionId === null) return { kind: "clear" };
+      // A question of its own, as a claim before dialling is: whatever was
+      // still on the wire when the slot was set aside answers for a slot
+      // given up, and nothing it says applies now. Without a new epoch the
+      // release's watch over those answers went on past this check, and a
+      // request out at the time that settled unanswered afterwards had the
+      // slot released again -- naming the grant this check had just taken,
+      // under a reconnect about to dial on it.
+      epoch += 1;
       if (pendingTakeover.length > 0) {
         // The customer chose this device, and the claim saying so has not
         // arrived. Asking who has the slot would only name the device
@@ -682,7 +690,8 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       // and a claim before dialling that went unanswered would dial as if
       // nothing had happened. As `unclaimed` the reconnect's pass asks
       // first, and says so when it cannot tell (obligation 9). Not a new
-      // epoch: the release's watch over answers still on the wire goes on.
+      // epoch: the release's watch over answers still on the wire goes on,
+      // until that standing check starts one of its own.
       subscriptionId = target;
       standing = "unclaimed";
       retryClaim = true;

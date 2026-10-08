@@ -146,8 +146,9 @@ pub struct Granted {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ikev2: Option<bool>,
     /// iOS's `hasPermission` only: whether another VPN configuration has
-    /// been chosen over every one of ours -- the one sign of another
-    /// app's VPN iOS gives an app. An automatic reconnect stops on it.
+    /// been chosen over one of ours, of its kind (the packet tunnel's, or
+    /// IKEv2's) -- the one sign of another app's VPN iOS gives an app. An
+    /// automatic reconnect stops on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_elsewhere: Option<bool>,
 }

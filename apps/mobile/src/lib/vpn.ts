@@ -69,10 +69,11 @@ export interface VpnAccess {
    * IKEv2 profile too (`Vpn.isVpnProfilePreConsented`; not observed on a
    * device). */
   ikev2?: boolean;
-  /** iOS: whether another VPN configuration is the enabled one and none
-   * of ours is -- another VPN app connected, or the customer picked one in
-   * Settings. iOS shows an app no other app's VPN, so this is the only
-   * sign of one. Absent on Android, where `tunnelGone` sees every VPN. */
+  /** iOS: whether another VPN configuration has been enabled over one of
+   * ours, of its kind -- the packet tunnel's, or IKEv2's -- because another
+   * VPN app connected, or the customer picked one in Settings. iOS shows
+   * an app no other app's VPN, so this is the only sign of one. Absent on
+   * Android, where `tunnelGone` sees every VPN. */
   chosenElsewhere?: boolean;
 }
 

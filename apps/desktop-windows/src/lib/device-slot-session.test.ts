@@ -1006,6 +1006,33 @@ describe("a slot set aside while a reconnect waits", () => {
     expect(h.renew).toHaveBeenCalledTimes(1);
   });
 
+  it("stops watching what it gave up on once the reconnect asks for itself", async () => {
+    // A renewal still out when the slot was set aside -- the phone sent to
+    // the background just after a poll -- that times out once the
+    // reconnect's own check has been granted the slot. Still watched, its
+    // unanswered end had the slot released again, naming the grant the
+    // check had just taken, under a reconnect about to dial on it.
+    const h = harness([GRANT]);
+    let finish: (value: RenewOutcome) => void = () => undefined;
+    h.renew.mockImplementationOnce(() => new Promise<RenewOutcome>((resolve) => (finish = resolve)));
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    const poll = h.session.onPoll();
+    await h.session.setAside();
+    expect(h.release).toHaveBeenCalledWith({ subscriptionId: SUB, handle: "mine" });
+    h.renew.mockImplementationOnce(async () => ({ kind: "held", grant: { ...HELD.grant, handle: "again" } }));
+    expect(await h.session.checkStanding()).toEqual({ kind: "clear" });
+    expect(h.session.standing()).toBe("held");
+    finish(UNANSWERED);
+    await poll;
+    await settle();
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.session.standing()).toBe("held");
+    // And Disconnect still gives back the grant the check took.
+    await h.session.release();
+    expect(h.release).toHaveBeenLastCalledWith({ subscriptionId: SUB, handle: "again" });
+  });
+
   it("keeps the customer's own choice of this device for the claim that asks", async () => {
     // "Use on this device instead", whose claim never arrived: the check
     // has to carry it, or it would only name the device they replaced.

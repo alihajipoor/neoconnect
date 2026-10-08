@@ -325,9 +325,16 @@ describe("a repair pressed while a connect is under way", () => {
   });
 
   it("waits longer than a live pass can go without hearing its stop", () => {
-    // The last rung's egress (30s) and reachability (8s) checks, then the
-    // service's disconnect (6s) and the settle that confirms it (6s).
-    expect(REPAIR_PASS_WAIT_MS).toBeGreaterThan(30_000 + 8_000 + 6_000 + 6_000);
+    // The pass's teardown on its way out: the service's disconnect (6s) and
+    // the settle that confirms it (6s).
+    const teardown = 6_000 + 6_000;
+    // After a rung's connect: the last rung's egress (30s) and
+    // reachability (8s) checks.
+    expect(REPAIR_PASS_WAIT_MS).toBeGreaterThan(30_000 + 8_000 + teardown);
+    // Before it: the settle's walk (12s), the server's names (2s and a
+    // 1s grace) and the IPv6 baseline (2.5s) -- with the stop asked again
+    // right before the connect, which the dashboard's wiring test pins.
+    expect(REPAIR_PASS_WAIT_MS).toBeGreaterThan(12_000 + 3_000 + 2_500 + teardown);
     // And no longer than the guard itself, past which no pass is in flight.
     expect(REPAIR_PASS_WAIT_MS).toBeLessThan(LADDER_MAX_MS);
   });
