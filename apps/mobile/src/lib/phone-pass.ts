@@ -50,7 +50,8 @@ export interface PhonePass {
    * whatever is up is the newer pass's. */
   owns(): boolean;
   /** Called at every rung: still alive, so a long ladder keeps its guard
-   * while a step that hangs still loses it. */
+   * -- and an automatic pass its attempt -- while a step that hangs still
+   * loses it. */
   progress(): void;
   /** On the way out, however the pass ended. Releases the guard -- if
    * this pass still holds it -- and tells every screen listening
@@ -79,7 +80,13 @@ export function beginPass(reconnect?: ReconnectAttempt, now = Date.now()): Phone
     generation,
     stopped: () => ladderPass.cancel.current || !owns() || (reconnect !== undefined && !reconnect.live()),
     owns,
-    progress: () => ladderPass.progress(generation),
+    // The guard, and an automatic pass's attempt: its ceiling is measured
+    // from the last rung too (`ATTEMPT_MAX_MS`), or a long ladder is given
+    // up on while it is still dialling.
+    progress: () => {
+      ladderPass.progress(generation);
+      reconnect?.progress();
+    },
     end: () => {
       // A pass that outlived its guard has been replaced, and releasing
       // the guard now would let a third pass start beside the second.

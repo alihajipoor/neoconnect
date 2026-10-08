@@ -2441,8 +2441,12 @@ export function Dashboard({
         if (ladderGenerationRef.current !== generation) break;
         // Still alive: each rung renews the guard, so a long ladder on a
         // filtered network keeps it while a wedged step still loses it.
-        // See `LADDER_MAX_MS`.
+        // See `LADDER_MAX_MS`. And a reconnect's attempt, whose own
+        // ceiling is measured the same way (`ATTEMPT_MAX_MS`): renewed
+        // only by the guard, it gave up on this pass at three minutes
+        // while it was still dialling.
         ladderPass.progress(generation);
+        options.reconnect?.progress();
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
         if (candidate.routeId === shownRouteId) triedShownRoute = true;

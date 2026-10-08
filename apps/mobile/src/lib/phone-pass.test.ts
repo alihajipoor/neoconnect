@@ -25,8 +25,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function attempt(live: () => boolean = () => true): ReconnectAttempt {
-  return { attempt: 1, maxAttempts: 6, resumeRouteId: null, live };
+function attempt(live: () => boolean = () => true, progress: () => void = () => undefined): ReconnectAttempt {
+  return { attempt: 1, maxAttempts: 6, resumeRouteId: null, live, progress };
 }
 
 function taken(result: PhonePass | "declined" | "cancelled"): PhonePass {
@@ -106,6 +106,21 @@ describe("the phone's pass, one per app", () => {
     }
     expect(passInFlight(start + 7 * 30_000 + LADDER_MAX_MS - 1)).toBe(true);
     expect(passInFlight(start + 7 * 30_000 + LADDER_MAX_MS)).toBe(false);
+  });
+
+  it("renews an automatic pass's attempt at every rung, as it renews the guard", () => {
+    // The attempt's ceiling is measured from the last rung, like the
+    // guard's. Renewed only by the guard, it gave up on a long ladder at
+    // three minutes while the pass was still dialling.
+    let renewed = 0;
+    const pass = taken(beginPass(attempt(undefined, () => (renewed += 1))));
+    pass.progress();
+    pass.progress();
+    expect(renewed).toBe(2);
+    // A press's own pass has no attempt to renew.
+    pass.end();
+    taken(beginPass()).progress();
+    expect(renewed).toBe(2);
   });
 
   it("stops a pass a newer one replaced, which then touches neither the guard nor the screens", () => {

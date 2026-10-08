@@ -85,7 +85,8 @@ export const QUICK_DEATHS_TO_STOP = 3;
  * a tunnel coming back on its own long after. */
 export const BLOCKED_WAIT_MAX_MS = 30 * 60_000;
 
-/** The longest one attempt is waited for before it is counted as failed.
+/** The longest one attempt is waited for without a sign of life before it
+ * is counted as failed.
  *
  * A ladder pass is bounded rung by rung, and its guard expires after
  * `LADDER_MAX_MS` without progress -- but a pass wedged on a call that
@@ -93,8 +94,18 @@ export const BLOCKED_WAIT_MAX_MS = 30 * 60_000;
  * on it would say "Reconnecting..." for as long as the app stayed open.
  * Past this, the attempt is a failure like any other (and by then the
  * budget is spent, so the episode ends and says the connection was
- * lost); whatever the wedged pass reports afterwards is ignored. Longer
- * than a pass's own guard, so no live pass is given up on. */
+ * lost); whatever the wedged pass reports afterwards is ignored.
+ *
+ * Measured the way the guard is, from the pass's last sign of life
+ * (`ReconnectAttempt.progress`, at every rung), and not from its start.
+ * From the start it caught live passes too: the number of rungs is not
+ * capped, and on a filtered network a pass with eight or so credentials
+ * is still dialling at three minutes. The episode was ended on the budget
+ * beneath it, "Stop reconnecting" went from the screen, and when the pass
+ * landed its tunnel was armed by nothing -- a reconnect's pass leaves that
+ * to the episode -- so its next drop said "VPN connection lost" and
+ * reconnected nothing. Longer than the guard, so no pass the guard still
+ * counts as live is given up on here. */
 export const ATTEMPT_MAX_MS = 180_000;
 
 /** Why an episode ended without a tunnel -- or never started. */
@@ -203,6 +214,12 @@ export interface ReconnectAttempt {
    * bring a tunnel up after the customer said stop. So a pass asks this
    * after every await, and stops when it is false. */
   readonly live: () => boolean;
+  /** The pass is still alive and moving: called as it begins each rung,
+   * beside `ladderPass.progress`. The attempt's ceiling (`ATTEMPT_MAX_MS`)
+   * starts again from here, so a long ladder on a filtered network is
+   * waited for while a step that never returns is still given up on.
+   * Nothing once the attempt is over. */
+  readonly progress: () => void;
 }
 
 /** Whether a ladder pass has been told to stop: the stop flag a press
@@ -756,26 +773,33 @@ export class AutoReconnect {
     const token = ++this.token;
     const startedAt = this.deps.now();
     this.set({ kind: "attempting", attempt, startedAt, episode });
+    // Every move out of `attempting` bumps the token, so this is false for
+    // good once anything has ended or replaced the attempt. The session
+    // too: one that ended where no screen could tell the episode (an
+    // expired session, from App) still ends what this attempt may do.
+    const live = () =>
+      token === this.token && this.phase.kind === "attempting" && this.deps.session() === episode.session;
     let watchdog: unknown = null;
     let outcome: ReconnectOutcome;
     try {
-      outcome = await Promise.race([
+      outcome = await new Promise<ReconnectOutcome>((resolve, reject) => {
+        // The ceiling, started now and again at every sign of life. On the
+        // timer's clock alone, which only goes forward.
+        const watch = () => {
+          if (watchdog !== null) this.deps.clearTimer(watchdog);
+          watchdog = this.deps.setTimer(() => resolve({ kind: "failed" }), ATTEMPT_MAX_MS);
+        };
+        watch();
         runner({
           attempt: attempt + 1,
           maxAttempts: RECONNECT_MAX_ATTEMPTS,
           resumeRouteId: episode.routeId,
-          // Every move out of `attempting` bumps the token, so this is
-          // false for good once anything has ended or replaced the
-          // attempt. The session too: one that ended where no screen
-          // could tell the episode (an expired session, from App) still
-          // ends what this attempt may do.
-          live: () =>
-            token === this.token && this.phase.kind === "attempting" && this.deps.session() === episode.session,
-        }),
-        new Promise<ReconnectOutcome>((resolve) => {
-          watchdog = this.deps.setTimer(() => resolve({ kind: "failed" }), ATTEMPT_MAX_MS);
-        }),
-      ]);
+          live,
+          progress: () => {
+            if (live()) watch();
+          },
+        }).then(resolve, reject);
+      });
     } catch {
       outcome = { kind: "failed" };
     } finally {

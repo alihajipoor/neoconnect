@@ -830,8 +830,62 @@ describe("a pass that never comes back", () => {
     expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "budget" });
   });
 
+  it("waits out a long pass that is still dialling, and arms the tunnel it lands", async () => {
+    // A filtered network and eight or so credentials: every rung is a sign
+    // of life, and the pass is still going at three minutes. The ceiling
+    // used to run from the start: it ended the episode on the budget
+    // beneath the pass, and the tunnel the pass then landed was armed by
+    // nothing, so its next drop was not reconnected.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(0);
+    const pass = h.asked[0]!;
+    // A rung a minute, for five minutes.
+    for (let rung = 0; rung < 5; rung++) {
+      await h.advance(60_000);
+      pass.progress();
+    }
+    expect(h.rc.current().kind).toBe("attempting");
+    expect(pass.live()).toBe(true);
+    expect(h.reports).toHaveLength(0);
+    h.settle({ kind: "connected", routeId: "r2" });
+    await h.advance(0);
+    expect(h.rc.current()).toMatchObject({ kind: "armed", routeId: "r2" });
+    // Armed, so its own drop is reconnected in turn.
+    await h.advance(10 * 60_000);
+    expect(h.rc.dropped()).toBe("reconnecting");
+  });
+
+  it("gives up on one a whole ceiling after its last sign of life, not after its start", async () => {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(0);
+    const pass = h.asked[0]!;
+    await h.advance(100_000);
+    pass.progress();
+    await h.advance(ATTEMPT_MAX_MS - 1_000);
+    expect(h.rc.current().kind).toBe("attempting");
+    await h.advance(2_000);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "budget" });
+    expect(pass.live()).toBe(false);
+    // A sign of life from a pass already given up on revives nothing.
+    pass.progress();
+    h.settle({ kind: "connected", routeId: "r" });
+    await h.advance(10 * 60_000);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "budget" });
+  });
+
   it("is waited for as long as a live pass can take", () => {
-    // Longer than a pass's own guard: no live pass is given up on.
+    // Both measured from the pass's last sign of life, and the attempt's
+    // the longer: no pass the guard still counts as live is given up on.
     expect(ATTEMPT_MAX_MS).toBeGreaterThan(LADDER_MAX_MS);
   });
 });
@@ -894,7 +948,13 @@ describe("a screen that is not there", () => {
 });
 
 describe("telemetry", () => {
-  const attempt: ReconnectAttempt = { attempt: 2, maxAttempts: 6, resumeRouteId: "r", live: () => true };
+  const attempt: ReconnectAttempt = {
+    attempt: 2,
+    maxAttempts: 6,
+    resumeRouteId: "r",
+    live: () => true,
+    progress: () => undefined,
+  };
 
   it("keeps a pass that landed a SUCCESS, marked automatic", () => {
     const report = asReconnectReport({ kind: "CONNECT", outcome: "SUCCESS", protocol: "Stealth", routeId: "r" }, attempt);

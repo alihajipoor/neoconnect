@@ -112,6 +112,13 @@ describe("what an attempt is", () => {
     expect(ladder).toContain("resumeRouteId: options.reconnect?.resumeRouteId ?? null,");
   });
 
+  it("renews the attempt at every rung, beside the guard", () => {
+    // Its ceiling runs from the last sign of life, as the guard's does;
+    // renewed by nothing, it gave up on a long ladder still dialling.
+    expect(ladder).toContain("ladderPass.progress(generation);\n        options.reconnect?.progress();");
+    expect(ladder.split("options.reconnect?.progress();").length - 1).toBe(1);
+  });
+
   it("is reported as automatic, whether it lands or not", () => {
     expect(ladder.split("asReconnectReport(").length - 1).toBe(2);
     expect(ladder.split("options.reconnect,\n").length - 1).toBe(2);
