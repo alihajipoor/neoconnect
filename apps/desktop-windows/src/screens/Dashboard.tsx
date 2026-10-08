@@ -1130,6 +1130,10 @@ export function Dashboard({
     // reconnect never began. Stamped and marked before asking, as every
     // drop check is.
     const vouched = vouching(autoReconnect.current(), sessionGeneration());
+    // And what a tunnel found up quotes when it is armed below: a press, a
+    // sign-out or the device limit landing while the service is asked
+    // overrules the answer. See `autoReconnect.stamp`.
+    const reconnectStamp = autoReconnect.stamp();
     const generation = intentRef.current.generation;
     const mark = statusDisturbances.mark();
     const adopted = await syncFromService();
@@ -1153,7 +1157,7 @@ export function Dashboard({
       // Settings. Its route is not known here -- the service reports the
       // protocol, not the credential -- so a reconnect of it walks the
       // ladder's ordinary order.
-      autoReconnect.tunnelUp({ routeId: null });
+      autoReconnect.tunnelUp({ routeId: null, stamp: reconnectStamp });
     }
     return adopted;
   }
@@ -2131,6 +2135,12 @@ export function Dashboard({
     // a sign-out can land while the pass is mid-ladder, from this screen
     // or from one that cannot reach `cancelRef`.
     const sessionAtStart = sessionGeneration();
+    // And what its landing quotes to the reconnect, taken here, after the
+    // press that began it: anything that overrules the pass from now on --
+    // a stop, a sign-out, the device limit, a repair from Settings while
+    // this screen is gone -- leaves nothing armed when it lands. See
+    // `autoReconnect.stamp`.
+    const reconnectStamp = autoReconnect.stamp();
     // The customer's side of the same fact. The ladder generation guards
     // the ladder against itself; this one tells every answer still in
     // flight anywhere in the file that a connect is now what the app is
@@ -2648,6 +2658,27 @@ export function Dashboard({
                 exitOfRoute(routes, candidate.routeId),
               ).catch(() => undefined);
             }
+            // The last moment this pass can hear a stop before the rung is
+            // recorded as a landing: nothing from here to the end of it
+            // awaits. Verifying takes seconds -- the egress check up to its
+            // whole budget on the last rung, the Custom-mode probe holding
+            // the service's one thread while the stop's teardown queues
+            // behind it -- and a stop pressed meanwhile cannot recall a
+            // request already in flight: a tunnel that carried it answers
+            // "connected" about a connect the customer has called off. That
+            // rung is cancelled, not landed. Taken as a landing, it reported
+            // a success nobody got, claimed the plan's slot back after the
+            // stop had given it up, and armed the reconnect for the tunnel
+            // the stop was taking down. What ran above is already harmless:
+            // the stop's own intent stamps out the publish (or it lands on
+            // a screen that has gone), and every pass sends the split-tunnel
+            // selection afresh. The phone's ladder asks the same after its
+            // verdict; a sign-out is handled as after the connect above.
+            if (sessionGeneration() !== sessionAtStart) {
+              await serviceDisconnect().catch(() => undefined);
+              return "failed";
+            }
+            if (cancelRef.current || ladderGenerationRef.current !== generation) break;
             const movedFromShown = Boolean(shownRouteId) && candidate.routeId !== shownRouteId;
             if (index > 0 || movedFromShown) {
               // Compared against what was on screen when Connect was
@@ -2730,9 +2761,14 @@ export function Dashboard({
             );
             // A tunnel to reconnect if it drops. A reconnect's own landing
             // is armed by the episode, which carries its count of quick
-            // deaths; every other pass starts the clock afresh.
+            // deaths; every other pass starts the clock afresh -- unless
+            // something overruled it that the check above cannot see. A
+            // repair run from Settings while this pass dials stops no pass,
+            // but it is taking this tunnel down; the stamp knows.
             passResultRef.current = { routeId: candidate.routeId, errorKind: null };
-            if (!options.reconnect) autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true });
+            if (!options.reconnect) {
+              autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: reconnectStamp });
+            }
             // Whatever the device limit had to say before this pass is
             // answered by it.
             setSlotNotice(null);

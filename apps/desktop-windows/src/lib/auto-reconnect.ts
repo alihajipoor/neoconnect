@@ -207,6 +207,23 @@ export type ReconnectOutcome =
 
 export type ReconnectRunner = (attempt: ReconnectAttempt) => Promise<ReconnectOutcome>;
 
+/** When a pass began, or the service was asked what is up: how many
+ * times the controller had been overruled (`cancel`) by then, and the
+ * customer session in force. An answer hands it back to `tunnelUp` when
+ * it comes. See `AutoReconnect.stamp`. */
+export interface ReconnectStamp {
+  readonly overrules: number;
+  readonly session: number;
+}
+
+/** What `tunnelUp` is told. A tunnel this app has just brought up quotes
+ * the stamp its pass took as it began, always: whether that pass has been
+ * overruled since is the one thing the controller cannot work out for
+ * itself, and a landing that does not say is one that cannot be told. */
+export type TunnelUp =
+  | { readonly routeId: string | null; readonly fresh: true; readonly stamp: ReconnectStamp }
+  | { readonly routeId: string | null; readonly fresh?: false; readonly stamp?: ReconnectStamp };
+
 export interface ReconnectDeps {
   now(): number;
   setTimer(fn: () => void, ms: number): unknown;
@@ -359,6 +376,10 @@ export class AutoReconnect {
   /** Bumped by every move out of `attempting`, so an outcome that comes
    * back after the episode was ended or superseded is ignored. */
   private token = 0;
+  /** Bumped by every `cancel` -- a press that takes over, "Stop
+   * reconnecting", a sign-out, the device limit -- so an answer asked for
+   * before one can tell it has been overruled. See `stamp`. */
+  private overrules = 0;
   private readonly listeners = new Set<() => void>();
   private requiresForeground = false;
 
@@ -397,6 +418,23 @@ export class AutoReconnect {
     };
   }
 
+  /** Taken as a pass begins -- after the press that began it, if a press
+   * did -- or as the service is asked what is up, and handed back to
+   * `tunnelUp` with the answer.
+   *
+   * An answer can come back after the customer has overruled it. A pass
+   * spends seconds verifying, and a stop pressed meanwhile cannot recall a
+   * request already in flight through a tunnel that carries it. On Windows
+   * such a pass landed anyway and armed the tunnel the stop was taking
+   * down, and the next screen to mount -- back from Settings -- found it
+   * gone, said "VPN connection lost" and dialled. Not everything that
+   * overrules a pass can reach it, either: a repair run from Settings stops
+   * no pass, and a session that expires ends where no screen can tell it.
+   * The stamp is how any answer, from any screen, finds out. */
+  stamp(): ReconnectStamp {
+    return { overrules: this.overrules, session: this.deps.session() };
+  }
+
   /** A tunnel the screen vouches for is up.
    *
    * `fresh` when this app has just brought it up -- a pass landed -- so
@@ -407,11 +445,21 @@ export class AutoReconnect {
    * customer asked to be rid of; the screen re-reading it on return from
    * Settings must not make its later death something to reconnect.
    *
+   * Nothing at all for an answer overruled since its `stamp` was taken --
+   * by a press, "Stop reconnecting", a sign-out or the device limit -- or
+   * one asked for under a session that has since ended. Whatever overruled
+   * it owns what is up now: a tunnel the customer was just told is going
+   * away is not one to bring back, and one armed under the next sign-in's
+   * session would greet it with "VPN connection lost".
+   *
    * Ignored while an attempt runs: that attempt's own outcome is what
    * arms, carrying the quick-death count. While waiting, a tunnel that
    * is somehow up again ends the episode -- there is nothing left to
    * reconnect, and the next attempt would tear it down to redial. */
-  tunnelUp({ routeId, fresh = false }: { routeId: string | null; fresh?: boolean }): void {
+  tunnelUp(up: TunnelUp): void {
+    const { routeId, stamp } = up;
+    const fresh = up.fresh === true;
+    if (stamp !== undefined && (stamp.overrules !== this.overrules || stamp.session !== this.deps.session())) return;
     const now = this.deps.now();
     switch (this.phase.kind) {
       case "attempting":
@@ -483,6 +531,9 @@ export class AutoReconnect {
    * does next is the news now. Anything else leaves idle as it is, so a
    * second call cannot re-word how an episode already ended. */
   cancel(why: ReconnectStop): void {
+    // Whatever phase it finds: a pass the customer started, already
+    // running when they pressed again, is as overruled as an episode.
+    this.overrules += 1;
     if (this.phase.kind === "idle") {
       if (this.phase.lost && !lostAfter(why)) this.set({ kind: "idle", lost: false, stopped: why });
       return;
@@ -532,6 +583,8 @@ export class AutoReconnect {
   reset(): void {
     this.clearTimers();
     this.token += 1;
+    // Bumped rather than zeroed: nothing asked before the reset may arm.
+    this.overrules += 1;
     this.phase = IDLE;
     this.runner = null;
     this.requiresForeground = false;

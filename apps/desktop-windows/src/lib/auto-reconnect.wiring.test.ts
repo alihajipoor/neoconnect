@@ -119,13 +119,65 @@ describe("what an attempt is", () => {
 
   it("arms the episode's clock only for a pass that is not itself a reconnect", () => {
     expect(ladder).toContain(
-      "if (!options.reconnect) autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true });",
+      "if (!options.reconnect) {\n              autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: reconnectStamp });",
     );
   });
 
-  it("arms a tunnel adopted from the service", () => {
+  it("quotes the stamp the pass took as it began, before anything it awaits", () => {
+    // Taken after the press that began the pass, and before the first
+    // await -- the window in which a later press could slip in unseen.
+    const head = ladder.slice(0, ladder.indexOf("try {"));
+    expect(head).toContain("const reconnectStamp = autoReconnect.stamp();");
+    expect(head).not.toContain("await ");
+    expect(ladder.split("autoReconnect.tunnelUp(").length - 1).toBe(1);
+  });
+
+  it("arms a tunnel adopted from the service, unless something overruled the answer while it was asked", () => {
     const adopt = body("async function adoptServiceState(sub: Subscription | null): Promise<ConnectionState | null> {");
-    expect(adopt).toContain("autoReconnect.tunnelUp({ routeId: null });");
+    const taken = adopt.indexOf("const reconnectStamp = autoReconnect.stamp();");
+    expect(taken).toBeGreaterThan(0);
+    expect(taken).toBeLessThan(adopt.indexOf("const adopted = await syncFromService();"));
+    expect(adopt).toContain("autoReconnect.tunnelUp({ routeId: null, stamp: reconnectStamp });");
+    // Nowhere else is a tunnel armed without a stamp.
+    expect(dashboard.split("autoReconnect.tunnelUp(").length - 1).toBe(2);
+  });
+});
+
+describe("a pass the customer stopped while it verified", () => {
+  // Verifying takes seconds, and a stop pressed meanwhile cannot recall the
+  // request in flight: a tunnel that carried it answers "connected" about
+  // a connect the customer called off. Taken as a landing, the pass armed
+  // the reconnect for the tunnel the stop was taking down, and the next
+  // screen back from Settings said "VPN connection lost" and dialled.
+  const ladder = dashboard.slice(dashboard.indexOf("async function runLadder("));
+  const landing = ladder.slice(ladder.indexOf('if (verdict === "connected" || verdict === "unverified") {'));
+  const check = landing.indexOf("if (cancelRef.current || ladderGenerationRef.current !== generation) break;");
+
+  it("is cancelled at the last moment it can hear the stop, not landed", () => {
+    expect(check).toBeGreaterThan(0);
+    // After the last await of the landing: the split-tunnel push...
+    expect(check).toBeGreaterThan(landing.indexOf("exitOfRoute(routes, candidate.routeId),"));
+    // ...with nothing awaited between it and the end of the landing.
+    const rest = landing.slice(check, landing.indexOf('return "connected";'));
+    expect(rest).not.toContain("await ");
+    // And before anything that records a landing.
+    for (const recorded of [
+      "rememberLastGood(",
+      "recordAttempt(",
+      'outcome: "SUCCESS"',
+      "autoReconnect.tunnelUp(",
+      "deviceSlot.afterConnected(",
+      "landed = true;",
+    ]) {
+      expect(landing.indexOf(recorded), recorded).toBeGreaterThan(check);
+    }
+  });
+
+  it("and one whose session ended meanwhile takes its own tunnel down, as after the connect", () => {
+    const signedOut = landing.indexOf("if (sessionGeneration() !== sessionAtStart) {");
+    expect(signedOut).toBeGreaterThan(0);
+    expect(signedOut).toBeLessThan(check);
+    expect(landing.slice(signedOut, check)).toContain("await serviceDisconnect().catch(() => undefined);");
   });
 });
 

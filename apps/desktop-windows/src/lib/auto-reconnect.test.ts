@@ -115,7 +115,7 @@ describe("a tunnel that drops on its own is reconnected", () => {
   it("starts the first pass at once, leading with the route that was up", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "route-fi", fresh: true });
+    h.rc.tunnelUp({ routeId: "route-fi", fresh: true, stamp: h.rc.stamp() });
     await h.advance(5 * 60_000);
     h.script([{ outcome: { kind: "connected", routeId: "route-fi" } }]);
 
@@ -147,7 +147,7 @@ describe("the backoff", () => {
   it("is immediate, then 2s, 5s, 10s, 20s, 30s -- and then it gives up", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     const droppedAt = h.elapsed();
     h.rc.dropped();
@@ -167,7 +167,7 @@ describe("the backoff", () => {
   it("stops starting passes once about two minutes have gone on them", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     // A filtered network: every pass dials for thirty seconds and fails.
     h.script([{ outcome: { kind: "failed" }, takesMs: 30_000 }]);
@@ -185,7 +185,7 @@ describe("the backoff", () => {
   it("never interrupts a pass for the budget", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     // One pass longer than the whole budget, and it lands.
     h.script([{ outcome: { kind: "connected", routeId: "r" }, takesMs: RECONNECT_BUDGET_MS + 30_000 }]);
@@ -210,7 +210,7 @@ describe("an engine that dies the moment it starts", () => {
     const h = harness();
     h.bind();
     h.script([{ outcome: { kind: "connected", routeId: "r" } }]);
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
 
     // Dies five seconds in, every time.
     await h.advance(5_000);
@@ -233,7 +233,7 @@ describe("an engine that dies the moment it starts", () => {
     const h = harness();
     h.bind();
     h.script([{ outcome: { kind: "connected", routeId: "r" } }]);
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(5_000);
     expect(h.rc.dropped()).toBe("reconnecting");
     await h.advance(QUICK_DEATH_MS + 1_000);
@@ -252,7 +252,7 @@ describe("an engine that dies the moment it starts", () => {
     // engine dying at second 50 would never count as quick.
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(30_000);
     h.rc.tunnelUp({ routeId: null });
     await h.advance(40_000);
@@ -267,7 +267,7 @@ describe("no network, or no foreground", () => {
   it("waits for the network instead of burning attempts", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.state.online = false;
     expect(h.rc.dropped()).toBe("reconnecting");
@@ -288,7 +288,7 @@ describe("no network, or no foreground", () => {
   it("pauses a backoff when the network goes, and goes at once when it is back", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(0); // attempt 1 fails at once; attempt 2 due in 2s
@@ -308,7 +308,7 @@ describe("no network, or no foreground", () => {
   it("does not charge the offline wait to the two-minute budget", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.state.online = false;
     h.rc.dropped();
@@ -324,7 +324,7 @@ describe("no network, or no foreground", () => {
   it("gives up after half an hour without a network", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.state.online = false;
     h.rc.dropped();
@@ -345,7 +345,7 @@ describe("no network, or no foreground", () => {
     // (or the app) coming back. Hours later is not a blip to reconnect.
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.state.online = false;
     h.rc.dropped();
@@ -360,7 +360,7 @@ describe("no network, or no foreground", () => {
   it("on a phone, waits for the app to be in front", async () => {
     const h = harness({ requiresForeground: true });
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.state.foreground = false;
     h.rc.dropped();
@@ -378,7 +378,7 @@ describe("no network, or no foreground", () => {
     // Control for the rule above.
     const h = harness({ requiresForeground: false });
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.state.foreground = false;
     h.rc.dropped();
@@ -391,7 +391,7 @@ describe("the customer outranks it", () => {
   it("a press during the wait ends the episode, and nothing runs after", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(0); // attempt 1 failed; attempt 2 is due in 2s
@@ -405,7 +405,7 @@ describe("the customer outranks it", () => {
   it("a press during a pass wins over whatever that pass reports later", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.script(["pending"]);
     h.rc.dropped();
@@ -426,7 +426,7 @@ describe("the customer outranks it", () => {
     // good, the moment anything ends it -- whichever screen pressed.
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.script(["pending"]);
     h.rc.dropped();
@@ -437,7 +437,7 @@ describe("the customer outranks it", () => {
     expect(first.live()).toBe(false);
     // A later episode's attempt is its own; the old one stays over.
     h.settle({ kind: "failed" });
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     h.rc.dropped();
     await h.advance(0);
     expect(h.asked).toHaveLength(2);
@@ -448,7 +448,7 @@ describe("the customer outranks it", () => {
   it("tells it the same when the attempt moves on without a press", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.script(["pending"]);
     h.rc.dropped();
@@ -463,7 +463,7 @@ describe("the customer outranks it", () => {
     // A session that ended where no screen could tell the episode.
     const s = harness();
     s.bind();
-    s.rc.tunnelUp({ routeId: "r", fresh: true });
+    s.rc.tunnelUp({ routeId: "r", fresh: true, stamp: s.rc.stamp() });
     await s.advance(10 * 60_000);
     s.script(["pending"]);
     s.rc.dropped();
@@ -476,7 +476,7 @@ describe("the customer outranks it", () => {
   it("Stop reconnecting leaves 'connection lost' up, until the next press", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(0);
@@ -496,7 +496,7 @@ describe("the customer outranks it", () => {
     // not something to reconnect -- the customer asked for it down.
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.cancel("customer");
     h.rc.tunnelUp({ routeId: null });
@@ -504,7 +504,7 @@ describe("the customer outranks it", () => {
     await h.advance(60_000);
     expect(h.asked).toHaveLength(0);
     // Control: a tunnel the app has just brought up again is armed.
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     expect(h.rc.current().kind).toBe("armed");
     // And on a fresh app, an adopted tunnel is armed too.
     const fresh = harness();
@@ -515,7 +515,7 @@ describe("the customer outranks it", () => {
   it("a Disconnect while connected disarms, so a later death is not reconnected", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.cancel("customer");
     expect(h.rc.dropped()).toBe("lost");
@@ -524,13 +524,80 @@ describe("the customer outranks it", () => {
     // Disarming is not an episode, and says nothing.
     expect(h.reports).toHaveLength(0);
   });
+
+  it("a connect the customer stopped arms nothing, though its verdict comes back after the stop", async () => {
+    // Stopped on "Checking connection...": the request already in flight
+    // through the tunnel answers before the stop's teardown lands, and the
+    // pass lands. Armed, the screen back from Settings found the tunnel the
+    // stop took down gone, said "VPN connection lost" and dialled.
+    const h = harness();
+    h.bind();
+    h.rc.cancel("customer"); // Connect
+    const pass = h.rc.stamp();
+    h.rc.cancel("customer"); // the stop, while it verifies
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: pass });
+    expect(h.rc.current().kind).toBe("idle");
+    expect(vouching(h.rc.current(), 1)).toBe(false);
+    expect(h.rc.dropped()).toBe("lost");
+    await h.advance(60_000);
+    expect(h.asked).toHaveLength(0);
+    expect(h.reports).toHaveLength(0);
+    // Control: the next connect, which nothing has overruled, is armed.
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    expect(h.rc.current().kind).toBe("armed");
+  });
+
+  it("nor does any pass that something else overruled while it dialled", () => {
+    // "Stop reconnecting", a sign-out, the device limit, a repair or a
+    // change of server from a screen the pass cannot reach -- whatever
+    // phase each finds the controller in.
+    for (const why of ["customer", "stopped", "signedOut", "refused"] as const) {
+      for (const armedBefore of [false, true]) {
+        const h = harness();
+        if (armedBefore) h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+        const pass = h.rc.stamp();
+        h.rc.cancel(why);
+        h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: pass });
+        expect(h.rc.current().kind, `${why}, armed before: ${armedBefore}`).toBe("idle");
+      }
+    }
+  });
+
+  it("nor a re-read that something overruled while the service was asked", () => {
+    // The answer named a tunnel the press is taking down -- here a
+    // sign-out, which a re-read's idle guard alone let through.
+    const h = harness();
+    const asked = h.rc.stamp();
+    h.rc.cancel("signedOut");
+    h.rc.tunnelUp({ routeId: null, stamp: asked });
+    expect(h.rc.current().kind).toBe("idle");
+    // Control: asked again afterwards, it is armed.
+    h.rc.tunnelUp({ routeId: null, stamp: h.rc.stamp() });
+    expect(h.rc.current().kind).toBe("armed");
+  });
+
+  it("an overruled answer leaves an episode that began after it alone", async () => {
+    const h = harness();
+    h.bind();
+    const stale = h.rc.stamp();
+    h.rc.cancel("customer");
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(0); // attempt 1 failed; attempt 2 due in 2s
+    expect(h.rc.current().kind).toBe("waiting");
+    h.rc.tunnelUp({ routeId: null, stamp: stale });
+    expect(h.rc.current().kind).toBe("waiting");
+    await h.advance(2_000);
+    expect(h.asked).toHaveLength(2);
+  });
 });
 
 describe("what rules a reconnect out", () => {
   it("never reconnects across a sign-out, and says nothing about it", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.state.session = 2;
     expect(h.rc.dropped()).toBe("lost");
@@ -542,7 +609,7 @@ describe("what rules a reconnect out", () => {
   it("stops between attempts if the session ends during the backoff", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(0);
@@ -552,10 +619,23 @@ describe("what rules a reconnect out", () => {
     expect(h.rc.current()).toMatchObject({ kind: "idle", lost: false, stopped: "signedOut" });
   });
 
+  it("arms nothing for a pass that lands after its session ended", () => {
+    // Ended out of sight -- a refresh refused, with no press to reach the
+    // pass. Armed at landing, it was armed under the session in force then:
+    // the next sign-in's, since only a session ending moves the count, and
+    // that sign-in's first screen found the tunnel gone and dialled.
+    const h = harness();
+    const pass = h.rc.stamp();
+    h.state.session = 2;
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: pass });
+    expect(h.rc.current().kind).toBe("idle");
+    expect(vouching(h.rc.current(), 2)).toBe(false);
+  });
+
   it("takes the screen's word that this moment rules it out", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     expect(h.rc.dropped({ exclusion: "refused" })).toBe("lost");
     await h.advance(60_000);
@@ -568,7 +648,7 @@ describe("what rules a reconnect out", () => {
     const h = harness();
     h.bind();
     h.script([{ outcome: { kind: "failed" } }, { outcome: { kind: "stop", why: "refused" } }]);
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(10 * 60_000);
@@ -584,7 +664,7 @@ describe("what is not a new drop", () => {
     // its own count rather than starting over at attempt one.
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(0); // attempt 1 failed; attempt 2 due in 2s
@@ -598,7 +678,7 @@ describe("what is not a new drop", () => {
     // when it lands nothing, the screen forgets it.
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.forget();
     expect(h.rc.dropped()).toBe("lost");
@@ -610,7 +690,7 @@ describe("what is not a new drop", () => {
   it("forgetting leaves an episode alone", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(0);
@@ -624,7 +704,7 @@ describe("a pass that never comes back", () => {
   it("is counted as failed after a ceiling, so the episode cannot hang on it", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.script(["pending"]);
     h.rc.dropped();
@@ -649,7 +729,7 @@ describe("a pass that never comes back", () => {
 describe("a screen that is not there", () => {
   it("holds a due attempt until a dashboard binds, then runs it", async () => {
     const h = harness();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(30_000);
@@ -668,7 +748,7 @@ describe("a screen that is not there", () => {
     // one that was due, and the episode carries on from there.
     const h = harness();
     const unbind = h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(0);
@@ -692,7 +772,7 @@ describe("a screen that is not there", () => {
   it("stands down if a tunnel is up again before the next attempt", async () => {
     const h = harness();
     h.bind();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(0);
@@ -763,7 +843,7 @@ describe("a ladder pass, as an attempt's outcome", () => {
 describe("whether the app is vouching for a tunnel", () => {
   it("is, for an armed tunnel of the session in force", async () => {
     const h = harness();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     expect(vouching(h.rc.current(), 1)).toBe(true);
   });
 
@@ -772,7 +852,7 @@ describe("whether the app is vouching for a tunnel", () => {
     // leave a tunnel armed. Signed in again, the first screen must not
     // take the sign-out's own teardown for a drop.
     const h = harness();
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     expect(vouching(h.rc.current(), 2)).toBe(false);
   });
 
@@ -780,7 +860,7 @@ describe("whether the app is vouching for a tunnel", () => {
     const h = harness();
     h.bind();
     expect(vouching(h.rc.current(), 1)).toBe(false);
-    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
     await h.advance(10 * 60_000);
     h.rc.dropped();
     expect(vouching(h.rc.current(), 1)).toBe(false);

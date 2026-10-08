@@ -221,8 +221,23 @@ describe("the phone dashboard's wiring", () => {
     // Landed, failed, cancelled and nothing usable: all four reports.
     expect(ladder.split("asReconnectReport(").length - 1).toBe(4);
     expect(ladder).toContain(
-      "if (!options.reconnect) autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true });",
+      "if (!options.reconnect) {\n            autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: reconnectStamp });",
     );
+  });
+
+  it("arms a landing only on the stamp its pass took as it began", () => {
+    // A pass the customer, a sign-out or the device limit overruled -- or
+    // whose session ended where no press reached it -- arms nothing when
+    // it lands anyway. Taken before the walk awaits anything, so no press
+    // can slip in between the one that began it and the stamp.
+    const walk = dashboard.slice(dashboard.indexOf("async function walkLadder("));
+    const taken = walk.indexOf("const reconnectStamp = autoReconnect.stamp();");
+    expect(taken).toBeGreaterThan(0);
+    expect(walk.slice(0, taken)).not.toContain("await ");
+    const run = dashboard.slice(dashboard.indexOf("async function runLadder("), dashboard.indexOf("async function walkLadder("));
+    expect(run.split("await ").length - 1).toBe(1);
+    expect(run).toContain("return await walkLadder(pass, options);");
+    expect(dashboard.split("autoReconnect.tunnelUp(").length - 1).toBe(2);
   });
 
   it("lets every press take over", () => {

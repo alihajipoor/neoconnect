@@ -1289,6 +1289,11 @@ export function Dashboard({
     // may already have finished by the time a slow connect returns. See
     // the check after each connect below.
     const sessionAtStart = sessionGeneration();
+    // And what its landing quotes to the reconnect, taken after the press
+    // that began it: whatever overrules the pass from now on -- a press,
+    // a sign-out, the device limit, a session that ends out of sight --
+    // leaves nothing armed if it lands anyway. See `autoReconnect.stamp`.
+    const reconnectStamp = autoReconnect.stamp();
     /** Ends a pass that has been told to stop (`pass.stopped()`).
      *
      * A press -- a stop, "Stop reconnecting", a Connect taking over, a
@@ -1725,7 +1730,9 @@ export function Dashboard({
           // is armed by the episode, which carries its count of quick
           // deaths; a customer's connect starts the clock afresh.
           passResultRef.current = { routeId: candidate.routeId, errorKind: null };
-          if (!options.reconnect) autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true });
+          if (!options.reconnect) {
+            autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: reconnectStamp });
+          }
           // The slot, now that a tunnel is up: claimed through it if the
           // claim before dialling went unanswered, or moved to the
           // credential the ladder landed on. Not awaited -- the pass is
