@@ -11,9 +11,9 @@ function deps(over: Partial<ReconnectPreflight> = {}): ReconnectPreflight & { as
       asked.push("vpnGone");
       return true;
     },
-    hasPermission: async () => {
-      asked.push("hasPermission");
-      return true;
+    access: async () => {
+      asked.push("access");
+      return { granted: true };
     },
     live: () => true,
     ...over,
@@ -23,8 +23,8 @@ function deps(over: Partial<ReconnectPreflight> = {}): ReconnectPreflight & { as
 describe("before a phone's reconnect may dial", () => {
   it("goes ahead when nothing stands in the way", async () => {
     const d = deps();
-    expect(await reconnectPreflight(d)).toBeNull();
-    expect(d.asked).toEqual(["vpnGone", "hasPermission"]);
+    expect(await reconnectPreflight(d)).toEqual({ kind: "clear", ikev2: true });
+    expect(d.asked).toEqual(["vpnGone", "access"]);
   });
 
   it("stops on what the screen rules out, asking the platform nothing", async () => {
@@ -42,20 +42,59 @@ describe("before a phone's reconnect may dial", () => {
         asked.push("vpnGone");
         return false;
       },
-      hasPermission: async () => {
-        asked.push("hasPermission");
-        return true;
+      access: async () => {
+        asked.push("access");
+        return { granted: true };
       },
     });
     expect(await reconnectPreflight(d)).toEqual({ kind: "stop", why: "otherVpn" });
     expect(asked).toEqual(["vpnGone"]);
   });
 
+  it("stops on an iPhone where another VPN configuration has been chosen over ours", async () => {
+    // iOS shows an app none of another app's VPN, so the wait above finds
+    // the device out of every VPN while another app's is connected. The
+    // permission's answer carries the one sign iOS gives: none of ours is
+    // the enabled configuration. Dialling would enable ours again, and
+    // switch the device off the other app's VPN.
+    const d = deps({ access: async () => ({ granted: true, ikev2: true, chosenElsewhere: true }) });
+    expect(await reconnectPreflight(d)).toEqual({ kind: "stop", why: "otherVpn" });
+    // One of ours still the enabled one: an ordinary drop.
+    expect(
+      await reconnectPreflight(deps({ access: async () => ({ granted: true, ikev2: true, chosenElsewhere: false }) })),
+    ).toEqual({ kind: "clear", ikev2: true });
+  });
+
   it("stops when the permission is no longer this app's, and never asks for it", async () => {
-    // `hasPermission` is the read-only question; the dialog is only ever
-    // raised by a connect the customer pressed.
-    const d = deps({ hasPermission: async () => false });
+    // `access` is the read-only question; the dialog is only ever raised
+    // by a connect the customer pressed.
+    const d = deps({ access: async () => ({ granted: false }) });
     expect(await reconnectPreflight(d)).toEqual({ kind: "stop", why: "permission" });
+    // Said as the permission, too, on an iPhone whose tunnel configuration
+    // is gone while IKEv2's, not the enabled one, is left.
+    expect(
+      await reconnectPreflight(deps({ access: async () => ({ granted: false, ikev2: true, chosenElsewhere: true }) })),
+    ).toEqual({ kind: "stop", why: "permission" });
+  });
+
+  it("clears an iPhone's pass without IKEv2 while IKEv2's own configuration is not installed", async () => {
+    // A sign-out removes it, and somebody who has only landed on Xray or
+    // WireGuard never had it. Dialling IKEv2 installs it, which raises
+    // iOS's "Add VPN Configurations" prompt -- not for an attempt nobody
+    // pressed. The rest of the ladder is still dialled.
+    expect(await reconnectPreflight(deps({ access: async () => ({ granted: true, ikev2: false }) }))).toEqual({
+      kind: "clear",
+      ikev2: false,
+    });
+    expect(await reconnectPreflight(deps({ access: async () => ({ granted: true, ikev2: true }) }))).toEqual({
+      kind: "clear",
+      ikev2: true,
+    });
+    // Android says nothing of IKEv2, and is not held back from it.
+    expect(await reconnectPreflight(deps({ access: async () => ({ granted: true }) }))).toEqual({
+      kind: "clear",
+      ikev2: true,
+    });
   });
 
   it("dials nothing for an attempt a press ended while the platform was being asked", async () => {
@@ -81,16 +120,16 @@ describe("before a phone's reconnect may dial", () => {
     live = true;
     const last = deps({
       live: () => live,
-      hasPermission: async () => {
+      access: async () => {
         live = false;
-        return true;
+        return { granted: true };
       },
     });
-    expect(await reconnectPreflight(last)).not.toBeNull();
+    expect(await reconnectPreflight(last)).toEqual({ kind: "stop", why: "customer" });
 
     // And one already over asks the platform nothing.
     const over = deps({ live: () => false });
-    expect(await reconnectPreflight(over)).not.toBeNull();
+    expect(await reconnectPreflight(over)).toEqual({ kind: "stop", why: "customer" });
     expect(over.asked).toEqual([]);
   });
 
@@ -98,7 +137,7 @@ describe("before a phone's reconnect may dial", () => {
     expect(await reconnectPreflight(deps({ vpnGone: () => Promise.reject(new Error("x")) }))).toEqual({
       kind: "failed",
     });
-    expect(await reconnectPreflight(deps({ hasPermission: () => Promise.reject(new Error("x")) }))).toEqual({
+    expect(await reconnectPreflight(deps({ access: () => Promise.reject(new Error("x")) }))).toEqual({
       kind: "failed",
     });
   });
@@ -174,12 +213,16 @@ describe("the phone dashboard's wiring", () => {
     expect(bindAt).toBeGreaterThan(0);
     expect(runner).toContain("await reconnectPreflight({");
     expect(runner).toContain("vpnGone: waitForTeardown,");
-    expect(runner).toContain("hasPermission: hasVpnPermission,");
+    // The whole answer, iOS's two extra words with it -- not the bare
+    // `granted` a press of Connect reads.
+    expect(runner).toContain("access: vpnAccess,");
+    expect(runner).not.toContain("hasVpnPermission");
     // Asked after every answer, so a press meanwhile is not dialled over.
     expect(runner).toContain("live: attempt.live,");
     // Never the dialog.
     expect(runner).not.toContain("requestVpnPermission");
-    expect(runner).toContain("runLadderRef.current({ reconnect: attempt })");
+    expect(runner).toContain('if (cleared.kind !== "clear") return cleared;');
+    expect(runner).toContain("runLadderRef.current({ reconnect: attempt, skipIkev2: !cleared.ikev2 })");
     expect(runner).toContain("reconnectOutcomeOf(outcome, passResultRef.current)");
     expect(runner).not.toContain("setConnectionState(");
   });
@@ -213,6 +256,26 @@ describe("the phone dashboard's wiring", () => {
     expect(guard).toBeLessThan(ladder.indexOf("setFailedOverTo(null);"));
     expect(guard).toBeLessThan(ladder.indexOf('setConnectionState("connecting");'));
     expect(guard).toBeLessThan(ladder.indexOf("const pass = beginPass(options.reconnect);"));
+  });
+
+  it("passes over IKEv2 on the pass a clearance holds it back from, before anything is dialled", () => {
+    const walk = dashboard.slice(dashboard.indexOf("async function walkLadder("));
+    // Counted out of "the last rung", so the rung before it is judged as
+    // the last one dialled.
+    expect(walk).toContain(
+      'const willDial = (c: ProtocolUser) =>\n      !(c.protocol === "IKEV2" && (allowedApps.length > 0 || options.skipIkev2 === true));',
+    );
+    const skip = walk.indexOf('if (candidate.protocol === "IKEV2" && options.skipIkev2) {');
+    expect(skip).toBeGreaterThan(walk.indexOf("for (const [index, candidate] of candidates.entries()) {"));
+    const block = walk.slice(skip, walk.indexOf("\n      }\n", skip));
+    expect(block).toContain("dials.push(null);");
+    expect(block).toContain("continue;");
+    // Ahead of everything the rung does: its baseline, and the dial that
+    // would install the configuration.
+    expect(skip).toBeLessThan(walk.indexOf("keepBaseline(baseline);"));
+    expect(skip).toBeLessThan(walk.indexOf("await connectIkev2({"));
+    // Only the automatic pass sets it; no press does.
+    expect(dashboard.split("skipIkev2:").length - 1).toBe(1);
   });
 
   it("leads with the route that was up, and reports the pass as automatic", () => {

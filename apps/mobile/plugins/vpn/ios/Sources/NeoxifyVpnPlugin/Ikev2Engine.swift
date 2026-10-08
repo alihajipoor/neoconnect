@@ -240,7 +240,10 @@ enum Ikev2Engine {
     /// has populated it, so reading the description off a fresh one
     /// answers "not ours" for a profile that is in fact ours and
     /// connected.
-    private static func loadedIfOurs() async -> NEVPNManager? {
+    ///
+    /// Not private: the plugin's `hasPermission` asks it whether our
+    /// profile is installed at all, and whether it is the enabled one.
+    static func loadedIfOurs() async -> NEVPNManager? {
         let manager = NEVPNManager.shared()
         guard (try? await manager.loadFromPreferences()) != nil else { return nil }
         return manager.localizedDescription == profileName ? manager : nil

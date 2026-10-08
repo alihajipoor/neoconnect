@@ -124,6 +124,7 @@ import {
   tunnelGone,
   hasVpnPermission,
   requestVpnPermission,
+  vpnAccess,
   vpnStatus,
 } from "../lib/vpn";
 import {
@@ -177,6 +178,11 @@ type LadderOptions = {
    * (`@shared/lib/auto-reconnect`): led by the route that was up, and
    * reported as automatic. */
   reconnect?: ReconnectAttempt;
+  /** Pass over the IKEv2 rungs: an automatic reconnect on an iPhone where
+   * IKEv2's own configuration is not installed (`ReconnectClearance`).
+   * A press never sets it -- the prompt dialling IKEv2 can raise is a
+   * question for somebody who pressed Connect. */
+  skipIkev2?: boolean;
 };
 
 /** The headline's colour for each tone `headlineFor` asks for. Full class
@@ -847,10 +853,12 @@ export function Dashboard({
   //
   // The phone's own questions first (`reconnectPreflight`): is another
   // VPN holding the device, and is the permission still this app's --
-  // never by raising the consent dialog. Then an ordinary ladder pass,
-  // led by the route that was up, claiming the slot as any pass does and
-  // judged by the same egress evidence before anything is called
-  // connected.
+  // never by raising the consent dialog. On an iPhone where IKEv2's own
+  // configuration is not installed the pass passes over IKEv2, since
+  // dialling it would install it, and installing asks. Then an ordinary
+  // ladder pass, led by the route that was up, claiming the slot as any
+  // pass does and judged by the same egress evidence before anything is
+  // called connected.
   //
   // Bound only once `loadAll` has finished, and again after every load.
   // The dashboard unmounts whenever Settings opens, so an attempt can fall
@@ -872,15 +880,15 @@ export function Dashboard({
   useEffect(() => {
     if (!loaded) return;
     return autoReconnect.bind(async (attempt) => {
-      const blocked = await reconnectPreflight({
+      const cleared = await reconnectPreflight({
         exclusion: reconnectExclusion,
         vpnGone: waitForTeardown,
-        hasPermission: hasVpnPermission,
+        access: vpnAccess,
         live: attempt.live,
       });
-      if (blocked !== null) return blocked;
+      if (cleared.kind !== "clear") return cleared;
       passResultRef.current = { routeId: null, errorKind: null };
-      const outcome = await runLadderRef.current({ reconnect: attempt });
+      const outcome = await runLadderRef.current({ reconnect: attempt, skipIkev2: !cleared.ikev2 });
       return reconnectOutcomeOf(outcome, passResultRef.current);
     });
   }, [loaded]);
@@ -1531,9 +1539,10 @@ export function Dashboard({
     };
 
     /** Whether the ladder would dial this candidate rather than skip it.
-     * Kept beside the skip below, so "the last rung" means the last one
+     * Kept beside the skips below, so "the last rung" means the last one
      * actually dialled. */
-    const willDial = (c: ProtocolUser) => !(c.protocol === "IKEV2" && allowedApps.length > 0);
+    const willDial = (c: ProtocolUser) =>
+      !(c.protocol === "IKEV2" && (allowedApps.length > 0 || options.skipIkev2 === true));
 
     for (const [index, candidate] of candidates.entries()) {
       // The customer pressed stop. Whatever this attempt left behind is
@@ -1555,6 +1564,19 @@ export function Dashboard({
       // baseline's endpoint, where an answer can prove something, and
       // moves on otherwise. The Windows ladder's rule.
       const isLast = !candidates.slice(index + 1).some(willDial);
+
+      // An automatic pass, on an iPhone where IKEv2's own configuration is
+      // not installed -- signed out since it was, or never landed on.
+      // Dialling would install it, and iOS would put its "Add VPN
+      // Configurations" prompt, passcode and all, in front of somebody who
+      // pressed nothing. Passed over before a baseline is taken for it,
+      // since nothing is dialled; a press of Connect dials it as before.
+      if (candidate.protocol === "IKEV2" && options.skipIkev2) {
+        attempts.push(`${label}: not dialled automatically -- its VPN configuration is not installed`);
+        // Skipped, not dialled: says nothing about the network.
+        dials.push(null);
+        continue;
+      }
 
       // Taken while nothing is up. Captured through a live tunnel it
       // would record the exit address as the "before" value, and every

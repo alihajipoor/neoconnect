@@ -138,7 +138,9 @@ export type ReconnectStop =
   /** A phone's VPN permission is gone: the system, or another VPN app,
    * holds it now. Not taken back without asking. */
   | "permission"
-  /** A phone is still routed through a VPN that is not ours. */
+  /** A phone is still routed through a VPN that is not ours -- or, on an
+   * iPhone, which cannot see another app's VPN, another VPN configuration
+   * has been chosen over every one of ours. */
   | "otherVpn"
   /** No network, or the app in the background, for longer than
    * `BLOCKED_WAIT_MAX_MS`. */

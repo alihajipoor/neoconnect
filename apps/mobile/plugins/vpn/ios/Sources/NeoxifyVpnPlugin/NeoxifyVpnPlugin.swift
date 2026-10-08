@@ -29,6 +29,9 @@ class NeoxifyVpnPlugin: Plugin {
         return existing.first ?? NETunnelProviderManager()
     }
 
+    /// Read-only, and asked by an automatic reconnect before it dials, so
+    /// it must never raise anything: loading a configuration does not
+    /// prompt, only saving a new one does.
     @objc public func hasPermission(_ invoke: Invoke) {
         Task {
             do {
@@ -37,7 +40,29 @@ class NeoxifyVpnPlugin: Plugin {
                 // asks when a configuration is first saved, and a saved
                 // one means they said yes.
                 let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-                invoke.resolve(["granted": !managers.isEmpty])
+                // IKEv2's is a second configuration with its own prompt,
+                // and a sign-out removes it (`Ikev2Engine.forget`), so the
+                // tunnel's being saved says nothing about it. Dialling
+                // IKEv2 without it installs it, and up comes the prompt,
+                // passcode and all; an automatic reconnect, which nobody
+                // pressed, passes over IKEv2 instead.
+                let ikev2 = await Ikev2Engine.loadedIfOurs()
+                // Whether another configuration has been chosen over ours.
+                // iOS enables one VPN configuration at a time, and
+                // enabling another -- another VPN app connecting, or a
+                // pick in Settings -- sets ours to not enabled. It is the
+                // one sign of another app's VPN iOS gives an app
+                // (`tunnelGone` cannot see one), and a reconnect that
+                // dialled over it would switch ours back on and the
+                // device off that VPN. Read from Apple's documentation of
+                // `isEnabled`, not observed on a device.
+                var enabled = managers.map { $0.isEnabled }
+                if let ikev2 { enabled.append(ikev2.isEnabled) }
+                invoke.resolve([
+                    "granted": !managers.isEmpty,
+                    "ikev2": ikev2 != nil,
+                    "chosenElsewhere": !enabled.isEmpty && !enabled.contains(true),
+                ])
             } catch {
                 invoke.reject("could not read the VPN configuration: \(error.localizedDescription)")
             }
