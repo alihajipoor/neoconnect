@@ -5352,15 +5352,70 @@ customer pressed something".
   protected" -- over an engine on its way down, beside "VPN connection
   lost", with the health poll started over it.
 
+### Fifth review round
+
+Four lows the checkers found at the fourth round's head: three that
+earlier rounds' fixes made reachable, and one those fixes left.
+
+- **A server picked over a tunnel kept up leads that tunnel's reconnect
+  from the pick** (`choosing({ routeId, tunnelShown })`, `LeadPick`,
+  `Episode.pick`, `pickFailed`). The armed tunnel stayed on its route
+  until the switch request answered -- seconds, on a filtered network. A
+  drop in between reconnected to the server the customer had just picked
+  to leave, and an answer that came during that attempt stopped it, as an
+  answer over any episode does: the drop the pick was meant not to touch
+  ended in "You're not protected". Now the pick leads at once; an episode
+  begun after it is left to go on by its answer; a switch that fails puts
+  the old lead back (an episode already dialling the pick goes on with
+  it -- a server the customer pressed). Beneath a screen showing nothing
+  up, the pick takes over at once, as `chose` did at the answer. The
+  shared picker names the pick and says when the switch fails
+  (`onPicking(routeId)`, `onPickFailed`). Both clients.
+- **Windows: every automatic pass puts the last pass's error line away as
+  it begins** -- in `runLadder`, after the declines; it was the reconnect
+  runner's alone. The mid-session failover left it, with the inline
+  "Repair my network" under "Connecting...". Run there, the repair stopped
+  the pass (`stopPassBeforeRepair`), whose end cleared the line and with
+  it the panel running the repair: its report, or the elevated command
+  when the service could not be reached, never shown. A pass turned away
+  while a repair runs leaves that panel where it is.
+- **iPhone: a pass that stops short says so** (`stoppedShort`,
+  `err.notEveryProtocolTried`, "None of the protocols tried carried
+  traffic. The others were not tried this time."). Its configuration
+  unreadable before a rung (`rungAccess` "unknown"), the pass dials
+  nothing more; the last dialled rung's "Tried every available protocol"
+  stood through the backoff, and beside "VPN connection lost". The
+  fourth round's rewording for the IKEv2 skip missed this exit.
+- **Phones: a Connect pressed on a screen since gone is shown on the one
+  mounted** (`connectPressed`, `connectPending`, `onConnectSettled` in
+  `phone-pass.ts`). A Connect over an automatic pass waits up to twenty
+  seconds for it to let go (new on this branch), then for its teardown
+  and the consent dialog. Settings opened and closed meanwhile, the screen
+  mounted on return read the platform as the automatic pass ended --
+  "You're not protected", Connect on the orb, the location picker live --
+  and went on saying so while the press, on the screen now gone, began
+  its pass and dialled: nothing tells a screen that a pass has begun. Now
+  that screen shows "Connecting..." from mounting until the press
+  settles, then what the press said there (the busy line, a failed
+  permission question, a refused permission) and the platform's word. A
+  pass's own error line is kept with the pass (`PhonePass.say`,
+  `passSaid`) and shown by a screen that reads its end without having run
+  it -- the failed ladder, nothing usable, a plan that has ended; until now
+  it said nothing there, whichever way the screen was replaced. A later
+  press, or the session's end, owns the screen as before: the orb pressed
+  there, on "Connecting...", is a stop, and the press under way gives way
+  to it. Not Windows, whose Connect waits on no other pass.
+
 ### Proven -- tests on this PC
 
-- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **1000
-  passed, 58 files** after the fourth review round (992 after the third,
-  985 after the second, 978 after the first, 853 / 56 on `main`);
-  `pnpm typecheck` clean.
-- `apps/mobile`: `pnpm test` **224 passed, 12 files** after the fourth
-  review round (207 after the third, 197 after the second, 192 after the
-  first, 140 / 10 on `main`); `npx tsc --noEmit -p .` clean.
+- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **1006
+  passed, 58 files** after the fifth review round (1000 after the fourth,
+  992 after the third, 985 after the second, 978 after the first, 853 / 56
+  on `main`); `pnpm typecheck` clean.
+- `apps/mobile`: `pnpm test` **232 passed, 12 files** after the fifth
+  review round (224 after the fourth, 207 after the third, 197 after the
+  second, 192 after the first, 140 / 10 on `main`); `npx tsc --noEmit -p .`
+  clean.
 - **The fourth round's Swift is not compiled here** -- the extension's
   stop record and the plugin's reading of it -- only pinned by source
   assertion, including that both use the app group the build script
@@ -5436,7 +5491,22 @@ customer pressed something".
   the unproven engine shown raw, the stand-down not waiting, the rung
   check ignoring `chosenElsewhere` or IKEv2's absence or not wired, the
   choice counting a press again, and the Swift reading or recording no
-  stop reason.
+  stop reason. For the fifth, 30, each applied alone against its test: the
+  answer ending an episode the pick began, the pick not leading or not
+  disarming beneath a screen showing nothing, a failed switch putting
+  nothing back, the drop not carrying the pick, the answer keeping the
+  pick's mark, the picker not naming the pick or not saying it failed,
+  either dashboard not passing that on or not saying what the screen
+  shows, the failover keeping the line or clearing it before the repair's
+  decline, the short stop unmarked or not reworded; on the phone a
+  pending press counted once overtaken or on its own screen, an overtaken
+  press still telling the screens, a replaced pass's line kept, any
+  pass's line answered, the platform read under a pending press or
+  Connect shown over one at mounting, the press never settling, its line,
+  or the pass's, not shown, its own screen reading again after it, the
+  failed walk's or the busy line not kept. One survived -- a guard against
+  settling twice that the press's own check already was -- and was
+  removed.
 
 ### Unverified -- needs the VM, or a phone
 
@@ -5516,6 +5586,16 @@ over three minutes, then Settings opened and closed -- expected
 repair job in the service's log, and no tunnel after it; a server picked
 while a reconnect waits on a network where the switch request is slow --
 expected no attempt after the click.
+
+Added in the fifth review round, unobserved. On a phone, a drop on a
+filtered network, Connect pressed during the attempt, Settings opened and
+closed while the press waits: expected "Connecting..." on return until
+the press settles, then the platform's word -- and, if its ladder fails,
+its error line on that screen. On either client, the list opened between
+attempts and an attempt landed beneath it, then a server picked on a
+network where the switch request is slow and the engine killed before it
+answers: expected one reconnect, led by the server picked, not stopped by
+the answer.
 
 **Known gaps, not decided here:**
 
