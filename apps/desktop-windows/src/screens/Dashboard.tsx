@@ -1438,13 +1438,10 @@ export function Dashboard({
       if (excluded !== null) return { kind: "stop", why: excluded };
       if (protocolUserRef.current === null) return { kind: "stop", why: "nothingToDial" };
       passResultRef.current = { routeId: null, errorKind: null };
-      // Cleared as a press clears it before its pass: the line on screen is
-      // the last attempt's, and that attempt is over. Left up, it kept the
-      // inline "Repair my network" under "Reconnecting..." through the next
-      // attempt -- offered at the one moment a repair has a pass to fight.
-      // Between attempts it is back, with nothing dialling, and the repair
-      // ends the episode before it starts.
-      setConnectionError(null);
+      // The last attempt's error line is put away as this one's pass begins
+      // (`runLadder`, for every automatic pass): between attempts it is
+      // back, with nothing dialling, and the repair ends the episode before
+      // it starts.
       const outcome = await runLadderRef.current({ automatic: true, reconnect: attempt });
       return reconnectOutcomeOf(outcome, passResultRef.current);
     });
@@ -1983,10 +1980,13 @@ export function Dashboard({
    * its pass stopped, as "Stop reconnecting" does: heard only with the
    * answer, which on a filtered network takes seconds, a backoff falling
    * due meanwhile dialled the old route after the press, and an attempt
-   * that landed first stayed up and armed on it. See
-   * `autoReconnect.choosing`. */
-  function pickingLocation() {
-    if (autoReconnect.choosing() === "stopPass") void stopPass();
+   * that landed first stayed up and armed on it. Over a tunnel the screen
+   * shows, its reconnect leads with the pick from here, should it drop
+   * before the answer; beneath a screen that shows nothing up, the pick
+   * takes over as any press does. See `autoReconnect.choosing`. */
+  function pickingLocation(routeId: string | null) {
+    const choice = autoReconnect.choosing({ routeId, tunnelShown: connectionStateRef.current !== "disconnected" });
+    if (choice === "stopPass") void stopPass();
   }
 
   /** Every press does something, and no press can leave the app worse
@@ -2239,6 +2239,18 @@ export function Dashboard({
     // which cancels the repair mid-step on the service, and its connect
     // comes up behind the repair. See `duringRepair`.
     if (options.automatic && repairUnderWay()) return "declined";
+    // An automatic pass -- a reconnect's attempt, or the mid-session
+    // failover -- puts the last pass's error line away as it begins, as a
+    // press does before its own: that pass is over. Left up, the inline
+    // "Repair my network" stayed under "Connecting..." -- offered at the
+    // one moment a repair has a pass to fight. The failover did leave it:
+    // after a failed pass shown "degraded", run from there, the repair
+    // stopped the failover's pass (`stopPassBeforeRepair`), whose end then
+    // cleared the line, and with it the panel running the repair -- its
+    // report, or the elevated command when the service could not be
+    // reached, never shown. After the declines, so a pass turned away
+    // while a repair runs leaves that repair's panel where it is.
+    if (options.automatic) setConnectionError(null);
     // Its own number, so a pass that stalled past its deadline can be
     // told apart from the one that replaced it. Without that, a stalled
     // pass finally waking would clear the live pass's guard and write
@@ -3821,6 +3833,9 @@ export function Dashboard({
           // The pick, as it is made: a reconnect under way ends there,
           // not once a server's switch request has answered.
           onPicking={pickingLocation}
+          // A switch that failed chose nothing: the reconnect leads with
+          // what it led with before the pick.
+          onPickFailed={() => autoReconnect.pickFailed()}
           onChooseAutomatic={() => {
             // A new choice while a reconnect waits ends the reconnect:
             // its next attempt would lead with the old route regardless.

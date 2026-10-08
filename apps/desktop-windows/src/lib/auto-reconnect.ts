@@ -169,6 +169,19 @@ export interface Episode {
   readonly droppedAt: number;
   /** Backoff waited and passes run so far, for `RECONNECT_BUDGET_MS`. */
   readonly spentMs: number;
+  /** The server picked over the tunnel before it dropped, whose switch
+   * request had not answered yet (`LeadPick.seq`): this episode already
+   * leads with that pick, and its answer (`chose`) leaves it alone. */
+  readonly pick?: number;
+}
+
+/** A server picked in the list over a tunnel the screen shows
+ * (`AutoReconnect.choosing`), whose switch request has not answered yet:
+ * which pick, and the route the reconnect led with before it, for a switch
+ * that fails (`pickFailed`). */
+export interface LeadPick {
+  readonly seq: number;
+  readonly before: string | null;
 }
 
 export type ReconnectPhase =
@@ -191,6 +204,9 @@ export type ReconnectPhase =
       readonly routeId: string | null;
       readonly quickDeaths: number;
       readonly session: number;
+      /** A server picked over this tunnel whose switch has not answered:
+       * `routeId` is that pick meanwhile. See `choosing`. */
+      readonly pick?: LeadPick;
     }
   /** Between attempts. `blockedBy` is set while there is no network, or a
    * phone app is in the background: the attempt runs as soon as that
@@ -538,6 +554,21 @@ export function vouching(phase: ReconnectPhase, session: number): boolean {
   return phase.kind === "armed" && phase.session === session;
 }
 
+type Armed = Extract<ReconnectPhase, { kind: "armed" }>;
+
+/** An armed tunnel with no pick waiting for its answer; the same phase
+ * when none is. */
+function withoutPick(armed: Armed): Armed {
+  if (armed.pick === undefined) return armed;
+  return {
+    kind: "armed",
+    since: armed.since,
+    routeId: armed.routeId,
+    quickDeaths: armed.quickDeaths,
+    session: armed.session,
+  };
+}
+
 export class AutoReconnect {
   private phase: ReconnectPhase = IDLE;
   private timer: unknown = null;
@@ -550,6 +581,10 @@ export class AutoReconnect {
    * reconnecting", a sign-out, the device limit -- so an answer asked for
    * before one can tell it has been overruled. See `stamp`. */
   private overrules = 0;
+  /** Counts the servers picked over a tunnel kept up (`choosing`), so the
+   * answer to a switch request -- or its failure -- can tell whether the
+   * pick it is about is still the one leading the reconnect. */
+  private picks = 0;
   /** The attempt running. Left behind by one a press ended while its pass
    * never answered, so it is the current attempt only while its token is
    * the controller's. */
@@ -692,7 +727,16 @@ export class AutoReconnect {
       this.stop("quickDeaths", 0);
       return "lost";
     }
-    this.schedule(0, { routeId: armed.routeId, quickDeaths, session: armed.session, droppedAt: now, spentMs: 0 });
+    this.schedule(0, {
+      routeId: armed.routeId,
+      quickDeaths,
+      session: armed.session,
+      droppedAt: now,
+      spentMs: 0,
+      // Led by a server picked over the tunnel, its switch still to answer:
+      // that answer is to leave this episode alone (`chose`).
+      ...(armed.pick !== undefined ? { pick: armed.pick.seq } : {}),
+    });
     return "reconnecting";
   }
 
@@ -728,7 +772,8 @@ export class AutoReconnect {
    * customer is reading it, and land. So the choice can find any phase,
    * and what it means differs. (A server, as opposed to Automatic, is
    * heard twice: as it is picked (`choosing`), which ends an episode under
-   * way there and then, and here once its switch request has answered.)
+   * way there and then and decides what a tunnel armed leads with, and
+   * here once its switch request has answered.)
    *
    *  - Between attempts it ends the episode, whose next attempt would lead
    *    with the old route regardless. Connect dials the new choice.
@@ -761,14 +806,27 @@ export class AutoReconnect {
    *    customer closed it and pressed Connect. Counted as an overrule, the
    *    choice disowned that connect's landing (`stamp`), the screen said
    *    Connected over a tunnel nothing was armed for, and its drop said
-   *    "VPN connection lost" and reconnected nothing. */
+   *    "VPN connection lost" and reconnected nothing.
+   *  - An episode begun by a drop after the server was picked over the
+   *    tunnel, and before this answer (`Episode.pick`): it already leads
+   *    with that pick, and is left alone. Ended here, a drop the pick was
+   *    meant not to touch ended with nothing reconnected and a plain
+   *    "You're not protected". */
   chose({ tunnelShown }: { tunnelShown: boolean }): LocationChoice {
     if (this.phase.kind === "armed" && tunnelShown) {
-      if (this.phase.routeId !== null) this.set({ ...this.phase, routeId: null });
+      const armed = withoutPick(this.phase);
+      if (armed.routeId !== null || armed !== this.phase) this.set({ ...armed, routeId: null });
       return "keepTunnel";
     }
     if (this.phase.kind === "idle") {
       this.retireLost("customer");
+      return null;
+    }
+    if (
+      (this.phase.kind === "waiting" || this.phase.kind === "attempting") &&
+      this.phase.episode.pick !== undefined &&
+      this.phase.episode.pick === this.picks
+    ) {
       return null;
     }
     const dialling = this.phase.kind === "attempting";
@@ -788,15 +846,51 @@ export class AutoReconnect {
    * it). So an episode under way ends here, as a press of the orb ends it,
    * and its pass is to be stopped (`"stopPass"`).
    *
-   * Nothing else is decided here. A tunnel armed, or nothing at all, waits
-   * for the answer: a switch that fails changes no tunnel, and `chose`
-   * knows by then what the screen shows. Automatic needs no request, and
-   * is `chose` at once. */
-  choosing(): "stopPass" | null {
+   * A tunnel armed is decided here too, as `chose` will decide it, because
+   * it can drop before the answer comes:
+   *
+   *  - shown on screen, it stays up and armed, and its reconnect leads with
+   *    the pick (`routeId`, the server picked, null for Automatic) from
+   *    now on. Left on the old route until the answer, a drop in between
+   *    reconnected to the server the customer had just picked to leave --
+   *    a dial after the press -- and an answer that came during that
+   *    attempt then stopped it, as one over an episode does: the drop the
+   *    pick was meant not to touch ended with nothing reconnected. An
+   *    episode begun so is left to go on when the answer comes
+   *    (`Episode.pick`), and a switch that fails puts back the route the
+   *    reconnect led with (`pickFailed`);
+   *  - beneath a screen that shows nothing up, as a press that takes over.
+   *
+   * With nothing at all, the pick waits for the answer: a switch that
+   * fails changes nothing, and an old "VPN connection lost" is retired
+   * only once one has not. Automatic needs no request, and is `chose` at
+   * once. */
+  choosing({ routeId, tunnelShown }: { routeId: string | null; tunnelShown: boolean }): "stopPass" | null {
+    if (this.phase.kind === "armed") {
+      if (!tunnelShown) {
+        this.cancel("customer");
+        return null;
+      }
+      this.picks += 1;
+      const led = withoutPick(this.phase);
+      this.set({ ...led, routeId, pick: { seq: this.picks, before: led.routeId } });
+      return null;
+    }
     if (this.phase.kind !== "waiting" && this.phase.kind !== "attempting") return null;
     const dialling = this.phase.kind === "attempting";
     this.cancel("customer");
     return dialling ? "stopPass" : null;
+  }
+
+  /** The switch request for a server picked over a tunnel kept up
+   * (`choosing`) has failed: nothing was chosen, and the reconnect leads
+   * with what it led with before the pick. An episode already begun on the
+   * pick -- the tunnel dropped before the answer -- goes on with it: it is
+   * dialling a server the customer pressed, and its pass is under way. */
+  pickFailed(): void {
+    if (this.phase.kind !== "armed" || this.phase.pick === undefined || this.phase.pick.seq !== this.picks) return;
+    const before = this.phase.pick.before;
+    this.set({ ...withoutPick(this.phase), routeId: before });
   }
 
   /** Idle: a press that takes over (`customer`, or a sign-out) retires a

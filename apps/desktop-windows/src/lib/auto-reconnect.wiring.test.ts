@@ -459,22 +459,54 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     // the press. The picker is shared, so this is both clients'.
     const picker = readFileSync(new URL("../components/LocationPicker.tsx", import.meta.url), "utf8");
     const pick = picker.slice(picker.indexOf("async function handlePick(route: RouteOption) {"));
-    const told = pick.indexOf("onPicking?.();");
+    const told = pick.indexOf("onPicking?.(route.id);");
     expect(told).toBeGreaterThan(0);
     expect(told).toBeLessThan(pick.indexOf("await switchRoute(subscriptionId, route.id);"));
     // Automatic too, before its own handler.
     const automatic = picker.slice(picker.indexOf("if (automatic || switchingId) return;"));
-    expect(automatic.indexOf("onPicking?.();")).toBeLessThan(automatic.indexOf("onChooseAutomatic();"));
-    const picking = body("function pickingLocation() {");
-    expect(picking).toContain('if (autoReconnect.choosing() === "stopPass") void stopPass();');
+    expect(automatic.indexOf("onPicking?.(null);")).toBeGreaterThan(0);
+    expect(automatic.indexOf("onPicking?.(null);")).toBeLessThan(automatic.indexOf("onChooseAutomatic();"));
+    const picking = body("function pickingLocation(routeId: string | null) {");
+    expect(picking).toContain(
+      'const choice = autoReconnect.choosing({ routeId, tunnelShown: connectionStateRef.current !== "disconnected" });',
+    );
+    expect(picking).toContain('if (choice === "stopPass") void stopPass();');
     expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain("onPicking={pickingLocation}");
   });
 
-  it("the inline repair is not offered while an attempt dials: the last attempt's error is cleared as the next begins", () => {
-    const runner = boundRunner();
-    const cleared = runner.indexOf("setConnectionError(null);");
+  it("a server picked over a tunnel kept up is what its reconnect leads with, until a switch that fails puts it back", () => {
+    // Told only once the switch answered, a drop in between reconnected to
+    // the server the customer had just picked to leave, and an answer that
+    // came during that attempt stopped it. The picker names the pick as it
+    // is made, and says when the switch fails.
+    const picker = readFileSync(new URL("../components/LocationPicker.tsx", import.meta.url), "utf8");
+    const pick = picker.slice(picker.indexOf("async function handlePick(route: RouteOption) {"));
+    const failed = pick.slice(pick.indexOf("} else {") + "} else {".length);
+    expect(failed.slice(0, failed.indexOf("}"))).toContain("onPickFailed?.();");
+    expect(pick.indexOf("onPickFailed?.();")).toBeGreaterThan(pick.indexOf("if (result.ok) {"));
+    expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain(
+      "onPickFailed={() => autoReconnect.pickFailed()}",
+    );
+  });
+
+  it("the inline repair is not offered while an automatic pass dials: the last pass's error is cleared as the next begins", () => {
+    // Every automatic pass, in the ladder: the reconnect's runner cleared
+    // it and the mid-session failover did not, so after a failed pass shown
+    // "degraded" the inline repair stayed under "Connecting..." -- run from
+    // there, it stopped the failover's pass, whose end cleared the line and
+    // unmounted the panel running the repair: its report, or the elevated
+    // command, never shown.
+    const ladder = body("async function runLadder(");
+    const cleared = ladder.indexOf("if (options.automatic) setConnectionError(null);");
     expect(cleared).toBeGreaterThan(0);
-    expect(cleared).toBeLessThan(runner.indexOf("runLadderRef.current("));
+    // After the declines -- one turned away while a repair runs leaves that
+    // repair's panel where it is -- and before anything is awaited.
+    expect(cleared).toBeGreaterThan(ladder.indexOf('if (options.automatic && repairUnderWay()) return "declined";'));
+    expect(cleared).toBeGreaterThan(ladder.indexOf('if (!protocolUser || ladderInFlight()) return "declined";'));
+    expect(ladder.slice(0, cleared)).not.toContain("await ");
+    // The failover's pass is one: it reaches the ladder as automatic.
+    expect(dashboard).toContain("if (failover) await runLadder({ automatic: true });");
+    expect(boundRunner()).toContain("runLadderRef.current({ automatic: true, reconnect: attempt })");
     // The inline repair is drawn only under an error.
     const error = dashboard.indexOf("{connectionError ? (");
     expect(error).toBeGreaterThan(0);

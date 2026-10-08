@@ -626,6 +626,10 @@ const en = {
   // is installed -- so "every available protocol" would not be true.
   "err.someProtocolsNotTried":
     "None of the protocols tried carried traffic. Some are tried only when you press Connect.",
+  // An iPhone's automatic reconnect that stops before its last protocol
+  // because the VPN configuration could not be read: the rest were not
+  // dialled, and the next attempt, or Connect, will dial them.
+  "err.notEveryProtocolTried": "None of the protocols tried carried traffic. The others were not tried this time.",
   "err.concurrentLimit": "Your plan's device limit is already in use. Disconnect another device and try again.",
   "err.quotaExhausted": "You've used all the data on your plan. Upgrade or wait for it to renew.",
   "err.subscriptionInactive": "Your subscription isn't active right now. Check its status on the dashboard.",
@@ -1298,6 +1302,8 @@ const fa: Record<TranslationKey, string> = {
   "err.allProtocolsFailed": "همه پروتکل‌های موجود امتحان شدند — هیچ‌کدام ترافیک را عبور ندادند.",
   "err.someProtocolsNotTried":
     "هیچ‌کدام از پروتکل‌هایی که امتحان شدند ترافیک را عبور ندادند. بعضی پروتکل‌ها فقط وقتی «اتصال» را بزنید امتحان می‌شوند.",
+  "err.notEveryProtocolTried":
+    "هیچ‌کدام از پروتکل‌هایی که امتحان شدند ترافیک را عبور ندادند. بقیه این بار امتحان نشدند.",
   "err.concurrentLimit": "سقف دستگاه‌های پلن شما پر شده است. یک دستگاه دیگر را قطع کنید.",
   "err.quotaExhausted": "حجم پلن شما تمام شده است.",
   "err.subscriptionInactive": "اشتراک شما فعال نیست.",

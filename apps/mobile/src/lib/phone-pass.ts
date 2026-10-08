@@ -1,4 +1,5 @@
 import type { ReconnectAttempt, ReconnectStamp } from "@shared/lib/auto-reconnect";
+import type { ClassifiedError } from "@shared/lib/connection-errors";
 import { ladderPass } from "@shared/lib/ladder-pass";
 import type { ProtocolUser } from "@shared/lib/types";
 
@@ -69,6 +70,96 @@ export const presses = { current: 0 };
  * tunnel up; one app's, like the guard. */
 export const passTunnel: { current: ProtocolUser | "unproven" | null } = { current: null };
 
+/** The error line the last pass to put one up ended on, and which pass
+ * that was (`PhonePass.say`). See `passSaid`. */
+const lastLine: { generation: number; line: ClassifiedError | null } = { generation: 0, line: null };
+
+/** The error line a pass ended on, when it put one up (`PhonePass.say`);
+ * undefined when it did not.
+ *
+ * For a screen that reads a pass's end without having run it -- mounted
+ * since the pass began, Settings opened and closed meanwhile. The pass set
+ * its line on the screen it began on, which was gone: a connect that
+ * failed said nothing at all on the screen in front of the customer, which
+ * went on saying "You're not protected" as though nothing had been tried. */
+export function passSaid(generation: number): ClassifiedError | null | undefined {
+  return lastLine.generation === generation && generation !== 0 ? lastLine.line : undefined;
+}
+
+/** What a press of Connect put on its own screen as it gave up before
+ * dialling, for the screen mounted since (`ConnectPress.settle`). */
+export interface PressSaid {
+  /** The error line: a pass still running that would not let go, or a
+   * question about the VPN permission that failed. */
+  line?: ClassifiedError;
+  /** The VPN permission was refused at the consent dialog. */
+  permissionDenied?: boolean;
+}
+
+/** A press of Connect on its way to the pass it will begin. See
+ * `connectPressed`. */
+export interface ConnectPress {
+  /** The press is over: its pass has ended, or it gave up before one.
+   * Tells the screens listening (`onConnectSettled`) what it said, and to
+   * read the platform -- unless a later press, or the end of the session,
+   * owns the screen by then. Once. */
+  settle(said?: PressSaid): void;
+}
+
+/** The press of Connect under way, while it is the press in force. */
+const pressing: { current: { press: ConnectPress; live: () => boolean } | null } = { current: null };
+const settledListeners = new Set<(press: ConnectPress, said: PressSaid) => void>();
+
+/** A press of Connect has been made, and is on its way to the pass it will
+ * begin: waiting up to twenty seconds for a pass it outranks to let go
+ * (`TAKEOVER_WAIT_MS`), for a teardown, for the consent dialog. `live`
+ * says whether it is still the press in force -- no later press, the same
+ * session.
+ *
+ * A screen mounted meanwhile -- Settings opened and closed -- shows it as
+ * connecting (`connectPending`) and reads the platform only once it has
+ * settled. It used to read the platform as the pass it was waiting on
+ * ended, show "You're not protected" with Connect on the orb, and go on
+ * showing it while the press, on the screen now gone, began its pass and
+ * dialled: nothing tells a screen that a pass has begun. */
+export function connectPressed(live: () => boolean): ConnectPress {
+  const press: ConnectPress = {
+    settle: (said = {}) => {
+      // Settled already, or a later press owns the screen and says what
+      // is on it itself.
+      if (pressing.current?.press !== press) return;
+      pressing.current = null;
+      if (!live()) return;
+      for (const listener of [...settledListeners]) {
+        try {
+          listener(press, said);
+        } catch {
+          // One screen's trouble is not the press's.
+        }
+      }
+    },
+  };
+  pressing.current = { press, live };
+  return press;
+}
+
+/** Whether a press of Connect is on its way to its pass, still the press in
+ * force: shown as connecting, as a pass under way is. `except`, a press the
+ * asking screen made itself, which shows itself and does not count. */
+export function connectPending(except: ConnectPress | null = null): boolean {
+  return pressing.current !== null && pressing.current.press !== except && pressing.current.live();
+}
+
+/** Told when a press of Connect settles (`ConnectPress.settle`), with the
+ * press, so the screen it was made on can tell it is its own. Returns the
+ * unsubscribe. */
+export function onConnectSettled(listener: (press: ConnectPress, said: PressSaid) => void): () => void {
+  settledListeners.add(listener);
+  return () => {
+    settledListeners.delete(listener);
+  };
+}
+
 /** A press of Connect that followed the pass holding the guard
  * (`pressOverPass` "follow", or a Connect turned away because that pass
  * took the guard first): which pass, and the stamp taken at that press.
@@ -104,6 +195,10 @@ export interface PhonePass {
    * Connect that followed it (`followPass`), or else `own`, the one the
    * pass took as it began. */
   landing(own: ReconnectStamp): ReconnectStamp;
+  /** The error line this pass ends on, as it puts it up on its own screen
+   * -- kept for a screen that reads its end without having run it
+   * (`passSaid`). Only while it is still the current pass. */
+  say(line: ClassifiedError | null): void;
   /** On the way out, however the pass ended. Releases the guard -- if
    * this pass still holds it -- and tells every screen listening
    * (`ladderPass.onEnd`). */
@@ -142,6 +237,11 @@ export function beginPass(reconnect?: ReconnectAttempt, now = Date.now()): Phone
       reconnect?.progress();
     },
     landing: (own) => (followed.generation === generation && followed.stamp !== null ? followed.stamp : own),
+    say: (line) => {
+      if (!owns()) return;
+      lastLine.generation = generation;
+      lastLine.line = line;
+    },
     end: () => {
       // A pass that outlived its guard has been replaced, and releasing
       // the guard now would let a third pass start beside the second.
@@ -250,4 +350,8 @@ export function resetPhonePass(): void {
   passTunnel.current = null;
   followed.generation = 0;
   followed.stamp = null;
+  lastLine.generation = 0;
+  lastLine.line = null;
+  pressing.current = null;
+  settledListeners.clear();
 }

@@ -897,7 +897,7 @@ describe("the customer outranks it", () => {
     await h.advance(10 * 60_000);
     h.rc.dropped();
     await h.advance(0); // attempt 1 failed; attempt 2 is due in 2s
-    expect(h.rc.choosing()).toBeNull();
+    expect(h.rc.choosing({ routeId: "new", tunnelShown: false })).toBeNull();
     expect(h.rc.current()).toEqual({ kind: "idle", lost: false, stopped: "customer", session: null });
     // The request takes eight seconds to answer; nothing dials meanwhile.
     await h.advance(8_000);
@@ -918,7 +918,7 @@ describe("the customer outranks it", () => {
     h.script(["pending"]);
     h.rc.dropped();
     await h.advance(0);
-    expect(h.rc.choosing()).toBe("stopPass");
+    expect(h.rc.choosing({ routeId: "new", tunnelShown: false })).toBe("stopPass");
     expect(h.asked[0]!.live()).toBe(false);
     // The pass lands before the switch request answers: nothing is armed,
     // so the answer finds no tunnel to keep on the old route.
@@ -930,32 +930,142 @@ describe("the customer outranks it", () => {
     expect(h.asked).toHaveLength(1);
   });
 
-  it("a server picked over a tunnel armed, or with nothing at all, decides nothing until it is chosen", async () => {
-    // A switch that fails changes no tunnel, and only the answer knows
-    // what the screen shows by then (`chose`).
-    const h = harness();
-    h.bind();
-    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
-    await h.advance(10 * 60_000);
-    const asked = h.rc.stamp();
-    expect(h.rc.choosing()).toBeNull();
-    expect(h.rc.current()).toMatchObject({ kind: "armed", routeId: "old" });
-    // Nothing overruled: an answer asked for before the pick still arms.
-    h.rc.tunnelUp({ routeId: null, stamp: asked });
-    expect(h.rc.current().kind).toBe("armed");
-
+  it("a server picked with nothing at all decides nothing until it is chosen", async () => {
     // Idle, with the customer's own connect dialling: its landing arms, and
-    // an old "VPN connection lost" waits for the answer to be retired.
+    // an old "VPN connection lost" waits for the answer to be retired -- a
+    // switch that fails changes nothing.
     const i = harness();
     i.bind();
     i.rc.tunnelUp({ routeId: "r", fresh: true, stamp: i.rc.stamp() });
     await i.advance(10 * 60_000);
     i.rc.dropped({ exclusion: "excluded" });
     const connect = i.rc.stamp();
-    expect(i.rc.choosing()).toBeNull();
+    expect(i.rc.choosing({ routeId: "new", tunnelShown: false })).toBeNull();
     expect(reconnectLost(i.rc.current(), 1)).toBe(true);
     i.rc.tunnelUp({ routeId: "new", fresh: true, stamp: connect });
     expect(vouching(i.rc.current(), 1)).toBe(true);
+  });
+
+  it("a server picked over a tunnel the screen shows keeps it up, and its reconnect leads with the pick from the press", async () => {
+    // Left on the old route until the switch answered -- seconds, on a
+    // filtered network -- a drop in between reconnected to the server the
+    // customer had just picked to leave: a dial after the press.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    const asked = h.rc.stamp();
+    expect(h.rc.choosing({ routeId: "new", tunnelShown: true })).toBeNull();
+    expect(vouching(h.rc.current(), 1)).toBe(true);
+    // Nothing overruled: an answer asked for before the pick still arms.
+    h.rc.tunnelUp({ routeId: null, stamp: asked });
+    expect(h.rc.current().kind).toBe("armed");
+    // The tunnel drops before the switch answers.
+    h.script(["pending"]);
+    expect(h.rc.dropped()).toBe("reconnecting");
+    await h.advance(0);
+    expect(h.asked).toHaveLength(1);
+    expect(h.asked[0]!.resumeRouteId).toBe("new");
+    // The answer comes during that attempt: it already leads with the
+    // pick, and goes on. Stopped, the drop the pick was meant not to touch
+    // ended with nothing reconnected.
+    expect(h.rc.chose({ tunnelShown: false })).toBeNull();
+    expect(h.asked[0]!.live()).toBe(true);
+    expect(h.rc.current().kind).toBe("attempting");
+    h.settle({ kind: "connected", routeId: "new" });
+    await h.advance(0);
+    expect(h.rc.current()).toMatchObject({ kind: "armed", routeId: "new" });
+    expect(h.reports).toHaveLength(0);
+  });
+
+  it("an answer between the attempts of an episode the pick began leaves the next attempt to lead with it", async () => {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.rc.choosing({ routeId: "new", tunnelShown: true });
+    h.rc.dropped();
+    await h.advance(0); // attempt 1, led by the pick, failed; attempt 2 is due
+    expect(h.rc.current().kind).toBe("waiting");
+    expect(h.rc.chose({ tunnelShown: false })).toBeNull();
+    expect(h.rc.current().kind).toBe("waiting");
+    await h.advance(60_000);
+    expect(h.asked.length).toBeGreaterThan(1);
+    expect(h.asked.every((a) => a.resumeRouteId === "new")).toBe(true);
+    // A later pick during the episode ends it, as any pick under way does.
+    h.rc.choosing({ routeId: "other", tunnelShown: false });
+    expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "customer" });
+  });
+
+  it("a pick over a tunnel kept up, answered, hands the lead to the ordinary order, which the choice now heads", async () => {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.rc.choosing({ routeId: "new", tunnelShown: true });
+    expect(h.rc.chose({ tunnelShown: true })).toBe("keepTunnel");
+    expect(h.rc.current()).toEqual({
+      kind: "armed",
+      since: expect.any(Number),
+      routeId: null,
+      quickDeaths: 0,
+      session: 1,
+    });
+    h.rc.dropped();
+    await h.advance(0);
+    expect(h.asked[0]!.resumeRouteId).toBeNull();
+  });
+
+  it("a switch that fails puts back what the reconnect led with, and its late answer cannot end an episode", async () => {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.rc.choosing({ routeId: "new", tunnelShown: true });
+    h.rc.pickFailed();
+    expect(h.rc.current()).toEqual({
+      kind: "armed",
+      since: expect.any(Number),
+      routeId: "old",
+      quickDeaths: 0,
+      session: 1,
+    });
+    h.rc.dropped();
+    await h.advance(0);
+    expect(h.asked[0]!.resumeRouteId).toBe("old");
+    // Nothing of that pick is left to keep an episode going on its answer:
+    // a choice made now ends it as before.
+    expect(h.rc.chose({ tunnelShown: false })).toBeNull();
+    expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "customer" });
+
+    // A failure after the tunnel dropped leaves the episode on the server
+    // the customer pressed.
+    const e = harness();
+    e.bind();
+    e.rc.tunnelUp({ routeId: "old", fresh: true, stamp: e.rc.stamp() });
+    await e.advance(10 * 60_000);
+    e.rc.choosing({ routeId: "new", tunnelShown: true });
+    e.rc.dropped();
+    await e.advance(0);
+    e.rc.pickFailed();
+    await e.advance(60_000);
+    expect(e.asked.every((a) => a.resumeRouteId === "new")).toBe(true);
+  });
+
+  it("a server picked over a tunnel armed beneath a screen that shows nothing up takes over at the pick", async () => {
+    // As `chose` does with the answer -- which can come after a drop the
+    // screen did not show, whose reconnect then led with the old route.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    expect(h.rc.choosing({ routeId: "new", tunnelShown: false })).toBeNull();
+    expect(vouching(h.rc.current(), 1)).toBe(false);
+    expect(h.rc.dropped()).toBe("lost");
+    await h.advance(10 * 60_000);
+    expect(h.asked).toHaveLength(0);
+    expect(h.rc.chose({ tunnelShown: false })).toBeNull();
+    expect(h.asked).toHaveLength(0);
   });
 
   it("Stop reconnecting leaves 'connection lost' up, until the next press", async () => {

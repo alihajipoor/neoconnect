@@ -4,9 +4,13 @@ import { AutoReconnect, vouching, type ReconnectAttempt } from "@shared/lib/auto
 import { LADDER_MAX_MS, ladderPass } from "@shared/lib/ladder-pass";
 import {
   beginPass,
+  connectPending,
+  connectPressed,
   followPass,
+  onConnectSettled,
   passAwayChanged,
   passInFlight,
+  passSaid,
   pressOverPass,
   reconnectPassInFlight,
   resetPhonePass,
@@ -419,6 +423,90 @@ describe("a press of Connect over an automatic pass", () => {
   });
 });
 
+describe("a press of Connect on its way to its pass", () => {
+  // A Connect pressed over an automatic pass waits up to twenty seconds for
+  // it to let go, then for its teardown and the consent dialog, before its
+  // own pass begins. Settings opened and closed meanwhile, the screen
+  // mounted on return read the platform as the automatic pass ended, said
+  // "You're not protected" with Connect on the orb, and went on saying so
+  // while the press, on the screen now gone, began its pass and dialled.
+
+  it("is shown as connecting from whichever screen, while it is the press in force", () => {
+    let live = true;
+    const press = connectPressed(() => live);
+    expect(connectPending()).toBe(true);
+    // The screen it was made on shows it itself.
+    expect(connectPending(press)).toBe(false);
+    // A later press -- a stop, a pick -- or a sign-out owns the screen.
+    live = false;
+    expect(connectPending()).toBe(false);
+    live = true;
+    press.settle();
+    expect(connectPending()).toBe(false);
+  });
+
+  it("tells the screens listening once it settles, with what it said on its own screen", () => {
+    const heard: unknown[] = [];
+    const stop = onConnectSettled((press, said) => heard.push({ press, said }));
+    const press = connectPressed(() => true);
+    const line = { kind: "serviceUnavailable", messageKey: "err.connectBusy", detail: "still running" } as const;
+    press.settle({ line });
+    press.settle({});
+    expect(heard).toEqual([{ press, said: { line } }]);
+    stop();
+    connectPressed(() => true).settle();
+    expect(heard).toHaveLength(1);
+  });
+
+  it("tells nobody once a later press owns the screen, which says what is on it itself", () => {
+    const heard: unknown[] = [];
+    onConnectSettled((press) => heard.push(press));
+    // Overtaken by a stop, or by the end of the session.
+    let live = true;
+    const stopped = connectPressed(() => live);
+    live = false;
+    stopped.settle();
+    // Overtaken by a newer Connect, still on its way.
+    const first = connectPressed(() => true);
+    const second = connectPressed(() => true);
+    first.settle();
+    expect(heard).toHaveLength(0);
+    expect(connectPending()).toBe(true);
+    second.settle();
+    expect(heard).toEqual([second]);
+  });
+});
+
+describe("the line a pass ended on", () => {
+  it("is kept for a screen that reads its end without having run it", () => {
+    // Set on the screen the pass began on, which was gone: a connect that
+    // failed said nothing on the screen in front of the customer.
+    const pass = taken(beginPass());
+    expect(passSaid(pass.generation)).toBeUndefined();
+    const line = { kind: "serverUnreachable", messageKey: "err.allProtocolsFailed", detail: "tried 3 of 3" } as const;
+    pass.say(line);
+    pass.end();
+    expect(passSaid(pass.generation)).toEqual(line);
+    // Only that pass's: a later one has said nothing yet.
+    const next = taken(beginPass());
+    expect(passSaid(next.generation)).toBeUndefined();
+    next.say(null);
+    expect(passSaid(next.generation)).toBeNull();
+    expect(passSaid(pass.generation)).toBeUndefined();
+  });
+
+  it("is not a replaced pass's to say", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const old = taken(beginPass());
+    vi.setSystemTime(1_000_000 + LADDER_MAX_MS + 1);
+    const newer = taken(beginPass());
+    old.say({ kind: "serverUnreachable", messageKey: "err.allProtocolsFailed", detail: "" });
+    expect(passSaid(old.generation)).toBeUndefined();
+    expect(passSaid(newer.generation)).toBeUndefined();
+  });
+});
+
 /** Source assertions, for the reason device-slot-steps.test.ts gives: the
  * dashboard needs a phone, a tunnel and a network. Each fails against
  * the dashboard as it was, with a stop flag per screen and no guard. */
@@ -545,7 +633,7 @@ describe("the phone dashboard's wiring", () => {
 
   it("reads what a pass it did not start left, when it ends", () => {
     expect(dashboard).toMatch(
-      /ladderPass\.onEnd\(\(\) => \{\n\s+if \(ladderPass\.generation\.current === followedPassRef\.current\) return;\n\s+if \(!loadedRef\.current\) return;\n\s+void adoptPlatformRef\.current\(/,
+      /ladderPass\.onEnd\(\(\) => \{\n\s+if \(ladderPass\.generation\.current === followedPassRef\.current\) return;\n\s+const said = passSaid\(ladderPass\.generation\.current\);\n\s+if \(said !== undefined\) setConnectionError\(said\);\n\s+if \(!loadedRef\.current\) return;\n\s+void adoptPlatformRef\.current\(/,
     );
     expect(body("async function runLadder(options: LadderOptions = {}): Promise<LadderOutcome> {")).toContain(
       "followedPassRef.current = pass.generation;",
@@ -575,7 +663,10 @@ describe("the phone dashboard's wiring", () => {
     // And over a pass under way, said at once, so a pass that ends between
     // that and the load's end is still read by the listener.
     const adopt = body("async function adoptPlatform(\n    sessionAtStart: number,");
-    const inFlight = adopt.slice(adopt.indexOf("if (passInFlight()) {"), adopt.indexOf("return;", adopt.indexOf("if (passInFlight()) {")));
+    const inFlight = adopt.slice(
+      adopt.indexOf("if (passInFlight() || pressElsewhere) {"),
+      adopt.indexOf("return;", adopt.indexOf("if (passInFlight() || pressElsewhere) {")),
+    );
     expect(inFlight).toContain("ready();");
   });
 
@@ -636,9 +727,11 @@ describe("the phone dashboard's wiring", () => {
   });
 
   it("shows a pass under way as one, on mounting and on loading, and never reads the platform under it", () => {
-    expect(dashboard).toMatch(/useState<ConnectionState>\(\(\) =>\s+passInFlight\(\) \? "connecting" : "disconnected",?\s+\)/);
+    expect(dashboard).toMatch(
+      /useState<ConnectionState>\(\(\) =>\s+passInFlight\(\) \|\| connectPending\(\) \? "connecting" : "disconnected",?\s+\)/,
+    );
     const adopt = body("async function adoptPlatform(\n    sessionAtStart: number,");
-    const inFlight = adopt.indexOf("if (passInFlight()) {");
+    const inFlight = adopt.indexOf("if (passInFlight() || pressElsewhere) {");
     expect(inFlight).toBeGreaterThan(0);
     expect(inFlight).toBeLessThan(adopt.indexOf("await withTimeout(vpnStatus()"));
     expect(adopt.slice(inFlight, adopt.indexOf("}", inFlight))).toContain('setConnectionState("connecting")');
@@ -733,5 +826,48 @@ describe("the phone dashboard's wiring", () => {
     expect(settle).toContain('setConnectionState(leftOver ? "disconnected" : state);');
     expect(settle).toContain("const tearingDown = slotTeardown.owed() || customerTeardown.owed();");
     expect(settle).not.toContain("setConnectionState(state);");
+  });
+
+  it("shows a Connect pressed on a screen since gone as connecting until it settles, then what it said", () => {
+    // Waiting on a screen that unmounted, the press began its pass behind a
+    // screen saying "You're not protected" with Connect on the orb, and a
+    // pass that failed said so on the screen that was gone.
+    const connect = body("async function connectNow(takeover?: string[]) {");
+    const pressed = connect.indexOf("const underWay = connectPressed(() => !superseded());");
+    expect(pressed).toBeGreaterThan(connect.indexOf("const superseded = () =>"));
+    expect(pressed).toBeLessThan(connect.indexOf('autoReconnect.cancel("customer");'));
+    expect(connect).toContain("pressedHereRef.current = underWay;");
+    // However it ends: after its pass, or before one.
+    expect(connect).toMatch(/\} finally \{\n\s+underWay\.settle\(said\);\n\s+\}\n?$/);
+    expect(connect.indexOf("try {")).toBeLessThan(connect.indexOf('autoReconnect.cancel("customer");'));
+    // What it says on its own screen goes with it.
+    expect(connect).toMatch(/if \(!letGo\) \{[^]*?say\(\{[^]*?messageKey: "err\.connectBusy"/);
+    expect(connect).toContain("said.permissionDenied = true;");
+    expect(connect).toContain("say(classifyConnectionError(err));");
+    expect(connect).not.toContain("setConnectionError(classifyConnectionError(err));");
+    // A screen mounted meanwhile shows it as connecting, and does not read
+    // the platform under it -- unless the press is its own.
+    const adopt = body("async function adoptPlatform(\n    sessionAtStart: number,");
+    expect(adopt).toContain("const pressElsewhere = connectPending(pressedHereRef.current);");
+    expect(adopt.indexOf("if (passInFlight() || pressElsewhere) {")).toBeLessThan(
+      adopt.indexOf("await withTimeout(vpnStatus()"),
+    );
+    // And reads it once the press settles, with its words.
+    expect(dashboard).toMatch(
+      /onConnectSettled\(\(press, said: PressSaid\) => \{\n\s+if \(press === pressedHereRef\.current\) return;\n\s+if \(said\.line !== undefined\) setConnectionError\(said\.line\);\n\s+if \(said\.permissionDenied === true\) setPermissionDenied\(true\);\n\s+if \(!loadedRef\.current\) return;\n\s+void adoptPlatformRef\.current\(/,
+    );
+  });
+
+  it("keeps the line a pass ends on with the pass, for a screen mounted since", () => {
+    const walk = body("async function walkLadder(pass: PhonePass, options: LadderOptions): Promise<LadderOutcome> {");
+    const shown = walk.indexOf("setConnectionError(heldBack !== null ? null : lastError);");
+    expect(walk.indexOf("pass.say(heldBack !== null ? null : lastError);")).toBeGreaterThan(shown);
+    expect(walk).toContain("setConnectionError(none);");
+    expect(walk.indexOf("pass.say(none);")).toBeGreaterThan(walk.indexOf("setConnectionError(none);"));
+    // Refused by the plan: the card is the app's already, the line is kept.
+    expect(walk).toContain("pass.say(showSlotStop(stop, options.reconnect));");
+    expect(dashboard).toContain(
+      "function showSlotStop(stop: SlotStop, reconnect?: ReconnectAttempt): ClassifiedError | null {",
+    );
   });
 });

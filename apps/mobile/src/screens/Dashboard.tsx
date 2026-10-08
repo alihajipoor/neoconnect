@@ -104,13 +104,19 @@ import { withTimeout } from "@shared/lib/service-call";
 import { droppedWhileAway, reconnectPreflight, rungAccess } from "../lib/reconnect-steps";
 import {
   beginPass,
+  connectPending,
+  connectPressed,
   followPass,
+  onConnectSettled,
   passInFlight,
+  passSaid,
   passTunnel,
   pressOverPass,
   presses,
   stopPassInFlight,
+  type ConnectPress,
   type PhonePass,
+  type PressSaid,
 } from "../lib/phone-pass";
 import {
   claimWhileRefreshing,
@@ -347,9 +353,11 @@ export function Dashboard({
   // A pass already under way as this screen mounts -- started by a
   // dashboard that unmounted when Settings opened -- is shown as one from
   // the first frame, so a press means stop rather than a second connect.
-  // Its end is read from the platform (the `ladderPass.onEnd` effect).
+  // Its end is read from the platform (the `ladderPass.onEnd` effect). So
+  // is a press of Connect made there that is still on its way to its pass
+  // (`connectPending`), read once it settles (`onConnectSettled`).
   const [connectionState, setConnectionState] = useState<ConnectionState>(() =>
-    passInFlight() ? "connecting" : "disconnected",
+    passInFlight() || connectPending() ? "connecting" : "disconnected",
   );
   /** The same, for a press reported after an await: the server list says
    * which location was chosen only once its switch request has answered. */
@@ -375,6 +383,10 @@ export function Dashboard({
    * one a press of Connect here is waiting on to let go. The end of any
    * other pass is read from the platform. */
   const followedPassRef = useRef(0);
+  /** The last press of Connect made on this screen: its settling is this
+   * screen's own to show, and the screens mounted since read it
+   * (`onConnectSettled`). */
+  const pressedHereRef = useRef<ConnectPress | null>(null);
   /** Counts the customer's presses, so a press still waiting on something
    * can tell that a later one has taken over from it -- pressed on this
    * screen or on one mounted since. One per app (`lib/phone-pass`). */
@@ -687,8 +699,16 @@ export function Dashboard({
     sub: Subscription | null,
     ready: () => void = () => undefined,
   ) {
-    if (passInFlight()) {
-      if (ladderPass.generation.current !== followedPassRef.current) setConnectionState("connecting");
+    // A press of Connect still on its way to its pass is shown as one too,
+    // and read again once it settles: read now, between the pass it waited
+    // on and its own, the platform said nothing was up -- "You're not
+    // protected", Connect on the orb -- and the screen went on saying so
+    // while that press dialled. Not a press made here, which shows itself.
+    const pressElsewhere = connectPending(pressedHereRef.current);
+    if (passInFlight() || pressElsewhere) {
+      if (ladderPass.generation.current !== followedPassRef.current || pressElsewhere) {
+        setConnectionState("connecting");
+      }
       ready();
       return;
     }
@@ -1011,6 +1031,10 @@ export function Dashboard({
   // tunnel its own egress check had just proven, with no poll running to
   // correct it. A pass this screen follows itself has its own answer.
   //
+  // With the line it ended on, if it put one up (`passSaid`): set on the
+  // screen it began on, which is gone, a connect that failed said nothing
+  // here at all.
+  //
   // Not before this screen has loaded: its subscription and credentials
   // are not in yet, and read with none, the adoption told the slot this
   // phone has no subscription -- wiping what the pass had claimed, and
@@ -1027,6 +1051,28 @@ export function Dashboard({
     () =>
       ladderPass.onEnd(() => {
         if (ladderPass.generation.current === followedPassRef.current) return;
+        const said = passSaid(ladderPass.generation.current);
+        if (said !== undefined) setConnectionError(said);
+        if (!loadedRef.current) return;
+        void adoptPlatformRef.current(sessionGeneration(), protocolUsersRef.current, subscriptionRef.current);
+      }),
+    [],
+  );
+
+  // A press of Connect made on a screen since gone -- Settings opened and
+  // closed while it waited for a pass to let go, for a teardown, for the
+  // consent dialog -- has settled: its pass has ended, or it gave up before
+  // one. Shown as connecting meanwhile (`connectPending`), this screen now
+  // shows what that press said on its own screen and reads the platform,
+  // as at a pass's end. Not a press made here, which says it all itself;
+  // and not one a later press overtook, which owns the screen
+  // (`ConnectPress.settle`).
+  useEffect(
+    () =>
+      onConnectSettled((press, said: PressSaid) => {
+        if (press === pressedHereRef.current) return;
+        if (said.line !== undefined) setConnectionError(said.line);
+        if (said.permissionDenied === true) setPermissionDenied(true);
         if (!loadedRef.current) return;
         void adoptPlatformRef.current(sessionGeneration(), protocolUsersRef.current, subscriptionRef.current);
       }),
@@ -1186,10 +1232,14 @@ export function Dashboard({
    * reconnect between attempts ends here, and one dialling has its pass
    * stopped, as "Stop reconnecting" does: heard only with the answer, an
    * attempt that began or landed meanwhile dialled the old route after the
-   * press. See `autoReconnect.choosing`. */
-  function pickingLocation() {
+   * press. Over a tunnel the screen shows, its reconnect leads with the
+   * pick from here, should it drop before the answer; beneath a screen
+   * that shows nothing up, the pick takes over as any press does. See
+   * `autoReconnect.choosing`. */
+  function pickingLocation(routeId: string | null) {
     pressRef.current += 1;
-    if (autoReconnect.choosing() === "stopPass") void stopPass();
+    const choice = autoReconnect.choosing({ routeId, tunnelShown: connectionStateRef.current !== "disconnected" });
+    if (choice === "stopPass") void stopPass();
   }
 
   async function handleConnectToggle() {
@@ -1262,112 +1312,127 @@ export function Dashboard({
      * screen or on one mounted since -- or the end of the session owns the
      * screen from here. Asked after every await before the ladder. */
     const superseded = () => pressRef.current !== press || sessionGeneration() !== sessionAtPress;
-    // The customer's own connect, from the orb or the device-limit card:
-    // an automatic reconnect under way, or waiting, ends here.
-    autoReconnect.cancel("customer");
-
-    // A pass already running that this screen is not showing: an
-    // automatic reconnect's that began as this press was made, or one a
-    // dashboard now gone started (Settings opened mid-pass). Never a
-    // second ladder beside it -- two took turns tearing down each other's
-    // engine through the one VPN service. The customer's own connect,
-    // already running and still wanted, is what this press asked for: it
-    // is shown, and its end read when it comes. Anything else is outranked
-    // (`pressOverPass`) -- an automatic reconnect's, whose episode the
-    // press above has ended, one the customer stopped that is still
-    // unwinding, any pass under "Use on this device instead": told to
-    // stop -- the flag reaches it from any screen -- and waited for, and
-    // then this connect clears whatever it left and dials. One that does
-    // not let go in time is said to be still running, never dialled beside.
-    let tookOver = false;
-    const over = pressOverPass({ takeover: takeover !== undefined });
-    if (over === "follow") {
-      // Its landing is this press's too, and quotes this press's stamp:
-      // its own was taken before this press overruled it (the `cancel`
-      // above), and its landing went unarmed -- "You're protected" over a
-      // tunnel whose drop then reconnected nothing. See `followPass`.
-      followPass(autoReconnect.stamp());
-      if (ladderPass.generation.current !== followedPassRef.current) setConnectionState("connecting");
-      return;
-    }
-    if (over === "takeOver") {
-      setConnectionState("connecting");
-      followedPassRef.current = ladderPass.generation.current;
-      const letGo = await stopPassInFlight();
-      if (superseded()) return;
-      if (!letGo) {
-        // Its end, when it comes, is read from the platform.
-        followedPassRef.current = 0;
-        setConnectionError({
-          kind: "serviceUnavailable",
-          messageKey: "err.connectBusy",
-          detail: "a pass still running did not stop in time",
-        });
-        return;
-      }
-      tookOver = true;
-    }
-
-    // A tunnel the device limit is still taking down comes down first,
-    // and so does one an earlier teardown left up -- the card can still
-    // be showing over it, and its "Use on this device instead" is the
-    // only way here with a tunnel up (the orb disconnects then). Dialling
-    // over it would hand the next engine a descriptor the last one has
-    // not let go of, so if it does not come down, nothing is dialled, and
-    // the card stays up beside the line that says the disconnect did not
-    // finish. The customer's own teardown, still owed or started here for
-    // a tunnel still up, is the same: tried, and if it does not finish,
-    // left owed and retried, with the line that says so -- shown as
-    // still disconnecting, never "degraded", which would say the server
-    // isn't responding when nothing measured that. And after an automatic
-    // pass this press stopped: it takes down what it brought up, but the
-    // platform is asked rather than that taken on trust.
-    const slotOwed = slotTeardown.owed();
-    const customerOwed = customerTeardown.owed();
-    if (slotOwed || customerOwed || tookOver || tunnelUp(connectionState)) {
-      setConnectionState("disconnecting");
-      const result = slotOwed
-        ? await slotTeardown.retry(teardownOnce)
-        : customerOwed
-          ? await customerTeardown.retry(teardownOnce)
-          : await customerTeardown.begin(teardownOnce);
-      // Down, on the platform's word -- and said, so a connect that stops
-      // at the consent dialog below does not leave the orb on
-      // "disconnecting". Not down: nothing is dialled over it.
-      settleTeardown(result);
-      if (result === "stuck") return;
-      if (superseded()) return;
-    }
-
-    // Their own connect from here; nothing is owed any more.
-    slotTeardown.clear();
-    customerTeardown.clear();
-    setConnectionError(null);
-    setPermissionDenied(false);
-    setSlotNotice(null);
-
-    // Consent first, and before anything is torn down or started.
-    // Android raises a system dialog the first time any app asks to
-    // create a VpnService, and it cannot be pre-granted -- so this is a
-    // real branch on first run, not a formality.
+    // On its way to its pass, as far as a screen mounted meanwhile can tell
+    // (`connectPressed`): shown there as connecting, and read there once it
+    // settles, with what it said here -- this screen may be gone by then.
+    const underWay = connectPressed(() => !superseded());
+    pressedHereRef.current = underWay;
+    const said: PressSaid = {};
+    const say = (line: ClassifiedError) => {
+      said.line = line;
+      setConnectionError(line);
+    };
     try {
-      if (!(await hasVpnPermission()) && !(await requestVpnPermission())) {
-        setPermissionDenied(true);
+      // The customer's own connect, from the orb or the device-limit card:
+      // an automatic reconnect under way, or waiting, ends here.
+      autoReconnect.cancel("customer");
+
+      // A pass already running that this screen is not showing: an
+      // automatic reconnect's that began as this press was made, or one a
+      // dashboard now gone started (Settings opened mid-pass). Never a
+      // second ladder beside it -- two took turns tearing down each other's
+      // engine through the one VPN service. The customer's own connect,
+      // already running and still wanted, is what this press asked for: it
+      // is shown, and its end read when it comes. Anything else is outranked
+      // (`pressOverPass`) -- an automatic reconnect's, whose episode the
+      // press above has ended, one the customer stopped that is still
+      // unwinding, any pass under "Use on this device instead": told to
+      // stop -- the flag reaches it from any screen -- and waited for, and
+      // then this connect clears whatever it left and dials. One that does
+      // not let go in time is said to be still running, never dialled beside.
+      let tookOver = false;
+      const over = pressOverPass({ takeover: takeover !== undefined });
+      if (over === "follow") {
+        // Its landing is this press's too, and quotes this press's stamp:
+        // its own was taken before this press overruled it (the `cancel`
+        // above), and its landing went unarmed -- "You're protected" over a
+        // tunnel whose drop then reconnected nothing. See `followPass`.
+        followPass(autoReconnect.stamp());
+        if (ladderPass.generation.current !== followedPassRef.current) setConnectionState("connecting");
         return;
       }
-    } catch (err) {
-      setConnectionError(classifyConnectionError(err));
-      return;
-    }
-    if (superseded()) return;
+      if (over === "takeOver") {
+        setConnectionState("connecting");
+        followedPassRef.current = ladderPass.generation.current;
+        const letGo = await stopPassInFlight();
+        if (superseded()) return;
+        if (!letGo) {
+          // Its end, when it comes, is read from the platform.
+          followedPassRef.current = 0;
+          say({
+            kind: "serviceUnavailable",
+            messageKey: "err.connectBusy",
+            detail: "a pass still running did not stop in time",
+          });
+          return;
+        }
+        tookOver = true;
+      }
 
-    // Declined: another pass took the guard after the check above -- two
-    // presses in the same moment. It is the connect this press asked for,
-    // so it is shown, and its end followed -- and armed when it lands, as
-    // for a pass followed above.
-    if ((await runLadder({ takeover })) === "declined") {
-      followPass(autoReconnect.stamp());
-      if (ladderPass.generation.current !== followedPassRef.current) setConnectionState("connecting");
+      // A tunnel the device limit is still taking down comes down first,
+      // and so does one an earlier teardown left up -- the card can still
+      // be showing over it, and its "Use on this device instead" is the
+      // only way here with a tunnel up (the orb disconnects then). Dialling
+      // over it would hand the next engine a descriptor the last one has
+      // not let go of, so if it does not come down, nothing is dialled, and
+      // the card stays up beside the line that says the disconnect did not
+      // finish. The customer's own teardown, still owed or started here for
+      // a tunnel still up, is the same: tried, and if it does not finish,
+      // left owed and retried, with the line that says so -- shown as
+      // still disconnecting, never "degraded", which would say the server
+      // isn't responding when nothing measured that. And after an automatic
+      // pass this press stopped: it takes down what it brought up, but the
+      // platform is asked rather than that taken on trust.
+      const slotOwed = slotTeardown.owed();
+      const customerOwed = customerTeardown.owed();
+      if (slotOwed || customerOwed || tookOver || tunnelUp(connectionState)) {
+        setConnectionState("disconnecting");
+        const result = slotOwed
+          ? await slotTeardown.retry(teardownOnce)
+          : customerOwed
+            ? await customerTeardown.retry(teardownOnce)
+            : await customerTeardown.begin(teardownOnce);
+        // Down, on the platform's word -- and said, so a connect that stops
+        // at the consent dialog below does not leave the orb on
+        // "disconnecting". Not down: nothing is dialled over it.
+        settleTeardown(result);
+        if (result === "stuck") return;
+        if (superseded()) return;
+      }
+
+      // Their own connect from here; nothing is owed any more.
+      slotTeardown.clear();
+      customerTeardown.clear();
+      setConnectionError(null);
+      setPermissionDenied(false);
+      setSlotNotice(null);
+
+      // Consent first, and before anything is torn down or started.
+      // Android raises a system dialog the first time any app asks to
+      // create a VpnService, and it cannot be pre-granted -- so this is a
+      // real branch on first run, not a formality.
+      try {
+        if (!(await hasVpnPermission()) && !(await requestVpnPermission())) {
+          said.permissionDenied = true;
+          setPermissionDenied(true);
+          return;
+        }
+      } catch (err) {
+        say(classifyConnectionError(err));
+        return;
+      }
+      if (superseded()) return;
+
+      // Declined: another pass took the guard after the check above -- two
+      // presses in the same moment. It is the connect this press asked for,
+      // so it is shown, and its end followed -- and armed when it lands, as
+      // for a pass followed above.
+      if ((await runLadder({ takeover })) === "declined") {
+        followPass(autoReconnect.stamp());
+        if (ladderPass.generation.current !== followedPassRef.current) setConnectionState("connecting");
+      }
+    } finally {
+      underWay.settle(said);
     }
   }
 
@@ -1380,8 +1445,12 @@ export function Dashboard({
    * One that stopped an automatic reconnect's pass is reported as that
    * pass's (`asReconnectReport`), as every other way it can end is. Sent
    * as it was, it read as the customer pressing Connect and being refused
-   * -- by somebody who had pressed nothing. */
-  function showSlotStop(stop: SlotStop, reconnect?: ReconnectAttempt) {
+   * -- by somebody who had pressed nothing.
+   *
+   * Returns the error line it put up, if any: a pass keeps it for a screen
+   * mounted since it began (`PhonePass.say`). The card is the app's
+   * already (`slotNoticeStore`). */
+  function showSlotStop(stop: SlotStop, reconnect?: ReconnectAttempt): ClassifiedError | null {
     if (stop.notice) setSlotNotice(stop.notice);
     if (stop.report) void reportAttempt(asReconnectReport(stop.report, reconnect));
     if (stop.inactive) {
@@ -1392,13 +1461,16 @@ export function Dashboard({
         setSubscription((current) => (current ? { ...current, status } : current));
       }
       if (status !== "SUSPENDED" && status !== "EXPIRED") {
-        setConnectionError({
+        const line: ClassifiedError = {
           kind: "subscriptionInactive",
           messageKey: "err.subscriptionInactive",
           detail: `subscription ${status ?? "not active"}`,
-        });
+        };
+        setConnectionError(line);
+        return line;
       }
     }
+    return null;
   }
 
   /** Ends a pass that dialled nothing -- refused by the device limit, or
@@ -1627,7 +1699,7 @@ export function Dashboard({
     // device limit when it was the plan that stopped it (`slotStopWhy`).
     if (stop) {
       passResultRef.current = { routeId: null, errorKind: stop.errorKind };
-      showSlotStop(stop, options.reconnect);
+      pass.say(showSlotStop(stop, options.reconnect));
       await settleUndialled();
       return "refused";
     }
@@ -1658,11 +1730,14 @@ export function Dashboard({
       const detail =
         "None of this subscription's servers offer a protocol this app can use. " +
         "OpenVPN is Windows-only; pick a different location.";
-      setConnectionError({
+      const none: ClassifiedError = {
         kind: "serverUnreachable",
         messageKey: "err.notCarryingTraffic",
         detail,
-      });
+      };
+      setConnectionError(none);
+      // And for a screen mounted since this pass began (`passSaid`).
+      pass.say(none);
       // Worth reporting even though nothing was attempted. It is not a
       // network fault at all -- it means a plan is being sold with
       // routes this build cannot use -- and that is invisible from the
@@ -1742,6 +1817,10 @@ export function Dashboard({
     /** Whether an IKEv2 rung was passed over for want of its configuration
      * (`skipIkev2`): one a press of Connect would dial. */
     let passedOver = false;
+    /** Whether the walk stopped before its last rung because the platform
+     * could not say whether the next one may be dialled (`rungAccess`
+     * "unknown"): the rungs after it were never dialled. */
+    let stoppedShort = false;
     /** What the platform said before a rung that ends the episode
      * (`rungAccess`): another configuration chosen over ours, or ours
      * gone. Nothing more is dialled. */
@@ -1922,6 +2001,7 @@ export function Dashboard({
         if (verdict === "unknown") {
           attempts.push(`${label}: not dialled -- the VPN configuration could not be read`);
           dials.push(null);
+          stoppedShort = true;
           break;
         }
         if (verdict !== "dial") {
@@ -2163,13 +2243,28 @@ export function Dashboard({
     if (passedOver && lastError?.messageKey === "err.allProtocolsFailed") {
       lastError = { ...lastError, messageKey: "err.someProtocolsNotTried" };
     }
+    // Nor of a pass that stopped short, the platform's answer before a
+    // rung unreadable: every rung from there went undialled -- the next
+    // attempt, or Connect, dials them -- and the last dialled rung's "Tried
+    // every available protocol" stood through the backoff, and beside "VPN
+    // connection lost" after the last attempt, over rungs nobody tried.
+    if (
+      stoppedShort &&
+      (lastError?.messageKey === "err.allProtocolsFailed" || lastError?.messageKey === "err.someProtocolsNotTried")
+    ) {
+      lastError = { ...lastError, messageKey: "err.notEveryProtocolTried" };
+    }
 
     setConnectedAt(null);
     setExitIp(null);
     // Turned away by the platform before a rung (`heldBack`): the episode
     // ends on that, and says "VPN connection lost". The last rung's error
-    // is not why this pass stopped, and is not put up.
+    // is not why this pass stopped, and is not put up. Kept with the pass
+    // for a screen mounted since it began, which reads its end (`passSaid`):
+    // the screen it began on may be gone, and with it every word of a
+    // connect that failed.
     setConnectionError(heldBack !== null ? null : lastError);
+    pass.say(heldBack !== null ? null : lastError);
     setConnectionState("disconnected");
     // Nothing came up, so this phone is not using one of the plan's
     // devices. Kept, the slot would turn the customer's other device away
@@ -2759,6 +2854,9 @@ export function Dashboard({
             // reconnect under way ends there -- not once a server's switch
             // request has answered.
             onPicking={pickingLocation}
+            // A switch that failed chose nothing: the reconnect leads with
+            // what it led with before the pick.
+            onPickFailed={() => autoReconnect.pickFailed()}
             onChooseAutomatic={() => {
               // A new choice while a reconnect waits ends the reconnect:
               // its next attempt would lead with the old route regardless.

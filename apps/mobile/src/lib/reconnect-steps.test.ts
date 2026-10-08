@@ -362,6 +362,26 @@ describe("the phone dashboard's wiring", () => {
     expect(said).toBeLessThan(walk.indexOf("setConnectionError(heldBack !== null ? null : lastError);"));
   });
 
+  it("does not say every protocol was tried when the walk stopped short of them, its configuration unreadable", () => {
+    // An iPhone's automatic pass whose platform answer could not be read
+    // before a rung dials nothing more. The last dialled rung's "Tried every
+    // available protocol" then stood through the backoff, and beside "VPN
+    // connection lost", over protocols nobody had dialled.
+    const walk = dashboard.slice(dashboard.indexOf("async function walkLadder("));
+    const unknown = walk.indexOf('if (verdict === "unknown") {');
+    expect(unknown).toBeGreaterThan(0);
+    const branch = walk.slice(unknown, walk.indexOf("break;", unknown));
+    expect(branch).toContain("stoppedShort = true;");
+    const said = walk.indexOf('lastError = { ...lastError, messageKey: "err.notEveryProtocolTried" };');
+    expect(said).toBeGreaterThan(0);
+    const guard = walk.lastIndexOf("if (", said);
+    expect(walk.slice(guard, said)).toContain("stoppedShort &&");
+    expect(walk.slice(guard, said)).toContain('lastError?.messageKey === "err.allProtocolsFailed"');
+    // After the IKEv2 rewording, which it overrides, and before it is shown.
+    expect(said).toBeGreaterThan(walk.indexOf('messageKey: "err.someProtocolsNotTried" };'));
+    expect(said).toBeLessThan(walk.indexOf("setConnectionError(heldBack !== null ? null : lastError);"));
+  });
+
   it("asks an iPhone whether another configuration was chosen over ours one kind at a time", () => {
     // iOS keeps one enabled configuration per kind: tunnel providers, and
     // NEVPNManager profiles such as our IKEv2. Asked across both, an iPhone
@@ -484,7 +504,9 @@ describe("the phone dashboard's wiring", () => {
     // Sent as it was, a refusal of the reconnect's claim read as the
     // customer pressing Connect and being refused; and a subscription that
     // had ended was filed as the device limit refusing the device.
-    const start = dashboard.indexOf("function showSlotStop(stop: SlotStop, reconnect?: ReconnectAttempt) {");
+    const start = dashboard.indexOf(
+      "function showSlotStop(stop: SlotStop, reconnect?: ReconnectAttempt): ClassifiedError | null {",
+    );
     expect(start).toBeGreaterThan(0);
     const show = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
     expect(show).toContain("if (stop.report) void reportAttempt(asReconnectReport(stop.report, reconnect));");
@@ -492,7 +514,7 @@ describe("the phone dashboard's wiring", () => {
     const walk = dashboard.slice(dashboard.indexOf("async function walkLadder("));
     const stopped = walk.slice(walk.indexOf("if (stop) {"), walk.indexOf('return "refused";'));
     expect(stopped).toContain("passResultRef.current = { routeId: null, errorKind: stop.errorKind };");
-    expect(stopped).toContain("showSlotStop(stop, options.reconnect);");
+    expect(stopped).toContain("pass.say(showSlotStop(stop, options.reconnect));");
   });
 
   it("arms a landing only on the stamp its pass took as it began", () => {
@@ -536,13 +558,22 @@ describe("the phone dashboard's wiring", () => {
     // customer closed the list and pressed Connect -- and that Connect,
     // superseded, returned without dialling.
     expect(choose).not.toContain("pressRef.current += 1;");
-    const pickAt = dashboard.indexOf("function pickingLocation() {");
+    const pickAt = dashboard.indexOf("function pickingLocation(routeId: string | null) {");
     expect(pickAt).toBeGreaterThan(0);
     const picking = dashboard.slice(pickAt, dashboard.indexOf("\n  }\n", pickAt));
     expect(picking).toContain("pressRef.current += 1;");
-    // And an episode under way ends there, as it is picked.
-    expect(picking).toContain('if (autoReconnect.choosing() === "stopPass") void stopPass();');
+    // And an episode under way ends there, as it is picked; a tunnel the
+    // screen shows is reconnected led by the pick from there, should it
+    // drop before the answer.
+    expect(picking).toContain(
+      'const choice = autoReconnect.choosing({ routeId, tunnelShown: connectionStateRef.current !== "disconnected" });',
+    );
+    expect(picking).toContain('if (choice === "stopPass") void stopPass();');
     expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain("onPicking={pickingLocation}");
+    // A switch that fails puts back what the pick decided ahead of it.
+    expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain(
+      "onPickFailed={() => autoReconnect.pickFailed()}",
+    );
     // Kept up only over a tunnel the screen shows: armed beneath a screen
     // saying "disconnected" -- the platform unasked -- the choice's reload
     // took the tunnel's absence for a drop it had missed, and redialled the
