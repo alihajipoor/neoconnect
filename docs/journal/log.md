@@ -5022,7 +5022,7 @@ press of Connect -- the episode never claims anything itself.
 | State | Means | Leaves on |
 |---|---|---|
 | `idle` (+ `lost`) | nothing to reconnect; `lost` = an episode ended without a tunnel, headline "VPN connection lost" | a pass landing (`armed`); any press clears `lost` |
-| `armed` | a tunnel the app vouches for: a pass that landed (clock starts), or one adopted from the service | a drop (`waiting`, or `idle`+lost); a press, the device limit, a sign-out (`idle`); the app's own teardown -- the mid-session failover landing nothing, a recheck finding nothing -- forgets it (`idle`) |
+| `armed` | a tunnel the app vouches for: a pass that landed (clock starts), or one adopted from the service | a drop (`waiting`, or `idle`+lost); a press, the device limit, a sign-out (`idle`) -- but not a location chosen in the server list, which is for the next connect (`chose`); the app's own teardown -- the mid-session failover landing nothing, a recheck finding nothing -- forgets it (`idle`) |
 | `waiting` | between attempts; `blockedBy` network / foreground / null | its backoff timer (`attempting`); network or app back (`attempting` at once); a press (`idle`) |
 | `attempting` | one ladder pass running | landed (`armed`, quick-death count kept); failed (`waiting`, next attempt); stop outcome (`idle`+lost) |
 
@@ -5049,6 +5049,17 @@ dial (phones); on phones, another VPN still holding the device or the VPN
 permission gone. App quit and upgrade need nothing: the episode lives in
 the process, and a fresh process starts `idle` (an adopted tunnel is
 armed, a missing one is not a drop).
+
+An attempt's pass stops once its attempt is over, however that came
+about -- a press, a sign-out, the attempt's 180 s ceiling (`passStopped`:
+the stop flag, or the attempt no longer `live`) -- so nothing that ends an
+episode can leave its pass dialling behind it. A location chosen during an
+attempt stops its pass at once, as "Stop reconnecting" does; chosen over
+a tunnel that came back while the server list was open, it leaves that
+tunnel up and armed, the choice being for the next connect. A repair has
+any pass in flight stopped and let go of (bounded, 60 s) before the
+service is asked: the pass's next connect would otherwise come up behind
+the repair, and its teardown -- a Disconnect -- cancel the repair mid-step.
 
 **Backoff.** Immediate, then 2 s, 5 s, 10 s, 20 s, 30 s -- six passes at
 most. No new pass starts once 120 s have gone on backoff and passes (a
