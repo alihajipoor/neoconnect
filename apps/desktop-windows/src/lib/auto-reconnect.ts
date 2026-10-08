@@ -161,12 +161,20 @@ export type ReconnectPhase =
     }
   /** Between attempts. `blockedBy` is set while there is no network, or a
    * phone app is in the background: the attempt runs as soon as that
-   * changes, and the wait costs no attempt and no budget. */
+   * changes, and the wait costs no attempt and no budget.
+   *
+   * Unblocked, the attempt is due when its backoff timer has fired, and
+   * not by any reading of the clock. The phase used to carry a `dueAt`
+   * from `Date.now()`, checked against `Date.now()` again when the timer
+   * fired -- two clocks, the timer's monotonic and the wall clock that
+   * steps. A wall clock set back during the wait (a time sync, a phone's
+   * network time, the customer correcting it) made the timer's firing
+   * read as early: nothing was started and nothing rescheduled, and the
+   * screen said "Reconnecting..." for good with nothing dialling. */
   | {
       readonly kind: "waiting";
       /** Zero-based: the attempt that runs next. */
       readonly attempt: number;
-      readonly dueAt: number;
       /** The backoff this wait stands for, counted towards the budget
        * when the attempt starts. Zero once a blocked wait paused it. */
       readonly delayMs: number;
@@ -672,7 +680,7 @@ export class AutoReconnect {
       this.block(attempt, episode, blocker, now);
       return;
     }
-    this.set({ kind: "waiting", attempt, dueAt: now + delay, delayMs: delay, blockedBy: null, blockedSince: null, episode });
+    this.set({ kind: "waiting", attempt, delayMs: delay, blockedBy: null, blockedSince: null, episode });
     this.timer = this.deps.setTimer(() => {
       this.timer = null;
       this.kick();
@@ -684,7 +692,7 @@ export class AutoReconnect {
       this.phase.kind === "waiting" && this.phase.blockedSince !== null ? this.phase.blockedSince : now;
     // The scheduled delay is not owed once the wait was paused: the
     // attempt runs as soon as the network, or the app, is back.
-    this.set({ kind: "waiting", attempt, dueAt: now, delayMs: 0, blockedBy: blocker, blockedSince: since, episode });
+    this.set({ kind: "waiting", attempt, delayMs: 0, blockedBy: blocker, blockedSince: since, episode });
     const left = Math.max(0, BLOCKED_WAIT_MAX_MS - (now - since));
     this.capTimer = this.deps.setTimer(() => {
       this.capTimer = null;
@@ -716,7 +724,10 @@ export class AutoReconnect {
         return;
       }
     } else {
-      if (this.timer !== null || now < waiting.dueAt) return;
+      // The backoff is over when its timer has fired, whatever the wall
+      // clock says (see `waiting`). Until then, nothing to do: a screen
+      // binding mid-backoff waits for it like everyone else.
+      if (this.timer !== null) return;
       const blocker = this.blocker();
       if (blocker !== null) {
         this.block(waiting.attempt, waiting.episode, blocker, now);
@@ -729,7 +740,7 @@ export class AutoReconnect {
       // it at once.
       if (waiting.blockedBy !== null) {
         this.clearTimers();
-        this.set({ ...waiting, blockedBy: null, blockedSince: null, dueAt: now });
+        this.set({ ...waiting, blockedBy: null, blockedSince: null });
       }
       return;
     }

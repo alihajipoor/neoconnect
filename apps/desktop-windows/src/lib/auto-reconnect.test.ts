@@ -26,15 +26,19 @@ import {
  * Timers are a list the test walks with `advance`, so "an attempt starts
  * two seconds after the first one failed" is an assertion about numbers
  * rather than about how long the test happened to sleep. The runner is
- * scripted per attempt: an outcome, and how long the pass takes. */
+ * scripted per attempt: an outcome, and how long the pass takes.
+ *
+ * `state.now` is the clock timers run on, which only goes forward;
+ * `wallSkew` is how far the wall clock (`Date.now()`, what the controller
+ * reads) has been set away from it. */
 function harness({ requiresForeground = false }: { requiresForeground?: boolean } = {}) {
   const start = 1_000_000;
-  const state = { now: start, online: true, foreground: true, session: 1 };
+  const state = { now: start, wallSkew: 0, online: true, foreground: true, session: 1 };
   const timers = new Map<number, { at: number; fn: () => void }>();
   let nextTimer = 1;
   const reports: AttemptReport[] = [];
   const rc = new AutoReconnect({
-    now: () => state.now,
+    now: () => state.now + state.wallSkew,
     setTimer: (fn, ms) => {
       const id = nextTimer++;
       timers.set(id, { at: state.now + ms, fn });
@@ -181,6 +185,29 @@ describe("the backoff", () => {
     expect(h.asked.map((a) => a.at - droppedAt)).toEqual([0, 32_000, 67_000, 107_000]);
     expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "budget" });
     expect(h.reports[0]!.reason).toContain("stopped after 4 attempt(s)");
+  });
+
+  it("starts the next pass when its backoff timer fires, though the wall clock was set back meanwhile", async () => {
+    // Timers run on a clock that only goes forward; `Date.now()` steps --
+    // a time sync, a phone's network time, the customer correcting it.
+    // The attempt used to be due only once `Date.now()` reached a deadline
+    // taken from `Date.now()`: set back by one millisecond during the wait,
+    // the timer's firing read as early, nothing ran, nothing was
+    // rescheduled, and the screen said "Reconnecting..." for good.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(0); // attempt 1 failed; attempt 2 due in 2s
+    h.state.wallSkew = -1;
+    await h.advance(RECONNECT_BACKOFF_MS[1]!);
+    expect(h.asked.map((a) => a.attempt)).toEqual([1, 2]);
+    // And the episode runs its course from there, however far back.
+    h.state.wallSkew = -60 * 60_000;
+    await h.advance(10 * 60_000);
+    expect(h.asked).toHaveLength(RECONNECT_MAX_ATTEMPTS);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "attempts" });
   });
 
   it("never interrupts a pass for the budget", async () => {
@@ -959,7 +986,7 @@ describe("what the screen is told", () => {
       reconnectingView({ kind: "attempting", attempt: 0, startedAt: 0, episode }),
     ).toEqual({ offline: false, waiting: false });
     expect(
-      reconnectingView({ kind: "waiting", attempt: 1, dueAt: 0, delayMs: 2_000, blockedBy: null, blockedSince: null, episode }),
+      reconnectingView({ kind: "waiting", attempt: 1, delayMs: 2_000, blockedBy: null, blockedSince: null, episode }),
     ).toEqual({ offline: false, waiting: true });
   });
 });
