@@ -91,6 +91,34 @@ describe("orderCandidates", () => {
   });
 });
 
+describe("an automatic reconnect's order", () => {
+  // Every signal that can lead a customer's own connect, all pointing
+  // somewhere other than the route the tunnel was on when it dropped.
+  const everythingElse = {
+    pinnedRouteId: "r-openvpn",
+    lastGoodRouteId: "r-trojan",
+    preferredRouteId: "r-tls",
+    reachability: { [reachabilityKey("r-reality", "XRAY_VLESS_REALITY")]: "unreachable" } as ReachabilityMap,
+  };
+
+  it("leads with the route that was up, ahead of the pin and everything else", () => {
+    const order = ids(orderCandidates(ALL, { ...everythingElse, resumeRouteId: "r-reality" }));
+    expect(order[0]).toBe("r-reality");
+    // Then the ladder's normal order, unchanged.
+    expect(order.slice(1)).toEqual(ids(orderCandidates(ALL, everythingElse)).filter((id) => id !== "r-reality"));
+  });
+
+  it("is the ordinary order when nothing dropped", () => {
+    // Control: without the resume route the same inputs lead with the pin.
+    expect(ids(orderCandidates(ALL, everythingElse))[0]).toBe("r-openvpn");
+    expect(ids(orderCandidates(ALL, { ...everythingElse, resumeRouteId: null }))[0]).toBe("r-openvpn");
+  });
+
+  it("keeps every candidate, so the reconnect can fall back", () => {
+    expect(orderCandidates(ALL, { resumeRouteId: "r-wg" })).toHaveLength(ALL.length);
+  });
+});
+
 describe("per-network memory", () => {
   it("remembers a different answer for each network", () => {
     // The whole reason it is keyed by network: what works at home and

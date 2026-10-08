@@ -786,6 +786,7 @@ describe("a claim refused after connecting", () => {
       report: null,
       subscriptionStatus: "SUSPENDED",
       inactive: true,
+      errorKind: "subscriptionInactive",
     });
   });
 
@@ -955,6 +956,128 @@ describe("a held slot whose renewals go unanswered", () => {
     await h.session.onPoll();
     h.advance(30_000);
     expect(h.session.needsStandingCheck()).toBe(false);
+  });
+});
+
+/** A phone's reconnect waiting for the app to be opened: nothing claims
+ * until then, so the slot is given back, and the pass that runs then
+ * asks first where the device stands (obligation 9). */
+describe("a slot set aside while a reconnect waits", () => {
+  it("is given back, naming its grant, and asked about before the reconnect dials", async () => {
+    const h = harness([GRANT], [{ kind: "displaced", by: null, at: null }]);
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" });
+    // Confirmed a moment ago: on its own, nothing would be asked first.
+    expect(h.session.needsStandingCheck()).toBe(false);
+    await h.session.setAside();
+    expect(h.release).toHaveBeenCalledWith({ subscriptionId: SUB, handle: "mine" });
+    expect(h.session.standing()).toBe("unclaimed");
+    expect(h.session.needsStandingCheck()).toBe(true);
+    // Taken over while the phone was in a pocket: said, not dialled over.
+    expect(await h.session.checkStanding()).toEqual({ kind: "displaced", by: null, at: null });
+    expect(h.renew).toHaveBeenCalledWith(SUB, 4_000);
+  });
+
+  it("is granted back when there is room, and the reconnect dials with it", async () => {
+    const h = harness([GRANT], [{ kind: "held", grant: { ...HELD.grant, handle: "again" } }]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    await h.session.setAside();
+    expect(await h.session.checkStanding()).toEqual({ kind: "clear" });
+    expect(h.session.standing()).toBe("held");
+    // And Disconnect then names the grant it holds now.
+    await h.session.release();
+    expect(h.release).toHaveBeenLastCalledWith({ subscriptionId: SUB, handle: "again" });
+  });
+
+  it("is asked about only once the release has gone", async () => {
+    // Asked straight after, the renewal could reach the server first and
+    // keep the slot under the handle the release names -- which then
+    // freed it, under a reconnect that believed it held one.
+    const h = harness([GRANT], [HELD]);
+    let finish: () => void = () => undefined;
+    h.release.mockImplementationOnce(() => new Promise<undefined>((resolve) => (finish = () => resolve(undefined))));
+    await h.session.beforeDial({ subscriptionId: SUB });
+    const setAside = h.session.setAside();
+    const check = h.session.checkStanding();
+    await settle();
+    expect(h.renew).not.toHaveBeenCalled();
+    finish();
+    await setAside;
+    expect(await check).toEqual({ kind: "clear" });
+    expect(h.renew).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops watching what it gave up on once the reconnect asks for itself", async () => {
+    // A renewal still out when the slot was set aside -- the phone sent to
+    // the background just after a poll -- that times out once the
+    // reconnect's own check has been granted the slot. Still watched, its
+    // unanswered end had the slot released again, naming the grant the
+    // check had just taken, under a reconnect about to dial on it.
+    const h = harness([GRANT]);
+    let finish: (value: RenewOutcome) => void = () => undefined;
+    h.renew.mockImplementationOnce(() => new Promise<RenewOutcome>((resolve) => (finish = resolve)));
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    const poll = h.session.onPoll();
+    await h.session.setAside();
+    expect(h.release).toHaveBeenCalledWith({ subscriptionId: SUB, handle: "mine" });
+    h.renew.mockImplementationOnce(async () => ({ kind: "held", grant: { ...HELD.grant, handle: "again" } }));
+    expect(await h.session.checkStanding()).toEqual({ kind: "clear" });
+    expect(h.session.standing()).toBe("held");
+    finish(UNANSWERED);
+    await poll;
+    await settle();
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.session.standing()).toBe("held");
+    // And Disconnect still gives back the grant the check took.
+    await h.session.release();
+    expect(h.release).toHaveBeenLastCalledWith({ subscriptionId: SUB, handle: "again" });
+  });
+
+  it("keeps the customer's own choice of this device for the claim that asks", async () => {
+    // "Use on this device instead", whose claim never arrived: the check
+    // has to carry it, or it would only name the device they replaced.
+    const h = harness([UNANSWERED, GRANT]);
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] });
+    await h.session.setAside();
+    expect(await h.session.checkStanding()).toEqual({ kind: "clear" });
+    expect(h.claim).toHaveBeenLastCalledWith({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] }, 4_000);
+  });
+
+  it("does nothing for a slot nothing counts, or one already given back", async () => {
+    const unlimited = harness([]);
+    await unlimited.session.beforeDial({ subscriptionId: SUB, deviceLimit: null });
+    await unlimited.session.setAside();
+    expect(unlimited.session.standing()).toBe("unenforced");
+    const released = harness([GRANT]);
+    await released.session.beforeDial({ subscriptionId: SUB });
+    await released.session.release();
+    await released.session.setAside();
+    expect(released.release).toHaveBeenCalledTimes(1);
+    expect(released.session.needsStandingCheck()).toBe(false);
+  });
+});
+
+describe("a second release", () => {
+  /** The episode gives the slot back as it ends, and a press -- or the
+   * pass that failed -- may give it back as well. The second has nothing
+   * to release, and must not start over: that ended the first one's
+   * watch over a renewal still on the wire, whose grant was then kept. */
+  it("leaves the first one's watch over answers still out", async () => {
+    const h = harness([GRANT]);
+    let finish: (value: RenewOutcome) => void = () => undefined;
+    h.renew.mockImplementationOnce(() => new Promise<RenewOutcome>((resolve) => (finish = resolve)));
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    const poll = h.session.onPoll();
+    await h.session.release();
+    await h.session.release();
+    expect(h.release).toHaveBeenCalledTimes(1);
+
+    finish({ kind: "held", grant: { ...HELD.grant, handle: "regranted" } });
+    await poll;
+    await settle();
+    expect(h.release).toHaveBeenCalledTimes(2);
+    expect(h.release).toHaveBeenLastCalledWith({ subscriptionId: SUB, handle: "regranted" });
   });
 });
 
@@ -1153,9 +1276,21 @@ describe("what a dashboard does when the slot stops it", () => {
       report: { kind: "CONNECT", outcome: "REJECTED", reason: "SUBSCRIPTION_INACTIVE" },
       subscriptionStatus: "EXPIRED",
       inactive: true,
+      errorKind: "subscriptionInactive",
     });
     const midSession = slotStop({ kind: "inactive", subscriptionStatus: "SOMETHING_NEW" }, "whileConnected");
     expect(midSession).toMatchObject({ report: null, subscriptionStatus: null, inactive: true });
+  });
+
+  it("says whether it was the plan or the device limit, for whoever counts it", () => {
+    // An automatic reconnect ends on this (`slotStopWhy`): the plan when
+    // the subscription has stopped, the device limit otherwise.
+    for (const when of ["beforeDial", "whileConnected"] as const) {
+      expect(slotStop({ kind: "inactive", subscriptionStatus: "EXPIRED" }, when).errorKind).toBe("subscriptionInactive");
+      expect(slotStop({ kind: "refused", refusal: REFUSAL }, when).errorKind).toBe("concurrentLimit");
+      expect(slotStop({ kind: "takeoverLimited", retryAfterSec: 60 }, when).errorKind).toBe("concurrentLimit");
+      expect(slotStop({ kind: "displaced", by: null, at: null }, when).errorKind).toBe("concurrentLimit");
+    }
   });
 
   it("says when a takeover has to wait, and adds nothing to a sign-out", () => {
@@ -1168,6 +1303,7 @@ describe("what a dashboard does when the slot stops it", () => {
       report: null,
       subscriptionStatus: null,
       inactive: false,
+      errorKind: null,
     });
   });
 });

@@ -29,6 +29,9 @@ class NeoxifyVpnPlugin: Plugin {
         return existing.first ?? NETunnelProviderManager()
     }
 
+    /// Read-only, and asked by an automatic reconnect before it dials, so
+    /// it must never raise anything: loading a configuration does not
+    /// prompt, only saving a new one does.
     @objc public func hasPermission(_ invoke: Invoke) {
         Task {
             do {
@@ -37,7 +40,50 @@ class NeoxifyVpnPlugin: Plugin {
                 // asks when a configuration is first saved, and a saved
                 // one means they said yes.
                 let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-                invoke.resolve(["granted": !managers.isEmpty])
+                // IKEv2's is a second configuration with its own prompt,
+                // and a sign-out removes it (`Ikev2Engine.forget`), so the
+                // tunnel's being saved says nothing about it. Dialling
+                // IKEv2 without it installs it, and up comes the prompt,
+                // passcode and all; an automatic reconnect, which nobody
+                // pressed, passes over IKEv2 instead.
+                let ikev2 = await Ikev2Engine.loadedIfOurs()
+                // Whether another configuration has been chosen over one
+                // of ours. iOS enables one configuration of each kind at a
+                // time -- tunnel providers are one kind ("enterprise"),
+                // NEVPNManager profiles such as our IKEv2 another
+                // ("personal") -- and enabling another of a kind (another
+                // VPN app connecting, or a pick in Settings) sets ours of
+                // that kind to not enabled, leaving the other kind alone.
+                // It is the one sign of another app's VPN iOS gives an app
+                // (`tunnelGone` cannot see one), and a reconnect that
+                // dialled over it would switch ours back on and the device
+                // off that VPN.
+                //
+                // So asked per kind. Asked across both -- none of ours
+                // enabled -- an iPhone that had ever landed on IKEv2 kept
+                // that profile enabled when another app's tunnel took the
+                // tunnel kind, and its reconnect went ahead and switched
+                // the device off the other app's VPN. Our own code never
+                // sets `isEnabled` false, so one of ours not enabled is
+                // somebody else's choice. Read from Apple's documentation
+                // of NETunnelProviderManager and `isEnabled`, not observed
+                // on a device.
+                let tunnelChosenElsewhere = !managers.isEmpty && !managers.contains(where: { $0.isEnabled })
+                let ikev2ChosenElsewhere = ikev2.map { !$0.isEnabled } ?? false
+                // And across kinds: another app's personal VPN connecting
+                // stops our packet tunnel without turning our provider
+                // off, so neither check above sees it -- on a phone with
+                // no IKEv2 profile of ours (never landed on IKEv2, or
+                // signed out since), nothing did, and the reconnect
+                // switched the device off that app's VPN. The system says
+                // why it stopped our tunnel, and the extension records it
+                // (`TunnelLastStop`).
+                let tunnelSuperseded = TunnelLastStop.superseded()
+                invoke.resolve([
+                    "granted": !managers.isEmpty,
+                    "ikev2": ikev2 != nil,
+                    "chosenElsewhere": tunnelChosenElsewhere || ikev2ChosenElsewhere || tunnelSuperseded,
+                ])
             } catch {
                 invoke.reject("could not read the VPN configuration: \(error.localizedDescription)")
             }
@@ -187,6 +233,11 @@ class NeoxifyVpnPlugin: Plugin {
                 let args = try invoke.parseArgs(Args.self)
                 try await Ikev2Engine.connect(
                     server: args.server, username: args.username, password: args.password)
+                // Our own VPN is the device's now: why our packet tunnel
+                // last stopped -- another configuration taking over, our
+                // own IKEv2 among them -- is no longer news. The extension
+                // clears it as it starts; IKEv2 does not start it.
+                TunnelLastStop.clear()
                 invoke.resolve()
             } catch {
                 // Domain and code as well as the text. NEVPNManager
@@ -569,6 +620,33 @@ enum ProviderStart {
             if let error { return error.localizedDescription }
         }
         return "the system gave no reason"
+    }
+}
+
+/// Why our packet tunnel last stopped, as the extension records it in the
+/// app group both targets carry -- `LastStop` in PacketTunnelProvider.swift,
+/// built into the other binary, with the same suite and key. Absent while
+/// the tunnel runs, and after a landing on IKEv2.
+///
+/// `superceded` (Apple's spelling) is the system stopping it because
+/// another configuration took over: another app's VPN connecting, of
+/// either kind, or one picked in Settings. Our own disconnects are
+/// `userInitiated`. Read from Apple's documentation, not observed on a
+/// device. Our own IKEv2 rung could read as it too, were it dialled while
+/// our packet tunnel was still up -- the ladder waits for that tunnel to be
+/// gone first, and a landing on IKEv2 clears it -- and then a reconnect
+/// errs the safe way: "VPN connection lost", nothing dialled.
+enum TunnelLastStop {
+    static let suite = "group.com.neoxify.mobile"
+    static let key = "tunnelLastStopReason"
+
+    static func superseded() -> Bool {
+        let reason = UserDefaults(suiteName: suite)?.object(forKey: key) as? Int
+        return reason == NEProviderStopReason.superceded.rawValue
+    }
+
+    static func clear() {
+        UserDefaults(suiteName: suite)?.removeObject(forKey: key)
     }
 }
 

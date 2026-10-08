@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { ladderPass } from "./ladder-pass";
 import { SERVICE_CALL_TIMEOUT_MS, withTimeout } from "./service-call";
 
 /** "Repair my network", and the diagnostics that go beside it.
@@ -139,6 +140,85 @@ export interface Diagnostics {
  * rejection by showing [`repairCommandLine`] rather than an error. */
 export async function repairNetwork(): Promise<RepairReport> {
   return withTimeout(invoke<RepairReport>("vpn_repair"), "the repair", REPAIR_TIMEOUT_MS);
+}
+
+/** How long a repair waits for a connect already under way to let go.
+ *
+ * The longest stretch a pass goes without checking its stop is its last
+ * rung's egress check (thirty seconds) and reachability check (eight),
+ * and on its way out it takes its own tunnel down and waits for the
+ * service to confirm it (six and six). Before a rung's connect it is the
+ * settle (about twelve at most), its server's names (three) and the IPv6
+ * baseline (two and a half) -- shorter, but only because the pass asks
+ * again right before it connects. It did not, at first: a repair pressed
+ * in that stretch was followed by the pass's connect anyway, queued behind
+ * the repair's own teardown and given up on only at the app's 45-second
+ * reply timeout, so the wait ran out while it still held the guard -- and
+ * its teardown, a Disconnect, then cancelled the repair mid-step. Past
+ * this the pass is wedged, and the repair runs regardless. */
+export const REPAIR_PASS_WAIT_MS = 60_000;
+
+/** Stops a ladder pass still dialling -- an automatic reconnect's attempt,
+ * a Connect pressed before Settings was opened, the mid-session failover
+ * -- and waits for it to let go, before the repair is asked for.
+ *
+ * The service runs one job at a time, and a pass left to itself fought
+ * the repair through it. Its next connect queued behind the repair and
+ * brought a tunnel up straight after it, which the customer had just been
+ * told the repair takes down. Its teardown between rungs is a Disconnect,
+ * which cancels whatever the service is running -- reaching the repair
+ * mid-step, every later step of it then reporting a failure the app had
+ * caused, on the machines that can least afford one.
+ *
+ * So the pass is told to stop, and the Disconnect the repair would make
+ * first anyway is sent now: it cancels the connect the pass is waiting on,
+ * so the pass unwinds in seconds and its own teardown lands before the
+ * repair rather than inside it.
+ *
+ * Not waited on for ever. A pass wedged on a service that never answers
+ * never lets go, and that machine is the one most in need of the repair
+ * -- or, the service being what is broken, of the command the repair
+ * hands over when it cannot reach it. Returns whether the pass let go. */
+export async function stopPassBeforeRepair(
+  disconnect: () => Promise<unknown> = () => withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect"),
+  ms = REPAIR_PASS_WAIT_MS,
+): Promise<boolean> {
+  if (!ladderPass.inFlight()) return true;
+  ladderPass.cancel.current = true;
+  await disconnect().catch(() => undefined);
+  return ladderPass.stopAndWait(ms);
+}
+
+/** Repairs under way, from the press until the service has answered. */
+let repairsRunning = 0;
+
+/** Whether a repair is under way: no automatic pass may start meanwhile,
+ * and the health poll stands aside. */
+export function repairUnderWay(): boolean {
+  return repairsRunning > 0;
+}
+
+/** Runs `work` -- the pass stopped, then the repair -- as a repair under
+ * way (`repairUnderWay`), however it ends.
+ *
+ * Stopping the pass in flight was not enough: nothing kept a new one from
+ * starting. After a failed pass whose teardown the service could not
+ * confirm, the screen shows "degraded" with "Repair my network" under it,
+ * and the health poll runs over "degraded" -- its strikes come from
+ * readings the repair itself disturbs. Pressed then, the repair found no
+ * pass to stop, and the poll's next strike began the failover's pass,
+ * whose first act is a Disconnect: on the service that supersedes and
+ * cancels the running job, so the repair was cancelled mid-step, its later
+ * steps reported failures the app had caused, and the pass's connect came
+ * up behind it, armed. Marked before anything is awaited, so a poll already
+ * measuring finds it when it is done. */
+export async function duringRepair<T>(work: () => Promise<T>): Promise<T> {
+  repairsRunning += 1;
+  try {
+    return await work();
+  } finally {
+    repairsRunning -= 1;
+  }
 }
 
 export async function collectDiagnostics(): Promise<Diagnostics> {

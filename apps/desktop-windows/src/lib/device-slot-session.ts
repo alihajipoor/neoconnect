@@ -44,7 +44,9 @@ import type { ConnectionState } from "../components/ConnectOrb";
  *  - `checkStanding` is for an automatic reconnect of a device whose slot
  *    is not confirmed: a degraded tunnel may be the plan's limit rather
  *    than the network (obligation 9).
- *  - `release` on Disconnect, fire and forget.
+ *  - `release` on Disconnect, fire and forget. `setAside` gives the slot
+ *    back the same way while a phone's reconnect waits for the app to be
+ *    opened, and leaves that reconnect to ask first.
  */
 
 /** Where this device stands. */
@@ -62,7 +64,9 @@ export type SlotStanding =
    * clock until a grant is counted. */
   | "uncounted"
   /** Dialled without an answer to the claim. Asked again through the
-   * tunnel, and on every renewal until it is answered. */
+   * tunnel, and on every renewal until it is answered. Also a slot given
+   * back while a reconnect waits (`setAside`): nothing is held, and
+   * whether one is to be had is asked before anything is dialled. */
   | "unclaimed"
   /** Another device has the slot. */
   | "displaced";
@@ -151,6 +155,11 @@ export interface DeviceSlotSession {
   checkStanding(): Promise<StandingCheck>;
   /** On Disconnect. Fire and forget; resolves within the release budget. */
   release(): Promise<void>;
+  /** Gives the slot back while nothing is going to renew it -- a phone's
+   * reconnect waiting for the app to be opened -- without forgetting that
+   * the pass which eventually dials has to ask where this device stands
+   * first (`needsStandingCheck`). Nothing when nothing is held. */
+  setAside(): Promise<void>;
   /** Forgets the slot without telling the server -- sign-out releases it
    * there by itself. */
   reset(): void;
@@ -343,6 +352,64 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
         pendingTakeover = [];
         return { kind: "takeoverLimited", retryAfterSec: outcome.retryAfterSec };
     }
+  }
+
+  /** `release`, as a function the session's own `setAside` can call. */
+  async function giveBack(): Promise<void> {
+    const target = subscriptionId;
+    // Nothing to give back, and nothing to start over: every request that
+    // could still be out was orphaned by whatever emptied the slot. A
+    // second release -- the press's own after the episode's, say -- that
+    // started over anyway would end the first one's watch over answers
+    // still on the wire, and a grant one of them left would then be kept.
+    if (target === null) return;
+    // `unclaimed` too: the claim may have arrived even though its answer
+    // did not. Nothing for `unenforced` or `uncounted` (nothing was
+    // recorded) or `displaced` (the slot is already someone else's).
+    const held = standing === "held" || standing === "unclaimed";
+    epoch += 1;
+    const releasedIn = epoch;
+    standing = "none";
+    subscriptionId = null;
+    claimedProtocolUserId = null;
+    dialledProtocolUserId = null;
+    lastAskedAt = 0;
+    lastConfirmedAt = 0;
+    pendingTakeover = [];
+
+    // A claim or renewal still out when Disconnect is pressed can be
+    // processed after this release -- slow through a filtered tunnel,
+    // or sent again after a token refresh -- and a renewal that finds
+    // no slot gives one back when there is room. The server would then
+    // count a device that is off, and the customer's phone would be
+    // told "in use on Windows PC" for the ninety seconds that takes to
+    // go stale. So once whatever was out has settled, the slot is
+    // released again, naming the grant the answer left: a counted
+    // grant's own handle, or, when no answer came and the request may
+    // have arrived anyway, the last one known. Never when anything has
+    // started since -- that slot is a new connect's.
+    const outstanding = [...inFlight];
+    if (outstanding.length > 0) {
+      void Promise.all(outstanding).then(
+        (answers) => {
+          if (epoch !== releasedIn) return;
+          const known = knownHandle(target);
+          const handles = [
+            ...new Set(answers.map((a) => heldBy(a, known)).filter((h): h is string => h !== null)),
+          ];
+          if (handles.length > 0) void sendRelease(target, handles);
+        },
+        () => undefined,
+      );
+    }
+    // By the latest grant's handle, and only by it. With none known --
+    // a claim that was sent and never answered -- nothing is sent: if
+    // that claim arrived, its slot goes stale ninety seconds after the
+    // tunnel stops carrying traffic, which "Use on this device instead"
+    // covers on the other device; a release naming no grant could free
+    // the slot of a Connect pressed in the meantime instead.
+    const handle = knownHandle(target);
+    if (held && handle !== null) await sendRelease(target, [handle]);
   }
 
   async function claimNow(protocolUserId: string | null, budgetMs: number): Promise<ClaimSettled> {
@@ -573,7 +640,20 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     },
 
     async checkStanding() {
+      // A release still on its way goes first, as before a claim: a slot
+      // set aside a moment ago (`setAside`) and asked about straight after
+      // would otherwise be renewed under the handle the release names, and
+      // freed by it as soon as it landed.
+      if (releasing) await releasing;
       if (subscriptionId === null) return { kind: "clear" };
+      // A question of its own, as a claim before dialling is: whatever was
+      // still on the wire when the slot was set aside answers for a slot
+      // given up, and nothing it says applies now. Without a new epoch the
+      // release's watch over those answers went on past this check, and a
+      // request out at the time that settled unanswered afterwards had the
+      // slot released again -- naming the grant this check had just taken,
+      // under a reconnect about to dial on it.
+      epoch += 1;
       if (pendingTakeover.length > 0) {
         // The customer chose this device, and the claim saying so has not
         // arrived. Asking who has the slot would only name the device
@@ -589,56 +669,35 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       return event.kind === "keep" ? { kind: "clear" } : event;
     },
 
-    async release() {
-      const target = subscriptionId;
-      // `unclaimed` too: the claim may have arrived even though its answer
-      // did not. Nothing for `unenforced` or `uncounted` (nothing was
-      // recorded) or `displaced` (the slot is already someone else's).
-      const held = standing === "held" || standing === "unclaimed";
-      epoch += 1;
-      const releasedIn = epoch;
-      standing = "none";
-      subscriptionId = null;
-      claimedProtocolUserId = null;
-      dialledProtocolUserId = null;
-      lastAskedAt = 0;
-      lastConfirmedAt = 0;
-      pendingTakeover = [];
-      if (target === null) return;
+    release: giveBack,
 
-      // A claim or renewal still out when Disconnect is pressed can be
-      // processed after this release -- slow through a filtered tunnel,
-      // or sent again after a token refresh -- and a renewal that finds
-      // no slot gives one back when there is room. The server would then
-      // count a device that is off, and the customer's phone would be
-      // told "in use on Windows PC" for the ninety seconds that takes to
-      // go stale. So once whatever was out has settled, the slot is
-      // released again, naming the grant the answer left: a counted
-      // grant's own handle, or, when no answer came and the request may
-      // have arrived anyway, the last one known. Never when anything has
-      // started since -- that slot is a new connect's.
-      const outstanding = [...inFlight];
-      if (outstanding.length > 0) {
-        void Promise.all(outstanding).then(
-          (answers) => {
-            if (epoch !== releasedIn) return;
-            const known = knownHandle(target);
-            const handles = [
-              ...new Set(answers.map((a) => heldBy(a, known)).filter((h): h is string => h !== null)),
-            ];
-            if (handles.length > 0) void sendRelease(target, handles);
-          },
-          () => undefined,
-        );
-      }
-      // By the latest grant's handle, and only by it. With none known --
-      // a claim that was sent and never answered -- nothing is sent: if
-      // that claim arrived, its slot goes stale ninety seconds after the
-      // tunnel stops carrying traffic, which "Use on this device instead"
-      // covers on the other device; a release naming no grant could free
-      // the slot of a Connect pressed in the meantime instead.
-      const handle = knownHandle(target);
-      if (held && handle !== null) await sendRelease(target, [handle]);
+    async setAside() {
+      const target = subscriptionId;
+      // Only a slot the server may be counting is worth giving back: one
+      // held, or claimed without an answer. Nothing else is recorded, and
+      // nothing else has a standing to ask about later that a claim before
+      // dialling would not ask anyway.
+      if (target === null || (standing !== "held" && standing !== "unclaimed")) return;
+      // Kept through the release: the customer's own choice of this device
+      // over another, which the standing check's claim still has to carry,
+      // and the credential that claim names.
+      const takeover = pendingTakeover;
+      const dialled = dialledProtocolUserId;
+      const released = giveBack();
+      // Given back, but not forgotten. By the time the app is opened the
+      // slot may be another device's -- given back here, or taken over
+      // while the phone was in a pocket, when this release frees nothing --
+      // and a claim before dialling that went unanswered would dial as if
+      // nothing had happened. As `unclaimed` the reconnect's pass asks
+      // first, and says so when it cannot tell (obligation 9). Not a new
+      // epoch: the release's watch over answers still on the wire goes on,
+      // until that standing check starts one of its own.
+      subscriptionId = target;
+      standing = "unclaimed";
+      retryClaim = true;
+      pendingTakeover = takeover;
+      dialledProtocolUserId = dialled;
+      await released;
     },
 
     reset() {
@@ -873,12 +932,19 @@ export interface SlotStop {
   subscriptionStatus: SubscriptionStatus | null;
   /** Whether the subscription has stopped, named or not. */
   inactive: boolean;
+  /** What the stop is as an error, the class its report is counted in:
+   * `subscriptionInactive` when the plan has ended, `concurrentLimit` for
+   * the device limit, null for a sign-out. An automatic reconnect ends on
+   * it (`slotStopWhy`), so the episode names the plan, not the device
+   * limit, when it was the plan that stopped it. */
+  errorKind: "concurrentLimit" | "subscriptionInactive" | null;
 }
 
 const STATUSES: readonly SubscriptionStatus[] = ["ACTIVE", "SUSPENDED", "EXPIRED", "PENDING", "CANCELLED"];
 
 export function slotStop(reason: SlotStopReason, when: "beforeDial" | "whileConnected"): SlotStop {
-  const none = { notice: null, report: null, subscriptionStatus: null, inactive: false };
+  const none = { notice: null, report: null, subscriptionStatus: null, inactive: false, errorKind: null };
+  const limited = { ...none, errorKind: "concurrentLimit" as const };
   const beforeDial = when === "beforeDial";
   switch (reason.kind) {
     case "refused":
@@ -886,24 +952,25 @@ export function slotStop(reason: SlotStopReason, when: "beforeDial" | "whileConn
       // dialling, over a tunnel the dashboard takes down, with no ladder
       // and nothing recorded.
       return {
-        ...none,
+        ...limited,
         notice: { kind: "refused", refusal: reason.refusal },
         report: beforeDial ? refusalReport("DEVICE_LIMIT") : null,
       };
     case "takeoverLimited":
       return {
-        ...none,
+        ...limited,
         notice: { kind: "takeoverLimited", retryAfterSec: reason.retryAfterSec },
         report: beforeDial ? refusalReport("TAKEOVER_LIMIT") : null,
       };
     case "displaced":
-      return { ...none, notice: { kind: "displaced", by: reason.by, at: reason.at } };
+      return { ...limited, notice: { kind: "displaced", by: reason.by, at: reason.at } };
     case "inactive":
       return {
         ...none,
         report: beforeDial ? refusalReport("SUBSCRIPTION_INACTIVE") : null,
         subscriptionStatus: STATUSES.find((s) => s === reason.subscriptionStatus && s !== "ACTIVE") ?? null,
         inactive: true,
+        errorKind: "subscriptionInactive",
       };
     case "signedOut":
       return none;

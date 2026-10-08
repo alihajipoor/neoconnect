@@ -541,11 +541,31 @@ const en = {
   // was protected a second ago and is not now. Measured on 2026-10-06:
   // the engine died, traffic went out direct in 0.2s, and the screen said
   // "You're protected" for another 17 seconds. It now says this instead,
-  // within about a second. No promise of a reconnect: nothing reconnects
-  // on its own.
+  // within about a second. Since 2026-10-07 the app reconnects by itself
+  // first (auto-reconnect.ts, and the "dash.reconnecting" lines below);
+  // these are the words once it has stopped trying -- or when it was
+  // never going to, after a sign-out or the device limit -- so they
+  // still promise nothing and ask for the press.
   "dash.dropped": "VPN connection lost",
   "dash.droppedHint":
     "The tunnel closed, so your traffic is now going out without Neoxify and is not protected. Connect again to protect it.",
+  // The automatic reconnect after a drop, while it runs. Fail-open is
+  // unchanged -- nothing is blocked while the tunnel is down -- so the
+  // hint has to say what that means for the customer's traffic in the
+  // meantime, in the same plain words as the line above. Never a
+  // reassurance: "protected" only comes back once the new tunnel has
+  // been proven exactly as a manual connect is.
+  "dash.reconnecting": "Reconnecting...",
+  "dash.reconnectingHint":
+    "The tunnel closed. Until it's back, your traffic is going out without Neoxify and is not protected.",
+  // No network at all: nothing is tried until one comes back, and the
+  // customer is told that rather than watching attempts fail.
+  "dash.reconnectingOfflineHint":
+    "The tunnel closed and there's no network. Neoxify will reconnect when the network is back. Until then, your traffic is not protected.",
+  // The orb between attempts: the customer's own connect, now, instead of
+  // waiting for the next attempt.
+  "dash.reconnectNow": "Reconnect now",
+  "dash.reconnectStop": "Stop reconnecting",
   "dash.degraded": "Not carrying traffic",
   "dash.degradedHint": "The tunnel is up but the server isn't responding. Your traffic is NOT protected. Try reconnecting or pick another server.",
   // The third answer, and the one the screen had no words for.
@@ -601,6 +621,15 @@ const en = {
   "err.serverUnreachable": "Couldn't reach this server. Your network may be blocking it — try another location.",
   "err.notCarryingTraffic": "Connected, but no traffic got through.",
   "err.allProtocolsFailed": "Tried every available protocol — none of them carried traffic.",
+  // The phone's automatic reconnect passes over a protocol it may not dial
+  // without the customer -- iOS's IKEv2, whose configuration asks before it
+  // is installed -- so "every available protocol" would not be true.
+  "err.someProtocolsNotTried":
+    "None of the protocols tried carried traffic. Some are tried only when you press Connect.",
+  // An iPhone's automatic reconnect that stops before its last protocol
+  // because the VPN configuration could not be read: the rest were not
+  // dialled, and the next attempt, or Connect, will dial them.
+  "err.notEveryProtocolTried": "None of the protocols tried carried traffic. The others were not tried this time.",
   "err.concurrentLimit": "Your plan's device limit is already in use. Disconnect another device and try again.",
   "err.quotaExhausted": "You've used all the data on your plan. Upgrade or wait for it to renew.",
   "err.subscriptionInactive": "Your subscription isn't active right now. Check its status on the dashboard.",
@@ -1239,6 +1268,13 @@ const fa: Record<TranslationKey, string> = {
   "dash.dropped": "اتصال VPN قطع شد",
   "dash.droppedHint":
     "تونل بسته شد، بنابراین ترافیک شما اکنون بدون نئوکسیفای ارسال می‌شود و محافظت نمی‌شود. برای محافظت، دوباره وصل شوید.",
+  "dash.reconnecting": "در حال اتصال دوباره...",
+  "dash.reconnectingHint":
+    "تونل بسته شد. تا وقتی دوباره وصل شود، ترافیک شما بدون نئوکسیفای ارسال می‌شود و محافظت نمی‌شود.",
+  "dash.reconnectingOfflineHint":
+    "تونل بسته شد و شبکه‌ای در دسترس نیست. نئوکسیفای پس از برگشتن شبکه دوباره وصل می‌شود. تا آن زمان، ترافیک شما محافظت نمی‌شود.",
+  "dash.reconnectNow": "همین حالا وصل شوید",
+  "dash.reconnectStop": "توقف اتصال دوباره",
   "dash.degraded": "ترافیک عبور نمی‌کند",
   "dash.degradedHint": "تونل برقرار است اما سرور پاسخ نمی‌دهد. ترافیک شما محافظت نمی‌شود. دوباره وصل شوید یا سرور دیگری انتخاب کنید.",
   "dash.unverified": "متصل، اما تأیید نشده",
@@ -1264,6 +1300,10 @@ const fa: Record<TranslationKey, string> = {
   "err.serverUnreachable": "این سرور در دسترس نیست. موقعیت دیگری را امتحان کنید.",
   "err.notCarryingTraffic": "اتصال برقرار شد اما ترافیکی عبور نکرد.",
   "err.allProtocolsFailed": "همه پروتکل‌های موجود امتحان شدند — هیچ‌کدام ترافیک را عبور ندادند.",
+  "err.someProtocolsNotTried":
+    "هیچ‌کدام از پروتکل‌هایی که امتحان شدند ترافیک را عبور ندادند. بعضی پروتکل‌ها فقط وقتی «اتصال» را بزنید امتحان می‌شوند.",
+  "err.notEveryProtocolTried":
+    "هیچ‌کدام از پروتکل‌هایی که امتحان شدند ترافیک را عبور ندادند. بقیه این بار امتحان نشدند.",
   "err.concurrentLimit": "سقف دستگاه‌های پلن شما پر شده است. یک دستگاه دیگر را قطع کنید.",
   "err.quotaExhausted": "حجم پلن شما تمام شده است.",
   "err.subscriptionInactive": "اشتراک شما فعال نیست.",

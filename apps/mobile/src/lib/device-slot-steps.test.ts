@@ -15,7 +15,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Answer =
   | { ok: true; data: unknown }
-  | { ok: false; error: string; status?: number; code?: string; body?: unknown; sessionExpired?: boolean }
+  | {
+      ok: false;
+      error: string;
+      status?: number;
+      code?: string;
+      body?: unknown;
+      sessionExpired?: boolean;
+      noResponse?: boolean;
+    }
   | "hang";
 
 const calls: { path: string; body: Record<string, unknown>; headers: Record<string, string> }[] = [];
@@ -317,6 +325,7 @@ describe("before dialling", () => {
       report: { kind: "CONNECT", outcome: "REJECTED", reason: "SUBSCRIPTION_INACTIVE" },
       subscriptionStatus: "EXPIRED",
       inactive: true,
+      errorKind: "subscriptionInactive",
     });
   });
 
@@ -339,6 +348,118 @@ describe("before dialling", () => {
       "X-Neoxify-Device-Platform": platform,
       ...(label !== null ? { "X-Neoxify-Device-Label": label } : {}),
     });
+  });
+});
+
+/** Obligation 9 on a phone: an automatic reconnect whose slot is not
+ * confirmed asks first, as the Windows client's does. A phone renews only
+ * in the foreground, so after any time in a pocket its slot is
+ * unconfirmed -- and may have been taken over meanwhile. */
+describe("before an automatic reconnect dials", () => {
+  const DISPLACED = {
+    status: "displaced",
+    subscriptionId: SUB,
+    limit: 1,
+    by: { handle: "YmF6cXV4", label: "Windows PC", platform: "windows" },
+    at: "2026-10-06T11:02:13.551Z",
+  };
+
+  /** Connected, then five minutes in a pocket renewing nothing, then the
+   * tunnel gone. */
+  async function afterAPocket() {
+    answer = () => ({ ok: true, data: GRANT });
+    const s = session();
+    await claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, s.slot);
+    await s.slot.afterConnected({ protocolUserId: CRED });
+    s.advance(5 * 60_000);
+    calls.length = 0;
+    return s;
+  }
+
+  it("asks where the phone stands instead of claiming, and stops on the answer", async () => {
+    const { slot } = await afterAPocket();
+    answer = () => ({ ok: true, data: DISPLACED });
+
+    const { refreshed, stop, note } = await claimWhileRefreshing(
+      { subscriptionId: SUB, protocolUserId: CRED, deviceLimit: 1, automatic: true },
+      fresh,
+      slot,
+    );
+
+    expect(refreshed).toBe("fresh config");
+    expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/renew"]);
+    // Said, not dialled over -- and no failed dial filed for it.
+    expect(stop?.notice).toEqual({ kind: "displaced", by: DISPLACED.by, at: DISPLACED.at });
+    expect(stop?.report).toBeNull();
+    expect(note).toBeNull();
+  });
+
+  it("says so when it cannot tell, and then dials", async () => {
+    // The phone was taken over in a pocket on a network where the API
+    // answers only through a tunnel: the claim went unanswered, the ladder
+    // dialled credentials the backstop held, and the customer read "none
+    // of them carried traffic" with no word about the plan's limit.
+    for (const [reply, noAnswer] of [
+      [{ ok: false as const, error: "Could not reach Neoxify. Check your internet connection.", noResponse: true }, true],
+      [{ ok: false as const, error: "Bad gateway", status: 502 }, false],
+    ] as const) {
+      const { slot } = await afterAPocket();
+      answer = () => reply;
+      const { stop, note } = await claimWhileRefreshing(
+        { subscriptionId: SUB, protocolUserId: CRED, deviceLimit: 1, automatic: true },
+        fresh,
+        slot,
+      );
+      expect(stop).toBeNull();
+      expect(note).toEqual({ kind: "unchecked", limit: 1, noAnswer });
+    }
+  });
+
+  it("dials with the slot when there was room after all", async () => {
+    const { slot } = await afterAPocket();
+    answer = () => ({ ok: true, data: HELD });
+    const { stop, note } = await claimWhileRefreshing(
+      { subscriptionId: SUB, protocolUserId: CRED, deviceLimit: 1, automatic: true },
+      fresh,
+      slot,
+    );
+    expect(stop).toBeNull();
+    expect(note).toBeNull();
+    expect(slot.standing()).toBe("held");
+  });
+
+  it("asks after a slot set aside while the app was away, once the release has gone", async () => {
+    // Confirmed a moment before the drop, so on its own nothing would be
+    // asked first. Set aside, it is given back, and asked about.
+    answer = () => ({ ok: true, data: GRANT });
+    const { slot } = session();
+    await claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, slot);
+    calls.length = 0;
+    answer = (path) => (path === "/customer/vpn/release" ? { ok: true, data: {} } : { ok: true, data: DISPLACED });
+    await slot.setAside();
+    const { stop } = await claimWhileRefreshing(
+      { subscriptionId: SUB, protocolUserId: CRED, deviceLimit: 1, automatic: true },
+      fresh,
+      slot,
+    );
+    expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/release", "/customer/vpn/renew"]);
+    expect(stop?.notice?.kind).toBe("displaced");
+  });
+
+  it("claims as before for a slot that is confirmed, or for a press", async () => {
+    answer = () => ({ ok: true, data: GRANT });
+    const recent = session();
+    await claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, recent.slot);
+    recent.advance(70_000);
+    calls.length = 0;
+    await claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED, automatic: true }, fresh, recent.slot);
+    expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/claim"]);
+
+    const pressed = await afterAPocket();
+    answer = () => ({ ok: true, data: GRANT });
+    const { note } = await claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, pressed.slot);
+    expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/claim"]);
+    expect(note).toBeNull();
   });
 });
 

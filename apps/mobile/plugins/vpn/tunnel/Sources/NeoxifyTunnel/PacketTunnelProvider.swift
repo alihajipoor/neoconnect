@@ -105,6 +105,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
+        // Started again: why it last stopped is no longer news.
+        LastStop.clear()
         var request: Request
         do {
             guard let parsed = try self.request(from: options) else {
@@ -265,6 +267,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         log.info("stopping: \(String(describing: reason))")
+        // For the app, which cannot otherwise tell another app's VPN taking
+        // the device from a crash; see `LastStop`.
+        LastStop.record(reason)
         // Both engines, unconditionally. stopTunnel does not say which
         // one was started, the provider may have been restarted since,
         // and each stop is a no-op when that engine is not running --
@@ -351,5 +356,34 @@ enum TunnelError: LocalizedError {
         // nothing was dialled.
         case .endpointUnresolved: "This server's WireGuard address could not be looked up on this network."
         }
+    }
+}
+
+/// Why this tunnel last stopped, kept where the app can read it: the app
+/// group both targets carry (`add-tunnel-extension.mjs`). Recorded as the
+/// system stops the tunnel, cleared as it starts. The app's reading is
+/// `TunnelLastStop` in the plugin, built into the other binary -- the
+/// suite and the key are the same two strings there.
+///
+/// iOS shows an app none of another app's VPN. An automatic reconnect
+/// that dialled after another app's VPN took the device would switch the
+/// device off it, and a configuration turned off (`isEnabled`) is the sign
+/// of that only within a kind: tunnel providers are one, NEVPNManager
+/// profiles another. Another app's personal VPN connecting stops this
+/// tunnel without touching our provider's `isEnabled`, and before this the
+/// app saw only a tunnel that had gone. The system says why it stopped a
+/// provider; `superceded` (Apple's spelling) is another configuration
+/// taking over. Read from Apple's documentation of NEProviderStopReason,
+/// not observed on a device.
+enum LastStop {
+    static let suite = "group.com.neoxify.mobile"
+    static let key = "tunnelLastStopReason"
+
+    static func record(_ reason: NEProviderStopReason) {
+        UserDefaults(suiteName: suite)?.set(reason.rawValue, forKey: key)
+    }
+
+    static func clear() {
+        UserDefaults(suiteName: suite)?.removeObject(forKey: key)
     }
 }

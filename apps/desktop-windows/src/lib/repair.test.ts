@@ -1,11 +1,16 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { LADDER_MAX_MS, ladderPass } from "./ladder-pass";
 import {
   anythingFixed,
   diagnosticsToText,
+  duringRepair,
   failedSteps,
   indeterminateSteps,
+  REPAIR_PASS_WAIT_MS,
   REPAIR_TIMEOUT_MS,
+  repairUnderWay,
+  stopPassBeforeRepair,
   unresolvedSteps,
   type Diagnostics,
   type RepairReport,
@@ -239,5 +244,148 @@ describe("the diagnostics text a customer pastes", () => {
     // And the control: the redaction the service applies survives into
     // the text unchanged, rather than being undone by the formatting.
     expect(text).toContain("c:\\users\\<user>\\");
+  });
+});
+
+describe("a repair pressed while a connect is under way", () => {
+  /** The service runs one job at a time, and a pass left dialling fought
+   * the repair through it: its next connect brought a tunnel up straight
+   * after the repair, and its teardown between rungs -- a Disconnect,
+   * which cancels whatever the service is running -- could land in the
+   * middle of the repair. Pressed from Settings, or on "Reconnecting...",
+   * the repair now has the pass stopped and gone before it starts. */
+  afterEach(() => {
+    ladderPass.reset();
+    vi.useRealTimers();
+  });
+
+  /** A pass holding the guard, as `runLadder` takes it. */
+  function passInFlight(): number {
+    const generation = ++ladderPass.generation.current;
+    ladderPass.running.current = true;
+    ladderPass.startedAt.current = Date.now();
+    ladderPass.cancel.current = false;
+    return generation;
+  }
+
+  /** The pass on its way out, as `runLadder`'s `finally` lets go. */
+  function passEnds(): void {
+    ladderPass.running.current = false;
+    ladderPass.ended();
+  }
+
+  it("stops the pass, cancels what it waits on, and goes on only once it has let go", async () => {
+    vi.useFakeTimers();
+    passInFlight();
+    const order: string[] = [];
+    let done: boolean | null = null;
+    void stopPassBeforeRepair(async () => {
+      // The pass is told to stop before the service is asked to cancel
+      // the connect it waits on, so it unwinds rather than dialling on.
+      order.push(ladderPass.cancel.current ? "disconnect after the stop" : "disconnect before the stop");
+    }).then((letGo) => {
+      order.push("repair");
+      done = letGo;
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(order).toEqual(["disconnect after the stop"]);
+    expect(done).toBeNull();
+    // Its own teardown is done by the time it lets go, so nothing of it
+    // reaches the service once the repair is running.
+    passEnds();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(order).toEqual(["disconnect after the stop", "repair"]);
+    expect(done).toBe(true);
+  });
+
+  it("does not wait for ever on one wedged on a service that will not answer", async () => {
+    vi.useFakeTimers();
+    passInFlight();
+    let done: boolean | null = null;
+    // Its disconnect times out as well, as the real one does after six
+    // seconds.
+    const unanswered = async () => {
+      throw new Error("vpn_disconnect did not answer in time");
+    };
+    void stopPassBeforeRepair(unanswered, REPAIR_PASS_WAIT_MS).then((letGo) => (done = letGo));
+    await vi.advanceTimersByTimeAsync(REPAIR_PASS_WAIT_MS - 1);
+    expect(done).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    // Said, so a caller could tell -- and the repair runs regardless: the
+    // machine with a wedged service is the one that needs it most.
+    expect(done).toBe(false);
+  });
+
+  it("asks nothing of the service, and touches no stop, when nothing is dialling", async () => {
+    let disconnects = 0;
+    const done = await stopPassBeforeRepair(async () => {
+      disconnects += 1;
+    });
+    expect(done).toBe(true);
+    expect(disconnects).toBe(0);
+    expect(ladderPass.cancel.current).toBe(false);
+  });
+
+  it("waits longer than a live pass can go without hearing its stop", () => {
+    // The pass's teardown on its way out: the service's disconnect (6s) and
+    // the settle that confirms it (6s).
+    const teardown = 6_000 + 6_000;
+    // After a rung's connect: the last rung's egress (30s) and
+    // reachability (8s) checks.
+    expect(REPAIR_PASS_WAIT_MS).toBeGreaterThan(30_000 + 8_000 + teardown);
+    // Before it: the settle's walk (12s), the server's names (2s and a
+    // 1s grace) and the IPv6 baseline (2.5s) -- with the stop asked again
+    // right before the connect, which the dashboard's wiring test pins.
+    expect(REPAIR_PASS_WAIT_MS).toBeGreaterThan(12_000 + 3_000 + 2_500 + teardown);
+    // And no longer than the guard itself, past which no pass is in flight.
+    expect(REPAIR_PASS_WAIT_MS).toBeLessThan(LADDER_MAX_MS);
+  });
+});
+
+describe("a repair under way", () => {
+  /** A repair the test answers when it chooses. */
+  function pending<T>(value: T) {
+    const gate = { open: (): void => undefined };
+    const work = () =>
+      new Promise<T>((resolve) => {
+        gate.open = () => resolve(value);
+      });
+    return { gate, work };
+  }
+
+  it("is one from before anything is awaited until the repair has answered, however it ends", async () => {
+    // What keeps an automatic pass from starting meanwhile -- the health
+    // poll's failover, whose opening Disconnect cancelled the repair
+    // mid-step on the service. Marked at once, so a poll already measuring
+    // finds it when it is done.
+    expect(repairUnderWay()).toBe(false);
+    const { gate, work } = pending("report");
+    const repaired = duringRepair(work);
+    expect(repairUnderWay()).toBe(true);
+    gate.open();
+    expect(await repaired).toBe("report");
+    expect(repairUnderWay()).toBe(false);
+
+    // A service that cannot be reached throws; the mark goes with it.
+    await expect(
+      duringRepair(async () => {
+        expect(repairUnderWay()).toBe(true);
+        throw new Error("the service did not answer");
+      }),
+    ).rejects.toThrow("the service did not answer");
+    expect(repairUnderWay()).toBe(false);
+  });
+
+  it("stays one while any repair runs, the Settings card's and the inline one's", async () => {
+    const first = pending(undefined);
+    const second = pending(undefined);
+    const a = duringRepair(first.work);
+    const b = duringRepair(second.work);
+    first.gate.open();
+    await a;
+    expect(repairUnderWay()).toBe(true);
+    second.gate.open();
+    await b;
+    expect(repairUnderWay()).toBe(false);
   });
 });

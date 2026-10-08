@@ -5,11 +5,14 @@ import {
   anythingFixed,
   failedSteps,
   indeterminateSteps,
+  duringRepair,
   repairCommandLine,
   repairNetwork,
+  stopPassBeforeRepair,
   type RepairReport,
   type RepairStep,
 } from "../lib/repair";
+import { autoReconnect } from "../lib/auto-reconnect";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import { Button, Card } from "../components/ui";
 import { cn } from "../lib/utils";
@@ -71,11 +74,25 @@ export function RepairNetwork({
   }, []);
 
   const run = useCallback(async () => {
+    // The repair disconnects. That is the customer's doing, not a drop,
+    // so a tunnel it takes down is not reconnected behind it, and a
+    // reconnect waiting between attempts does not dial into the middle
+    // of it.
+    autoReconnect.cancel("customer");
     setBusy(true);
     setReport(null);
     setUnreachable(null);
     try {
-      const result = await repairNetwork();
+      // And a pass already dialling -- the reconnect's, or any other -- is
+      // stopped and let go of first, so it neither brings a tunnel up
+      // behind the repair nor cancels the repair with its teardown. See
+      // `stopPassBeforeRepair`. No automatic pass starts until the repair
+      // is over, either -- the health poll's failover above all
+      // (`duringRepair`).
+      const result = await duringRepair(async () => {
+        await stopPassBeforeRepair();
+        return await repairNetwork();
+      });
       if (!alive.current) return;
       setReport(result);
     } catch (err) {
