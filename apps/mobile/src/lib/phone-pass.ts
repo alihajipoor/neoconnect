@@ -108,32 +108,12 @@ export function reconnectPassInFlight(now = Date.now()): boolean {
  * an attempt is still running rather than dial beside it. */
 export const TAKEOVER_WAIT_MS = 20_000;
 
-/** How often the wait looks for a guard that lapsed: a pass wedged past
- * it never says it ended. */
-const TAKEOVER_POLL_MS = 500;
-
 /** Tells the pass in flight to stop and waits, bounded, for it to let go
  * of the guard. True once no pass holds it; false if one still does at
- * the end of `ms`. */
+ * the end of `ms`. The wait itself is `ladderPass.stopAndWait`, which the
+ * Windows repair shares. */
 export function stopPassInFlight(ms = TAKEOVER_WAIT_MS): Promise<boolean> {
-  ladderPass.cancel.current = true;
-  if (!ladderPass.inFlight()) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      stopListening();
-      clearInterval(poll);
-      clearTimeout(deadline);
-      resolve(!ladderPass.inFlight());
-    };
-    const stopListening = ladderPass.onEnd(finish);
-    const poll = setInterval(() => {
-      if (!ladderPass.inFlight()) finish();
-    }, TAKEOVER_POLL_MS);
-    const deadline = setTimeout(finish, ms);
-  });
+  return ladderPass.stopAndWait(ms);
 }
 
 /** For tests: back to an app that has never connected. */

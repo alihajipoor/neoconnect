@@ -86,6 +86,10 @@ const tunnelServer: { current: TunnelServer | null } = { current: null };
 
 const endListeners = new Set<() => void>();
 
+/** How often `stopAndWait` looks for a guard that lapsed: a pass wedged
+ * past it never says it ended. */
+const STOP_POLL_MS = 500;
+
 export const ladderPass = {
   running,
   startedAt,
@@ -115,6 +119,37 @@ export const ladderPass = {
     return () => {
       endListeners.delete(listener);
     };
+  },
+
+  /** Tells the pass in flight to stop and waits, for at most `ms`, for it
+   * to let go of the guard. True once no pass holds it; false if one
+   * still does at the end.
+   *
+   * For a press whose next step must not share the service with a pass
+   * still unwinding: the phone's Connect over an automatic reconnect, and
+   * a repair. The pass checks its stop between steps, so it lets go after
+   * the step it is on -- and its own teardown -- rather than at once.
+   * Bounded, because a pass wedged on a call that never returns never
+   * lets go at all. */
+  stopAndWait(ms: number): Promise<boolean> {
+    cancel.current = true;
+    if (!ladderPass.inFlight()) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        stopListening();
+        clearInterval(poll);
+        clearTimeout(deadline);
+        resolve(!ladderPass.inFlight());
+      };
+      const stopListening = ladderPass.onEnd(finish);
+      const poll = setInterval(() => {
+        if (!ladderPass.inFlight()) finish();
+      }, STOP_POLL_MS);
+      const deadline = setTimeout(finish, ms);
+    });
   },
 
   /** Called by the pass on its way out, after it has released the guard

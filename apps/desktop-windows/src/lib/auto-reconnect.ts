@@ -17,8 +17,9 @@
  *    module never says "connected"; it only learns from the pass that one
  *    landed.
  *  - **The customer outranks it.** Any press -- Connect, Disconnect, the
- *    stop line, a change of mode or server -- ends an episode at once and
- *    the press does what it says.
+ *    stop line, a change of mode or server, a repair -- ends an episode at
+ *    once, a pass it was dialling included, and the press does what it
+ *    says.
  *
  * Pure apart from what it is given (`ReconnectDeps`), so the whole
  * sequence -- a drop, the backoff, a network that goes away and comes
@@ -195,6 +196,33 @@ export interface ReconnectAttempt {
    * after every await, and stops when it is false. */
   readonly live: () => boolean;
 }
+
+/** Whether a ladder pass has been told to stop: the stop flag a press
+ * sets (`ladderPass.cancel`), or -- for a pass an automatic reconnect
+ * started -- its attempt no longer live.
+ *
+ * Both, because they are reached by different things. The flag is set by
+ * what stops a pass directly -- the orb, "Stop reconnecting", a new
+ * location or a repair during an attempt, a sign-out, the device limit.
+ * The attempt ends with anything that ends its episode or moves it on --
+ * those, and a change of mode, an expired session, the attempt's own
+ * ceiling. The Windows pass asked only the flag, which a repair and a new
+ * location did not set then: it went on dialling the old order behind
+ * them, and brought a tunnel up after the repair or on the old server. */
+export function passStopped(cancelled: boolean, attempt: ReconnectAttempt | undefined): boolean {
+  return cancelled || (attempt !== undefined && !attempt.live());
+}
+
+/** What a location chosen from the server list asks of the screen; see
+ * `AutoReconnect.chose`. */
+export type LocationChoice =
+  /** An attempt was dialling: stop its pass, as a press of the orb does. */
+  | "stopPass"
+  /** A tunnel the app vouches for is up, and stays up and armed: go on
+   * naming the route it is on. */
+  | "keepTunnel"
+  /** Nothing up and nothing dialling. */
+  | null;
 
 /** How an attempt went. */
 export type ReconnectOutcome =
@@ -428,9 +456,9 @@ export class AutoReconnect {
    * such a pass landed anyway and armed the tunnel the stop was taking
    * down, and the next screen to mount -- back from Settings -- found it
    * gone, said "VPN connection lost" and dialled. Not everything that
-   * overrules a pass can reach it, either: a repair run from Settings stops
-   * no pass, and a session that expires ends where no screen can tell it.
-   * The stamp is how any answer, from any screen, finds out. */
+   * overrules a pass can reach it, either: a session that expires ends
+   * where no screen can tell it. The stamp is how any answer, from any
+   * screen, finds out. */
   stamp(): ReconnectStamp {
     return { overrules: this.overrules, session: this.deps.session() };
   }
@@ -545,6 +573,31 @@ export class AutoReconnect {
       return;
     }
     this.stop(why, this.attemptsMade());
+  }
+
+  /** A location, or Automatic, chosen from the server list.
+   *
+   * The list opens only while nothing is up, but nothing closes it when
+   * the episode moves on beneath it: an attempt can start while the
+   * customer is reading it, and land. So the choice can find any phase,
+   * and what it means differs:
+   *
+   *  - Between attempts it ends the episode, whose next attempt would lead
+   *    with the old route regardless. Connect dials the new choice.
+   *  - During one it ends the episode, and the screen is to stop the pass
+   *    as a press of the orb does. Ended here alone, the pass went on
+   *    dialling the old order and landed on the old server.
+   *  - Over a tunnel the app vouches for it changes nothing about that
+   *    tunnel: the choice is for the next connect, the tunnel is still
+   *    reconnected if it drops, and the screen goes on naming its route.
+   *    Treated as a press that takes over, it disarmed the tunnel, and its
+   *    next drop said "VPN connection lost" for the rest of its life.
+   *  - Idle, as any press: an old "VPN connection lost" is retired. */
+  chose(): LocationChoice {
+    if (this.phase.kind === "armed") return "keepTunnel";
+    const dialling = this.phase.kind === "attempting";
+    this.cancel("customer");
+    return dialling ? "stopPass" : null;
   }
 
   /** The screen has stopped vouching for a tunnel without a drop: an

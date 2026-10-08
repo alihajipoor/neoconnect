@@ -6,6 +6,7 @@ import {
   ATTEMPT_MAX_MS,
   AutoReconnect,
   BLOCKED_WAIT_MAX_MS,
+  passStopped,
   QUICK_DEATH_MS,
   QUICK_DEATHS_TO_STOP,
   RECONNECT_BACKOFF_MS,
@@ -471,6 +472,88 @@ describe("the customer outranks it", () => {
     expect(s.asked[0]!.live()).toBe(true);
     s.state.session += 1;
     expect(s.asked[0]!.live()).toBe(false);
+  });
+
+  it("stops a pass dialling for an episode a press ended, whichever press, flag or no flag", async () => {
+    // Windows' ladder asked only the stop flag, which a repair, a new
+    // location and a change of mode never set: they ended the episode and
+    // the pass went on dialling the old order behind them. `passStopped`
+    // asks the attempt too.
+    const ends: [string, (h: ReturnType<typeof harness>) => void][] = [
+      ["a repair, or a change of mode", (h) => h.rc.cancel("customer")],
+      ["a new location", (h) => void h.rc.chose()],
+      ["Stop reconnecting", (h) => h.rc.cancel("stopped")],
+      ["a session that ended out of sight", (h) => (h.state.session += 1)],
+    ];
+    for (const [press, end] of ends) {
+      const h = harness();
+      h.bind();
+      h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+      await h.advance(10 * 60_000);
+      h.script(["pending"]);
+      h.rc.dropped();
+      await h.advance(0);
+      const attempt = h.asked[0]!;
+      expect(passStopped(false, attempt), press).toBe(false);
+      end(h);
+      expect(passStopped(false, attempt), press).toBe(true);
+    }
+    // The flag stops any pass; the customer's own connect is not held to
+    // an episode it is not part of.
+    expect(passStopped(true, undefined)).toBe(true);
+    expect(passStopped(false, undefined)).toBe(false);
+  });
+
+  it("a new location chosen between attempts ends the episode, and nothing runs after", async () => {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(0); // attempt 1 failed; attempt 2 is due in 2s
+    expect(h.rc.chose()).toBeNull();
+    await h.advance(10 * 60_000);
+    expect(h.asked).toHaveLength(1);
+    expect(h.rc.current()).toEqual({ kind: "idle", lost: false, stopped: "customer" });
+  });
+
+  it("one chosen during an attempt ends it and asks the screen to stop its pass", async () => {
+    // Ended alone, the pass went on dialling, led by the old route, and
+    // landed there under a screen already naming the new one.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(0);
+    expect(h.rc.chose()).toBe("stopPass");
+    expect(h.asked[0]!.live()).toBe(false);
+    h.settle({ kind: "connected", routeId: "r" });
+    await h.advance(10 * 60_000);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "customer" });
+    expect(h.asked).toHaveLength(1);
+  });
+
+  it("one chosen over a tunnel that came back beneath the list leaves it up and still reconnected", async () => {
+    // The list opens only while nothing is up; a reconnect can land while
+    // it is open. Taken as a press that takes over, the choice disarmed
+    // that tunnel, and its next drop said "VPN connection lost". The
+    // choice is for the next connect; the tunnel up is the same one.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    const asked = h.rc.stamp();
+    expect(h.rc.chose()).toBe("keepTunnel");
+    expect(vouching(h.rc.current(), 1)).toBe(true);
+    // Nothing was overruled: an answer asked for before it still arms.
+    h.rc.tunnelUp({ routeId: null, stamp: asked });
+    expect(h.rc.current().kind).toBe("armed");
+    expect(h.rc.dropped()).toBe("reconnecting");
+    await h.advance(0);
+    expect(h.asked).toHaveLength(1);
+    expect(h.reports).toHaveLength(0);
   });
 
   it("Stop reconnecting leaves 'connection lost' up, until the next press", async () => {

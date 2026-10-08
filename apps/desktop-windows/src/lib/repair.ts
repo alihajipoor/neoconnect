@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { ladderPass } from "./ladder-pass";
 import { SERVICE_CALL_TIMEOUT_MS, withTimeout } from "./service-call";
 
 /** "Repair my network", and the diagnostics that go beside it.
@@ -139,6 +140,46 @@ export interface Diagnostics {
  * rejection by showing [`repairCommandLine`] rather than an error. */
 export async function repairNetwork(): Promise<RepairReport> {
   return withTimeout(invoke<RepairReport>("vpn_repair"), "the repair", REPAIR_TIMEOUT_MS);
+}
+
+/** How long a repair waits for a connect already under way to let go.
+ *
+ * The longest stretch a pass goes without checking its stop is its last
+ * rung's egress check (thirty seconds) and reachability check (eight),
+ * and on its way out it takes its own tunnel down and waits for the
+ * service to confirm it (six and six). Past that the pass is wedged, and
+ * the repair runs regardless. */
+export const REPAIR_PASS_WAIT_MS = 60_000;
+
+/** Stops a ladder pass still dialling -- an automatic reconnect's attempt,
+ * a Connect pressed before Settings was opened, the mid-session failover
+ * -- and waits for it to let go, before the repair is asked for.
+ *
+ * The service runs one job at a time, and a pass left to itself fought
+ * the repair through it. Its next connect queued behind the repair and
+ * brought a tunnel up straight after it, which the customer had just been
+ * told the repair takes down. Its teardown between rungs is a Disconnect,
+ * which cancels whatever the service is running -- reaching the repair
+ * mid-step, every later step of it then reporting a failure the app had
+ * caused, on the machines that can least afford one.
+ *
+ * So the pass is told to stop, and the Disconnect the repair would make
+ * first anyway is sent now: it cancels the connect the pass is waiting on,
+ * so the pass unwinds in seconds and its own teardown lands before the
+ * repair rather than inside it.
+ *
+ * Not waited on for ever. A pass wedged on a service that never answers
+ * never lets go, and that machine is the one most in need of the repair
+ * -- or, the service being what is broken, of the command the repair
+ * hands over when it cannot reach it. Returns whether the pass let go. */
+export async function stopPassBeforeRepair(
+  disconnect: () => Promise<unknown> = () => withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect"),
+  ms = REPAIR_PASS_WAIT_MS,
+): Promise<boolean> {
+  if (!ladderPass.inFlight()) return true;
+  ladderPass.cancel.current = true;
+  await disconnect().catch(() => undefined);
+  return ladderPass.stopAndWait(ms);
 }
 
 export async function collectDiagnostics(): Promise<Diagnostics> {

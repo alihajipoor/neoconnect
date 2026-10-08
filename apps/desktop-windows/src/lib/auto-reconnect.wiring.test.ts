@@ -151,7 +151,7 @@ describe("a pass the customer stopped while it verified", () => {
   // screen back from Settings said "VPN connection lost" and dialled.
   const ladder = dashboard.slice(dashboard.indexOf("async function runLadder("));
   const landing = ladder.slice(ladder.indexOf('if (verdict === "connected" || verdict === "unverified") {'));
-  const check = landing.indexOf("if (cancelRef.current || ladderGenerationRef.current !== generation) break;");
+  const check = landing.indexOf("if (stopped() || ladderGenerationRef.current !== generation) break;");
 
   it("is cancelled at the last moment it can hear the stop, not landed", () => {
     expect(check).toBeGreaterThan(0);
@@ -222,7 +222,7 @@ describe("the customer outranks it", () => {
   it("and a change of mode, of server, or a repair", () => {
     expect(body("async function changeMode(next: AppMode) {")).toContain('autoReconnect.cancel("customer");');
     const picker = dashboard.slice(dashboard.indexOf("<LocationPicker"));
-    expect(picker.split('autoReconnect.cancel("customer");').length - 1).toBe(2);
+    expect(picker.split("chooseLocation(").length - 1).toBe(2);
     expect(repair).toContain('autoReconnect.cancel("customer");');
   });
 
@@ -235,6 +235,80 @@ describe("the customer outranks it", () => {
   it("a sign-out and the device limit end it too", () => {
     expect(body("async function handleLogout() {")).toContain('autoReconnect.cancel("signedOut");');
     expect(body("async function endForSlot(event: SlotStopReason) {")).toContain('autoReconnect.cancel("refused");');
+  });
+});
+
+describe("a press that ends the episode also stops the pass it was dialling", () => {
+  // A repair, a new location and a change of mode ended the episode but
+  // never set the stop flag, the only thing the ladder asked: the pass went
+  // on dialling the old order behind them, and its tunnel came up after the
+  // repair or on the old server.
+  const ladder = body("async function runLadder(");
+
+  it("the ladder asks the attempt as well as the flag, everywhere it used to ask the flag", () => {
+    expect(ladder).toContain("const stopped = () => passStopped(cancelRef.current, options.reconnect);");
+    // The flag is read nowhere else in the ladder: cleared as it begins,
+    // and asked only through `stopped`.
+    const reads = ladder.split("cancelRef.current").length - 1;
+    expect(reads).toBe(2);
+    expect(ladder).toContain("cancelRef.current = false;");
+    for (const check of [
+      "const stillWanted = !stopped() && sessionGeneration() === sessionAtStart;",
+      "if (stopped() || sessionGeneration() !== sessionAtStart) break;",
+      "if (stopped()) break;",
+      "if (stopped() || ladderGenerationRef.current !== generation) break;",
+      "setConnectionError(stopped() ? null : lastError);",
+      "if (!stopped()) {",
+    ]) {
+      expect(ladder, check).toContain(check);
+    }
+  });
+
+  it("a pass stopped while its engine came up puts nothing of that rung on screen", () => {
+    const connected = ladder.indexOf('await invoke("vpn_connect", {');
+    const check = ladder.indexOf("if (stopped()) break;", connected);
+    expect(check).toBeGreaterThan(connected);
+    // Before the rung's route is named or its clock started -- a location
+    // chosen meanwhile has named its own.
+    expect(check).toBeLessThan(ladder.indexOf("setProtocolUser(candidate);", connected));
+    expect(check).toBeLessThan(ladder.indexOf("setConnectedAt(Date.now());", connected));
+    expect(check).toBeLessThan(ladder.indexOf('publishObserved(intent, "verifying");', connected));
+  });
+
+  it("a location chosen during an attempt stops its pass as Stop reconnecting does; over a tunnel, keeps it", () => {
+    const choose = body("function chooseLocation(routeId: string | null): string | null {");
+    expect(choose).toContain("const choice = autoReconnect.chose();");
+    expect(choose).toContain('if (choice === "stopPass") void stopPass();');
+    // Over a tunnel that stays up the screen goes on naming its route, read
+    // as it is now rather than as it was when the list was pressed.
+    expect(choose).toContain('choice === "keepTunnel" ? (protocolUserRef.current?.routeId ?? routeId) : routeId');
+    const picker = dashboard.slice(dashboard.indexOf("<LocationPicker"));
+    expect(picker).toContain("const shown = chooseLocation(routeId ?? null);");
+    expect(picker).toContain("void loadAll(shown ?? undefined);");
+    expect(picker).toContain("chooseLocation(null);");
+    // Nothing in the list ends the episode any other way.
+    expect(picker).not.toContain("autoReconnect.cancel(");
+  });
+
+  it("a repair has any pass stopped and gone before the service is asked to repair", () => {
+    const run = repair.slice(repair.indexOf("const run = useCallback(async () => {"));
+    const cancel = run.indexOf('autoReconnect.cancel("customer");');
+    const stop = run.indexOf("await stopPassBeforeRepair();");
+    const repaired = run.indexOf("await repairNetwork();");
+    expect(cancel).toBeGreaterThan(0);
+    expect(stop).toBeGreaterThan(cancel);
+    expect(repaired).toBeGreaterThan(stop);
+  });
+
+  it("the inline repair is not offered while an attempt dials: the last attempt's error is cleared as the next begins", () => {
+    const runner = boundRunner();
+    const cleared = runner.indexOf("setConnectionError(null);");
+    expect(cleared).toBeGreaterThan(0);
+    expect(cleared).toBeLessThan(runner.indexOf("runLadderRef.current("));
+    // The inline repair is drawn only under an error.
+    const error = dashboard.indexOf("{connectionError ? (");
+    expect(error).toBeGreaterThan(0);
+    expect(dashboard.indexOf('<RepairNetwork variant="inline" />')).toBeGreaterThan(error);
   });
 });
 

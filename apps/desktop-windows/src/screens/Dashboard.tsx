@@ -79,6 +79,7 @@ import { ladderPass } from "../lib/ladder-pass";
 import {
   asReconnectReport,
   autoReconnect,
+  passStopped,
   reconnectingView,
   reconnectLost,
   reconnectOutcomeOf,
@@ -1376,6 +1377,13 @@ export function Dashboard({
       if (excluded !== null) return { kind: "stop", why: excluded };
       if (protocolUserRef.current === null) return { kind: "stop", why: "excluded" };
       passResultRef.current = { routeId: null, errorKind: null };
+      // Cleared as a press clears it before its pass: the line on screen is
+      // the last attempt's, and that attempt is over. Left up, it kept the
+      // inline "Repair my network" under "Reconnecting..." through the next
+      // attempt -- offered at the one moment a repair has a pass to fight.
+      // Between attempts it is back, with nothing dialling, and the repair
+      // ends the episode before it starts.
+      setConnectionError(null);
       const outcome = await runLadderRef.current({ automatic: true, reconnect: attempt });
       return reconnectOutcomeOf(outcome, passResultRef.current);
     });
@@ -1886,6 +1894,23 @@ export function Dashboard({
     void deviceSlot.release();
   }
 
+  /** A location, or Automatic, chosen from the server list -- which opens
+   * only while nothing is up, but stays open while a reconnect moves on
+   * beneath it. Between attempts that ends the episode; during one it
+   * ends it and stops the pass, as "Stop reconnecting" does; over a tunnel
+   * the app vouches for it changes nothing about that tunnel. See
+   * `autoReconnect.chose`.
+   *
+   * Returns the route the screen goes on naming: the tunnel's, while one
+   * stays up, and otherwise the choice. Read through the ref: the list
+   * reports a server only once the switch request has answered, and the
+   * render it was pressed in can predate the pass that landed meanwhile. */
+  function chooseLocation(routeId: string | null): string | null {
+    const choice = autoReconnect.chose();
+    if (choice === "stopPass") void stopPass();
+    return choice === "keepTunnel" ? (protocolUserRef.current?.routeId ?? routeId) : routeId;
+  }
+
   /** Every press does something, and no press can leave the app worse
    * off than it found it.
    *
@@ -2150,6 +2175,14 @@ export function Dashboard({
     ladderRunningRef.current = true;
     ladderStartedAtRef.current = Date.now();
     cancelRef.current = false;
+    /** Whether this pass has been told to stop: the stop flag, from
+     * whichever screen pressed, or -- for an automatic reconnect's -- the
+     * attempt it dials for being over. Not everything that ends an episode
+     * reaches the flag (a change of mode, an expired session, the attempt's
+     * ceiling), and a pass that asked only the flag went on dialling the
+     * old order behind a repair or a new location and landed on the old
+     * server. Asked wherever the flag used to be. See `passStopped`. */
+    const stopped = () => passStopped(cancelRef.current, options.reconnect);
     /** Whether this pass brought a tunnel up. One of the app's own
      * automatic passes that did not -- the mid-session failover -- has
      * just taken the tunnel the episode was armed for down on purpose,
@@ -2238,7 +2271,7 @@ export function Dashboard({
       if (stoppedBySlot !== null) {
         // Said only to a customer still waiting on this pass: one who
         // pressed stop, or signed out, has already moved on.
-        const stillWanted = !cancelRef.current && sessionGeneration() === sessionAtStart;
+        const stillWanted = !stopped() && sessionGeneration() === sessionAtStart;
         if (stillWanted) {
           showSlotStop(stoppedBySlot, "beforeDial");
           if (options.automatic || stoppedBySlot.kind === "displaced") slotLostRef.current = true;
@@ -2335,7 +2368,7 @@ export function Dashboard({
       // Placed after the teardown above, so this is dead time that
       // would otherwise be spent dialling something that cannot answer.
       // A cancel landing during it needs no handling here: the loop
-      // below checks `cancelRef` on its first pass and a superseded
+      // below checks `stopped` on its first pass and a superseded
       // generation is caught after it, and adding a third exit would
       // mean a third opinion about what that outcome is called.
       const reachability = await probeCandidates(dialable).catch(() => ({}));
@@ -2401,7 +2434,7 @@ export function Dashboard({
       const nodeAddresses = nodeAddressesOf(dialable);
 
       for (const [index, candidate] of candidates.entries()) {
-        if (cancelRef.current || sessionGeneration() !== sessionAtStart) break;
+        if (stopped() || sessionGeneration() !== sessionAtStart) break;
         // A pass whose guard expired and that a newer pass has replaced
         // stops dialling here, rather than tearing that pass's engine
         // down with its next connect.
@@ -2490,6 +2523,12 @@ export function Dashboard({
             await serviceDisconnect().catch(() => undefined);
             return "failed";
           }
+          // Stopped while the engine came up: nothing about this rung
+          // reaches the screen. Not its route least of all -- a location
+          // chosen meanwhile has just named its own, and this one landing
+          // on top of it named a server nothing will dial. The teardown
+          // after the loop takes the engine down.
+          if (stopped()) break;
           setProtocolUser(candidate);
           setConnectedAt(Date.now());
 
@@ -2499,7 +2538,6 @@ export function Dashboard({
           // the same time -- did our packets actually leave via the
           // server.
           publishObserved(intent, "verifying");
-          if (cancelRef.current) break;
 
           // Custom mode has to be checked a different way, and the
           // reason is structural rather than a quirk worth working
@@ -2678,7 +2716,7 @@ export function Dashboard({
               await serviceDisconnect().catch(() => undefined);
               return "failed";
             }
-            if (cancelRef.current || ladderGenerationRef.current !== generation) break;
+            if (stopped() || ladderGenerationRef.current !== generation) break;
             const movedFromShown = Boolean(shownRouteId) && candidate.routeId !== shownRouteId;
             if (index > 0 || movedFromShown) {
               // Compared against what was on screen when Connect was
@@ -2762,9 +2800,8 @@ export function Dashboard({
             // A tunnel to reconnect if it drops. A reconnect's own landing
             // is armed by the episode, which carries its count of quick
             // deaths; every other pass starts the clock afresh -- unless
-            // something overruled it that the check above cannot see. A
-            // repair run from Settings while this pass dials stops no pass,
-            // but it is taking this tunnel down; the stamp knows.
+            // something overruled it that the checks above did not see;
+            // the stamp has the last word on that.
             passResultRef.current = { routeId: candidate.routeId, errorKind: null };
             if (!options.reconnect) {
               autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: reconnectStamp });
@@ -2817,15 +2854,16 @@ export function Dashboard({
       setConnectedAt(null);
       setExitIp(null);
       // A pass the customer stopped is not a failure and must not be
-      // reported as one.
-      setConnectionError(cancelRef.current ? null : lastError);
+      // reported as one -- nor one whose episode a press ended, which has
+      // filed its own row.
+      setConnectionError(stopped() ? null : lastError);
       // Nothing came up, so this device is not using one of the plan's
       // devices. Kept, the slot would turn the customer's phone away for
       // the next ninety seconds with "Neoxify is in use on Windows PC" --
       // a claim about a device that is not connected.
       void deviceSlot.release();
       passResultRef.current = { routeId: null, errorKind: lastError?.kind ?? null };
-      if (!cancelRef.current) {
+      if (!stopped()) {
         // The whole ladder failed. This is the report that has been
         // costing a screenshot and a conversation every time: which
         // protocols were tried, in order, and what each one did. An
@@ -3661,8 +3699,9 @@ export function Dashboard({
           onChooseAutomatic={() => {
             // A new choice while a reconnect waits ends the reconnect:
             // its next attempt would lead with the old route regardless.
-            // Connect then dials the new choice.
-            autoReconnect.cancel("customer");
+            // Connect then dials the new choice. One dialling is stopped,
+            // and a tunnel already back is left as it is.
+            chooseLocation(null);
             setChosenRouteId(null);
             void saveChosenRoute(null);
           }}
@@ -3677,7 +3716,7 @@ export function Dashboard({
           // on that endpoint's exact shape.
           onSwitched={(routeId) => {
             // As for Automatic, above.
-            autoReconnect.cancel("customer");
+            const shown = chooseLocation(routeId ?? null);
             // Their choice leads the order. It used to be the only
             // candidate, which quietly disabled failover for anyone who
             // had ever opened this list.
@@ -3688,8 +3727,10 @@ export function Dashboard({
             void saveChosenRoute(routeId ?? null);
             // Passed explicitly: the state set above has not landed yet
             // when loadAll reads it, which is why the screen kept
-            // showing the previous choice.
-            void loadAll(routeId);
+            // showing the previous choice. Over a tunnel that stays up,
+            // the route it is on: naming the choice there would name a
+            // server the traffic is not leaving from.
+            void loadAll(shown ?? undefined);
           }}
         />
       ) : null}

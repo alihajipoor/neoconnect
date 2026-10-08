@@ -249,7 +249,26 @@ describe("the phone dashboard's wiring", () => {
     expect(dashboard).toContain('autoReconnect.cancel("refused");');
     expect(dashboard).toContain('autoReconnect.cancel("stopped");');
     const picker = dashboard.slice(dashboard.indexOf("<LocationPicker"));
-    expect(picker.split('autoReconnect.cancel("customer");').length - 1).toBe(2);
+    expect(picker.split("chooseLocation(").length - 1).toBe(2);
+  });
+
+  it("a location chosen during an attempt stops its pass at once; over a tunnel that came back, keeps it armed", () => {
+    // Taken as a press that takes over, a choice over a tunnel that landed
+    // beneath the open list disarmed it, and its next drop said "VPN
+    // connection lost"; and the pass of an attempt it ended went on to the
+    // end of its step, "Connecting..." over a choice already made.
+    const start = dashboard.indexOf("function chooseLocation(routeId: string | null): string | null {");
+    expect(start).toBeGreaterThan(0);
+    const choose = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
+    expect(choose).toContain("pressRef.current += 1;");
+    expect(choose).toContain("const choice = autoReconnect.chose();");
+    expect(choose).toContain('if (choice === "stopPass") void stopPass();');
+    expect(choose).toContain('choice === "keepTunnel" ? (protocolUserRef.current?.routeId ?? routeId) : routeId');
+    expect(dashboard).toContain("protocolUserRef.current = protocolUser;");
+    const picker = dashboard.slice(dashboard.indexOf("<LocationPicker"));
+    expect(picker).toContain("const shown = chooseLocation(routeId ?? null);");
+    expect(picker).toContain("void loadAll(shown ?? undefined);");
+    expect(picker).not.toContain("autoReconnect.cancel(");
   });
 
   it("takes its words from the shared tables", () => {

@@ -7,6 +7,7 @@ import {
   indeterminateSteps,
   repairCommandLine,
   repairNetwork,
+  stopPassBeforeRepair,
   type RepairReport,
   type RepairStep,
 } from "../lib/repair";
@@ -81,6 +82,11 @@ export function RepairNetwork({
     setReport(null);
     setUnreachable(null);
     try {
+      // And a pass already dialling -- the reconnect's, or any other -- is
+      // stopped and let go of first, so it neither brings a tunnel up
+      // behind the repair nor cancels the repair with its teardown. See
+      // `stopPassBeforeRepair`.
+      await stopPassBeforeRepair();
       const result = await repairNetwork();
       if (!alive.current) return;
       setReport(result);

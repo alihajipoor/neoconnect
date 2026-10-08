@@ -448,6 +448,11 @@ export function Dashboard({
   /** The subscription, for callbacks registered once. */
   const subscriptionRef = useRef<Subscription | null>(null);
   subscriptionRef.current = subscription;
+  /** The credential on screen, for a press reported after an await: the
+   * server list says which location was chosen only once its switch
+   * request has answered, and a pass can land in between. */
+  const protocolUserRef = useRef<ProtocolUser | null>(null);
+  protocolUserRef.current = protocolUser;
 
   useEffect(() => {
     // The remembered route is read first and handed straight to
@@ -994,6 +999,22 @@ export function Dashboard({
       return;
     }
     void deviceSlot.release();
+  }
+
+  /** A location, or Automatic, chosen from the server list -- which opens
+   * only while nothing is up, but stays open while a reconnect moves on
+   * beneath it. Between attempts that ends the episode; during one it
+   * ends it and stops the pass, as "Stop reconnecting" does, rather than
+   * leaving it to notice at its next step; over a tunnel the app vouches
+   * for it changes nothing about that tunnel. See `autoReconnect.chose`.
+   *
+   * Returns the route the screen goes on naming: the tunnel's, while one
+   * stays up, and otherwise the choice. */
+  function chooseLocation(routeId: string | null): string | null {
+    pressRef.current += 1;
+    const choice = autoReconnect.chose();
+    if (choice === "stopPass") void stopPass();
+    return choice === "keepTunnel" ? (protocolUserRef.current?.routeId ?? routeId) : routeId;
   }
 
   async function handleConnectToggle() {
@@ -2364,26 +2385,27 @@ export function Dashboard({
             onChooseAutomatic={() => {
               // A new choice while a reconnect waits ends the reconnect:
               // its next attempt would lead with the old route regardless.
-              // A pass of its still running stands down by itself
-              // (`attempt.live`), and so does a connect pressed here that
-              // is still waiting to dial.
-              pressRef.current += 1;
-              autoReconnect.cancel("customer");
+              // A pass of its still running is stopped, and so is a
+              // connect pressed here that is still waiting to dial; a
+              // tunnel already back is left as it is.
+              chooseLocation(null);
               setChosenRouteId(null);
               void saveChosenRoute(null);
             }}
             onClose={() => setShowLocationPicker(false)}
             onSwitched={(routeId) => {
               // As for Automatic, above.
-              pressRef.current += 1;
-              autoReconnect.cancel("customer");
+              const shown = chooseLocation(routeId ?? null);
               setChosenRouteId(routeId ?? null);
               // Best-effort and deliberately not awaited: the customer's
               // connection should not wait on a disk write, and losing
               // the preference costs them one re-pick rather than a
               // connection.
               void saveChosenRoute(routeId ?? null);
-              void loadAll(routeId);
+              // Over a tunnel that stays up, the route it is on: naming
+              // the choice there would name a server the traffic is not
+              // leaving from.
+              void loadAll(shown ?? undefined);
             }}
           />
         ) : null}
