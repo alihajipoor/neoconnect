@@ -419,6 +419,60 @@ describe("the customer outranks it", () => {
     expect(h.asked).toHaveLength(1);
   });
 
+  it("tells a pass still asking questions that a press has ended its attempt, before it dials", async () => {
+    // The phone's pass asks the platform two things before it dials. A
+    // stop pressed meanwhile used to be ignored: the outcome was dropped,
+    // but the tunnel came up anyway. The attempt now says it is over, for
+    // good, the moment anything ends it -- whichever screen pressed.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(0);
+    const first = h.asked[0]!;
+    expect(first.live()).toBe(true);
+    h.rc.cancel("stopped");
+    expect(first.live()).toBe(false);
+    // A later episode's attempt is its own; the old one stays over.
+    h.settle({ kind: "failed" });
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    h.rc.dropped();
+    await h.advance(0);
+    expect(h.asked).toHaveLength(2);
+    expect(h.asked[1]!.live()).toBe(true);
+    expect(first.live()).toBe(false);
+  });
+
+  it("tells it the same when the attempt moves on without a press", async () => {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(0);
+    const wedged = h.asked[0]!;
+    // The attempt's own ceiling: counted as failed (and, that far in, the
+    // budget is spent with it).
+    await h.advance(ATTEMPT_MAX_MS);
+    expect(h.rc.current().kind).not.toBe("attempting");
+    expect(wedged.live()).toBe(false);
+
+    // A session that ended where no screen could tell the episode.
+    const s = harness();
+    s.bind();
+    s.rc.tunnelUp({ routeId: "r", fresh: true });
+    await s.advance(10 * 60_000);
+    s.script(["pending"]);
+    s.rc.dropped();
+    await s.advance(0);
+    expect(s.asked[0]!.live()).toBe(true);
+    s.state.session += 1;
+    expect(s.asked[0]!.live()).toBe(false);
+  });
+
   it("Stop reconnecting leaves 'connection lost' up, until the next press", async () => {
     const h = harness();
     h.bind();
@@ -650,7 +704,7 @@ describe("a screen that is not there", () => {
 });
 
 describe("telemetry", () => {
-  const attempt: ReconnectAttempt = { attempt: 2, maxAttempts: 6, resumeRouteId: "r" };
+  const attempt: ReconnectAttempt = { attempt: 2, maxAttempts: 6, resumeRouteId: "r", live: () => true };
 
   it("keeps a pass that landed a SUCCESS, marked automatic", () => {
     const report = asReconnectReport({ kind: "CONNECT", outcome: "SUCCESS", protocol: "Stealth", routeId: "r" }, attempt);

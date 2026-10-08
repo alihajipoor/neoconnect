@@ -183,6 +183,17 @@ export interface ReconnectAttempt {
   readonly maxAttempts: number;
   /** The route to lead with: the one the tunnel was on. */
   readonly resumeRouteId: string | null;
+  /** Whether this attempt is still the episode's current one, for the
+   * session it began under. False from the moment anything ends or moves
+   * the episode on -- a press, a sign-out, the device limit, the
+   * attempt's own ceiling -- and never true again.
+   *
+   * The episode ignores what a superseded attempt reports, but that alone
+   * cannot stop it dialling: a pass that awaits anything before it dials
+   * (the phone asks the platform two questions first) would otherwise
+   * bring a tunnel up after the customer said stop. So a pass asks this
+   * after every await, and stops when it is false. */
+  readonly live: () => boolean;
 }
 
 /** How an attempt went. */
@@ -636,6 +647,13 @@ export class AutoReconnect {
           attempt: attempt + 1,
           maxAttempts: RECONNECT_MAX_ATTEMPTS,
           resumeRouteId: episode.routeId,
+          // Every move out of `attempting` bumps the token, so this is
+          // false for good once anything has ended or replaced the
+          // attempt. The session too: one that ended where no screen
+          // could tell the episode (an expired session, from App) still
+          // ends what this attempt may do.
+          live: () =>
+            token === this.token && this.phase.kind === "attempting" && this.deps.session() === episode.session,
         }),
         new Promise<ReconnectOutcome>((resolve) => {
           watchdog = this.deps.setTimer(() => resolve({ kind: "failed" }), ATTEMPT_MAX_MS);
