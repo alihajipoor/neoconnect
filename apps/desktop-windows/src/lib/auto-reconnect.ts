@@ -58,7 +58,10 @@ export const RECONNECT_MAX_ATTEMPTS = RECONNECT_BACKOFF_MS.length;
  * Time spent waiting for a network, or (on a phone) for the app to come
  * back to the front, does not count. Those waits burn nothing, and a
  * reconnect is most useful exactly when a network that went away comes
- * back. They have their own ceiling: `BLOCKED_WAIT_MAX_MS`. */
+ * back. They have their own ceiling: `BLOCKED_WAIT_MAX_MS`. Nor does the
+ * time a phone app spends in the background while a pass runs: the OS
+ * freezes the pass meanwhile, so that time is the customer's, not the
+ * pass's (see `awayChanged`). */
 export const RECONNECT_BUDGET_MS = 120_000;
 
 /** A tunnel that ends within this long of coming up died "right after
@@ -82,7 +85,8 @@ export const QUICK_DEATHS_TO_STOP = 3;
  * not a blip any more -- they may have turned the VPN off in the
  * system's own settings meanwhile, which this app cannot see -- and the
  * honest answer then is "VPN connection lost" and a Connect button, not
- * a tunnel coming back on its own long after. */
+ * a tunnel coming back on its own long after. The same for a pass the
+ * phone app was away from that long (`awayChanged`). */
 export const BLOCKED_WAIT_MAX_MS = 30 * 60_000;
 
 /** The longest one attempt is waited for without a sign of life before it
@@ -105,7 +109,8 @@ export const BLOCKED_WAIT_MAX_MS = 30 * 60_000;
  * landed its tunnel was armed by nothing -- a reconnect's pass leaves that
  * to the episode -- so its next drop said "VPN connection lost" and
  * reconnected nothing. Longer than the guard, so no pass the guard still
- * counts as live is given up on here. */
+ * counts as live is given up on here. Held while a phone app is in the
+ * background: see `awayChanged`. */
 export const ATTEMPT_MAX_MS = 180_000;
 
 /** Why an episode ended without a tunnel -- or never started. */
@@ -293,6 +298,22 @@ export interface ReconnectDeps {
 
 const IDLE: ReconnectPhase = { kind: "idle", lost: false, stopped: null };
 
+/** What the controller keeps of the attempt running, for as long as it
+ * runs: its ceiling, and the time a phone app has spent away from it. */
+interface RunningAttempt {
+  /** The controller's token while it is the current attempt. */
+  readonly token: number;
+  /** Counts the attempt as failed: its ceiling has run out. */
+  giveUp: () => void;
+  /** The ceiling's timer. Null while the app is away. */
+  watchdog: unknown;
+  /** When a phone app went to the background during the attempt, while
+   * it is there. */
+  awaySince: number | null;
+  /** How long it had spent there before that, in all. */
+  awayMs: number;
+}
+
 /** Whether an episode that ended this way leaves "VPN connection lost"
  * to be said. A press that took over has its own outcome to show, and a
  * session that ended has no screen. */
@@ -433,6 +454,10 @@ export class AutoReconnect {
    * reconnecting", a sign-out, the device limit -- so an answer asked for
    * before one can tell it has been overruled. See `stamp`. */
   private overrules = 0;
+  /** The attempt running. Left behind by one a press ended while its pass
+   * never answered, so it is the current attempt only while its token is
+   * the controller's. */
+  private running: RunningAttempt | null = null;
   private readonly listeners = new Set<() => void>();
   private requiresForeground = false;
 
@@ -638,6 +663,10 @@ export class AutoReconnect {
 
   /** The network or the app's visibility may have changed. */
   conditionsChanged(): void {
+    if (this.phase.kind === "attempting") {
+      this.awayChanged();
+      return;
+    }
     if (this.phase.kind !== "waiting") return;
     const blocker = this.blocker();
     const waiting = this.phase;
@@ -665,7 +694,87 @@ export class AutoReconnect {
     this.overrules += 1;
     this.phase = IDLE;
     this.runner = null;
+    this.running = null;
     this.requiresForeground = false;
+  }
+
+  /** A phone app gone to the background, or back to the front, while a
+   * pass runs.
+   *
+   * The OS freezes the pass meanwhile -- iOS within seconds -- so the time
+   * is not the pass's, and charging it as such ended episodes that had
+   * barely begun. A customer who looked away for two and a half minutes
+   * came back to an attempt charged 150 s of a 120 s budget: "VPN
+   * connection lost", five attempts unspent. Three minutes away, and the
+   * attempt's ceiling fell due in the background, ending the episode
+   * beneath a pass about to go on dialling, whose tunnel then came up
+   * armed by nothing.
+   *
+   * So while the app is away the ceiling is held, and starts again in
+   * full when it is back -- the pass has had no time to show a sign of
+   * life -- and the budget is charged only for the time in front. Away for
+   * `BLOCKED_WAIT_MAX_MS`, the attempt ends there as a blocked wait would,
+   * its pass with it: a tunnel coming back on its own half an hour after
+   * the customer last saw "Reconnecting..." is not a reconnect any more.
+   *
+   * Not on Windows, where a minimised window is still a running app and
+   * its pass goes on dialling. */
+  private awayChanged(): void {
+    const running = this.running;
+    if (!this.requiresForeground || running === null || running.token !== this.token) return;
+    if (this.phase.kind !== "attempting") return;
+    const now = this.deps.now();
+    const away = !this.deps.foreground();
+    if (away && running.awaySince === null) {
+      running.awaySince = now;
+      this.watch(running);
+      if (this.capTimer !== null) this.deps.clearTimer(this.capTimer);
+      this.capTimer = this.deps.setTimer(() => {
+        this.capTimer = null;
+        if (running.token === this.token && running.awaySince !== null && this.phase.kind === "attempting") {
+          this.stop("waitedTooLong", this.attemptsMade());
+        }
+      }, BLOCKED_WAIT_MAX_MS);
+      return;
+    }
+    if (!away && running.awaySince !== null) {
+      const awayFor = Math.max(0, now - running.awaySince);
+      // Checked here as well as by the timer above, which a frozen app
+      // does not run until it is back -- possibly after this.
+      if (awayFor >= BLOCKED_WAIT_MAX_MS) {
+        this.stop("waitedTooLong", this.attemptsMade());
+        return;
+      }
+      running.awayMs += awayFor;
+      running.awaySince = null;
+      if (this.capTimer !== null) {
+        this.deps.clearTimer(this.capTimer);
+        this.capTimer = null;
+      }
+      this.watch(running);
+    }
+  }
+
+  /** Starts an attempt's ceiling again -- as it begins, at every sign of
+   * life, and as a phone app comes back to the front -- or holds it while
+   * the app is away. On the timer's clock alone, which only goes forward.
+   *
+   * Falling due while the app is away means its going there was never
+   * heard (a phone can freeze the app first): that is taken as the moment
+   * it went, rather than as a pass that gave no sign of life. */
+  private watch(running: RunningAttempt): void {
+    if (running.watchdog !== null) this.deps.clearTimer(running.watchdog);
+    running.watchdog =
+      running.awaySince !== null
+        ? null
+        : this.deps.setTimer(() => {
+            running.watchdog = null;
+            if (running.token === this.token && this.requiresForeground && !this.deps.foreground()) {
+              this.awayChanged();
+              return;
+            }
+            running.giveUp();
+          }, ATTEMPT_MAX_MS);
   }
 
   private blocker(): "network" | "foreground" | null {
@@ -680,7 +789,10 @@ export class AutoReconnect {
     return 0;
   }
 
-  private schedule(attempt: number, episode: Episode): void {
+  /** `awaySince`: when a phone app went to the background during the
+   * attempt that just failed, if it is there still -- the wait that
+   * follows has been blocked since then, for `BLOCKED_WAIT_MAX_MS`. */
+  private schedule(attempt: number, episode: Episode, awaySince: number | null = null): void {
     this.clearTimers();
     if (attempt >= RECONNECT_MAX_ATTEMPTS) {
       this.stop("attempts", attempt);
@@ -694,7 +806,7 @@ export class AutoReconnect {
     const now = this.deps.now();
     const blocker = this.blocker();
     if (blocker !== null) {
-      this.block(attempt, episode, blocker, now);
+      this.block(attempt, episode, blocker, now, awaySince);
       return;
     }
     this.set({ kind: "waiting", attempt, delayMs: delay, blockedBy: null, blockedSince: null, episode });
@@ -704,9 +816,15 @@ export class AutoReconnect {
     }, delay);
   }
 
-  private block(attempt: number, episode: Episode, blocker: "network" | "foreground", now: number): void {
+  private block(
+    attempt: number,
+    episode: Episode,
+    blocker: "network" | "foreground",
+    now: number,
+    awaySince: number | null = null,
+  ): void {
     const since =
-      this.phase.kind === "waiting" && this.phase.blockedSince !== null ? this.phase.blockedSince : now;
+      awaySince ?? (this.phase.kind === "waiting" && this.phase.blockedSince !== null ? this.phase.blockedSince : now);
     // The scheduled delay is not owed once the wait was paused: the
     // attempt runs as soon as the network, or the app, is back.
     this.set({ kind: "waiting", attempt, delayMs: 0, blockedBy: blocker, blockedSince: since, episode });
@@ -779,38 +897,42 @@ export class AutoReconnect {
     // expired session, from App) still ends what this attempt may do.
     const live = () =>
       token === this.token && this.phase.kind === "attempting" && this.deps.session() === episode.session;
-    let watchdog: unknown = null;
+    const running: RunningAttempt = { token, giveUp: () => undefined, watchdog: null, awaySince: null, awayMs: 0 };
+    this.running = running;
     let outcome: ReconnectOutcome;
     try {
       outcome = await new Promise<ReconnectOutcome>((resolve, reject) => {
-        // The ceiling, started now and again at every sign of life. On the
-        // timer's clock alone, which only goes forward.
-        const watch = () => {
-          if (watchdog !== null) this.deps.clearTimer(watchdog);
-          watchdog = this.deps.setTimer(() => resolve({ kind: "failed" }), ATTEMPT_MAX_MS);
-        };
-        watch();
+        running.giveUp = () => resolve({ kind: "failed" });
+        // The ceiling, started now and again at every sign of life.
+        this.watch(running);
         runner({
           attempt: attempt + 1,
           maxAttempts: RECONNECT_MAX_ATTEMPTS,
           resumeRouteId: episode.routeId,
           live,
           progress: () => {
-            if (live()) watch();
+            if (live()) this.watch(running);
           },
         }).then(resolve, reject);
       });
     } catch {
       outcome = { kind: "failed" };
     } finally {
-      if (watchdog !== null) this.deps.clearTimer(watchdog);
+      if (running.watchdog !== null) this.deps.clearTimer(running.watchdog);
+      running.watchdog = null;
+      if (this.running === running) this.running = null;
     }
     // Ended or superseded while it ran -- a press, a sign-out. Whatever
     // that did stands.
     if (token !== this.token || this.phase.kind !== "attempting") return;
     const now = this.deps.now();
+    // Time a phone app spent in the background is the customer's, not the
+    // pass's (`awayChanged`).
+    const awayMs = running.awayMs + (running.awaySince !== null ? Math.max(0, now - running.awaySince) : 0);
     switch (outcome.kind) {
       case "connected":
+        // The ceiling on a background stay, if the pass landed in one.
+        this.clearTimers();
         this.token += 1;
         this.set({
           kind: "armed",
@@ -825,7 +947,11 @@ export class AutoReconnect {
         return;
       case "failed":
         this.token += 1;
-        this.schedule(attempt + 1, { ...episode, spentMs: episode.spentMs + Math.max(0, now - startedAt) });
+        this.schedule(
+          attempt + 1,
+          { ...episode, spentMs: episode.spentMs + Math.max(0, now - startedAt - awayMs) },
+          running.awaySince,
+        );
         return;
     }
   }

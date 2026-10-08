@@ -402,6 +402,143 @@ describe("no network, or no foreground", () => {
     expect(h.asked).toHaveLength(1);
   });
 
+  it("on a phone, does not charge the time in the background to a pass that was running", async () => {
+    // The customer opens the app on "Reconnecting..." and switches away
+    // three seconds into a pass, which the OS freezes; back two and a half
+    // minutes later, the pass fails. Charged by the wall clock, that was
+    // 155 s of a 120 s budget: "VPN connection lost", five attempts unspent.
+    const h = harness({ requiresForeground: true });
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(3_000);
+    h.state.foreground = false;
+    h.rc.conditionsChanged();
+    await h.advance(150_000);
+    h.state.foreground = true;
+    h.rc.conditionsChanged();
+    await h.advance(2_000);
+    expect(h.rc.current().kind).toBe("attempting");
+    h.script([{ outcome: { kind: "failed" } }]);
+    h.settle({ kind: "failed" });
+    await h.advance(0);
+    expect(h.rc.current()).toMatchObject({ kind: "waiting", attempt: 1, blockedBy: null });
+    await h.advance(10 * 60_000);
+    expect(h.asked).toHaveLength(RECONNECT_MAX_ATTEMPTS);
+    expect(h.rc.current()).toMatchObject({ stopped: "attempts" });
+  });
+
+  it("on a phone, holds the attempt's ceiling while the app is in the background", async () => {
+    // Away for longer than the ceiling, it fell due in the background: the
+    // episode ended on the budget beneath a pass about to go on dialling,
+    // and the tunnel that pass landed was armed by nothing.
+    const h = harness({ requiresForeground: true });
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(3_000);
+    h.state.foreground = false;
+    h.rc.conditionsChanged();
+    await h.advance(10 * 60_000);
+    expect(h.rc.current().kind).toBe("attempting");
+    h.state.foreground = true;
+    h.rc.conditionsChanged();
+    // A whole ceiling again from the moment it is back.
+    await h.advance(ATTEMPT_MAX_MS - 1_000);
+    expect(h.asked[0]!.live()).toBe(true);
+    h.settle({ kind: "connected", routeId: "r" });
+    await h.advance(0);
+    expect(h.rc.current().kind).toBe("armed");
+    expect(h.reports).toHaveLength(0);
+    // Control: in front, a silent pass is still given up on.
+    h.script(["pending"]);
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(ATTEMPT_MAX_MS + 1_000);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "budget" });
+  });
+
+  it("on a phone, holds it too when the ceiling falls due before the move to the background was heard", async () => {
+    // A phone can freeze the app before its visibility change is handled.
+    const h = harness({ requiresForeground: true });
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(3_000);
+    h.state.foreground = false;
+    await h.advance(ATTEMPT_MAX_MS + 60_000);
+    expect(h.rc.current().kind).toBe("attempting");
+    h.state.foreground = true;
+    h.rc.conditionsChanged();
+    await h.advance(ATTEMPT_MAX_MS - 1_000);
+    expect(h.rc.current().kind).toBe("attempting");
+    await h.advance(2_000);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true });
+  });
+
+  it("on a phone, ends an attempt the app was away from for half an hour, as it ends a wait", async () => {
+    // Timers running in the background (Android need not freeze the app).
+    const h = harness({ requiresForeground: true });
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(3_000);
+    h.state.foreground = false;
+    h.rc.conditionsChanged();
+    await h.advance(BLOCKED_WAIT_MAX_MS - 1_000);
+    expect(h.rc.current().kind).toBe("attempting");
+    await h.advance(2_000);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "waitedTooLong" });
+    expect(h.asked[0]!.live()).toBe(false);
+    // What the pass says on waking changes nothing.
+    h.state.foreground = true;
+    h.rc.conditionsChanged();
+    h.settle({ kind: "connected", routeId: "r" });
+    await h.advance(0);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "waitedTooLong" });
+
+    // Frozen: no timer runs until the app is back, an hour later.
+    const f = harness({ requiresForeground: true });
+    f.bind();
+    f.rc.tunnelUp({ routeId: "r", fresh: true, stamp: f.rc.stamp() });
+    await f.advance(10 * 60_000);
+    f.script(["pending"]);
+    f.rc.dropped();
+    await f.advance(3_000);
+    f.state.foreground = false;
+    f.rc.conditionsChanged();
+    f.state.now += 60 * 60_000;
+    f.state.foreground = true;
+    f.rc.conditionsChanged();
+    expect(f.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "waitedTooLong" });
+    expect(f.asked[0]!.live()).toBe(false);
+
+    // A pass that failed in the background leaves a wait blocked since the
+    // app went there, not since the failure: half an hour in all.
+    const b = harness({ requiresForeground: true });
+    b.bind();
+    b.rc.tunnelUp({ routeId: "r", fresh: true, stamp: b.rc.stamp() });
+    await b.advance(10 * 60_000);
+    b.script([{ outcome: { kind: "failed" }, takesMs: 10 * 60_000 }]);
+    b.rc.dropped();
+    await b.advance(0);
+    b.state.foreground = false;
+    b.rc.conditionsChanged();
+    await b.advance(10 * 60_000);
+    expect(b.rc.current()).toMatchObject({ kind: "waiting", attempt: 1, blockedBy: "foreground" });
+    await b.advance(BLOCKED_WAIT_MAX_MS - 10 * 60_000 + 1_000);
+    expect(b.rc.current()).toMatchObject({ kind: "idle", stopped: "waitedTooLong" });
+    expect(b.asked).toHaveLength(1);
+  });
+
   it("on Windows, a window in the background is no reason to wait", async () => {
     // Control for the rule above.
     const h = harness({ requiresForeground: false });
