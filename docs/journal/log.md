@@ -5764,3 +5764,68 @@ the answer.
   `VpnService.prepare`, which can itself move the VPN back to this app.
   Another app taking the VPN during a pass meets whatever the next rung's
   connect does there. Unobserved.
+
+## 2026-10-08 — automatic reconnect proven in the VM; desktop 0.9.47, mobile 0.2.25
+
+`claude/auto-reconnect` after five review rounds: an independent review
+(6 lenses, 2 skeptics per finding) confirmed 28 findings and 2 split, no
+high after verification; all 30 fixed by theme, then re-checked at the
+branch head by two checkers per theme plus a regression hunter until no
+finding was judged open. CI (ci.yml and ci-ios.yml, which compiles the
+Swift) green at every pushed head. Desktop `pnpm test` 1006 / 58 files,
+mobile 232 / 12, both typechecks clean.
+
+**Proven in the VM** (finland1, on the build of the final head, bundle
+`index-D3aOLgJ3.js` confirmed in the guest; earlier heads the same):
+each engine killed under a verified tunnel -- `xray.exe` on Stealth,
+Stealth Web, Stealth HTTPS, Stealth Lite; `wireguard.exe`;
+`openvpn.exe`; `rasdial /disconnect` for IKEv2. On every one the screen
+said "Reconnecting..." with "Stop reconnecting" and the unprotected hint
+0.4-1.8 s after the kill, traffic went direct meanwhile (fail open, as
+designed), and "You're protected" came back 5-16 s after the kill from
+the new pass's own egress check. In the 12 s after that, a NIC capture
+(`pktmon --comp nics`) saw **0** packets sent directly to the probe
+address, and the exit address was finland1's every time.
+- Three kills within a minute: two reconnects, then "VPN connection
+  lost" and no further pass.
+- Disconnect: "You're not protected", engine gone, nothing redialled in
+  the next minute.
+- "Stop reconnecting" during an attempt that had started its engine: the
+  engine stopped within ~0.3 s, "VPN connection lost", nothing more.
+- Engine killed with Settings open, back after ~10 s: the dashboard
+  loaded first, then "Reconnecting..." and protected.
+- Guest adapter disabled for 50 s after a kill (on the third round's head,
+  `a2d8c2f`; not re-run on the final one): "Reconnecting..." and the
+  unprotected hint throughout, protected once the adapter was back. The
+  pass running when the network went walked its rungs through the
+  outage; WebView2's `navigator.onLine` did go false in the guest, but a
+  pass under way is not interrupted by it (by design).
+- A location picked over a live tunnel (fi -> fr): the live tunnel kept
+  its route and was re-verified; after a kill the reconnect went to the
+  picked server (exit france-1).
+- Telemetry rows arrive as `auto-reconnect attempt N of at most 6 ...`
+  and `auto-reconnect stopped after N attempt(s): ...`; rows made while
+  the control plane was unreachable arrive later from the queue.
+
+**Unverified:** phones (Android and iPhone: no device run of the
+reconnect), a minimized window (WebView2 timer throttling), a real
+censored network, a device-limit refusal on a reconnect's own claim
+(needs two devices).
+
+**Known, not fixed in this release** -- all low, found by the final
+checkers, none showing protection without proof:
+- Desktop: a health-poll failover verdict landing in the instant after a
+  sign-out's session bump can dial and arm under the next session
+  (predates the branch).
+- Desktop: a server picked while the mid-session failover dials does not
+  stop that pass; and a pick's answer during the attempt it leads can
+  name the picked server on the tile while the tunnel landed on another
+  rung.
+- Phone: an episode whose every attempt fails in the preflight (the
+  permission read itself failing) keeps the slot until it goes stale
+  (90 s).
+- Phone: a screen remounted while a Connect it waits on is overruled from
+  a screen since gone can stay on "Connecting..." until pressed.
+- Phone: a failed attempt's error line, carried onto a remounted screen,
+  stays under "You're protected" after a later attempt lands (Windows
+  clears it as each automatic pass begins; the phone does not yet).
