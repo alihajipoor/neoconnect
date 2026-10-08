@@ -288,6 +288,39 @@ describe("the phone dashboard's wiring", () => {
     );
   });
 
+  it("asks where the phone stands before a reconnect dials, and says so when it cannot tell", () => {
+    // Obligation 9, as the Windows client keeps it: a phone that renews
+    // only in the foreground redialled an unconfirmed slot with no word
+    // about the plan's limit.
+    const walk = dashboard.slice(dashboard.indexOf("async function walkLadder("));
+    const ask = walk.indexOf("const { refreshed, stop, note } = await claimWhileRefreshing(");
+    expect(ask).toBeGreaterThan(0);
+    expect(walk.slice(ask, walk.indexOf("    );\n", ask))).toContain("automatic: options.reconnect !== undefined,");
+    // Said once nothing stopped the pass, before the ladder runs.
+    const said = walk.indexOf("if (note) setSlotNotice(note);");
+    expect(said).toBeGreaterThan(walk.indexOf("if (stop) {"));
+    expect(said).toBeLessThan(walk.indexOf("const usable = all.filter("));
+    // And answered by a landing, as on Windows: not left over a tunnel
+    // the pass has just proven.
+    const landing = walk.slice(walk.indexOf("passResultRef.current = { routeId: candidate.routeId, errorKind: null };"));
+    expect(landing.slice(0, landing.indexOf('return "connected";'))).toContain("setSlotNotice(null);");
+  });
+
+  it("reports a stop by the slot as the reconnect's own, and ends the episode on what stopped it", () => {
+    // Sent as it was, a refusal of the reconnect's claim read as the
+    // customer pressing Connect and being refused; and a subscription that
+    // had ended was filed as the device limit refusing the device.
+    const start = dashboard.indexOf("function showSlotStop(stop: SlotStop, reconnect?: ReconnectAttempt) {");
+    expect(start).toBeGreaterThan(0);
+    const show = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
+    expect(show).toContain("if (stop.report) void reportAttempt(asReconnectReport(stop.report, reconnect));");
+    expect(dashboard.split("void reportAttempt(stop.report)").length - 1).toBe(0);
+    const walk = dashboard.slice(dashboard.indexOf("async function walkLadder("));
+    const stopped = walk.slice(walk.indexOf("if (stop) {"), walk.indexOf('return "refused";'));
+    expect(stopped).toContain("passResultRef.current = { routeId: null, errorKind: stop.errorKind };");
+    expect(stopped).toContain("showSlotStop(stop, options.reconnect);");
+  });
+
   it("arms a landing only on the stamp its pass took as it began", () => {
     // A pass the customer, a sign-out or the device limit overruled -- or
     // whose session ended where no press reached it -- arms nothing when
@@ -309,7 +342,7 @@ describe("the phone dashboard's wiring", () => {
     const connect = dashboard.slice(dashboard.indexOf("async function connectNow("));
     expect(connect.slice(0, 400)).toContain('autoReconnect.cancel("customer");');
     expect(dashboard).toContain('autoReconnect.cancel("signedOut");');
-    expect(dashboard).toContain('autoReconnect.cancel("refused");');
+    expect(dashboard).toContain("autoReconnect.cancel(slotStopWhy(stop.errorKind));");
     expect(dashboard).toContain('autoReconnect.cancel("stopped");');
     const picker = dashboard.slice(dashboard.indexOf("<LocationPicker"));
     expect(picker.split("chooseLocation(").length - 1).toBe(2);
@@ -336,7 +369,7 @@ describe("the phone dashboard's wiring", () => {
 
   it("takes its words from the shared tables", () => {
     expect(dashboard).toContain(
-      "headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect), customMode: false, reconnecting })",
+      "headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: false, reconnecting })",
     );
     expect(dashboard).toContain("pressFor(connectionState, { reconnectWaiting: reconnecting?.waiting === true })");
     // The old chains are gone, so the two cannot disagree.

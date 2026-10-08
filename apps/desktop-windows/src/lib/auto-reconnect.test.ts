@@ -16,10 +16,13 @@ import {
   reconnectingView,
   reconnectLost,
   reconnectOutcomeOf,
+  slotStopWhy,
   vouching,
   type ReconnectAttempt,
   type ReconnectOutcome,
 } from "./auto-reconnect";
+import { slotStop } from "./device-slot-session";
+import type { DeviceLimitRefusal } from "./device-slots";
 
 /** A controller on a clock the test owns.
  *
@@ -37,6 +40,8 @@ function harness({ requiresForeground = false }: { requiresForeground?: boolean 
   const timers = new Map<number, { at: number; fn: () => void }>();
   let nextTimer = 1;
   const reports: AttemptReport[] = [];
+  /** Each time the controller said nothing will claim the slot soon. */
+  const slotIdled: ("ended" | "away")[] = [];
   const rc = new AutoReconnect({
     now: () => state.now + state.wallSkew,
     setTimer: (fn, ms) => {
@@ -51,6 +56,7 @@ function harness({ requiresForeground = false }: { requiresForeground?: boolean 
     foreground: () => state.foreground,
     session: () => state.session,
     report: (report) => reports.push(report),
+    slotIdle: (how) => slotIdled.push(how),
   });
   rc.setRequiresForeground(requiresForeground);
 
@@ -104,6 +110,7 @@ function harness({ requiresForeground = false }: { requiresForeground?: boolean 
     rc,
     state,
     reports,
+    slotIdled,
     asked,
     advance,
     flush,
@@ -132,7 +139,7 @@ describe("a tunnel that drops on its own is reconnected", () => {
     expect(h.asked[0]!.at).toBe(5 * 60_000);
     // Landed: armed again, nothing said about losing anything.
     expect(h.rc.current().kind).toBe("armed");
-    expect(reconnectLost(h.rc.current())).toBe(false);
+    expect(reconnectLost(h.rc.current(), h.state.session)).toBe(false);
   });
 
   it("does nothing for a tunnel it was never told about", async () => {
@@ -162,7 +169,7 @@ describe("the backoff", () => {
     const starts = h.asked.map((a) => a.at - droppedAt);
     expect(starts).toEqual([0, 2_000, 7_000, 17_000, 37_000, 67_000]);
     expect(h.asked.map((a) => a.attempt)).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(h.rc.current()).toEqual({ kind: "idle", lost: true, stopped: "attempts" });
+    expect(h.rc.current()).toEqual({ kind: "idle", lost: true, stopped: "attempts", session: 1 });
     // Said once, and said as an automatic reconnect.
     expect(h.reports).toHaveLength(1);
     expect(h.reports[0]).toMatchObject({ kind: "CONNECT", outcome: "OTHER" });
@@ -564,7 +571,7 @@ describe("the customer outranks it", () => {
     await h.advance(10 * 60_000);
     expect(h.asked).toHaveLength(1);
     // The press has its own outcome to show; no "lost" on its behalf.
-    expect(h.rc.current()).toEqual({ kind: "idle", lost: false, stopped: "customer" });
+    expect(h.rc.current()).toEqual({ kind: "idle", lost: false, stopped: "customer", session: null });
   });
 
   it("a press during a pass wins over whatever that pass reports later", async () => {
@@ -678,7 +685,7 @@ describe("the customer outranks it", () => {
     expect(h.rc.chose()).toBeNull();
     await h.advance(10 * 60_000);
     expect(h.asked).toHaveLength(1);
-    expect(h.rc.current()).toEqual({ kind: "idle", lost: false, stopped: "customer" });
+    expect(h.rc.current()).toEqual({ kind: "idle", lost: false, stopped: "customer", session: null });
   });
 
   it("one chosen during an attempt ends it and asks the screen to stop its pass", async () => {
@@ -728,13 +735,13 @@ describe("the customer outranks it", () => {
     h.rc.dropped();
     await h.advance(0);
     h.rc.cancel("stopped");
-    expect(reconnectLost(h.rc.current())).toBe(true);
+    expect(reconnectLost(h.rc.current(), h.state.session)).toBe(true);
     // A second call cannot re-word it...
     h.rc.cancel("attempts");
     expect(h.rc.current()).toMatchObject({ stopped: "stopped" });
     // ...but the customer's next press is the news now.
     h.rc.cancel("customer");
-    expect(reconnectLost(h.rc.current())).toBe(false);
+    expect(reconnectLost(h.rc.current(), h.state.session)).toBe(false);
   });
 
   it("a tunnel the customer asked to be rid of is not armed again by a re-read", async () => {
@@ -1145,6 +1152,204 @@ describe("a ladder pass, as an attempt's outcome", () => {
       expect(reconnectOutcomeOf("failed", { errorKind: kind })).toEqual({ kind: "stop", why: "notEntitled" });
     }
   });
+
+  it("ends on the plan, not the device limit, when the slot's stop was the plan ending", () => {
+    // A subscription that expired mid-session, with the app's copy still
+    // saying ACTIVE: the reconnect's claim answers SUBSCRIPTION_INACTIVE,
+    // and the episode's row said the device limit had refused the device.
+    const ended = slotStop({ kind: "inactive", subscriptionStatus: "EXPIRED" }, "beforeDial");
+    expect(reconnectOutcomeOf("refused", { errorKind: ended.errorKind })).toEqual({ kind: "stop", why: "notEntitled" });
+    expect(slotStopWhy(ended.errorKind)).toBe("notEntitled");
+    // The device limit itself, every way it can say so, stays the device
+    // limit.
+    const refusal = { limit: 1, devices: [] } as unknown as DeviceLimitRefusal;
+    for (const reason of [
+      { kind: "refused", refusal },
+      { kind: "takeoverLimited", retryAfterSec: null },
+      { kind: "displaced", by: null, at: null },
+    ] as const) {
+      const stop = slotStop(reason, "beforeDial");
+      expect(reconnectOutcomeOf("refused", { errorKind: stop.errorKind })).toEqual({ kind: "stop", why: "refused" });
+      expect(slotStopWhy(stop.errorKind)).toBe("refused");
+    }
+    expect(reconnectOutcomeOf("refused")).toEqual({ kind: "stop", why: "refused" });
+  });
+
+  it("files the plan's words for an episode the plan ended", async () => {
+    const h = harness();
+    h.bind();
+    h.script([{ outcome: reconnectOutcomeOf("refused", { errorKind: "subscriptionInactive" }) }]);
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(0);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "notEntitled" });
+    expect(h.reports).toHaveLength(1);
+    expect(h.reports[0]!.reason).toContain("the plan does not allow a connection now");
+    expect(h.reports[0]!.reason).not.toContain("device limit");
+  });
+});
+
+describe("'VPN connection lost'", () => {
+  it("is said only to the session whose tunnel dropped", async () => {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(10 * 60_000);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "attempts" });
+    expect(reconnectLost(h.rc.current(), 1)).toBe(true);
+    // The session then ends by a way no press goes through -- revoked,
+    // expired, the account deleted from Settings -- and somebody signs
+    // in. Their first screen is not told a tunnel of theirs was lost.
+    h.state.session = 2;
+    expect(reconnectLost(h.rc.current(), 2)).toBe(false);
+  });
+
+  it("belongs to the session the drop happened under, even when the episode ends after it", async () => {
+    // The session expired while the episode waited for a network, with no
+    // press to tell it; the wait ran out half an hour later, by which time
+    // the customer had signed in again.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.state.online = false;
+    h.rc.dropped();
+    await h.advance(60_000);
+    h.state.session = 2;
+    await h.advance(BLOCKED_WAIT_MAX_MS);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "waitedTooLong" });
+    expect(reconnectLost(h.rc.current(), 2)).toBe(false);
+  });
+});
+
+describe("the slot the drop kept for the reconnect's claim", () => {
+  /** A tunnel up for ten minutes, then a drop. */
+  async function dropped(h: ReturnType<typeof harness>) {
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    return h.rc.dropped();
+  }
+
+  it("is given back when the episode stops before any pass of it claimed", async () => {
+    // Another VPN app took the phone over, the permission went, the plan
+    // stopped, nothing to dial: nothing is coming back, and a slot kept
+    // for nothing turned the customer's other device away as "in use on
+    // Android phone" about a phone with no tunnel.
+    for (const why of ["otherVpn", "permission", "notEntitled", "excluded"] as const) {
+      const h = harness();
+      h.script([{ outcome: { kind: "stop", why } }]);
+      expect(await dropped(h)).toBe("reconnecting");
+      // Kept while the reconnect's own claim is coming.
+      expect(h.slotIdled).toEqual([]);
+      await h.advance(0);
+      expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: why });
+      expect(h.slotIdled, why).toEqual(["ended"]);
+    }
+  });
+
+  it("is given back when the episode has waited too long", async () => {
+    const h = harness();
+    h.state.online = false;
+    await dropped(h);
+    await h.advance(BLOCKED_WAIT_MAX_MS + 1_000);
+    expect(h.rc.current()).toMatchObject({ stopped: "waitedTooLong" });
+    expect(h.slotIdled).toEqual(["ended"]);
+  });
+
+  it("is left to whatever ended the episode when that accounts for it", async () => {
+    // A press claims (Connect) or gives it back (Disconnect, Stop
+    // reconnecting); a sign-out releases it on the server; after the
+    // device limit it is somebody else's.
+    for (const why of ["customer", "stopped", "signedOut", "refused"] as const) {
+      const h = harness();
+      await dropped(h);
+      await h.advance(0);
+      h.rc.cancel(why);
+      expect(h.slotIdled, why).toEqual([]);
+    }
+    // The pass that failed last gave it back itself -- and one still
+    // running past its ceiling may yet claim it, so it is not taken from
+    // under it.
+    const spent = harness();
+    await dropped(spent);
+    await spent.advance(10 * 60_000);
+    expect(spent.rc.current()).toMatchObject({ stopped: "attempts" });
+    const wedged = harness();
+    wedged.script(["pending"]);
+    await dropped(wedged);
+    await wedged.advance(ATTEMPT_MAX_MS + 1_000);
+    expect(wedged.rc.current()).toMatchObject({ stopped: "budget" });
+    expect([...spent.slotIdled, ...wedged.slotIdled]).toEqual([]);
+    // A refusal from the reconnect's own claim: the slot is not this
+    // device's.
+    const refused = harness();
+    refused.script([{ outcome: { kind: "stop", why: "refused" } }]);
+    await dropped(refused);
+    await refused.advance(0);
+    expect(refused.slotIdled).toEqual([]);
+  });
+
+  it("is the screen's to give back at a drop that starts no episode", async () => {
+    // The screen is told "lost", and gives it back itself.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    expect(h.rc.dropped({ exclusion: "notEntitled" })).toBe("lost");
+    expect(h.slotIdled).toEqual([]);
+  });
+
+  it("on a phone, is set aside while the episode waits for the app to be opened", async () => {
+    // A poll that ran in the background found the tunnel gone. Nothing
+    // claims until the app is opened -- up to half an hour -- so the slot
+    // is given back meanwhile, and the pass that runs then asks first.
+    const h = harness({ requiresForeground: true });
+    h.state.foreground = false;
+    expect(await dropped(h)).toBe("reconnecting");
+    expect(h.rc.current()).toMatchObject({ kind: "waiting", blockedBy: "foreground" });
+    expect(h.slotIdled).toEqual(["away"]);
+    await h.advance(10 * 60_000);
+    expect(h.slotIdled).toEqual(["away"]);
+    h.script([{ outcome: { kind: "connected", routeId: "r" } }]);
+    h.state.foreground = true;
+    h.rc.conditionsChanged();
+    await h.advance(0);
+    expect(h.rc.current().kind).toBe("armed");
+    expect(h.slotIdled).toEqual(["away"]);
+  });
+
+  it("on a phone, is set aside too when the app goes to the background between attempts", async () => {
+    const h = harness({ requiresForeground: true });
+    await dropped(h);
+    await h.advance(0); // attempt 1 failed; attempt 2 is due in 2s
+    expect(h.slotIdled).toEqual([]);
+    h.state.foreground = false;
+    h.rc.conditionsChanged();
+    expect(h.slotIdled).toEqual(["away"]);
+  });
+
+  it("is not set aside on Windows, nor while a phone's pass is running", async () => {
+    // A minimised window is still a running app, and its next attempt
+    // claims on time.
+    const windows = harness();
+    windows.state.foreground = false;
+    await dropped(windows);
+    await windows.advance(0);
+    expect(windows.slotIdled).toEqual([]);
+    // A pass the OS froze in the background holds its own claim.
+    const phone = harness({ requiresForeground: true });
+    phone.script(["pending"]);
+    await dropped(phone);
+    await phone.advance(0);
+    phone.state.foreground = false;
+    phone.rc.conditionsChanged();
+    expect(phone.rc.current().kind).toBe("attempting");
+    expect(phone.slotIdled).toEqual([]);
+  });
 });
 
 describe("whether the app is vouching for a tunnel", () => {
@@ -1176,7 +1381,7 @@ describe("whether the app is vouching for a tunnel", () => {
 
 describe("what the screen is told", () => {
   it("has a view only while an episode runs", () => {
-    expect(reconnectingView({ kind: "idle", lost: true, stopped: "attempts" })).toBeNull();
+    expect(reconnectingView({ kind: "idle", lost: true, stopped: "attempts", session: 1 })).toBeNull();
     expect(reconnectingView({ kind: "armed", since: 0, routeId: null, quickDeaths: 0, session: 1 })).toBeNull();
     const episode = { routeId: null, quickDeaths: 0, session: 1, droppedAt: 0, spentMs: 0 };
     expect(

@@ -72,6 +72,7 @@ import {
   slotStop,
   slotTeardown,
   slotTeardownShown,
+  type SlotStop,
   type SlotStopReason,
 } from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
@@ -83,6 +84,7 @@ import {
   reconnectingView,
   reconnectLost,
   reconnectOutcomeOf,
+  slotStopWhy,
   vouching,
   type ReconnectAttempt,
   type ReconnectStop,
@@ -862,7 +864,9 @@ export function Dashboard({
     // Nothing renews a slot without a tunnel, and nothing is going to
     // bring one back: given back, rather than left to turn the
     // customer's other device away as "in use" until it goes stale. Kept
-    // while a reconnect runs, whose claim renews it.
+    // while a reconnect runs, whose claim renews it -- and given back by
+    // the episode itself if it ends before a pass of it claimed
+    // (`slotIdle`).
     if (autoReconnect.dropped({ exclusion: reconnectExclusion() }) === "lost") void deviceSlot.release();
     return true;
   }
@@ -2063,11 +2067,15 @@ export function Dashboard({
    * for what is shown and reported, which both clients share. A
    * refusal is reported as a limit, never as a failed dial: no rungs, so
    * no route is marked as failing for anybody, and nothing is
-   * remembered as this network's best or worst route. */
-  function showSlotStop(reason: SlotStopReason, when: "beforeDial" | "whileConnected") {
-    const stop = slotStop(reason, when);
+   * remembered as this network's best or worst route.
+   *
+   * One that stopped an automatic reconnect's pass is reported as that
+   * pass's (`asReconnectReport`), as every other way it can end is. Sent
+   * as it was, it read as the customer pressing Connect and being refused
+   * -- by somebody who had pressed nothing. */
+  function showSlotStop(stop: SlotStop, reconnect?: ReconnectAttempt) {
     if (stop.notice) setSlotNotice(stop.notice);
-    if (stop.report) void reportAttempt(stop.report);
+    if (stop.report) void reportAttempt(asReconnectReport(stop.report, reconnect));
     if (stop.inactive) {
       // The plan-ended card already says what to do about SUSPENDED and
       // EXPIRED; anything else gets the error line.
@@ -2105,13 +2113,15 @@ export function Dashboard({
     // sign-in screen, tunnel included; there is nothing to add.
     if (event.kind === "signedOut") return;
     slotLostRef.current = true;
+    const stop = slotStop(event, "whileConnected");
     // Nothing reconnects after this either: the teardown below is the
-    // device limit's, and the tunnel's end is not a drop.
-    autoReconnect.cancel("refused");
+    // device limit's, and the tunnel's end is not a drop. Ended as what
+    // it is -- the plan, when it was the plan that stopped.
+    autoReconnect.cancel(slotStopWhy(stop.errorKind));
     // A pass in flight stops between its steps rather than dialling the
     // next protocol on a slot that is somebody else's.
     cancelRef.current = true;
-    showSlotStop(event, "whileConnected");
+    showSlotStop(stop);
     setFailedOverTo(null);
     await slotTeardown.begin(tearDownForSlotOnce);
   }
@@ -2269,11 +2279,16 @@ export function Dashboard({
         }
       }
       if (stoppedBySlot !== null) {
+        const stop = slotStop(stoppedBySlot, "beforeDial");
+        // What an automatic reconnect's episode ends on: the device limit,
+        // or the plan, when the claim said the subscription has stopped
+        // (`slotStopWhy`).
+        passResultRef.current = { routeId: null, errorKind: stop.errorKind };
         // Said only to a customer still waiting on this pass: one who
         // pressed stop, or signed out, has already moved on.
         const stillWanted = !stopped() && sessionGeneration() === sessionAtStart;
         if (stillWanted) {
-          showSlotStop(stoppedBySlot, "beforeDial");
+          showSlotStop(stop, options.reconnect);
           if (options.automatic || stoppedBySlot.kind === "displaced") slotLostRef.current = true;
         }
         // A pass started by the poll still had a tunnel up, and a slot
@@ -3029,7 +3044,7 @@ export function Dashboard({
   // connection lost" is this screen's own word at the drop, or the
   // episode's once it has stopped without a tunnel; "Reconnecting..."
   // while one runs.
-  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect), customMode: splitTunnelActive, reconnecting });
+  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting });
 
   if (loading) {
     return (

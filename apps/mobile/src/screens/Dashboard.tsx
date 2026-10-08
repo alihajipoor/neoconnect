@@ -92,6 +92,7 @@ import {
   reconnectingView,
   reconnectLost,
   reconnectOutcomeOf,
+  slotStopWhy,
   vouching,
   type ReconnectAttempt,
   type ReconnectStop,
@@ -715,8 +716,10 @@ export function Dashboard({
    *
    * Said as lost, and handed to the automatic reconnect
    * (`@shared/lib/auto-reconnect`), which says "Reconnecting..." instead
-   * while it runs. The slot is given back only when nothing is coming
-   * back: a reconnect's own claim renews it. */
+   * while it runs. The slot is given back here only when nothing is
+   * coming back: a reconnect's own claim renews it. The episode gives it
+   * back itself when that claim is not coming -- it waits for the app to
+   * be opened, or ends before a pass of it claimed (`slotIdle`). */
   function reportDrop() {
     sessionTrackerRef.current.broken();
     setConnectionState("disconnected");
@@ -1189,10 +1192,15 @@ export function Dashboard({
    * what is shown and reported, which both clients share. A refusal is
    * reported as a limit, never as a failed dial: no rungs, so no route
    * is marked as failing for anybody, and nothing is remembered as this
-   * network's best or worst route. */
-  function showSlotStop(stop: SlotStop) {
+   * network's best or worst route.
+   *
+   * One that stopped an automatic reconnect's pass is reported as that
+   * pass's (`asReconnectReport`), as every other way it can end is. Sent
+   * as it was, it read as the customer pressing Connect and being refused
+   * -- by somebody who had pressed nothing. */
+  function showSlotStop(stop: SlotStop, reconnect?: ReconnectAttempt) {
     if (stop.notice) setSlotNotice(stop.notice);
-    if (stop.report) void reportAttempt(stop.report);
+    if (stop.report) void reportAttempt(asReconnectReport(stop.report, reconnect));
     if (stop.inactive) {
       // The plan-ended card already says what to do about SUSPENDED and
       // EXPIRED; anything else gets the error line.
@@ -1254,9 +1262,11 @@ export function Dashboard({
     // A connect still waiting to dial (see `connectNow`) gives way: the
     // device limit has the last word.
     pressRef.current += 1;
+    const stop = slotStop(reason, "whileConnected");
     // Nothing reconnects after this: the teardown is the device limit's,
-    // not a drop.
-    autoReconnect.cancel("refused");
+    // not a drop. Ended as what it is -- the plan, when it was the plan
+    // that stopped.
+    autoReconnect.cancel(slotStopWhy(stop.errorKind));
     // A teardown already under way for an earlier event is the one this
     // event asks for too.
     if (slotTeardown.running()) return;
@@ -1264,7 +1274,7 @@ export function Dashboard({
     // dialling the next one on a slot that is somebody else's -- whichever
     // dashboard started it.
     cancelRef.current = true;
-    showSlotStop(slotStop(reason, "whileConnected"));
+    showSlotStop(stop);
     setFailedOverTo(null);
     setConnectionState("disconnecting");
     // Down only on the platform's word. Still routed through a VPN, the
@@ -1363,12 +1373,17 @@ export function Dashboard({
     //
     // The credential named is the one on screen; once the ladder lands,
     // the slot is moved to the one it landed on (`afterConnected`).
-    const { refreshed, stop } = await claimWhileRefreshing(
+    //
+    // An automatic reconnect whose slot is not confirmed asks where this
+    // phone stands instead, and says so when it cannot tell (obligation
+    // 9; see `claimWhileRefreshing`).
+    const { refreshed, stop, note } = await claimWhileRefreshing(
       {
         subscriptionId: subscription?.id ?? protocolUser!.subscriptionId,
         protocolUserId: protocolUser!.id,
         takeover: options.takeover,
         deviceLimit: subscription?.deviceLimit,
+        automatic: options.reconnect !== undefined,
       },
       () =>
         refreshConnectionConfig({
@@ -1396,12 +1411,19 @@ export function Dashboard({
 
     // Every one of the plan's devices is in use elsewhere, or the plan has
     // stopped: nothing is dialled. Never a failed dial in the attempt
-    // history, never a "best route" learned, never the ladder.
+    // history, never a "best route" learned, never the ladder. An
+    // automatic reconnect's episode ends on the plan rather than the
+    // device limit when it was the plan that stopped it (`slotStopWhy`).
     if (stop) {
-      showSlotStop(stop);
+      passResultRef.current = { routeId: null, errorKind: stop.errorKind };
+      showSlotStop(stop, options.reconnect);
       await settleUndialled();
       return "refused";
     }
+    // Could not learn where this phone stands: said, and then the ladder
+    // runs as usual. A limit that could not be checked is a possibility,
+    // not a verdict.
+    if (note) setSlotNotice(note);
 
     const all =
       refreshed.protocolUsers.length > 0
@@ -1776,6 +1798,11 @@ export function Dashboard({
           if (!options.reconnect) {
             autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: reconnectStamp });
           }
+          // Whatever the device limit had to say before this pass is
+          // answered by it -- a reconnect's note that the limit could not
+          // be checked above all, which is not to stay up over a tunnel
+          // its own egress check has just proven.
+          setSlotNotice(null);
           // The slot, now that a tunnel is up: claimed through it if the
           // claim before dialling went unanswered, or moved to the
           // credential the ladder landed on. Not awaited -- the pass is
@@ -1938,7 +1965,7 @@ export function Dashboard({
   // still this screen's own (`handleConnectToggle`), because what it
   // does to a phone's tunnel differs; only the words are shared.
   const connectLabel = t(pressFor(connectionState, { reconnectWaiting: reconnecting?.waiting === true }).labelKey);
-  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect), customMode: false, reconnecting });
+  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: false, reconnecting });
 
   if (loading) {
     return (

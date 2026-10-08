@@ -71,6 +71,17 @@ describe("where an episode begins", () => {
     expect(publishDrop).toContain('=== "lost") void deviceSlot.release();');
   });
 
+  it("and the episode gives it back when it ends before a claim, or waits for the app", () => {
+    // The app's one controller, wired to the app's one slot: an episode
+    // ended by the phone's own checks, a plan no longer active or nothing
+    // to dial released nothing, and a phone's episode waiting for the app
+    // to be opened kept the slot from the customer's other device.
+    const controller = readFileSync(new URL("./auto-reconnect.ts", import.meta.url), "utf8");
+    expect(controller).toContain(
+      'slotIdle: (how) => void (how === "ended" ? deviceSlot.release() : deviceSlot.setAside()),',
+    );
+  });
+
   it("rules out the device limit, a plan that stopped, and gaming mode", () => {
     const exclusion = body("function reconnectExclusion(): ReconnectStop | null {");
     expect(exclusion).toContain('if (slotLostRef.current || slotTeardown.owed()) return "refused";');
@@ -122,6 +133,24 @@ describe("what an attempt is", () => {
   it("is reported as automatic, whether it lands or not", () => {
     expect(ladder.split("asReconnectReport(").length - 1).toBe(2);
     expect(ladder.split("options.reconnect,\n").length - 1).toBe(2);
+  });
+
+  it("reports a stop by the slot as the reconnect's own, and ends the episode on what stopped it", () => {
+    // Sent as it was, a refusal of the reconnect's claim read as the
+    // customer pressing Connect and being refused; and a subscription that
+    // had ended was filed as the device limit refusing the device.
+    const show = body("function showSlotStop(stop: SlotStop, reconnect?: ReconnectAttempt) {");
+    expect(show).toContain("if (stop.report) void reportAttempt(asReconnectReport(stop.report, reconnect));");
+    expect(dashboard.split("void reportAttempt(stop.report)").length - 1).toBe(0);
+    const start = ladder.indexOf("if (stoppedBySlot !== null) {");
+    expect(start).toBeGreaterThan(0);
+    const stopped = ladder.slice(start, ladder.indexOf('return "refused";', start));
+    expect(stopped).toContain('const stop = slotStop(stoppedBySlot, "beforeDial");');
+    expect(stopped).toContain("passResultRef.current = { routeId: null, errorKind: stop.errorKind };");
+    expect(stopped).toContain("showSlotStop(stop, options.reconnect);");
+    // Before anything is awaited: the runner reads it as soon as the
+    // pass returns, and every return below follows an await.
+    expect(stopped.indexOf("passResultRef.current")).toBeLessThan(stopped.indexOf("await "));
   });
 
   it("arms the episode's clock only for a pass that is not itself a reconnect", () => {
@@ -241,7 +270,7 @@ describe("the customer outranks it", () => {
 
   it("a sign-out and the device limit end it too", () => {
     expect(body("async function handleLogout() {")).toContain('autoReconnect.cancel("signedOut");');
-    expect(body("async function endForSlot(event: SlotStopReason) {")).toContain('autoReconnect.cancel("refused");');
+    expect(body("async function endForSlot(event: SlotStopReason) {")).toContain("autoReconnect.cancel(slotStopWhy(stop.errorKind));");
   });
 });
 
@@ -322,7 +351,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
 describe("what the screen says", () => {
   it("takes the words from the table, episode included", () => {
     expect(dashboard).toContain(
-      "headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect), customMode: splitTunnelActive, reconnecting })",
+      "headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting })",
     );
     expect(dashboard).toContain("pressFor(connectionState, { reconnectWaiting: reconnecting?.waiting === true })");
   });

@@ -5,6 +5,7 @@ import {
   type SlotEvent,
   type SlotStop,
 } from "@shared/lib/device-slot-session";
+import type { SlotNotice } from "@shared/lib/device-slot-notice";
 import { withTimeout } from "@shared/lib/service-call";
 
 /** The phone's half of the plan's device limit.
@@ -29,8 +30,12 @@ import { withTimeout } from "@shared/lib/service-call";
  * (`reconnect-steps.ts`), and the device limit holds it back: a
  * displaced phone ends any episode (`endForSlot`), a teardown the limit
  * still owes rules one out, and a refusal on a reconnect's own claim
- * stops it. So a displaced phone disconnects and stays disconnected
- * until the customer presses something.
+ * stops it. A phone that does not yet know it was displaced -- taken
+ * over while it was in a pocket, renewing nothing -- asks before its
+ * reconnect dials (`claimWhileRefreshing`), stops on the answer, and
+ * says so when no answer comes; the ladder then runs, as obligation 9
+ * allows. While a reconnect waits for the app to be opened, the slot is
+ * given back (`setAside`), since nothing claims it until then.
  */
 
 /** Whether the app is in front of the customer. True outside a browser
@@ -49,7 +54,16 @@ export interface PreDialRequest {
   /** `deviceLimit` from the subscription: null is unlimited (no claim),
    * undefined is an older backend or nothing loaded (claim anyway). */
   deviceLimit?: number | null;
+  /** An automatic reconnect's pass, which asks where this device stands
+   * first when its slot is not confirmed (obligation 9). */
+  automatic?: boolean;
 }
+
+/** The note obligation 9 asks for when an automatic reconnect could not
+ * learn where this device stands: Neoxify out of reach, or answering
+ * without a verdict (`noAnswer` false), and the plan's limit possibly the
+ * reason nothing carries. Shown, and then the ladder runs as usual. */
+export type UncheckedNote = Extract<SlotNotice, { kind: "unchecked" }>;
 
 /** Claims a slot while the connection config refreshes.
  *
@@ -65,16 +79,43 @@ export interface PreDialRequest {
  * device limit says not to. A stop is reported as REJECTED with no
  * rungs, and is read before the ladder has dialled, probed or
  * remembered anything -- so a refusal leaves no failed dial in the
- * history and teaches nothing about this network's best route. */
+ * history and teaches nothing about this network's best route.
+ *
+ * An automatic reconnect whose slot is not confirmed -- held, but not
+ * renewed for as long as the server keeps a slot nobody renews (a phone
+ * renews only in the foreground), never answered, or given back while
+ * the reconnect waited for the app (`setAside`) -- asks the standing
+ * check's question instead, as the Windows client's does (obligation 9).
+ * By then the slot may be another device's: taken over while the phone
+ * was in a pocket, and its credentials held by the backstop. A claim
+ * that went unanswered dialled them anyway and ended on "none of them
+ * carried traffic", never saying the plan's limit might be why. The
+ * check stops on a verdict, and when it gets none `note` says so before
+ * the ladder runs. Not torn down first, as on Windows: the reconnect's
+ * own checks have already waited for the phone to be out of every VPN,
+ * so the question cannot go into a tunnel that is held. */
 export async function claimWhileRefreshing<R>(
   request: PreDialRequest,
   refresh: () => Promise<R>,
   slot: DeviceSlotSession = deviceSlot,
-): Promise<{ refreshed: R; stop: SlotStop | null }> {
+): Promise<{ refreshed: R; stop: SlotStop | null; note: UncheckedNote | null }> {
+  if (request.automatic === true && slot.needsStandingCheck()) {
+    const standing = slot.checkStanding();
+    const [refreshed, answer] = await Promise.all([refresh(), standing]);
+    if (answer.kind === "clear") return { refreshed, stop: null, note: null };
+    if (answer.kind !== "unanswered") return { refreshed, stop: slotStop(answer, "beforeDial"), note: null };
+    // Worded by whether anything came back, and only with a limit to name.
+    const limit = slot.limit() ?? request.deviceLimit ?? null;
+    return {
+      refreshed,
+      stop: null,
+      note: typeof limit === "number" ? { kind: "unchecked", limit, noAnswer: answer.noAnswer } : null,
+    };
+  }
   // Started first, so the request is on its way before the refresh is.
   const decision = slot.beforeDial(request);
   const [refreshed, outcome] = await Promise.all([refresh(), decision]);
-  return { refreshed, stop: outcome.kind === "dial" ? null : slotStop(outcome, "beforeDial") };
+  return { refreshed, stop: outcome.kind === "dial" ? null : slotStop(outcome, "beforeDial"), note: null };
 }
 
 /** The renewal on the health poll, in the foreground only.

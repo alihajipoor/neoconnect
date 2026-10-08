@@ -35,6 +35,7 @@
  */
 
 import { reportAttempt, type AttemptReport } from "./attempts";
+import { deviceSlot } from "./device-slot-session";
 import { sessionGeneration } from "./session-end";
 
 /** How long to wait before each attempt, by attempt number.
@@ -166,8 +167,15 @@ export interface Episode {
 export type ReconnectPhase =
   /** Nothing to reconnect. `lost` asks the screen to say "VPN connection
    * lost" while nothing is up: an episode ended without a tunnel and the
-   * customer has not pressed anything since. */
-  | { readonly kind: "idle"; readonly lost: boolean; readonly stopped: ReconnectStop | null }
+   * customer has not pressed anything since. `session` is the customer
+   * session that episode belonged to, and the only one `lost` is about
+   * (`reconnectLost`); null when nothing is lost. */
+  | {
+      readonly kind: "idle";
+      readonly lost: boolean;
+      readonly stopped: ReconnectStop | null;
+      readonly session: number | null;
+    }
   /** A tunnel the screen vouches for, which would be reconnected if it
    * dropped. */
   | {
@@ -296,9 +304,16 @@ export interface ReconnectDeps {
   session(): number;
   /** Telemetry, fire and forget. */
   report(report: AttemptReport): void;
+  /** Nothing is going to claim this device's slot soon, though the drop
+   * kept it for the claim a reconnect's pass makes -- see `SLOT_LEFT_IDLE`
+   * and `set`. `ended`: the episode is over, and the slot is given back.
+   * `away`: a phone's episode waits for the app to be opened; the slot is
+   * given back, and the pass that runs then asks first where the device
+   * stands (`DeviceSlotSession.setAside`). */
+  slotIdle(how: "ended" | "away"): void;
 }
 
-const IDLE: ReconnectPhase = { kind: "idle", lost: false, stopped: null };
+const IDLE: ReconnectPhase = { kind: "idle", lost: false, stopped: null, session: null };
 
 /** What the controller keeps of the attempt running, for as long as it
  * runs: its ceiling, and the time a phone app has spent away from it. */
@@ -322,6 +337,29 @@ interface RunningAttempt {
 export function lostAfter(why: ReconnectStop): boolean {
   return why !== "customer" && why !== "signedOut";
 }
+
+/** The ways an episode ends that leave this device's slot to nobody.
+ *
+ * A drop that starts an episode keeps the slot, because the reconnect's
+ * own claim comes at once and renews it. An episode that ends before any
+ * pass claimed -- the phone's own checks stopping it, a plan no longer
+ * active, nothing to dial, a wait that went on too long -- breaks that
+ * promise, and a slot kept for nothing turns the customer's other device
+ * away as "in use" until it goes stale, about a device with no tunnel.
+ *
+ * Not the others, each of which accounts for the slot itself: a press
+ * claims (Connect) or gives it back (Disconnect, "Stop reconnecting"); a
+ * sign-out releases it on the server; after `refused` it is somebody
+ * else's; and `attempts` and `budget` follow a pass that failed and gave
+ * it back -- or one still running past its ceiling, or holding the guard,
+ * which may yet claim it and is not to have it taken from under it. */
+const SLOT_LEFT_IDLE: ReadonlySet<ReconnectStop> = new Set<ReconnectStop>([
+  "notEntitled",
+  "permission",
+  "otherVpn",
+  "excluded",
+  "waitedTooLong",
+]);
 
 /** Plain words for the telemetry, so a row reads without this file. */
 const STOP_WORDS: Record<ReconnectStop, string> = {
@@ -375,11 +413,26 @@ export function asReconnectReport(report: AttemptReport, attempt: ReconnectAttem
  * dashboard's `NOT_THE_NETWORK`. Retrying cannot change them. */
 const NOT_ENTITLED_KINDS = new Set(["concurrentLimit", "quotaExhausted", "subscriptionInactive"]);
 
+/** What the plan's device limit stopping this device ends an episode as,
+ * from the stop's `errorKind` (`SlotStop.errorKind`).
+ *
+ * A claim answered SUBSCRIPTION_INACTIVE stops a pass, or a session, the
+ * way the device limit does, but it is the plan that has ended: the
+ * episode's record said "the plan's device limit refused this device"
+ * for a subscription that had expired. Everything else the slot can say
+ * -- a refusal, another device taking the slot over, too many takeovers
+ * -- is the device limit. */
+export function slotStopWhy(errorKind: string | null): "refused" | "notEntitled" {
+  return errorKind === "subscriptionInactive" ? "notEntitled" : "refused";
+}
+
 /** What a ladder pass came to, as an attempt's outcome.
  *
  *  - `declined`: another pass held the guard (the mid-session failover,
  *    or one a remounted screen adopted). Counted as a failed attempt, so
  *    an episode can never spin on it.
+ *  - `refused`: the slot stopped the pass before it dialled; `errorKind`
+ *    says whether that was the device limit or the plan (`slotStopWhy`).
  *  - `cancelled`: the customer stopped the pass. The press itself has
  *    already ended the episode; this only makes sure it stays ended.
  *  - `unusable`: nothing this build can dial.
@@ -392,7 +445,7 @@ export function reconnectOutcomeOf(
     case "connected":
       return { kind: "connected", routeId };
     case "refused":
-      return { kind: "stop", why: "refused" };
+      return { kind: "stop", why: slotStopWhy(errorKind) };
     case "cancelled":
       return { kind: "stop", why: "customer" };
     case "unusable":
@@ -427,9 +480,15 @@ export function reconnectingView(phase: ReconnectPhase): ReconnectingView | null
 }
 
 /** Whether the screen should say "VPN connection lost" on the
- * controller's word -- an episode that ended without a tunnel. */
-export function reconnectLost(phase: ReconnectPhase): boolean {
-  return phase.kind === "idle" && phase.lost;
+ * controller's word -- an episode that ended without a tunnel.
+ *
+ * Only for the session in force, as `vouching` is. The controller is the
+ * app's, and outlives a session: one that ended by expiring, by being
+ * revoked or by the account being deleted goes through no press that
+ * would retire the words, and the next sign-in -- the same account or
+ * another -- opened on "VPN connection lost" about a tunnel it never had. */
+export function reconnectLost(phase: ReconnectPhase, session: number): boolean {
+  return phase.kind === "idle" && phase.lost && phase.session === session;
 }
 
 /** Whether the app is vouching for a tunnel that, if it dropped, would be
@@ -615,13 +674,13 @@ export class AutoReconnect {
     // running when they pressed again, is as overruled as an episode.
     this.overrules += 1;
     if (this.phase.kind === "idle") {
-      if (this.phase.lost && !lostAfter(why)) this.set({ kind: "idle", lost: false, stopped: why });
+      if (this.phase.lost && !lostAfter(why)) this.set({ kind: "idle", lost: false, stopped: why, session: null });
       return;
     }
     if (this.phase.kind === "armed") {
       // Not an episode, so nothing is reported -- but remembered, so a
       // re-read of the same tunnel cannot arm it again (see `tunnelUp`).
-      this.set({ kind: "idle", lost: false, stopped: why });
+      this.set({ kind: "idle", lost: false, stopped: why, session: null });
       return;
     }
     this.stop(why, this.attemptsMade());
@@ -959,9 +1018,22 @@ export class AutoReconnect {
   }
 
   private stop(why: ReconnectStop, attemptsMade: number): void {
+    const was = this.phase;
+    // The session the drop happened under: the one "VPN connection lost"
+    // is about, whatever session is in force by the time it is said.
+    const session =
+      was.kind === "armed"
+        ? was.session
+        : was.kind === "waiting" || was.kind === "attempting"
+          ? was.episode.session
+          : this.deps.session();
     this.clearTimers();
     this.token += 1;
-    this.set({ kind: "idle", lost: lostAfter(why), stopped: why });
+    const lost = lostAfter(why);
+    this.set({ kind: "idle", lost, stopped: why, session: lost ? session : null });
+    // An episode, not a drop that never became one: that drop answered
+    // "lost", and the screen gave the slot back itself.
+    if ((was.kind === "waiting" || was.kind === "attempting") && SLOT_LEFT_IDLE.has(why)) this.deps.slotIdle("ended");
     // Every episode that does not end in a tunnel says so once, so a
     // drop is never invisible in the data: one that ended in a tunnel is
     // already there, as the SUCCESS of the pass that landed it. A
@@ -989,7 +1061,16 @@ export class AutoReconnect {
   }
 
   private set(next: ReconnectPhase): void {
+    const wasAway = this.phase.kind === "waiting" && this.phase.blockedBy === "foreground";
     this.phase = next;
+    // A phone's episode that has to wait for the app to be opened -- the
+    // drop seen by a poll that ran in the background, or the app sent
+    // there between attempts -- has no claim coming until it is, which may
+    // be half an hour. The slot kept for that claim is given back meanwhile
+    // (`slotIdle`), rather than turning the customer's other device away as
+    // "in use on Android phone" about a phone with no tunnel. Here, where
+    // every way into that wait passes, so none is missed.
+    if (!wasAway && next.kind === "waiting" && next.blockedBy === "foreground") this.deps.slotIdle("away");
     for (const listener of [...this.listeners]) {
       try {
         listener();
@@ -1015,6 +1096,7 @@ export const autoReconnect = new AutoReconnect({
   foreground: () => typeof document === "undefined" || document.visibilityState !== "hidden",
   session: () => sessionGeneration(),
   report: (report) => void reportAttempt(report),
+  slotIdle: (how) => void (how === "ended" ? deviceSlot.release() : deviceSlot.setAside()),
 });
 
 // The moments a blocked wait can end. Registered once, for the life of
