@@ -1,5 +1,6 @@
 import type { ReconnectAttempt } from "@shared/lib/auto-reconnect";
 import { ladderPass } from "@shared/lib/ladder-pass";
+import type { ProtocolUser } from "@shared/lib/types";
 
 /** The phone's connect ladder, owned by the app rather than by the screen
  * that started it.
@@ -47,6 +48,26 @@ const reconnecting = { current: false };
  * its own pass began, and dialled after the customer had said stop. */
 export const presses = { current: 0 };
 
+/** What the platform has up, as far as the passes know it: the credential
+ * the last pass landed on, as its own screen showed it -- proven, or
+ * "Connected, not confirmed" -- or `"unproven"`: the last pass dialled an
+ * engine it did not land on, which had not gone by the time the pass
+ * stopped waiting for it. Null when no pass has said: nothing left up by
+ * one, or a fresh app, which may have found a tunnel the platform kept.
+ *
+ * A screen that did not run the pass reads the platform when it ends --
+ * mounted since, back from Settings -- and the platform cannot say which
+ * credential is up, or whether the pass proved it. It said "up" of a failed
+ * rung's engine still on its way down past the pass's eight-second wait,
+ * and the screen showed "You're protected" over a tunnel the pass had just
+ * rejected and armed the reconnect over it, ending the episode's remaining
+ * attempts. And over a tunnel the pass had proven on another route than
+ * the one on screen, the health poll credited that tunnel's sustained
+ * success to the screen's route -- the one that had failed on this network
+ * -- for the per-ISP tags. Set by the pass, the only thing that brings a
+ * tunnel up; one app's, like the guard. */
+export const passTunnel: { current: ProtocolUser | "unproven" | null } = { current: null };
+
 /** A pass that holds the guard. */
 export interface PhonePass {
   readonly generation: number;
@@ -56,6 +77,13 @@ export interface PhonePass {
    * once its guard lapsed. Asked after every await, and before every
    * dial. */
   stopped(): boolean;
+  /** Whether what stopped it was a press: the app's stop flag, set for
+   * this pass. Not when only its attempt is over -- its ceiling, half an
+   * hour away, a session that ended out of sight -- or a newer pass
+   * replaced it. Only a press is the customer giving up; the rest was filed
+   * as "cancelled by the customer" about somebody who pressed nothing, and
+   * the episode files why it ended itself. */
+  pressed(): boolean;
   /** Whether it is still the current pass. Only then may it take down
    * what it brought up, or say anything about the tunnel: once replaced,
    * whatever is up is the newer pass's. */
@@ -90,6 +118,9 @@ export function beginPass(reconnect?: ReconnectAttempt, now = Date.now()): Phone
   return {
     generation,
     stopped: () => ladderPass.cancel.current || !owns() || (reconnect !== undefined && !reconnect.live()),
+    // A newer pass clears the flag as it begins, and a stop pressed for it
+    // is not one for this.
+    pressed: () => ladderPass.cancel.current && owns(),
     owns,
     // The guard, and an automatic pass's attempt: its ceiling is measured
     // from the last rung too (`ATTEMPT_MAX_MS`), or a long ladder is given
@@ -119,8 +150,33 @@ export function reconnectPassInFlight(now = Date.now()): boolean {
   return ladderPass.inFlight(now) && reconnecting.current;
 }
 
-/** How long a press of Connect waits for an automatic reconnect's pass to
- * let go. That pass checks its stop after every step, and the longest step
+/** What a press of Connect does about a pass still holding the guard.
+ *
+ *  - `"none"`: nothing holds it; dial.
+ *  - `"follow"`: the customer's own connect, still wanted, is what this
+ *    press asked for. It is shown, and its end read when it comes -- never
+ *    a second ladder beside it.
+ *  - `"takeOver"`: anything else. An automatic reconnect's pass, which a
+ *    press outranks; one the customer has already stopped, still unwinding
+ *    -- the claim, a baseline walk of up to twelve seconds, its teardown --
+ *    whose Connect is a new request, not that pass; and any pass when the
+ *    press is "Use on this device instead", which asks for something no
+ *    pass running asked for. Told to stop, waited for, and then this press
+ *    dials. Followed instead, a Connect pressed over a stopped pass did
+ *    nothing at all: the orb read Connect, the pass ended cancelled, and
+ *    nothing was dialled or said. */
+export function pressOverPass(
+  { takeover = false }: { takeover?: boolean } = {},
+  now = Date.now(),
+): "none" | "follow" | "takeOver" {
+  if (!ladderPass.inFlight(now)) return "none";
+  if (reconnecting.current || ladderPass.cancel.current || takeover) return "takeOver";
+  return "follow";
+}
+
+/** How long a press of Connect waits for a pass it outranks
+ * (`pressOverPass`) -- an automatic reconnect's, or one already stopped --
+ * to let go. That pass checks its stop after every step, and the longest step
  * between two checks is a baseline walk (`BASELINE_WALK_MS`, twelve
  * seconds) or the platform starting an engine -- after which a pass with
  * an engine up waits for it to be gone (eight seconds at most, usually
@@ -141,4 +197,5 @@ export function resetPhonePass(): void {
   ladderPass.reset();
   reconnecting.current = false;
   presses.current = 0;
+  passTunnel.current = null;
 }

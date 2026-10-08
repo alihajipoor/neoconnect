@@ -234,11 +234,32 @@ describe("which screen runs an attempt", () => {
 
   it("is one that has loaded, bound again after every load", () => {
     expect(effect).toMatch(
-      /^useEffect\(\(\) => \{\n\s+if \(loading \|\| !routeMemoryLoaded\) return;\n\s+return autoReconnect\.bind\(async \(attempt\) => \{/,
+      /^useEffect\(\(\) => \{\n\s+if \(loading \|\| !routeMemoryLoaded \|\| !routeListLoaded\) return;\n\s+return autoReconnect\.bind\(async \(attempt\) => \{/,
     );
-    expect(dashboard.slice(dashboard.indexOf("\n  }, [", start), dashboard.indexOf("\n  }, [", start) + 40)).toContain(
-      "}, [loading, routeMemoryLoaded]);",
+    expect(dashboard.slice(dashboard.indexOf("\n  }, [", start), dashboard.indexOf("\n  }, [", start) + 60)).toContain(
+      "}, [loading, routeMemoryLoaded, routeListLoaded]);",
     );
+  });
+
+  it("and has the route list, which the pass reads for the extra exits and the split tunnel's egress", () => {
+    // Bound before it had arrived -- `loading` ends, and the route memory is
+    // read in milliseconds, ahead of the list's request -- a held attempt
+    // ran on a `runLadder` with no routes: `concurrentExitsFor` found no
+    // extra exit and `exitOfRoute` no egress, so it landed without concurrent
+    // exits and with every game's placement Unknown until the next connect.
+    const load = body("async function loadAll(preferRouteId?: string) {");
+    // Online: once the list has been asked for, answered or not.
+    const asked = load.indexOf("const routesResult = await getAvailableRoutes(sub.id);");
+    const said = load.indexOf("} finally {\n      setRouteListLoaded(true);\n    }");
+    expect(asked).toBeGreaterThan(0);
+    expect(said).toBeGreaterThan(asked);
+    expect(load.indexOf("setRoutes(currentRoutes);")).toBeLessThan(said);
+    // Cached: with the cached list on screen. And with nothing to dial, at
+    // once, as the route memory is.
+    const cached = load.indexOf("setRoutes(cached.routes);\n        setRouteListLoaded(true);");
+    expect(cached).toBeGreaterThan(0);
+    expect(load.split("setRouteListLoaded(true);").length - 1).toBe(3);
+    expect(dashboard.split("setRouteListLoaded(true)").length - 1).toBe(3);
   });
 
   it("and has this network's route memory, which the pass orders by and its landing writes back whole", () => {
@@ -422,5 +443,9 @@ describe("what the screen says", () => {
       "headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting })",
     );
     expect(dashboard).toContain("pressFor(connectionState, { reconnectWaiting: reconnecting?.waiting === true })");
+    // Only for an episode of the session in force: one a sign-out left
+    // behind said "Reconnecting..." to the next sign-in until its screen
+    // had loaded.
+    expect(dashboard).toContain("const reconnecting = reconnectingView(reconnect, sessionGeneration());");
   });
 });

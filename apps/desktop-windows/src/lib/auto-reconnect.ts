@@ -36,7 +36,7 @@
 
 import { reportAttempt, type AttemptReport } from "./attempts";
 import { deviceSlot } from "./device-slot-session";
-import { sessionGeneration } from "./session-end";
+import { onSessionEnd, sessionGeneration } from "./session-end";
 
 /** How long to wait before each attempt, by attempt number.
  *
@@ -153,7 +153,8 @@ export type ReconnectStop =
 /** One drop, from the moment it was seen to the moment it ends. */
 export interface Episode {
   /** The route the tunnel was on, which the first pass leads with. Null
-   * when the tunnel was adopted rather than brought up here. */
+   * when the tunnel was adopted rather than brought up here, or when a
+   * location chosen since is to lead instead (`chose`). */
   readonly routeId: string | null;
   /** Consecutive quick deaths, this drop included. */
   readonly quickDeaths: number;
@@ -293,7 +294,18 @@ export type TunnelUp =
   | { readonly routeId: string | null; readonly fresh?: false; readonly stamp?: ReconnectStamp };
 
 export interface ReconnectDeps {
+  /** The wall clock: what the budget is charged on, and what tells a
+   * phone's half hour away (`BLOCKED_WAIT_MAX_MS`), which has to count a
+   * device asleep. */
   now(): number;
+  /** A clock that only goes forward, for a stretch measured while the
+   * app is running in front: the time in front an attempt's ceiling is
+   * charged (`awayChanged`). The wall clock steps -- a phone's network
+   * time on the very network change that dropped the tunnel -- and read
+   * there, a forward step of five minutes ate the whole ceiling in a
+   * five-second trip away, and a live pass was given up on as it came
+   * back. */
+  elapsed(): number;
   setTimer(fn: () => void, ms: number): unknown;
   clearTimer(handle: unknown): void;
   /** Whether the device has a network at all. */
@@ -327,7 +339,8 @@ interface RunningAttempt {
   /** What is left of the ceiling, as of `ceilingFrom`: all of it from the
    * last sign of life, less the time in front since -- see `awayChanged`. */
   ceilingLeft: number;
-  /** When the watchdog was last started. */
+  /** When the watchdog was last started, on the clock that only goes
+   * forward (`ReconnectDeps.elapsed`). */
   ceilingFrom: number;
   /** When a phone app went to the background during the attempt, while
    * it is there. */
@@ -473,12 +486,18 @@ export interface ReconnectingView {
   readonly waiting: boolean;
 }
 
-export function reconnectingView(phase: ReconnectPhase): ReconnectingView | null {
+/** Only for the session in force, as `reconnectLost` and `vouching` are.
+ * An episode whose session ended out of sight -- an account deleted from
+ * Settings, a refused refresh -- with no timer and no screen left to move
+ * it on, used to put "Reconnecting..." and "Reconnect now" on the next
+ * sign-in's dashboard until that screen had loaded and its bind ended the
+ * episode. Nothing was going to dial for it. */
+export function reconnectingView(phase: ReconnectPhase, session: number): ReconnectingView | null {
   switch (phase.kind) {
     case "waiting":
-      return { offline: phase.blockedBy === "network", waiting: true };
+      return phase.episode.session === session ? { offline: phase.blockedBy === "network", waiting: true } : null;
     case "attempting":
-      return { offline: false, waiting: false };
+      return phase.episode.session === session ? { offline: false, waiting: false } : null;
     default:
       return null;
   }
@@ -679,7 +698,7 @@ export class AutoReconnect {
     // running when they pressed again, is as overruled as an episode.
     this.overrules += 1;
     if (this.phase.kind === "idle") {
-      if (this.phase.lost && !lostAfter(why)) this.set({ kind: "idle", lost: false, stopped: why, session: null });
+      this.retireLost(why);
       return;
     }
     if (this.phase.kind === "armed") {
@@ -708,22 +727,49 @@ export class AutoReconnect {
    *    for the next connect, the tunnel is still reconnected if it drops,
    *    and the screen goes on naming its route. Treated as a press that
    *    takes over, it disarmed the tunnel, and its next drop said "VPN
-   *    connection lost" for the rest of its life.
+   *    connection lost" for the rest of its life. The next connect includes
+   *    that reconnect, though: it no longer leads with the route the tunnel
+   *    was on, but with the choice, which the ordinary order puts first.
+   *    Left leading with the old route, the automatic pass dialled the
+   *    server the customer had just chosen to leave, under a tile naming
+   *    the new one.
    *  - Armed beneath a screen that shows nothing up, as a press that takes
    *    over. The two can disagree: the Windows health poll's readings that
    *    are not a drop (the service's guess while busy, a read a teardown
    *    disturbed) publish "disconnected" and forget nothing, and a phone
-   *    screen that could not ask the platform, or loaded from the cache,
-   *    never adopts what is up. Kept armed there, the choice's own reload
-   *    found the tunnel gone, took it for a drop it had missed, and
-   *    reconnected -- the old route first -- straight after the customer
-   *    chose a new server.
-   *  - Idle, as any press: an old "VPN connection lost" is retired. */
+   *    screen that could not ask the platform never adopts what is up.
+   *    Kept armed there, the choice's own reload found the tunnel gone,
+   *    took it for a drop it had missed, and reconnected -- the old route
+   *    first -- straight after the customer chose a new server.
+   *  - Idle: an old "VPN connection lost" is retired, as by any press --
+   *    but nothing is overruled. Idle, the only pass that can be running
+   *    is the customer's own connect, which the choice does not stop: the
+   *    list answers once its switch request has, which can be after the
+   *    customer closed it and pressed Connect. Counted as an overrule, the
+   *    choice disowned that connect's landing (`stamp`), the screen said
+   *    Connected over a tunnel nothing was armed for, and its drop said
+   *    "VPN connection lost" and reconnected nothing. */
   chose({ tunnelShown }: { tunnelShown: boolean }): LocationChoice {
-    if (this.phase.kind === "armed" && tunnelShown) return "keepTunnel";
+    if (this.phase.kind === "armed" && tunnelShown) {
+      if (this.phase.routeId !== null) this.set({ ...this.phase, routeId: null });
+      return "keepTunnel";
+    }
+    if (this.phase.kind === "idle") {
+      this.retireLost("customer");
+      return null;
+    }
     const dialling = this.phase.kind === "attempting";
     this.cancel("customer");
     return dialling ? "stopPass" : null;
+  }
+
+  /** Idle: a press that takes over (`customer`, or a sign-out) retires a
+   * "VPN connection lost" left by an earlier episode. Anything else leaves
+   * idle as it is. */
+  private retireLost(why: ReconnectStop): void {
+    if (this.phase.kind === "idle" && this.phase.lost && !lostAfter(why)) {
+      this.set({ kind: "idle", lost: false, stopped: why, session: null });
+    }
   }
 
   /** The screen has stopped vouching for a tunnel without a drop: an
@@ -799,8 +845,9 @@ export class AutoReconnect {
    * front -- and a wedged pass said "Reconnecting..." for as long as they
    * did, the episode never moving on to its next attempt or to "VPN
    * connection lost". The time in front is the pass's to account for: it
-   * showed no sign of life in it. Read on the same clock the budget is
-   * charged on.
+   * showed no sign of life in it. Read on the clock that only goes forward
+   * (`elapsed`), as the ceiling's own timer runs. Only the half hour away
+   * is read on the wall clock, which has to count a device asleep.
    *
    * `heard` is false when the ceiling fell due in the background before
    * the move there was heard (see `watch`): how much of that stretch was
@@ -816,7 +863,9 @@ export class AutoReconnect {
     const away = !this.deps.foreground();
     if (away && running.awaySince === null) {
       running.awaySince = now;
-      if (heard) running.ceilingLeft -= Math.min(running.ceilingLeft, Math.max(0, now - running.ceilingFrom));
+      if (heard) {
+        running.ceilingLeft -= Math.min(running.ceilingLeft, Math.max(0, this.deps.elapsed() - running.ceilingFrom));
+      }
       this.watch(running);
       if (this.capTimer !== null) this.deps.clearTimer(this.capTimer);
       this.capTimer = this.deps.setTimer(() => {
@@ -860,7 +909,7 @@ export class AutoReconnect {
       running.watchdog = null;
       return;
     }
-    running.ceilingFrom = this.deps.now();
+    running.ceilingFrom = this.deps.elapsed();
     running.watchdog = this.deps.setTimer(() => {
       running.watchdog = null;
       if (running.token === this.token && this.requiresForeground && !this.deps.foreground()) {
@@ -996,7 +1045,7 @@ export class AutoReconnect {
       giveUp: () => undefined,
       watchdog: null,
       ceilingLeft: ATTEMPT_MAX_MS,
-      ceilingFrom: startedAt,
+      ceilingFrom: this.deps.elapsed(),
       awaySince: null,
       awayMs: 0,
     };
@@ -1141,6 +1190,7 @@ export class AutoReconnect {
  * the passes are the only way to find out. */
 export const autoReconnect = new AutoReconnect({
   now: () => Date.now(),
+  elapsed: () => (typeof performance !== "undefined" ? performance.now() : Date.now()),
   setTimer: (fn, ms) => setTimeout(fn, ms),
   clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
   online: () => typeof navigator === "undefined" || navigator.onLine !== false,
@@ -1149,6 +1199,14 @@ export const autoReconnect = new AutoReconnect({
   report: (report) => void reportAttempt(report),
   slotIdle: (how) => void (how === "ended" ? deviceSlot.release() : deviceSlot.setAside()),
 });
+
+// A session that ends ends its episode there and then, however it ended:
+// the dashboard's own sign-out says so itself, but a sign-out from
+// Settings, an account deleted there and a refused refresh reach no
+// screen. An episode left waiting with no timer and no screen bound was
+// ended only by the next sign-in's dashboard, once loaded -- and a press
+// there before that filed it as the new customer's.
+onSessionEnd(() => autoReconnect.cancel("signedOut"));
 
 // The moments a blocked wait can end. Registered once, for the life of
 // the app: the instance outlives every screen.

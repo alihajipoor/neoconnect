@@ -244,7 +244,9 @@ describe("the phone dashboard's wiring", () => {
     );
     expect(load).toContain("const load = ++loadRef.current;");
     expect(load.indexOf("setLoaded(false);")).toBeLessThan(load.indexOf("await loadScreen(preferRouteId, ready);"));
-    expect(load).toMatch(/const ready = \(\) => \{\n\s+if \(loadRef\.current === load\) setLoaded\(true\);\n\s+\};/);
+    expect(load).toMatch(
+      /const ready = \(\) => \{\n\s+if \(loadRef\.current !== load\) return;\n\s+loadedRef\.current = true;\n\s+setLoaded\(true\);\n\s+\};/,
+    );
     expect(load).toMatch(/\} finally \{\n\s+ready\(\);/);
     expect(dashboard.split("setLoaded(true)").length - 1).toBe(1);
   });
@@ -257,14 +259,15 @@ describe("the phone dashboard's wiring", () => {
     const start = dashboard.indexOf("async function adoptPlatform(");
     const adopt = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
     const read = adopt.indexOf('adopted = stateFromStatus(await withTimeout(vpnStatus(), "vpn_status"));');
-    const ready = adopt.indexOf("ready();");
+    // The read's own, not the one said at once over a pass under way.
+    const ready = adopt.indexOf("ready();", read);
     const walk = adopt.indexOf("await takeBaseline(");
     expect(read).toBeGreaterThan(0);
     expect(ready).toBeGreaterThan(read);
     // After the drop is reported and the tunnel armed, so the attempt runs
     // on what the platform said.
     expect(ready).toBeGreaterThan(adopt.indexOf("reportDrop();"));
-    expect(ready).toBeGreaterThan(adopt.indexOf("autoReconnect.tunnelUp({ routeId: null });"));
+    expect(ready).toBeGreaterThan(adopt.indexOf("autoReconnect.tunnelUp({ routeId: null, stamp: reconnectStamp });"));
     expect(walk).toBeGreaterThan(ready);
     // The walk stands aside for a pass begun meanwhile.
     expect(adopt.slice(walk)).toContain("if (overtaken()) return;");
@@ -396,7 +399,8 @@ describe("the phone dashboard's wiring", () => {
     const toggle = dashboard.slice(dashboard.indexOf("async function handleConnectToggle()"));
     expect(toggle.slice(0, 400)).toContain('autoReconnect.cancel("customer");');
     const connect = dashboard.slice(dashboard.indexOf("async function connectNow("));
-    expect(connect.slice(0, 400)).toContain('autoReconnect.cancel("customer");');
+    // Before anything the press waits on.
+    expect(connect.slice(0, connect.indexOf("= await "))).toContain('autoReconnect.cancel("customer");');
     expect(dashboard).toContain('autoReconnect.cancel("signedOut");');
     expect(dashboard).toContain("autoReconnect.cancel(slotStopWhy(stop.errorKind));");
     expect(dashboard).toContain('autoReconnect.cancel("stopped");');
@@ -414,9 +418,9 @@ describe("the phone dashboard's wiring", () => {
     const choose = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
     expect(choose).toContain("pressRef.current += 1;");
     // Kept up only over a tunnel the screen shows: armed beneath a screen
-    // saying "disconnected" -- the platform unasked, or the cached load --
-    // the choice's reload took the tunnel's absence for a drop it had
-    // missed, and redialled the old route.
+    // saying "disconnected" -- the platform unasked -- the choice's reload
+    // took the tunnel's absence for a drop it had missed, and redialled the
+    // old route.
     expect(choose).toContain(
       'const choice = autoReconnect.chose({ tunnelShown: connectionStateRef.current !== "disconnected" });',
     );
@@ -435,6 +439,10 @@ describe("the phone dashboard's wiring", () => {
       "headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: false, reconnecting })",
     );
     expect(dashboard).toContain("pressFor(connectionState, { reconnectWaiting: reconnecting?.waiting === true })");
+    // Only for an episode of the session in force: one a sign-out left
+    // behind said "Reconnecting..." to the next sign-in until its screen
+    // had loaded.
+    expect(dashboard).toContain("const reconnecting = reconnectingView(reconnect, sessionGeneration());");
     // The old chains are gone, so the two cannot disagree.
     expect(dashboard).not.toContain('t("dash.protected")');
   });

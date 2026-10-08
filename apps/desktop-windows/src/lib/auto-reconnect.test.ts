@@ -31,9 +31,9 @@ import type { DeviceLimitRefusal } from "./device-slots";
  * rather than about how long the test happened to sleep. The runner is
  * scripted per attempt: an outcome, and how long the pass takes.
  *
- * `state.now` is the clock timers run on, which only goes forward;
- * `wallSkew` is how far the wall clock (`Date.now()`, what the controller
- * reads) has been set away from it. */
+ * `state.now` is the clock timers run on, which only goes forward -- and
+ * the controller's own such clock (`elapsed`); `wallSkew` is how far the
+ * wall clock (`Date.now()`, its `now`) has been set away from it. */
 function harness({ requiresForeground = false }: { requiresForeground?: boolean } = {}) {
   const start = 1_000_000;
   const state = { now: start, wallSkew: 0, online: true, foreground: true, session: 1 };
@@ -44,6 +44,7 @@ function harness({ requiresForeground = false }: { requiresForeground?: boolean 
   const slotIdled: ("ended" | "away")[] = [];
   const rc = new AutoReconnect({
     now: () => state.now + state.wallSkew,
+    elapsed: () => state.now,
     setTimer: (fn, ms) => {
       const id = nextTimer++;
       timers.set(id, { at: state.now + ms, fn });
@@ -309,7 +310,7 @@ describe("no network, or no foreground", () => {
     await h.advance(10 * 60_000);
 
     expect(h.asked).toHaveLength(0);
-    expect(reconnectingView(h.rc.current())).toEqual({ offline: true, waiting: true });
+    expect(reconnectingView(h.rc.current(), 1)).toEqual({ offline: true, waiting: true });
 
     h.script([{ outcome: { kind: "connected", routeId: "r" } }]);
     h.state.online = true;
@@ -516,6 +517,34 @@ describe("no network, or no foreground", () => {
       l.rc.conditionsChanged();
     }
     expect(l.asked[0]!.live()).toBe(true);
+  });
+
+  it("on a phone, charges the ceiling for its time in front on a clock that only goes forward", async () => {
+    // The wall clock steps -- a phone's network time, on the very network
+    // change that dropped the tunnel. Read there, a forward step of five
+    // minutes ate the whole ceiling in a five-second trip away, and the
+    // live pass was given up on the moment the app came back.
+    const h = harness({ requiresForeground: true });
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(10_000);
+    h.state.wallSkew += 5 * 60_000;
+    await h.advance(10_000);
+    h.state.foreground = false;
+    h.rc.conditionsChanged();
+    await h.advance(5_000);
+    h.state.foreground = true;
+    h.rc.conditionsChanged();
+    await h.advance(1_000);
+    expect(h.asked[0]!.live()).toBe(true);
+    // Twenty seconds of it went in front: the rest runs from the return.
+    await h.advance(ATTEMPT_MAX_MS - 20_000 - 3_000);
+    expect(h.asked[0]!.live()).toBe(true);
+    await h.advance(3_000);
+    expect(h.asked[0]!.live()).toBe(false);
   });
 
   it("on a phone, holds it too when the ceiling falls due before the move to the background was heard", async () => {
@@ -774,6 +803,68 @@ describe("the customer outranks it", () => {
     await h.advance(0);
     expect(h.asked).toHaveLength(1);
     expect(h.reports).toHaveLength(0);
+  });
+
+  it("and that tunnel's reconnect leads with the choice, not the route the customer chose to leave", async () => {
+    // Kept armed on the old route, the episode led its automatic pass with
+    // it -- ahead of the pin (`orderCandidates`) -- while the tile, with
+    // nothing up, named the new choice. With no route to resume, the pass
+    // takes the ordinary order, the choice first.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    expect(h.rc.chose({ tunnelShown: true })).toBe("keepTunnel");
+    // A screen mounting re-reads the same tunnel, and names no route.
+    h.rc.tunnelUp({ routeId: null, stamp: h.rc.stamp() });
+    expect(h.rc.dropped()).toBe("reconnecting");
+    await h.advance(0);
+    expect(h.asked).toHaveLength(1);
+    expect(h.asked[0]!.resumeRouteId).toBeNull();
+
+    // Control: with nothing chosen, it leads with the route that was up.
+    const c = harness();
+    c.bind();
+    c.rc.tunnelUp({ routeId: "old", fresh: true, stamp: c.rc.stamp() });
+    await c.advance(10 * 60_000);
+    c.rc.dropped();
+    await c.advance(0);
+    expect(c.asked[0]!.resumeRouteId).toBe("old");
+  });
+
+  it("one chosen while the customer's own connect dials leaves that connect's landing armed", async () => {
+    // The list answers once its switch request has, which can be after the
+    // customer closed it and pressed Connect. Counted as an overrule, the
+    // choice disowned that connect's landing (`stamp`): Connected on
+    // screen, nothing armed, and its drop said "VPN connection lost" and
+    // reconnected nothing. The choice does not stop that connect, so it
+    // does not disown it either.
+    const h = harness();
+    h.bind();
+    // An earlier episode ended without a tunnel: "VPN connection lost".
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    expect(h.rc.dropped({ exclusion: "excluded" })).toBe("lost");
+    expect(reconnectLost(h.rc.current(), 1)).toBe(true);
+    // The customer's connect begins, as a press: the words are retired.
+    h.rc.cancel("customer");
+    const connect = h.rc.stamp();
+    expect(h.rc.chose({ tunnelShown: false })).toBeNull();
+    h.rc.tunnelUp({ routeId: "new", fresh: true, stamp: connect });
+    expect(vouching(h.rc.current(), 1)).toBe(true);
+    await h.advance(10 * 60_000);
+    expect(h.rc.dropped()).toBe("reconnecting");
+    await h.advance(0);
+    expect(h.asked).toHaveLength(1);
+
+    // The choice still retires an old "VPN connection lost", as any press.
+    const l = harness();
+    l.rc.tunnelUp({ routeId: "r", fresh: true, stamp: l.rc.stamp() });
+    await l.advance(10 * 60_000);
+    l.rc.dropped({ exclusion: "excluded" });
+    expect(reconnectLost(l.rc.current(), 1)).toBe(true);
+    expect(l.rc.chose({ tunnelShown: false })).toBeNull();
+    expect(reconnectLost(l.rc.current(), 1)).toBe(false);
   });
 
   it("one chosen while armed beneath a screen that shows nothing up takes over, and nothing redials", async () => {
@@ -1473,14 +1564,42 @@ describe("whether the app is vouching for a tunnel", () => {
 
 describe("what the screen is told", () => {
   it("has a view only while an episode runs", () => {
-    expect(reconnectingView({ kind: "idle", lost: true, stopped: "attempts", session: 1 })).toBeNull();
-    expect(reconnectingView({ kind: "armed", since: 0, routeId: null, quickDeaths: 0, session: 1 })).toBeNull();
+    expect(reconnectingView({ kind: "idle", lost: true, stopped: "attempts", session: 1 }, 1)).toBeNull();
+    expect(reconnectingView({ kind: "armed", since: 0, routeId: null, quickDeaths: 0, session: 1 }, 1)).toBeNull();
     const episode = { routeId: null, quickDeaths: 0, session: 1, droppedAt: 0, spentMs: 0 };
     expect(
-      reconnectingView({ kind: "attempting", attempt: 0, startedAt: 0, episode }),
+      reconnectingView({ kind: "attempting", attempt: 0, startedAt: 0, episode }, 1),
     ).toEqual({ offline: false, waiting: false });
     expect(
-      reconnectingView({ kind: "waiting", attempt: 1, delayMs: 2_000, blockedBy: null, blockedSince: null, episode }),
+      reconnectingView({ kind: "waiting", attempt: 1, delayMs: 2_000, blockedBy: null, blockedSince: null, episode }, 1),
     ).toEqual({ offline: false, waiting: true });
+  });
+
+  it("has none for an episode whose session has ended", async () => {
+    // Its session ended out of sight -- an account deleted from Settings, a
+    // refused refresh -- with the attempt held for a screen and no timer
+    // left to move it on. The next sign-in's dashboard said
+    // "Reconnecting...", with "Reconnect now" on the orb, until it had
+    // loaded and its bind ended an episode nothing was going to dial for.
+    const h = harness();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(0);
+    expect(h.rc.current()).toMatchObject({ kind: "waiting", attempt: 0 });
+    expect(reconnectingView(h.rc.current(), 1)).toEqual({ offline: false, waiting: true });
+    h.state.session = 2;
+    expect(reconnectingView(h.rc.current(), 2)).toBeNull();
+    // Nor while one of its passes still runs.
+    const a = harness();
+    a.bind();
+    a.rc.tunnelUp({ routeId: "r", fresh: true, stamp: a.rc.stamp() });
+    await a.advance(10 * 60_000);
+    a.script(["pending"]);
+    a.rc.dropped();
+    await a.advance(0);
+    expect(a.rc.current().kind).toBe("attempting");
+    expect(reconnectingView(a.rc.current(), 1)).toEqual({ offline: false, waiting: false });
+    expect(reconnectingView(a.rc.current(), 2)).toBeNull();
   });
 });

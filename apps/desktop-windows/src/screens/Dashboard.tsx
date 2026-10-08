@@ -555,6 +555,16 @@ export function Dashboard({
    * `loadRouteMemory`. Until then they are empty placeholders, not this
    * network's memory. */
   const [routeMemoryLoaded, setRouteMemoryLoaded] = useState(false);
+  /** Whether `loadAll` has asked for the route list -- answered or not --
+   * or put the cached one on screen. Until then `routes` is the empty
+   * placeholder, not this subscription's list. What an automatic
+   * reconnect's attempt waits for besides the route memory: the pass
+   * reads the list throughout, for the extra exits of concurrent
+   * multi-exit (`concurrentExitsFor`), the egress the split tunnel places
+   * games against (`exitOfRoute`), and the per-ISP tie-break. Run before
+   * it had arrived, a held attempt landed with no extra exits and every
+   * game's placement Unknown, and kept that until the next connect. */
+  const [routeListLoaded, setRouteListLoaded] = useState(false);
   /** Names the protocol we ended up on when it is not the one we
    * started with. Landing somewhere else without saying so is the same
    * dishonesty as a false "Connected". */
@@ -679,9 +689,11 @@ export function Dashboard({
   const slotLostRef = useRef(false);
   /** The automatic reconnect after a drop (`lib/auto-reconnect`): one per
    * app, so an episode under way survives this screen unmounting for
-   * Settings, and the screen mounted on return words it the same way. */
+   * Settings, and the screen mounted on return words it the same way --
+   * for the session in force only, so an episode a sign-out left behind
+   * says nothing to the next sign-in. */
   const reconnect = useSyncExternalStore(autoReconnect.subscribe, autoReconnect.current);
-  const reconnecting = reconnectingView(reconnect);
+  const reconnecting = reconnectingView(reconnect, sessionGeneration());
   /** How the last ladder pass ended, beyond its outcome: which route it
    * landed on, or the kind of error it stopped on. Read by the reconnect
    * runner, which has to tell "the plan said no" from "the network did". */
@@ -1259,6 +1271,7 @@ export function Dashboard({
         setSubscription(cached.subscription);
         setProtocolUsers(cached.protocolUsers);
         setRoutes(cached.routes);
+        setRouteListLoaded(true);
         const preferred = preferRouteId ?? chosenRouteId;
         setProtocolUser(
           cached.protocolUsers.find((u) => u.routeId === preferred) ?? cached.protocolUsers[0] ?? null,
@@ -1278,7 +1291,9 @@ export function Dashboard({
       setError(!meResult.ok ? meResult.error : !subsResult.ok ? subsResult.error : t("dash.loadFailed"));
       setLoading(false);
       // Nothing here to dial with, but an attempt held for this screen
-      // waits for the memory too, and is ended by the runner once it runs.
+      // waits for the memory and the list too, and is ended by the runner
+      // once it runs.
+      setRouteListLoaded(true);
       loadRouteMemory();
       return;
     }
@@ -1313,13 +1328,22 @@ export function Dashboard({
     // protocol-user row carries a routeId but no human-readable
     // location. Best-effort: a failure here costs a label, not the
     // screen, so it must never surface as an error.
+    //
+    // Not only a label, though: an automatic reconnect's pass reads it
+    // throughout, and an attempt held for this screen waits for it
+    // (`routeListLoaded`) -- answered or not, so a list that cannot be
+    // had never holds an attempt for good.
     let currentRoutes: RouteOption[] = [];
-    if (sub) {
-      const routesResult = await getAvailableRoutes(sub.id);
-      if (routesResult.ok) {
-        currentRoutes = routesResult.data;
-        setRoutes(currentRoutes);
+    try {
+      if (sub) {
+        const routesResult = await getAvailableRoutes(sub.id);
+        if (routesResult.ok) {
+          currentRoutes = routesResult.data;
+          setRoutes(currentRoutes);
+        }
       }
+    } finally {
+      setRouteListLoaded(true);
     }
 
     // A sign-out landed while the route list was in flight -- the button
@@ -1388,8 +1412,11 @@ export function Dashboard({
   // `loading` ends once the credentials are in and the service's state is
   // on screen; what `loadAll` does after that stands aside for a pass
   // (`captureBaselinesWhileDown`) -- except the route memory, which the
-  // pass orders by and writes back, and which is waited for too
-  // (`loadRouteMemory`).
+  // pass orders by and writes back, and the route list, which it reads
+  // for the extra exits and the split tunnel's egress, and both of which
+  // are waited for too (`loadRouteMemory`, `routeListLoaded`). The pass
+  // runs on the `runLadder` of the render it starts in, so whatever it
+  // reads has to be on screen by then: arriving a moment later is too late.
   //
   // A screen that has loaded and still has nothing to dial with -- no
   // credential on the account, or no answer and nothing cached -- ends
@@ -1401,7 +1428,7 @@ export function Dashboard({
   const protocolUserRef = useRef(protocolUser);
   protocolUserRef.current = protocolUser;
   useEffect(() => {
-    if (loading || !routeMemoryLoaded) return;
+    if (loading || !routeMemoryLoaded || !routeListLoaded) return;
     return autoReconnect.bind(async (attempt) => {
       const excluded = reconnectExclusion();
       if (excluded !== null) return { kind: "stop", why: excluded };
@@ -1417,7 +1444,7 @@ export function Dashboard({
       const outcome = await runLadderRef.current({ automatic: true, reconnect: attempt });
       return reconnectOutcomeOf(outcome, passResultRef.current);
     });
-  }, [loading, routeMemoryLoaded]);
+  }, [loading, routeMemoryLoaded, routeListLoaded]);
 
   // Asks the one question the IPv4 egress check cannot: is IPv6 still
   // reaching the internet while we are connected?
