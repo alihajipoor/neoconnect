@@ -44,12 +44,28 @@ export interface ReconnectPreflight {
   /** Whether this app may start a VPN without asking. Must never raise a
    * dialog. */
   hasPermission: () => Promise<boolean>;
+  /** Whether the attempt is still the episode's current one
+   * (`ReconnectAttempt.live`). */
+  live: () => boolean;
 }
+
+/** What a preflight answers for an attempt that was ended while it asked.
+ * The episode has already moved on and ignores it; what matters is that
+ * nothing is dialled. */
+const OVERTAKEN: ReconnectOutcome = { kind: "stop", why: "customer" };
 
 /** Null to go ahead and dial; otherwise the attempt's outcome. A check
  * that could not be made is a failed attempt rather than a reason to
- * stop: the next attempt asks again, and the episode is bounded. */
+ * stop: the next attempt asks again, and the episode is bounded.
+ *
+ * Whether the attempt is still live is asked again after every answer.
+ * Each question is a call to the platform -- the wait for the device to
+ * be out of every VPN can run to seconds -- and "Stop reconnecting", a
+ * Connect, a sign-out or the device limit pressed meanwhile used to be
+ * overridden: the pass dialled once these came back, and the tunnel came
+ * up after the customer had said stop. */
 export async function reconnectPreflight(deps: ReconnectPreflight): Promise<ReconnectOutcome | null> {
+  if (!deps.live()) return OVERTAKEN;
   const excluded = deps.exclusion();
   if (excluded !== null) return { kind: "stop", why: excluded };
 
@@ -59,6 +75,7 @@ export async function reconnectPreflight(deps: ReconnectPreflight): Promise<Reco
   } catch {
     return { kind: "failed" };
   }
+  if (!deps.live()) return OVERTAKEN;
   if (!gone) return { kind: "stop", why: "otherVpn" };
 
   let granted: boolean;
@@ -67,6 +84,7 @@ export async function reconnectPreflight(deps: ReconnectPreflight): Promise<Reco
   } catch {
     return { kind: "failed" };
   }
+  if (!deps.live()) return OVERTAKEN;
   if (!granted) return { kind: "stop", why: "permission" };
   return null;
 }

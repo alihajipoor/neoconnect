@@ -15,6 +15,7 @@ function deps(over: Partial<ReconnectPreflight> = {}): ReconnectPreflight & { as
       asked.push("hasPermission");
       return true;
     },
+    live: () => true,
     ...over,
   };
 }
@@ -55,6 +56,42 @@ describe("before a phone's reconnect may dial", () => {
     // raised by a connect the customer pressed.
     const d = deps({ hasPermission: async () => false });
     expect(await reconnectPreflight(d)).toEqual({ kind: "stop", why: "permission" });
+  });
+
+  it("dials nothing for an attempt a press ended while the platform was being asked", async () => {
+    // "Stop reconnecting", a Connect, a sign-out or the device limit,
+    // landing while the device was still being waited out of a VPN: the
+    // pass used to dial as soon as the answers came back.
+    let live = true;
+    const during = deps({
+      live: () => live,
+      vpnGone: async () => {
+        during.asked.push("vpnGone");
+        live = false;
+        return true;
+      },
+    });
+    const answer = await reconnectPreflight(during);
+    expect(answer).not.toBeNull();
+    expect(answer).toEqual({ kind: "stop", why: "customer" });
+    // Not even the next question.
+    expect(during.asked).toEqual(["vpnGone"]);
+
+    // Ended during the last question, the permission's.
+    live = true;
+    const last = deps({
+      live: () => live,
+      hasPermission: async () => {
+        live = false;
+        return true;
+      },
+    });
+    expect(await reconnectPreflight(last)).not.toBeNull();
+
+    // And one already over asks the platform nothing.
+    const over = deps({ live: () => false });
+    expect(await reconnectPreflight(over)).not.toBeNull();
+    expect(over.asked).toEqual([]);
   });
 
   it("counts a check that could not be made as a failed attempt, not a reason to stop", async () => {
@@ -138,6 +175,8 @@ describe("the phone dashboard's wiring", () => {
     expect(runner).toContain("await reconnectPreflight({");
     expect(runner).toContain("vpnGone: waitForTeardown,");
     expect(runner).toContain("hasPermission: hasVpnPermission,");
+    // Asked after every answer, so a press meanwhile is not dialled over.
+    expect(runner).toContain("live: attempt.live,");
     // Never the dialog.
     expect(runner).not.toContain("requestVpnPermission");
     expect(runner).toContain("runLadderRef.current({ reconnect: attempt })");
@@ -173,7 +212,7 @@ describe("the phone dashboard's wiring", () => {
     // Before the first state the pass touches -- "connecting" above all.
     expect(guard).toBeLessThan(ladder.indexOf("setFailedOverTo(null);"));
     expect(guard).toBeLessThan(ladder.indexOf('setConnectionState("connecting");'));
-    expect(guard).toBeLessThan(ladder.indexOf("cancelRef.current = false;"));
+    expect(guard).toBeLessThan(ladder.indexOf("const pass = beginPass(options.reconnect);"));
   });
 
   it("leads with the route that was up, and reports the pass as automatic", () => {

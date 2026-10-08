@@ -14,6 +14,11 @@
  * Here, they are one per app, the way `deviceSlot` and `slotTeardown`
  * already are. Plain `{ current }` holders, so the screen reads and
  * writes them exactly as it did its refs.
+ *
+ * The phone's dashboard uses the same holders, through `@shared`, with
+ * `apps/mobile/src/lib/phone-pass.ts` on top: it had the same per-screen
+ * flag and no guard at all, and its automatic reconnect made the second
+ * ladder reachable without a press.
  */
 
 import type { BaselineIp, TunnelServer } from "./egress";
