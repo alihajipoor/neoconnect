@@ -83,6 +83,16 @@ const baseline: { current: BaselineIp | null } = { current: null };
  * kept up across a restart leaves nothing to compare, so nothing the
  * server's own mirror says can be held against that tunnel either. */
 const tunnelServer: { current: TunnelServer | null } = { current: null };
+/** When a phone app went to the background, while it is there: the
+ * guard's clock is held meanwhile (`hold`, `resume`). Never set on
+ * Windows. */
+const heldSince: { current: number | null } = { current: null };
+
+/** How long the pass holding the guard has gone without a step forward,
+ * counting only time the app was in front. */
+function sinceProgress(now: number): number {
+  return heldSince.current === null ? now - startedAt.current : Math.max(0, heldSince.current - startedAt.current);
+}
 
 const endListeners = new Set<() => void>();
 
@@ -100,7 +110,33 @@ export const ladderPass = {
 
   /** Whether a pass could still be running. */
   inFlight(now = Date.now()): boolean {
-    return running.current && now - startedAt.current < LADDER_MAX_MS;
+    return running.current && sinceProgress(now) < LADDER_MAX_MS;
+  },
+
+  /** A phone app has gone to the background: the guard's clock stops
+   * until it is back (`resume`).
+   *
+   * The OS freezes the pass meanwhile -- iOS within seconds -- so the time
+   * away is not the pass's, as it is not its attempt's
+   * (`AutoReconnect.awayChanged`). Counted, a pass frozen for more than
+   * two and a half minutes came back with its guard lapsed, and read that
+   * way until its next rung renewed it -- up to a baseline walk, a connect
+   * or an egress check later. A screen mounted in that window (Settings
+   * opened and closed) read the platform under the pass and offered
+   * Connect, and Connect began a second ladder beside the first, which no
+   * longer owned what it was bringing up. Held rather than renewed on
+   * return: renewed, a wedged pass kept the guard for as long as the
+   * customer kept leaving and coming back. Phones only; a minimised
+   * Windows window is still a running app, and its pass goes on. */
+  hold(now = Date.now()): void {
+    if (heldSince.current === null) heldSince.current = now;
+  },
+
+  /** Back in front: the guard's clock goes on from where it stopped. */
+  resume(now = Date.now()): void {
+    if (heldSince.current === null) return;
+    if (running.current) startedAt.current = now - sinceProgress(now);
+    heldSince.current = null;
   },
 
   /** A pass is still alive and moving: called as it starts each rung, so
@@ -172,6 +208,7 @@ export const ladderPass = {
     cancel.current = false;
     baseline.current = null;
     tunnelServer.current = null;
+    heldSince.current = null;
     endListeners.clear();
   },
 };

@@ -147,8 +147,14 @@ export type ReconnectStop =
    * `BLOCKED_WAIT_MAX_MS`. */
   | "waitedTooLong"
   /** Something about the moment rules a reconnect out: gaming mode, a
-   * teardown of the app's own, nothing usable to dial. */
-  | "excluded";
+   * teardown of the app's own. */
+  | "excluded"
+  /** The screen the attempt ran on had nothing to dial: no credential
+   * loaded (the API unreachable with nothing cached, an account being
+   * provisioned again), or none this build can use. Found as the attempt
+   * began, so that attempt dialled nothing and is not counted as one
+   * made (`AutoReconnect.run`). */
+  | "nothingToDial";
 
 /** One drop, from the moment it was seen to the moment it ends. */
 export interface Episode {
@@ -376,6 +382,7 @@ const SLOT_LEFT_IDLE: ReadonlySet<ReconnectStop> = new Set<ReconnectStop>([
   "permission",
   "otherVpn",
   "excluded",
+  "nothingToDial",
   "waitedTooLong",
 ]);
 
@@ -393,6 +400,7 @@ const STOP_WORDS: Record<ReconnectStop, string> = {
   otherVpn: "another VPN holds the device",
   waitedTooLong: `no network, or the app in the background, for over ${BLOCKED_WAIT_MAX_MS / 60_000} minutes`,
   excluded: "a reconnect was ruled out at the moment of the drop",
+  nothingToDial: "the screen had nothing to dial: no credential loaded, or none this app can use",
 };
 
 /** The start of every reconnect report's `reason`.
@@ -453,7 +461,10 @@ export function slotStopWhy(errorKind: string | null): "refused" | "notEntitled"
  *    says whether that was the device limit or the plan (`slotStopWhy`).
  *  - `cancelled`: the customer stopped the pass. The press itself has
  *    already ended the episode; this only makes sure it stays ended.
- *  - `unusable`: nothing this build can dial.
+ *  - `unusable`: nothing this build can dial -- no credential on the
+ *    screen, or none of a protocol it carries. Not "ruled out at the
+ *    moment of the drop", which it was filed as: found as the attempt
+ *    began, after others may have dialled (`nothingToDial`).
  */
 export function reconnectOutcomeOf(
   ladder: "connected" | "failed" | "declined" | "refused" | "cancelled" | "unusable",
@@ -467,7 +478,7 @@ export function reconnectOutcomeOf(
     case "cancelled":
       return { kind: "stop", why: "customer" };
     case "unusable":
-      return { kind: "stop", why: "excluded" };
+      return { kind: "stop", why: "nothingToDial" };
     case "declined":
       return { kind: "failed" };
     case "failed":
@@ -715,7 +726,9 @@ export class AutoReconnect {
    * The list opens only while nothing is up, but nothing closes it when
    * the episode moves on beneath it: an attempt can start while the
    * customer is reading it, and land. So the choice can find any phase,
-   * and what it means differs:
+   * and what it means differs. (A server, as opposed to Automatic, is
+   * heard twice: as it is picked (`choosing`), which ends an episode under
+   * way there and then, and here once its switch request has answered.)
    *
    *  - Between attempts it ends the episode, whose next attempt would lead
    *    with the old route regardless. Connect dials the new choice.
@@ -758,6 +771,29 @@ export class AutoReconnect {
       this.retireLost("customer");
       return null;
     }
+    const dialling = this.phase.kind === "attempting";
+    this.cancel("customer");
+    return dialling ? "stopPass" : null;
+  }
+
+  /** A server picked in the list, at the moment it is picked -- before
+   * the switch request that `chose` waits on has answered.
+   *
+   * That request goes to the control plane, up to eight seconds an
+   * endpoint, slowest on exactly the filtered network whose tunnel just
+   * dropped. Told only when it answered, the episode went on meanwhile: a
+   * backoff falling due started an attempt led by the old route after the
+   * customer's press, and one that landed before the answer stayed up and
+   * armed on the old server (`chose` then found a tunnel shown, and kept
+   * it). So an episode under way ends here, as a press of the orb ends it,
+   * and its pass is to be stopped (`"stopPass"`).
+   *
+   * Nothing else is decided here. A tunnel armed, or nothing at all, waits
+   * for the answer: a switch that fails changes no tunnel, and `chose`
+   * knows by then what the screen shows. Automatic needs no request, and
+   * is `chose` at once. */
+  choosing(): "stopPass" | null {
+    if (this.phase.kind !== "waiting" && this.phase.kind !== "attempting") return null;
     const dialling = this.phase.kind === "attempting";
     this.cancel("customer");
     return dialling ? "stopPass" : null;
@@ -1104,7 +1140,11 @@ export class AutoReconnect {
         });
         return;
       case "stop":
-        this.stop(outcome.why, attempt + 1);
+        // An attempt that found nothing to dial made no attempt: the row
+        // counts the ones that dialled. Counted, a screen that came back
+        // from Settings with no credential after two failed dials filed
+        // "stopped after 3 attempt(s)".
+        this.stop(outcome.why, outcome.why === "nothingToDial" ? attempt : attempt + 1);
         return;
       case "failed":
         this.token += 1;

@@ -189,6 +189,38 @@ export async function stopPassBeforeRepair(
   return ladderPass.stopAndWait(ms);
 }
 
+/** Repairs under way, from the press until the service has answered. */
+let repairsRunning = 0;
+
+/** Whether a repair is under way: no automatic pass may start meanwhile,
+ * and the health poll stands aside. */
+export function repairUnderWay(): boolean {
+  return repairsRunning > 0;
+}
+
+/** Runs `work` -- the pass stopped, then the repair -- as a repair under
+ * way (`repairUnderWay`), however it ends.
+ *
+ * Stopping the pass in flight was not enough: nothing kept a new one from
+ * starting. After a failed pass whose teardown the service could not
+ * confirm, the screen shows "degraded" with "Repair my network" under it,
+ * and the health poll runs over "degraded" -- its strikes come from
+ * readings the repair itself disturbs. Pressed then, the repair found no
+ * pass to stop, and the poll's next strike began the failover's pass,
+ * whose first act is a Disconnect: on the service that supersedes and
+ * cancels the running job, so the repair was cancelled mid-step, its later
+ * steps reported failures the app had caused, and the pass's connect came
+ * up behind it, armed. Marked before anything is awaited, so a poll already
+ * measuring finds it when it is done. */
+export async function duringRepair<T>(work: () => Promise<T>): Promise<T> {
+  repairsRunning += 1;
+  try {
+    return await work();
+  } finally {
+    repairsRunning -= 1;
+  }
+}
+
 export async function collectDiagnostics(): Promise<Diagnostics> {
   return withTimeout(
     invoke<Diagnostics>("vpn_diagnostics"),

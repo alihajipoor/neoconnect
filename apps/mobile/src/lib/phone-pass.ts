@@ -1,4 +1,4 @@
-import type { ReconnectAttempt } from "@shared/lib/auto-reconnect";
+import type { ReconnectAttempt, ReconnectStamp } from "@shared/lib/auto-reconnect";
 import { ladderPass } from "@shared/lib/ladder-pass";
 import type { ProtocolUser } from "@shared/lib/types";
 
@@ -30,9 +30,10 @@ import type { ProtocolUser } from "@shared/lib/types";
  * and the episode's own word that an automatic pass is still wanted.
  *
  * The guard lapses after `LADDER_MAX_MS` without a step forward, as on
- * Windows. A phone's rung is bounded by its own ceilings -- the wait for a
- * teardown, the baseline walk, the egress check -- and by how long the
- * platform takes to start an engine. */
+ * Windows -- counting only time the app is in front (`passAwayChanged`),
+ * since the OS freezes a pass in the background. A phone's rung is bounded
+ * by its own ceilings -- the wait for a teardown, the baseline walk, the
+ * egress check -- and by how long the platform takes to start an engine. */
 
 /** Whether the pass holding the guard is an automatic reconnect's. */
 const reconnecting = { current: false };
@@ -68,6 +69,12 @@ export const presses = { current: 0 };
  * tunnel up; one app's, like the guard. */
 export const passTunnel: { current: ProtocolUser | "unproven" | null } = { current: null };
 
+/** A press of Connect that followed the pass holding the guard
+ * (`pressOverPass` "follow", or a Connect turned away because that pass
+ * took the guard first): which pass, and the stamp taken at that press.
+ * See `followPass`. */
+const followed: { generation: number; stamp: ReconnectStamp | null } = { generation: 0, stamp: null };
+
 /** A pass that holds the guard. */
 export interface PhonePass {
   readonly generation: number;
@@ -92,6 +99,11 @@ export interface PhonePass {
    * -- and an automatic pass its attempt -- while a step that hangs still
    * loses it. */
   progress(): void;
+  /** The stamp this pass's landing quotes to the reconnect
+   * (`autoReconnect.tunnelUp`): the one taken at the latest press of
+   * Connect that followed it (`followPass`), or else `own`, the one the
+   * pass took as it began. */
+  landing(own: ReconnectStamp): ReconnectStamp;
   /** On the way out, however the pass ended. Releases the guard -- if
    * this pass still holds it -- and tells every screen listening
    * (`ladderPass.onEnd`). */
@@ -129,6 +141,7 @@ export function beginPass(reconnect?: ReconnectAttempt, now = Date.now()): Phone
       ladderPass.progress(generation);
       reconnect?.progress();
     },
+    landing: (own) => (followed.generation === generation && followed.stamp !== null ? followed.stamp : own),
     end: () => {
       // A pass that outlived its guard has been replaced, and releasing
       // the guard now would let a third pass start beside the second.
@@ -174,6 +187,43 @@ export function pressOverPass(
   return "follow";
 }
 
+/** A press of Connect follows the pass holding the guard: the customer's
+ * own connect, still wanted -- what the press asked for. Its landing is
+ * this press's as much as that pass's, and quotes `stamp`, taken at this
+ * press, after the press's own `autoReconnect.cancel`.
+ *
+ * Every press counts as an overrule (`autoReconnect.cancel`, even with
+ * nothing to end), and the pass's own stamp was taken before this one. So
+ * the landing of the very connect the press chose to follow was refused as
+ * overruled: "You're protected" over a tunnel nothing had armed, whose
+ * drop then said "VPN connection lost" and reconnected nothing.
+ *
+ * Only for the customer's own pass, still wanted. An automatic reconnect's,
+ * or one already stopped, is taken over rather than followed
+ * (`pressOverPass`), and keeps the stamp it began with. A later press
+ * overrules this stamp as it would the pass's own. True when the pass
+ * holding the guard will quote it. */
+export function followPass(stamp: ReconnectStamp, now = Date.now()): boolean {
+  if (!ladderPass.inFlight(now) || reconnecting.current || ladderPass.cancel.current) return false;
+  followed.generation = ladderPass.generation.current;
+  followed.stamp = stamp;
+  return true;
+}
+
+/** A phone app gone to the background, or back to the front: the guard's
+ * clock is held while it is away (`ladderPass.hold`), as the reconnect's
+ * attempt ceiling is. */
+export function passAwayChanged(away: boolean, now = Date.now()): void {
+  if (away) ladderPass.hold(now);
+  else ladderPass.resume(now);
+}
+
+// Registered once, for the life of the app, as the reconnect's own are:
+// the guard outlives every screen.
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  document.addEventListener("visibilitychange", () => passAwayChanged(document.visibilityState === "hidden"));
+}
+
 /** How long a press of Connect waits for a pass it outranks
  * (`pressOverPass`) -- an automatic reconnect's, or one already stopped --
  * to let go. That pass checks its stop after every step, and the longest step
@@ -198,4 +248,6 @@ export function resetPhonePass(): void {
   reconnecting.current = false;
   presses.current = 0;
   passTunnel.current = null;
+  followed.generation = 0;
+  followed.stamp = null;
 }

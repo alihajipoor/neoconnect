@@ -38,6 +38,12 @@ import type { VpnAccess } from "./vpn";
  *    same way: dialling would switch ours back on, and the device off the
  *    other app's VPN. Asked per kind, since our own code turns nothing
  *    off; read from Apple's documentation, not observed on a device.
+ *    Across kinds -- another app's personal VPN connecting over our packet
+ *    tunnel turns nothing of ours off -- the sign is why the system
+ *    stopped our tunnel: `superceded`, which the extension records for
+ *    the app (`TunnelLastStop` in the plugin). Also from the
+ *    documentation, also unobserved. And asked again before every rung of
+ *    a pass, not only as it begins (`rungAccess`).
  *  - **The permission is gone.** A system that took the VPN away, or an
  *    iOS profile the customer deleted, leaves this app without one. An
  *    automatic attempt never raises the consent dialog -- that is a
@@ -120,6 +126,40 @@ export async function reconnectPreflight(deps: ReconnectPreflight): Promise<Reco
   // Only a platform that says IKEv2 is not installed holds it back;
   // Android says nothing of it.
   return { kind: "clear", ikev2: access.ikev2 !== false };
+}
+
+/** What an automatic pass on an iPhone does with the rung it is about to
+ * dial, on the platform's answer asked right then (`vpnAccess`; null when
+ * it could not be read).
+ *
+ * The preflight asks once, as the attempt begins. A pass then walks its
+ * rungs for minutes on a filtered network, and the app can be left and
+ * come back to in that time, so what the preflight cleared can be untrue
+ * by the next rung:
+ *
+ *  - another VPN app connected meanwhile (`chosenElsewhere`). The next Xray
+ *    or WireGuard rung set our configuration enabled again and started it,
+ *    switching the device off that app's working VPN with nobody pressing
+ *    anything -- and if the rung then failed, leaving it with none;
+ *  - our configuration was deleted in Settings meanwhile (`granted` false,
+ *    or `ikev2` false). The next rung saved a new one, and up came the
+ *    "Add VPN Configurations" prompt, passcode and all.
+ *
+ * So asked again before every dial. `"skip"` passes over an IKEv2 rung
+ * whose configuration is gone, as the clearance does; `"permission"` and
+ * `"otherVpn"` end the episode as the preflight would; `"unknown"` -- the
+ * answer could not be read -- dials nothing more on this pass, which ends
+ * as failed, and the next attempt's preflight asks again. Not Android:
+ * asking there (`VpnService.prepare`) can itself move the VPN back to this
+ * app, and `tunnelGone` sees every VPN anyway. */
+export type RungAccess = "dial" | "skip" | "unknown" | "permission" | "otherVpn";
+
+export function rungAccess(access: VpnAccess | null, protocol: string): RungAccess {
+  if (access === null) return "unknown";
+  if (!access.granted) return "permission";
+  if (access.chosenElsewhere === true) return "otherVpn";
+  if (protocol === "IKEV2" && access.ikev2 === false) return "skip";
+  return "dial";
 }
 
 /** Whether a screen mounting -- back from Settings, a new location, the

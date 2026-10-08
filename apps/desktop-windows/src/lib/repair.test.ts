@@ -4,10 +4,12 @@ import { LADDER_MAX_MS, ladderPass } from "./ladder-pass";
 import {
   anythingFixed,
   diagnosticsToText,
+  duringRepair,
   failedSteps,
   indeterminateSteps,
   REPAIR_PASS_WAIT_MS,
   REPAIR_TIMEOUT_MS,
+  repairUnderWay,
   stopPassBeforeRepair,
   unresolvedSteps,
   type Diagnostics,
@@ -337,5 +339,53 @@ describe("a repair pressed while a connect is under way", () => {
     expect(REPAIR_PASS_WAIT_MS).toBeGreaterThan(12_000 + 3_000 + 2_500 + teardown);
     // And no longer than the guard itself, past which no pass is in flight.
     expect(REPAIR_PASS_WAIT_MS).toBeLessThan(LADDER_MAX_MS);
+  });
+});
+
+describe("a repair under way", () => {
+  /** A repair the test answers when it chooses. */
+  function pending<T>(value: T) {
+    const gate = { open: (): void => undefined };
+    const work = () =>
+      new Promise<T>((resolve) => {
+        gate.open = () => resolve(value);
+      });
+    return { gate, work };
+  }
+
+  it("is one from before anything is awaited until the repair has answered, however it ends", async () => {
+    // What keeps an automatic pass from starting meanwhile -- the health
+    // poll's failover, whose opening Disconnect cancelled the repair
+    // mid-step on the service. Marked at once, so a poll already measuring
+    // finds it when it is done.
+    expect(repairUnderWay()).toBe(false);
+    const { gate, work } = pending("report");
+    const repaired = duringRepair(work);
+    expect(repairUnderWay()).toBe(true);
+    gate.open();
+    expect(await repaired).toBe("report");
+    expect(repairUnderWay()).toBe(false);
+
+    // A service that cannot be reached throws; the mark goes with it.
+    await expect(
+      duringRepair(async () => {
+        expect(repairUnderWay()).toBe(true);
+        throw new Error("the service did not answer");
+      }),
+    ).rejects.toThrow("the service did not answer");
+    expect(repairUnderWay()).toBe(false);
+  });
+
+  it("stays one while any repair runs, the Settings card's and the inline one's", async () => {
+    const first = pending(undefined);
+    const second = pending(undefined);
+    const a = duringRepair(first.work);
+    const b = duringRepair(second.work);
+    first.gate.open();
+    await a;
+    expect(repairUnderWay()).toBe(true);
+    second.gate.open();
+    await b;
+    expect(repairUnderWay()).toBe(false);
   });
 });

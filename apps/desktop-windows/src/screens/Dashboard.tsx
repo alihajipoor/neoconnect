@@ -77,6 +77,7 @@ import {
 } from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
+import { repairUnderWay } from "../lib/repair";
 import {
   asReconnectReport,
   autoReconnect,
@@ -1422,7 +1423,10 @@ export function Dashboard({
   // credential on the account, or no answer and nothing cached -- ends
   // the episode instead. Held, it would say "Reconnecting..." over a
   // screen that never will; declined, every attempt would be spent on
-  // nothing.
+  // nothing. Ended as what it is (`nothingToDial`), an attempt that
+  // dialled nothing: filed as `excluded` it read "ruled out at the moment
+  // of the drop" -- after earlier attempts had dialled -- and counted
+  // itself among the attempts made.
   const runLadderRef = useRef(runLadder);
   runLadderRef.current = runLadder;
   const protocolUserRef = useRef(protocolUser);
@@ -1432,7 +1436,7 @@ export function Dashboard({
     return autoReconnect.bind(async (attempt) => {
       const excluded = reconnectExclusion();
       if (excluded !== null) return { kind: "stop", why: excluded };
-      if (protocolUserRef.current === null) return { kind: "stop", why: "excluded" };
+      if (protocolUserRef.current === null) return { kind: "stop", why: "nothingToDial" };
       passResultRef.current = { routeId: null, errorKind: null };
       // Cleared as a press clears it before its pass: the line on screen is
       // the last attempt's, and that attempt is over. Left up, it kept the
@@ -1510,8 +1514,12 @@ export function Dashboard({
     // below, which only covers the measuring.
     const measure = async (): Promise<boolean> => {
       // A ladder already running will decide the state itself; polling
-      // underneath it would fight over the same fields.
-      if (ladderInFlight()) return false;
+      // underneath it would fight over the same fields. Nor during a
+      // repair: what it reads then is the repair at work -- the service's
+      // fallback while the repair holds its thread, egress through
+      // adapters being removed -- and its strikes started the failover
+      // into the middle of the repair (`duringRepair`).
+      if (ladderInFlight() || repairUnderWay()) return false;
       lastCheckAtRef.current = Date.now();
 
       // Stamped before the first question, not after the last answer.
@@ -1969,6 +1977,18 @@ export function Dashboard({
     return choice === "keepTunnel" ? (protocolUserRef.current?.routeId ?? routeId) : routeId;
   }
 
+  /** A server, or Automatic, picked in the list -- heard as it is picked,
+   * before a server's switch request answers (`chooseLocation` waits for
+   * that). A reconnect between attempts ends here, and one dialling has
+   * its pass stopped, as "Stop reconnecting" does: heard only with the
+   * answer, which on a filtered network takes seconds, a backoff falling
+   * due meanwhile dialled the old route after the press, and an attempt
+   * that landed first stayed up and armed on it. See
+   * `autoReconnect.choosing`. */
+  function pickingLocation() {
+    if (autoReconnect.choosing() === "stopPass") void stopPass();
+  }
+
   /** Every press does something, and no press can leave the app worse
    * off than it found it.
    *
@@ -2214,6 +2234,11 @@ export function Dashboard({
     } = {},
   ): Promise<LadderOutcome> {
     if (!protocolUser || ladderInFlight()) return "declined";
+    // Never an automatic pass while a repair runs -- the health poll's
+    // failover, or a reconnect's attempt. Its first act is a Disconnect,
+    // which cancels the repair mid-step on the service, and its connect
+    // comes up behind the repair. See `duringRepair`.
+    if (options.automatic && repairUnderWay()) return "declined";
     // Its own number, so a pass that stalled past its deadline can be
     // told apart from the one that replaced it. Without that, a stalled
     // pass finally waking would clear the live pass's guard and write
@@ -3793,6 +3818,9 @@ export function Dashboard({
           // no server call, because every route's credential is already
           // provisioned and the ladder chooses among them at connect time.
           automatic={!chosenRouteId}
+          // The pick, as it is made: a reconnect under way ends there,
+          // not once a server's switch request has answered.
+          onPicking={pickingLocation}
           onChooseAutomatic={() => {
             // A new choice while a reconnect waits ends the reconnect:
             // its next attempt would lead with the old route regardless.

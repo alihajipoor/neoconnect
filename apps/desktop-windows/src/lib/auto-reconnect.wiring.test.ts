@@ -282,7 +282,9 @@ describe("which screen runs an attempt", () => {
   });
 
   it("on a screen that loaded nothing to dial, ends the episode rather than spending its attempts", () => {
-    const check = runner.indexOf('if (protocolUserRef.current === null) return { kind: "stop", why: "excluded" };');
+    // Ended as an attempt that dialled nothing, not as one "ruled out at
+    // the moment of the drop" -- counted among the attempts made.
+    const check = runner.indexOf('if (protocolUserRef.current === null) return { kind: "stop", why: "nothingToDial" };');
     expect(check).toBeGreaterThan(runner.indexOf("const excluded = reconnectExclusion();"));
     expect(check).toBeLessThan(runner.indexOf("runLadderRef.current("));
     // The credential the screen has now, not the one it had when bound.
@@ -423,6 +425,49 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     expect(cancel).toBeGreaterThan(0);
     expect(stop).toBeGreaterThan(cancel);
     expect(repaired).toBeGreaterThan(stop);
+  });
+
+  it("no automatic pass starts while a repair runs, and the health poll stands aside", () => {
+    // Stopping the pass in flight left nothing to keep a new one from
+    // starting: after a failed pass shown as "degraded", the poll's strikes
+    // -- read off the repair at work -- began the failover's pass, whose
+    // opening Disconnect cancelled the repair mid-step on the service, and
+    // whose connect came up behind it.
+    const run = repair.slice(repair.indexOf("const run = useCallback(async () => {"));
+    const marked = run.indexOf("await duringRepair(async () => {");
+    expect(marked).toBeGreaterThan(run.indexOf('autoReconnect.cancel("customer");'));
+    // The stop and the repair both inside it.
+    expect(run.indexOf("await stopPassBeforeRepair();")).toBeGreaterThan(marked);
+    expect(run.indexOf("await repairNetwork();")).toBeGreaterThan(marked);
+    expect(run.indexOf("await repairNetwork();")).toBeLessThan(run.indexOf("});", marked));
+    // The ladder turns an automatic pass away while it runs -- the failover
+    // and a reconnect's attempt alike -- before anything is said or sent.
+    const ladder = body("async function runLadder(");
+    const declined = ladder.indexOf('if (options.automatic && repairUnderWay()) return "declined";');
+    expect(declined).toBeGreaterThan(0);
+    expect(ladder.slice(0, declined)).not.toContain("await ");
+    expect(declined).toBeLessThan(ladder.indexOf("const generation = ++ladderGenerationRef.current;"));
+    expect(declined).toBeLessThan(ladder.indexOf("await serviceDisconnect()"));
+    // The poll's measurement reads nothing while it runs, so it counts no
+    // strike off the repair's own disturbance.
+    expect(dashboard).toContain("if (ladderInFlight() || repairUnderWay()) return false;");
+  });
+
+  it("a server picked in the list ends a reconnect under way as it is picked, not when the switch answers", () => {
+    // The switch request can take seconds; told only with its answer, an
+    // attempt that began or landed meanwhile dialled the old route after
+    // the press. The picker is shared, so this is both clients'.
+    const picker = readFileSync(new URL("../components/LocationPicker.tsx", import.meta.url), "utf8");
+    const pick = picker.slice(picker.indexOf("async function handlePick(route: RouteOption) {"));
+    const told = pick.indexOf("onPicking?.();");
+    expect(told).toBeGreaterThan(0);
+    expect(told).toBeLessThan(pick.indexOf("await switchRoute(subscriptionId, route.id);"));
+    // Automatic too, before its own handler.
+    const automatic = picker.slice(picker.indexOf("if (automatic || switchingId) return;"));
+    expect(automatic.indexOf("onPicking?.();")).toBeLessThan(automatic.indexOf("onChooseAutomatic();"));
+    const picking = body("function pickingLocation() {");
+    expect(picking).toContain('if (autoReconnect.choosing() === "stopPass") void stopPass();');
+    expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain("onPicking={pickingLocation}");
   });
 
   it("the inline repair is not offered while an attempt dials: the last attempt's error is cleared as the next begins", () => {

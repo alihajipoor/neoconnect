@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ReconnectAttempt } from "@shared/lib/auto-reconnect";
+import { AutoReconnect, vouching, type ReconnectAttempt } from "@shared/lib/auto-reconnect";
 import { LADDER_MAX_MS, ladderPass } from "@shared/lib/ladder-pass";
 import {
   beginPass,
+  followPass,
+  passAwayChanged,
   passInFlight,
   pressOverPass,
   reconnectPassInFlight,
@@ -211,6 +213,172 @@ describe("what a press of Connect does about a pass already running", () => {
   });
 });
 
+describe("a press of Connect that follows the customer's own pass", () => {
+  /** The shared controller on a still clock: only stamps and arming
+   * matter here. */
+  function controller() {
+    return new AutoReconnect({
+      now: () => 1_000_000,
+      elapsed: () => 0,
+      setTimer: () => 0,
+      clearTimer: () => undefined,
+      online: () => true,
+      foreground: () => true,
+      session: () => 1,
+      report: () => undefined,
+      slotIdle: () => undefined,
+    });
+  }
+
+  it("arms that pass's landing, which its own stamp, taken before the press, could not", () => {
+    // Connect pressed, stopped, pressed again: the second press waits for
+    // the first pass to let go, and the customer opens Settings meanwhile.
+    // The screen back from Settings shows Connect over the second pass,
+    // and a press there follows it -- after its own `cancel`, which counts
+    // as an overrule whatever it finds. The landing then quoted the stamp
+    // the pass took as it began, was refused, and "You're protected" stood
+    // over a tunnel whose drop reconnected nothing.
+    const rc = controller();
+    const pass = taken(beginPass());
+    const own = rc.stamp();
+    // The press: `handleConnectToggle` and `connectNow` each cancel.
+    rc.cancel("customer");
+    rc.cancel("customer");
+    expect(pressOverPass()).toBe("follow");
+    expect(followPass(rc.stamp())).toBe(true);
+    rc.tunnelUp({ routeId: "r", fresh: true, stamp: pass.landing(own) });
+    expect(vouching(rc.current(), 1)).toBe(true);
+
+    // Control: not followed, the same landing arms nothing.
+    resetPhonePass();
+    const c = controller();
+    const unfollowed = taken(beginPass());
+    const before = c.stamp();
+    c.cancel("customer");
+    c.tunnelUp({ routeId: "r", fresh: true, stamp: unfollowed.landing(before) });
+    expect(vouching(c.current(), 1)).toBe(false);
+  });
+
+  it("is overruled by a later press as the pass's own stamp would be", () => {
+    const rc = controller();
+    const pass = taken(beginPass());
+    const own = rc.stamp();
+    rc.cancel("customer");
+    followPass(rc.stamp());
+    // A stop pressed after it: the landing arms nothing.
+    rc.cancel("customer");
+    rc.tunnelUp({ routeId: "r", fresh: true, stamp: pass.landing(own) });
+    expect(vouching(rc.current(), 1)).toBe(false);
+  });
+
+  it("re-stamps only the customer's own pass, still wanted, and only that pass", () => {
+    const rc = controller();
+    // An automatic reconnect's is taken over, never followed.
+    const automatic = taken(beginPass(attempt()));
+    const stamp = rc.stamp();
+    expect(followPass({ overrules: 99, session: 1 })).toBe(false);
+    expect(automatic.landing(stamp)).toBe(stamp);
+    automatic.end();
+    // Nor one already stopped, still unwinding.
+    const stopped = taken(beginPass());
+    ladderPass.cancel.current = true;
+    expect(followPass({ overrules: 99, session: 1 })).toBe(false);
+    expect(stopped.landing(stamp)).toBe(stamp);
+    stopped.end();
+    // Nothing running, nothing to follow.
+    expect(followPass({ overrules: 99, session: 1 })).toBe(false);
+    // Followed, and then a newer pass: that one keeps its own.
+    const first = taken(beginPass());
+    const followed = { overrules: 7, session: 1 };
+    expect(followPass(followed)).toBe(true);
+    expect(first.landing(stamp)).toBe(followed);
+    first.end();
+    const next = taken(beginPass());
+    expect(next.landing(stamp)).toBe(stamp);
+  });
+});
+
+describe("the guard while the app is away", () => {
+  it("is held, so a pass the OS froze for minutes is still the pass when the app comes back", () => {
+    // iOS freezes the pass in the background. Counted against the guard,
+    // three minutes away read as a lapsed guard on return until the pass's
+    // next rung: a screen mounted then offered Connect, and Connect began a
+    // second ladder beside the first.
+    const start = 1_000_000;
+    taken(beginPass(undefined, start));
+    passAwayChanged(true, start + 10_000);
+    expect(passInFlight(start + 10_000 + 200_000)).toBe(true);
+    passAwayChanged(false, start + 10_000 + 200_000);
+    const back = start + 210_000;
+    expect(passInFlight(back + 1)).toBe(true);
+    expect(pressOverPass({}, back + 1)).toBe("follow");
+    // Its time in front still runs out: 10 s before, and the rest after.
+    expect(passInFlight(back + LADDER_MAX_MS - 10_000 - 1)).toBe(true);
+    expect(passInFlight(back + LADDER_MAX_MS - 10_000)).toBe(false);
+
+    // Control: not held, the same stretch away lapses it.
+    resetPhonePass();
+    taken(beginPass(undefined, start));
+    expect(passInFlight(start + 210_001)).toBe(false);
+  });
+
+  it("is held from where it was, not renewed: a wedged pass still loses it to a customer who keeps coming back", () => {
+    const start = 1_000_000;
+    taken(beginPass(undefined, start));
+    let now = start;
+    // A minute in front, ten seconds away, again and again.
+    for (let i = 0; i < 3; i++) {
+      now += 60_000;
+      passAwayChanged(true, now);
+      now += 10_000;
+      passAwayChanged(false, now);
+    }
+    // 180 s in front by now: past the guard.
+    expect(passInFlight(now)).toBe(false);
+  });
+
+  it("goes on counting a pass that steps forward while away, as Android's can", () => {
+    const start = 1_000_000;
+    const pass = taken(beginPass(undefined, start));
+    passAwayChanged(true, start + 100_000);
+    ladderPass.progress(pass.generation, start + 150_000);
+    passAwayChanged(false, start + 400_000);
+    // The step forward was the last sign of life; nothing since was in front.
+    expect(passInFlight(start + 400_000 + LADDER_MAX_MS - 1)).toBe(true);
+    expect(passInFlight(start + 400_000 + LADDER_MAX_MS)).toBe(false);
+  });
+
+  it("is told by the app's visibility, registered once for the life of the app", async () => {
+    vi.resetModules();
+    const listeners: (() => void)[] = [];
+    const doc = {
+      visibilityState: "visible" as "visible" | "hidden",
+      addEventListener: (type: string, fn: () => void) => {
+        if (type === "visibilitychange") listeners.push(fn);
+      },
+    };
+    vi.stubGlobal("document", doc);
+    try {
+      const fresh = await import("./phone-pass");
+      const shared = await import("@shared/lib/ladder-pass");
+      expect(listeners).toHaveLength(1);
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000_000);
+      taken(fresh.beginPass());
+      vi.setSystemTime(1_010_000);
+      doc.visibilityState = "hidden";
+      listeners[0]!();
+      vi.setSystemTime(1_310_000);
+      doc.visibilityState = "visible";
+      listeners[0]!();
+      expect(shared.ladderPass.inFlight()).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+});
+
 describe("a press of Connect over an automatic pass", () => {
   it("tells it to stop, and goes on once it has let go", async () => {
     vi.useFakeTimers();
@@ -367,7 +535,7 @@ describe("the phone dashboard's wiring", () => {
     const stopped = tail.indexOf("if (pass.stopped()) {\n      await standDown(false);\n      return reportCancelled();\n    }");
     expect(stopped).toBeGreaterThan(owned);
     // Before the screen, the slot or the report hears anything of it.
-    for (const said of ["setConnectionError(lastError);", "void deviceSlot.release();", "void reportAttempt("]) {
+    for (const said of ["setConnectionError(heldBack !== null ? null : lastError);", "void deviceSlot.release();", "void reportAttempt("]) {
       expect(tail.indexOf(said), said).toBeGreaterThan(stopped);
     }
     // Set only where a rung is about to be dialled.
@@ -517,5 +685,53 @@ describe("the phone dashboard's wiring", () => {
     // followed, not doubled; anything else is taken over (`pressOverPass`).
     expect(connect).toMatch(/if \(over === "follow"\) \{[^}]*return;\n\s+\}/);
     expect(connect).toContain('if (over === "takeOver") {');
+  });
+
+  it("arms the landing of a pass a press followed, on that press's stamp", () => {
+    // The press's own `cancel` overrules the stamp the pass took as it
+    // began, and the landing of the very connect it chose to follow went
+    // unarmed: "You're protected", and its drop reconnected nothing.
+    const connect = body("async function connectNow(takeover?: string[]) {");
+    const follow = connect.slice(connect.indexOf('if (over === "follow") {'));
+    expect(follow.slice(0, follow.indexOf("return;"))).toContain("followPass(autoReconnect.stamp());");
+    expect(connect.indexOf('autoReconnect.cancel("customer");')).toBeLessThan(connect.indexOf('if (over === "follow") {'));
+    // So does the press another pass beat to the guard, which it follows too.
+    const declined = connect.slice(connect.indexOf('if ((await runLadder({ takeover })) === "declined") {'));
+    expect(declined.slice(0, declined.indexOf("\n    }\n"))).toContain("followPass(autoReconnect.stamp());");
+    // And the landing quotes whichever is the latest.
+    const walk = body("async function walkLadder(pass: PhonePass, options: LadderOptions): Promise<LadderOutcome> {");
+    expect(walk).toContain(
+      "autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: pass.landing(reconnectStamp) });",
+    );
+    expect(walk).not.toContain("fresh: true, stamp: reconnectStamp });");
+  });
+
+  it("waits for the last rung's engine before letting go, at every stop in the walk", () => {
+    // The previous rung's engine is told to stop at the end of its rung and
+    // not waited for. A pass stopped by no press -- its attempt over by its
+    // ceiling -- then told the screen what the platform had up: that
+    // engine on its way down, shown as "Connected, not confirmed", or
+    // "You're protected" over a fresh WireGuard handshake.
+    const walk = body("async function walkLadder(pass: PhonePass, options: LadderOptions): Promise<LadderOutcome> {");
+    const loop = walk.slice(walk.indexOf("for (const [index, candidate] of candidates.entries()) {"));
+    const top = loop.slice(0, loop.indexOf("pass.progress();"));
+    expect(top).toContain("await standDown(dialled);");
+    const dial = loop.indexOf("dialled = true;");
+    const beforeDial = loop.slice(loop.lastIndexOf("if (pass.stopped()) {", dial), dial);
+    expect(beforeDial).toContain("await standDown(dialled);");
+    expect(loop.slice(0, dial)).not.toContain("await standDown(false);");
+  });
+
+  it("shows an engine a pass dialled and never proved as nothing up, whoever ends the pass", () => {
+    // Its engine can outlive the wait for it; read raw, the screen said
+    // "Connected, not confirmed" over a rung the pass rejected, beside the
+    // episode's "VPN connection lost", and the health poll started over it.
+    const settle = body("async function settleUndialled() {");
+    expect(settle).toContain(
+      'const leftOver = state !== "disconnected" && !tearingDown && passTunnel.current === "unproven";',
+    );
+    expect(settle).toContain('setConnectionState(leftOver ? "disconnected" : state);');
+    expect(settle).toContain("const tearingDown = slotTeardown.owed() || customerTeardown.owed();");
+    expect(settle).not.toContain("setConnectionState(state);");
   });
 });

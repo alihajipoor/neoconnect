@@ -5,6 +5,7 @@ import {
   anythingFixed,
   failedSteps,
   indeterminateSteps,
+  duringRepair,
   repairCommandLine,
   repairNetwork,
   stopPassBeforeRepair,
@@ -85,9 +86,13 @@ export function RepairNetwork({
       // And a pass already dialling -- the reconnect's, or any other -- is
       // stopped and let go of first, so it neither brings a tunnel up
       // behind the repair nor cancels the repair with its teardown. See
-      // `stopPassBeforeRepair`.
-      await stopPassBeforeRepair();
-      const result = await repairNetwork();
+      // `stopPassBeforeRepair`. No automatic pass starts until the repair
+      // is over, either -- the health poll's failover above all
+      // (`duringRepair`).
+      const result = await duringRepair(async () => {
+        await stopPassBeforeRepair();
+        return await repairNetwork();
+      });
       if (!alive.current) return;
       setReport(result);
     } catch (err) {

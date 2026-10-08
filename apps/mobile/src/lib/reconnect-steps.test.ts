@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { droppedWhileAway, reconnectPreflight, type ReconnectPreflight } from "./reconnect-steps";
+import { droppedWhileAway, reconnectPreflight, rungAccess, type ReconnectPreflight } from "./reconnect-steps";
 
 function deps(over: Partial<ReconnectPreflight> = {}): ReconnectPreflight & { asked: string[] } {
   const asked: string[] = [];
@@ -143,6 +143,41 @@ describe("before a phone's reconnect may dial", () => {
   });
 });
 
+describe("an iPhone's automatic pass, before each rung's dial", () => {
+  // The preflight's answer is from as the attempt began; a pass walks for
+  // minutes on a filtered network, and the app can be left and come back
+  // to meanwhile.
+  it("dials while what the preflight cleared still holds", () => {
+    const access = { granted: true, ikev2: true, chosenElsewhere: false };
+    for (const protocol of ["XRAY_VLESS_REALITY", "WIREGUARD", "IKEV2"]) {
+      expect(rungAccess(access, protocol), protocol).toBe("dial");
+    }
+  });
+
+  it("stops once another VPN app has connected since, rather than switch the device off it", () => {
+    // The next Xray or WireGuard rung set our configuration enabled again
+    // and started it: the device off the other app's working VPN, and on
+    // no VPN at all if the rung then failed.
+    expect(rungAccess({ granted: true, ikev2: true, chosenElsewhere: true }, "XRAY_VLESS_REALITY")).toBe("otherVpn");
+    expect(rungAccess({ granted: true, ikev2: false, chosenElsewhere: true }, "WIREGUARD")).toBe("otherVpn");
+  });
+
+  it("stops once our configuration has been deleted since, rather than raise the prompt saving one asks", () => {
+    expect(rungAccess({ granted: false, ikev2: true }, "XRAY_TROJAN")).toBe("permission");
+    expect(rungAccess({ granted: false, ikev2: true, chosenElsewhere: true }, "IKEV2")).toBe("permission");
+  });
+
+  it("passes over an IKEv2 rung whose own configuration has been deleted since, and dials the others", () => {
+    expect(rungAccess({ granted: true, ikev2: false }, "IKEV2")).toBe("skip");
+    expect(rungAccess({ granted: true, ikev2: false }, "XRAY_VLESS_TLS")).toBe("dial");
+  });
+
+  it("dials nothing more on an answer it could not read", () => {
+    // The next attempt's preflight asks again; the episode is bounded.
+    expect(rungAccess(null, "XRAY_VLESS_REALITY")).toBe("unknown");
+  });
+});
+
 describe("a drop nobody saw", () => {
   const base = { vouching: true, answered: true, connected: false, tearingDown: false };
 
@@ -222,9 +257,48 @@ describe("the phone dashboard's wiring", () => {
     // Never the dialog.
     expect(runner).not.toContain("requestVpnPermission");
     expect(runner).toContain('if (cleared.kind !== "clear") return cleared;');
-    expect(runner).toContain("runLadderRef.current({ reconnect: attempt, skipIkev2: !cleared.ikev2 })");
+    expect(runner).toMatch(
+      /runLadderRef\.current\(\{\n\s+reconnect: attempt,\n\s+skipIkev2: !cleared\.ikev2,\n[^]*?rungAccess: isIOS\(\) \? vpnAccess : undefined,\n\s+\}\);/,
+    );
     expect(runner).toContain("reconnectOutcomeOf(outcome, passResultRef.current)");
     expect(runner).not.toContain("setConnectionState(");
+  });
+
+  it("asks an iPhone again before every rung's dial, and ends the episode on what it says", () => {
+    // The preflight's answer is from as the attempt began. Another VPN app
+    // connected while the pass walked was dialled over by the next rung --
+    // the device switched off that app's VPN -- and a configuration
+    // deleted meanwhile was saved again, raising the "Add VPN
+    // Configurations" prompt in front of somebody who pressed nothing.
+    const walk = dashboard.slice(dashboard.indexOf("async function walkLadder("));
+    const loop = walk.indexOf("for (const [index, candidate] of candidates.entries()) {");
+    const asked = walk.indexOf("const access = await options.rungAccess().catch(() => null);");
+    const judged = walk.indexOf("const verdict = rungAccess(access, candidate.protocol);");
+    const dial = walk.indexOf("dialled = true;");
+    expect(asked).toBeGreaterThan(walk.indexOf("keepBaseline(baseline);", loop));
+    expect(judged).toBeGreaterThan(asked);
+    expect(dial).toBeGreaterThan(judged);
+    // The stop and session checks still come after it, right before the dial.
+    const last = walk.slice(judged, dial);
+    expect(last).toContain('if (sessionGeneration() !== sessionAtStart) return "failed";');
+    expect(last).toContain("if (pass.stopped()) {");
+    // Skipped as the clearance skips IKEv2; ended on anything else.
+    const skip = walk.slice(walk.indexOf('if (verdict === "skip") {', judged));
+    expect(skip.slice(0, skip.indexOf("continue;"))).toContain("passedOver = true;");
+    expect(last).toMatch(/if \(verdict === "unknown"\) \{[^]*?break;\n\s+\}/);
+    expect(last).toMatch(/if \(verdict !== "dial"\) \{\n\s+heldBack = verdict;\n\s+break;\n\s+\}/);
+    // The pass ends saying nothing of its own -- the episode says "VPN
+    // connection lost" -- and hands the episode why.
+    const tail = walk.slice(walk.lastIndexOf("if (dialled) await engineGone();"));
+    expect(tail).toContain("setConnectionError(heldBack !== null ? null : lastError);");
+    expect(tail).toContain("? { routeId: null, errorKind: null, stop: heldBack }");
+    const bindAt2 = dashboard.indexOf("autoReconnect.bind(async (attempt) => {");
+    const runner2 = dashboard.slice(bindAt2, dashboard.indexOf("\n    });\n", bindAt2));
+    expect(runner2).toContain("const held = passResultRef.current.stop;");
+    expect(runner2).toContain('return held !== undefined ? { kind: "stop", why: held } : reconnectOutcomeOf(outcome, passResultRef.current);');
+    // Only the automatic pass on an iPhone asks: on Android, asking is
+    // `VpnService.prepare`, which can move the VPN back to this app.
+    expect(dashboard.split("rungAccess:").length - 1).toBe(1);
   });
 
   it("binds the runner only once loadAll has the screen ready", () => {
@@ -285,7 +359,7 @@ describe("the phone dashboard's wiring", () => {
       'if (passedOver && lastError?.messageKey === "err.allProtocolsFailed") {\n      lastError = { ...lastError, messageKey: "err.someProtocolsNotTried" };',
     );
     expect(said).toBeGreaterThan(0);
-    expect(said).toBeLessThan(walk.indexOf("setConnectionError(lastError);"));
+    expect(said).toBeLessThan(walk.indexOf("setConnectionError(heldBack !== null ? null : lastError);"));
   });
 
   it("asks an iPhone whether another configuration was chosen over ours one kind at a time", () => {
@@ -303,8 +377,49 @@ describe("the phone dashboard's wiring", () => {
       "let tunnelChosenElsewhere = !managers.isEmpty && !managers.contains(where: { $0.isEnabled })",
     );
     expect(swift).toContain("let ikev2ChosenElsewhere = ikev2.map { !$0.isEnabled } ?? false");
-    expect(swift).toContain('"chosenElsewhere": tunnelChosenElsewhere || ikev2ChosenElsewhere,');
+    expect(swift).toContain(
+      '"chosenElsewhere": tunnelChosenElsewhere || ikev2ChosenElsewhere || tunnelSuperseded,',
+    );
     expect(swift).not.toContain("!enabled.contains(true)");
+  });
+
+  it("asks an iPhone why its tunnel last stopped, which sees another app's VPN of the other kind", () => {
+    // Another app's personal VPN connecting stops our packet tunnel and
+    // turns nothing of ours off, so asked per kind it went unseen -- on a
+    // phone with no IKEv2 profile of ours, always -- and the reconnect
+    // switched the device off that app's VPN. The system says why it
+    // stopped a provider (`superceded`); the extension records it where
+    // the app can read it. Neither binary is compiled here; this pins what
+    // each does, and that they agree on where.
+    const plugin = readFileSync(
+      new URL("../../plugins/vpn/ios/Sources/NeoxifyVpnPlugin/NeoxifyVpnPlugin.swift", import.meta.url),
+      "utf8",
+    );
+    const tunnel = readFileSync(
+      new URL("../../plugins/vpn/tunnel/Sources/NeoxifyTunnel/PacketTunnelProvider.swift", import.meta.url),
+      "utf8",
+    );
+    const script = readFileSync(new URL("../../scripts/add-tunnel-extension.mjs", import.meta.url), "utf8");
+    // The same app group both targets are entitled to, and the same key.
+    expect(script).toContain('const GROUP = "group.com.neoxify.mobile";');
+    for (const swift of [plugin, tunnel]) {
+      expect(swift).toContain('static let suite = "group.com.neoxify.mobile"');
+      expect(swift).toContain('static let key = "tunnelLastStopReason"');
+    }
+    // Recorded as the system stops the tunnel, cleared as it starts.
+    const stop = tunnel.slice(tunnel.indexOf("override func stopTunnel(with reason: NEProviderStopReason"));
+    expect(stop.slice(0, stop.indexOf("completionHandler()"))).toContain("LastStop.record(reason)");
+    const start = tunnel.slice(tunnel.indexOf("override func startTunnel("));
+    expect(start.indexOf("LastStop.clear()")).toBeGreaterThan(0);
+    expect(start.indexOf("LastStop.clear()")).toBeLessThan(start.indexOf("completionHandler("));
+    expect(tunnel).toContain("UserDefaults(suiteName: suite)?.set(reason.rawValue, forKey: key)");
+    // Read as another configuration taking over, and only that: our own
+    // disconnects are `userInitiated`.
+    expect(plugin).toContain("return reason == NEProviderStopReason.superceded.rawValue");
+    expect(plugin).toContain("let tunnelSuperseded = TunnelLastStop.superseded()");
+    // A landing on our own IKEv2 makes it old news.
+    const ikev2 = plugin.slice(plugin.indexOf("try await Ikev2Engine.connect("));
+    expect(ikev2.slice(0, ikev2.indexOf("invoke.resolve()"))).toContain("TunnelLastStop.clear()");
   });
 
   it("turns a pass away before anything on screen moves when there is nothing to dial", () => {
@@ -343,7 +458,7 @@ describe("the phone dashboard's wiring", () => {
     // Landed, failed, cancelled and nothing usable: all four reports.
     expect(ladder.split("asReconnectReport(").length - 1).toBe(4);
     expect(ladder).toContain(
-      "if (!options.reconnect) {\n            autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: reconnectStamp });",
+      "if (!options.reconnect) {\n            autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: pass.landing(reconnectStamp) });",
     );
   });
 
@@ -416,7 +531,18 @@ describe("the phone dashboard's wiring", () => {
     const start = dashboard.indexOf("function chooseLocation(routeId: string | null): string | null {");
     expect(start).toBeGreaterThan(0);
     const choose = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
-    expect(choose).toContain("pressRef.current += 1;");
+    // Counted as a press where it is picked, not here: a server's choice is
+    // heard here once its switch request answers, which can be after the
+    // customer closed the list and pressed Connect -- and that Connect,
+    // superseded, returned without dialling.
+    expect(choose).not.toContain("pressRef.current += 1;");
+    const pickAt = dashboard.indexOf("function pickingLocation() {");
+    expect(pickAt).toBeGreaterThan(0);
+    const picking = dashboard.slice(pickAt, dashboard.indexOf("\n  }\n", pickAt));
+    expect(picking).toContain("pressRef.current += 1;");
+    // And an episode under way ends there, as it is picked.
+    expect(picking).toContain('if (autoReconnect.choosing() === "stopPass") void stopPass();');
+    expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain("onPicking={pickingLocation}");
     // Kept up only over a tunnel the screen shows: armed beneath a screen
     // saying "disconnected" -- the platform unasked -- the choice's reload
     // took the tunnel's absence for a drop it had missed, and redialled the

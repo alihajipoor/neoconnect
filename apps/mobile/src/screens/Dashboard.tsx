@@ -101,9 +101,10 @@ import { headlineFor, type HeadlineTone } from "@shared/lib/connection-evidence"
 import { pressFor } from "@shared/lib/connect-intent";
 import { ladderPass } from "@shared/lib/ladder-pass";
 import { withTimeout } from "@shared/lib/service-call";
-import { droppedWhileAway, reconnectPreflight } from "../lib/reconnect-steps";
+import { droppedWhileAway, reconnectPreflight, rungAccess } from "../lib/reconnect-steps";
 import {
   beginPass,
+  followPass,
   passInFlight,
   passTunnel,
   pressOverPass,
@@ -118,7 +119,7 @@ import {
   whenForegrounded,
 } from "../lib/device-slot-steps";
 import { loadAllowedApps } from "../lib/per-app";
-import { protocolSupported } from "../lib/platform";
+import { isIOS, protocolSupported } from "../lib/platform";
 import {
   connectIkev2,
   connectWireGuard,
@@ -130,6 +131,7 @@ import {
   requestVpnPermission,
   vpnAccess,
   vpnStatus,
+  type VpnAccess,
 } from "../lib/vpn";
 import {
   buildXrayConfig,
@@ -187,6 +189,11 @@ type LadderOptions = {
    * A press never sets it -- the prompt dialling IKEv2 can raise is a
    * question for somebody who pressed Connect. */
   skipIkev2?: boolean;
+  /** Asked right before every dial: an automatic reconnect on an iPhone,
+   * whose preflight's answer can be untrue by the next rung -- another VPN
+   * app connected, or our configuration deleted, while the pass walked.
+   * See `rungAccess`. A press never sets it. */
+  rungAccess?: () => Promise<VpnAccess>;
 };
 
 /** The headline's colour for each tone `headlineFor` asks for. Full class
@@ -462,8 +469,10 @@ export function Dashboard({
   const reconnect = useSyncExternalStore(autoReconnect.subscribe, autoReconnect.current);
   const reconnecting = reconnectingView(reconnect, sessionGeneration());
   /** How the last pass ended beyond its outcome, for the reconnect: the
-   * route it landed on, or the kind of error it stopped on. */
-  const passResultRef = useRef<{ routeId: string | null; errorKind: string | null }>({
+   * route it landed on, or the kind of error it stopped on -- or, for an
+   * iPhone's automatic pass the platform turned away before a rung
+   * (`rungAccess`), what ends the episode. */
+  const passResultRef = useRef<{ routeId: string | null; errorKind: string | null; stop?: ReconnectStop }>({
     routeId: null,
     errorKind: null,
   });
@@ -961,6 +970,12 @@ export function Dashboard({
   // the app's one guard (`beginPass`): a press, a sign-out or the device
   // limit landing while the platform was being asked used to be undone by
   // the dial that followed.
+  //
+  // On an iPhone the platform's half is asked again before every rung's
+  // dial (`rungAccess`): a pass walks for minutes on a filtered network,
+  // and another VPN app connected, or our configuration deleted, in that
+  // time was dialled over -- the device switched off the other app's VPN,
+  // or the "Add VPN Configurations" prompt raised, with nobody pressing.
   const runLadderRef = useRef(runLadder);
   runLadderRef.current = runLadder;
   useEffect(() => {
@@ -974,8 +989,16 @@ export function Dashboard({
       });
       if (cleared.kind !== "clear") return cleared;
       passResultRef.current = { routeId: null, errorKind: null };
-      const outcome = await runLadderRef.current({ reconnect: attempt, skipIkev2: !cleared.ikev2 });
-      return reconnectOutcomeOf(outcome, passResultRef.current);
+      const outcome = await runLadderRef.current({
+        reconnect: attempt,
+        skipIkev2: !cleared.ikev2,
+        // On an iPhone, the platform asked again before every rung's dial.
+        rungAccess: isIOS() ? vpnAccess : undefined,
+      });
+      // Turned away by the platform before a rung: the episode ends as
+      // the preflight would have ended it.
+      const held = passResultRef.current.stop;
+      return held !== undefined ? { kind: "stop", why: held } : reconnectOutcomeOf(outcome, passResultRef.current);
     });
   }, [loaded]);
 
@@ -1142,12 +1165,31 @@ export function Dashboard({
    * armed. See `autoReconnect.chose`.
    *
    * Returns the route the screen goes on naming: the tunnel's, while one
-   * stays up, and otherwise the choice. */
+   * stays up, and otherwise the choice.
+   *
+   * Counts as no press here: it was counted as it was picked
+   * (`pickingLocation`). A server's choice is heard here only once its
+   * switch request has answered, which can be after the customer closed
+   * the list and pressed Connect -- and counted then, it superseded that
+   * Connect, which returned without dialling while the consent dialog was
+   * still up, leaving the orb on Connect and the press lost. */
   function chooseLocation(routeId: string | null): string | null {
-    pressRef.current += 1;
     const choice = autoReconnect.chose({ tunnelShown: connectionStateRef.current !== "disconnected" });
     if (choice === "stopPass") void stopPass();
     return choice === "keepTunnel" ? (protocolUserRef.current?.routeId ?? routeId) : routeId;
+  }
+
+  /** A server, or Automatic, picked in the list -- heard as it is picked,
+   * before a server's switch request answers (`chooseLocation` waits for
+   * that). The press is counted here, so a Connect still waiting to dial
+   * from before it gives way, and one pressed after it does not. A
+   * reconnect between attempts ends here, and one dialling has its pass
+   * stopped, as "Stop reconnecting" does: heard only with the answer, an
+   * attempt that began or landed meanwhile dialled the old route after the
+   * press. See `autoReconnect.choosing`. */
+  function pickingLocation() {
+    pressRef.current += 1;
+    if (autoReconnect.choosing() === "stopPass") void stopPass();
   }
 
   async function handleConnectToggle() {
@@ -1240,6 +1282,11 @@ export function Dashboard({
     let tookOver = false;
     const over = pressOverPass({ takeover: takeover !== undefined });
     if (over === "follow") {
+      // Its landing is this press's too, and quotes this press's stamp:
+      // its own was taken before this press overruled it (the `cancel`
+      // above), and its landing went unarmed -- "You're protected" over a
+      // tunnel whose drop then reconnected nothing. See `followPass`.
+      followPass(autoReconnect.stamp());
       if (ladderPass.generation.current !== followedPassRef.current) setConnectionState("connecting");
       return;
     }
@@ -1316,9 +1363,11 @@ export function Dashboard({
 
     // Declined: another pass took the guard after the check above -- two
     // presses in the same moment. It is the connect this press asked for,
-    // so it is shown, and its end followed.
-    if ((await runLadder({ takeover })) === "declined" && ladderPass.generation.current !== followedPassRef.current) {
-      setConnectionState("connecting");
+    // so it is shown, and its end followed -- and armed when it lands, as
+    // for a pass followed above.
+    if ((await runLadder({ takeover })) === "declined") {
+      followPass(autoReconnect.stamp());
+      if (ladderPass.generation.current !== followedPassRef.current) setConnectionState("connecting");
     }
   }
 
@@ -1359,7 +1408,14 @@ export function Dashboard({
    * the platform says rather than to an assumed "disconnected": a press
    * landing during an earlier teardown that did not finish would
    * otherwise be told that a tunnel still up was down. Read the way
-   * `loadAll` adopts a tunnel, so the two agree. */
+   * `loadAll` adopts a tunnel, so the two agree -- an engine a pass dialled
+   * and never proved, still up (`passTunnel` "unproven"), included: that is
+   * shown as nothing up, never as a tunnel. A pass standing down with no
+   * press behind it (its attempt over by its ceiling, or half an hour
+   * away) ends here, and its rung's engine can outlive the wait for it:
+   * read raw, the screen said "Connected, not confirmed" -- "You're
+   * protected", over a WireGuard handshake still fresh -- over an engine the
+   * pass was taking down, beside the episode's "VPN connection lost". */
   async function settleUndialled() {
     let state: ConnectionState = "disconnected";
     try {
@@ -1368,7 +1424,9 @@ export function Dashboard({
       // As in loadAll. This pass brought nothing up, so a platform that
       // cannot answer has nothing of this pass's to report.
     }
-    setConnectionState(state);
+    const tearingDown = slotTeardown.owed() || customerTeardown.owed();
+    const leftOver = state !== "disconnected" && !tearingDown && passTunnel.current === "unproven";
+    setConnectionState(leftOver ? "disconnected" : state);
   }
 
   /** The device limit ended this phone's session while it was connected:
@@ -1684,6 +1742,10 @@ export function Dashboard({
     /** Whether an IKEv2 rung was passed over for want of its configuration
      * (`skipIkev2`): one a press of Connect would dial. */
     let passedOver = false;
+    /** What the platform said before a rung that ends the episode
+     * (`rungAccess`): another configuration chosen over ours, or ours
+     * gone. Nothing more is dialled. */
+    let heldBack: "permission" | "otherVpn" | null = null;
     let lastError: ClassifiedError | null = null;
     const attempts: string[] = [];
     // Parallel to `attempts`: which route each rung dialled and whether
@@ -1737,10 +1799,15 @@ export function Dashboard({
     for (const [index, candidate] of candidates.entries()) {
       // The customer pressed stop. Whatever this attempt left behind is
       // torn down by the toggle that set the flag, so this only has to
-      // stop walking the list.
+      // stop walking the list. The last rung's engine, told to stop at the
+      // end of its rung but not waited for, is waited for first
+      // (`standDown`): no press may have stopped this pass -- an attempt
+      // over by its ceiling -- and then the screen is told what the
+      // platform has up as the pass lets go, which was that engine on its
+      // way down, shown as a tunnel.
       if (sessionGeneration() !== sessionAtStart) return "failed";
       if (pass.stopped()) {
-        await standDown(false);
+        await standDown(dialled);
         return reportCancelled();
       }
       // Still alive and moving, so the guard holds for a long ladder.
@@ -1837,6 +1904,32 @@ export function Dashboard({
         continue;
       }
 
+      // An iPhone's automatic pass: is what the preflight cleared still
+      // true? Another VPN app connected while this pass walked, and the
+      // dial below would switch ours back on and the device off that VPN;
+      // our configuration deleted in Settings, and the dial would save a
+      // new one and raise the "Add VPN Configurations" prompt in front of
+      // somebody who pressed nothing. See `rungAccess`.
+      if (options.rungAccess !== undefined) {
+        const access = await options.rungAccess().catch(() => null);
+        const verdict = rungAccess(access, candidate.protocol);
+        if (verdict === "skip") {
+          attempts.push(`${label}: not dialled automatically -- its VPN configuration is not installed`);
+          dials.push(null);
+          passedOver = true;
+          continue;
+        }
+        if (verdict === "unknown") {
+          attempts.push(`${label}: not dialled -- the VPN configuration could not be read`);
+          dials.push(null);
+          break;
+        }
+        if (verdict !== "dial") {
+          heldBack = verdict;
+          break;
+        }
+      }
+
       // Asked again right before dialling: the waits above -- the last
       // rung's teardown, a baseline walk -- run to seconds each, and a
       // stop or a sign-out pressed during them used to be noticed only
@@ -1844,7 +1937,7 @@ export function Dashboard({
       // had found nothing to take down.
       if (sessionGeneration() !== sessionAtStart) return "failed";
       if (pass.stopped()) {
-        await standDown(false);
+        await standDown(dialled);
         return reportCancelled();
       }
 
@@ -1976,10 +2069,12 @@ export function Dashboard({
           );
           // A tunnel to reconnect if it drops. A reconnect's own landing
           // is armed by the episode, which carries its count of quick
-          // deaths; a customer's connect starts the clock afresh.
+          // deaths; a customer's connect starts the clock afresh -- on the
+          // stamp of the latest press that followed it, if one did
+          // (`followPass`).
           passResultRef.current = { routeId: candidate.routeId, errorKind: null };
           if (!options.reconnect) {
-            autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: reconnectStamp });
+            autoReconnect.tunnelUp({ routeId: candidate.routeId, fresh: true, stamp: pass.landing(reconnectStamp) });
           }
           // Whatever the device limit had to say before this pass is
           // answered by it -- a reconnect's note that the limit could not
@@ -2071,14 +2166,20 @@ export function Dashboard({
 
     setConnectedAt(null);
     setExitIp(null);
-    setConnectionError(lastError);
+    // Turned away by the platform before a rung (`heldBack`): the episode
+    // ends on that, and says "VPN connection lost". The last rung's error
+    // is not why this pass stopped, and is not put up.
+    setConnectionError(heldBack !== null ? null : lastError);
     setConnectionState("disconnected");
     // Nothing came up, so this phone is not using one of the plan's
     // devices. Kept, the slot would turn the customer's other device away
     // for the next ninety seconds with "Neoxify is in use on Android
     // phone" -- a claim about a phone that is not connected.
     void deviceSlot.release();
-    passResultRef.current = { routeId: null, errorKind: lastError?.kind ?? null };
+    passResultRef.current =
+      heldBack !== null
+        ? { routeId: null, errorKind: null, stop: heldBack }
+        : { routeId: null, errorKind: lastError?.kind ?? null };
     // The report that has been costing a screenshot and a conversation
     // every time a tablet could not connect: which protocols were tried,
     // in order, and what each one did. An automatic reconnect's is filed
@@ -2087,8 +2188,15 @@ export function Dashboard({
       asReconnectReport(
         {
           kind: "CONNECT",
-          outcome: lastError ? outcomeFromError(lastError.kind) : "OTHER",
-          reason: lastError?.detail,
+          outcome: heldBack === null && lastError ? outcomeFromError(lastError.kind) : "OTHER",
+          reason:
+            heldBack !== null
+              ? `stopped before the next rung: ${
+                  heldBack === "otherVpn"
+                    ? "another VPN configuration was chosen over ours"
+                    : "the VPN configuration is no longer this app's"
+                }${lastError ? `; ${lastError.detail}` : ""}`
+              : lastError?.detail,
           attempts: rungsFrom(attempts, dials),
         },
         options.reconnect,
@@ -2647,6 +2755,10 @@ export function Dashboard({
             // starts on; choosing it clears the pin on this device. Every
             // route is already provisioned, so there is no server call.
             automatic={!chosenRouteId}
+            // The pick, as it is made: counted as a press there, and a
+            // reconnect under way ends there -- not once a server's switch
+            // request has answered.
+            onPicking={pickingLocation}
             onChooseAutomatic={() => {
               // A new choice while a reconnect waits ends the reconnect:
               // its next attempt would lead with the old route regardless.

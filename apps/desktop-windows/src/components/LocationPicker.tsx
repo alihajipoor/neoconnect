@@ -24,7 +24,15 @@ export function LocationPicker({
   initialRoutes,
   automatic = false,
   onChooseAutomatic,
+  onPicking,
 }: {
+  /** Told the moment a server or Automatic is picked, before anything is
+   * awaited -- a server's switch request can take seconds to answer, and
+   * `onSwitched` waits for it. Whatever an automatic reconnect was doing
+   * beneath the list ends here (`autoReconnect.choosing`): told only with
+   * the answer, an attempt that began or landed in between dialled the
+   * old route after the customer's press. */
+  onPicking?: () => void;
   /** Whether nothing is pinned, so the ladder chooses -- what a new
    * install starts on. Marks the Automatic row as the current choice and
    * leaves every server row pickable, since picking one is how a
@@ -239,6 +247,8 @@ export function LocationPicker({
 
   async function handlePick(route: RouteOption) {
     if (route.id === pinnedRouteId || switchingId) return;
+    // The press, heard as it is made -- not once the request answers.
+    onPicking?.();
     setSwitchError(null);
     setSwitchingId(route.id);
     const result = await switchRoute(subscriptionId, route.id);
@@ -299,6 +309,7 @@ export function LocationPicker({
               type="button"
               onClick={() => {
                 if (automatic || switchingId) return;
+                onPicking?.();
                 onChooseAutomatic();
                 onClose();
               }}

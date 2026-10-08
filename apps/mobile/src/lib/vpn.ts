@@ -71,9 +71,12 @@ export interface VpnAccess {
   ikev2?: boolean;
   /** iOS: whether another VPN configuration has been enabled over one of
    * ours, of its kind -- the packet tunnel's, or IKEv2's -- because another
-   * VPN app connected, or the customer picked one in Settings. iOS shows
-   * an app no other app's VPN, so this is the only sign of one. Absent on
-   * Android, where `tunnelGone` sees every VPN. */
+   * VPN app connected, or the customer picked one in Settings; or whether
+   * the system last stopped our packet tunnel because another
+   * configuration, of either kind, took over (`TunnelLastStop` in the
+   * plugin: another app's personal VPN turns nothing of ours off). iOS
+   * shows an app no other app's VPN, so these are the only signs of one.
+   * Absent on Android, where `tunnelGone` sees every VPN. */
   chosenElsewhere?: boolean;
 }
 

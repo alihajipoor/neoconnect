@@ -886,6 +886,78 @@ describe("the customer outranks it", () => {
     expect(h.reports).toHaveLength(0);
   });
 
+  it("a server picked between attempts ends the episode as it is picked, not when its switch request answers", async () => {
+    // The request goes to the control plane -- seconds, on the filtered
+    // network whose tunnel just dropped. Told only with the answer, the
+    // backoff fell due meanwhile and an attempt led by the old route
+    // dialled after the customer's press.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.rc.dropped();
+    await h.advance(0); // attempt 1 failed; attempt 2 is due in 2s
+    expect(h.rc.choosing()).toBeNull();
+    expect(h.rc.current()).toEqual({ kind: "idle", lost: false, stopped: "customer", session: null });
+    // The request takes eight seconds to answer; nothing dials meanwhile.
+    await h.advance(8_000);
+    expect(h.asked).toHaveLength(1);
+    // The answer changes nothing more.
+    expect(h.rc.chose({ tunnelShown: false })).toBeNull();
+    await h.advance(10 * 60_000);
+    expect(h.asked).toHaveLength(1);
+    expect(h.reports).toHaveLength(1);
+    expect(h.reports[0]!.reason).toContain("the customer pressed something");
+  });
+
+  it("a server picked during an attempt stops its pass as it is picked, before it can land on the old route", async () => {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script(["pending"]);
+    h.rc.dropped();
+    await h.advance(0);
+    expect(h.rc.choosing()).toBe("stopPass");
+    expect(h.asked[0]!.live()).toBe(false);
+    // The pass lands before the switch request answers: nothing is armed,
+    // so the answer finds no tunnel to keep on the old route.
+    h.settle({ kind: "connected", routeId: "old" });
+    await h.advance(0);
+    expect(vouching(h.rc.current(), 1)).toBe(false);
+    expect(h.rc.chose({ tunnelShown: false })).toBeNull();
+    await h.advance(10 * 60_000);
+    expect(h.asked).toHaveLength(1);
+  });
+
+  it("a server picked over a tunnel armed, or with nothing at all, decides nothing until it is chosen", async () => {
+    // A switch that fails changes no tunnel, and only the answer knows
+    // what the screen shows by then (`chose`).
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "old", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    const asked = h.rc.stamp();
+    expect(h.rc.choosing()).toBeNull();
+    expect(h.rc.current()).toMatchObject({ kind: "armed", routeId: "old" });
+    // Nothing overruled: an answer asked for before the pick still arms.
+    h.rc.tunnelUp({ routeId: null, stamp: asked });
+    expect(h.rc.current().kind).toBe("armed");
+
+    // Idle, with the customer's own connect dialling: its landing arms, and
+    // an old "VPN connection lost" waits for the answer to be retired.
+    const i = harness();
+    i.bind();
+    i.rc.tunnelUp({ routeId: "r", fresh: true, stamp: i.rc.stamp() });
+    await i.advance(10 * 60_000);
+    i.rc.dropped({ exclusion: "excluded" });
+    const connect = i.rc.stamp();
+    expect(i.rc.choosing()).toBeNull();
+    expect(reconnectLost(i.rc.current(), 1)).toBe(true);
+    i.rc.tunnelUp({ routeId: "new", fresh: true, stamp: connect });
+    expect(vouching(i.rc.current(), 1)).toBe(true);
+  });
+
   it("Stop reconnecting leaves 'connection lost' up, until the next press", async () => {
     const h = harness();
     h.bind();
@@ -1327,7 +1399,55 @@ describe("a ladder pass, as an attempt's outcome", () => {
     expect(reconnectOutcomeOf("declined")).toEqual({ kind: "failed" });
     expect(reconnectOutcomeOf("refused")).toEqual({ kind: "stop", why: "refused" });
     expect(reconnectOutcomeOf("cancelled")).toEqual({ kind: "stop", why: "customer" });
-    expect(reconnectOutcomeOf("unusable")).toEqual({ kind: "stop", why: "excluded" });
+    expect(reconnectOutcomeOf("unusable")).toEqual({ kind: "stop", why: "nothingToDial" });
+  });
+
+  it("files an attempt that found nothing to dial as that, and does not count it as one made", async () => {
+    // Two failed dials, then the screen back from Settings loaded no
+    // credential (the API unreachable with nothing cached, or the account
+    // being provisioned again). Filed as `excluded`, the row said "stopped
+    // after 3 attempt(s): a reconnect was ruled out at the moment of the
+    // drop" -- untrue of the moment, and of the count.
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "r", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(10 * 60_000);
+    h.script([
+      { outcome: { kind: "failed" } },
+      { outcome: { kind: "failed" } },
+      { outcome: reconnectOutcomeOf("unusable") },
+    ]);
+    h.rc.dropped();
+    await h.advance(60_000);
+    expect(h.asked).toHaveLength(3);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", lost: true, stopped: "nothingToDial" });
+    expect(h.reports).toHaveLength(1);
+    expect(h.reports[0]!.reason).toBe(
+      `${RECONNECT_REASON_PREFIX} stopped after 2 attempt(s): the screen had nothing to dial: no credential loaded, or none this app can use`,
+    );
+    expect(h.reports[0]!.reason).not.toContain("moment of the drop");
+
+    // Found on the first attempt: nothing was attempted at all.
+    const f = harness();
+    f.bind();
+    f.rc.tunnelUp({ routeId: "r", fresh: true, stamp: f.rc.stamp() });
+    await f.advance(10 * 60_000);
+    f.script([{ outcome: reconnectOutcomeOf("unusable") }]);
+    f.rc.dropped();
+    await f.advance(0);
+    expect(f.reports[0]!.reason).toMatch(new RegExp(`^${RECONNECT_REASON_PREFIX} not attempted after the tunnel dropped: the screen had nothing to dial`));
+    // And the slot the drop kept is given back: no pass of it will claim.
+    expect(f.slotIdled).toEqual(["ended"]);
+
+    // Any other stop an attempt reports counts that attempt, as before.
+    const o = harness();
+    o.bind();
+    o.rc.tunnelUp({ routeId: "r", fresh: true, stamp: o.rc.stamp() });
+    await o.advance(10 * 60_000);
+    o.script([{ outcome: { kind: "failed" } }, { outcome: { kind: "stop", why: "otherVpn" } }]);
+    o.rc.dropped();
+    await o.advance(60_000);
+    expect(o.reports[0]!.reason).toContain("stopped after 2 attempt(s): another VPN holds the device");
   });
 
   it("stops on what only the plan can change", () => {
@@ -1422,7 +1542,7 @@ describe("the slot the drop kept for the reconnect's claim", () => {
     // stopped, nothing to dial: nothing is coming back, and a slot kept
     // for nothing turned the customer's other device away as "in use on
     // Android phone" about a phone with no tunnel.
-    for (const why of ["otherVpn", "permission", "notEntitled", "excluded"] as const) {
+    for (const why of ["otherVpn", "permission", "notEntitled", "excluded", "nothingToDial"] as const) {
       const h = harness();
       h.script([{ outcome: { kind: "stop", why } }]);
       expect(await dropped(h)).toBe("reconnecting");
