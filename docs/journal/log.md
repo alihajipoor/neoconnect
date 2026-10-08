@@ -5051,26 +5051,50 @@ subscription not `ACTIVE`, or a pass failing on `concurrentLimit`,
 `quotaExhausted`, `subscriptionInactive`; gaming mode; nothing usable to
 dial (phones); on phones, another VPN still holding the device (on iOS,
 which shows an app no other app's VPN: another configuration chosen over
-every one of ours) or the VPN permission gone. App quit and upgrade need
+one of ours, of its kind) or the VPN permission gone. App quit and upgrade need
 nothing: the episode lives in the process, and a fresh process starts
 `idle` (an adopted tunnel is armed, a missing one is not a drop).
 
 An attempt's pass stops once its attempt is over, however that came
 about -- a press, a sign-out, the attempt's 180 s ceiling (`passStopped`:
 the stop flag, or the attempt no longer `live`) -- so nothing that ends an
-episode can leave its pass dialling behind it. A location chosen during an
-attempt stops its pass at once, as "Stop reconnecting" does; chosen over
-a tunnel that came back while the server list was open, it leaves that
-tunnel up and armed, the choice being for the next connect. A repair has
-any pass in flight stopped and let go of (bounded, 60 s) before the
+episode can leave its pass dialling behind it. The Windows ladder asks
+right before each rung's connect as well as before and after it (second
+review round: the settle, the server's names and the IPv6 baseline ran
+to ~17 s unasked, and a stop in them dialled the old route once more). A
+location chosen during an attempt stops its pass at once, as "Stop
+reconnecting" does; chosen over a tunnel that came back while the server
+list was open -- one the screen shows -- it leaves that tunnel up and
+armed, the choice being for the next connect. Armed beneath a screen that
+shows nothing up (a Windows poll reading that was not a drop; a phone
+screen that could not ask the platform, or loaded from the cache), the
+choice takes over as any press: kept armed there, its own reload took the
+tunnel's absence for a missed drop and redialled the old route. A repair
+has any pass in flight stopped and let go of (bounded, 60 s) before the
 service is asked: the pass's next connect would otherwise come up behind
 the repair, and its teardown -- a Disconnect -- cancel the repair mid-step.
+The 60 s holds because of the check before the connect: without it, a
+connect sent after the repair's own Disconnect queued behind that
+Disconnect's uncancellable teardown and ran to the 45 s reply timeout.
+
+A pass ends -- and a screen mounted since it began reads the platform --
+only once its engine is gone. On the phones `disconnect` returns before
+Android's `:xray` has stopped; the pass now waits for `tunnelGone` (8 s at
+most) after a failed walk and when it stands down, whoever stopped it.
+Read at once, the engine on its way down showed "Connected, not
+confirmed" and armed the episode over nothing. A phone pass replaced
+during those waits touches nothing (`pass.owns()` asked again). A press
+counts for the whole app (`presses`): a Connect waiting on a screen that
+unmounted now hears a stop pressed on the one mounted since.
 
 **Backoff.** Immediate, then 2 s, 5 s, 10 s, 20 s, 30 s -- six passes at
 most. No new pass starts once 120 s have gone on backoff and passes (a
 running pass is never interrupted); a pass that shows no sign of life --
 no new rung -- for 180 s counts as failed, measured as the ladder's own
-150 s guard is, so a long ladder still dialling is waited for. Three
+150 s guard is, so a long ladder still dialling is waited for. On a phone
+that is 180 s in front: held while the app is away and resumed, not
+restarted, on its return -- restarted, a customer who kept leaving and
+coming back kept a wedged pass on "Reconnecting..." for good. Three
 deaths in a row within 60 s of coming up stop it without another
 attempt. No network (`navigator.onLine` false), or a phone app in the
 background -- between attempts, or during one, whose pass the OS freezes
@@ -5095,6 +5119,14 @@ timer fires; the wall clock, which can be set back, is not asked.
   an attempt begins, nothing to dial, a wait past half an hour -- gives
   it back itself (`slotIdle`, `SLOT_LEFT_IDLE`); a press, a sign-out,
   the device limit and a pass that failed account for it themselves.
+  Second review round: a held attempt runs once the screen has loaded
+  *and* read this network's route memory (`loadRouteMemory`), which the
+  pass orders by and its landing writes back whole -- run as loading
+  ended, it dialled without the memory and its landing replaced every
+  network's remembered route and history with its one entry. A pass a
+  newer one replaced no longer forgets the newer one's armed tunnel, and
+  a failover note compares against the server the tile showed
+  (`displayedRouteId`), not the credential the screen holds.
 - Phones: attempts wait for the app to be in front
   (`setRequiresForeground`). There is no background work to run them
   from -- Android's tunnel service is a separate process with no
@@ -5106,7 +5138,10 @@ timer fires; the wall clock, which can be set back, is not asked.
   `VpnService.prepare` can itself move the VPN back to a once-allowed
   app -- read from AOSP, not observed), then the permission, never the
   consent dialog. The phone's headline and orb label now come from the
-  shared tables; it gains "VPN connection lost", which it never had.
+  shared tables; it gains "VPN connection lost", which it never had. A
+  held attempt runs once the screen has its credentials, the route list
+  and the platform's state -- the last read within a bound now -- and no
+  longer waits out the twelve-second baseline walk after them.
 - Phones, the device slot, after review: an episode that has to wait for
   the app to be opened sets the slot aside (`setAside`) -- released, but
   left `unclaimed`, so the pass that runs on opening asks first. Kept
@@ -5118,15 +5153,28 @@ timer fires; the wall clock, which can be set back, is not asked.
   verdict puts up the "couldn't check" note and the ladder runs. It used
   to claim like any connect, and an unanswered claim dialled credentials
   the backstop may hold, ending on "none of them carried traffic" with no
-  word about the plan's limit.
+  word about the plan's limit. The standing check starts a slot epoch of
+  its own (second review round): the release's watch over requests still
+  out when the slot was set aside used to run on past it, and one that
+  settled unanswered released the grant the check had just taken.
 - iOS, added after review: that wait cannot see another app's VPN --
   `tunnelGone` reports on our own two connections -- so the permission's
   answer (`vpnAccess`) also says whether another configuration has been
-  chosen over every one of ours. iOS enables one VPN configuration at a
-  time, and Apple documents that enabling another sets `isEnabled`
-  false on ours; none of ours enabled stops the episode as `otherVpn`.
-  Before it, opening the app after another VPN app took over started a
-  reconnect that re-enabled ours and switched the device off that VPN.
+  chosen over one of ours. Apple documents one enabled configuration *per
+  kind*: tunnel providers ("enterprise") are one kind, NEVPNManager
+  profiles such as our IKEv2 ("personal") another, and enabling another
+  of a kind sets `isEnabled` false on ours of that kind only. Our code
+  never sets it false, so one of ours not enabled stops the episode as
+  `otherVpn` -- asked per kind since the second review round. Asked
+  across both (none of ours enabled), as first written on the reading
+  that iOS enables one configuration in all, an iPhone that had ever
+  landed on IKEv2 kept that profile enabled when another app's tunnel
+  took the tunnel kind, and the reconnect switched the device off it.
+  Before any of it, opening the app after another VPN app took over
+  started a reconnect that re-enabled ours and switched the device off
+  that VPN. If iOS does in fact enable one in all, the per-kind check errs
+  the safe way: after landing on the other kind, an automatic reconnect
+  stops as `otherVpn` and says "VPN connection lost" rather than dialling.
   The answer also says whether IKEv2's own configuration is installed --
   a second one, with its own "Add VPN Configurations" prompt, removed at
   every sign-out. Without it an automatic pass passes over IKEv2
@@ -5134,7 +5182,10 @@ timer fires; the wall clock, which can be set back, is not asked.
   rung"): dialling it would install it, and the system prompt came up,
   passcode and all, in front of somebody who had pressed nothing -- on
   the rung reached exactly when every other had failed. A press of
-  Connect still dials it, prompt and all.
+  Connect still dials it, prompt and all -- and a pass that passed it
+  over no longer ends on "Tried every available protocol" but on
+  `err.someProtocolsNotTried` ("Some are tried only when you press
+  Connect"; Persian too).
 - iOS: **no on-demand rules.** NEVPNManager could reconnect in the
   background by itself, but turning that on silently was ruled out; the
   gap is that an iOS tunnel that stops while the app is in the background
@@ -5158,15 +5209,19 @@ not allow a connection now", not as the device limit refusing the
 device. "VPN connection lost" is said only to the session whose tunnel
 dropped (`reconnectLost` takes the session, as `vouching` does): a
 session ended by expiry, revocation or account deletion used to hand it
-to the next sign-in.
+to the next sign-in. An attempt whose session ended out of sight (a
+refused refresh, from App) ends as `signedOut` with no row whatever its
+pass reports -- it read to the pass as overtaken and was filed as "the
+customer pressed something".
 
 ### Proven -- tests on this PC
 
-- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **978
-  passed, 58 files** after review (853 / 56 on `main`); `pnpm typecheck`
-  clean.
-- `apps/mobile`: `pnpm test` **192 passed, 12 files** after review
-  (140 / 10 on `main`); `npx tsc --noEmit -p .` clean.
+- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **985
+  passed, 58 files** after the second review round (978 after the first,
+  853 / 56 on `main`); `pnpm typecheck` clean.
+- `apps/mobile`: `pnpm test` **197 passed, 12 files** after the second
+  review round (192 after the first, 140 / 10 on `main`);
+  `npx tsc --noEmit -p .` clean.
 - No desktop Rust touched, so `cargo test --workspace` was not run. The
   mobile plugin's `Granted` was: `cargo test -p tauri-plugin-neoxify-vpn`
   (from `apps/mobile/src-tauri`) **6 passed**, two new -- iOS's
@@ -5202,7 +5257,19 @@ to the next sign-in.
   release, a second release starting over, the phone skipping the
   standing check or its note or not clearing it, the slot's stop
   unmarked or always the device limit, "connection lost" read without
-  the session or from the session in force -- each fails a test.
+  the session or from the session in force -- each fails a test. For the
+  second review round, 20 more, each reverted alone against its test:
+  the choice ignoring what the screen shows (either dashboard, and the
+  controller), the attempt's session not asked as it ends, the phone's
+  ceiling restarted on return, the standing check keeping the release's
+  epoch, no stop check before the Windows connect, the superseded pass's
+  `forget`, the failover note against the credential, the bind not
+  waiting for the route memory, the phone's press count per screen or
+  unasked after the teardown, the stand-down's wait after the press check
+  or without its ownership check, the failed walk not waiting for its
+  engine, readiness after the baseline walk, the status read unbounded,
+  the skip not marked, and the iOS check across both kinds (a source
+  assertion on the Swift, which is not compiled here).
 
 ### Unverified -- needs the VM, or a phone
 
@@ -5238,12 +5305,26 @@ still works, and telemetry rows with the `auto-reconnect` reason. Then:
 
 On an iPhone (none has carried a packet yet): connected through Neoxify,
 connect another VPN app, bring Neoxify to the front -- expected "VPN
-connection lost", no pass, and the other app's VPN still up. That rests
-on Apple's documented rule that enabling another configuration sets
-`isEnabled` false on ours, unobserved. And signed out and back in,
-landed on Xray, then a drop on a network where Xray and WireGuard fail
--- expected the IKEv2 rung passed over (`not dialled automatically` in
-the attempt's rungs) and no "Add VPN Configurations" prompt.
+connection lost", no pass, and the other app's VPN still up. Twice: once
+on a phone that has never landed on IKEv2, and once on one that landed
+on IKEv2 and later on Xray, so that both of our configurations are
+installed -- the case a check across both kinds missed. That rests on
+Apple's documented rule that enabling another configuration of a kind
+sets `isEnabled` false on ours of that kind, unobserved; the second run
+also shows whether our own Xray landing left our IKEv2 profile enabled
+(per kind, as documented) or not (one in all -- then every automatic
+reconnect after a landing on the other kind stops as `otherVpn`). And
+signed out and back in, landed on Xray, then a drop on a network where
+Xray and WireGuard fail -- expected the IKEv2 rung passed over (`not
+dialled automatically` in the attempt's rungs), no "Add VPN
+Configurations" prompt, and "Some are tried only when you press
+Connect" rather than "Tried every available protocol".
+
+On an Android phone, a drop with an Xray rung that comes up but carries
+nothing, Settings opened and closed during the attempt: expected the
+screen back from Settings to show "Reconnecting..." and then the next
+attempt or "VPN connection lost" -- never "Connected, not confirmed" as
+the failed rung's `:xray` comes down. Unobserved.
 
 **Known gaps, not decided here:**
 
@@ -5294,3 +5375,12 @@ the attempt's rungs) and no "Add VPN Configurations" prompt.
   well past a minute -- stopped as quick deaths, on phones after every
   "connect, then leave the app". Only the service saying when the engine
   exited would settle it.
+- Windows, from `main` and not this branch's: a Connect pressed in the
+  moment after the screen leaves loading, before its route memory has
+  been read (`loadRouteMemory`; milliseconds normally, up to the gateway
+  ARP's few seconds on a network that does not answer it), dials with the
+  empty placeholders and its landing writes them back -- the same erasure
+  the held reconnect attempt had, which now waits. A press cannot wait
+  the same way without the ladder reading the memory through refs, as
+  the phone's ladder reads it from the store; left for a change of its
+  own.
