@@ -4998,11 +4998,15 @@ completed; whether that helps is not established.
 Not merged, not tagged, not released. **Not run in the VM** -- the
 coordinating session is to prove it there by killing the engine (list
 under *Unverified*). Nothing on this branch has carried a packet.
-**Touches:** JS/TS only. Shared: `apps/desktop-windows/src/lib/`
+**Touches:** JS/TS, and after review one small native change for iOS.
+Shared: `apps/desktop-windows/src/lib/`
 `auto-reconnect.ts` (new), `failover.ts`, `connection-evidence.ts`,
 `connect-intent.ts`, `i18n.tsx`; `components/RepairNetwork.tsx`; both
 dashboards; `apps/mobile/src/lib/reconnect-steps.ts` (new) and
-`apps/mobile/src/App.tsx`. No Rust, no Kotlin, no Swift, no backend.
+`apps/mobile/src/App.tsx`. iOS's `hasPermission`
+(`plugins/vpn/ios/.../NeoxifyVpnPlugin.swift`, `Ikev2Engine.swift`) and
+the plugin's `Granted` that carries its answer (`plugins/vpn/src/lib.rs`).
+No Kotlin, no backend.
 
 Owner decision 2026-10-07: when the tunnel ends without the customer
 asking, the app reconnects instead of waiting for Connect. Until now the
@@ -5045,10 +5049,11 @@ displacement or refusal while connected, a teardown it still owes, a
 refusal on the reconnect's own claim (the refusal card shows); a
 subscription not `ACTIVE`, or a pass failing on `concurrentLimit`,
 `quotaExhausted`, `subscriptionInactive`; gaming mode; nothing usable to
-dial (phones); on phones, another VPN still holding the device or the VPN
-permission gone. App quit and upgrade need nothing: the episode lives in
-the process, and a fresh process starts `idle` (an adopted tunnel is
-armed, a missing one is not a drop).
+dial (phones); on phones, another VPN still holding the device (on iOS,
+which shows an app no other app's VPN: another configuration chosen over
+every one of ours) or the VPN permission gone. App quit and upgrade need
+nothing: the episode lives in the process, and a fresh process starts
+`idle` (an adopted tunnel is armed, a missing one is not a drop).
 
 An attempt's pass stops once its attempt is over, however that came
 about -- a press, a sign-out, the attempt's 180 s ceiling (`passStopped`:
@@ -5098,6 +5103,22 @@ timer fires; the wall clock, which can be set back, is not asked.
   app -- read from AOSP, not observed), then the permission, never the
   consent dialog. The phone's headline and orb label now come from the
   shared tables; it gains "VPN connection lost", which it never had.
+- iOS, added after review: that wait cannot see another app's VPN --
+  `tunnelGone` reports on our own two connections -- so the permission's
+  answer (`vpnAccess`) also says whether another configuration has been
+  chosen over every one of ours. iOS enables one VPN configuration at a
+  time, and Apple documents that enabling another sets `isEnabled`
+  false on ours; none of ours enabled stops the episode as `otherVpn`.
+  Before it, opening the app after another VPN app took over started a
+  reconnect that re-enabled ours and switched the device off that VPN.
+  The answer also says whether IKEv2's own configuration is installed --
+  a second one, with its own "Add VPN Configurations" prompt, removed at
+  every sign-out. Without it an automatic pass passes over IKEv2
+  (`skipIkev2`, before the rung's baseline, counted out of "the last
+  rung"): dialling it would install it, and the system prompt came up,
+  passcode and all, in front of somebody who had pressed nothing -- on
+  the rung reached exactly when every other had failed. A press of
+  Connect still dials it, prompt and all.
 - iOS: **no on-demand rules.** NEVPNManager could reconnect in the
   background by itself, but turning that on silently was ruled out; the
   gap is that an iOS tunnel that stops while the app is in the background
@@ -5116,12 +5137,19 @@ sign-out files nothing. The panel does not yet filter on the prefix.
 
 ### Proven -- tests on this PC
 
-- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **924
-  passed, 58 files** (853 / 56 on `main`); `pnpm typecheck` clean.
-- `apps/mobile`: `pnpm test` **156 passed, 11 files** (140 / 10 on
-  `main`); `npx tsc --noEmit -p .` clean.
-- No Rust touched, so `cargo test --workspace` was not run. Kotlin and
-  Swift cannot be built here and were not changed.
+- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **958
+  passed, 58 files** after review (853 / 56 on `main`); `pnpm typecheck`
+  clean.
+- `apps/mobile`: `pnpm test` **185 passed, 12 files** after review
+  (140 / 10 on `main`); `npx tsc --noEmit -p .` clean.
+- No desktop Rust touched, so `cargo test --workspace` was not run. The
+  mobile plugin's `Granted` was: `cargo test -p tauri-plugin-neoxify-vpn`
+  (from `apps/mobile/src-tauri`) **6 passed**, two new -- iOS's
+  permission answer reaching the UI whole, Android's unchanged. The
+  first fails against the struct as it was, which dropped both fields
+  without an error. **The Swift change (iOS `hasPermission`) is not
+  compiled here**; `ci-ios.yml` compiles it on push, and nothing runs it
+  short of an iPhone. Kotlin is unchanged.
 - The episode, on a clock the test owns: the attempt start times
   (0, 2, 7, 17, 37, 67 s after the drop), the budget (four 30-second
   passes, then stop), the quick-death stop and its reset, offline and
@@ -5137,7 +5165,11 @@ sign-out files nothing. The panel does not yet filter on the prefix.
   assertion, as for the liveness poll.
 - 22 mutations of the shared logic and 10 of the phone's, each removing
   one rule; every one fails a test. One survived at first (the ceiling
-  check on waking) and got its test.
+  check on waking) and got its test. For the iOS review fixes, six more
+  -- the preflight ignoring `chosenElsewhere`, the clearance always
+  allowing IKEv2, the runner not passing it on or reading the bare
+  `granted`, the walk not skipping, `willDial` not counting the skip --
+  and `Granted` without its two fields; each fails a test.
 
 ### Unverified -- needs the VM, or a phone
 
@@ -5164,6 +5196,15 @@ still works, and telemetry rows with the `auto-reconnect` reason. Then:
 - A device-limit refusal on a reconnect's claim (needs a second device
   on a limited plan): the card, "VPN connection lost", no further passes.
 
+On an iPhone (none has carried a packet yet): connected through Neoxify,
+connect another VPN app, bring Neoxify to the front -- expected "VPN
+connection lost", no pass, and the other app's VPN still up. That rests
+on Apple's documented rule that enabling another configuration sets
+`isEnabled` false on ours, unobserved. And signed out and back in,
+landed on Xray, then a drop on a network where Xray and WireGuard fail
+-- expected the IKEv2 rung passed over (`not dialled automatically` in
+the attempt's rungs) and no "Add VPN Configurations" prompt.
+
 **Known gaps, not decided here:**
 
 - A disconnect made outside the app is indistinguishable from a drop and
@@ -5176,6 +5217,19 @@ still works, and telemetry rows with the `auto-reconnect` reason. Then:
 - Android IKEv2: `Ikev2Engine.isUp` reads a platform tunnel that is
   re-negotiating (`STATE_CONNECTING`) as down. The poll used to say
   "You're not protected" over it; now it also redials. Unobserved.
+- Android IKEv2 consent: an automatic pass dials IKEv2 on the reading
+  that the VpnService grant the preflight checks also covers the
+  platform's IKEv2 profile (AOSP `Vpn.isVpnProfilePreConsented`), so
+  `provisionVpnProfile` returns no consent Intent. The Kotlin plugin's
+  own comment says the grant does not cover it. Unobserved either way;
+  if Android does ask, the iOS skip needs an Android answer too.
+- An iPhone whose only usable routes are IKEv2, without IKEv2's
+  configuration, dials nothing on an automatic pass, and each pass
+  counts as failed until the episode's attempts run out -- the shape the
+  Android allowed-apps skip of IKEv2 already had. Reachable only when the
+  configuration was deleted in Settings, or the plan's other routes went
+  away since the last landing: a landing on IKEv2 installs it, and only a
+  sign-out, which ends the session, removes it.
 - A service that stops answering mid-session ("Can't tell right now")
   and comes back with nothing running is *not* reconnected: by the drop
   rule the screen was not claiming a tunnel then, and the armed tunnel is
