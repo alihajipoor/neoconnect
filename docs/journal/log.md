@@ -5090,7 +5090,11 @@ timer fires; the wall clock, which can be set back, is not asked.
   reconnect })`, so the device-limit claim behaves as for the mid-session
   failover (standing check first when the slot was never confirmed).
   The slot is now given back at a drop when nothing will reconnect;
-  during an episode the reconnect's claim renews it.
+  during an episode the reconnect's claim renews it. After review: an
+  episode that ends before a pass of it claimed -- an exclusion found as
+  an attempt begins, nothing to dial, a wait past half an hour -- gives
+  it back itself (`slotIdle`, `SLOT_LEFT_IDLE`); a press, a sign-out,
+  the device limit and a pass that failed account for it themselves.
 - Phones: attempts wait for the app to be in front
   (`setRequiresForeground`). There is no background work to run them
   from -- Android's tunnel service is a separate process with no
@@ -5103,6 +5107,18 @@ timer fires; the wall clock, which can be set back, is not asked.
   app -- read from AOSP, not observed), then the permission, never the
   consent dialog. The phone's headline and orb label now come from the
   shared tables; it gains "VPN connection lost", which it never had.
+- Phones, the device slot, after review: an episode that has to wait for
+  the app to be opened sets the slot aside (`setAside`) -- released, but
+  left `unclaimed`, so the pass that runs on opening asks first. Kept
+  for a claim that would not come for up to half an hour, it turned the
+  customer's other device away as "in use on Android phone" about a
+  phone with no tunnel. That first question is obligation 9's standing
+  check, as on Windows, for any reconnect whose slot is not confirmed (a
+  phone renews only in the foreground): a verdict stops the pass, no
+  verdict puts up the "couldn't check" note and the ladder runs. It used
+  to claim like any connect, and an unanswered claim dialled credentials
+  the backstop may hold, ending on "none of them carried traffic" with no
+  word about the plan's limit.
 - iOS, added after review: that wait cannot see another app's VPN --
   `tunnelGone` reports on our own two connections -- so the permission's
   answer (`vpnAccess`) also says whether another configuration has been
@@ -5134,13 +5150,22 @@ reason. Every episode that ends without a tunnel files one
 `CONNECT`/`OTHER` row, `auto-reconnect stopped after N attempt(s): ...`
 or `auto-reconnect not attempted after the tunnel dropped: ...`; a
 sign-out files nothing. The panel does not yet filter on the prefix.
+After review: a refusal of the reconnect's own claim is the pass's row
+too (`OTHER`, with `REJECTED` and the server's code in the reason) --
+it was filed as a customer's refused Connect -- and a claim answered
+`SUBSCRIPTION_INACTIVE` ends the episode as `notEntitled`, "the plan does
+not allow a connection now", not as the device limit refusing the
+device. "VPN connection lost" is said only to the session whose tunnel
+dropped (`reconnectLost` takes the session, as `vouching` does): a
+session ended by expiry, revocation or account deletion used to hand it
+to the next sign-in.
 
 ### Proven -- tests on this PC
 
-- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **958
+- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **978
   passed, 58 files** after review (853 / 56 on `main`); `pnpm typecheck`
   clean.
-- `apps/mobile`: `pnpm test` **185 passed, 12 files** after review
+- `apps/mobile`: `pnpm test` **192 passed, 12 files** after review
   (140 / 10 on `main`); `npx tsc --noEmit -p .` clean.
 - No desktop Rust touched, so `cargo test --workspace` was not run. The
   mobile plugin's `Granted` was: `cargo test -p tauri-plugin-neoxify-vpn`
@@ -5169,7 +5194,15 @@ sign-out files nothing. The panel does not yet filter on the prefix.
   -- the preflight ignoring `chosenElsewhere`, the clearance always
   allowing IKEv2, the runner not passing it on or reading the bare
   `granted`, the walk not skipping, `willDial` not counting the skip --
-  and `Granted` without its two fields; each fails a test.
+  and `Granted` without its two fields; each fails a test. For the
+  slot, record and session fixes, 27 more -- the episode giving nothing
+  back, giving it back after a failed pass or at a drop that started no
+  episode, the wait for the app keeping it, `setAside` forgetting the
+  subscription or the customer's takeover, the check not waiting for the
+  release, a second release starting over, the phone skipping the
+  standing check or its note or not clearing it, the slot's stop
+  unmarked or always the device limit, "connection lost" read without
+  the session or from the session in force -- each fails a test.
 
 ### Unverified -- needs the VM, or a phone
 
@@ -5195,6 +5228,13 @@ still works, and telemetry rows with the `auto-reconnect` reason. Then:
   that long. Not measured.
 - A device-limit refusal on a reconnect's claim (needs a second device
   on a limited plan): the card, "VPN connection lost", no further passes.
+- On an Android phone and the PC, one plan of one device: the phone's
+  `:xray` process killed while the app is in the background, then
+  Connect on the PC within ninety seconds -- expected not refused (the
+  slot was set aside). Then the phone opened -- expected the standing
+  check's answer: the displaced card naming the PC, no pass. With the
+  API blocked on the phone's network, the "couldn't check" note, then
+  the ladder. Unobserved; the release's arrival is the server's to show.
 
 On an iPhone (none has carried a packet yet): connected through Neoxify,
 connect another VPN app, bring Neoxify to the front -- expected "VPN
@@ -5230,6 +5270,11 @@ the attempt's rungs) and no "Add VPN Configurations" prompt.
   configuration was deleted in Settings, or the plan's other routes went
   away since the last landing: a landing on IKEv2 installs it, and only a
   sign-out, which ends the session, removes it.
+- A location or a mode chosen between attempts ends the episode as a
+  press that takes over, and neither claims nor releases: the slot the
+  drop kept goes stale on its own, about ninety seconds, as before this
+  review. Giving it back there would also delay a Connect pressed in the
+  next second and a half, which waits for a release on the wire.
 - A service that stops answering mid-session ("Can't tell right now")
   and comes back with nothing running is *not* reconnected: by the drop
   rule the screen was not claiming a tunnel then, and the armed tunnel is
