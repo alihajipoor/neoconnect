@@ -165,7 +165,17 @@ const PRESS: Record<ConnectionState, { action: PressAction; labelKey: Translatio
   disconnecting: { action: "disconnect", labelKey: "dash.disconnecting" },
 };
 
-export function pressFor(state: ConnectionState): { action: PressAction; labelKey: TranslationKey } {
+/** `reconnectWaiting` is an automatic reconnect between attempts
+ * (`auto-reconnect.ts`). Nothing is up then, so the press is still a
+ * connect -- the customer's own, which ends the episode and dials at once
+ * instead of waiting out the backoff -- and the label says that rather
+ * than "Connect", which under "Reconnecting..." would read as though the
+ * app had stopped trying. */
+export function pressFor(
+  state: ConnectionState,
+  { reconnectWaiting = false }: { reconnectWaiting?: boolean } = {},
+): { action: PressAction; labelKey: TranslationKey } {
+  if (reconnectWaiting && state === "disconnected") return { action: "connect", labelKey: "dash.reconnectNow" };
   return PRESS[state];
 }
 

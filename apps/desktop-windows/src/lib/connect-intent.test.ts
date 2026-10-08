@@ -222,6 +222,22 @@ describe("the control cannot promise one thing and do another", () => {
     expect(labels.get("unknown")).toBe("dash.recheck");
     expect(labels.get("connecting")).toBe("dash.connecting");
   });
+
+  it("between reconnect attempts, offers to reconnect now -- and does just that", () => {
+    // Nothing is up while an automatic reconnect waits out its backoff,
+    // so the press is the customer's own connect, taking over at once.
+    // "Connect" there would read as the app having stopped trying.
+    const waiting = pressFor("disconnected", { reconnectWaiting: true });
+    expect(waiting.labelKey).toBe("dash.reconnectNow");
+    expect(movesTunnel(waiting.action)).toBe("up");
+    // Control: the same phase with no episode keeps its ordinary label.
+    expect(pressFor("disconnected").labelKey).toBe("dash.connect");
+    // And an episode never changes what a press does to a live tunnel or
+    // to a pass in flight: those keep their own labels and actions.
+    for (const state of every.filter((s) => s !== "disconnected")) {
+      expect(pressFor(state, { reconnectWaiting: true }), state).toEqual(pressFor(state));
+    }
+  });
 });
 
 describe("the wiring the pure functions cannot check", () => {

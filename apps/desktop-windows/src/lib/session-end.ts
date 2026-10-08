@@ -32,6 +32,23 @@ export function sessionGeneration(): number {
   return generation;
 }
 
+const endListeners = new Set<() => void>();
+
+/** Told, at once, whenever a session ends -- as the generation moves,
+ * before anything is awaited. For state kept per app that something
+ * under way has to stop for, where asking the generation later would
+ * leave it standing until then: the automatic reconnect's episode, which
+ * a sign-out from Settings, an account deleted there or a refused refresh
+ * used to leave waiting, with no screen and no timer to end it, until the
+ * next sign-in's dashboard had loaded. Registered by the module that owns
+ * that state, so this one imports none of it. Returns the unsubscribe. */
+export function onSessionEnd(listener: () => void): () => void {
+  endListeners.add(listener);
+  return () => {
+    endListeners.delete(listener);
+  };
+}
+
 export type SessionEnd = { tunnel: TeardownVerdict };
 
 /** Everything that belongs to one signed-in customer, forgotten in one
@@ -91,6 +108,13 @@ export async function endCustomerSession(): Promise<SessionEnd> {
   // particular has to move before the teardown starts, or a ladder that
   // checks it during the teardown would still see its session as live.
   generation += 1;
+  for (const listener of [...endListeners]) {
+    try {
+      listener();
+    } catch {
+      // One listener's trouble does not keep the session from ending.
+    }
+  }
   clearGamingProfileCache();
   // Forgotten, not released: signing out releases this device's slot on
   // the server by itself (docs/device-slots.md, obligation 8), and a

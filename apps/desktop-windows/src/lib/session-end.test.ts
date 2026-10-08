@@ -348,3 +348,44 @@ describe("ending a session forgets this device's slot", () => {
     expect(slotTeardown.owed()).toBe(false);
   });
 });
+
+describe("ending a session ends what was under way for it", () => {
+  it("tells those listening as the generation moves, before anything is awaited", async () => {
+    const { onSessionEnd } = await import("./session-end");
+    const before = sessionGeneration();
+    const heard: number[] = [];
+    const stop = onSessionEnd(() => {
+      heard.push(sessionGeneration());
+      order.push("told");
+    });
+    await endCustomerSession();
+    stop();
+    expect(heard).toEqual([before + 1]);
+    expect(order[0]).toBe("told");
+    // Unsubscribed, told nothing more.
+    await endCustomerSession();
+    expect(heard).toHaveLength(1);
+  });
+
+  it("ends the automatic reconnect's episode, from wherever the session ended", async () => {
+    // A sign-out from Settings, an account deleted there, a refused
+    // refresh: none reaches the dashboard, whose own sign-out ended the
+    // episode itself. One waiting for a screen, with no timer left to move
+    // it on, stood until the next sign-in's dashboard had loaded -- worded
+    // there as "Reconnecting...", and filed as the new customer's if they
+    // pressed first.
+    const { autoReconnect } = await import("./auto-reconnect");
+    autoReconnect.reset();
+    autoReconnect.tunnelUp({ routeId: "r", fresh: true, stamp: autoReconnect.stamp() });
+    expect(autoReconnect.dropped()).toBe("reconnecting");
+    // Its first attempt falls due with no screen bound: held, due, with
+    // nothing left to fire.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(autoReconnect.current()).toMatchObject({ kind: "waiting", attempt: 0 });
+
+    await endCustomerSession();
+
+    expect(autoReconnect.current()).toEqual({ kind: "idle", lost: false, stopped: "signedOut", session: null });
+    autoReconnect.reset();
+  });
+});

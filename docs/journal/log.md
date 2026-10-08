@@ -5077,3 +5077,755 @@ rows as they were are in `/root/db-backups/pre-stripe-expired-reconcile-*.csv`.
 never sent to the endpoint, and live mode's shell is read-only, so the
 first proof is the next real checkout that completes or expires: its
 delivery should show 200 under the endpoint, and the row should change.
+## 2026-10-07 — automatic reconnect after a drop (branch `claude/auto-reconnect`)
+
+**Status:** pushed to `claude/auto-reconnect`, off `main` at `454112b`.
+Not merged, not tagged, not released. **Not run in the VM** -- the
+coordinating session is to prove it there by killing the engine (list
+under *Unverified*). Nothing on this branch has carried a packet.
+**Touches:** JS/TS, and after review one small native change for iOS.
+Shared: `apps/desktop-windows/src/lib/`
+`auto-reconnect.ts` (new), `failover.ts`, `connection-evidence.ts`,
+`connect-intent.ts`, `i18n.tsx`; `components/RepairNetwork.tsx`; both
+dashboards; `apps/mobile/src/lib/reconnect-steps.ts` (new) and
+`apps/mobile/src/App.tsx`. iOS's `hasPermission`
+(`plugins/vpn/ios/.../NeoxifyVpnPlugin.swift`, `Ikev2Engine.swift`) and
+the plugin's `Granted` that carries its answer (`plugins/vpn/src/lib.rs`).
+Since the fourth review round also `components/LocationPicker.tsx`,
+`lib/repair.ts`, `lib/ladder-pass.ts`, `apps/mobile/src/lib/phone-pass.ts`
+and the iOS tunnel extension (`plugins/vpn/tunnel/.../PacketTunnelProvider.swift`).
+No Kotlin, no backend.
+
+Owner decision 2026-10-07: when the tunnel ends without the customer
+asking, the app reconnects instead of waiting for Connect. Until now the
+desktop said "VPN connection lost" within ~1-2 s (engine-death detection,
+the 2026-10-06 entries) and waited; the phones said "You're not
+protected" on the next fifteen-second poll and waited.
+
+**Fail open is unchanged and no kill switch was added.** While the
+tunnel is down nothing is blocked; the screen says "Reconnecting..." with
+"The tunnel closed. Until it's back, your traffic is going out without
+Neoxify and is not protected." (Persian too). "You're protected" comes
+back only from the reconnect pass's own egress proof, exactly as after a
+press of Connect -- the episode never claims anything itself.
+
+### The state machine (`auto-reconnect.ts`, one instance per app)
+
+| State | Means | Leaves on |
+|---|---|---|
+| `idle` (+ `lost`) | nothing to reconnect; `lost` = an episode ended without a tunnel, headline "VPN connection lost" | a pass landing (`armed`); any press clears `lost` |
+| `armed` | a tunnel the app vouches for: a pass that landed (clock starts), or one adopted from the service | a drop (`waiting`, or `idle`+lost); a press, the device limit, a sign-out (`idle`) -- but not a location chosen in the server list, which is for the next connect (`chose`); the app's own teardown -- the mid-session failover landing nothing, a recheck finding nothing -- forgets it (`idle`) |
+| `waiting` | between attempts; `blockedBy` network / foreground / null | its backoff timer (`attempting`); network or app back (`attempting` at once); a press (`idle`) |
+| `attempting` | one ladder pass running | landed (`armed`, quick-death count kept); failed (`waiting`, next attempt); stop outcome (`idle`+lost) |
+
+**Triggers.** Windows: `publishDrop`, the one place a drop is said,
+after `droppedFromPoll` (liveness poll, 1 s; health poll, 15 s) has ruled
+out our own teardowns and disturbances; and `droppedUnseen` -- the same
+rule with "the screen was showing a tunnel" replaced by "the app is armed
+for this session" -- when a screen mounting back from Settings finds the
+tunnel verifiably gone (both polls unmount with the screen, so that drop
+was never seen before). Phones: the health poll's "nothing is running"
+while a tunnel is shown, now also run as the app comes to the front, and
+`droppedWhileAway` on a screen mounting.
+
+**Exclusions** (no episode, or it ends): any customer press except a
+recheck -- Connect (takes over at once), Disconnect, stopping a pass,
+"Stop reconnecting", "Use on this device instead", a change of mode or
+server, a repair; a sign-out or expired session (`sessionGeneration`,
+checked at the drop and before every attempt); the device limit -- a
+displacement or refusal while connected, a teardown it still owes, a
+refusal on the reconnect's own claim (the refusal card shows); a
+subscription not `ACTIVE`, or a pass failing on `concurrentLimit`,
+`quotaExhausted`, `subscriptionInactive`; gaming mode; nothing usable to
+dial (phones); on phones, another VPN still holding the device (on iOS,
+which shows an app no other app's VPN: another configuration chosen over
+one of ours, of its kind) or the VPN permission gone. App quit and upgrade need
+nothing: the episode lives in the process, and a fresh process starts
+`idle` (an adopted tunnel is armed, a missing one is not a drop).
+
+An attempt's pass stops once its attempt is over, however that came
+about -- a press, a sign-out, the attempt's 180 s ceiling (`passStopped`:
+the stop flag, or the attempt no longer `live`) -- so nothing that ends an
+episode can leave its pass dialling behind it. The Windows ladder asks
+right before each rung's connect as well as before and after it (second
+review round: the settle, the server's names and the IPv6 baseline ran
+to ~17 s unasked, and a stop in them dialled the old route once more). A
+location chosen during an attempt stops its pass at once, as "Stop
+reconnecting" does; chosen over a tunnel that came back while the server
+list was open -- one the screen shows -- it leaves that tunnel up and
+armed, the choice being for the next connect. Armed beneath a screen that
+shows nothing up (a Windows poll reading that was not a drop; a phone
+screen that could not ask the platform, or loaded from the cache), the
+choice takes over as any press: kept armed there, its own reload took the
+tunnel's absence for a missed drop and redialled the old route. A repair
+has any pass in flight stopped and let go of (bounded, 60 s) before the
+service is asked: the pass's next connect would otherwise come up behind
+the repair, and its teardown -- a Disconnect -- cancel the repair mid-step.
+The 60 s holds because of the check before the connect: without it, a
+connect sent after the repair's own Disconnect queued behind that
+Disconnect's uncancellable teardown and ran to the 45 s reply timeout.
+
+A pass ends -- and a screen mounted since it began reads the platform --
+only once its engine is gone. On the phones `disconnect` returns before
+Android's `:xray` has stopped; the pass now waits for `tunnelGone` (8 s at
+most) after a failed walk and when it stands down, whoever stopped it.
+Read at once, the engine on its way down showed "Connected, not
+confirmed" and armed the episode over nothing. A phone pass replaced
+during those waits touches nothing (`pass.owns()` asked again). A press
+counts for the whole app (`presses`): a Connect waiting on a screen that
+unmounted now hears a stop pressed on the one mounted since.
+
+**Backoff.** Immediate, then 2 s, 5 s, 10 s, 20 s, 30 s -- six passes at
+most. No new pass starts once 120 s have gone on backoff and passes (a
+running pass is never interrupted); a pass that shows no sign of life --
+no new rung -- for 180 s counts as failed, measured as the ladder's own
+150 s guard is, so a long ladder still dialling is waited for. On a phone
+that is 180 s in front: held while the app is away and resumed, not
+restarted, on its return -- restarted, a customer who kept leaving and
+coming back kept a wedged pass on "Reconnecting..." for good. Three
+deaths in a row within 60 s of coming up stop it without another
+attempt. No network (`navigator.onLine` false), or a phone app in the
+background -- between attempts, or during one, whose pass the OS freezes
+-- pauses the episode without spending attempts or budget, for 30
+minutes at most -- then "VPN connection lost". A backoff is over when its
+timer fires; the wall clock, which can be set back, is not asked.
+
+### What is shared and what is per platform
+
+- Shared (desktop `src/lib`, mobile through `@shared`): the episode, its
+  order (`orderCandidates` `resumeRouteId` -- the route that was up
+  first, ahead of the pin, then the normal order), the headline
+  (`headlineFor` `reconnecting`, never over a tunnel that is up or over
+  "unknown"), the orb label ("Reconnect now" between attempts --
+  `pressFor`), the words, and the telemetry shape.
+- Windows: the triggers above; each attempt is `runLadder({ automatic,
+  reconnect })`, so the device-limit claim behaves as for the mid-session
+  failover (standing check first when the slot was never confirmed).
+  The slot is now given back at a drop when nothing will reconnect;
+  during an episode the reconnect's claim renews it. After review: an
+  episode that ends before a pass of it claimed -- an exclusion found as
+  an attempt begins, nothing to dial, a wait past half an hour -- gives
+  it back itself (`slotIdle`, `SLOT_LEFT_IDLE`); a press, a sign-out,
+  the device limit and a pass that failed account for it themselves.
+  Second review round: a held attempt runs once the screen has loaded
+  *and* read this network's route memory (`loadRouteMemory`), which the
+  pass orders by and its landing writes back whole -- run as loading
+  ended, it dialled without the memory and its landing replaced every
+  network's remembered route and history with its one entry (and, since
+  the third round, the route list). A pass a
+  newer one replaced no longer forgets the newer one's armed tunnel, and
+  a failover note compares against the server the tile showed
+  (`displayedRouteId`), not the credential the screen holds.
+- Phones: attempts wait for the app to be in front
+  (`setRequiresForeground`). There is no background work to run them
+  from -- Android's tunnel service is a separate process with no
+  JavaScript, iOS suspends the app -- so a drop in the background is
+  **reconnected when the app is next opened**, and says
+  "Reconnecting..." then. Before each attempt (`reconnectPreflight`): a
+  bounded wait for the device to be out of every VPN (another app's VPN
+  stops the episode, *before* the permission is asked, since on Android
+  `VpnService.prepare` can itself move the VPN back to a once-allowed
+  app -- read from AOSP, not observed), then the permission, never the
+  consent dialog. The phone's headline and orb label now come from the
+  shared tables; it gains "VPN connection lost", which it never had. A
+  held attempt runs once the screen has its credentials, the route list
+  and the platform's state -- the last read within a bound now -- and no
+  longer waits out the twelve-second baseline walk after them.
+- Phones, the device slot, after review: an episode that has to wait for
+  the app to be opened sets the slot aside (`setAside`) -- released, but
+  left `unclaimed`, so the pass that runs on opening asks first. Kept
+  for a claim that would not come for up to half an hour, it turned the
+  customer's other device away as "in use on Android phone" about a
+  phone with no tunnel. That first question is obligation 9's standing
+  check, as on Windows, for any reconnect whose slot is not confirmed (a
+  phone renews only in the foreground): a verdict stops the pass, no
+  verdict puts up the "couldn't check" note and the ladder runs. It used
+  to claim like any connect, and an unanswered claim dialled credentials
+  the backstop may hold, ending on "none of them carried traffic" with no
+  word about the plan's limit. The standing check starts a slot epoch of
+  its own (second review round): the release's watch over requests still
+  out when the slot was set aside used to run on past it, and one that
+  settled unanswered released the grant the check had just taken.
+- iOS, added after review: that wait cannot see another app's VPN --
+  `tunnelGone` reports on our own two connections -- so the permission's
+  answer (`vpnAccess`) also says whether another configuration has been
+  chosen over one of ours. Apple documents one enabled configuration *per
+  kind*: tunnel providers ("enterprise") are one kind, NEVPNManager
+  profiles such as our IKEv2 ("personal") another, and enabling another
+  of a kind sets `isEnabled` false on ours of that kind only. Our code
+  never sets it false, so one of ours not enabled stops the episode as
+  `otherVpn` -- asked per kind since the second review round. Asked
+  across both (none of ours enabled), as first written on the reading
+  that iOS enables one configuration in all, an iPhone that had ever
+  landed on IKEv2 kept that profile enabled when another app's tunnel
+  took the tunnel kind, and the reconnect switched the device off it.
+  Before any of it, opening the app after another VPN app took over
+  started a reconnect that re-enabled ours and switched the device off
+  that VPN. If iOS does in fact enable one in all, the per-kind check errs
+  the safe way: after landing on the other kind, an automatic reconnect
+  stops as `otherVpn` and says "VPN connection lost" rather than dialling.
+  The answer also says whether IKEv2's own configuration is installed --
+  a second one, with its own "Add VPN Configurations" prompt, removed at
+  every sign-out. Without it an automatic pass passes over IKEv2
+  (`skipIkev2`, before the rung's baseline, counted out of "the last
+  rung"): dialling it would install it, and the system prompt came up,
+  passcode and all, in front of somebody who had pressed nothing -- on
+  the rung reached exactly when every other had failed. A press of
+  Connect still dials it, prompt and all -- and a pass that passed it
+  over no longer ends on "Tried every available protocol" but on
+  `err.someProtocolsNotTried` ("Some are tried only when you press
+  Connect"; Persian too).
+- iOS: **no on-demand rules.** NEVPNManager could reconnect in the
+  background by itself, but turning that on silently was ruled out; the
+  gap is that an iOS tunnel that stops while the app is in the background
+  stays down until the app is opened. Turning on-demand on is a product
+  decision (and a profile change customers would see in Settings).
+
+**Telemetry**, within the current backend DTO (its enums are not
+extended): a reconnect's pass goes out as `CONNECT` with a `reason`
+starting `auto-reconnect attempt N of at most 6 after the tunnel
+dropped` -- `SUCCESS` kept when it lands (the per-ISP data reads only the
+rungs), a failure filed as `OTHER` with what it would have been in the
+reason. Every episode that ends without a tunnel files one
+`CONNECT`/`OTHER` row, `auto-reconnect stopped after N attempt(s): ...`
+or `auto-reconnect not attempted after the tunnel dropped: ...`; a
+sign-out files nothing. The panel does not yet filter on the prefix.
+After review: a refusal of the reconnect's own claim is the pass's row
+too (`OTHER`, with `REJECTED` and the server's code in the reason) --
+it was filed as a customer's refused Connect -- and a claim answered
+`SUBSCRIPTION_INACTIVE` ends the episode as `notEntitled`, "the plan does
+not allow a connection now", not as the device limit refusing the
+device. "VPN connection lost" is said only to the session whose tunnel
+dropped (`reconnectLost` takes the session, as `vouching` does): a
+session ended by expiry, revocation or account deletion used to hand it
+to the next sign-in. An attempt whose session ended out of sight (a
+refused refresh, from App) ends as `signedOut` with no row whatever its
+pass reports -- it read to the pass as overtaken and was filed as "the
+customer pressed something".
+
+### Third review round
+
+- **A session that ends ends its episode** (`onSessionEnd` in
+  `session-end.ts`, told as the generation moves; the controller
+  registers itself). A sign-out from Settings, an account deleted there
+  or a refused refresh reach no dashboard, and an attempt held for a
+  screen had no timer left: the next sign-in's dashboard said
+  "Reconnecting..." until it had loaded. `reconnectingView` now takes the
+  session too, as `reconnectLost` and `vouching` do.
+- **Windows: a held attempt waits for the route list** as well as the
+  route memory (`routeListLoaded`, answered or not). The pass runs on the
+  `runLadder` of the render it starts in; started before the list
+  arrived, it landed with no concurrent extra exits and every game's
+  placement Unknown until the next connect.
+- **A location chosen while idle overrules nothing.** Idle, the only pass
+  running is the customer's own connect, which the choice does not stop
+  -- the list answers when its switch request does, possibly after the
+  customer closed it and pressed Connect -- and counting it as an
+  overrule left that connect's landing unarmed. Chosen over a tunnel kept
+  up, the episode no longer leads with the route that tunnel is on: the
+  automatic pass dialled the server just left, under a tile naming the
+  new one. It takes the ordinary order, the choice first.
+- **The ceiling's time in front is measured on a clock that only goes
+  forward** (`ReconnectDeps.elapsed`, `performance.now()`). A forward step
+  of the wall clock -- a phone's network time on the network change that
+  dropped the tunnel -- ate the ceiling in a five-second trip away and gave
+  up a live pass. The half hour away stays on the wall clock, which has to
+  count a device asleep.
+- **Phones, what a pass leaves** (`passTunnel` in `phone-pass.ts`): the
+  credential it landed on, or `"unproven"` -- an engine it dialled and did
+  not land on, still up past its eight-second wait. A screen adopting the
+  platform's word names and credits the landed credential (the per-ISP
+  session success went to the screen's route, the one that had failed
+  over), proves it against the pass's baseline only then, and shows an
+  unproven engine as the pass's own screen does -- nothing up -- with
+  nothing armed or claimed (it read "You're protected" over a rung the
+  pass had rejected, and arming it ended the episode's remaining
+  attempts). Arming quotes a stamp taken before the platform is asked.
+- **Phones, a pass's end on a screen still loading is the load's to
+  read**, now on the cached path too (it never read the platform; the
+  gap below is closed). Read from the listener with nothing loaded, the
+  slot was told the phone had no subscription: its standing wiped, the
+  landing's claim through the tunnel thrown away, and -- on the cached
+  path -- never claimed or renewed again that session.
+- **Phones, the device limit's teardown begun on a screen now gone** (a
+  late refusal of a landed pass's claim) is shown on the one mounted:
+  still disconnecting while owed, down once not. It said "You're
+  protected" beside the card, and over nothing after.
+- **Phones, presses.** Connect over the customer's own pass that has
+  been stopped and is still unwinding, or "Use on this device instead"
+  over any pass, takes it over and dials (`pressOverPass`); followed, the
+  press did nothing at all. Connect's waits ask the session as well as the
+  press count: a sign-out from Settings during the twenty-second wait for
+  a pass to let go was followed by a dial of the old account's credential.
+  A stop during the failed walk's last wait owns the screen (the error
+  line and a failed-connect row followed it). A stopped pass is filed as
+  the customer's only when a press stopped it (`pass.pressed`); its
+  attempt ending by itself filed "cancelled by the customer". A session
+  ended during the egress check takes its tunnel down silently, as after
+  the connect.
+- **Declined: iOS holding back only the rungs of the kind chosen
+  elsewhere.** Reported: an IKEv2 profile left disabled by another app's
+  personal VPN long ago stops every later automatic reconnect of an Xray
+  tunnel as `otherVpn`, with no other VPN up. True, and it errs the safe
+  way ("VPN connection lost", a press dials as before). The proposed fix
+  -- skip IKEv2's rungs and dial Xray -- is unsafe in a case the flag
+  cannot tell apart: that same other app, whose configuration is already
+  its kind's enabled one, connecting and kicking our Xray tunnel off.
+  Enabling nothing changes then (different kinds), so the stale flag is
+  the drop's only sign; iOS runs one VPN at a time (believed, not
+  observed), so dialling Xray would switch the device off the other
+  app's VPN -- the harm the check exists for. Telling the two apart needs
+  a native signal (why our tunnel stopped, `fetchLastDisconnectError`)
+  that the plugin does not carry. (Since the fourth round the extension
+  records why the system stopped our tunnel -- below. The decline stands
+  until an iPhone has shown that signal is what Apple documents.)
+
+### Fourth review round (the last before the VM)
+
+- **An attempt that found nothing to dial** -- a screen back from
+  Settings that loaded no credential, or none this build carries -- ends
+  the episode as `nothingToDial`, and is not counted among the attempts
+  made. Filed as `excluded`, its row said "stopped after 3 attempt(s): a
+  reconnect was ruled out at the moment of the drop" after two dials.
+- **Phones, a Connect that follows the customer's own pass arms its
+  landing** (`followPass`; the pass quotes `pass.landing(stamp)`). Every
+  press overrules (`cancel`, even idle), so the followed pass's landing,
+  stamped before that press, was refused: "You're protected" over a
+  tunnel whose drop reconnected nothing. Also for a Connect another pass
+  beat to the guard. A later press overrules it as before.
+- **Phones, the pass guard is held while the app is away**
+  (`ladderPass.hold`/`resume`, from `visibilitychange` in `phone-pass.ts`),
+  as the attempt's ceiling is -- from where it was, not renewed. Counted,
+  a pass iOS froze for over 150 s came back with its guard lapsed until
+  its next rung, and a screen mounted then let Connect start a second
+  ladder beside it. Windows never holds it.
+- **A server picked in the list ends a reconnect under way as it is
+  picked** (`onPicking` on the shared picker, `autoReconnect.choosing`),
+  not when the switch request answers -- seconds on a filtered network, in
+  which a backoff fell due and dialled the old route after the press, or
+  an attempt landed and stayed up armed on it. A tunnel armed, or nothing,
+  still waits for the answer (`chose`). On the phone the press is counted
+  there too, and no longer when the answer comes: counted then, it
+  superseded a Connect pressed after the list was closed, which returned
+  without dialling -- a lost press.
+- **Windows, no automatic pass while a repair runs** (`duringRepair`,
+  `repairUnderWay`): the ladder declines an automatic pass and the health
+  poll measures nothing. Stopping the pass in flight was not enough: over
+  a "degraded" screen the poll's strikes, read off the repair at work,
+  began the failover, whose opening Disconnect cancelled the repair
+  mid-step and whose connect came up behind it, armed.
+- **iPhone, the platform asked again before every rung of an automatic
+  pass** (`rungAccess`): another VPN app connected while the pass walked
+  ends the episode as `otherVpn` rather than switching the device off it;
+  our configuration deleted in Settings meanwhile ends it as `permission`
+  -- or passes over IKEv2, if that is what went -- rather than raising "Add
+  VPN Configurations". Not Android, where asking is `VpnService.prepare`.
+- **iPhone, another app's VPN of the other kind** (c19's last path): a
+  personal VPN connecting over our packet tunnel turns nothing of ours off,
+  so on a phone with no IKEv2 profile of ours the per-kind check saw
+  nothing and the reconnect switched the device off it. The extension now
+  records why the system stopped our tunnel, in the app group both targets
+  carry, and `hasPermission` reports `superceded` (another configuration
+  took over) as `chosenElsewhere`. Cleared as our tunnel starts and as
+  IKEv2 lands. From Apple's documentation of `NEProviderStopReason`;
+  neither binary is compiled here.
+- **Phones, a pass that stands down with no press behind it** (its
+  attempt over by the ceiling, or half an hour away) waits for the last
+  rung's engine at every stop in the walk, and `settleUndialled` shows an
+  engine a pass never proved as nothing up, as `adoptPlatform` does. It
+  read the platform raw: "Connected, not confirmed" -- or "You're
+  protected" -- over an engine on its way down, beside "VPN connection
+  lost", with the health poll started over it.
+
+### Fifth review round
+
+Four lows the checkers found at the fourth round's head: three that
+earlier rounds' fixes made reachable, and one those fixes left.
+
+- **A server picked over a tunnel kept up leads that tunnel's reconnect
+  from the pick** (`choosing({ routeId, tunnelShown })`, `LeadPick`,
+  `Episode.pick`, `pickFailed`). The armed tunnel stayed on its route
+  until the switch request answered -- seconds, on a filtered network. A
+  drop in between reconnected to the server the customer had just picked
+  to leave, and an answer that came during that attempt stopped it, as an
+  answer over any episode does: the drop the pick was meant not to touch
+  ended in "You're not protected". Now the pick leads at once; an episode
+  begun after it is left to go on by its answer; a switch that fails puts
+  the old lead back (an episode already dialling the pick goes on with
+  it -- a server the customer pressed). Beneath a screen showing nothing
+  up, the pick takes over at once, as `chose` did at the answer. The
+  shared picker names the pick and says when the switch fails
+  (`onPicking(routeId)`, `onPickFailed`). Both clients.
+- **Windows: every automatic pass puts the last pass's error line away as
+  it begins** -- in `runLadder`, after the declines; it was the reconnect
+  runner's alone. The mid-session failover left it, with the inline
+  "Repair my network" under "Connecting...". Run there, the repair stopped
+  the pass (`stopPassBeforeRepair`), whose end cleared the line and with
+  it the panel running the repair: its report, or the elevated command
+  when the service could not be reached, never shown. A pass turned away
+  while a repair runs leaves that panel where it is.
+- **iPhone: a pass that stops short says so** (`stoppedShort`,
+  `err.notEveryProtocolTried`, "None of the protocols tried carried
+  traffic. The others were not tried this time."). Its configuration
+  unreadable before a rung (`rungAccess` "unknown"), the pass dials
+  nothing more; the last dialled rung's "Tried every available protocol"
+  stood through the backoff, and beside "VPN connection lost". The
+  fourth round's rewording for the IKEv2 skip missed this exit.
+- **Phones: a Connect pressed on a screen since gone is shown on the one
+  mounted** (`connectPressed`, `connectPending`, `onConnectSettled` in
+  `phone-pass.ts`). A Connect over an automatic pass waits up to twenty
+  seconds for it to let go (new on this branch), then for its teardown
+  and the consent dialog. Settings opened and closed meanwhile, the screen
+  mounted on return read the platform as the automatic pass ended --
+  "You're not protected", Connect on the orb, the location picker live --
+  and went on saying so while the press, on the screen now gone, began
+  its pass and dialled: nothing tells a screen that a pass has begun. Now
+  that screen shows "Connecting..." from mounting until the press
+  settles, then what the press said there (the busy line, a failed
+  permission question, a refused permission) and the platform's word. A
+  pass's own error line is kept with the pass (`PhonePass.say`,
+  `passSaid`) and shown by a screen that reads its end without having run
+  it -- the failed ladder, nothing usable, a plan that has ended; until now
+  it said nothing there, whichever way the screen was replaced. A later
+  press, or the session's end, owns the screen as before: the orb pressed
+  there, on "Connecting...", is a stop, and the press under way gives way
+  to it. Not Windows, whose Connect waits on no other pass.
+
+### Proven -- tests on this PC
+
+- `apps/desktop-windows`: `pnpm test` (Git Bash script shell) **1006
+  passed, 58 files** after the fifth review round (1000 after the fourth,
+  992 after the third, 985 after the second, 978 after the first, 853 / 56
+  on `main`); `pnpm typecheck` clean.
+- `apps/mobile`: `pnpm test` **232 passed, 12 files** after the fifth
+  review round (224 after the fourth, 207 after the third, 197 after the
+  second, 192 after the first, 140 / 10 on `main`); `npx tsc --noEmit -p .`
+  clean.
+- **The fourth round's Swift is not compiled here** -- the extension's
+  stop record and the plugin's reading of it -- only pinned by source
+  assertion, including that both use the app group the build script
+  entitles both targets to.
+- No desktop Rust touched, so `cargo test --workspace` was not run. The
+  mobile plugin's `Granted` was: `cargo test -p tauri-plugin-neoxify-vpn`
+  (from `apps/mobile/src-tauri`) **6 passed**, two new -- iOS's
+  permission answer reaching the UI whole, Android's unchanged. The
+  first fails against the struct as it was, which dropped both fields
+  without an error. **The Swift change (iOS `hasPermission`) is not
+  compiled here**; `ci-ios.yml` compiles it on push, and nothing runs it
+  short of an iPhone. Kotlin is unchanged.
+- The episode, on a clock the test owns: the attempt start times
+  (0, 2, 7, 17, 37, 67 s after the drop), the budget (four 30-second
+  passes, then stop), the quick-death stop and its reset, offline and
+  background pauses that cost nothing, the 30-minute ceiling (also when
+  the clock jumps past it with no timer firing, as after sleep), a press
+  winning over a pass that reports later, sign-out at the drop and
+  between attempts, the device-limit refusal, a wedged pass, a second
+  drop during an episode, no re-arming of a tunnel the customer asked to
+  be rid of, no vouching across sessions. Added after review: a backoff
+  timer firing with the wall clock set back, a pass still dialling at
+  five minutes, and a phone app away during a pass (budget, ceiling, the
+  half-hour end, frozen or not). The wiring in both dashboards by source
+  assertion, as for the liveness poll.
+- 22 mutations of the shared logic and 10 of the phone's, each removing
+  one rule; every one fails a test. One survived at first (the ceiling
+  check on waking) and got its test. For the iOS review fixes, six more
+  -- the preflight ignoring `chosenElsewhere`, the clearance always
+  allowing IKEv2, the runner not passing it on or reading the bare
+  `granted`, the walk not skipping, `willDial` not counting the skip --
+  and `Granted` without its two fields; each fails a test. For the
+  slot, record and session fixes, 27 more -- the episode giving nothing
+  back, giving it back after a failed pass or at a drop that started no
+  episode, the wait for the app keeping it, `setAside` forgetting the
+  subscription or the customer's takeover, the check not waiting for the
+  release, a second release starting over, the phone skipping the
+  standing check or its note or not clearing it, the slot's stop
+  unmarked or always the device limit, "connection lost" read without
+  the session or from the session in force -- each fails a test. For the
+  second review round, 20 more, each reverted alone against its test:
+  the choice ignoring what the screen shows (either dashboard, and the
+  controller), the attempt's session not asked as it ends, the phone's
+  ceiling restarted on return, the standing check keeping the release's
+  epoch, no stop check before the Windows connect, the superseded pass's
+  `forget`, the failover note against the credential, the bind not
+  waiting for the route memory, the phone's press count per screen or
+  unasked after the teardown, the stand-down's wait after the press check
+  or without its ownership check, the failed walk not waiting for its
+  engine, readiness after the baseline walk, the status read unbounded,
+  the skip not marked, and the iOS check across both kinds (a source
+  assertion on the Swift, which is not compiled here). For the third
+  review round, 33 more, each reverted alone against its test: the view
+  across sessions (the controller, either dashboard), the session's end
+  not told or not registered, the bind or the flag without the route
+  list, the idle choice overruling, the kept tunnel's route kept, the
+  ceiling on the wall clock; and on the phone the listener adopting while
+  loading, the cached path not adopting, readiness not said over a pass
+  or not set at once, the slot teardown not shown either way, any stop
+  filed as the customer's, `pressed` as `stopped` or without ownership,
+  no session check after the egress check, the landing not recorded, its
+  credential not named, the baseline kept for an unknown tunnel, no
+  `"unproven"` mark, an unproven engine shown or armed, the adoption
+  unstamped, the engine's departure not recorded, a stopped pass followed,
+  a takeover followed (in `pressOverPass` and in the dashboard), Connect
+  not asking the session, and no stop check after the last wait. For the
+  fourth, 22 more, each reverted alone against its test: the undialled
+  attempt counted, or filed as `excluded` (the mapping, the Windows
+  runner), `choosing` doing nothing, the repair unmarked, the ladder or
+  the poll not asking it, the picker not telling the pick; on the phone
+  the guard counted while away or renewed on return, its listener not
+  registered, `landing` ignoring the follow, the follow not re-stamping,
+  the unproven engine shown raw, the stand-down not waiting, the rung
+  check ignoring `chosenElsewhere` or IKEv2's absence or not wired, the
+  choice counting a press again, and the Swift reading or recording no
+  stop reason. For the fifth, 30, each applied alone against its test: the
+  answer ending an episode the pick began, the pick not leading or not
+  disarming beneath a screen showing nothing, a failed switch putting
+  nothing back, the drop not carrying the pick, the answer keeping the
+  pick's mark, the picker not naming the pick or not saying it failed,
+  either dashboard not passing that on or not saying what the screen
+  shows, the failover keeping the line or clearing it before the repair's
+  decline, the short stop unmarked or not reworded; on the phone a
+  pending press counted once overtaken or on its own screen, an overtaken
+  press still telling the screens, a replaced pass's line kept, any
+  pass's line answered, the platform read under a pending press or
+  Connect shown over one at mounting, the press never settling, its line,
+  or the pass's, not shown, its own screen reading again after it, the
+  failed walk's or the busy line not kept. One survived -- a guard against
+  settling twice that the press's own check already was -- and was
+  removed.
+
+### Unverified -- needs the VM, or a phone
+
+In `Neoxify-Test`, NIC capture (`pktmon --comp nics`) and the app's text
+on one clock, for each of: `xray.exe` killed on the four Xray profiles,
+full tunnel and Custom mode; `openvpn.exe` killed; the
+`WireGuardTunnel$neoconnect` process killed; `rasdial Neoxify
+/disconnect`. Expected: "Reconnecting..." within ~1-2 s, packets direct
+meanwhile (fail open), "You're protected" only after the new pass's
+egress proof with the node's exit IP, the same route as before when it
+still works, and telemetry rows with the `auto-reconnect` reason. Then:
+
+- Killing the engine three times within a minute: two reconnects, then
+  "VPN connection lost" and no more passes.
+- The guest's adapter disabled after a kill: the offline hint, no
+  passes; re-enabled: a pass at once. Whether WebView2's
+  `navigator.onLine` follows the adapter in the guest is not known.
+- A kill while Settings is open: on return, "Reconnecting..." -- the
+  `droppedUnseen` path.
+- A kill while the window is minimized: WebView2 throttles timers in a
+  minimized window to about one a minute (see the heartbeat note in
+  `src-tauri/src/lib.rs`), so detection and each backoff step may take
+  that long. Not measured.
+- A device-limit refusal on a reconnect's claim (needs a second device
+  on a limited plan): the card, "VPN connection lost", no further passes.
+- On an Android phone and the PC, one plan of one device: the phone's
+  `:xray` process killed while the app is in the background, then
+  Connect on the PC within ninety seconds -- expected not refused (the
+  slot was set aside). Then the phone opened -- expected the standing
+  check's answer: the displaced card naming the PC, no pass. With the
+  API blocked on the phone's network, the "couldn't check" note, then
+  the ladder. Unobserved; the release's arrival is the server's to show.
+
+On an iPhone (none has carried a packet yet): connected through Neoxify,
+connect another VPN app, bring Neoxify to the front -- expected "VPN
+connection lost", no pass, and the other app's VPN still up. Twice: once
+on a phone that has never landed on IKEv2, and once on one that landed
+on IKEv2 and later on Xray, so that both of our configurations are
+installed -- the case a check across both kinds missed. That rests on
+Apple's documented rule that enabling another configuration of a kind
+sets `isEnabled` false on ours of that kind, unobserved; the second run
+also shows whether our own Xray landing left our IKEv2 profile enabled
+(per kind, as documented) or not (one in all -- then every automatic
+reconnect after a landing on the other kind stops as `otherVpn`). And
+signed out and back in, landed on Xray, then a drop on a network where
+Xray and WireGuard fail -- expected the IKEv2 rung passed over (`not
+dialled automatically` in the attempt's rungs), no "Add VPN
+Configurations" prompt, and "Some are tried only when you press
+Connect" rather than "Tried every available protocol".
+
+On an Android phone, a drop with an Xray rung that comes up but carries
+nothing, Settings opened and closed during the attempt: expected the
+screen back from Settings to show "Reconnecting..." and then the next
+attempt or "VPN connection lost" -- never "Connected, not confirmed" as
+the failed rung's `:xray` comes down. Unobserved.
+
+Added in the third review round, all unobserved on a phone: Connect
+pressed, stopped during its baseline walk, and pressed again -- expected
+a connect, not a dead orb; a pass landing while the screen back from
+Settings is still loading on a network where only the tunnel reaches the
+API -- expected the slot claimed through the tunnel and renewed after; on
+a plan of one device, a landed pass's claim refused late while that
+screen is mounted -- expected "Disconnecting..." and then the card, never
+"You're protected" beside it.
+
+Added in the fourth review round. On an iPhone with no IKEv2 profile of
+ours, connected on Xray: another app's IKEv2/IPsec (personal) VPN
+connected, Neoxify brought to the front -- expected "VPN connection lost",
+no pass, the other VPN still up, and the extension's log saying
+`superceded`. During a reconnect pass on a filtered network: another VPN
+app connected, then Neoxify back -- expected the pass to stop before its
+next rung; and our configuration deleted in Settings mid-pass -- expected
+no "Add VPN Configurations" prompt. A pass frozen in the background for
+over three minutes, then Settings opened and closed -- expected
+"Connecting..." and one ladder. On Windows, Repair pressed over a
+"degraded" screen -- expected no Disconnect from the app during the
+repair job in the service's log, and no tunnel after it; a server picked
+while a reconnect waits on a network where the switch request is slow --
+expected no attempt after the click.
+
+Added in the fifth review round, unobserved. On a phone, a drop on a
+filtered network, Connect pressed during the attempt, Settings opened and
+closed while the press waits: expected "Connecting..." on return until
+the press settles, then the platform's word -- and, if its ladder fails,
+its error line on that screen. On either client, the list opened between
+attempts and an attempt landed beneath it, then a server picked on a
+network where the switch request is slow and the engine killed before it
+answers: expected one reconnect, led by the server picked, not stopped by
+the answer.
+
+**Known gaps, not decided here:**
+
+- A disconnect made outside the app is indistinguishable from a drop and
+  is reconnected: Windows' own VPN flyout for IKEv2's RAS entry, or the
+  WireGuard tunnel service stopped by hand; Android's VPN settings
+  "Disconnect" when it leaves the permission in place (believed to, from
+  AOSP; unobserved); the iOS Settings toggle, on the next foreground.
+  Telling them apart needs native signals (Android `onRevoke`, iOS
+  `fetchLastDisconnectError`) that the IPC and plugins do not carry.
+- Android IKEv2: `Ikev2Engine.isUp` reads a platform tunnel that is
+  re-negotiating (`STATE_CONNECTING`) as down. The poll used to say
+  "You're not protected" over it; now it also redials. Unobserved.
+- Android IKEv2 consent: an automatic pass dials IKEv2 on the reading
+  that the VpnService grant the preflight checks also covers the
+  platform's IKEv2 profile (AOSP `Vpn.isVpnProfilePreConsented`), so
+  `provisionVpnProfile` returns no consent Intent. The Kotlin plugin's
+  own comment says the grant does not cover it. Unobserved either way;
+  if Android does ask, the iOS skip needs an Android answer too.
+- An iPhone whose only usable routes are IKEv2, without IKEv2's
+  configuration, dials nothing on an automatic pass, and each pass
+  counts as failed until the episode's attempts run out -- the shape the
+  Android allowed-apps skip of IKEv2 already had. Reachable only when the
+  configuration was deleted in Settings, or the plan's other routes went
+  away since the last landing: a landing on IKEv2 installs it, and only a
+  sign-out, which ends the session, removes it.
+- A location or a mode chosen between attempts ends the episode as a
+  press that takes over, and neither claims nor releases: the slot the
+  drop kept goes stale on its own, about ninety seconds, as before this
+  review. Giving it back there would also delay a Connect pressed in the
+  next second and a half, which waits for a release on the wire.
+- A service that stops answering mid-session ("Can't tell right now")
+  and comes back with nothing running is *not* reconnected: by the drop
+  rule the screen was not claiming a tunnel then, and the armed tunnel is
+  forgotten.
+- ~~Mobile on a network where the API is unreachable takes the cached
+  path in `loadAll`, which never adopts the platform's state~~ -- closed in
+  the third review round: the cached path reads the platform as the other
+  path does.
+- The attempt budget is still charged on the wall clock, as it always
+  was: a forward step of the clock during a pass spends it. Since the third
+  round the pass goes on (its ceiling is on the clock that only goes
+  forward), but if it fails no further attempt starts -- "VPN connection
+  lost". Moving the budget off the wall clock would also stop a laptop
+  asleep mid-pass from spending it, a change to Windows' behaviour not
+  made here.
+- Phones: a tunnel no pass of this process landed -- a fresh app over
+  one the platform kept -- is adopted with no credential and no baseline,
+  so the poll reads it "Connected, not confirmed" unless a fresh handshake
+  vouches for it, and credits nothing to any route. As before the second
+  round; that round's baseline now goes only with a landed credential.
+  A tunnel brought up outside the app (the iOS Settings toggle on our
+  IKEv2 profile) after a landing is still named as that landing's.
+- The quick-death stop counts from when a drop is *noticed*. If a
+  minimized window's timers are throttled to one a minute (unproven: wry
+  does not mark a minimized WebView2 hidden), a tunnel dying in roughly
+  the last P seconds of its first minute (P, the pass's length) is
+  noticed after the minute, resets the count, and is reconnected every
+  minute or two until the window is restored -- each landing proven, as
+  for one that dies at 61 s. Left so after review: the app's polls cannot
+  place a death inside a minute-long gap, and counting from the last poll
+  that saw the tunnel alive only moves the error onto tunnels that lived
+  well past a minute -- stopped as quick deaths, on phones after every
+  "connect, then leave the app". Only the service saying when the engine
+  exited would settle it.
+- Windows, from `main` and not this branch's: a Connect pressed in the
+  moment after the screen leaves loading, before its route memory has
+  been read (`loadRouteMemory`; milliseconds normally, up to the gateway
+  ARP's few seconds on a network that does not answer it), dials with the
+  empty placeholders and its landing writes them back -- the same erasure
+  the held reconnect attempt had, which now waits. A press cannot wait
+  the same way without the ladder reading the memory through refs, as
+  the phone's ladder reads it from the store; left for a change of its
+  own.
+- iPhone, the stop record: our own IKEv2 rung dialled while our packet
+  tunnel was still up -- only when the ladder's eight-second wait for it
+  timed out -- may be recorded as `superceded` after the IKEv2 landing
+  cleared it, and the next automatic reconnect then stops as `otherVpn`.
+  The safe way: "VPN connection lost", a press dials as before.
+- Android asks nothing between a pass's rungs: asking is
+  `VpnService.prepare`, which can itself move the VPN back to this app.
+  Another app taking the VPN during a pass meets whatever the next rung's
+  connect does there. Unobserved.
+
+## 2026-10-08 — automatic reconnect proven in the VM; desktop 0.9.47, mobile 0.2.25
+
+`claude/auto-reconnect` after five review rounds: an independent review
+(6 lenses, 2 skeptics per finding) confirmed 28 findings and 2 split, no
+high after verification; all 30 fixed by theme, then re-checked at the
+branch head by two checkers per theme plus a regression hunter until no
+finding was judged open. CI (ci.yml and ci-ios.yml, which compiles the
+Swift) green at every pushed head. Desktop `pnpm test` 1006 / 58 files,
+mobile 232 / 12, both typechecks clean.
+
+**Proven in the VM** (finland1, on the build of the final head, bundle
+`index-D3aOLgJ3.js` confirmed in the guest; earlier heads the same):
+each engine killed under a verified tunnel -- `xray.exe` on Stealth,
+Stealth Web, Stealth HTTPS, Stealth Lite; `wireguard.exe`;
+`openvpn.exe`; `rasdial /disconnect` for IKEv2. On every one the screen
+said "Reconnecting..." with "Stop reconnecting" and the unprotected hint
+0.4-1.8 s after the kill, traffic went direct meanwhile (fail open, as
+designed), and "You're protected" came back 5-16 s after the kill from
+the new pass's own egress check. In the 12 s after that, a NIC capture
+(`pktmon --comp nics`) saw **0** packets sent directly to the probe
+address, and the exit address was finland1's every time.
+- Three kills within a minute: two reconnects, then "VPN connection
+  lost" and no further pass.
+- Disconnect: "You're not protected", engine gone, nothing redialled in
+  the next minute.
+- "Stop reconnecting" during an attempt that had started its engine: the
+  engine stopped within ~0.3 s, "VPN connection lost", nothing more.
+- Engine killed with Settings open, back after ~10 s: the dashboard
+  loaded first, then "Reconnecting..." and protected.
+- Guest adapter disabled for 50 s after a kill (on the third round's head,
+  `a2d8c2f`; not re-run on the final one): "Reconnecting..." and the
+  unprotected hint throughout, protected once the adapter was back. The
+  pass running when the network went walked its rungs through the
+  outage; WebView2's `navigator.onLine` did go false in the guest, but a
+  pass under way is not interrupted by it (by design).
+- A location picked over a live tunnel (fi -> fr): the live tunnel kept
+  its route and was re-verified; after a kill the reconnect went to the
+  picked server (exit france-1).
+- Telemetry rows arrive as `auto-reconnect attempt N of at most 6 ...`
+  and `auto-reconnect stopped after N attempt(s): ...`; rows made while
+  the control plane was unreachable arrive later from the queue.
+
+**Unverified:** phones (Android and iPhone: no device run of the
+reconnect), a minimized window (WebView2 timer throttling), a real
+censored network, a device-limit refusal on a reconnect's own claim
+(needs two devices).
+
+**Known, not fixed in this release** -- all low, found by the final
+checkers, none showing protection without proof:
+- Desktop: a health-poll failover verdict landing in the instant after a
+  sign-out's session bump can dial and arm under the next session
+  (predates the branch).
+- Desktop: a server picked while the mid-session failover dials does not
+  stop that pass; and a pick's answer during the attempt it leads can
+  name the picked server on the tile while the tunnel landed on another
+  rung.
+- Phone: an episode whose every attempt fails in the preflight (the
+  permission read itself failing) keeps the slot until it goes stale
+  (90 s).
+- Phone: a screen remounted while a Connect it waits on is overruled from
+  a screen since gone can stay on "Connecting..." until pressed.
+- Phone: a failed attempt's error line, carried onto a remounted screen,
+  stays under "You're protected" after a later attempt lands (Windows
+  clears it as each automatic pass begins; the phone does not yet).

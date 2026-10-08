@@ -24,7 +24,22 @@ export function LocationPicker({
   initialRoutes,
   automatic = false,
   onChooseAutomatic,
+  onPicking,
+  onPickFailed,
 }: {
+  /** Told the moment a server or Automatic is picked, before anything is
+   * awaited -- a server's switch request can take seconds to answer, and
+   * `onSwitched` waits for it. Whatever an automatic reconnect was doing
+   * beneath the list ends here (`autoReconnect.choosing`): told only with
+   * the answer, an attempt that began or landed in between dialled the
+   * old route after the customer's press. With the server picked, or null
+   * for Automatic: a tunnel kept up beneath the list is reconnected led by
+   * the pick from then on, should it drop before the answer. */
+  onPicking?: (routeId: string | null) => void;
+  /** Told when a server's switch request fails: nothing was chosen, and
+   * what the pick decided ahead of the answer is put back
+   * (`autoReconnect.pickFailed`). */
+  onPickFailed?: () => void;
   /** Whether nothing is pinned, so the ladder chooses -- what a new
    * install starts on. Marks the Automatic row as the current choice and
    * leaves every server row pickable, since picking one is how a
@@ -239,6 +254,8 @@ export function LocationPicker({
 
   async function handlePick(route: RouteOption) {
     if (route.id === pinnedRouteId || switchingId) return;
+    // The press, heard as it is made -- not once the request answers.
+    onPicking?.(route.id);
     setSwitchError(null);
     setSwitchingId(route.id);
     const result = await switchRoute(subscriptionId, route.id);
@@ -247,6 +264,7 @@ export function LocationPicker({
       onSwitched(route.id);
       onClose();
     } else {
+      onPickFailed?.();
       setSwitchError(result.error);
     }
   }
@@ -299,6 +317,7 @@ export function LocationPicker({
               type="button"
               onClick={() => {
                 if (automatic || switchingId) return;
+                onPicking?.(null);
                 onChooseAutomatic();
                 onClose();
               }}

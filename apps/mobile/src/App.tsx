@@ -3,6 +3,7 @@ import { ScreenTransition } from "@shared/components/ScreenTransition";
 import { getTokens } from "@shared/lib/session";
 import { flushAttempts } from "@shared/lib/attempts";
 import { endCustomerSession, setTunnelTeardown, type SessionEnd } from "@shared/lib/session-end";
+import { autoReconnect } from "@shared/lib/auto-reconnect";
 import { onSessionRevoked } from "@shared/lib/session-revoked";
 import { useI18n } from "@shared/lib/i18n";
 import { tearDownMobileForSignOut } from "./lib/vpn";
@@ -32,6 +33,15 @@ const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 // service that does not exist here. At module scope so it is in place
 // before any screen can end a session.
 setTunnelTeardown(tearDownMobileForSignOut);
+
+// An automatic reconnect after a drop waits for the app to be in front.
+// Neither phone has background work of this kind to run it from: the
+// Android tunnel's foreground service lives in its own process and runs
+// no JavaScript, and iOS suspends the app within seconds -- a pass begun
+// there would be frozen half-way. So a drop noticed in the background is
+// reconnected when the app is next opened, and says "Reconnecting..."
+// then. See lib/reconnect-steps.ts and the journal.
+autoReconnect.setRequiresForeground(true);
 
 /** The Android client.
  *

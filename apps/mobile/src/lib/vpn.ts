@@ -52,12 +52,42 @@ export interface WireGuardProfile {
   allowedApps: string[];
 }
 
+/** What this app may start without asking, read without raising
+ * anything -- the answer an automatic reconnect checks before it dials.
+ *
+ * `granted` is the one every platform gives. iOS adds two, because it
+ * keeps two configurations where Android keeps one permission: */
+export interface VpnAccess {
+  /** Whether this app may start its VPN without the consent dialog --
+   * Android's VpnService grant, iOS's saved packet-tunnel configuration
+   * (which Xray and WireGuard share). */
+  granted: boolean;
+  /** iOS: whether IKEv2's own configuration is installed. Dialling IKEv2
+   * without it installs it, and that raises the system's "Add VPN
+   * Configurations" prompt. A sign-out removes it. Absent on Android,
+   * where the VpnService grant is read from AOSP to cover the platform's
+   * IKEv2 profile too (`Vpn.isVpnProfilePreConsented`; not observed on a
+   * device). */
+  ikev2?: boolean;
+  /** iOS: whether another VPN configuration has been enabled over one of
+   * ours, of its kind -- the packet tunnel's, or IKEv2's -- because another
+   * VPN app connected, or the customer picked one in Settings; or whether
+   * the system last stopped our packet tunnel because another
+   * configuration, of either kind, took over (`TunnelLastStop` in the
+   * plugin: another app's personal VPN turns nothing of ours off). iOS
+   * shows an app no other app's VPN, so these are the only signs of one.
+   * Absent on Android, where `tunnelGone` sees every VPN. */
+  chosenElsewhere?: boolean;
+}
+
+export const vpnAccess = () => invoke<VpnAccess>("vpn_has_permission");
+
 /** Whether the customer has granted VPN permission.
  *
  * Android shows a system consent dialog the first time any app asks to
  * create a VpnService, and it cannot be pre-granted or bypassed. The UI
  * has to expect a connect attempt to pause here on first use. */
-export const hasVpnPermission = () => invoke<{ granted: boolean }>("vpn_has_permission").then((r) => r.granted);
+export const hasVpnPermission = () => vpnAccess().then((r) => r.granted);
 
 /** Raises the system consent dialog. Resolves once the customer has
  * answered -- true if they allowed it. */

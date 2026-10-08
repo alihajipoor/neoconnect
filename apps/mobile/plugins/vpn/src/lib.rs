@@ -131,8 +131,26 @@ pub struct InstalledApp {
 /// answer needs a field to live in -- a bare boolean or array has
 /// nowhere to go.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Granted {
     pub granted: bool,
+    /// iOS's `hasPermission` only: whether IKEv2's own configuration is
+    /// installed. It is a second one with its own consent prompt, so an
+    /// automatic reconnect without it passes over IKEv2 rather than raise
+    /// that prompt. Absent on Android, and left absent on the way to the
+    /// UI rather than sent as a null.
+    ///
+    /// Declared here, not only in Swift, because the answer crosses Rust
+    /// as this struct: a field it does not name is dropped without an
+    /// error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ikev2: Option<bool>,
+    /// iOS's `hasPermission` only: whether another VPN configuration has
+    /// been chosen over one of ours, of its kind (the packet tunnel's, or
+    /// IKEv2's) -- the one sign of another app's VPN iOS gives an app. An
+    /// automatic reconnect stops on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_elsewhere: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -267,7 +285,29 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 /// up only by reading one side against the other.
 #[cfg(test)]
 mod plugin_contract_tests {
-    use super::{Empty, VpnStatus};
+    use super::{Empty, Granted, VpnStatus};
+
+    /// What iOS's `hasPermission` sends, reaching the UI whole.
+    ///
+    /// The answer crosses Rust as this struct, so a field it does not
+    /// declare is dropped on the way through without an error -- and an
+    /// automatic reconnect would have gone on dialling over another app's
+    /// VPN, and raising IKEv2's consent prompt, while iOS said both.
+    #[test]
+    fn the_ios_permission_answer_reaches_the_ui_whole() {
+        let payload = r#"{"granted":true,"ikev2":false,"chosenElsewhere":true}"#;
+        let parsed = serde_json::from_str::<Granted>(payload).expect("iOS permission answer rejected");
+        let out = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(out, serde_json::json!({"granted": true, "ikev2": false, "chosenElsewhere": true}));
+    }
+
+    /// Android's, which says nothing of either and must not be made to.
+    #[test]
+    fn the_android_permission_answer_stays_as_it_was() {
+        let parsed = serde_json::from_str::<Granted>(r#"{"granted":false}"#).expect("Android permission answer rejected");
+        let out = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(out, serde_json::json!({"granted": false}));
+    }
 
     /// iOS's empty response, exactly as it arrives.
     ///
