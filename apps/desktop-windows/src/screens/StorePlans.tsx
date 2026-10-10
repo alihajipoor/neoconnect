@@ -6,6 +6,7 @@ import { formatBytes } from "../lib/utils";
 import { Button, Card } from "../components/ui";
 import { Logo } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 
 /** Buying a plan on iPhone, through the App Store.
  *
@@ -39,7 +40,7 @@ export function StorePlans({
     void loadIapPlans().then((result) => {
       if (cancelled) return;
       if (result.ok) setPlans(result.data);
-      else setLoadError(result.error);
+      else setLoadError(failureText(result, t));
     });
     return () => {
       cancelled = true;
@@ -55,7 +56,7 @@ export function StorePlans({
       // an error here would be both wrong and alarming.
       if (result === null) return;
       if (!result.ok) {
-        setError(result.error);
+        setError(failureText(result, t));
         return;
       }
       onActivated();

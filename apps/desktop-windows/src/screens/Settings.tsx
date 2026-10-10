@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { changePassword, deleteAccount } from "../lib/auth";
 import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { Button, Card, Input, Label } from "../components/ui";
 import { RepairNetwork } from "../components/RepairNetwork";
 import { cn } from "../lib/utils";
@@ -276,7 +277,7 @@ function PasswordSection() {
     setBusy(false);
 
     if (!result.ok) {
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     // Cleared rather than left filled: this screen stays open afterwards,
@@ -395,7 +396,7 @@ function DeleteAccountSection({ onDeleted }: { onDeleted: () => void }) {
     setBusy(false);
 
     if (!result.ok) {
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     // No success state on this screen -- there is no account left for it

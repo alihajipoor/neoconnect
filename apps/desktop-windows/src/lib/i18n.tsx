@@ -929,6 +929,23 @@ const en = {
   // not be reached, which is for when nothing answered at all.
   "common.stillTrying": "This is taking longer than usual. Still trying...",
 
+  // What a screen says about a request that failed (failure-text.ts). The
+  // API layer's own sentences stay English for the reports; these are
+  // what the customer reads.
+  //
+  // Nothing answered: every address was asked and none gave any answer at
+  // all. The only failure allowed to say Neoxify could not be reached.
+  "api.unreachable": "Could not reach Neoxify. Check your internet connection.",
+  // Neoxify answered this sign-in's challenge, or this write's health
+  // check, moments before, and then nothing answered the request itself.
+  // It was reached, so this does not say it could not be.
+  "api.stoppedAnswering": "Neoxify answered but then stopped responding. Please try again.",
+  // Something answered, with an error status and no message of its own:
+  // a proxy's failure page, a CDN's check. Not "could not reach", because
+  // something replied; and not said to be Neoxify's own answer, because
+  // it may not have been.
+  "api.serverError": "The server answered with an error ({status}). Please try again in a moment.",
+
   // The prominent disclosure shown once, before sign-in, on store
   // builds. Google Play requires an in-app explanation of why the app
   // needs VpnService and what data is collected, accepted by a
@@ -1483,6 +1500,10 @@ const fa: Record<TranslationKey, string> = {
 
   "common.loading": "در حال بارگذاری...",
   "common.stillTrying": "بیشتر از معمول طول کشیده است. تلاش ادامه دارد...",
+
+  "api.unreachable": "نتوانستیم به نئوکسیفای دسترسی پیدا کنیم. اتصال اینترنت خود را بررسی کنید.",
+  "api.stoppedAnswering": "نئوکسیفای پاسخ داد، اما بعد دیگر پاسخی نداد. لطفاً دوباره تلاش کنید.",
+  "api.serverError": "سرور با خطا پاسخ داد ({status}). لطفاً کمی بعد دوباره تلاش کنید.",
 
   "disclosure.title": "پیش از اتصال",
   "disclosure.subtitle": "این برنامه چه می‌کند و ما چه اطلاعاتی جمع‌آوری می‌کنیم. لطفاً یک بار بخوانید.",

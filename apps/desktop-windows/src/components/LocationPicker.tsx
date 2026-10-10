@@ -11,6 +11,7 @@ import { Button } from "./ui";
 import { Latency } from "./Latency";
 import { Flag } from "./Flag";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
 
 // Full-screen overlay, not a floating dialog -- this app's window is a
@@ -140,7 +141,7 @@ export function LocationPicker({
     } else if (routes.length === 0) {
       // A failed refresh must not blank a list the customer can see and
       // use. It only becomes an error when there is nothing behind it.
-      setError(result.error);
+      setError(failureText(result, t));
     }
     setLoading(false);
   }
@@ -278,7 +279,7 @@ export function LocationPicker({
       onClose();
     } else {
       onPickFailed?.();
-      setSwitchError(result.error);
+      setSwitchError(failureText(result, t));
     }
   }
 

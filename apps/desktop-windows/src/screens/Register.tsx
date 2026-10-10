@@ -3,6 +3,7 @@ import { register } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { Logo } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
 import { SocialSignIn } from "../components/SocialSignIn";
 
@@ -43,7 +44,7 @@ export function Register({
     if (result.ok) {
       onNeedsVerification(email, password);
     } else {
-      setError(result.error);
+      setError(failureText(result, t));
     }
   }
 

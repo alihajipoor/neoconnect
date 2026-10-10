@@ -113,6 +113,7 @@ import { CommunityLinks } from "../components/CommunityLinks";
 import { RepairNetwork } from "../components/RepairNetwork";
 import { DeviceSlotCard } from "../components/DeviceSlotCard";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
 
 /** How a ladder pass ended.
@@ -1296,7 +1297,13 @@ export function Dashboard({
         return;
       }
 
-      setError(!meResult.ok ? meResult.error : !subsResult.ok ? subsResult.error : t("dash.loadFailed"));
+      setError(
+        !meResult.ok
+          ? failureText(meResult, t)
+          : !subsResult.ok
+            ? failureText(subsResult, t)
+            : t("dash.loadFailed"),
+      );
       setLoading(false);
       // Nothing here to dial with, but an attempt held for this screen
       // waits for the memory and the list too, and is ended by the runner

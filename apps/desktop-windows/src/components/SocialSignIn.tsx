@@ -2,6 +2,7 @@ import { useState, type ReactElement } from "react";
 
 import { AppleIcon, FacebookIcon, GoogleIcon } from "./BrandIcons";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { socialSignIn } from "../lib/auth";
 import {
   appleSignInAvailable,
@@ -69,7 +70,7 @@ export function SocialSignIn({
       // wrong is both wrong and alarming.
       if (result === null) return;
       if (!result.ok) {
-        setError(result.error || t("auth.socialFailed"));
+        setError(failureText(result, t) || t("auth.socialFailed"));
         return;
       }
       onSuccess();

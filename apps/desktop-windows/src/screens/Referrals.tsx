@@ -4,6 +4,7 @@ import { ArrowLeft, Check, Copy, Gift, Users } from "lucide-react";
 import { getReferrals } from "../lib/customer";
 import type { ReferralOverview } from "../lib/types";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { Button, Card } from "../components/ui";
 
 /** Invite friends, earn free time.
@@ -25,7 +26,7 @@ export function Referrals({ onBack }: { onBack: () => void }) {
     void getReferrals().then((result) => {
       if (cancelled) return;
       if (result.ok) setData(result.data);
-      else setError(result.error);
+      else setError(failureText(result, t));
     });
     return () => {
       cancelled = true;

@@ -4,6 +4,7 @@ import { previewVoucher, redeemVoucher } from "../lib/customer";
 import type { SubscriptionPlan } from "../lib/types";
 import { formatBytes } from "../lib/utils";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { Button, Card, Input } from "./ui";
 
 /** Redeeming a code, as a two-step confirm rather than one action.
@@ -45,7 +46,7 @@ export function RedeemVoucher({
 
     if (!result.ok) {
       setFound(null);
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     setFound({ plan: result.data.plan, expiresAt: result.data.expiresAt });
@@ -63,7 +64,7 @@ export function RedeemVoucher({
       // above. Clearing the preview sends them back to the input rather
       // than leaving a confirm button that will keep failing.
       setFound(null);
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     onRedeemed();

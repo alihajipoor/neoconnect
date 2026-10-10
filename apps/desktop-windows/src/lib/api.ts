@@ -759,7 +759,13 @@ export type ApiResult<T> = { ok: true; data: T } | RequestFailure;
  *
  * A fresh object each time rather than a shared constant, so a caller
  * that stashes a result can never mutate the message every other caller
- * is about to read. */
+ * is about to read.
+ *
+ * English whatever language the app is in, as are `STOPPED_ANSWERING`
+ * and `requestFailed`. The sentence is what the attempt reports carry to
+ * the panel, inside diagnostics written in English, and the panel is read
+ * in English. What a customer is shown is chosen by `noResponse` and the
+ * status in failure-text.ts, in their own language. */
 const unreachable = (): RequestFailure => ({
   ok: false,
   error: "Could not reach Neoxify. Check your internet connection.",
@@ -782,6 +788,18 @@ function unansweredFailure(err: unknown): RequestFailure {
   return err instanceof StoppedAnswering ? { ok: false, error: STOPPED_ANSWERING, noResponse: true } : unreachable();
 }
 
+/** The sentence for an answer that carried no message of its own: a page
+ * from in front of the backend, or a body that was not the JSON promised.
+ *
+ * One function for both places that word it, and exported, because the
+ * screens tell this case apart from the backend's own refusals by it
+ * (failure-text.ts): something answered, with an error and nothing to say
+ * about it, which is neither "could not reach Neoxify" nor a sentence the
+ * backend wrote for the customer. */
+export function requestFailed(status: number): string {
+  return `Request failed (${status})`;
+}
+
 /** A refusal, in full: the sentence, the status, and the code.
  *
  * The body is read once and every part of the answer is kept. Reading it
@@ -795,7 +813,7 @@ async function failureFrom(res: Response): Promise<RequestFailure> {
     ? message.join(", ")
     : typeof message === "string"
       ? message
-      : `Request failed (${res.status})`;
+      : requestFailed(res.status);
   const code = typeof fields?.code === "string" ? fields.code : undefined;
   // The body travels only with a coded refusal, which is the only kind
   // whose fields anyone reads; a plain error is its sentence and status.
@@ -1222,7 +1240,7 @@ async function resultFrom<T>(res: Response, backend: boolean): Promise<ApiResult
   try {
     return { ok: true, data: (await res.json()) as T };
   } catch {
-    return { ok: false, error: `Request failed (${res.status})`, status: res.status };
+    return { ok: false, error: requestFailed(res.status), status: res.status };
   }
 }
 

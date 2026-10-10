@@ -21,6 +21,7 @@ import {
 } from "../lib/customer";
 import { collectDiagnostics, diagnosticsToText } from "../lib/repair";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { Button, Card, Input, Label } from "../components/ui";
 import { cn } from "../lib/utils";
 import type { SupportOverview, SupportThread, SupportTicketSummary } from "../lib/types";
@@ -49,7 +50,7 @@ export function Support({ onBack }: { onBack: () => void }) {
       setOverview(result.data);
       setError(null);
     } else {
-      setError(result.error);
+      setError(failureText(result, t));
     }
   }, []);
 
@@ -328,7 +329,7 @@ function NewTicket({
     const result = await openSupportTicket(subject.trim(), body.trim());
     setBusy(false);
     if (!result.ok) {
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     onOpened(result.data);
@@ -400,7 +401,7 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
       const result = await getSupportThread(id);
       if (cancelled) return;
       if (result.ok) setThread(result.data);
-      else setError(result.error);
+      else setError(failureText(result, t));
     };
     void fetchThread();
     const timer = setInterval(() => void fetchThread(), POLL_MS);
@@ -424,7 +425,7 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
     const result = await replyToSupportTicket(id, trimmed);
     setBusy(false);
     if (!result.ok) {
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     // Cleared only once the server has it. Clearing first means a

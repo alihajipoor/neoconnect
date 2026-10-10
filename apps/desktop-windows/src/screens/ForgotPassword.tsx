@@ -3,6 +3,7 @@ import { forgotPassword, resetPasswordByCode } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { LogoMark } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 
 /** Getting back in after forgetting the password.
  *
@@ -38,7 +39,7 @@ export function ForgotPassword({ onDone, onCancel }: { onDone: (notice: string) 
     // here on an error would leak the difference the endpoint works to
     // hide -- and the only real failure worth reporting is the network
     // being down, which the next step surfaces anyway.
-    if (!result.ok && result.error) setError(result.error);
+    if (!result.ok && result.error) setError(failureText(result, t));
     setSent(true);
   }
 
@@ -54,7 +55,7 @@ export function ForgotPassword({ onDone, onCancel }: { onDone: (notice: string) 
     setPending(true);
     const result = await resetPasswordByCode(email, code.trim(), password);
     setPending(false);
-    if (!result.ok) return setError(result.error);
+    if (!result.ok) return setError(failureText(result, t));
     onDone(t("forgot.done"));
   }
 

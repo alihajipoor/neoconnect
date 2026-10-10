@@ -8,6 +8,7 @@ import { Button, Card } from "../components/ui";
 import { Logo } from "../components/Logo";
 import { RedeemVoucher } from "../components/RedeemVoucher";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 
 type Stage =
   | { name: "choosing" }
@@ -64,7 +65,7 @@ export function Plans({
   useEffect(() => {
     void getPlans().then((result) => {
       if (result.ok) setPlans(result.data);
-      else setError(result.error);
+      else setError(failureText(result, t));
     });
   }, []);
 
@@ -89,14 +90,14 @@ export function Plans({
 
     const created = await createSubscription(plan.id);
     if (!created.ok) {
-      setError(created.error);
+      setError(failureText(created, t));
       setStage({ name: "choosing" });
       return;
     }
 
     const payment = await startPayment(created.data.id, provider);
     if (!payment.ok) {
-      setError(payment.error);
+      setError(failureText(payment, t));
       setStage({ name: "choosing" });
       return;
     }

@@ -3,6 +3,7 @@ import { login } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { LogoMark } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
 import { SocialSignIn } from "../components/SocialSignIn";
 
@@ -36,7 +37,7 @@ export function Login({
     const result = await login(email, password);
     setPending(false);
     if (!result.ok) {
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     if ("requiresVerification" in result.data) {

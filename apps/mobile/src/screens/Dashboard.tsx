@@ -61,6 +61,7 @@ import { LocationPicker } from "@shared/components/LocationPicker";
 import { Sheet } from "@shared/components/Sheet";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
 import { useI18n } from "@shared/lib/i18n";
+import { failureText } from "@shared/lib/failure-text";
 import { useStillTrying } from "@shared/lib/still-trying";
 import { sessionGeneration } from "@shared/lib/session-end";
 import {
@@ -619,9 +620,9 @@ export function Dashboard({
 
       setError(
         !meResult.ok
-          ? meResult.error
+          ? failureText(meResult, t)
           : !subsResult.ok
-            ? subsResult.error
+            ? failureText(subsResult, t)
             : t("dash.loadFailed"),
       );
       setLoading(false);
