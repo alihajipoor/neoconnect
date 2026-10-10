@@ -59,7 +59,7 @@ import {
 } from "../lib/split-tunnel";
 import { exitOfRoute } from "../lib/exit-options";
 import { gamingDisarm, loadGaming, saveGaming, type AppMode } from "../lib/gaming";
-import { loadSnapshot, saveSnapshot } from "../lib/credential-cache";
+import { cachedRoutesFor, loadSnapshot, saveSnapshot } from "../lib/credential-cache";
 import { sessionGeneration } from "../lib/session-end";
 import { refreshConnectionConfig } from "../lib/connection-config";
 import { useRefreshOnResume } from "../lib/resume";
@@ -1348,6 +1348,17 @@ export function Dashboard({
         if (routesResult.ok) {
           currentRoutes = routesResult.data;
           setRoutes(currentRoutes);
+        } else {
+          // Everything else answered and the list did not, so the one
+          // cached for this plan stands in for it -- on screen, and in
+          // the snapshot below. Cached as an empty list, it left the next
+          // start with Neoxify out of reach no servers to show; see
+          // `cachedRoutesFor`. On screen it gives the picker rows to open
+          // on, and a reconnect's pass the exits and egress it reads from
+          // them. Not set when there is nothing cached, so a failed
+          // request never blanks a list already showing.
+          currentRoutes = await cachedRoutesFor(sub);
+          if (currentRoutes.length > 0) setRoutes(currentRoutes);
         }
       }
     } finally {
@@ -1361,9 +1372,11 @@ export function Dashboard({
     // credentials back to disk after the sign-out cleared them.
     if (sessionGeneration() !== sessionAtStart) return;
 
-    // Written only after a wholly successful fetch, so a partial answer
-    // can never overwrite a good cache with a worse one. Asked again at
-    // the moment of writing, for a sign-out that lands in between.
+    // Written only once the credentials and the plan have answered, so a
+    // partial answer can never overwrite a good cache with a worse one --
+    // and with the cached route list when only that request failed, never
+    // an empty one in its place. Asked again at the moment of writing,
+    // for a sign-out that lands in between.
     void saveSnapshot(
       {
         subscription: sub,

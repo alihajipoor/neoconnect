@@ -64,6 +64,7 @@ import { useI18n } from "@shared/lib/i18n";
 import { useStillTrying } from "@shared/lib/still-trying";
 import { sessionGeneration } from "@shared/lib/session-end";
 import {
+  cachedRoutesFor,
   loadSnapshot,
   saveSnapshot,
 } from "@shared/lib/credential-cache";
@@ -647,6 +648,15 @@ export function Dashboard({
       if (routesResult.ok) {
         currentRoutes = routesResult.data;
         setRoutes(currentRoutes);
+      } else {
+        // Everything else answered and the list did not, so the one
+        // cached for this plan stands in for it -- on screen, and in the
+        // snapshot below. Cached as an empty list, it left the next start
+        // with Neoxify out of reach no servers to show; see
+        // `cachedRoutesFor`. Not set when there is nothing cached, so a
+        // failed request never blanks a list already showing.
+        currentRoutes = await cachedRoutesFor(sub);
+        if (currentRoutes.length > 0) setRoutes(currentRoutes);
       }
     }
 
@@ -656,8 +666,10 @@ export function Dashboard({
     // sign-out cleared them. The same guard as the Windows screen.
     if (sessionGeneration() !== sessionAtStart) return;
 
-    // Only after a wholly successful fetch, so a partial answer cannot
-    // overwrite a good cache with a worse one.
+    // Only once the credentials and the plan have answered, so a partial
+    // answer cannot overwrite a good cache with a worse one -- and with the
+    // cached route list when only that request failed, never an empty one
+    // in its place.
     void saveSnapshot(
       {
         subscription: sub,

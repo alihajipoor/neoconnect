@@ -197,6 +197,36 @@ export async function updateSnapshotProtocolUsers(
   );
 }
 
+/** The cached server list, for a load whose route request failed while
+ * everything else it asked for answered.
+ *
+ * The list is the one thing a load asks for separately, after the
+ * credentials and the plan, so it can fail on its own -- a network that
+ * answered three requests and lost the fourth. Such a load used to cache
+ * an empty list beside the fresh credentials, and the next start with
+ * Neoxify out of reach had no servers to show: the picker opened on
+ * "Could not reach Neoxify" over servers that were perfectly reachable,
+ * with their credentials in hand. That is the picker testers on censored
+ * networks have described; whether this is what produced it is not
+ * established, since the test machine's route requests always answered.
+ *
+ * Only this plan's list. Routes belong to a subscription, and changing
+ * plans is a new subscription, so a list cached for another one, or for
+ * this one before its plan was changed, would offer servers the plan may
+ * not include. Nothing is better than that: the picker then says honestly
+ * that it could not get the list, and a pick it cannot honour is never
+ * offered.
+ *
+ * Empty when nothing usable is cached, which is what the load wrote
+ * before, so the worst case is the old behaviour. */
+export async function cachedRoutesFor(subscription: Subscription): Promise<RouteOption[]> {
+  const snapshot = await loadSnapshot();
+  const held = snapshot?.subscription;
+  if (!snapshot || !held) return [];
+  if (held.id !== subscription.id || held.planId !== subscription.planId) return [];
+  return snapshot.routes;
+}
+
 /** Forgets everything. Called on sign-out: leaving one customer's
  * credentials on the machine for the next person to connect with is not
  * a cache, it is a leak. */
