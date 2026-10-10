@@ -136,7 +136,10 @@ const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
  * The browser has a network stack of its own and may get through where
  * this did not; past that it is opened at the first compiled-in address,
  * as it always was, rather than after a race with nothing answering has
- * run its twenty-odd seconds.
+ * run its twenty-odd seconds -- and as soon as that address is the only
+ * one still to answer, with nothing else having answered, since the
+ * browser goes there whatever it says. A mirror answering 200 is
+ * preferred to one over its throttle (`answeringEndpoint`).
  *
  * What this cannot move is the end of the flow. The provider sends the
  * browser back to one fixed address, the backend's PUBLIC_API_URL, because
@@ -148,12 +151,20 @@ export async function socialStartBase(signal?: AbortSignal): Promise<string> {
   const timer = setTimeout(() => asked.abort(), START_BASE_BUDGET_MS);
   const cancelled = () => asked.abort();
   signal?.addEventListener("abort", cancelled);
+  // A signal that fired before it was listened to -- Cancel pressed, or the
+  // screen gone, while the PKCE pair was being made -- never fires again,
+  // and the race used to run its whole budget for a flow already given up.
+  if (signal?.aborted) asked.abort();
   try {
     const endpoints = await apiEndpoints();
     const compiled = endpoints.filter((base) => API_BASE_URLS.includes(base));
+    // The address this falls back to when nothing answers: once it is the
+    // only one still to settle, the race ends (`answeringEndpoint`).
     const answering = await answeringEndpoint(
       [...compiled, ...endpoints.filter((base) => !compiled.includes(base))],
       asked.signal,
+      undefined,
+      API_BASE_URL,
     );
     if (answering !== null && answering.startsWith("https://")) return answering;
   } catch {

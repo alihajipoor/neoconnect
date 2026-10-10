@@ -1301,6 +1301,12 @@ function stagesOf(count: number, healthy: number): [number, number][] {
   return stages;
 }
 
+/** When a race may end without a winner before every address has
+ * settled: told the addresses still to settle, asked or not, and the
+ * answers so far. For a caller that knows what it will do with the
+ * outcome by then (`answeringEndpoint`). */
+type GiveUp = (pending: string[], answers: RaceAnswer[]) => boolean;
+
 /** Sends one request to the endpoints as a staggered race.
  *
  * In stages (`stagesOf`). The address that answered last time goes
@@ -1313,8 +1319,8 @@ function stagesOf(count: number, healthy: number): [number, number][] {
  * block page, does not lead, even if it was the last to answer. Each
  * address gets `SLOW_ANSWER_MS` from when it is
  * asked. The race is won by the first answer `wins` accepts; it ends
- * without a winner when every address has settled, or when the caller's
- * signal fires.
+ * without a winner when every address has settled, when the caller's
+ * signal fires, or when `giveUp` says the rest cannot change the outcome.
  *
  * What the stages cost: where the remembered address works, nothing --
  * nobody else is asked. Where only a demoted address answers, up to two
@@ -1344,6 +1350,7 @@ async function staggeredRace(
   request: RequestInit,
   wins: (answer: RaceAnswer) => boolean,
   trace?: EndpointTrace,
+  giveUp?: GiveUp,
 ): Promise<Staggered> {
   const { ordered, healthy } = demotedLast(endpoints);
   // With nothing to ask there is no stage to settle the race; every
@@ -1471,6 +1478,7 @@ async function staggeredRace(
         settled += 1;
         if (decided) return;
         if (settled === ordered.length) decide(null);
+        else if (giveUp?.(ordered.filter((_, j) => !done[j]), answers)) decide(null);
         // Everything asked so far has failed. Nothing is gained by keeping
         // the next stage waiting out the rest of its head start.
         else if (settled === asked) askNextStage();
@@ -1687,7 +1695,12 @@ interface HealthRace {
  * Traced under its own phase, `health`, and the caller's phase put back
  * after. Every request is stopped once the race is decided; no body is
  * read. */
-async function raceForHealth(endpoints: string[], signal: AbortSignal | null, trace?: EndpointTrace): Promise<HealthRace> {
+async function raceForHealth(
+  endpoints: string[],
+  signal: AbortSignal | null,
+  trace?: EndpointTrace,
+  choosy?: { wins: (response: Response) => boolean; giveUp?: GiveUp },
+): Promise<HealthRace> {
   const phase = trace?.phase;
   if (trace) trace.phase = "health";
   try {
@@ -1695,8 +1708,9 @@ async function raceForHealth(endpoints: string[], signal: AbortSignal | null, tr
       endpoints,
       HEALTH_PATH,
       { method: "GET", signal },
-      (answer) => provesBackend(answer.response),
+      (answer) => provesBackend(answer.response) && (choosy?.wins(answer.response) ?? true),
       trace,
+      choosy?.giveUp,
     );
     stop();
     for (const answer of answers) notePublicAnswer(answer.base, answer.response);
@@ -1717,22 +1731,44 @@ async function raceForHealth(endpoints: string[], signal: AbortSignal | null, tr
   }
 }
 
-/** The first of `endpoints` whose answer to the health check proves it
- * reaches the backend (`raceForHealth`), asked in that order as a
- * staggered race, or null when none does.
+/** The first of `endpoints` whose answer to the health check says it
+ * reaches a backend that is up, asked in that order as a staggered race
+ * (`raceForHealth`); failing that, the first whose answer proves it reaches
+ * the backend at all; or null when none does.
  *
  * For a request that is not this app's to send: the browser's, which
  * starts Google and Facebook sign-in (`socialStartBase` in
  * social-auth.ts). It gets one address and no second try, so it is given
  * one that has just answered, rather than whatever answered last in some
- * earlier run on some other network. */
+ * earlier run on some other network.
+ *
+ * And one that answered 200, where any did. For a write a 429 is as good
+ * an answer as a 200 -- the address reaches the backend, and the write
+ * waits its turn -- but the browser cannot wait its turn. A node's mirror
+ * over its throttle won this race, and the browser was sent to start the
+ * flow there, behind a stricter throttle of its own, to be shown a raw
+ * JSON 429, while another mirror answering 200 a moment later would have
+ * started it. A 429 or a 503 is kept for when nothing better answers.
+ *
+ * `fallback` is where the caller goes when this finds nothing. Once it is
+ * the only address left to settle, and nothing has answered, nothing the
+ * race can still learn changes where the browser goes, and it ends there:
+ * the browser used to wait out the rest of the caller's budget on a slow
+ * CDN, with every mirror already refused, and then open at that same CDN. */
 export async function answeringEndpoint(
   endpoints: string[],
   signal?: AbortSignal,
   trace?: EndpointTrace,
+  fallback?: string,
 ): Promise<string | null> {
   if (endpoints.length === 0) return null;
-  const health = await raceForHealth(endpoints, signal ?? null, trace);
+  const health = await raceForHealth(endpoints, signal ?? null, trace, {
+    wins: (response) => response.ok,
+    giveUp: (pending, answers) =>
+      fallback !== undefined &&
+      pending.every((base) => base === fallback) &&
+      !answers.some((answer) => provesBackend(answer.response)),
+  });
   return health.answered[0]?.base ?? null;
 }
 

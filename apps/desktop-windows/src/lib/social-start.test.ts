@@ -35,9 +35,33 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 
 /** The addresses that never connect: the CDN name is blocked, and every
  * other address answers, unless a test says otherwise. */
-const { down, stalled } = vi.hoisted(() => ({ down: new Set<string>(), stalled: new Set<string>() }));
+const { down, stalled, replies } = vi.hoisted(() => ({
+  down: new Set<string>(),
+  stalled: new Set<string>(),
+  /** Addresses that answer after a delay, with a status of their own. */
+  replies: new Map<string, { after: number; status: number }>(),
+}));
 vi.mock("@tauri-apps/plugin-http", () => ({
   fetch: (url: string, init?: RequestInit) => {
+    const reply = [...replies].find(([base]) => url.startsWith(base))?.[1];
+    if (reply) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(
+          () =>
+            resolve(
+              new Response(JSON.stringify({ statusCode: reply.status }), {
+                status: reply.status,
+                headers: { "content-type": "application/json" },
+              }),
+            ),
+          reply.after,
+        );
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new Error("Request cancelled"));
+        });
+      });
+    }
     if ([...stalled].some((base) => url.startsWith(base))) {
       // Connected, and never answers: given up on only when stopped.
       return new Promise((_resolve, reject) => {
@@ -72,6 +96,7 @@ beforeEach(async () => {
   down.clear();
   down.add(CDN);
   stalled.clear();
+  replies.clear();
   listed = [CDN, MIRROR];
   invoke.mockReset();
   invoke.mockImplementation(async (cmd, args) => {
@@ -293,5 +318,90 @@ describe("what the sign-in screen says about the way back", () => {
     expect(cancelled).toBeGreaterThan(signIn);
     expect(answered).toBeGreaterThan(cancelled);
     expect(source).toContain('{t("auth.socialNeedsCloudflare")}');
+  });
+});
+
+describe("the address the browser sign-in starts at, when the answers differ", () => {
+  const OTHER = "https://other.example:2053/api";
+
+  /** A node's mirror over its throttle answers the health check first. For
+   * a write that is an answer; for the browser, which gets one try, it is a
+   * flow that starts behind a stricter throttle of its own and shows a raw
+   * JSON 429. Before: the browser was sent there, while another mirror
+   * answered 200 a moment later. */
+  it("is a mirror that answered 200 rather than one over its throttle", async () => {
+    vi.useFakeTimers();
+    try {
+      listed = [CDN, MIRROR, OTHER];
+      replies.set(MIRROR, { after: 100, status: 429 });
+      replies.set(OTHER, { after: 200, status: 200 });
+      let base: string | null = null;
+      void social.socialStartBase().then((found) => (base = found));
+      await vi.runAllTimersAsync();
+      expect(base).toBe(OTHER);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** But a throttled mirror is still better than nothing. */
+  it("is a throttled mirror when nothing answers 200", async () => {
+    vi.useFakeTimers();
+    try {
+      listed = [CDN, MIRROR, OTHER];
+      down.add(OTHER);
+      replies.set(MIRROR, { after: 100, status: 429 });
+      let base: string | null = null;
+      void social.socialStartBase().then((found) => (base = found));
+      await vi.runAllTimersAsync();
+      expect(base).toBe(MIRROR);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** The compiled-in CDN answers slowly and every mirror refuses at once:
+   * the browser goes to the CDN whatever happens next. Before: it waited
+   * out the whole eight seconds first, and then opened there anyway. */
+  it("is the compiled-in address at once when it is all that is left to answer", async () => {
+    vi.useFakeTimers();
+    try {
+      listed = [config.API_BASE_URL, MIRROR, OTHER];
+      replies.set(config.API_BASE_URL, { after: 15_000, status: 200 });
+      down.add(MIRROR);
+      down.add(OTHER);
+      let base: string | null = null;
+      const startedAt = Date.now();
+      let doneAt = 0;
+      void social.socialStartBase().then((found) => {
+        base = found;
+        doneAt = Date.now() - startedAt;
+      });
+      await vi.runAllTimersAsync();
+      expect(base).toBe(config.API_BASE_URL);
+      // The first address's head start, and the mirrors' refusals.
+      expect(doneAt).toBe(1_500);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** Cancelled before it was asked: nothing is asked. Before: the race ran
+   * its full eight seconds for a flow already given up. */
+  it("asks nothing for a flow already cancelled", async () => {
+    vi.useFakeTimers();
+    try {
+      stalled.add(CDN);
+      stalled.add(MIRROR);
+      const cancelled = new AbortController();
+      cancelled.abort();
+      const startedAt = Date.now();
+      let doneAt: number | null = null;
+      void social.socialStartBase(cancelled.signal).then(() => (doneAt = Date.now() - startedAt));
+      await vi.runAllTimersAsync();
+      expect(doneAt).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
