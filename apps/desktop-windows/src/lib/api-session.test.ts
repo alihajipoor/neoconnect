@@ -16,7 +16,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * dropped.
  */
 
-type Reply = { status: number; body?: unknown } | "unreachable";
+/** An answer, JSON unless `page` gives the HTML of something in front of
+ * the backend instead. */
+type Reply = { status: number; body?: unknown; page?: string } | "unreachable";
 const replies: Record<string, Reply[]> = {};
 const requested: string[] = [];
 
@@ -26,6 +28,9 @@ vi.mock("@tauri-apps/plugin-http", () => ({
     requested.push(path);
     const reply = replies[path]?.shift();
     if (reply === undefined || reply === "unreachable") return Promise.reject(new Error(`no route to ${url}`));
+    if (reply.page !== undefined) {
+      return Promise.resolve(new Response(reply.page, { status: reply.status, headers: { "content-type": "text/html" } }));
+    }
     return Promise.resolve(
       new Response(reply.body === undefined ? null : JSON.stringify(reply.body), {
         status: reply.status,
@@ -55,7 +60,7 @@ vi.mock("./session", () => ({
   },
 }));
 
-const { apiRequest } = await import("./api");
+const { apiRequest, resetRaceWinnerForTests } = await import("./api");
 const { newTrace, renderTrace } = await import("./endpoint-trace");
 const { onSessionRevoked } = await import("./session-revoked");
 
@@ -65,16 +70,26 @@ onSessionRevoked(() => {
 });
 
 beforeEach(() => {
+  // Forgets which addresses the backend has answered from, which decides
+  // whether a refused refresh is believed.
+  resetRaceWinnerForTests();
   for (const key of Object.keys(replies)) delete replies[key];
   requested.length = 0;
   stored = { accessToken: "old-access", refreshToken: "refresh" };
   announced = 0;
 });
 
+const REVOKED = { statusCode: 401, message: "Refresh token has been revoked", error: "Unauthorized" };
+const HEALTHY = { status: "ok", timestamp: "2026-10-09T00:00:00.000Z" };
+
 describe("a refresh the server refuses", () => {
+  /** The app starts with an expired access token and a revoked session:
+   * the only answers so far are 401s, so the address is asked for the
+   * health check before its refusal is believed. */
   it("ends the session and tells the whole app", async () => {
     replies["/customer/me"] = [{ status: 401 }];
-    replies["/customer-auth/refresh"] = [{ status: 401, body: { message: "Refresh token has been revoked" } }];
+    replies["/customer-auth/refresh"] = [{ status: 401, body: REVOKED }];
+    replies["/health"] = [{ status: 200, body: HEALTHY }];
 
     const result = await apiRequest("/customer/me");
 
@@ -82,6 +97,100 @@ describe("a refresh the server refuses", () => {
     expect(!result.ok && result.sessionExpired).toBe(true);
     expect(stored).toBeNull();
     expect(announced).toBe(1);
+    expect(requested).toEqual(["/customer/me", "/customer-auth/refresh", "/health"]);
+  });
+
+  /** The backend's own 503 from the health check is still the backend. */
+  it("believes it from an address whose health check says the database is down", async () => {
+    replies["/customer/me"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 401, body: REVOKED }];
+    replies["/health"] = [{ status: 503, body: { statusCode: 503, message: "database unreachable" } }];
+
+    const result = await apiRequest("/customer/me");
+
+    expect(!result.ok && result.sessionExpired).toBe(true);
+    expect(announced).toBe(1);
+  });
+
+  it("does not ask for the health check where the backend has already answered", async () => {
+    replies["/customer/subscriptions"] = [{ status: 200, body: [] }];
+    await apiRequest("/customer/subscriptions");
+    requested.length = 0;
+    replies["/customer/me"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 401, body: REVOKED }];
+
+    const result = await apiRequest("/customer/me");
+
+    expect(!result.ok && result.sessionExpired).toBe(true);
+    expect(announced).toBe(1);
+    expect(requested).toEqual(["/customer/me", "/customer-auth/refresh"]);
+  });
+});
+
+/** A 401 from something that is not the backend says nothing about the
+ * session. In a simulated network, one broken address answering 401 --
+ * as a page, or as JSON -- signed the customer out, and signing out takes
+ * the tunnel down. */
+describe("a 401 that is not the backend's", () => {
+  const signedOutNothing = (result: Awaited<ReturnType<typeof apiRequest>>) => {
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.sessionExpired).toBeFalsy();
+    expect(stored).toEqual({ accessToken: "old-access", refreshToken: "refresh" });
+    expect(announced).toBe(0);
+  };
+
+  it("does not send the refresh when the request was answered by a page", async () => {
+    replies["/customer/me"] = [{ status: 401, page: "<html><body>401 Authorization Required</body></html>" }];
+    replies["/customer-auth/refresh"] = [{ status: 401, body: REVOKED }];
+
+    const result = await apiRequest("/customer/me");
+
+    signedOutNothing(result);
+    expect(!result.ok && result.status).toBe(401);
+    expect(requested).toEqual(["/customer/me"]);
+  });
+
+  it("ends nothing when the refresh is answered by a page", async () => {
+    replies["/customer/me"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 401, page: "<html><body>401 Authorization Required</body></html>" }];
+    replies["/health"] = [{ status: 200, body: HEALTHY }];
+
+    signedOutNothing(await apiRequest("/customer/me"));
+  });
+
+  /** An address that answers 401 to everything, the health check
+   * included, which is public: that is not the backend refusing a token. */
+  it("ends nothing when the address answers the health check with a 401 too", async () => {
+    replies["/customer/me"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 401, body: REVOKED }];
+    replies["/health"] = [{ status: 401, body: { message: "Unauthorized" } }];
+
+    signedOutNothing(await apiRequest("/customer/me"));
+  });
+
+  it("ends nothing when the address does not answer the health check", async () => {
+    replies["/customer/me"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 401, body: REVOKED }];
+    replies["/health"] = ["unreachable"];
+
+    signedOutNothing(await apiRequest("/customer/me"));
+  });
+
+  it("ends nothing when the address answers the health check with a page", async () => {
+    replies["/customer/me"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 401, body: REVOKED }];
+    replies["/health"] = [{ status: 200, page: "<html><body>It works!</body></html>" }];
+
+    signedOutNothing(await apiRequest("/customer/me"));
+  });
+
+  /** A page with a success status is not a new pair of tokens. It used to
+   * be read as one, and the JSON parse threw out of the request. */
+  it("does not take a page for a renewed session", async () => {
+    replies["/customer/me"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 200, page: "<html><body>Welcome</body></html>" }];
+
+    signedOutNothing(await apiRequest("/customer/me"));
   });
 });
 

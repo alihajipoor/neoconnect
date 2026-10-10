@@ -39,8 +39,11 @@
  * when no race has found an answering address in the last minute, to
  * decide where the write is sent (see `sendWrite` in api.ts). It comes
  * just before the leg it was run for -- `health: ...; refresh: ...` is
- * the token refresh's. Not called `probe`, which is the socket-level
- * section that may follow the trace (control-plane-probe.ts). */
+ * the token refresh's. A health check after a leg is the other use: a
+ * refused token refresh, checked against the one address that refused
+ * it before the session is ended (`refusedByBackend` in api.ts). Not
+ * called `probe`, which is the socket-level section that may follow the
+ * trace (control-plane-probe.ts). */
 export type TracePhase = "challenge" | "health" | "req" | "refresh" | "retry";
 
 /** How one address's attempt ended, in the classes this side can tell

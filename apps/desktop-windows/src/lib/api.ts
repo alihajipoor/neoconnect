@@ -68,15 +68,36 @@ export const SLOW_ANSWER_MS = 20_000;
  * such setting: there an unreachable address takes the full deadline. */
 export const CONNECT_TIMEOUT_MS = 10_000;
 
-/** Sends one request to one address, with the connection deadline.
+/** Sends one request to one address, with the connection deadline, and
+ * notes who answered (`noteAnswer`).
  *
  * The options are put together in a variable rather than as a literal in
  * the call, because the web portal type-checks this file against the
  * browser's `fetch`, whose options have no `connectTimeout`; a literal
  * there would be rejected as an unknown property. */
-function send(base: string, path: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+async function send(base: string, path: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
   const options: RequestInit & { connectTimeout: number } = { ...init, signal, connectTimeout: CONNECT_TIMEOUT_MS };
-  return fetch(`${base}${path}`, options);
+  const response = await fetch(`${base}${path}`, options);
+  noteAnswer(base, response);
+  return response;
+}
+
+/** Which address each response came from, for the one decision that
+ * depends on it after the response has left the race or the walk: whether
+ * a refused token refresh was refused by the backend (`refusedByBackend`). */
+const answeredBy = new WeakMap<object, string>();
+
+/** The addresses the backend has answered from in this run with something
+ * other than a 401: JSON, of any other status. See `refusedByBackend` for
+ * why a 401 does not count. */
+const servedBackend = new Set<string>();
+
+function noteAnswer(base: string, response: Response): void {
+  // Tests stand responses in with plain objects; anything else cannot be
+  // keyed, and there is nothing to note about it.
+  if (typeof response !== "object" || response === null) return;
+  answeredBy.set(response, base);
+  if (isBackendAnswer(response) && response.status !== 401) servedBackend.add(base);
 }
 
 /** How a request that got no answer is recorded in the trace.
@@ -173,10 +194,12 @@ function timeoutAt(base: string): number {
   return lastWinner !== null && lastWinner.base === base ? followUpTimeout(lastWinner) : ENDPOINT_TIMEOUT_MS;
 }
 
-/** Forgets the last race winner, so one test's race does not decide
- * where the next test's write is sent. */
+/** Forgets the last race winner, and which addresses the backend has
+ * answered from, so one test's answers do not decide where the next
+ * test's write is sent or whether its refused refresh is believed. */
 export function resetRaceWinnerForTests(): void {
   lastWinner = null;
+  servedBackend.clear();
 }
 
 /** Statuses a proxy in front of the backend -- a node mirror's nginx,
@@ -197,8 +220,33 @@ const GATEWAY_STATUSES = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525, 5
  * mirror to the panel reset part-way -- and the CDN's 520 is an origin
  * that returned something empty or unreadable. Neither says the request
  * never arrived. The rest (503, 521-523, 525, 526, 530) are refusals
- * before the backend was reached, and a write moves on after those. */
+ * before the backend was reached, and a write moves on after those --
+ * as it does after any other page from in front of the backend
+ * (`isForeignPage`), none of which got as far as the backend either. */
 const MAY_HAVE_REACHED_BACKEND = new Set([502, 504, 520, 524]);
+
+/** The writes that may go on to the next address even after a page that
+ * says the backend may have been reached (`MAY_HAVE_REACHED_BACKEND`),
+ * because a second copy reaching it does no harm.
+ *
+ * The token refresh only. The backend checks the token and the session it
+ * names, marks that session used and hands back a new pair; the refresh
+ * token is not used up, so a copy that did arrive, and whose answer was
+ * lost on the way back, leaves nothing for a second one to collide with.
+ * Stopping there instead told the customer the session could not be
+ * renewed while another address would have renewed it. (A token from
+ * before sessions existed is given a new session each time, so a second
+ * copy leaves one unused session behind, which the backend drops once it
+ * has been idle as long as a refresh token lives.)
+ *
+ * Not the sign-in, although a second copy of it creates nothing that
+ * matters: it carries a single-use proof-of-work solution, so a copy sent
+ * after one that did arrive is refused as a security check already used,
+ * and that is what the customer would be shown about a sign-in that had
+ * in fact gone through. Doing it properly needs a fresh challenge for the
+ * second copy. Not anything that buys, redeems, registers or claims,
+ * which `MAY_HAVE_REACHED_BACKEND` is there for. */
+const REPEATABLE_WRITES = new Set(["/customer-auth/refresh"]);
 
 /** Whether this response is a proxy's own failure page rather than an
  * answer from the backend.
@@ -209,11 +257,13 @@ const MAY_HAVE_REACHED_BACKEND = new Set([502, 504, 520, 524]);
  * broken mirror from speaking for the service: it answers 502 in one
  * round trip -- faster than a healthy endpoint, because it never reaches
  * the backend -- and used to win every raced GET, get remembered, and
- * then lead every write, which stopped on it. */
+ * then lead every write, which stopped on it.
+ *
+ * One kind of `isForeignPage`, singled out for what it says about a
+ * write: see `MAY_HAVE_REACHED_BACKEND`. */
 export function isGatewayFailure(response: Response): boolean {
   if (!GATEWAY_STATUSES.has(response.status)) return false;
-  const type = response.headers?.get?.("content-type") ?? "";
-  return !type.toLowerCase().includes("application/json");
+  return !isBackendAnswer(response);
 }
 
 /** Whether this response is the backend speaking.
@@ -227,9 +277,38 @@ function isBackendAnswer(response: Response): boolean {
   return type.toLowerCase().includes("application/json");
 }
 
-/** Thrown inside the race for a gateway failure, so `Promise.any` waits
- * for a real answer instead of settling on it. */
-class GatewayFailure extends Error {}
+/** Whether this response is a page from whatever stands in front of the
+ * backend, rather than the backend's own answer: an error status that is
+ * not JSON.
+ *
+ * Every refusal the backend makes is JSON -- its validation errors, its
+ * 401s, its throttle's 429s, its "try again" 503s, and its answer to a
+ * path it does not have. An error page from anything else is not: a
+ * proxy's failure page (`isGatewayFailure`), a node's fallback site that
+ * has no `/api` location and answers 404, nginx refusing a request it
+ * will not pass on, the CDN's bot check, which is a 403 page. Each of
+ * them answers faster than the backend can, because it never reaches it.
+ * While only the gateway pages were kept out of the race, a 403 or 404
+ * page in fifty milliseconds won the server list and sign-in, was
+ * remembered, led every write after it and ended them, and both screens
+ * said "Request failed (404)" until that address stopped answering. That
+ * was measured against a simulated network, not reported from the field.
+ *
+ * Such a page is never a race's winner, never remembered, never asked for
+ * the address bundle, and never the end of a walk; it is kept only as the
+ * answer of last resort, so that a request nothing better answered says
+ * what did answer rather than "could not reach Neoxify".
+ *
+ * A success without JSON is not counted here. The backend's 204s and
+ * 304s carry no body and no type at all. */
+export function isForeignPage(response: Response): boolean {
+  return response.status >= 400 && !isBackendAnswer(response);
+}
+
+/** Thrown inside the race for a page from in front of the backend
+ * (`isForeignPage`), so `Promise.any` waits for a real answer instead of
+ * settling on it. */
+class ForeignPage extends Error {}
 
 /** Thrown for a write whose health race the backend answered, when the
  * write itself then got no answer anywhere it was sent. Neoxify was
@@ -240,12 +319,12 @@ class StoppedAnswering extends Error {}
 interface Walk {
   /** Every address this request has been sent to. None gets it twice. */
   tried: Set<string>;
-  /** A proxy's own failure page, kept in case nothing better answers. See
-   * `isGatewayFailure`: after one that says the backend was never
-   * reached, the next endpoint is tried -- but not after one where it may
-   * have been (`MAY_HAVE_REACHED_BACKEND`), because a write must not be
-   * sent twice. */
-  gateway: Response | null;
+  /** The first page from in front of the backend (`isForeignPage`), kept
+   * in case nothing better answers. After one, the next endpoint is
+   * tried -- except after a gateway page that says the backend may have
+   * been reached (`MAY_HAVE_REACHED_BACKEND`), because a write must not be
+   * sent twice, unless it is one that may (`REPEATABLE_WRITES`). */
+  page: Response | null;
   lastError: unknown;
   /** The remembered endpoint as the walk last read it. */
   remembered: string | undefined;
@@ -261,7 +340,7 @@ async function rememberedNow(): Promise<string | undefined> {
 }
 
 async function newWalk(): Promise<Walk> {
-  return { tried: new Set(), gateway: null, lastError: undefined, remembered: await rememberedNow() };
+  return { tried: new Set(), page: null, lastError: undefined, remembered: await rememberedNow() };
 }
 
 /** Puts the remembered endpoint at the head of the walk if it has
@@ -287,10 +366,15 @@ async function followRemembered(queue: Stop[], walk: Walk): Promise<void> {
  * found in `walk` for the next stage or the caller.
  *
  * The shape every request had before 0.9.39, kept for the ones that must
- * not be duplicated. "Answers" means the transport completed -- any HTTP
- * status counts, because a 401 is the server telling us the password was
- * wrong and must not send us looking for a mirror that says something
- * nicer.
+ * not be duplicated. "Answers" means the backend answered -- any status,
+ * because a 401 is the server telling us the password was wrong and must
+ * not send us looking for a mirror that says something nicer. A page from
+ * in front of the backend (`isForeignPage`) is not the backend saying
+ * anything: it is kept as the answer of last resort and the walk goes on,
+ * unless it says the backend may already have acted on the write
+ * (`MAY_HAVE_REACHED_BACKEND`). Then the walk ends there, as before,
+ * except for a write that can safely be sent twice (`REPEATABLE_WRITES`).
+ * Either way such a page is never remembered or asked for the bundle.
  *
  * Each stop carries its own timeout: an address that has just answered
  * is given time to answer at the pace it just showed (`followUpTimeout`).
@@ -335,10 +419,14 @@ async function fetchOneEndpointAtATime(
     try {
       const response = await send(base, path, init, controller.signal);
       settleAttempt(entry, `h${response.status}`);
-      if (isGatewayFailure(response) && !MAY_HAVE_REACHED_BACKEND.has(response.status)) {
-        // Not remembered and not asked for the bundle: it is not the
-        // service. Kept only as the answer of last resort.
-        walk.gateway ??= response;
+      if (isForeignPage(response)) {
+        // Never remembered and never asked for the bundle: it is not the
+        // service. The CDN's 502 page used to be both, and then led every
+        // write after it. A gateway page that may have come after the
+        // backend acted still ends a write that must not be sent twice;
+        // any other page is kept, and the next address is tried.
+        if (MAY_HAVE_REACHED_BACKEND.has(response.status) && !REPEATABLE_WRITES.has(path)) return response;
+        walk.page ??= response;
         continue;
       }
       void rememberEndpoint(base);
@@ -360,10 +448,11 @@ async function fetchOneEndpointAtATime(
 }
 
 /** What a walk that got no answer ends with. Something did answer, if
- * only a proxy: then the caller gets its status, never "could not reach
- * Neoxify". Otherwise the walk's failure is thrown. */
+ * only a page from in front of the backend: then the caller gets its
+ * status, never "could not reach Neoxify". Otherwise the walk's failure is
+ * thrown. */
 function unanswered(walk: Walk, init: RequestInit): Response {
-  if (walk.gateway) return walk.gateway;
+  if (walk.page) return walk.page;
   throw walk.lastError ?? new Error(init.signal?.aborted ? "the request ran out of time" : "no API endpoint answered");
 }
 
@@ -445,21 +534,21 @@ async function sendWrite(
   }
   // A write cut off by its caller's own deadline was not left unanswered
   // by the backend: that is the caller's to say, as before.
-  if (reached && !walk.gateway && !outer?.aborted) throw new StoppedAnswering();
+  if (reached && !walk.page && !outer?.aborted) throw new StoppedAnswering();
   return unanswered(walk, init);
 }
 
 /** Sends one request, trying each known endpoint until one answers.
  *
- * "Answers" means a real HTTP response, whatever its status. A 401 or a
- * 500 proves the endpoint is reachable and is the service -- moving on
- * would be wrong, and would turn one rejected password into a walk
- * through every mirror. Only a transport failure, which is what a
- * blocked address looks like, rotates to the next -- and a proxy's own
- * failure page (`isGatewayFailure`), which is a mirror or the CDN saying
- * the backend could not be reached through it, not the backend saying
- * anything. That one is kept as the answer only if nothing better
- * replies.
+ * "Answers" means a real HTTP response from the backend, whatever its
+ * status. A 401 or a 500 proves the endpoint is reachable and is the
+ * service -- moving on would be wrong, and would turn one rejected
+ * password into a walk through every mirror. Only a transport failure,
+ * which is what a blocked address looks like, rotates to the next -- and
+ * a page from whatever stands in front of the backend (`isForeignPage`):
+ * a proxy saying the backend could not be reached through it, a fallback
+ * site, the CDN's bot check, none of them the backend saying anything.
+ * Such a page is kept as the answer only if nothing better replies.
  *
  * Throws if none answered, so the callers below keep their existing
  * "could not reach Neoxify" handling unchanged -- or `StoppedAnswering`,
@@ -580,23 +669,23 @@ async function fetchAnyEndpoint(
   if (outer?.aborted) onOuterAbort();
   outer?.addEventListener("abort", onOuterAbort);
 
-  // Proxies' own failure pages, in the order they arrived. None of them
-  // may win the race -- see `isGatewayFailure` -- but if nothing better
-  // answers, the first is what the caller gets.
-  const gateway: { i: number; response: Response }[] = [];
+  // Pages from in front of the backend, in the order they arrived. None
+  // of them may win the race -- see `isForeignPage` -- but if nothing
+  // better answers, the first is what the caller gets.
+  const pages: { i: number; response: Response }[] = [];
   const attempts = endpoints.map(async (base, i) => {
     try {
       const response = await send(base, path, init, controllers[i].signal);
       settleAttempt(entries[i], `h${response.status}`);
-      if (isGatewayFailure(response)) {
-        gateway.push({ i, response });
-        throw new GatewayFailure(`gateway ${response.status}`);
+      if (isForeignPage(response)) {
+        pages.push({ i, response });
+        throw new ForeignPage(`page ${response.status}`);
       }
       // Only a real answer counts as a win. A request that fails rejects,
       // and Promise.any moves on to whichever endpoint actually replied.
       return { base, response };
     } catch (err) {
-      if (!(err instanceof GatewayFailure)) {
+      if (!(err instanceof ForeignPage)) {
         settleAttempt(entries[i], failedAs(err, timedOut[i], startedAt));
       }
       throw err;
@@ -621,8 +710,8 @@ async function fetchAnyEndpoint(
     // connections for every request once a good address is known.
     void rememberEndpoint(base);
     // And offered to the next write (`sendWrite`) -- but only an answer
-    // that is the backend's own. A page from in front of it can win this
-    // race today; a write sent there on its strength would stop on it.
+    // that is the backend's own JSON. A success with no body, which can
+    // win here, says less about where a write will be answered.
     if (isBackendAnswer(response)) noteWinner(base, Date.now() - startedAt);
     // The endpoint answered, so it can also serve the next address list.
     // This is the only trigger the bundle has; without it a published
@@ -630,11 +719,11 @@ async function fetchAnyEndpoint(
     void maybeRefreshBundle(base);
     return response;
   } catch (err) {
-    // Nothing but proxies answered. The first of their failure pages is
-    // the answer -- the caller sees "Request failed (502)" with a status,
-    // because something did reply -- and it is neither remembered nor
-    // asked for the bundle: it is not the service.
-    const kept = gateway[0];
+    // Nothing but pages from in front of the backend answered. The first
+    // of them is the answer -- the caller sees "Request failed (502)" or
+    // "(403)" with a status, because something did reply -- and it is
+    // neither remembered nor asked for the bundle: it is not the service.
+    const kept = pages[0];
     if (kept !== undefined) {
       controllers.forEach((c, i) => {
         if (i !== kept.i) c.abort();
@@ -978,7 +1067,7 @@ function answeredInOrder(endpoints: string[], winner: RaceAnswer | null, answers
  * mirror being over its limit says nothing about the next one. A 429 is
  * kept as an answer, and the race goes on for one that is not. A page
  * from something in front of the backend never wins, for the reason
- * `isGatewayFailure` gives. If nothing better arrives, the first 429, or
+ * `isForeignPage` gives. If nothing better arrives, the first 429, or
  * failing that the first page, is the result, because something did
  * answer.
  *
@@ -1075,8 +1164,69 @@ async function resultFrom<T>(res: Response, backend: boolean): Promise<ApiResult
  * request that never arrived. Every one of those used to sign the
  * customer out, and now that signing out takes the tunnel down it would
  * also disconnect somebody because a network in Iran dropped one
- * request. */
+ * request. And a 401 ends it only when it is the backend's: see
+ * `refusedByBackend`. */
 const REFRESH_REFUSED = 401;
+
+/** Whether a 401 to the token refresh is the backend refusing the token,
+ * which ends the session and takes the tunnel down with it.
+ *
+ * Only a JSON 401, which is how the backend says it, and only from an
+ * address the backend has answered from with something other than a 401
+ * (`servedBackend`). A page from in front of the backend can say 401 too
+ * -- a node's fallback site, anything at a mirror's address that is not
+ * our API -- and it answers faster than the backend, so it could win the
+ * read and then be sent the refresh. A simulated network showed both an
+ * HTML and a JSON 401 from one broken address signing the customer out
+ * that way. A 401 is not counted as having heard from the backend, because
+ * an address that answers 401 to everything is exactly the one in doubt.
+ *
+ * An address the backend has not otherwise answered from in this run is
+ * asked for the health check, once, before its 401 is believed. That is
+ * what happens when the app starts with an expired access token and a
+ * revoked session: the refusal is real, and nothing but 401s has been
+ * heard from anywhere yet. The health check is public, so a 401 to it is
+ * not the backend's either.
+ *
+ * What this does not do is find the backend elsewhere. An address that
+ * answers JSON 401 to everything still wins every read it answers first,
+ * and each of those reads ends with "could not renew your session"; the
+ * customer is not signed out, and the tunnel stays up. */
+async function refusedByBackend(res: Response, trace?: EndpointTrace): Promise<boolean> {
+  if (res.status !== REFRESH_REFUSED || !isBackendAnswer(res)) return false;
+  const base = answeredBy.get(res);
+  if (base === undefined) return false;
+  if (servedBackend.has(base)) return true;
+  await askForHealth(base, trace);
+  return servedBackend.has(base);
+}
+
+/** Sends the health check to one address and waits for the headers. The
+ * answer is noted by `send` like any other; nothing else is done with it.
+ * Traced under `health`, with the caller's phase put back after. */
+async function askForHealth(base: string, trace?: EndpointTrace): Promise<void> {
+  const phase = trace?.phase;
+  if (trace) trace.phase = "health";
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutAt(base));
+  const startedAt = Date.now();
+  const entry = beginAttempt(trace, base, startedAt);
+  try {
+    const response = await send(base, HEALTH_PATH, { method: "GET" }, controller.signal);
+    settleAttempt(entry, `h${response.status}`);
+  } catch (err) {
+    settleAttempt(entry, failedAs(err, timedOut, startedAt));
+  } finally {
+    clearTimeout(timer);
+    // The body is not wanted.
+    controller.abort();
+    if (trace && phase !== undefined) trace.phase = phase;
+  }
+}
 
 type Refresh =
   | { kind: "renewed"; tokens: TokenPair }
@@ -1091,23 +1241,36 @@ async function refreshTokens(trace?: EndpointTrace): Promise<Refresh> {
   const current = await getTokens();
   if (!current) return { kind: "none" };
 
-  const result = await publicRequest<TokenPair>(
-    "/customer-auth/refresh",
-    {
-      method: "POST",
-      body: JSON.stringify({ refreshToken: current.refreshToken }),
-      // What this device is called on the customer's other devices
-      // ("Neoxify is in use on a Windows PC"). Sent on every refresh because
-      // a session started in the system browser could not send it, and its
-      // first refresh is what names that device. See device-identity.ts.
-      headers: deviceHeaders(),
-    },
-    trace,
-  );
-  if (!result.ok) {
-    return result.status === REFRESH_REFUSED ? { kind: "refused" } : { kind: "unavailable" };
+  // Sent through `fetchAnyEndpoint` rather than `publicRequest`, so the
+  // response is still in hand to say where a refusal came from.
+  let res: Response;
+  try {
+    res = await fetchAnyEndpoint(
+      "/customer-auth/refresh",
+      {
+        method: "POST",
+        body: JSON.stringify({ refreshToken: current.refreshToken }),
+        headers: {
+          "Content-Type": "application/json",
+          // What this device is called on the customer's other devices
+          // ("Neoxify is in use on a Windows PC"). Sent on every refresh
+          // because a session started in the system browser could not send
+          // it, and its first refresh is what names that device. See
+          // device-identity.ts.
+          ...deviceHeaders(),
+        },
+      },
+      trace,
+    );
+  } catch {
+    return { kind: "unavailable" };
   }
+  if (await refusedByBackend(res, trace)) return { kind: "refused" };
 
+  // A page from in front of the backend is never a new pair of tokens,
+  // whatever its status.
+  const result = await resultFrom<TokenPair>(res, isBackendAnswer(res));
+  if (!result.ok) return { kind: "unavailable" };
   await setTokens(result.data);
   return { kind: "renewed", tokens: result.data };
 }
@@ -1163,7 +1326,10 @@ async function authenticatedAttempt(path: string, init?: RequestInit, trace?: En
     return { answered: false, failure: unansweredFailure(err) };
   }
 
-  if (res.status === 401) {
+  // The backend's 401 only. A 401 page from something in front of it is
+  // the answer of last resort -- nothing better replied -- and says
+  // nothing about this session's tokens; it is returned as it is.
+  if (res.status === 401 && isBackendAnswer(res)) {
     if (trace) trace.phase = "refresh";
     const refreshed = await refreshTokens(trace);
     if (refreshed.kind === "unavailable") {

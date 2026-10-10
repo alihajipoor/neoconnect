@@ -38,11 +38,12 @@ vi.mock("./endpoint-bundle-store", () => ({
 
 let publicRequest: typeof import("./api").publicRequest;
 let isGatewayFailure: typeof import("./api").isGatewayFailure;
+let isForeignPage: typeof import("./api").isForeignPage;
 let resetRaceWinnerForTests: typeof import("./api").resetRaceWinnerForTests;
 
 beforeEach(async () => {
   vi.resetModules();
-  ({ publicRequest, isGatewayFailure, resetRaceWinnerForTests } = await import("./api"));
+  ({ publicRequest, isGatewayFailure, isForeignPage, resetRaceWinnerForTests } = await import("./api"));
 });
 
 afterEach(() => {
@@ -58,6 +59,13 @@ const gatewayPage = (status = 502) =>
   });
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+/** A page from something in front of the backend that is not a gateway
+ * failure: a node's fallback site without the API (404), the CDN's bot
+ * check (403), nginx refusing what it will not pass on (400, 405, 413),
+ * its own rate limit (429), a fallback site behind a password (401). */
+const page = (status: number) =>
+  new Response(`<html><body>${status}</body></html>`, { status, headers: { "content-type": "text/html" } });
+const PAGE_STATUSES = [400, 401, 403, 404, 405, 413, 429];
 
 /** Answers per origin, after a delay per origin. */
 function serve(routes: Record<string, { after: number; reply: () => Response } | "unreachable">) {
@@ -76,6 +84,20 @@ describe("telling a proxy's failure page from an answer", () => {
     expect(isGatewayFailure(json({ message: "database unreachable" }, 503))).toBe(false);
     expect(isGatewayFailure(json({ message: "nope" }, 500))).toBe(false);
     expect(isGatewayFailure(new Response("no", { status: 401 }))).toBe(false);
+  });
+
+  it("knows any error that is not JSON is not the backend's", () => {
+    for (const status of [...PAGE_STATUSES, 500, 502, 503, 521]) {
+      expect(isForeignPage(page(status)), `${status}`).toBe(true);
+    }
+    expect(isForeignPage(new Response("no", { status: 401 }))).toBe(true);
+    // The backend's refusals are JSON, every one of them.
+    expect(isForeignPage(json({ message: "Unauthorized" }, 401))).toBe(false);
+    expect(isForeignPage(json({ message: "Cannot GET /x" }, 404))).toBe(false);
+    expect(isForeignPage(json({ message: "ThrottlerException: Too Many Requests" }, 429))).toBe(false);
+    // A success is not judged by its type: the backend's 204 has none.
+    expect(isForeignPage(new Response(null, { status: 204 }))).toBe(false);
+    expect(isForeignPage(new Response(null, { status: 304 }))).toBe(false);
   });
 });
 
@@ -105,6 +127,51 @@ describe("a raced read", () => {
     // Something replied, so this is not "could not reach Neoxify".
     expect(result).not.toHaveProperty("noResponse");
     expect(remembered).toEqual([]);
+  });
+
+  /** Before: the page won in no time, the server list said "Request
+   * failed (404)", and the address was remembered and asked for the
+   * bundle, so every request after it started there. */
+  it("does not let any other fast page beat a slower real answer, or remember it", async () => {
+    for (const status of PAGE_STATUSES) {
+      remembered.length = 0;
+      refreshed.length = 0;
+      serve({
+        [MIRROR]: { after: 0, reply: () => page(status) },
+        [CDN]: { after: 30, reply: () => json({ hello: "world" }) },
+        [OTHER]: "unreachable",
+      });
+      await expect(publicRequest<{ hello: string }>("/config"), `after ${status}`).resolves.toEqual({
+        ok: true,
+        data: { hello: "world" },
+      });
+      expect(remembered, `after ${status}`).toEqual([CDN]);
+      expect(refreshed, `after ${status}`).toEqual([CDN]);
+    }
+  });
+
+  it("takes the backend's own JSON refusal as the answer, however it compares", async () => {
+    serve({
+      [MIRROR]: { after: 30, reply: () => json({ hello: "world" }) },
+      [CDN]: { after: 0, reply: () => json({ message: "Cannot GET /config" }, 404) },
+      [OTHER]: "unreachable",
+    });
+    const result = await publicRequest("/config");
+    expect(result).toMatchObject({ ok: false, status: 404, error: "Cannot GET /config" });
+    expect(remembered).toEqual([CDN]);
+  });
+
+  it("reports the first page's status when only pages answer, and remembers neither", async () => {
+    serve({
+      [MIRROR]: { after: 0, reply: () => page(403) },
+      [CDN]: { after: 5, reply: () => page(404) },
+      [OTHER]: "unreachable",
+    });
+    const result = await publicRequest("/config");
+    expect(result).toMatchObject({ ok: false, status: 403 });
+    expect(result).not.toHaveProperty("noResponse");
+    expect(remembered).toEqual([]);
+    expect(refreshed).toEqual([]);
   });
 });
 
@@ -155,6 +222,67 @@ describe("a write, sent one endpoint at a time", () => {
       const result = await publicRequest("/orders", { method: "POST", body: "{}" });
       expect(result, `after ${status}`).toMatchObject({ ok: false, status });
       expect(seen, `after ${status}`).toEqual([MIRROR]);
+    }
+  });
+
+  /** Before: the write stopped on the page, failed with its status, and
+   * the page's address was remembered, so the next write went there
+   * first and stopped on it too. */
+  it("steps past any other page from in front of the backend, and does not remember it", async () => {
+    for (const status of PAGE_STATUSES) {
+      resetRaceWinnerForTests();
+      remembered.length = 0;
+      refreshed.length = 0;
+      const seen = serveWrite((origin) => (origin === MIRROR ? page(status) : json({ token: "ok" })));
+      await expect(
+        publicRequest("/customer-auth/login", { method: "POST", body: "{}" }),
+        `after ${status}`,
+      ).resolves.toEqual({ ok: true, data: { token: "ok" } });
+      expect(seen, `after ${status}`).toEqual([MIRROR, CDN]);
+      // The mirror for its answer to the health check only.
+      expect(remembered, `after ${status}`).toEqual([MIRROR, CDN, CDN]);
+      expect(refreshed, `after ${status}`).toEqual([MIRROR, CDN, CDN]);
+    }
+  });
+
+  it("still answers with the page when nothing better takes the write", async () => {
+    const seen = serveWrite(() => page(403));
+    const result = await publicRequest("/customer/vpn/claim", { method: "POST", body: "{}" });
+    expect(result).toMatchObject({ ok: false, status: 403 });
+    expect(result).not.toHaveProperty("noResponse");
+    // Each address once.
+    expect(seen).toEqual([MIRROR, CDN, OTHER]);
+  });
+
+  /** It ends the write, which must not be sent twice, but it is not the
+   * service. Before: remembered and asked for the bundle, so every write
+   * after it went there first. */
+  it("does not remember a gateway page that ends a write, or ask it for the bundle", async () => {
+    for (const status of [502, 504, 520, 524]) {
+      resetRaceWinnerForTests();
+      remembered.length = 0;
+      refreshed.length = 0;
+      serveWrite((origin) => (origin === MIRROR ? gatewayPage(status) : json({ id: "second copy" }, 201)));
+      await publicRequest("/orders", { method: "POST", body: "{}" });
+      // For its answer to the health check, never for its page.
+      expect(remembered, `after ${status}`).toEqual([MIRROR]);
+      expect(refreshed, `after ${status}`).toEqual([MIRROR]);
+    }
+  });
+
+  /** The token refresh changes nothing a second copy could duplicate, so
+   * a page saying the backend may have seen it is no reason to stop.
+   * Before: "could not renew your session" while the next address would
+   * have renewed it. */
+  it("sends the token refresh on past a gateway page", async () => {
+    for (const status of [502, 504, 520, 524]) {
+      resetRaceWinnerForTests();
+      const seen = serveWrite((origin) =>
+        origin === MIRROR ? gatewayPage(status) : json({ accessToken: "a2", refreshToken: "r2" }),
+      );
+      const result = await publicRequest("/customer-auth/refresh", { method: "POST", body: "{}" });
+      expect(result, `after ${status}`).toEqual({ ok: true, data: { accessToken: "a2", refreshToken: "r2" } });
+      expect(seen, `after ${status}`).toEqual([MIRROR, CDN]);
     }
   });
 

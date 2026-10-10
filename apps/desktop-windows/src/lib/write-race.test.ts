@@ -54,6 +54,12 @@ vi.mock("./session", () => ({
 
 const { apiRequest, publicRequest, resetRaceWinnerForTests } = await import("./api");
 const { newTrace, renderTrace } = await import("./endpoint-trace");
+const { onSessionRevoked } = await import("./session-revoked");
+
+let announced = 0;
+onSessionRevoked(() => {
+  announced += 1;
+});
 
 const UNREACHABLE = "Could not reach Neoxify. Check your internet connection.";
 
@@ -124,6 +130,7 @@ beforeEach(() => {
   network = {};
   sent = [];
   remembered.length = 0;
+  announced = 0;
   stored.tokens = { accessToken: "access", refreshToken: "refresh" };
   tauriFetch.mockImplementation((url: string, init?: RequestInit) => {
     const { origin, pathname } = new URL(url);
@@ -343,6 +350,80 @@ describe("a write after a read", () => {
     expect(sentTo("/health")).toEqual([A, B, C, D]);
     expect(sentTo("/customer/subscriptions/s1/route")).toEqual([D]);
     expect(ms).toBe(1_500 + 100 + 200);
+  });
+});
+
+/** A 401 from an address that is not the backend, which answers faster
+ * than the backend can because it never reaches it. In a simulated
+ * network, before: the 401 won the read, the token refresh was sent to the
+ * same address and refused there, and the customer was signed out --
+ * which takes the tunnel down. */
+describe("a 401 from something that is not the backend", () => {
+  const unauthorized = () => json({ statusCode: 401, message: "Unauthorized" }, 401);
+  const pair = () => json({ accessToken: "access2", refreshToken: "refresh2" });
+
+  it("does not sign the customer out when one address answers 401 to everything", async () => {
+    network[A] = {
+      "/customer/me": answers(50, unauthorized),
+      "/customer-auth/refresh": answers(50, unauthorized),
+      "/health": answers(50, unauthorized),
+    };
+    network[D] = {
+      "/customer/me": answers(300, () => json({ id: "c1" })),
+      "/customer-auth/refresh": answers(300, pair),
+      "/health": answers(300, healthy),
+    };
+    const trace = newTrace();
+
+    const { result } = await run(() => apiRequest("/customer/me", undefined, trace));
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.sessionExpired).toBeFalsy();
+    expect(stored.tokens).toEqual({ accessToken: "access", refreshToken: "refresh" });
+    expect(announced).toBe(0);
+    // The refusal was not believed until the address answered the public
+    // health check as the backend would, and it did not.
+    expect(renderTrace(trace)).toBe(
+      "req: a.example=h401@50 b.example=cancel@50 c.example=cancel@50 d.example=cancel@50; " +
+        "refresh: a.example=h401@50; health: a.example=h401@50",
+    );
+  });
+
+  /** Before: the page won the read, and the read failed with "Request
+   * failed (401)" after a token refresh nobody needed. */
+  it("does not let a fast 401 page decide the read", async () => {
+    network[A] = {
+      "/customer/me": answers(50, () => page(401)),
+      "/customer-auth/refresh": answers(50, () => page(401)),
+      "/health": answers(50, () => page(401)),
+    };
+    network[D] = { "/customer/me": answers(300, () => json({ id: "c1" })) };
+
+    const { result } = await run(() => apiRequest("/customer/me"));
+
+    expect(result).toEqual({ ok: true, data: { id: "c1" } });
+    expect(sentTo("/customer-auth/refresh")).toEqual([]);
+    expect(announced).toBe(0);
+  });
+
+  /** The refresh may be sent twice (`REPEATABLE_WRITES` in api.ts), so a
+   * gateway page at the address it went to first does not end it. Before:
+   * "could not renew your session" with D ready to renew it. */
+  it("sends the token refresh on past a gateway page", async () => {
+    network[A] = {
+      "/customer/me": [answers(100, unauthorized), answers(100, () => json({ id: "c1" }))],
+      "/customer-auth/refresh": answers(100, () => page(502)),
+    };
+    network[D] = { "/health": answers(200, healthy), "/customer-auth/refresh": answers(100, pair) };
+
+    const { result, ms } = await run(() => apiRequest("/customer/me"));
+
+    expect(result).toEqual({ ok: true, data: { id: "c1" } });
+    expect(sentTo("/customer-auth/refresh")).toEqual([A, D]);
+    expect(stored.tokens).toEqual({ accessToken: "access2", refreshToken: "refresh2" });
+    // The read, A's page, B's head start in the health race, D's answer
+    // to it, the refresh at D, and the read again.
+    expect(ms).toBe(100 + 100 + 1_500 + 200 + 100 + 100);
   });
 });
 
