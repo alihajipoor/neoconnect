@@ -108,6 +108,28 @@ interface QueuedReport extends AttemptReport {
   occurredAt: string;
   /** The network attestation held when it happened. */
   network?: string;
+  /** The access token of the session the report was made in, or null
+   * when it was made with nobody signed in. Never part of the body: `send`
+   * takes it off and sends it as the request's Authorization.
+   *
+   * Taken when the report is made, because the token held when it is
+   * delivered says nothing about it. The reports this file exists for are
+   * the ones that could not be sent at the time, and they go out on a
+   * later contact -- usually after the fifteen-minute access token has
+   * expired, so they arrived anonymous, and a per-customer query of the
+   * table missed most of a tester's unreachable reports (the test VM: made
+   * 23:52:40, delivered three minutes later, no customer). And the token
+   * held at delivery may not be the same customer's at all: a failed
+   * sign-in queued with nobody signed in was filed under whoever signed in
+   * next. The server accepts an expired token on this one endpoint, for
+   * filing the report and nothing else (client-attempts.controller.ts).
+   *
+   * Kept beside the report in the same per-user data directory as the
+   * session itself (session.ts), and gone with the report.
+   *
+   * Absent on a report queued by a build from before it was kept. Those
+   * go out with the token held at delivery, as they always did. */
+  bearer?: string | null;
 }
 
 /** Which platform the user agent suggests -- the fallback only.
@@ -244,18 +266,20 @@ async function writeQueue(queue: QueuedReport[]): Promise<void> {
  * sent once more with the trace cut to fit, rather than lost whole over
  * its longest field. A current server never sees the second request.
  */
-async function send(report: QueuedReport): Promise<boolean> {
+async function send(queued: QueuedReport): Promise<boolean> {
   // Attached by hand rather than by using the authenticated helper. That
   // one refreshes on a 401 and reports session expiry to the UI, and a
   // background diagnostic must never be the thing that signs somebody
-  // out. An expired token here simply leaves the report anonymous --
-  // the server verifies it if it can and ignores it if it cannot.
-  const tokens = await getTokens();
-  const post = (body: QueuedReport) =>
+  // out. The token is the one the report was made with (see `bearer`);
+  // the server files the report under its customer if it verifies, and
+  // anonymously if it does not.
+  const { bearer, ...report } = queued;
+  const accessToken = bearer === undefined ? (await getTokens())?.accessToken : bearer;
+  const post = (body: Omit<QueuedReport, "bearer">) =>
     publicRequest<void>("/client-attempts", {
       method: "POST",
       body: JSON.stringify(body),
-      headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : undefined,
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
     });
 
   let result = await post(report);
@@ -351,6 +375,9 @@ async function sendFollowUp(original: QueuedReport, addendum: AttemptAddendum): 
       appVersion: original.appVersion,
       occurredAt: original.occurredAt,
       ...(original.network ? { network: original.network } : {}),
+      // Filed under the same customer as the report it follows, or under
+      // none, as that one was.
+      ...(original.bearer !== undefined ? { bearer: original.bearer } : {}),
       reason: `probe follow-up to the ${original.kind} ${original.outcome} report of ${original.occurredAt}, which was no longer held when the probe answered; not an attempt`,
     },
     addendum,
@@ -425,6 +452,9 @@ export async function reportAttempt(
       // The same, for the one field long enough to hit its limit: the
       // hostname list 0.9.39 to 0.9.43 send would overrun the old 200.
       apiEndpoint: shaped.apiEndpoint === undefined ? undefined : clipTrace(shaped.apiEndpoint, API_ENDPOINT_MAX),
+      // Whose report it is, decided now, while the session it happened in
+      // is the one held. See `bearer`.
+      bearer: (await getTokens())?.accessToken ?? null,
     };
 
     if (await send(queued)) {

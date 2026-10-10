@@ -30,7 +30,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) =
 
 const publicRequest = vi.fn<(path: string, init?: RequestInit) => Promise<ApiResult<void>>>();
 vi.mock("./api", () => ({ publicRequest: (path: string, init?: RequestInit) => publicRequest(path, init) }));
-vi.mock("./session", () => ({ getTokens: async () => null }));
+/** The session held right now: whoever is signed in, or nobody. */
+const session: { current: { accessToken: string; refreshToken: string } | null } = { current: null };
+vi.mock("./session", () => ({ getTokens: async () => session.current }));
 vi.mock("./network-identity", () => ({ currentAttestation: () => null }));
 
 type Attempts = typeof import("./attempts");
@@ -43,6 +45,7 @@ function sentBodies(): Record<string, unknown>[] {
 
 beforeEach(async () => {
   for (const data of files.values()) data.clear();
+  session.current = null;
   invoke.mockReset();
   publicRequest.mockReset();
   publicRequest.mockResolvedValue({ ok: true, data: undefined });
@@ -320,5 +323,120 @@ describe("an addendum that is still being worked out", () => {
     expect(Object.keys(sentBodies()[1]).sort()).toEqual(
       ["apiEndpoint", "appVersion", "kind", "occurredAt", "outcome", "platform", "reason"].sort(),
     );
+  });
+});
+
+/** Whose report it is. The reports worth having could not be sent when
+ * they happened, and go out on a later contact: with the token held then,
+ * which had usually expired -- so they were filed under nobody -- or
+ * belonged to someone else altogether. */
+describe("the customer a report is filed under", () => {
+  const UNREACHABLE: ApiResult<void> = {
+    ok: false,
+    error: "Could not reach Neoxify. Check your internet connection.",
+    noResponse: true,
+  };
+  const queued = () => (files.get("attempt-reports.json")?.get("queue") as Record<string, unknown>[] | undefined) ?? [];
+  const signedIn = (accessToken: string) => ({ accessToken, refreshToken: `${accessToken}-refresh` });
+  /** The Authorization each request carried, in order; null for none. */
+  const sentAs = () =>
+    publicRequest.mock.calls.map(([, init]) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      return headers.Authorization ?? null;
+    });
+  const unreachable = { kind: "CONNECT" as const, outcome: "CONTROL_PLANE_UNREACHABLE" as const, reason: "r" };
+
+  beforeEach(() => invoke.mockResolvedValue("windows"));
+
+  /** The test VM's case: made during an outage, delivered after the
+   * token it was made with had been replaced by a refresh. */
+  it("is the session it was made in, not the one holding a token at delivery", async () => {
+    session.current = signedIn("made-with");
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    await attempts.reportAttempt(unreachable);
+    expect(queued()).toHaveLength(1);
+
+    session.current = signedIn("refreshed-later");
+    publicRequest.mockReset();
+    publicRequest.mockResolvedValue({ ok: true, data: undefined });
+    await attempts.flushAttempts();
+
+    expect(queued()).toHaveLength(0);
+    expect(sentAs()).toEqual(["Bearer made-with"]);
+  });
+
+  /** Signed out, or another customer signed in, before it went. */
+  it("stays with its own customer after a sign-out or a change of account", async () => {
+    session.current = signedIn("alice");
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    await attempts.reportAttempt(unreachable);
+
+    session.current = signedIn("bob");
+    publicRequest.mockReset();
+    publicRequest.mockResolvedValue({ ok: true, data: undefined });
+    await attempts.reportAttempt({ kind: "SIGN_IN", outcome: "SUCCESS" });
+
+    // Bob's own report, then Alice's from the queue under Alice.
+    expect(sentAs()).toEqual(["Bearer bob", "Bearer alice"]);
+  });
+
+  /** A sign-in that could not reach Neoxify has no customer, and the
+   * customer who signs in afterwards is not proof of one. It used to be
+   * filed under them. */
+  it("is nobody's when nobody was signed in, whoever is by delivery", async () => {
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    await attempts.reportAttempt({ kind: "SIGN_IN", outcome: "CONTROL_PLANE_UNREACHABLE", reason: "r" });
+
+    session.current = signedIn("signed-in-later");
+    publicRequest.mockReset();
+    publicRequest.mockResolvedValue({ ok: true, data: undefined });
+    await attempts.flushAttempts();
+
+    expect(sentAs()).toEqual([null]);
+  });
+
+  it("goes out with no token field in the body", async () => {
+    session.current = signedIn("t");
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    await attempts.reportAttempt(unreachable);
+    publicRequest.mockReset();
+    publicRequest.mockResolvedValue({ ok: true, data: undefined });
+    await attempts.flushAttempts();
+    expect(sentBodies()[0]).not.toHaveProperty("bearer");
+    expect(JSON.stringify(sentBodies()[0])).not.toContain("t-refresh");
+    expect(JSON.stringify(sentBodies()[0])).not.toMatch(/"t"/);
+  });
+
+  /** A probe's answer that comes after its report has gone is filed with
+   * that report, under the same customer. */
+  it("carries over to a probe follow-up", async () => {
+    session.current = signedIn("made-with");
+    let settle!: (value: { apiEndpoint: string }) => void;
+    const probe = new Promise<{ apiEndpoint: string }>((resolve) => {
+      settle = resolve;
+    });
+    const done = attempts.reportAttempt({ ...unreachable, apiEndpoint: "req: a.example=timeout@8000" }, probe);
+    await vi.waitFor(() => expect(publicRequest).toHaveBeenCalledTimes(1));
+    session.current = signedIn("refreshed-later");
+    settle({ apiEndpoint: "probe: a.example=dns@40" });
+    await done;
+    expect(sentAs()).toEqual(["Bearer made-with", "Bearer made-with"]);
+  });
+
+  /** Queued by a build that did not keep the token: sent as it always
+   * was, with whatever is held at delivery. */
+  it("is the session held at delivery for a report an older build queued", async () => {
+    files.set(
+      "attempt-reports.json",
+      new Map<string, unknown>([
+        [
+          "queue",
+          [{ ...unreachable, platform: "windows", appVersion: "0.9.47", occurredAt: new Date().toISOString() }],
+        ],
+      ]),
+    );
+    session.current = signedIn("held-now");
+    await attempts.flushAttempts();
+    expect(sentAs()).toEqual(["Bearer held-now"]);
   });
 });

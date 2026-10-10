@@ -5,12 +5,17 @@ import { ApiBearerAuth, ApiExcludeEndpoint, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { ClientAttemptKind, ClientAttemptOutcome } from "@prisma/client";
 import type { Request } from "express";
-import { ClientAttemptsService } from "./client-attempts.service";
+import { ClientAttemptsService, RETENTION_DAYS } from "./client-attempts.service";
 import { ReportAttemptDto } from "./dto/report-attempt.dto";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { ThrottleVolumePerSession } from "../../common/guards/client-throttler.guard";
 import { clientIpOf } from "../../common/client-ip";
 import type { CustomerAccessTokenPayload } from "../customer-auth/types";
+
+/** How long after its expiry a customer's access token still files a
+ * report under them. The retention window: a report older than that is
+ * not kept anyway (`plausibleOccurredAt`), and a client drops it unsent. */
+export const ATTRIBUTION_GRACE_MS = RETENTION_DAYS * 86_400_000;
 
 @ApiTags("client-attempts")
 @Controller()
@@ -33,22 +38,39 @@ export class ClientAttemptsController {
    * table untrustworthy.
    *
    * So the token is verified if present and ignored entirely if not.
-   * An expired or forged one leaves the report anonymous rather than
-   * rejecting it.
+   * A forged one leaves the report anonymous rather than rejecting it.
+   *
+   * An expired one is accepted, here and nowhere else, if it expired
+   * inside the retention window (`ATTRIBUTION_GRACE_MS`). The reports this
+   * endpoint exists for are the ones a client could not send when they
+   * happened: it queues them and sends them on the next contact, with the
+   * token of the session they happened in -- and by then the fifteen-minute
+   * access token has almost always run out. Verified with expiry, such a
+   * report arrived anonymous; on the test VM the first unreachable report
+   * of an outage was made at 23:52:40, delivered three minutes later, and
+   * filed under nobody. The signature still has to verify, so this is
+   * still proof of who the session belonged to. All it lets a token do
+   * past its expiry is file a report under its own customer: it opens
+   * nothing, and the throttle still counts it against the address
+   * (ClientThrottlerGuard verifies with expiry).
    *
    * A sign-in token only, as CustomerJwtStrategy accepts: the emailed
    * verify-email and password-reset tokens are signed with the same
    * secret, and an account that never verified would otherwise count as
    * one of the distinct customers the per-ISP tags require.
    */
-  private customerIdFrom(req: Request): string | undefined {
+  private customerIdFrom(req: Request, now = Date.now()): string | undefined {
     const header = req.headers.authorization;
     if (!header?.startsWith("Bearer ")) return undefined;
     try {
-      const payload = this.jwt.verify<CustomerAccessTokenPayload & { purpose?: unknown }>(header.slice(7), {
-        secret: this.config.get<string>("customerJwt.accessSecret"),
-      });
+      const payload = this.jwt.verify<CustomerAccessTokenPayload & { purpose?: unknown; exp?: unknown }>(
+        header.slice(7),
+        { secret: this.config.get<string>("customerJwt.accessSecret"), ignoreExpiration: true },
+      );
       if (payload.purpose !== undefined) return undefined;
+      // Only the expiry is relaxed, and only this far. A token without one
+      // is taken as the ordinary verification would take it.
+      if (typeof payload.exp === "number" && payload.exp * 1000 < now - ATTRIBUTION_GRACE_MS) return undefined;
       return payload.sub;
     } catch {
       return undefined;
