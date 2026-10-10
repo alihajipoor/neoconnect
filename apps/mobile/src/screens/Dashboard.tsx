@@ -531,14 +531,19 @@ export function Dashboard({
       // on every foreground past the horizon, so it is most of them.
       trigger,
       appState: connectionState,
+      // An answer after the refresh's budget is the same answer, late.
+      onLateAnswer: adoptRefreshed,
     });
     if (refreshed.source !== "network") return;
-    setProtocolUsers(refreshed.protocolUsers);
-    setProtocolUser(
-      (current) =>
-        refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current,
-    );
+    adoptRefreshed(refreshed.protocolUsers);
   });
+
+  /** Holds credentials a refresh has just fetched: the list, and the
+   * one on screen replaced by its new copy. */
+  function adoptRefreshed(fresh: ProtocolUser[]) {
+    setProtocolUsers(fresh);
+    setProtocolUser((current) => fresh.find((u) => u.id === current?.id) ?? current);
+  }
 
   useEffect(() => {
     setNow(Date.now());
@@ -1677,15 +1682,13 @@ export function Dashboard({
           held: protocolUsers.length > 0 ? protocolUsers : [protocolUser!],
           trigger: "connect",
           appState: connectionState,
+          // Too late for this pass, which has dialled what it held by
+          // then, but held for the next one: inside the freshness horizon
+          // that one asks nothing and dials what the screen holds.
+          onLateAnswer: adoptRefreshed,
         }),
     );
-    if (refreshed.source === "network") {
-      setProtocolUsers(refreshed.protocolUsers);
-      setProtocolUser(
-        (current) =>
-          refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current,
-      );
-    }
+    if (refreshed.source === "network") adoptRefreshed(refreshed.protocolUsers);
     // Signed out, or stopped, while those were asked: nothing has been
     // dialled, and whoever did it owns the state from here (see
     // `standDown`). (A sign-out is "failed" to a reconnect, whose own

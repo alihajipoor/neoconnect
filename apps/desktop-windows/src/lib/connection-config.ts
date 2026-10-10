@@ -1,9 +1,11 @@
+import type { ApiResult } from "./api";
 import { reportAttempt, type AttemptReport } from "./attempts";
 import { connectStarting, probeAddendum } from "./control-plane-probe";
 import { newTrace, renderTrace } from "./endpoint-trace";
 import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
 import { getProtocolUsers } from "./customer";
 import type { ResumeTrigger } from "./resume";
+import { sessionGeneration } from "./session-end";
 import type { ProtocolUser } from "./types";
 import { watchBackground } from "./visibility";
 
@@ -85,8 +87,8 @@ export interface ConfigRefresh {
  * without it.
  *
  * This is not the same budget as a normal request and must not be. A
- * plain `apiRequest` gives each endpoint up to 8s, and after a 401 runs
- * a token refresh and a retry on top -- right when someone is waiting
+ * plain `apiRequest` read gives each endpoint up to 20s, and after a 401
+ * runs a token refresh and a retry on top -- right when someone is waiting
  * for a screen, wrong when they have pressed Connect: on a filtered
  * network that would add tens of seconds of nothing-happening before the
  * first packet of the actual tunnel, and the reward for waiting it out
@@ -102,6 +104,11 @@ export interface ConfigRefresh {
  * says it should change. A connect that would otherwise have started
  * instantly is delayed by at most this, once, and only when what is held
  * is already past its horizon.
+ *
+ * The request is not stopped when the budget runs out, and an answer
+ * that comes in after it is still kept (`keepLateAnswer`): the connect
+ * has gone ahead without it, but the next one, and an offline start, get
+ * today's values instead of paying the same six seconds again for them.
  */
 export const REFRESH_BUDGET_MS = 6_000;
 
@@ -189,8 +196,14 @@ export function describeConfigDrift(before: ProtocolUser[], after: ProtocolUser[
  * The work is not cancelled, only stopped being waited for. That
  * distinction is what makes the timeout cheap rather than wasteful: a
  * refresh that arrives two seconds after the connect started still gets
- * to write the cache, so the delay costs this one connect and is already
- * paid for by the time of the next one.
+ * to write the cache (`keepLateAnswer`), so the delay costs this one
+ * connect and is already paid for by the time of the next one.
+ *
+ * This comment once promised that while the late answer was in fact
+ * dropped -- nothing was listening for it. With the CDN answering at seven
+ * seconds, a simulated network showed no cache write thirty seconds
+ * later, so every connect on that network waited six seconds and then
+ * dialled the same old values.
  */
 const TIMED_OUT = Symbol("timed out");
 
@@ -241,6 +254,16 @@ export interface RefreshOptions {
    * there is a different problem from one on the bare network. It is
    * what the app believed, not a verified fact, and is labelled so. */
   appState?: string;
+  /** Told when the answer comes in after the budget has run out, with
+   * the credentials it carried, once they have been written to the cache.
+   *
+   * For the screen to hold them as well. The next connect inside the
+   * freshness horizon dials what the screen holds and asks nothing,
+   * because the cache now says it is fresh; written to the cache alone,
+   * the late answer would make that connect skip the question and dial
+   * the old values anyway. Not called after a sign-out, nor for an answer
+   * that was a refusal. */
+  onLateAnswer?: (protocolUsers: ProtocolUser[]) => void;
   now?: number;
 }
 
@@ -257,6 +280,60 @@ const TRIGGER_LABEL: Record<RefreshTrigger, string> = {
  * the control plane is reached over. A probe begun in one would measure
  * the move. Matched as strings: `appState` is whatever the screen held. */
 const PATH_CHANGING: ReadonlySet<string> = new Set(["connecting", "verifying", "disconnecting"]);
+
+/** What `keepLateAnswer` needs to know about the refresh it outlives. */
+interface LateAnswerContext {
+  held: ProtocolUser[];
+  askedAt: number;
+  budgetMs: number;
+  trigger: RefreshTrigger;
+  /** Whether the customer who asked is still the one signed in. */
+  stillCurrent: () => boolean;
+  onLateAnswer?: (protocolUsers: ProtocolUser[]) => void;
+}
+
+/** Keeps the answer to a refresh that ran out of budget, when it comes.
+ *
+ * The connect has gone ahead on what was held, and nothing here changes
+ * that tunnel. What it changes is the next one: the credentials are
+ * written to the cache and handed to the screen, so the next connect, or
+ * an offline start, dials them -- on a network where the control plane
+ * takes seven seconds to answer, it used to pay six and get nothing,
+ * every time.
+ *
+ * Dropped after a sign-out, and so is a refusal or a failure: neither
+ * says anything about the credentials, and the refusal has already been
+ * dealt with where it was answered (`apiRequest`).
+ *
+ * A late answer whose servers have moved is reported as the on-time one
+ * is, and says it was late: the connect it was asked for has already
+ * dialled the old values, which is the first thing to know if that
+ * connect failed. */
+function keepLateAnswer(request: Promise<ApiResult<ProtocolUser[]>>, context: LateAnswerContext): void {
+  const { held, askedAt, budgetMs, trigger, stillCurrent, onLateAnswer } = context;
+  void request.then(
+    async (late) => {
+      if (!late.ok || !stillCurrent()) return;
+      const fresh = late.data;
+      await updateSnapshotProtocolUsers(fresh, stillCurrent);
+      // Asked again: the cache write may have been the last thing to
+      // happen before a sign-out.
+      if (!stillCurrent()) return;
+      onLateAnswer?.(fresh);
+      const drift = describeConfigDrift(held, fresh);
+      if (drift.length === 0) return;
+      const after = Date.now() - askedAt;
+      void reportAttempt({
+        kind: "CONNECT",
+        outcome: "SUCCESS",
+        reason:
+          `${TRIGGER_LABEL[trigger]} refresh answered after its ${budgetMs}ms budget (in ${after}ms) and found changed server parameters: ${drift.join("; ")}` +
+          (trigger === "connect" ? "; the connect had gone ahead on the cached values" : ""),
+      });
+    },
+    () => undefined,
+  );
+}
 
 /** Fetches the credentials again, unless what is held is still fresh.
  *
@@ -288,8 +365,14 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   // Whether the app was backgrounded while this ran -- on iOS that
   // suspends it, and a "timeout" then says nothing about the network.
   const backgrounded = watchBackground();
+  // Which customer session the answer is for. A sign-out bumps it before
+  // it clears the cache, and an answer still in flight then must not
+  // write the old customer's credentials back.
+  const sessionAtStart = sessionGeneration();
+  const stillCurrent = () => sessionGeneration() === sessionAtStart;
   const askedAt = Date.now();
-  const outcome = await withBudget(getProtocolUsers(trace), budgetMs);
+  const request = getProtocolUsers(trace);
+  const outcome = await withBudget(request, budgetMs);
   const elapsedMs = Date.now() - askedAt;
   // Read now, at the moment the wait ended, because the request carries
   // on after a budget expires: whatever is still in flight here is what
@@ -305,7 +388,7 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     const drift = describeConfigDrift(held, fresh);
     // Written before returning so the values that were just dialled are
     // also the ones an offline start would come back to.
-    void updateSnapshotProtocolUsers(fresh);
+    void updateSnapshotProtocolUsers(fresh, stillCurrent);
     if (drift.length > 0) {
       // Worth a line even though nothing failed. A server whose
       // parameters moved is the single most likely explanation for a
@@ -326,6 +409,13 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     // does not authenticate against the control plane -- but the caller
     // needs to know so the UI can ask for a sign-in.
     return { protocolUsers: held, source: "stale", ageMs, drift: [], sessionExpired: true };
+  }
+
+  // Out of budget, with the request still going: its answer is kept when
+  // it comes. Before the report below, which says nothing about it -- the
+  // report is about this connect, which goes ahead without it.
+  if (!answered) {
+    keepLateAnswer(request, { held, askedAt, budgetMs, trigger, stillCurrent, onLateAnswer: options.onLateAnswer });
   }
 
   // Could not ask. The connect goes ahead regardless; the only thing

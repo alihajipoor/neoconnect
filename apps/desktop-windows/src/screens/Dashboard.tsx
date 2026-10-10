@@ -1096,17 +1096,20 @@ export function Dashboard({
   // `force` because the hook has already done the staleness check; it
   // does not call this at all inside the horizon.
   useRefreshOnResume(async (trigger) => {
+    const adopt = (fresh: ProtocolUser[]) => {
+      setProtocolUsers(fresh);
+      setProtocolUser((current) => fresh.find((u) => u.id === current?.id) ?? current);
+    };
     const refreshed = await refreshConnectionConfig({
       held: protocolUsers,
       force: true,
       trigger,
       appState: connectionState,
+      // An answer after the refresh's budget is the same answer, late.
+      onLateAnswer: adopt,
     });
     if (refreshed.source !== "network") return;
-    setProtocolUsers(refreshed.protocolUsers);
-    setProtocolUser(
-      (current) => refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current,
-    );
+    adopt(refreshed.protocolUsers);
   });
 
   // Ticks for as long as the screen is mounted, not just while connected.
@@ -2346,6 +2349,10 @@ export function Dashboard({
         held: protocolUsers,
         trigger: "connect",
         appState: connectionState,
+        // Too late for this pass, which has dialled what it held by then,
+        // but held for the next one: inside the freshness horizon that
+        // one asks nothing and dials what the screen holds.
+        onLateAnswer: setProtocolUsers,
       });
       if (refreshed.source === "network") setProtocolUsers(refreshed.protocolUsers);
       const dialable = refreshed.protocolUsers.length > 0 ? refreshed.protocolUsers : [protocolUser];

@@ -173,16 +173,28 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
  * credentials and no subscription is a shape `loadSnapshot` would hand
  * back and the offline path would then render as a customer with no
  * plan; the full `loadAll` will write a complete one soon enough.
+ *
+ * `stillCurrent` is `saveSnapshot`'s. It matters more here than there,
+ * because the refresh's answer may come in long after it was asked for:
+ * after a sign-out and the next customer's sign-in, the snapshot this
+ * reads is theirs, and without the check one customer's credentials
+ * would be written into the other's.
  */
-export async function updateSnapshotProtocolUsers(protocolUsers: ProtocolUser[]): Promise<void> {
+export async function updateSnapshotProtocolUsers(
+  protocolUsers: ProtocolUser[],
+  stillCurrent?: () => boolean,
+): Promise<void> {
   if (protocolUsers.length === 0) return;
   const existing = await loadSnapshot();
   if (!existing) return;
-  await saveSnapshot({
-    subscription: existing.subscription,
-    protocolUsers,
-    routes: existing.routes,
-  });
+  await saveSnapshot(
+    {
+      subscription: existing.subscription,
+      protocolUsers,
+      routes: existing.routes,
+    },
+    stillCurrent,
+  );
 }
 
 /** Forgets everything. Called on sign-out: leaving one customer's

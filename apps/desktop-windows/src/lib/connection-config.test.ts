@@ -54,6 +54,11 @@ vi.mock("./control-plane-probe", () => ({
   connectStarting: () => connectStarting(),
 }));
 
+/** The customer session in force. Moved by a test to stand for a
+ * sign-out, which is what `endCustomerSession` does first. */
+const session = vi.hoisted(() => ({ generation: 0 }));
+vi.mock("./session-end", () => ({ sessionGeneration: () => session.generation }));
+
 /** Reports are fire-and-forget, so a test waits for one rather than
  * reading it the moment the refresh returns. */
 async function firstReport<T>(): Promise<T> {
@@ -483,6 +488,161 @@ describe("refreshConnectionConfig", () => {
     fetchUsers.mockResolvedValue({ ok: true, data: [reality("www.samsung.com")] });
 
     expect((await refreshConnectionConfig({ held })).source).toBe("network");
+  });
+
+  /** A sign-out while the question was out, then the next customer's
+   * sign-in: the snapshot on disk is theirs by the time the answer
+   * comes. Writing the answer into it would hand them the previous
+   * customer's credentials. */
+  it("does not write an answer into the next customer's cache", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const theirs = reality("www.apple.com", "pu-theirs");
+    fetchUsers.mockImplementation(async () => {
+      session.generation += 1;
+      await saveSnapshot({ subscription: null, protocolUsers: [theirs], routes: [] });
+      return { ok: true, data: [reality("www.samsung.com")] };
+    });
+
+    await refreshConnectionConfig({ held });
+    // The write is fire-and-forget; give it every chance to land.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect((await loadSnapshot())!.protocolUsers).toEqual([theirs]);
+  });
+});
+
+/** The answer that comes in after the budget has run out.
+ *
+ * The connect does not wait for it, and must not. But it used to be
+ * dropped as well: with the control plane answering in seven seconds,
+ * every connect waited six, dialled what it held, and left the cache as
+ * stale as before, so the next connect paid the same six seconds for the
+ * same nothing. */
+describe("an answer after the budget", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  const serverName = async () => String((await loadSnapshot())!.protocolUsers[0].connection.publicParams.serverName);
+
+  it("is written to the cache and handed to the screen", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const answer = deferred<ApiResult<ProtocolUser[]>>();
+    fetchUsers.mockReturnValue(answer.promise);
+    const onLateAnswer = vi.fn();
+
+    const result = await refreshConnectionConfig({ held, budgetMs: 30, onLateAnswer });
+    // The connect went ahead on what it held, as before.
+    expect(result.source).toBe("stale");
+    expect(result.protocolUsers).toEqual(held);
+
+    answer.resolve({ ok: true, data: [reality("www.samsung.com")] });
+
+    await vi.waitFor(async () => expect(await serverName()).toBe("www.samsung.com"));
+    await vi.waitFor(() => expect(onLateAnswer).toHaveBeenCalledWith([reality("www.samsung.com")]));
+  });
+
+  /** What the cache now holds is fresh, so the next connect asks nothing
+   * and dials the late answer. */
+  it("spares the next connect the question", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const answer = deferred<ApiResult<ProtocolUser[]>>();
+    fetchUsers.mockReturnValue(answer.promise);
+    let screen = held;
+
+    await refreshConnectionConfig({ held: screen, budgetMs: 30, onLateAnswer: (fresh) => (screen = fresh) });
+    answer.resolve({ ok: true, data: [reality("www.samsung.com")] });
+    await vi.waitFor(async () => expect(await serverName()).toBe("www.samsung.com"));
+
+    fetchUsers.mockClear();
+    const next = await refreshConnectionConfig({ held: screen, budgetMs: 30 });
+
+    expect(fetchUsers).not.toHaveBeenCalled();
+    expect(next.source).toBe("fresh");
+    expect(String(next.protocolUsers[0].connection.publicParams.serverName)).toBe("www.samsung.com");
+  });
+
+  /** The connect it was asked for has dialled the old values by then,
+   * which is the first thing to know if that connect failed. */
+  it("reports servers that moved, and that the connect had not waited", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const answer = deferred<ApiResult<ProtocolUser[]>>();
+    fetchUsers.mockReturnValue(answer.promise);
+
+    await refreshConnectionConfig({ held, budgetMs: 30 });
+    answer.resolve({ ok: true, data: [reality("www.samsung.com")] });
+
+    await vi.waitFor(() => expect(reportAttempt).toHaveBeenCalledTimes(2));
+    // The connect's own report first, as before: it did go ahead blind.
+    expect((reportAttempt.mock.calls[0][0] as { outcome: string }).outcome).toBe("CONTROL_PLANE_UNREACHABLE");
+    const late = reportAttempt.mock.calls[1][0] as { kind: string; outcome: string; reason: string };
+    expect(late.kind).toBe("CONNECT");
+    expect(late.outcome).toBe("SUCCESS");
+    expect(late.reason).toMatch(/^pre-connect refresh answered after its 30ms budget \(in \d+ms\) and found changed server parameters: /);
+    expect(late.reason).toContain("the connect had gone ahead on the cached values");
+  });
+
+  /** Nothing moved: nothing to say, beyond keeping the answer. */
+  it("reports nothing more when nothing moved", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const answer = deferred<ApiResult<ProtocolUser[]>>();
+    fetchUsers.mockReturnValue(answer.promise);
+    const onLateAnswer = vi.fn();
+
+    await refreshConnectionConfig({ held, budgetMs: 30, onLateAnswer });
+    answer.resolve({ ok: true, data: [reality("cloudflare.com")] });
+
+    await vi.waitFor(() => expect(onLateAnswer).toHaveBeenCalled());
+    expect(reportAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  /** Signed out while it was in flight: the answer is the old customer's,
+   * and neither the cache nor the screen may have it. */
+  it("is dropped after a sign-out", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const answer = deferred<ApiResult<ProtocolUser[]>>();
+    fetchUsers.mockReturnValue(answer.promise);
+    const onLateAnswer = vi.fn();
+
+    await refreshConnectionConfig({ held, budgetMs: 30, onLateAnswer });
+    session.generation += 1;
+    const theirs = reality("www.apple.com", "pu-theirs");
+    await saveSnapshot({ subscription: null, protocolUsers: [theirs], routes: [] });
+    answer.resolve({ ok: true, data: [reality("www.samsung.com")] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect((await loadSnapshot())!.protocolUsers).toEqual([theirs]);
+    expect(onLateAnswer).not.toHaveBeenCalled();
+  });
+
+  /** A late failure or refusal says nothing about the credentials. */
+  it.each([
+    ["a failure", { ok: false, error: "Could not reach Neoxify. Check your internet connection.", noResponse: true }],
+    ["a refusal", { ok: false, error: "Your session expired. Please sign in again.", sessionExpired: true }],
+  ] as const)("keeps nothing from %s", async (_name, late) => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const answer = deferred<ApiResult<ProtocolUser[]>>();
+    fetchUsers.mockReturnValue(answer.promise);
+    const onLateAnswer = vi.fn();
+
+    await refreshConnectionConfig({ held, budgetMs: 30, onLateAnswer });
+    answer.resolve(late);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(await serverName()).toBe("cloudflare.com");
+    expect(onLateAnswer).not.toHaveBeenCalled();
+    expect(reportAttempt).toHaveBeenCalledTimes(1);
   });
 });
 
