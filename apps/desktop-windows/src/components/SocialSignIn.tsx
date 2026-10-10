@@ -6,6 +6,7 @@ import { failureText } from "../lib/failure-text";
 import { socialSignIn } from "../lib/auth";
 import {
   appleSignInAvailable,
+  finishesBehindCloudflare,
   socialSignInAvailable,
   type SocialProvider,
 } from "../lib/social-auth";
@@ -57,24 +58,39 @@ export function SocialSignIn({
   const { t } = useI18n();
   const [busy, setBusy] = useState<SocialProvider | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Whether to say that Google and Facebook sign-in comes back through
+  // Cloudflare: from when one of them opens the browser until it ends in
+  // an answer. The app cannot see that leg fail. Where Cloudflare is
+  // blocked the provider's redirect back never loads, and all the app
+  // ever learns is that the browser was closed -- or, on Windows, nothing
+  // at all for five minutes. So the line shows while the browser is open,
+  // where the Windows window stays visible beside it, and stays after the
+  // browser closes without a result, which is the only moment a phone
+  // shows it. An answer of any kind, an error included, means the browser
+  // got back, and the line goes.
+  const [cloudflareNote, setCloudflareNote] = useState(false);
 
   if (providers.length === 0) return null;
 
   async function start(provider: SocialProvider) {
     setError(null);
     setBusy(provider);
+    setCloudflareNote(finishesBehindCloudflare(provider));
     try {
       const result = await socialSignIn(provider);
       // A cancelled sheet is not a failure and must not show an error --
       // the customer knows what they just did, and telling them it went
-      // wrong is both wrong and alarming.
+      // wrong is both wrong and alarming. The note stays: it does not say
+      // anything went wrong, only where to go if the page never loaded.
       if (result === null) return;
+      setCloudflareNote(false);
       if (!result.ok) {
         setError(failureText(result, t) || t("auth.socialFailed"));
         return;
       }
       onSuccess();
     } catch (err) {
+      setCloudflareNote(false);
       setError(err instanceof Error ? err.message : t("auth.socialFailed"));
     } finally {
       setBusy(null);
@@ -116,6 +132,12 @@ export function SocialSignIn({
           </button>
         ))}
       </div>
+
+      {cloudflareNote ? (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          {t("auth.socialNeedsCloudflare")}
+        </p>
+      ) : null}
 
       {error ? (
         <p role="alert" className="mt-2 text-xs text-destructive">

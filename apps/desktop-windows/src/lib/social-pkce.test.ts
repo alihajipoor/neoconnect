@@ -47,8 +47,12 @@ describe("pkcePair", () => {
 
 describe("startUrl", () => {
   it("carries the challenge when there is one, and is unchanged when there is not", () => {
-    expect(startUrl("google", "fa", "abc_DEF-123")).toMatch(/\/customer-auth\/social\/google\/start\?locale=fa&challenge=abc_DEF-123$/);
-    expect(startUrl("google", "fa")).toMatch(/\/start\?locale=fa$/);
+    expect(startUrl("https://a.example/api", "google", "fa", "abc_DEF-123")).toBe(
+      "https://a.example/api/customer-auth/social/google/start?locale=fa&challenge=abc_DEF-123",
+    );
+    expect(startUrl("https://a.example/api/", "google", "fa")).toBe(
+      "https://a.example/api/customer-auth/social/google/start?locale=fa",
+    );
   });
 });
 

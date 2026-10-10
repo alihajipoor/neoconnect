@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { rememberedEndpoint } from "./api-endpoints";
 import { API_BASE_URL } from "./config";
 import { currentLanguage, DICTIONARIES } from "./i18n";
 import type { TranslationKey } from "./i18n";
@@ -94,17 +95,55 @@ export const socialSignInAvailable = (): boolean => hasNativeRuntime();
  */
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
-/** The URL that starts the browser flow.
+/** The address the browser flow starts at: the one the backend answered
+ * from last (`rememberedEndpoint`), or the first compiled-in address when
+ * none has answered yet.
  *
- * Deliberately pointed at whichever API base the app is already talking
- * to, so a client on a mirror does not send the customer to an endpoint
- * its network cannot reach.
- */
-export function startUrl(provider: "google" | "facebook", locale: string, challenge?: string): string {
-  const base = API_BASE_URL.replace(/\/$/, "");
-  const url = `${base}/customer-auth/social/${provider}/start?locale=${encodeURIComponent(locale)}`;
+ * It used to be the first compiled-in address, a CDN name, no matter which
+ * address the app was actually reaching. Where that name was blocked,
+ * Google and Facebook sign-in could not even open, while the exchange that
+ * follows it, which walks every address, would have got through. Any
+ * address that reaches the backend can start the flow: the state it mints
+ * is kept by the backend, not in a cookie on the name the browser used,
+ * so the provider's redirect back to the backend's own address finds it.
+ * Asked of production on 2026-10-09, every node mirror that answered sent
+ * the browser on to Google with the same return address the CDN name did.
+ * Behind a node's mirror the start's throttle, ten a minute, is counted
+ * against the node's address and shared by everyone using that mirror
+ * (ClientThrottlerGuard), as the email sign-in's is.
+ *
+ * Only an https address: this goes to the customer's browser, and a plain
+ * http one is never a production address. That leaves a development
+ * build on its own compiled-in address, which is localhost there anyway.
+ *
+ * What this cannot move is the end of the flow. The provider sends the
+ * browser back to one fixed address, the backend's PUBLIC_API_URL, because
+ * that is the address registered with the provider; it is behind
+ * Cloudflare. The sign-in screen says so (`auth.socialNeedsCloudflare`).
+ * Moving it needs the backend and the providers' consoles, not the app. */
+export async function socialStartBase(): Promise<string> {
+  try {
+    const remembered = await rememberedEndpoint();
+    if (remembered !== undefined && remembered.startsWith("https://")) return remembered;
+  } catch {
+    // Not knowing costs the flow its best address, not the flow.
+  }
+  return API_BASE_URL;
+}
+
+/** The URL that starts the browser flow at `base` (`socialStartBase`). */
+export function startUrl(base: string, provider: "google" | "facebook", locale: string, challenge?: string): string {
+  const url = `${base.replace(/\/$/, "")}/customer-auth/social/${provider}/start?locale=${encodeURIComponent(locale)}`;
   return challenge ? `${url}&challenge=${encodeURIComponent(challenge)}` : url;
 }
+
+/** Whether this provider's sign-in finishes in a browser at the backend's
+ * fixed address (`socialStartBase` says why that is behind Cloudflare).
+ *
+ * Google and Facebook do. Apple's native sheet hands its token straight
+ * to the app, which sends it through any address it can reach. */
+export const finishesBehindCloudflare = (provider: SocialProvider): boolean =>
+  provider === "google" || provider === "facebook";
 
 function base64url(bytes: Uint8Array): string {
   let binary = "";
@@ -294,9 +333,10 @@ export async function startSocialSignIn(
   }
 
   const pkce = await pkcePair();
+  const base = await socialStartBase();
   let callback: string | null;
   try {
-    callback = await openAuthSession(startUrl(provider, locale, pkce?.challenge));
+    callback = await openAuthSession(startUrl(base, provider, locale, pkce?.challenge));
   } catch (err) {
     throw nativeError(err);
   }

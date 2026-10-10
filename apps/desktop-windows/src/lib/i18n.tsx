@@ -33,6 +33,16 @@ const en = {
   "auth.socialFailed": "That sign-in did not work. Please try again.",
   "auth.socialUnavailable": "That sign-in method is not available right now. Please use another one.",
   "auth.appleNoAccount": "Sign in to your Apple Account in Settings, then try again.",
+  // Under the Google and Facebook buttons while their browser sign-in is
+  // open, and after it closes without a result (SocialSignIn). The app
+  // starts that page on whichever Neoxify address answers, but the
+  // provider sends the browser back to one fixed address, the backend's
+  // PUBLIC_API_URL, which is behind Cloudflare; where Cloudflare is
+  // blocked that last step never loads. Email sign-in goes through every
+  // address the app knows. If PUBLIC_API_URL ever moves off Cloudflare,
+  // this sentence has to change with it.
+  "auth.socialNeedsCloudflare":
+    "Google and Facebook sign-in returns to the app through Cloudflare, which some networks block. If the sign-in page does not load, close it and use your email and password below.",
   "auth.signInToConnect": "Sign in to connect.",
   "auth.noCardRequired": "No credit card required to get started.",
   "verify.noCode": "Didn't get a code? Resend it",
@@ -989,6 +999,8 @@ const fa: Record<TranslationKey, string> = {
   "auth.socialFailed": "ورود انجام نشد. لطفاً دوباره تلاش کنید.",
   "auth.socialUnavailable": "این روش ورود در حال حاضر در دسترس نیست. لطفاً از روش دیگری استفاده کنید.",
   "auth.appleNoAccount": "ابتدا در تنظیمات وارد حساب اپل خود شوید، سپس دوباره تلاش کنید.",
+  "auth.socialNeedsCloudflare":
+    "ورود با گوگل و فیسبوک از طریق کلادفلر (Cloudflare) به برنامه برمی‌گردد که در برخی شبکه‌ها مسدود است. اگر صفحه ورود باز نشد، آن را ببندید و با ایمیل و رمز عبور خود در فرم پایین ادامه دهید.",
   "auth.signInToConnect": "برای اتصال وارد شوید.",
   "auth.noCardRequired": "برای شروع نیازی به کارت بانکی نیست.",
   "verify.noCode": "کد را دریافت نکردید؟ ارسال دوباره",
