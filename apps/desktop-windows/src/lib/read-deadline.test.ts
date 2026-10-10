@@ -43,7 +43,7 @@ vi.mock("./api-endpoints", () => ({
 }));
 vi.mock("./endpoint-bundle-store", () => ({ maybeRefreshBundle: () => Promise.resolve() }));
 
-const { publicRequest, resetRaceWinnerForTests, CONNECT_TIMEOUT_MS, SLOW_ANSWER_MS } = await import("./api");
+const { publicRequest, resetRaceWinnerForTests, CONNECT_TIMEOUT_MS, LEAD_MS, SLOW_ANSWER_MS } = await import("./api");
 const { newTrace, renderTrace } = await import("./endpoint-trace");
 
 const UNREACHABLE = "Could not reach Neoxify. Check your internet connection.";
@@ -152,7 +152,9 @@ describe("a read on a slow network", () => {
   });
 
   /** Blocked addresses drop out at the connection deadline; the one that
-   * connected is still given its full time to answer. */
+   * connected is still given its full time to answer. The first address
+   * has the race to itself for its head start, so the rest are asked a
+   * second and a half in. */
   it("waits on an address that connected after the blackholed ones have dropped out", async () => {
     network[C] = { "/customer/routes": answers(18_000, () => json([])) };
     const trace = newTrace();
@@ -160,14 +162,14 @@ describe("a read on a slow network", () => {
     const { result, ms } = await run(() => publicRequest("/customer/routes", undefined, trace));
 
     expect(result.ok).toBe(true);
-    expect(ms).toBe(18_000);
+    expect(ms).toBe(LEAD_MS + 18_000);
     expect(renderTrace(trace)).toBe(
       "req: a.example=timeout@10000 b.example=timeout@10000 c.example=h200@18000 d.example=timeout@10000",
     );
   });
 
   /** Still a deadline: an address that connected and then says nothing
-   * is given up on at twenty seconds. */
+   * is given up on twenty seconds after it was asked. */
   it("gives up on an answer that has not come in twenty seconds", async () => {
     network[A] = { "/customer/routes": "stall" };
     network[B] = { "/customer/routes": answers(SLOW_ANSWER_MS + 1, () => json([])) };
@@ -176,7 +178,7 @@ describe("a read on a slow network", () => {
     const { result, ms } = await run(() => publicRequest("/customer/routes", undefined, trace));
 
     expect(result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
-    expect(ms).toBe(SLOW_ANSWER_MS);
+    expect(ms).toBe(LEAD_MS + SLOW_ANSWER_MS);
     expect(renderTrace(trace)).toBe(
       "req: a.example=timeout@20000 b.example=timeout@20000 c.example=timeout@10000 d.example=timeout@10000",
     );
@@ -193,7 +195,8 @@ describe("a network where nothing connects", () => {
     const { result, ms } = await run(() => publicRequest("/customer/routes", undefined, trace));
 
     expect(result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
-    expect(ms).toBe(CONNECT_TIMEOUT_MS);
+    // The first address's head start, then the deadline for the rest.
+    expect(ms).toBe(LEAD_MS + CONNECT_TIMEOUT_MS);
     // Recorded as timeouts, as a blackhole always has been. The plugin's
     // sentence for them is the same as for a refusal; read as `net`,
     // every blocked address would look refused.

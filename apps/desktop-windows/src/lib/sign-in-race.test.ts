@@ -311,14 +311,17 @@ describe("an answer that stops", () => {
     const { result, ms } = await run(() => login("someone@example.com", "pw"));
 
     expect(result).toMatchObject({ ok: false, error: STOPPED, noResponse: true });
-    // The deadline: the head start, two slow answers' worth, and slack.
-    expect(ms).toBe(45_000);
-    // A got its twenty seconds, C the eight it had left, D never started.
+    // The deadline: two head starts -- the first address's, and the one
+    // the demoted addresses wait out behind the rest -- two slow answers'
+    // worth, and slack.
+    expect(ms).toBe(46_500);
+    // A got its twenty seconds, C what was left of its eight, D never
+    // started.
     expect(sentTo("/customer-auth/login")).toEqual([A, C]);
 
     await vi.waitFor(() => expect(reportAttempt).toHaveBeenCalledTimes(1));
     const trace = String((reportAttempt.mock.calls[0][0] as { apiEndpoint: string }).apiEndpoint);
     // Cut off by the deadline, which is not the network refusing it.
-    expect(trace).toContain("req: a.example=timeout@20000 c.example=budget@6000");
+    expect(trace).toContain("req: a.example=timeout@20000 c.example=budget@7500");
   });
 });

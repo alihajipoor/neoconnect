@@ -151,14 +151,22 @@ describe("a raced read", () => {
   });
 
   it("takes the backend's own JSON refusal as the answer, however it compares", async () => {
-    serve({
-      [MIRROR]: { after: 30, reply: () => json({ hello: "world" }) },
-      [CDN]: { after: 0, reply: () => json({ message: "Cannot GET /config" }, 404) },
-      [OTHER]: "unreachable",
-    });
-    const result = await publicRequest("/config");
-    expect(result).toMatchObject({ ok: false, status: 404, error: "Cannot GET /config" });
-    expect(remembered).toEqual([CDN]);
+    vi.useFakeTimers();
+    try {
+      serve({
+        // Not in before the end of its head start, so the others are asked.
+        [MIRROR]: { after: 1_530, reply: () => json({ hello: "world" }) },
+        [CDN]: { after: 0, reply: () => json({ message: "Cannot GET /config" }, 404) },
+        [OTHER]: "unreachable",
+      });
+      const pending = publicRequest("/config");
+      await vi.runAllTimersAsync();
+      const result = await pending;
+      expect(result).toMatchObject({ ok: false, status: 404, error: "Cannot GET /config" });
+      expect(remembered).toEqual([CDN]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports the first page's status when only pages answer, and remembers neither", async () => {

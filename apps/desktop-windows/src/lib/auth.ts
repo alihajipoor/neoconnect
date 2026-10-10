@@ -68,17 +68,21 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: Endpo
  * minutes with everything blackholed, in a simulated network.
  *
  * Long enough for one slow route to finish the job. The challenge race
- * gives the first address a head start (`LEAD_MS`) and every address
- * `SLOW_ANSWER_MS`; the attempt then gets up to that again at the
- * address that answered slowly (see `followUpTimeout` in api.ts); and a
- * few seconds are left for solving the challenge, which takes
- * milliseconds unless an account is under attack. A CDN that answers in
- * about twenty seconds, with every mirror blocked, still signs the
- * customer in. A network where nothing answers is told so after the race
- * alone, without waiting for this: a little over twenty seconds at most,
- * and about eleven and a half where no address even completes a
- * connection (`CONNECT_TIMEOUT_MS` in api.ts). */
-const SIGN_IN_DEADLINE_MS = LEAD_MS + 2 * SLOW_ANSWER_MS + 3_500;
+ * asks in stages a head start apart (`LEAD_MS`): the first address, then
+ * the rest, then those that recently failed on this network, so the last
+ * is asked at most two head starts in, and each gets `SLOW_ANSWER_MS`.
+ * The attempt then gets up to that again at the address that answered
+ * slowly (see `followUpTimeout` in api.ts); and a few seconds are left
+ * for solving the challenge, which takes milliseconds unless an account
+ * is under attack. A CDN that answers in about twenty seconds, with every
+ * mirror blocked, still signs the customer in, even when it had failed
+ * here recently. A network where nothing answers is told so after the
+ * race alone, without waiting for this: a little over twenty seconds at
+ * most, and about eleven and a half where no address even completes a
+ * connection (`CONNECT_TIMEOUT_MS` in api.ts) -- thirteen when some of
+ * them were asked a stage late -- and in moments where every name
+ * resolves to Iran's block page (`resolvesToBlockPage`). */
+const SIGN_IN_DEADLINE_MS = 2 * LEAD_MS + 2 * SLOW_ANSWER_MS + 3_500;
 
 /** Sends a sign-in or sign-up, with a proof-of-work solution, where the
  * challenge race says it will be answered.

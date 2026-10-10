@@ -285,7 +285,10 @@ describe("a write after a read", () => {
     expect(result).toEqual({ ok: true, data: { id: "c1" } });
     expect(sentTo("/customer-auth/refresh")).toEqual([D]);
     expect(sentTo("/health")).toEqual([]);
-    expect(ms).toBe(600);
+    // Each read waits out A's head start, since this list leads with A
+    // whatever answered (the app's own leads with the address that did),
+    // and is answered by D; the refresh goes straight to D in between.
+    expect(ms).toBe(1_500 + 200 + 200 + 1_500 + 200);
   });
 
   /** A page can win a raced read today. It is not offered to the next
@@ -382,11 +385,9 @@ describe("a 401 from something that is not the backend", () => {
     expect(stored.tokens).toEqual({ accessToken: "access", refreshToken: "refresh" });
     expect(announced).toBe(0);
     // The refusal was not believed until the address answered the public
-    // health check as the backend would, and it did not.
-    expect(renderTrace(trace)).toBe(
-      "req: a.example=h401@50 b.example=cancel@50 c.example=cancel@50 d.example=cancel@50; " +
-        "refresh: a.example=h401@50; health: a.example=h401@50",
-    );
+    // health check as the backend would, and it did not. A answered the
+    // read inside its head start, so nobody else was asked.
+    expect(renderTrace(trace)).toBe("req: a.example=h401@50; refresh: a.example=h401@50; health: a.example=h401@50");
   });
 
   /** Before: the page won the read, and the read failed with "Request

@@ -174,8 +174,9 @@ export async function tunnelServerOf(
 
 /** `resolve_ipv4`, given up on a little after its own bound. Unresolvable,
  * a build without the command, or a call that never returns: nothing
- * known. */
-function resolveIpv4(host: string, timeoutMs: number): Promise<string[]> {
+ * known. Also how a race looks for Iran's block page behind a name
+ * (`resolvesToBlockPage` in endpoint-demotion.ts). */
+export function resolveIpv4(host: string, timeoutMs: number): Promise<string[]> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const stalled = new Promise<string[]>((resolve) => {
     timer = setTimeout(() => resolve([]), timeoutMs + RESOLVE_GRACE_MS);

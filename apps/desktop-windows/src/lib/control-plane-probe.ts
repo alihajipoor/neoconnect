@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AttemptAddendum } from "./attempts";
+import { demoteName } from "./endpoint-demotion";
 import { endpointLabel, type TraceEntry } from "./endpoint-trace";
 import { watchBackground } from "./visibility";
 
@@ -201,6 +202,13 @@ async function runProbe(entries: TraceEntry[], now: number, options: ProbeOption
       const result = answer[i] as { outcome?: unknown; ms?: unknown } | null;
       const outcome = typeof result?.outcome === "string" && OUTCOMES.has(result.outcome) ? result.outcome : "?";
       const ms = typeof result?.ms === "number" && Number.isFinite(result.ms) ? Math.max(0, Math.round(result.ms)) : 0;
+      // Iran's DNS block page for this name: every address under it, on
+      // any port, is asked last on this network (endpoint-demotion.ts).
+      // A race usually sees that for itself (`resolvesToBlockPage`). This
+      // covers what it does not: a lookup slower than the race waits for
+      // one, and a name that resolves into the block page and somewhere
+      // else as well, which the race leaves alone.
+      if (outcome === "blockpage") demoteName(target.host);
       return `${target.label}=${outcome}@${ms}`;
     });
     return { section: `probe: ${parts.join(" ")}`, answered: true };

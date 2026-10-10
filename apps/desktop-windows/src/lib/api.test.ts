@@ -89,11 +89,14 @@ describe("reading the winner's body", () => {
 
 describe("which endpoints a request is sent to", () => {
   /** A read may go to every mirror: that is the anti-filtering feature.
+   * But only once the first address has had its head start and not
+   * answered.
    *
-   * The slowest address costs nothing because nobody waits for it, which
-   * is what stopped one blocked endpoint failing a config refresh.
+   * Before: every read went to every address at once, even with the
+   * first answering at once -- a VM counted 112 connections for one
+   * launch of the app, sixteen for each of seven reads.
    */
-  it("races a read across every endpoint", async () => {
+  it("sends a read to the first endpoint alone when it answers", async () => {
     const seen: string[] = [];
     tauriFetch.mockImplementation(async (url: string) => {
       seen.push(new URL(url).origin);
@@ -101,7 +104,38 @@ describe("which endpoints a request is sent to", () => {
     });
 
     await publicRequest("/config");
-    expect(seen.sort()).toEqual([...ENDPOINTS].sort());
+    await publicRequest("/customer/routes");
+    await publicRequest("/customer/me");
+    expect(seen).toEqual([ENDPOINTS[0], ENDPOINTS[0], ENDPOINTS[0]]);
+  });
+
+  /** The slowest address still costs nothing once the head start is
+   * over, because nobody waits for it -- which is what stopped one
+   * blocked endpoint failing a config refresh. */
+  it("races a read across every endpoint when the first does not answer in its head start", async () => {
+    vi.useFakeTimers();
+    try {
+      const seen: string[] = [];
+      tauriFetch.mockImplementation((url: string, init?: RequestInit) => {
+        const origin = new URL(url).origin;
+        seen.push(origin);
+        if (origin === ENDPOINTS[0]) {
+          return new Promise((_, reject) =>
+            init?.signal?.addEventListener("abort", () => reject(new Error("Request cancelled"))),
+          );
+        }
+        return Promise.resolve(jsonResponse({ ok: true }));
+      });
+
+      const pending = publicRequest("/config");
+      await vi.advanceTimersByTimeAsync(1_499);
+      expect(seen).toEqual([ENDPOINTS[0]]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toEqual({ ok: true, data: { ok: true } });
+      expect(seen).toEqual(ENDPOINTS);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   /** The second 0.9.39 defect, and the one that would have kept sign-in
@@ -200,9 +234,12 @@ describe("the endpoint trace", () => {
     );
     const trace = newTrace();
 
-    await publicRequest("/config", undefined, trace);
+    const pending = publicRequest("/config", undefined, trace);
+    // The first address's head start.
+    await vi.advanceTimersByTimeAsync(1_500);
+    await pending;
 
-    expect(renderTrace(trace)).toBe("req: a.example=cancel@0 b.example=h200@0 c.example=cancel@0");
+    expect(renderTrace(trace)).toBe("req: a.example=cancel@1500 b.example=h200@0 c.example=cancel@0");
   });
 
   /** None answered: each address says how it failed. One that connected
@@ -254,13 +291,22 @@ describe("the endpoint trace", () => {
 
   /** An observer only: the request goes to the same places either way. */
   it("changes nothing about where a request is sent", async () => {
+    vi.useFakeTimers();
     const seen: string[] = [];
-    tauriFetch.mockImplementation(async (url: string) => {
-      seen.push(new URL(url).origin);
-      return jsonResponse({ ok: true });
+    tauriFetch.mockImplementation((url: string, init?: RequestInit) => {
+      const origin = new URL(url).origin;
+      seen.push(origin);
+      // The first address silent, so that every address is asked.
+      return origin === ENDPOINTS[0] ? hangsUntilAborted(url, init) : Promise.resolve(jsonResponse({ ok: true }));
     });
-    await publicRequest("/config", undefined, newTrace());
-    await publicRequest("/config");
-    expect(seen.slice(0, 3).sort()).toEqual(seen.slice(3).sort());
+    const traced = publicRequest("/config", undefined, newTrace());
+    await vi.advanceTimersByTimeAsync(1_500);
+    await traced;
+    const withTrace = seen.splice(0);
+    const untraced = publicRequest("/config");
+    await vi.advanceTimersByTimeAsync(1_500);
+    await untraced;
+    expect(withTrace).toEqual(ENDPOINTS);
+    expect(seen).toEqual(withTrace);
   });
 });

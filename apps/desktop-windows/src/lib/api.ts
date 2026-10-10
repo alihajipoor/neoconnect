@@ -2,6 +2,14 @@ import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints, rememberedEndpoint, rememberEndpoint } from "./api-endpoints";
 import { deviceHeaders } from "./device-identity";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
+import {
+  clearDemotion,
+  demotedLast,
+  demoteEndpoint,
+  knownOnBlockPage,
+  resetDemotionsForTests,
+  resolvesToBlockPage,
+} from "./endpoint-demotion";
 import { beginAttempt, failureOutcome, settleAttempt, type EndpointTrace, type TraceEntry } from "./endpoint-trace";
 import { clearTokens, getTokens, setTokens } from "./session";
 import { announceSessionRevoked } from "./session-revoked";
@@ -93,6 +101,9 @@ const answeredBy = new WeakMap<object, string>();
 const servedBackend = new Set<string>();
 
 function noteAnswer(base: string, response: Response): void {
+  // Whatever answered, the network let a request through to this
+  // address, so it is no longer one to ask last (endpoint-demotion.ts).
+  clearDemotion(base);
   // Tests stand responses in with plain objects; anything else cannot be
   // keyed, and there is nothing to note about it.
   if (typeof response !== "object" || response === null) return;
@@ -118,8 +129,28 @@ function failedAs(err: unknown, timedOut: boolean, startedAt: number): "timeout"
   return outcome === "net" && elapsed >= CONNECT_TIMEOUT_MS && elapsed < CONNECT_TIMEOUT_MS + 1_000 ? "timeout" : outcome;
 }
 
+/** Records an attempt at `base` that got no answer, and demotes the
+ * address on this network if it timed out (endpoint-demotion.ts): a
+ * timeout is what a blackholed address costs every race that asks it. A
+ * name on the block page has been demoted already, by the lookup that
+ * found it.
+ *
+ * For a failure, not for an attempt stopped because another address
+ * answered or because the caller's own deadline ran out. Neither says
+ * anything about this address. */
+function settleFailure(
+  entry: TraceEntry | undefined,
+  base: string,
+  outcome: ReturnType<typeof failedAs> | "blockpage",
+): void {
+  settleAttempt(entry, outcome);
+  if (outcome === "timeout") demoteEndpoint(base);
+}
+
 /** How long the first address, the one that answered last time, has a
- * staggered race to itself before the others are asked.
+ * staggered race to itself before the others are asked -- and how long
+ * those others then have before the addresses demoted on this network
+ * are asked as well (`staggeredRace`).
  *
  * Every request in such a race is counted by the server, and the
  * sign-in challenge is throttled per address. Behind a node's mirror that
@@ -127,7 +158,19 @@ function failedAs(err: unknown, timedOut: boolean, startedAt: number): "timeout"
  * bucket. Asking all eleven or more at once on every click would spend a
  * slot in every mirror's bucket, including mirrors other customers depend
  * on. Where the remembered address works, as it usually does, it answers
- * well inside this head start and nothing else is sent. */
+ * well inside this head start and nothing else is sent.
+ *
+ * Reads too. Every read used to go to every address at once, even with
+ * the remembered one answering in eighty milliseconds: a VM counted 112
+ * HTTPS connections for one launch of the app, seven reads to sixteen
+ * addresses, each a fresh TCP and TLS handshake because the HTTP plugin
+ * builds a new client for every request. On a throttled or metered
+ * network that is traffic and time, and on a filtered one it is a burst
+ * of handshakes to blocked names on every screen. With the head start,
+ * the same launch opens seven where the remembered address works --
+ * worked out from the code, not yet counted in the VM. Where it does not
+ * work, a read waits this long before asking the rest, and only once:
+ * the address that answers instead is remembered in its place. */
 export const LEAD_MS = 1_500;
 
 /** An address that has just answered, and how long the answer took. */
@@ -194,12 +237,14 @@ function timeoutAt(base: string): number {
   return lastWinner !== null && lastWinner.base === base ? followUpTimeout(lastWinner) : ENDPOINT_TIMEOUT_MS;
 }
 
-/** Forgets the last race winner, and which addresses the backend has
- * answered from, so one test's answers do not decide where the next
- * test's write is sent or whether its refused refresh is believed. */
+/** Forgets the last race winner, which addresses the backend has
+ * answered from, and which have been demoted, so one test's answers do
+ * not decide where the next test's write is sent, whether its refused
+ * refresh is believed, or which address its races ask first. */
 export function resetRaceWinnerForTests(): void {
   lastWinner = null;
   servedBackend.clear();
+  resetDemotionsForTests();
 }
 
 /** Statuses a proxy in front of the backend -- a node mirror's nginx,
@@ -304,11 +349,6 @@ function isBackendAnswer(response: Response): boolean {
 export function isForeignPage(response: Response): boolean {
   return response.status >= 400 && !isBackendAnswer(response);
 }
-
-/** Thrown inside the race for a page from in front of the backend
- * (`isForeignPage`), so `Promise.any` waits for a real answer instead of
- * settling on it. */
-class ForeignPage extends Error {}
 
 /** Thrown for a write whose health race the backend answered, when the
  * write itself then got no answer anywhere it was sent. Neoxify was
@@ -437,7 +477,7 @@ async function fetchOneEndpointAtATime(
       // pending, which the trace renders as `budget`. Recording it as a
       // transport failure would say the network refused an address that
       // was simply still being waited for.
-      if (timedOut || !outer?.aborted) settleAttempt(entry, failedAs(err, timedOut, startedAt));
+      if (timedOut || !outer?.aborted) settleFailure(entry, base, failedAs(err, timedOut, startedAt));
       walk.lastError = err;
     } finally {
       clearTimeout(timer);
@@ -488,9 +528,11 @@ function unanswered(walk: Walk, init: RequestInit): Response {
  * The write itself is still sent to one address at a time, and to each
  * at most once, for the reasons `fetchAnyEndpoint` gives. When nothing
  * answers the health race the write is not sent at all, and the result
- * is "could not reach Neoxify" after twenty seconds at most -- about
+ * is "could not reach Neoxify" after about twenty seconds at most --
  * eleven and a half where no address completes a connection
- * (`CONNECT_TIMEOUT_MS`) -- rather than after a walk of the whole list.
+ * (`CONNECT_TIMEOUT_MS`), thirteen when some of them had been demoted
+ * and are asked a head start later (`staggeredRace`) -- rather than
+ * after a walk of the whole list.
  * When the backend answered it and then the write got no answer,
  * `StoppedAnswering` is thrown instead: Neoxify was reached moments
  * earlier. */
@@ -619,22 +661,23 @@ async function fetchAnyEndpoint(
   //
   // Racing removes the arithmetic entirely. The slowest address costs
   // nothing because nobody waits for it, and the result arrives in one
-  // round trip rather than in however many dead addresses precede the
-  // live one. A config refresh is a handful of small GETs; running them
-  // together is well within what the network and the service will carry.
-  // Raced only when racing is safe, which means only when the request
-  // can be sent more than once without the server minding.
+  // round trip -- after the first address's head start, when it is not
+  // the one that answers -- rather than after however many dead addresses
+  // precede the live one. Raced only when racing is safe, which means only
+  // when the request can be sent more than once without the server
+  // minding.
   //
-  // A race sends the request to *every* mirror. For a config GET that is
-  // the whole point. For a sign-in it means one click becomes eleven
-  // login attempts, and that breaks login in two ways at once. The
-  // proof-of-work challenge is single-use, so the first request to
-  // arrive spends it and the server answers the rest with 400 "this
-  // security check was already used" -- refused before any password
-  // hashing, so those 400s come back *faster* than the one real answer
-  // and win the race. And the endpoint is throttled at five attempts a
-  // minute per address, so a single click is already over budget and
-  // starts collecting 429s.
+  // A race may send the request to every mirror. For a config GET that is
+  // the point, where the remembered address does not answer: then the
+  // rest are asked a head start later (`staggeredRace`). For a sign-in it
+  // means one click becomes eleven login attempts, and that breaks login
+  // in two ways at once. The proof-of-work challenge is single-use, so
+  // the first request to arrive spends it and the server answers the rest
+  // with 400 "this security check was already used" -- refused before any
+  // password hashing, so those 400s come back *faster* than the one real
+  // answer and win the race. And the endpoint is throttled at five
+  // attempts a minute per address, so a single click is already over
+  // budget and starts collecting 429s.
   //
   // So anything that is not a plain read goes to one endpoint at a
   // time, which is what 0.9.38 did for every request and what sign-in
@@ -645,119 +688,30 @@ async function fetchAnyEndpoint(
   const method = (init.method ?? "GET").toUpperCase();
   if (method !== "GET" && method !== "HEAD") return await sendWrite(path, init, endpoints, trace);
 
-  const startedAt = Date.now();
-  const controllers = endpoints.map(() => new AbortController());
-  // Which aborts were our own deadline, so the trace can say "timeout"
-  // rather than the generic transport failure the abort surfaces as.
-  const timedOut = endpoints.map(() => false);
-  // Each address gets `SLOW_ANSWER_MS`, as in every other race, and not a
-  // walk's eight seconds: an answer that took longer than eight seconds
-  // used to be thrown away here, and the screen said Neoxify could not be
-  // reached. An address that cannot even connect still drops out at
-  // `CONNECT_TIMEOUT_MS`.
-  const timers = controllers.map((c, i) =>
-    setTimeout(() => {
-      timedOut[i] = true;
-      c.abort();
-    }, SLOW_ANSWER_MS),
+  // Won by any answer that is not a page from in front of the backend
+  // (`isForeignPage`): the backend's JSON, whatever its status, and the
+  // bodiless 204s and 304s it sends with no type at all.
+  const { winner, answers, stop } = await staggeredRace(
+    endpoints,
+    path,
+    init,
+    (answer) => !isForeignPage(answer.response),
+    trace,
   );
-  const entries = endpoints.map((base) => beginAttempt(trace, base, startedAt));
-  // The caller's signal stops every runner at once. See
-  // fetchOneEndpointAtATime for why a caller may bring one.
-  const outer = init.signal ?? null;
-  const onOuterAbort = () => controllers.forEach((c) => c.abort());
-  if (outer?.aborted) onOuterAbort();
-  outer?.addEventListener("abort", onOuterAbort);
-
-  // Pages from in front of the backend, in the order they arrived. None
-  // of them may win the race -- see `isForeignPage` -- but if nothing
-  // better answers, the first is what the caller gets.
-  const pages: { i: number; response: Response }[] = [];
-  const attempts = endpoints.map(async (base, i) => {
-    try {
-      const response = await send(base, path, init, controllers[i].signal);
-      settleAttempt(entries[i], `h${response.status}`);
-      if (isForeignPage(response)) {
-        pages.push({ i, response });
-        throw new ForeignPage(`page ${response.status}`);
-      }
-      // Only a real answer counts as a win. A request that fails rejects,
-      // and Promise.any moves on to whichever endpoint actually replied.
-      return { base, response };
-    } catch (err) {
-      if (!(err instanceof ForeignPage)) {
-        settleAttempt(entries[i], failedAs(err, timedOut[i], startedAt));
-      }
-      throw err;
-    }
-  });
-
-  try {
-    const { base, response } = await Promise.any(attempts);
-
-    // Everyone else can stop; the answer is in hand. Marked as stopped
-    // before the abort lands, so the trace reads "cancel" and not as a
-    // failure of an address that may have been about to answer.
-    controllers.forEach((c, i) => {
-      if (endpoints[i] !== base) {
-        settleAttempt(entries[i], "cancel");
-        c.abort();
-      }
-    });
-
-    // Remembered so the next request starts here. With a race this is no
-    // longer about avoiding a timeout -- it is about not opening eight
-    // connections for every request once a good address is known.
-    void rememberEndpoint(base);
-    // And offered to the next write (`sendWrite`) -- but only an answer
-    // that is the backend's own JSON. A success with no body, which can
-    // win here, says less about where a write will be answered.
-    if (isBackendAnswer(response)) noteWinner(base, Date.now() - startedAt);
-    // The endpoint answered, so it can also serve the next address list.
-    // This is the only trigger the bundle has; without it a published
-    // rotation never reaches a single client.
-    void maybeRefreshBundle(base);
-    return response;
-  } catch (err) {
-    // Nothing but pages from in front of the backend answered. The first
-    // of them is the answer -- the caller sees "Request failed (502)" or
-    // "(403)" with a status, because something did reply -- and it is
-    // neither remembered nor asked for the bundle: it is not the service.
-    const kept = pages[0];
-    if (kept !== undefined) {
-      controllers.forEach((c, i) => {
-        if (i !== kept.i) c.abort();
-      });
-      return kept.response;
-    }
-    // Nothing won, so there is no body anyone is still reading and
-    // every straggler can be cut loose here.
-    controllers.forEach((c) => c.abort());
-    // AggregateError when every endpoint failed. Its `errors` carries
-    // one entry per address, which is more than the caller needs, so the
-    // first is surfaced to keep the existing "could not reach Neoxify"
-    // handling unchanged.
-    const first =
-      err instanceof AggregateError ? (err.errors as unknown[])[0] : err;
-    throw first ?? new Error("no API endpoint answered");
-  } finally {
-    // Timers only. Aborting every controller here is what broke login
-    // in 0.9.39: `return response` runs this block *before* the value
-    // reaches the caller, so the winner was aborted along with the
-    // losers -- while its body was still unread. `Promise.any` resolves
-    // when the headers arrive, not when the body does, so the caller's
-    // `response.json()` was left waiting on a stream that had just been
-    // cancelled. The sign-in button sat on "Signing in..." for ever and
-    // nginx recorded 499 for the winning request as well as the losing
-    // ones, because the client had indeed hung up first.
-    //
-    // The losers are already aborted in the success path above, where
-    // the winner is known and can be spared.
-    timers.forEach(clearTimeout);
-    // Detached for the same reason: a caller's signal firing after the
-    // answer is in hand must not cancel a body still being read.
-    outer?.removeEventListener("abort", onOuterAbort);
+  if (winner) {
+    stop(winner);
+    return winner.response;
   }
+  // Nothing but pages from in front of the backend answered. The first of
+  // them is the answer -- the caller sees "Request failed (502)" or
+  // "(403)" with a status, because something did reply -- and it was
+  // neither remembered nor asked for the bundle: it is not the service.
+  const kept = answers[0];
+  stop(kept);
+  if (kept !== undefined) return kept.response;
+  // Thrown so the callers keep their "could not reach Neoxify" handling;
+  // which address failed how is the trace's to say.
+  throw new Error(init.signal?.aborted ? "the request ran out of time" : "no API endpoint answered");
 }
 
 /** The failure half of every result shape below.
@@ -894,6 +848,8 @@ export interface Raced<T> {
 
 /** One address's answer in a race. */
 interface RaceAnswer {
+  base: string;
+  /** Its place in the order the race asked in, for stopping the rest. */
   i: number;
   response: Response;
   ms: number;
@@ -907,23 +863,65 @@ interface Staggered {
   /** Every answer, in the order it arrived. */
   answers: RaceAnswer[];
   /** The addresses that failed without an answer: refused, timed out,
-   * unreachable. Not those stopped because the race was decided. */
-  failed: number[];
-  /** Stops every request still running, except the one at `spare`, whose
-   * body the caller is about to read. */
-  stop(spare?: number): void;
+   * unreachable. Not those stopped because the race was decided, and not
+   * those the race was decided without asking. */
+  failed: string[];
+  /** Stops every request still running, except `spare`'s, whose body the
+   * caller is about to read. */
+  stop(spare?: RaceAnswer): void;
+}
+
+/** The stages a race over `count` addresses asks them in, as [from, to)
+ * ranges of its order, when the first `healthy` of them have not been
+ * demoted: the first address alone; the rest of those not demoted; the
+ * demoted. Empty stages are left out, so with nothing demoted, or nothing
+ * but the first address undemoted, there are two. */
+function stagesOf(count: number, healthy: number): [number, number][] {
+  const stages: [number, number][] = [];
+  let from = 0;
+  for (const to of [1, healthy, count]) {
+    if (to > from) {
+      stages.push([from, to]);
+      from = to;
+    }
+  }
+  return stages;
 }
 
 /** Sends one request to the endpoints as a staggered race.
  *
- * The address that answered last time goes first, alone, for `LEAD_MS`.
- * If it has not answered by then, or has failed already, every other
- * address is asked too. Each gets `SLOW_ANSWER_MS`. The race is won by
- * the first answer `wins` accepts; it ends without a winner when every
- * address has settled, or when the caller's signal fires.
+ * In stages (`stagesOf`). The address that answered last time goes
+ * first, alone, for `LEAD_MS`. If it has not answered by then, or has
+ * failed already, the other addresses are asked too -- except those
+ * demoted on this network (endpoint-demotion.ts), which are asked
+ * `LEAD_MS` after that, or as soon as everything asked before them has
+ * failed. Demotion also decides the first: an address that has timed out
+ * on this network in the last half hour, or whose name was found on the
+ * block page, does not lead, even if it was the last to answer. Each
+ * address gets `SLOW_ANSWER_MS` from when it is
+ * asked. The race is won by the first answer `wins` accepts; it ends
+ * without a winner when every address has settled, or when the caller's
+ * signal fires.
  *
- * A winner is remembered, offered to the next write (`sendWrite`), and
- * asked for the address bundle, as a raced read's is. */
+ * What the stages cost: where the remembered address works, nothing --
+ * nobody else is asked. Where only a demoted address answers, up to two
+ * head starts before it is asked; that is the price of not asking the
+ * dead ones every time, and it is paid only until that address answers,
+ * which lifts its demotion. A race nothing answers ends no later than
+ * `2 * LEAD_MS + SLOW_ANSWER_MS`.
+ *
+ * An address whose name resolves to Iran's block page holds up nothing.
+ * As each address is asked, its name's DNS answer is looked at too
+ * (`resolvesToBlockPage`), and a request whose name turns out to resolve
+ * to the block page and nothing else is stopped there and counted as
+ * failed, so the next stage need not wait out the head start on it. A
+ * name already found there in the last minute is not sent the request
+ * at all. Either way the name is demoted on this network.
+ *
+ * A winner is remembered, and asked for the address bundle. One that is
+ * the backend's own JSON is also offered to the next write (`sendWrite`);
+ * a success with no body, which can win a read, says less about where a
+ * write will be answered. */
 async function staggeredRace(
   endpoints: string[],
   path: string,
@@ -931,16 +929,33 @@ async function staggeredRace(
   wins: (answer: RaceAnswer) => boolean,
   trace?: EndpointTrace,
 ): Promise<Staggered> {
+  const { ordered, healthy } = demotedLast(endpoints);
+  // With nothing to ask there is no stage to settle the race; every
+  // caller checks first, and this keeps one that did not from waiting for
+  // ever.
+  if (ordered.length === 0) return { winner: null, answers: [], failed: [], stop: () => undefined };
+  const stages = stagesOf(ordered.length, healthy);
   const outer = request.signal ?? null;
-  const controllers = endpoints.map(() => new AbortController());
-  const timedOut = endpoints.map(() => false);
+  const controllers = ordered.map(() => new AbortController());
+  // Which aborts were our own deadline, so the trace can say "timeout"
+  // rather than the generic transport failure the abort surfaces as.
+  const timedOut = ordered.map(() => false);
+  // Which were stopped, or never sent, because the name resolves to the
+  // block page.
+  const blockPage = ordered.map(() => false);
+  // Which have answered or failed, so a lookup that comes back after
+  // either leaves them be.
+  const done = ordered.map(() => false);
   const timers: ReturnType<typeof setTimeout>[] = [];
   const entries: (TraceEntry | undefined)[] = [];
   const answers: RaceAnswer[] = [];
-  const failed: number[] = [];
+  const failed: string[] = [];
   let settled = 0;
-  let fannedOut = false;
-  let leadTimer: ReturnType<typeof setTimeout> | undefined;
+  // How many addresses have been asked, which is always a whole number of
+  // stages, and which stage is next.
+  let asked = 0;
+  let stage = 0;
+  let stageTimer: ReturnType<typeof setTimeout> | undefined;
 
   let decided = false;
   let decide: (winner: RaceAnswer | null) => void = () => undefined;
@@ -953,79 +968,136 @@ async function staggeredRace(
   });
 
   const launch = (i: number) => {
+    const base = ordered[i];
     const startedAt = Date.now();
-    entries[i] = beginAttempt(trace, endpoints[i], startedAt);
+    entries[i] = beginAttempt(trace, base, startedAt);
+    // Each address gets `SLOW_ANSWER_MS`, and not a walk's eight seconds:
+    // an answer that took longer than eight seconds used to be thrown away
+    // by the read race, and the screen said Neoxify could not be reached.
+    // An address that cannot even connect still drops out at
+    // `CONNECT_TIMEOUT_MS`.
     timers.push(
       setTimeout(() => {
         timedOut[i] = true;
         controllers[i].abort();
       }, SLOW_ANSWER_MS),
     );
+    // Its name's DNS answer, looked at beside the request: the block page
+    // stops it, and one found there in the last minute means it is not
+    // sent at all.
+    if (knownOnBlockPage(base)) blockPage[i] = true;
+    else
+      void resolvesToBlockPage(base).then((found) => {
+        if (!found || done[i] || decided) return;
+        blockPage[i] = true;
+        controllers[i].abort();
+      });
     // Started inside a promise, so a fetch that throws rather than
     // rejecting is still one address failing, not the whole race.
     void Promise.resolve()
-      .then(() => send(endpoints[i], path, request, controllers[i].signal))
+      .then(() => {
+        if (blockPage[i]) throw new Error("on the block page");
+        return send(base, path, request, controllers[i].signal);
+      })
       .then(
         (response) => {
+          done[i] = true;
           settleAttempt(entries[i], `h${response.status}`);
-          const answer: RaceAnswer = { i, response, ms: Date.now() - startedAt, backend: isBackendAnswer(response) };
+          const answer: RaceAnswer = {
+            base,
+            i,
+            response,
+            ms: Date.now() - startedAt,
+            backend: isBackendAnswer(response),
+          };
           answers.push(answer);
           if (wins(answer)) decide(answer);
         },
         (err: unknown) => {
-          // Stopped because the race was decided is not a failure.
-          if (!decided) failed.push(i);
-          // As in the walk: stopped by the caller's deadline is `budget`,
-          // not a transport failure.
-          if (timedOut[i] || !outer?.aborted) settleAttempt(entries[i], failedAs(err, timedOut[i], startedAt));
+          done[i] = true;
+          const outcome = blockPage[i] ? "blockpage" : failedAs(err, timedOut[i], startedAt);
+          if (!decided) {
+            failed.push(base);
+            settleFailure(entries[i], base, outcome);
+            return;
+          }
+          // After the decision: stopped because the race was decided, or
+          // by the caller's deadline, which is not a failure and demotes
+          // nothing -- even when it lands just past the connection
+          // deadline, where the plugin's words for a cancelled request and
+          // for a connection given up on are the same. `stop` has already
+          // marked the first `cancel`; the second is left pending, which
+          // the trace renders as `budget`.
+          if (timedOut[i] || !outer?.aborted) settleAttempt(entries[i], outcome);
         },
       )
       .finally(() => {
         settled += 1;
         if (decided) return;
-        if (settled === endpoints.length) decide(null);
-        // The lead has settled without the answer. Nothing is gained by
-        // keeping everyone else waiting out the rest of its head start.
-        else if (!fannedOut) fanOut();
+        if (settled === ordered.length) decide(null);
+        // Everything asked so far has failed. Nothing is gained by keeping
+        // the next stage waiting out the rest of its head start.
+        else if (settled === asked) askNextStage();
       });
   };
 
-  const fanOut = () => {
-    if (fannedOut || decided) return;
-    fannedOut = true;
-    clearTimeout(leadTimer);
-    for (let i = 1; i < endpoints.length; i += 1) launch(i);
+  const askNextStage = () => {
+    clearTimeout(stageTimer);
+    if (decided || stage === stages.length) return;
+    const [from, to] = stages[stage];
+    stage += 1;
+    asked = to;
+    for (let i = from; i < to; i += 1) launch(i);
+    if (stage < stages.length) stageTimer = setTimeout(askNextStage, LEAD_MS);
   };
 
+  // The caller's signal stops every request at once, and one that has
+  // already fired asks nobody. See `fetchOneEndpointAtATime` for why a
+  // caller may bring one.
   const onOuterAbort = () => {
-    controllers.forEach((c) => c.abort());
     decide(null);
+    controllers.forEach((c) => c.abort());
   };
   outer?.addEventListener("abort", onOuterAbort);
+  if (outer?.aborted) onOuterAbort();
 
-  launch(0);
-  if (endpoints.length > 1) leadTimer = setTimeout(fanOut, LEAD_MS);
+  askNextStage();
 
   const winner = await decision;
-  clearTimeout(leadTimer);
-  // Timers only, and not the winner's controller: its body has not been
-  // read yet. See the comment on the same step in `fetchAnyEndpoint`.
+  clearTimeout(stageTimer);
+  // Timers only, and not the winner's controller. Aborting every
+  // controller once the race was decided is what broke login in 0.9.39:
+  // the winner was aborted along with the losers while its body was still
+  // unread. A race resolves when the headers arrive, not when the body
+  // does, so the caller's `response.json()` was left waiting on a stream
+  // that had just been cancelled. The sign-in button sat on "Signing
+  // in..." for ever and nginx recorded 499 for the winning request as
+  // well as the losing ones, because the client had indeed hung up first.
+  // The losers are stopped by the caller (`stop`), which knows which
+  // answer it is about to read.
   timers.forEach(clearTimeout);
+  // Detached for the same reason: a caller's signal firing after the
+  // answer is in hand must not cancel a body still being read.
   outer?.removeEventListener("abort", onOuterAbort);
 
   if (winner) {
-    const base = endpoints[winner.i];
-    void rememberEndpoint(base);
-    noteWinner(base, winner.ms);
-    void maybeRefreshBundle(base);
+    // Remembered so the next request starts here and need ask nobody
+    // else. The address bundle is asked for too: this is the only trigger
+    // it has, and without it a published rotation never reaches a single
+    // client.
+    void rememberEndpoint(winner.base);
+    if (winner.backend) noteWinner(winner.base, winner.ms);
+    void maybeRefreshBundle(winner.base);
   }
 
-  const stop = (spare?: number) => {
+  const stop = (spare?: RaceAnswer) => {
     controllers.forEach((c, i) => {
-      if (i === spare) return;
-      // "cancel" only when somebody won. Without a winner everything has
+      if (i === spare?.i) return;
+      // "cancel" only when somebody won, and marked before the abort
+      // lands, so the trace does not read as a failure of an address that
+      // may have been about to answer. Without a winner everything has
       // settled already, or the caller's deadline stopped it, which is
-      // `budget`.
+      // `budget`. An address never asked has no entry to mark.
       if (winner) settleAttempt(entries[i], "cancel");
       c.abort();
     });
@@ -1036,7 +1108,7 @@ async function staggeredRace(
 /** Every address that answered a race, in the order a follow-up should
  * try them: the winner first, then the backend's other answers, then
  * pages from whatever stands in front of it. Each once. */
-function answeredInOrder(endpoints: string[], winner: RaceAnswer | null, answers: RaceAnswer[]): AnsweredBase[] {
+function answeredInOrder(winner: RaceAnswer | null, answers: RaceAnswer[]): AnsweredBase[] {
   const ordered = [
     ...(winner ? [winner] : []),
     ...answers.filter((answer) => answer.backend && answer !== winner),
@@ -1044,8 +1116,7 @@ function answeredInOrder(endpoints: string[], winner: RaceAnswer | null, answers
   ];
   const answered: AnsweredBase[] = [];
   for (const answer of ordered) {
-    const base = endpoints[answer.i];
-    if (!answered.some((a) => a.base === base)) answered.push({ base, ms: answer.ms });
+    if (!answered.some((a) => a.base === answer.base)) answered.push({ base: answer.base, ms: answer.ms });
   }
   return answered;
 }
@@ -1092,11 +1163,11 @@ export async function publicRace<T>(path: string, init: RequestInit, trace?: End
   // The answer that becomes the result: the winner, or failing that the
   // first 429, or failing that the first page.
   const kept = winner ?? answers.find((answer) => answer.backend) ?? answers[0];
-  stop(kept?.i);
+  stop(kept);
   if (kept === undefined) return { result: unreachable(), answered: [] };
   return {
     result: await resultFrom<T>(kept.response, kept.backend),
-    answered: answeredInOrder(endpoints, winner, answers),
+    answered: answeredInOrder(winner, answers),
   };
 }
 
@@ -1133,9 +1204,9 @@ async function raceForHealth(
     );
     stop();
     return {
-      answered: answeredInOrder(endpoints, winner, answers),
+      answered: answeredInOrder(winner, answers),
       backend: winner !== null,
-      silent: failed.map((i) => endpoints[i]),
+      silent: failed,
     };
   } finally {
     if (trace && phase !== undefined) trace.phase = phase;
@@ -1219,7 +1290,7 @@ async function askForHealth(base: string, trace?: EndpointTrace): Promise<void> 
     const response = await send(base, HEALTH_PATH, { method: "GET" }, controller.signal);
     settleAttempt(entry, `h${response.status}`);
   } catch (err) {
-    settleAttempt(entry, failedAs(err, timedOut, startedAt));
+    settleFailure(entry, base, failedAs(err, timedOut, startedAt));
   } finally {
     clearTimeout(timer);
     // The body is not wanted.

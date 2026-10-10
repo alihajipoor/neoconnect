@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) =
 
 const { CONNECT_QUIET_MS, connectStarting, probeAddendum, probeControlPlane, probeTargets, resetProbeForTests } =
   await import("./control-plane-probe");
+const { demotedLast, resetDemotionsForTests } = await import("./endpoint-demotion");
 
 const entry = (base: string, outcome: TraceEntry["outcome"]): TraceEntry => ({
   phase: "req",
@@ -22,6 +23,7 @@ const entry = (base: string, outcome: TraceEntry["outcome"]): TraceEntry => ({
 beforeEach(() => {
   invoke.mockReset();
   resetProbeForTests();
+  resetDemotionsForTests();
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -119,6 +121,40 @@ describe("probeControlPlane", () => {
     resetProbeForTests();
     invoke.mockResolvedValue([{ outcome: "ok", ms: 1 }]);
     expect(await probeControlPlane(failed, 0)).toBeUndefined();
+  });
+
+  /** Iran's DNS block page for a name: every address under it goes to
+   * the back of the next race's order, whatever its port, because the
+   * resolver's answer is for the name -- here including one this request
+   * never tried. Before: it was reported and nothing else, and every race
+   * asked it again. */
+  it("demotes every address under a name that resolved into the block page", async () => {
+    invoke.mockResolvedValue([
+      { outcome: "blockpage", ms: 12 },
+      { outcome: "tls", ms: 312 },
+      { outcome: "tcp-timeout", ms: 4001 },
+    ]);
+    const tried = [
+      entry("https://a.example.net/api", "net"),
+      entry("https://b.example.net:2053/api", "net"),
+      entry("https://c.example.net/api", "timeout"),
+    ];
+    expect(await probeControlPlane(tried, 0)).toBe(
+      "probe: a.example.net=blockpage@12 b.example.net:2053=tls@312 c.example.net=tcp-timeout@4001",
+    );
+
+    const list = [
+      "https://a.example.net/api",
+      "https://a.example.net:2053/api",
+      "https://b.example.net:2053/api",
+      "https://d.example.net/api",
+    ];
+    expect(demotedLast(list).ordered).toEqual([
+      "https://b.example.net:2053/api",
+      "https://d.example.net/api",
+      "https://a.example.net/api",
+      "https://a.example.net:2053/api",
+    ]);
   });
 
   /** It decorates a report; it must not hold one up indefinitely. */
