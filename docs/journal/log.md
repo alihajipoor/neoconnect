@@ -5917,3 +5917,56 @@ portal has no connect deadline; the demotion key is the baseline ASN, and
 answers through a tunnel can lift a carrier-network demotion; a write
 after 90 s idle pays one health round trip; a social start through a
 mirror (only when the CDN does not answer) shares that node's throttle.
+
+## 2026-10-10 — control-plane resilience, third review round (same branch, not merged)
+
+**Status:** code done, unreleased -- still needs the VM, a filtered network, phones
+**Commits:** `f61a9b3` (sign-in, writes, block page), `05b3036` (social
+start), `c8bdb17` (reports), `38f2043` (screens and caches)
+
+The checkers' third pass found the branch's own new rules biting back.
+What changed:
+
+- **What marks an address "not the backend"** is now only JSON 401/403/404
+  to a public request (`/health`, `/login-challenge`). A gateway page on
+  `/health` during a deploy used to mark it, after which the backend's own
+  401 from that address was treated as a page and the token was never
+  refreshed. A JSON 403/404 on `/health` no longer counts as the backend
+  having answered, so its 401 to the refresh is not a sign-out.
+- **Sign-in:** a JSON 401/403/404 can no longer win the challenge race; a
+  page answering the attempt (521, WAF 403, and for sign-in also
+  502/504/520/524) races a fresh challenge elsewhere instead of ending it;
+  every `via` address gets 20 s and the walk stops after a timeout rather
+  than re-sending the same solution. Sign-up is not re-sent after no answer
+  or a may-have-reached page: the account may already exist.
+- **Writes:** a read won by a 401 is offered only to the token refresh; a
+  device-slot write (its own short budget) goes straight to the remembered
+  address when no race was won lately, demoted or not, with the name's block
+  page looked at beside it; "stopped responding" only when this write's own
+  health race was answered.
+- **Block page:** a name already found there is looked at before anything is
+  sent and not sent anything; a reset that beats the lookup no longer hides
+  "your network is blocking Neoxify".
+- **Screens:** a first load with a snapshot shows it at 8 s and keeps
+  waiting (was 11.5-23 s); the banner tells "can't reach" from "answered with
+  an error"; errors are worded at render time; still-trying on Settings,
+  gaming and referrals; late config answers ordered by ask time; overtaken
+  loads no longer overwrite route lists or snapshots; the picker follows the
+  dashboard's newer list and hands its own back.
+- **Reports:** no access token written back to disk by a report in hand at
+  sign-out; page-only and renewal-unanswered loads now leave a row.
+
+Left as is: an address cancelled because another answered first is never
+demoted (nothing is known about it); demotions are still filed under the
+baseline ASN.
+
+**Proven -- tests on this PC:** desktop `pnpm test` 1298 / 73 files and
+`pnpm typecheck`; mobile 239 / 16 and `tsc`; web portal 2 / 1 and `tsc`;
+desktop-macos `tsc`. Every new test was checked to fail with the sources
+reverted. No Rust or backend change this round. The screen changes are
+pinned by source assertions; none were run in the app.
+
+**Unverified:** everything on a real Iranian network, the VM, Android and
+iPhone; the cached-start-at-8-s path with a Connect pressed while the load
+is still waiting; whether real CDN/mirror deployments produce the page and
+JSON-401 shapes these rules are written against.
