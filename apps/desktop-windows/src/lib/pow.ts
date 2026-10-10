@@ -1,4 +1,5 @@
-import { publicRequest } from "./api";
+import { publicRace, type AnsweredBase, type RequestFailure } from "./api";
+import type { EndpointTrace } from "./endpoint-trace";
 
 /** A challenge as the server issues it. Echoed back untouched. */
 export interface Challenge {
@@ -80,29 +81,57 @@ export async function solve(challenge: Challenge): Promise<Solution> {
   }
 }
 
+/** What asking for a challenge found out, besides the challenge. */
+export type ChallengeRace =
+  /** No address gave any HTTP answer. The sign-in would only walk the
+   * same dead list again, so it is not sent at all. */
+  | { reached: false; failure: RequestFailure }
+  | {
+      reached: true;
+      /** Undefined when no usable challenge came back. */
+      solution?: Solution;
+      /** Where to send the attempt: every address that answered, the one
+       * that handed out the challenge first. See `Raced.answered`. */
+      answered: AnsweredBase[];
+    };
+
 /**
- * Fetch and solve a challenge, or return undefined.
+ * Fetches a challenge as a race across the endpoints, and solves it.
  *
- * Deliberately best-effort. If the challenge endpoint cannot be reached
- * -- which on a censored network is a real possibility -- returning
- * undefined lets the sign-in attempt go ahead and be judged on its
- * merits, rather than making an anti-abuse measure into one more thing
- * that can lock a customer out of their own account. The server refuses
- * the attempt if it genuinely requires a solution.
+ * Raced rather than walked. Walked, it was the first of two walks over
+ * the same list -- this one, then the sign-in itself -- each giving
+ * every blocked address eight seconds. Against a simulated network with
+ * the real eleven-address list, a sign-in with every address blackholed
+ * took about three minutes to fail, and one with only the last address
+ * alive eighty seconds to succeed. The challenge is minted and signed
+ * without the server keeping any record of it, so it can safely be asked
+ * of more than one address (`publicRace`). The race also answers the
+ * question the sign-in would otherwise spend its own walk on: which
+ * addresses answer on this network.
+ *
+ * The solution is still best-effort. If a challenge does not come back
+ * -- refused, throttled, unreadable -- the attempt goes ahead without
+ * one and is judged on its merits, rather than making an anti-abuse
+ * measure into one more thing that can lock a customer out of their own
+ * account. The server refuses the attempt if it genuinely requires a
+ * solution. Only when nothing answered at all is there no attempt to
+ * make.
  */
-export async function solveChallengeFor(
+export async function raceChallengeFor(
   scope: LoginScope,
-  email?: string,
-): Promise<Solution | undefined> {
+  email: string | undefined,
+  trace?: EndpointTrace,
+  signal?: AbortSignal,
+): Promise<ChallengeRace> {
+  const { result, answered } = await publicRace<Challenge>(
+    "/login-challenge",
+    { method: "POST", body: JSON.stringify({ scope, email }), signal },
+    trace,
+  );
+  if (!result.ok) return answered.length === 0 ? { reached: false, failure: result } : { reached: true, answered };
   try {
-    const result = await publicRequest<Challenge>("/login-challenge", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scope, email }),
-    });
-    if (!result.ok) return undefined;
-    return await solve(result.data);
+    return { reached: true, solution: await solve(result.data), answered };
   } catch {
-    return undefined;
+    return { reached: true, answered };
   }
 }

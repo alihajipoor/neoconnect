@@ -100,6 +100,8 @@ describe("the exchange", () => {
         return replies.shift() ?? { ok: false, error: "stood in for" };
       },
       apiRequest: vi.fn(),
+      LEAD_MS: 1_500,
+      SLOW_ANSWER_MS: 20_000,
     }));
     vi.doMock("./attempts", async (original) => ({
       ...(await original<typeof import("./attempts")>()),

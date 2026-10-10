@@ -2,7 +2,7 @@ import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints, rememberEndpoint } from "./api-endpoints";
 import { deviceHeaders } from "./device-identity";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
-import { beginAttempt, failureOutcome, settleAttempt, type EndpointTrace } from "./endpoint-trace";
+import { beginAttempt, failureOutcome, settleAttempt, type EndpointTrace, type TraceEntry } from "./endpoint-trace";
 import { clearTokens, getTokens, setTokens } from "./session";
 import { announceSessionRevoked } from "./session-revoked";
 import type { TokenPair } from "./types";
@@ -22,6 +22,53 @@ import type { TokenPair } from "./types";
  * request, since the winner is remembered.
  */
 const ENDPOINT_TIMEOUT_MS = 8_000;
+
+/** How long each address gets in a race for an answer worth waiting for.
+ *
+ * Longer than `ENDPOINT_TIMEOUT_MS` because in a race nobody waits for a
+ * slow address once another has answered, so a long deadline costs
+ * something only when nothing answers at all. What it buys is the CDN
+ * answering after nine to twenty seconds while every mirror is blocked:
+ * at eight seconds that answer was thrown away, and the screen said it
+ * could not reach a server that had in fact replied. That shape fits the
+ * testers' reports, but it was modelled in a simulated network, not
+ * observed on theirs. */
+export const SLOW_ANSWER_MS = 20_000;
+
+/** How long the first address, the one that answered last time, has a
+ * staggered race to itself before the others are asked.
+ *
+ * Every request in such a race is counted by the server, and the
+ * sign-in challenge is throttled per address. Behind a node's mirror that
+ * address is the node's, so every customer using that mirror shares one
+ * bucket. Asking all eleven or more at once on every click would spend a
+ * slot in every mirror's bucket, including mirrors other customers depend
+ * on. Where the remembered address works, as it usually does, it answers
+ * well inside this head start and nothing else is sent. */
+export const LEAD_MS = 1_500;
+
+/** An address that has just answered, and how long the answer took. */
+export interface AnsweredBase {
+  base: string;
+  /** From when the request was sent to when the response headers came back. */
+  ms: number;
+}
+
+/** How long a follow-up gets at an address that has just answered.
+ *
+ * Never less than an ordinary walk gives anyone, and twice what the
+ * address just took, so one that answered in fifteen seconds is given
+ * time to answer again at the same pace instead of being cut off at
+ * eight. Capped, because the address may have stopped answering since. */
+function followUpTimeout(answered: AnsweredBase): number {
+  return Math.min(SLOW_ANSWER_MS, Math.max(ENDPOINT_TIMEOUT_MS, 2 * answered.ms));
+}
+
+/** One address in a walk and how long it gets. */
+interface Stop {
+  base: string;
+  timeoutMs: number;
+}
 
 /** Statuses a proxy in front of the backend -- a node mirror's nginx,
  * the CDN -- uses for "I could not get you an answer": bad gateway,
@@ -60,6 +107,17 @@ export function isGatewayFailure(response: Response): boolean {
   return !type.toLowerCase().includes("application/json");
 }
 
+/** Whether this response is the backend speaking.
+ *
+ * Every answer the backend gives is JSON, its refusals included. Pages
+ * from whatever stands in front of it are not: a proxy's failure page, a
+ * node's fallback site that has no `/api` location, the CDN's bot check.
+ * Used only where a request's every answer is known to be JSON. */
+function isBackendAnswer(response: Response): boolean {
+  const type = response.headers?.get?.("content-type") ?? "";
+  return type.toLowerCase().includes("application/json");
+}
+
 /** Thrown inside the race for a gateway failure, so `Promise.any` waits
  * for a real answer instead of settling on it. */
 class GatewayFailure extends Error {}
@@ -83,11 +141,16 @@ class GatewayFailure extends Error {}
  * GET is retried. The endpoint trace records which leg
  * the budget ran out in; nothing about the walk itself is changed on the
  * strength of that reading alone.
+ *
+ * Each stop carries its own timeout. A full walk gives every address the
+ * same `ENDPOINT_TIMEOUT_MS`; a walk over addresses that have just
+ * answered gives each one time to answer at the pace it just showed
+ * (`followUpTimeout`).
  */
 async function fetchOneEndpointAtATime(
   path: string,
   init: RequestInit,
-  endpoints: string[],
+  stops: Stop[],
   trace?: EndpointTrace,
 ): Promise<Response> {
   let lastError: unknown;
@@ -104,14 +167,14 @@ async function fetchOneEndpointAtATime(
   // must be over in a second and a half -- walked every mirror at eight
   // seconds each regardless.
   const outer = init.signal ?? null;
-  for (const base of endpoints) {
+  for (const { base, timeoutMs } of stops) {
     if (outer?.aborted) break;
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, ENDPOINT_TIMEOUT_MS);
+    }, timeoutMs);
     const entry = beginAttempt(trace, base);
     const onOuterAbort = () => controller.abort();
     outer?.addEventListener("abort", onOuterAbort);
@@ -128,7 +191,11 @@ async function fetchOneEndpointAtATime(
       void maybeRefreshBundle(base);
       return response;
     } catch (err) {
-      settleAttempt(entry, timedOut ? "timeout" : failureOutcome(err));
+      // Stopped by the caller's deadline rather than failing: left
+      // pending, which the trace renders as `budget`. Recording it as a
+      // transport failure would say the network refused an address that
+      // was simply still being waited for.
+      if (timedOut || !outer?.aborted) settleAttempt(entry, timedOut ? "timeout" : failureOutcome(err));
       lastError = err;
     } finally {
       clearTimeout(timer);
@@ -159,13 +226,30 @@ async function fetchOneEndpointAtATime(
  * `trace`, when given, is told about every address tried and how each
  * attempt ended -- see endpoint-trace.ts. It changes nothing about which
  * addresses are tried or for how long.
+ *
+ * `via`, when given, replaces the list: the request walks exactly those
+ * addresses, in that order, one at a time, each with a timeout fitted to
+ * how fast it has just answered. It is for a write that follows a race
+ * (`publicRace`): the race has already found out which addresses answer
+ * on this network, and walking the whole list again would spend another
+ * eight seconds on every blocked address before reaching the one that
+ * answered a moment ago.
  */
-async function fetchAnyEndpoint(path: string, init: RequestInit, trace?: EndpointTrace): Promise<Response> {
-  const endpoints = await apiEndpoints();
+async function fetchAnyEndpoint(
+  path: string,
+  init: RequestInit,
+  trace?: EndpointTrace,
+  via?: AnsweredBase[],
+): Promise<Response> {
+  const endpoints = via ? via.map((answered) => answered.base) : await apiEndpoints();
   if (endpoints.length === 0) throw new Error("no API endpoint is configured");
   // A caller whose deadline has already passed gets nothing sent on its
   // behalf, by either path below.
   if (init.signal?.aborted) throw new Error("the request ran out of time");
+  if (via) {
+    const stops = via.map((answered) => ({ base: answered.base, timeoutMs: followUpTimeout(answered) }));
+    return await fetchOneEndpointAtATime(path, init, stops, trace);
+  }
 
   // Raced, not walked.
   //
@@ -227,7 +311,8 @@ async function fetchAnyEndpoint(path: string, init: RequestInit, trace?: Endpoin
   // never safe.
   const method = (init.method ?? "GET").toUpperCase();
   if (method !== "GET" && method !== "HEAD") {
-    return await fetchOneEndpointAtATime(path, init, endpoints, trace);
+    const stops = endpoints.map((base) => ({ base, timeoutMs: ENDPOINT_TIMEOUT_MS }));
+    return await fetchOneEndpointAtATime(path, init, stops, trace);
   }
 
   const controllers = endpoints.map(() => new AbortController());
@@ -407,8 +492,15 @@ async function failureFrom(res: Response): Promise<RequestFailure> {
 
 /** Unauthenticated request -- login/register don't have a token yet.
  *
- * `trace` records which addresses were tried; see endpoint-trace.ts. */
-export async function publicRequest<T>(path: string, init?: RequestInit, trace?: EndpointTrace): Promise<ApiResult<T>> {
+ * `trace` records which addresses were tried; see endpoint-trace.ts.
+ * `via` sends it only to addresses a race has just heard from; see
+ * `fetchAnyEndpoint`. */
+export async function publicRequest<T>(
+  path: string,
+  init?: RequestInit,
+  trace?: EndpointTrace,
+  via?: AnsweredBase[],
+): Promise<ApiResult<T>> {
   let res: Response;
   try {
     res = await fetchAnyEndpoint(
@@ -418,6 +510,7 @@ export async function publicRequest<T>(path: string, init?: RequestInit, trace?:
         headers: { "Content-Type": "application/json", ...init?.headers },
       },
       trace,
+      via,
     );
   } catch {
     return unreachable();
@@ -428,6 +521,187 @@ export async function publicRequest<T>(path: string, init?: RequestInit, trace?:
   }
   if (res.status === 204) return { ok: true, data: undefined as T };
   return { ok: true, data: (await res.json()) as T };
+}
+
+/** What a race found: the answer, and who else answered. */
+export interface Raced<T> {
+  result: ApiResult<T>;
+  /** Every address that gave an HTTP answer, in the order a follow-up
+   * should try them: the one whose answer became `result` first, then
+   * the backend's other answers, then pages from whatever stands in front
+   * of it. Empty only when nothing answered at all, which is also the
+   * only time `result` says Neoxify could not be reached. */
+  answered: AnsweredBase[];
+}
+
+/** One address's answer in a race. */
+interface RaceAnswer {
+  i: number;
+  response: Response;
+  ms: number;
+  backend: boolean;
+}
+
+/** Sends one unauthenticated request to the endpoints as a staggered
+ * race, and reports who answered as well as what the answer was.
+ *
+ * Only for a request that the server does not mind receiving more than
+ * once -- nothing stored, nothing spent, beyond the throttle's count --
+ * and whose every answer is JSON. The sign-in challenge is the reason
+ * this exists. It is minted, signed and handed back without the server
+ * keeping any record of it, so racing it is safe, where racing the
+ * sign-in itself never was (see `fetchAnyEndpoint`).
+ *
+ * The address that answered last time goes first, alone, for `LEAD_MS`.
+ * If it has not answered by then, or has failed already, every other
+ * address is asked too. Each gets `SLOW_ANSWER_MS`.
+ *
+ * The race is won by the first answer from the backend itself
+ * (`isBackendAnswer`), with one exception: a 429. The throttle counts
+ * per address, and behind a mirror that is the node's address, so one
+ * mirror being over its limit says nothing about the next one. A 429 is
+ * kept as an answer, and the race goes on for one that is not. A page
+ * from something in front of the backend never wins, for the reason
+ * `isGatewayFailure` gives. If nothing better arrives, the first 429, or
+ * failing that the first page, is the result, because something did
+ * answer.
+ *
+ * The winner is remembered, as a raced read's is. The rest are stopped
+ * as soon as it is in.
+ */
+export async function publicRace<T>(path: string, init: RequestInit, trace?: EndpointTrace): Promise<Raced<T>> {
+  const endpoints = await apiEndpoints();
+  const outer = init.signal ?? null;
+  if (endpoints.length === 0 || outer?.aborted) return { result: unreachable(), answered: [] };
+  const request: RequestInit = {
+    ...init,
+    headers: { "Content-Type": "application/json", ...init.headers },
+  };
+
+  const controllers = endpoints.map(() => new AbortController());
+  const timedOut = endpoints.map(() => false);
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  const entries: (TraceEntry | undefined)[] = [];
+  // Every answer, in the order it arrived.
+  const answers: RaceAnswer[] = [];
+  let launched = 0;
+  let settled = 0;
+  let fannedOut = false;
+  let leadTimer: ReturnType<typeof setTimeout> | undefined;
+
+  let decided = false;
+  let decide: (winner: RaceAnswer | null) => void = () => undefined;
+  const decision = new Promise<RaceAnswer | null>((resolve) => {
+    decide = (winner) => {
+      if (decided) return;
+      decided = true;
+      resolve(winner);
+    };
+  });
+
+  const launch = (i: number) => {
+    launched += 1;
+    const startedAt = Date.now();
+    entries[i] = beginAttempt(trace, endpoints[i], startedAt);
+    timers.push(
+      setTimeout(() => {
+        timedOut[i] = true;
+        controllers[i].abort();
+      }, SLOW_ANSWER_MS),
+    );
+    // Started inside a promise, so a fetch that throws rather than
+    // rejecting is still one address failing, not the whole race.
+    void Promise.resolve()
+      .then(() => fetch(`${endpoints[i]}${path}`, { ...request, signal: controllers[i].signal }))
+      .then(
+        (response) => {
+          settleAttempt(entries[i], `h${response.status}`);
+          const answer: RaceAnswer = { i, response, ms: Date.now() - startedAt, backend: isBackendAnswer(response) };
+          answers.push(answer);
+          if (answer.backend && response.status !== 429) decide(answer);
+        },
+        (err: unknown) => {
+          // As in the walk: stopped by the caller's deadline is `budget`,
+          // not a transport failure.
+          if (timedOut[i] || !outer?.aborted) settleAttempt(entries[i], timedOut[i] ? "timeout" : failureOutcome(err));
+        },
+      )
+      .finally(() => {
+        settled += 1;
+        if (decided) return;
+        if (settled === endpoints.length) decide(null);
+        // The lead has settled without the answer. Nothing is gained by
+        // keeping everyone else waiting out the rest of its head start.
+        else if (!fannedOut) fanOut();
+      });
+  };
+
+  const fanOut = () => {
+    if (fannedOut || decided) return;
+    fannedOut = true;
+    clearTimeout(leadTimer);
+    for (let i = 1; i < endpoints.length; i += 1) launch(i);
+  };
+
+  const onOuterAbort = () => {
+    controllers.forEach((c) => c.abort());
+    decide(null);
+  };
+  outer?.addEventListener("abort", onOuterAbort);
+
+  launch(0);
+  if (endpoints.length > 1) leadTimer = setTimeout(fanOut, LEAD_MS);
+
+  const winner = await decision;
+  clearTimeout(leadTimer);
+  // Timers only, and not the winner's controller: its body has not been
+  // read yet. See the comment on the same step in `fetchAnyEndpoint`.
+  timers.forEach(clearTimeout);
+  outer?.removeEventListener("abort", onOuterAbort);
+
+  // The answer that becomes the result: the winner, or failing that the
+  // first 429, or failing that the first page.
+  const kept = winner ?? answers.find((answer) => answer.backend) ?? answers[0];
+  controllers.forEach((c, i) => {
+    if (kept !== undefined && i === kept.i) return;
+    // "cancel" only when somebody won. Without a winner everything has
+    // settled already, or the caller's deadline stopped it, which is
+    // `budget`.
+    if (winner) settleAttempt(entries[i], "cancel");
+    c.abort();
+  });
+  if (kept === undefined) return { result: unreachable(), answered: [] };
+
+  if (winner) {
+    void rememberEndpoint(endpoints[winner.i]);
+    void maybeRefreshBundle(endpoints[winner.i]);
+  }
+
+  const ordered = [
+    ...(winner ? [winner] : []),
+    ...answers.filter((answer) => answer.backend && answer !== winner),
+    ...answers.filter((answer) => !answer.backend),
+  ];
+  const answered: AnsweredBase[] = [];
+  for (const answer of ordered) {
+    const base = endpoints[answer.i];
+    if (!answered.some((a) => a.base === base)) answered.push({ base, ms: answer.ms });
+  }
+
+  return { result: await resultFrom<T>(kept.response, kept.backend), answered };
+}
+
+/** The result a raced answer stands for. A page from in front of the
+ * backend is never a success, whatever its status: a node's fallback site
+ * can answer 200 with HTML to any path. */
+async function resultFrom<T>(res: Response, backend: boolean): Promise<ApiResult<T>> {
+  if (!res.ok || !backend) return await failureFrom(res);
+  if (res.status === 204) return { ok: true, data: undefined as T };
+  try {
+    return { ok: true, data: (await res.json()) as T };
+  } catch {
+    return { ok: false, error: `Request failed (${res.status})`, status: res.status };
+  }
 }
 
 /** The status with which the server says this refresh token is no good.

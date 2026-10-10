@@ -14,6 +14,8 @@ const publicRequest = vi.fn<(trace?: EndpointTrace) => Promise<ApiResult<unknown
 vi.mock("./api", () => ({
   publicRequest: (_path: string, _init: RequestInit, trace?: EndpointTrace) => publicRequest(trace),
   apiRequest: vi.fn(),
+  LEAD_MS: 1_500,
+  SLOW_ANSWER_MS: 20_000,
 }));
 
 const reportAttempt = vi.fn();
@@ -28,7 +30,12 @@ type Addendum = { apiEndpoint?: string; reason?: string } | undefined;
 const probeAddendum = vi.fn<(entries: unknown[]) => Promise<Addendum>>();
 vi.mock("./control-plane-probe", () => ({ probeAddendum: (e: unknown[]) => probeAddendum(e) }));
 
-vi.mock("./pow", () => ({ solveChallengeFor: async () => undefined }));
+/** The challenge race, stood in for: something answered it, so the
+ * attempt is sent. What sign-in does when nothing did is
+ * sign-in-race.test.ts's. */
+vi.mock("./pow", () => ({
+  raceChallengeFor: async () => ({ reached: true, answered: [{ base: "https://api.example.net/api", ms: 100 }] }),
+}));
 vi.mock("./session", () => ({ setTokens: vi.fn() }));
 vi.mock("./session-end", () => ({ endCustomerSession: vi.fn() }));
 vi.mock("./customer", () => ({ clearGamingProfileCache: vi.fn() }));

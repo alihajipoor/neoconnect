@@ -13,13 +13,17 @@ const publicRequest = vi.fn<(path: string, init?: RequestInit) => Promise<ApiRes
 vi.mock("./api", () => ({
   publicRequest: (path: string, init?: RequestInit) => publicRequest(path, init),
   apiRequest: vi.fn(),
+  LEAD_MS: 1_500,
+  SLOW_ANSWER_MS: 20_000,
 }));
 vi.mock("./api-endpoints", () => ({ attemptedEndpoints: async () => undefined }));
 vi.mock("./attempts", async (original) => {
   const real = await original<typeof import("./attempts")>();
   return { ...real, reportAttempt: vi.fn() };
 });
-vi.mock("./pow", () => ({ solveChallengeFor: async () => undefined }));
+vi.mock("./pow", () => ({
+  raceChallengeFor: async () => ({ reached: true, answered: [{ base: "https://api.example.net/api", ms: 100 }] }),
+}));
 vi.mock("./session", () => ({ setTokens: vi.fn() }));
 vi.mock("./session-end", () => ({ endCustomerSession: vi.fn() }));
 vi.mock("./customer", () => ({ clearGamingProfileCache: vi.fn() }));

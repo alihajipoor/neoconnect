@@ -1,11 +1,11 @@
-import { apiRequest, publicRequest } from "./api";
+import { apiRequest, LEAD_MS, publicRequest, SLOW_ANSWER_MS } from "./api";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
 import { probeAddendum } from "./control-plane-probe";
 import { newTrace, renderTrace, type EndpointTrace } from "./endpoint-trace";
 import { setTokens } from "./session";
 import { endCustomerSession, type SessionEnd } from "./session-end";
 import { clearGamingProfileCache } from "./customer";
-import { solveChallengeFor } from "./pow";
+import { raceChallengeFor, type Solution } from "./pow";
 import { currentLanguage } from "./i18n";
 import { deviceHeaders } from "./device-identity";
 import { startSocialSignIn } from "./social-auth";
@@ -40,7 +40,12 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: Endpo
     void reportAttempt({ kind, outcome: "SUCCESS" });
     return;
   }
-  const outcome = outcomeFromApiError(result.error);
+  // `noResponse` first: a sign-in whose challenge was answered but whose
+  // own request then was not is told so in its own words (see
+  // `STOPPED_ANSWERING`), and it is still a request that never got an
+  // answer. The sentence is the fallback for a failure that never went
+  // through `publicRequest`, such as a social provider's.
+  const outcome = result.noResponse ? "CONTROL_PLANE_UNREACHABLE" : outcomeFromApiError(result.error);
   if (outcome !== "CONTROL_PLANE_UNREACHABLE" || !trace) {
     void reportAttempt({ kind, outcome, reason: result.error });
     return;
@@ -55,20 +60,88 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: Endpo
   );
 }
 
+/** How long a sign-in or sign-up may take, all told.
+ *
+ * There was no limit. The challenge and the attempt were two walks over
+ * the same list, eight seconds for every blocked address in each, and the
+ * button sat on "Signing in..." for as long as that took: about three
+ * minutes with everything blackholed, in a simulated network.
+ *
+ * Long enough for one slow route to finish the job. The challenge race
+ * gives the first address a head start (`LEAD_MS`) and every address
+ * `SLOW_ANSWER_MS`; the attempt then gets up to that again at the
+ * address that answered slowly (see `followUpTimeout` in api.ts); and a
+ * few seconds are left for solving the challenge, which takes
+ * milliseconds unless an account is under attack. A CDN that answers in
+ * about twenty seconds, with every mirror blocked, still signs the
+ * customer in. A network where nothing answers is told so after the race
+ * alone, a little over twenty seconds, without waiting for this. */
+const SIGN_IN_DEADLINE_MS = LEAD_MS + 2 * SLOW_ANSWER_MS + 3_500;
+
+/** What a sign-in says when an address answered the challenge and then
+ * nothing answered the attempt itself.
+ *
+ * Not "could not reach Neoxify": it was reached seconds earlier, so the
+ * customer's connection was working then. Saying otherwise would send
+ * them to check a connection that may well be fine. The result still carries
+ * `noResponse`, because this request got no answer, and is reported as
+ * an unreachable control plane with the trace showing both legs. */
+const STOPPED_ANSWERING = "Neoxify answered but then stopped responding. Please try again.";
+
+/** Sends a sign-in or sign-up, with a proof-of-work solution, where the
+ * challenge race says it will be answered.
+ *
+ * The challenge is raced across the endpoints (`raceChallengeFor`).
+ * Nothing answering ends it there, as Neoxify unreachable -- the attempt
+ * is not then walked over the same dead list. Otherwise the attempt goes
+ * first to the address that handed out the challenge. It has just shown
+ * it works, and the server priced the challenge for the source address
+ * it saw there, which is the one the attempt will arrive from too. Then
+ * it goes to the other addresses that answered. It is still sent to one address at a
+ * time, for the reasons `fetchAnyEndpoint` gives: the solution is single
+ * use, and sign-in is throttled hard.
+ *
+ * The whole thing ends by `SIGN_IN_DEADLINE_MS`.
+ *
+ * Solved before the attempt, not in response to being refused: the
+ * server raises the required difficulty as failures accumulate, so
+ * carrying a solution is what keeps sign-in usable once an address or an
+ * account has drawn attention. */
+async function sendWithChallenge<T>(
+  path: string,
+  email: string | undefined,
+  init: (solution: Solution | undefined) => RequestInit,
+  trace: EndpointTrace,
+): Promise<ApiResult<T>> {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), SIGN_IN_DEADLINE_MS);
+  try {
+    trace.phase = "challenge";
+    const race = await raceChallengeFor("customer", email, trace, deadline.signal);
+    trace.phase = "req";
+    if (!race.reached) return race.failure;
+    const result = await publicRequest<T>(
+      path,
+      { ...init(race.solution), signal: deadline.signal },
+      trace,
+      race.answered,
+    );
+    if (!result.ok && result.noResponse) return { ...result, error: STOPPED_ANSWERING };
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Never returns a usable session -- see RequiresVerification's doc
  * comment. The app must always follow this up by showing the verify
  * screen, never a dashboard. */
 export async function register(email: string, password: string, referralCode?: string) {
-  // Solved before the attempt, not in response to being refused: the
-  // server raises the required difficulty as failures accumulate, so
-  // carrying a solution is what keeps signup usable once an address or
-  // an account has drawn attention. Undefined when the challenge
-  // endpoint could not be reached, which the server tolerates.
-  const challenge = await solveChallengeFor("customer");
   const trace = newTrace();
-  const result = await publicRequest<RequiresVerification>(
+  const result = await sendWithChallenge<RequiresVerification>(
     "/customer-auth/register",
-    {
+    undefined,
+    (challenge) => ({
       method: "POST",
       // Omitted entirely when blank rather than sent as "": the backend
       // treats a supplied-but-wrong code as an error, and an empty string
@@ -86,7 +159,7 @@ export async function register(email: string, password: string, referralCode?: s
         ...(referralCode ? { referralCode } : {}),
         ...(challenge ? { challenge } : {}),
       }),
-    },
+    }),
     trace,
   );
   reportAuth("REGISTER", result, trace);
@@ -97,20 +170,20 @@ export async function register(email: string, password: string, referralCode?: s
  * `requiresVerification` results are never persisted, so an unverified
  * account can't end up with stray tokens sitting in the store. */
 export async function login(email: string, password: string) {
-  // The email is sent with the challenge request so the server can
-  // price this attempt against that account's own recent failures --
-  // the case per-address rate limiting cannot see.
-  const challenge = await solveChallengeFor("customer", email);
   const trace = newTrace();
-  const result = await publicRequest<LoginResult>(
+  const result = await sendWithChallenge<LoginResult>(
     "/customer-auth/login",
-    {
+    // The email is sent with the challenge request so the server can
+    // price this attempt against that account's own recent failures --
+    // the case per-address rate limiting cannot see.
+    email,
+    (challenge) => ({
       method: "POST",
       body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
       // Names this device to the customer's others ("Neoxify is in use on
       // a Windows PC"). See device-identity.ts.
       headers: deviceHeaders(),
-    },
+    }),
     trace,
   );
   if (result.ok && !("requiresVerification" in result.data)) {

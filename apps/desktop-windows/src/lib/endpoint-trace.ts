@@ -29,8 +29,12 @@
  * the token refresh its 401 triggers, and the retry with the new token.
  * After fifteen minutes idle the access token has expired, so the
  * pre-connect refresh is usually all three -- each a fresh connection --
- * and which leg ran out of time is the thing worth knowing. */
-export type TracePhase = "req" | "refresh" | "retry";
+ * and which leg ran out of time is the thing worth knowing.
+ *
+ * A sign-in or sign-up has a leg before its request: the race for the
+ * proof-of-work challenge, which is also what decides where the request
+ * is sent. When nothing answered that race, it is the only leg there is. */
+export type TracePhase = "challenge" | "req" | "refresh" | "retry";
 
 /** How one address's attempt ended, in the classes this side can tell
  * apart.
