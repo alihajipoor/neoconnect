@@ -38,10 +38,11 @@ vi.mock("./endpoint-bundle-store", () => ({
 
 let publicRequest: typeof import("./api").publicRequest;
 let isGatewayFailure: typeof import("./api").isGatewayFailure;
+let resetRaceWinnerForTests: typeof import("./api").resetRaceWinnerForTests;
 
 beforeEach(async () => {
   vi.resetModules();
-  ({ publicRequest, isGatewayFailure } = await import("./api"));
+  ({ publicRequest, isGatewayFailure, resetRaceWinnerForTests } = await import("./api"));
 });
 
 afterEach(() => {
@@ -57,7 +58,6 @@ const gatewayPage = (status = 502) =>
   });
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-const origin = (url: string) => new URL(url).origin;
 
 /** Answers per origin, after a delay per origin. */
 function serve(routes: Record<string, { after: number; reply: () => Response } | "unreachable">) {
@@ -109,24 +109,36 @@ describe("a raced read", () => {
 });
 
 describe("a write, sent one endpoint at a time", () => {
+  /** Every address answers the health check a write is preceded by, so
+   * the write starts at the first; `write` decides what the write gets.
+   * Returns the addresses the write itself was sent to. */
+  function serveWrite(write: (origin: string) => Response): string[] {
+    const seen: string[] = [];
+    tauriFetch.mockImplementation(async (url: string) => {
+      const { origin, pathname } = new URL(url);
+      if (pathname === "/health") return json({ status: "ok" });
+      seen.push(origin);
+      return write(origin);
+    });
+    return seen;
+  }
+
   it("steps past a page that says the backend was never reached, and does not remember it", async () => {
     // 503 from nginx with no live upstream; the CDN's 521-523 (origin
     // down, refused, timed out connecting), 525/526 (TLS to the origin)
     // and 530: the request never got as far as the backend.
     for (const status of [503, 521, 522, 523, 525, 526, 530]) {
-      const seen: string[] = [];
+      resetRaceWinnerForTests();
       remembered.length = 0;
-      tauriFetch.mockImplementation(async (url: string) => {
-        const origin = new URL(url).origin;
-        seen.push(origin);
-        return origin === MIRROR ? gatewayPage(status) : json({ token: "ok" });
-      });
+      const seen = serveWrite((origin) => (origin === MIRROR ? gatewayPage(status) : json({ token: "ok" })));
       await expect(publicRequest("/customer-auth/login", { method: "POST", body: "{}" })).resolves.toEqual({
         ok: true,
         data: { token: "ok" },
       });
       expect(seen, `after ${status}`).toEqual([MIRROR, CDN]);
-      expect(remembered, `after ${status}`).toEqual([CDN]);
+      // The mirror for its answer to the health check, and the CDN for its
+      // own and for the write's. Never the mirror for its page.
+      expect(remembered, `after ${status}`).toEqual([MIRROR, CDN, CDN]);
     }
   });
 
@@ -138,11 +150,8 @@ describe("a write, sent one endpoint at a time", () => {
     // a voucher redemption on to the next endpoint after any of them can
     // run it twice.
     for (const status of [502, 504, 520, 524]) {
-      const seen: string[] = [];
-      tauriFetch.mockImplementation(async (url: string) => {
-        seen.push(new URL(url).origin);
-        return origin(url) === MIRROR ? gatewayPage(status) : json({ id: "second copy" }, 201);
-      });
+      resetRaceWinnerForTests();
+      const seen = serveWrite((origin) => (origin === MIRROR ? gatewayPage(status) : json({ id: "second copy" }, 201)));
       const result = await publicRequest("/orders", { method: "POST", body: "{}" });
       expect(result, `after ${status}`).toMatchObject({ ok: false, status });
       expect(seen, `after ${status}`).toEqual([MIRROR]);
@@ -150,11 +159,7 @@ describe("a write, sent one endpoint at a time", () => {
   });
 
   it("stops at the backend's own refusal exactly as before", async () => {
-    const seen: string[] = [];
-    tauriFetch.mockImplementation(async (url: string) => {
-      seen.push(new URL(url).origin);
-      return json({ message: "wrong password" }, 401);
-    });
+    const seen = serveWrite(() => json({ message: "wrong password" }, 401));
     const result = await publicRequest("/customer-auth/login", { method: "POST", body: "{}" });
     expect(result).toMatchObject({ ok: false, status: 401 });
     expect(seen).toEqual([MIRROR]);

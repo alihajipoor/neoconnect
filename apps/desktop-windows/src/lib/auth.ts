@@ -1,4 +1,4 @@
-import { apiRequest, LEAD_MS, publicRequest, SLOW_ANSWER_MS } from "./api";
+import { apiRequest, LEAD_MS, publicRequest, SLOW_ANSWER_MS, STOPPED_ANSWERING } from "./api";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
 import { probeAddendum } from "./control-plane-probe";
 import { newTrace, renderTrace, type EndpointTrace } from "./endpoint-trace";
@@ -77,16 +77,6 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: Endpo
  * customer in. A network where nothing answers is told so after the race
  * alone, a little over twenty seconds, without waiting for this. */
 const SIGN_IN_DEADLINE_MS = LEAD_MS + 2 * SLOW_ANSWER_MS + 3_500;
-
-/** What a sign-in says when an address answered the challenge and then
- * nothing answered the attempt itself.
- *
- * Not "could not reach Neoxify": it was reached seconds earlier, so the
- * customer's connection was working then. Saying otherwise would send
- * them to check a connection that may well be fine. The result still carries
- * `noResponse`, because this request got no answer, and is reported as
- * an unreachable control plane with the trace showing both legs. */
-const STOPPED_ANSWERING = "Neoxify answered but then stopped responding. Please try again.";
 
 /** Sends a sign-in or sign-up, with a proof-of-work solution, where the
  * challenge race says it will be answered.

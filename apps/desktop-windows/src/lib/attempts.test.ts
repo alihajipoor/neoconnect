@@ -90,7 +90,11 @@ describe("the platform a report carries", () => {
  * delivered, so the queued ones were the ones thrown away. */
 describe("the throttle", () => {
   const THROTTLED: ApiResult<void> = { ok: false, error: "ThrottlerException: Too Many Requests", status: 429 };
-  const UNREACHABLE: ApiResult<void> = { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+  const UNREACHABLE: ApiResult<void> = {
+    ok: false,
+    error: "Could not reach Neoxify. Check your internet connection.",
+    noResponse: true,
+  };
   const queued = () => (files.get("attempt-reports.json")?.get("queue") as unknown[] | undefined) ?? [];
 
   beforeEach(() => invoke.mockResolvedValue("windows"));
@@ -126,6 +130,19 @@ describe("the throttle", () => {
     expect(queued()).toHaveLength(6);
     // The oldest went first; what is left is the newest, in order.
     expect((queued() as { reason: string }[]).map((r) => r.reason)).toEqual(["r19", "r20", "r21", "r22", "r23", "r24"]);
+  });
+
+  /** A report whose health race the backend answered, and whose own
+   * request then got no answer, is told so in other words than "could not
+   * reach Neoxify". It never arrived either, and is kept. */
+  it("keeps a report that got no answer, whatever the sentence", async () => {
+    publicRequest.mockResolvedValue({
+      ok: false,
+      error: "Neoxify answered but then stopped responding. Please try again.",
+      noResponse: true,
+    });
+    await attempts.reportAttempt({ kind: "CONNECT", outcome: "CONTROL_PLANE_UNREACHABLE", reason: "r" });
+    expect(queued()).toHaveLength(1);
   });
 
   /** Everything else with a status is still a verdict on the report,
@@ -186,7 +203,11 @@ describe("the length of apiEndpoint", () => {
  * backgrounded app is suspended within seconds and may be killed, and a
  * report still held in memory dies with it. */
 describe("an addendum that is still being worked out", () => {
-  const UNREACHABLE: ApiResult<void> = { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+  const UNREACHABLE: ApiResult<void> = {
+    ok: false,
+    error: "Could not reach Neoxify. Check your internet connection.",
+    noResponse: true,
+  };
   const queued = () => (files.get("attempt-reports.json")?.get("queue") as Record<string, unknown>[] | undefined) ?? [];
   const report = {
     kind: "SIGN_IN" as const,

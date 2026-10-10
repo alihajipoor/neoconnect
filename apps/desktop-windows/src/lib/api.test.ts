@@ -118,7 +118,7 @@ describe("which endpoints a request is sent to", () => {
   it("sends a write to one endpoint, not to all of them", async () => {
     const seen: string[] = [];
     tauriFetch.mockImplementation(async (url: string) => {
-      seen.push(new URL(url).origin);
+      if (new URL(url).pathname === "/login") seen.push(new URL(url).origin);
       return jsonResponse({ token: "ok" });
     });
 
@@ -132,12 +132,14 @@ describe("which endpoints a request is sent to", () => {
    * Withdrawing the race must not withdraw the endpoint list. A blocked
    * address still has to step to the next one, or this fix would trade a
    * broken sign-in for an unreachable one on exactly the networks the
-   * mirrors exist for.
+   * mirrors exist for. Here the first address answers the health check
+   * the write is preceded by, and then cannot be reached for the write.
    */
   it("steps to the next endpoint when a write cannot reach the first", async () => {
     const seen: string[] = [];
     tauriFetch.mockImplementation(async (url: string) => {
-      const origin = new URL(url).origin;
+      const { origin, pathname } = new URL(url);
+      if (pathname === "/health") return jsonResponse({ status: "ok" });
       seen.push(origin);
       if (origin === ENDPOINTS[0]) throw new TypeError("network error");
       return jsonResponse({ token: "ok" });
@@ -158,7 +160,7 @@ describe("which endpoints a request is sent to", () => {
   it("does not try another endpoint when the server refuses a write", async () => {
     const seen: string[] = [];
     tauriFetch.mockImplementation(async (url: string) => {
-      seen.push(new URL(url).origin);
+      if (new URL(url).pathname === "/login") seen.push(new URL(url).origin);
       return jsonResponse({ message: "wrong password" }, { status: 401 });
     });
 
@@ -224,11 +226,15 @@ describe("the endpoint trace", () => {
     expect(renderTrace(trace)).toBe("req: a.example=net@0 b.example=scope@0 c.example=timeout@8000");
   });
 
-  /** A write walks the list one address at a time; the trace is the walk. */
+  /** A write goes one address at a time, each found by a health race
+   * just before; the trace is both, in the order they happened. Every
+   * address answers the health check here, and each in turn then fails
+   * the write until the last refuses it. */
   it("records a write's walk in the order it was taken", async () => {
     vi.useFakeTimers();
     tauriFetch.mockImplementation((url: string, init?: RequestInit) => {
-      const origin = new URL(url).origin;
+      const { origin, pathname } = new URL(url);
+      if (pathname === "/health") return Promise.resolve(jsonResponse({ status: "ok" }));
       if (origin === ENDPOINTS[0]) return hangsUntilAborted(url, init);
       if (origin === ENDPOINTS[1]) return Promise.reject("error sending request for url");
       return Promise.resolve(jsonResponse({ message: "wrong password" }, { status: 401 }));
@@ -239,7 +245,10 @@ describe("the endpoint trace", () => {
     await vi.advanceTimersByTimeAsync(8_000);
     await pending;
 
-    expect(renderTrace(trace)).toBe("req: a.example=timeout@8000 b.example=net@0 c.example=h401@0");
+    expect(renderTrace(trace)).toBe(
+      "health: a.example=h200@0; req: a.example=timeout@8000; health: b.example=h200@0; req: b.example=net@0; " +
+        "health: c.example=h200@0; req: c.example=h401@0",
+    );
   });
 
   /** An observer only: the request goes to the same places either way. */

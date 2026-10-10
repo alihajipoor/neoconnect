@@ -265,10 +265,11 @@ async function send(report: QueuedReport): Promise<boolean> {
 
   if (result.ok) return true;
   if (result.status === THROTTLED) return false;
-  // publicRequest flattens both cases into a string, and only one of
-  // them should keep the report alive. This is the message it uses when
-  // no endpoint answered at all.
-  return !result.error.startsWith("Could not reach Neoxify");
+  // Kept when no endpoint answered this request at all. Read from
+  // `noResponse`, not from the sentence: a report whose health race was
+  // answered and whose own request then was not is told it in other
+  // words ("stopped responding"), and it never arrived either.
+  return !result.noResponse;
 }
 
 /** Attaches the network, or strips what only a new server understands.

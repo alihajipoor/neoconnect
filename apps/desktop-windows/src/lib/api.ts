@@ -1,5 +1,5 @@
 import { fetch } from "@tauri-apps/plugin-http";
-import { apiEndpoints, rememberEndpoint } from "./api-endpoints";
+import { apiEndpoints, rememberedEndpoint, rememberEndpoint } from "./api-endpoints";
 import { deviceHeaders } from "./device-identity";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
 import { beginAttempt, failureOutcome, settleAttempt, type EndpointTrace, type TraceEntry } from "./endpoint-trace";
@@ -70,6 +70,53 @@ interface Stop {
   timeoutMs: number;
 }
 
+/** How long a race winner is trusted to take a write without asking the
+ * endpoints again.
+ *
+ * Long enough to cover what follows a read in the ordinary course of
+ * things: the token refresh after a read's 401, a route switch after the
+ * route list, a report after the screen that failed. Short enough that a
+ * network change or a block that has just landed costs a write one
+ * timeout at the old address, and then the health race (`sendWrite`). */
+const PROVEN_FOR_MS = 60_000;
+
+/** What a write asks the endpoints before it is sent, when no race has
+ * found an answering address in the last `PROVEN_FOR_MS`. The backend's
+ * health check: unauthenticated, small, stores nothing, and JSON from the
+ * backend whatever it says -- a 503 from it saying the database is down
+ * still proves the address reaches the backend. */
+const HEALTH_PATH = "/health";
+
+/** The last race in which the backend itself answered: where, how fast,
+ * and when. Any race counts -- a read's, the sign-in challenge's, a
+ * write's health race. */
+let lastWinner: (AnsweredBase & { at: number }) | null = null;
+
+function noteWinner(base: string, ms: number): void {
+  lastWinner = { base, ms, at: Date.now() };
+}
+
+/** The last race winner, if it won within `PROVEN_FOR_MS`. */
+function recentWinner(): AnsweredBase | null {
+  if (lastWinner === null) return null;
+  const age = Date.now() - lastWinner.at;
+  // A clock set back is not a fresh answer.
+  if (age < 0 || age >= PROVEN_FOR_MS) return null;
+  return { base: lastWinner.base, ms: lastWinner.ms };
+}
+
+/** How long a walk gives an address it had not planned to try: the
+ * pace it last won a race at, when it did, or else an ordinary walk's. */
+function timeoutAt(base: string): number {
+  return lastWinner !== null && lastWinner.base === base ? followUpTimeout(lastWinner) : ENDPOINT_TIMEOUT_MS;
+}
+
+/** Forgets the last race winner, so one test's race does not decide
+ * where the next test's write is sent. */
+export function resetRaceWinnerForTests(): void {
+  lastWinner = null;
+}
+
 /** Statuses a proxy in front of the backend -- a node mirror's nginx,
  * the CDN -- uses for "I could not get you an answer": bad gateway,
  * unavailable, gateway timeout, and the CDN's own origin-unreachable
@@ -122,7 +169,60 @@ function isBackendAnswer(response: Response): boolean {
  * for a real answer instead of settling on it. */
 class GatewayFailure extends Error {}
 
-/** Walks the endpoints, one at a time, and returns the first that answers.
+/** Thrown for a write whose health race the backend answered, when the
+ * write itself then got no answer anywhere it was sent. Neoxify was
+ * reached moments earlier, so this is not "could not reach Neoxify". */
+class StoppedAnswering extends Error {}
+
+/** A walk over addresses, one at a time, carried across its stages. */
+interface Walk {
+  /** Every address this request has been sent to. None gets it twice. */
+  tried: Set<string>;
+  /** A proxy's own failure page, kept in case nothing better answers. See
+   * `isGatewayFailure`: after one that says the backend was never
+   * reached, the next endpoint is tried -- but not after one where it may
+   * have been (`MAY_HAVE_REACHED_BACKEND`), because a write must not be
+   * sent twice. */
+  gateway: Response | null;
+  lastError: unknown;
+  /** The remembered endpoint as the walk last read it. */
+  remembered: string | undefined;
+}
+
+/** `rememberedEndpoint`, which is advisory: a walk goes on without it. */
+async function rememberedNow(): Promise<string | undefined> {
+  try {
+    return await rememberedEndpoint();
+  } catch {
+    return undefined;
+  }
+}
+
+async function newWalk(): Promise<Walk> {
+  return { tried: new Set(), gateway: null, lastError: undefined, remembered: await rememberedNow() };
+}
+
+/** Puts the remembered endpoint at the head of the walk if it has
+ * changed since the walk last looked and has not been tried.
+ *
+ * A walk's list is fixed when it starts, and another request may find an
+ * address that answers while this one is still waiting out a dead one.
+ * Measured in a VM with every name but one sinkholed: the dashboard's
+ * reads found the live address in under a second, and a report sent at
+ * the same moment walked six other addresses at eight seconds each, 56
+ * seconds in all, before reaching it. */
+async function followRemembered(queue: Stop[], walk: Walk): Promise<void> {
+  const remembered = await rememberedNow();
+  if (remembered === undefined || remembered === walk.remembered) return;
+  walk.remembered = remembered;
+  if (walk.tried.has(remembered)) return;
+  const at = queue.findIndex((stop) => stop.base === remembered);
+  queue.unshift(at === -1 ? { base: remembered, timeoutMs: timeoutAt(remembered) } : queue.splice(at, 1)[0]);
+}
+
+/** Walks the given addresses, one at a time, and returns the first
+ * answer -- or null when none of them gave one, leaving what the walk
+ * found in `walk` for the next stage or the caller.
  *
  * The shape every request had before 0.9.39, kept for the ones that must
  * not be duplicated. "Answers" means the transport completed -- any HTTP
@@ -130,36 +230,21 @@ class GatewayFailure extends Error {}
  * wrong and must not send us looking for a mirror that says something
  * nicer.
  *
- * Each address gets its own `ENDPOINT_TIMEOUT_MS`. That was a real
- * problem for the pre-connect config refresh, whose own budget is
- * shorter than one endpoint's timeout, so the refresh expired inside the
- * first address and never tried the rest. Its GET now races. But this
- * walk is still inside that budget sometimes: once the access token has
- * expired -- it lives fifteen minutes, and the refresh only runs on a
- * snapshot over ten minutes old, so after any real idle it has -- the
- * GET's 401 sends the token refresh, a POST, through here before the
- * GET is retried. The endpoint trace records which leg
- * the budget ran out in; nothing about the walk itself is changed on the
- * strength of that reading alone.
- *
- * Each stop carries its own timeout. A full walk gives every address the
- * same `ENDPOINT_TIMEOUT_MS`; a walk over addresses that have just
- * answered gives each one time to answer at the pace it just showed
- * (`followUpTimeout`).
+ * Each stop carries its own timeout: an address that has just answered
+ * is given time to answer at the pace it just showed (`followUpTimeout`).
+ * Before each step the remembered endpoint is read again
+ * (`followRemembered`), and an address no request had heard from when
+ * the walk began is tried as soon as one has. An address already in
+ * `walk.tried` is skipped: a write goes to each address once.
  */
 async function fetchOneEndpointAtATime(
   path: string,
   init: RequestInit,
   stops: Stop[],
+  walk: Walk,
   trace?: EndpointTrace,
-): Promise<Response> {
-  let lastError: unknown;
-  // A proxy's own failure page, kept in case nothing better answers. See
-  // `isGatewayFailure`: after one that says the backend was never
-  // reached, the next endpoint is tried -- but not after one where it may
-  // have been (`MAY_HAVE_REACHED_BACKEND`), because a write must not be
-  // sent twice.
-  let gateway: Response | null = null;
+): Promise<Response | null> {
+  const queue = [...stops];
   // A caller's own signal, when it brought one. Each endpoint still gets
   // its own controller and timeout; the caller's only ever shortens that,
   // and once it has fired no further endpoint is tried. Without this a
@@ -167,8 +252,14 @@ async function fetchOneEndpointAtATime(
   // must be over in a second and a half -- walked every mirror at eight
   // seconds each regardless.
   const outer = init.signal ?? null;
-  for (const { base, timeoutMs } of stops) {
+  for (;;) {
+    await followRemembered(queue, walk);
     if (outer?.aborted) break;
+    const stop = queue.shift();
+    if (stop === undefined) break;
+    const { base, timeoutMs } = stop;
+    if (walk.tried.has(base)) continue;
+    walk.tried.add(base);
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -184,7 +275,7 @@ async function fetchOneEndpointAtATime(
       if (isGatewayFailure(response) && !MAY_HAVE_REACHED_BACKEND.has(response.status)) {
         // Not remembered and not asked for the bundle: it is not the
         // service. Kept only as the answer of last resort.
-        gateway ??= response;
+        walk.gateway ??= response;
         continue;
       }
       void rememberEndpoint(base);
@@ -196,16 +287,101 @@ async function fetchOneEndpointAtATime(
       // transport failure would say the network refused an address that
       // was simply still being waited for.
       if (timedOut || !outer?.aborted) settleAttempt(entry, timedOut ? "timeout" : failureOutcome(err));
-      lastError = err;
+      walk.lastError = err;
     } finally {
       clearTimeout(timer);
       outer?.removeEventListener("abort", onOuterAbort);
     }
   }
-  // Something did answer, if only a proxy: the caller gets its status,
-  // never "could not reach Neoxify".
-  if (gateway) return gateway;
-  throw lastError ?? new Error(outer?.aborted ? "the request ran out of time" : "no API endpoint answered");
+  return null;
+}
+
+/** What a walk that got no answer ends with. Something did answer, if
+ * only a proxy: then the caller gets its status, never "could not reach
+ * Neoxify". Otherwise the walk's failure is thrown. */
+function unanswered(walk: Walk, init: RequestInit): Response {
+  if (walk.gateway) return walk.gateway;
+  throw walk.lastError ?? new Error(init.signal?.aborted ? "the request ran out of time" : "no API endpoint answered");
+}
+
+/** Sends a write -- anything but a plain read -- to one address at a
+ * time, and only to addresses that have just answered.
+ *
+ * A write used to walk the whole list, eight seconds for every address
+ * that did not answer, whatever the rest of the app had already found
+ * out about this network. In a VM with every name but one sinkholed, a
+ * POST took 56 seconds to reach the address the dashboard's reads had
+ * found in under a second, and 134 to try all sixteen. Sign-in no longer
+ * does that (`publicRace`); this is the same for every other write: the
+ * token refresh, the social sign-in exchange, a route switch, an attempt
+ * report, and the rest.
+ *
+ * First, the address a race last heard the backend from, if that was
+ * within `PROVEN_FOR_MS` -- the usual case, since writes mostly follow
+ * reads. Otherwise, or if that address does not answer, the endpoints not
+ * yet tried are raced for the health check (`raceForHealth`), and the
+ * write walks only those that answered it, in the order they answered,
+ * each given time to answer at the pace it just showed. Throughout, the
+ * remembered endpoint is read again before each step
+ * (`followRemembered`).
+ *
+ * If none of those takes the write, the race is run again over the
+ * addresses it has not yet heard from -- the ones stopped when the first
+ * answer came in -- and so on until one takes it or nothing more answers.
+ * An address that failed a health race, or has been sent the write, is
+ * not asked again, so every round is smaller than the one before. Usually
+ * there is one round: the address that answered the health check takes
+ * the write.
+ *
+ * The write itself is still sent to one address at a time, and to each
+ * at most once, for the reasons `fetchAnyEndpoint` gives. When nothing
+ * answers the health race the write is not sent at all, and the result
+ * is "could not reach Neoxify" after about twenty seconds rather than
+ * after a walk of the whole list. When the backend answered it and then
+ * the write got no answer, `StoppedAnswering` is thrown instead: Neoxify
+ * was reached moments earlier. */
+async function sendWrite(
+  path: string,
+  init: RequestInit,
+  endpoints: string[],
+  trace?: EndpointTrace,
+): Promise<Response> {
+  const outer = init.signal ?? null;
+  const walk = await newWalk();
+  // Addresses a health race may still ask.
+  let candidates = [...endpoints];
+  // Whether the backend itself answered a health race for this write.
+  let reached = false;
+
+  const recent = recentWinner();
+  if (recent !== null) {
+    const stop = { base: recent.base, timeoutMs: followUpTimeout(recent) };
+    const response = await fetchOneEndpointAtATime(path, init, [stop], walk, trace);
+    if (response) return response;
+    // The last winner has just failed a write, unless the caller's own
+    // deadline cut it short. It is no longer offered to the next one,
+    // which would otherwise wait out the same timeout before asking.
+    if (lastWinner?.base === recent.base && !outer?.aborted) lastWinner = null;
+  }
+
+  let stops: Stop[] = [];
+  for (;;) {
+    if (stops.length > 0) {
+      const response = await fetchOneEndpointAtATime(path, init, stops, walk, trace);
+      if (response) return response;
+    }
+    candidates = candidates.filter((base) => !walk.tried.has(base));
+    if (candidates.length === 0 || outer?.aborted) break;
+    const health = await raceForHealth(candidates, outer, trace);
+    reached ||= health.backend;
+    if (health.answered.length === 0) break;
+    candidates = candidates.filter((base) => !health.silent.includes(base));
+    stops = health.answered.map((answered) => ({ base: answered.base, timeoutMs: followUpTimeout(answered) }));
+  }
+  // A write cut off by its caller's own deadline was not left unanswered
+  // by the backend: that is the caller's to say, as before.
+  if (reached && !walk.gateway && !outer?.aborted) throw new StoppedAnswering();
+  return unanswered(walk, init);
 }
 
 /** Sends one request, trying each known endpoint until one answers.
@@ -221,7 +397,8 @@ async function fetchOneEndpointAtATime(
  * replies.
  *
  * Throws if none answered, so the callers below keep their existing
- * "could not reach Neoxify" handling unchanged.
+ * "could not reach Neoxify" handling unchanged -- or `StoppedAnswering`,
+ * for a write the backend had just answered the health race for.
  *
  * `trace`, when given, is told about every address tried and how each
  * attempt ended -- see endpoint-trace.ts. It changes nothing about which
@@ -233,7 +410,8 @@ async function fetchOneEndpointAtATime(
  * (`publicRace`): the race has already found out which addresses answer
  * on this network, and walking the whole list again would spend another
  * eight seconds on every blocked address before reaching the one that
- * answered a moment ago.
+ * answered a moment ago. A write without `via` finds that out for itself
+ * (`sendWrite`).
  */
 async function fetchAnyEndpoint(
   path: string,
@@ -244,11 +422,12 @@ async function fetchAnyEndpoint(
   const endpoints = via ? via.map((answered) => answered.base) : await apiEndpoints();
   if (endpoints.length === 0) throw new Error("no API endpoint is configured");
   // A caller whose deadline has already passed gets nothing sent on its
-  // behalf, by either path below.
+  // behalf, by any path below.
   if (init.signal?.aborted) throw new Error("the request ran out of time");
   if (via) {
     const stops = via.map((answered) => ({ base: answered.base, timeoutMs: followUpTimeout(answered) }));
-    return await fetchOneEndpointAtATime(path, init, stops, trace);
+    const walk = await newWalk();
+    return (await fetchOneEndpointAtATime(path, init, stops, walk, trace)) ?? unanswered(walk, init);
   }
 
   // Raced, not walked.
@@ -305,16 +484,14 @@ async function fetchAnyEndpoint(
   //
   // So anything that is not a plain read goes to one endpoint at a
   // time, which is what 0.9.38 did for every request and what sign-in
-  // has always needed. The endpoint list and its failover are
-  // unchanged -- a blocked address still steps to the next one -- it is
-  // only the simultaneity that is withdrawn, and only where it was
-  // never safe.
+  // has always needed. A blocked address still steps to the next one; it
+  // is only the simultaneity that is withdrawn, and only where it was
+  // never safe. Which addresses the write is walked over, and in what
+  // order, is `sendWrite`'s to decide.
   const method = (init.method ?? "GET").toUpperCase();
-  if (method !== "GET" && method !== "HEAD") {
-    const stops = endpoints.map((base) => ({ base, timeoutMs: ENDPOINT_TIMEOUT_MS }));
-    return await fetchOneEndpointAtATime(path, init, stops, trace);
-  }
+  if (method !== "GET" && method !== "HEAD") return await sendWrite(path, init, endpoints, trace);
 
+  const startedAt = Date.now();
   const controllers = endpoints.map(() => new AbortController());
   // Which aborts were our own deadline, so the trace can say "timeout"
   // rather than the generic transport failure the abort surfaces as.
@@ -373,6 +550,10 @@ async function fetchAnyEndpoint(
     // longer about avoiding a timeout -- it is about not opening eight
     // connections for every request once a good address is known.
     void rememberEndpoint(base);
+    // And offered to the next write (`sendWrite`) -- but only an answer
+    // that is the backend's own. A page from in front of it can win this
+    // race today; a write sent there on its strength would stop on it.
+    if (isBackendAnswer(response)) noteWinner(base, Date.now() - startedAt);
     // The endpoint answered, so it can also serve the next address list.
     // This is the only trigger the bundle has; without it a published
     // rotation never reaches a single client.
@@ -435,7 +616,9 @@ export type RequestFailure = {
   status?: number;
   /** True only when no endpoint gave any HTTP answer: the request failed
    * in transport everywhere it was sent. The one failure that may be
-   * described as "could not reach Neoxify".
+   * described as "could not reach Neoxify" -- or, when the backend had
+   * answered this sign-in's challenge or this write's health race moments
+   * before, as having stopped responding (`STOPPED_ANSWERING`).
    *
    * Absent is not the opposite. A 401 whose token refresh could not be
    * completed has no `status` either, and the server did answer that
@@ -469,6 +652,22 @@ const unreachable = (): RequestFailure => ({
   error: "Could not reach Neoxify. Check your internet connection.",
   noResponse: true,
 });
+
+/** What a request says when Neoxify answered moments earlier -- the
+ * sign-in challenge, or a write's health race -- and then nothing
+ * answered the request itself.
+ *
+ * Not "could not reach Neoxify": it was reached, so the customer's
+ * connection was working then. Saying otherwise would send them to check
+ * a connection that may well be fine. The result still carries
+ * `noResponse`, because this request got no answer, and is reported as
+ * an unreachable control plane. */
+export const STOPPED_ANSWERING = "Neoxify answered but then stopped responding. Please try again.";
+
+/** The failure for a request that got no answer: see `StoppedAnswering`. */
+function unansweredFailure(err: unknown): RequestFailure {
+  return err instanceof StoppedAnswering ? { ok: false, error: STOPPED_ANSWERING, noResponse: true } : unreachable();
+}
 
 /** A refusal, in full: the sentence, the status, and the code.
  *
@@ -512,8 +711,8 @@ export async function publicRequest<T>(
       trace,
       via,
     );
-  } catch {
-    return unreachable();
+  } catch (err) {
+    return unansweredFailure(err);
   }
 
   if (!res.ok) {
@@ -542,49 +741,44 @@ interface RaceAnswer {
   backend: boolean;
 }
 
-/** Sends one unauthenticated request to the endpoints as a staggered
- * race, and reports who answered as well as what the answer was.
- *
- * Only for a request that the server does not mind receiving more than
- * once -- nothing stored, nothing spent, beyond the throttle's count --
- * and whose every answer is JSON. The sign-in challenge is the reason
- * this exists. It is minted, signed and handed back without the server
- * keeping any record of it, so racing it is safe, where racing the
- * sign-in itself never was (see `fetchAnyEndpoint`).
+/** How a staggered race ended. */
+interface Staggered {
+  /** The first answer the race's rule accepts, or null. */
+  winner: RaceAnswer | null;
+  /** Every answer, in the order it arrived. */
+  answers: RaceAnswer[];
+  /** The addresses that failed without an answer: refused, timed out,
+   * unreachable. Not those stopped because the race was decided. */
+  failed: number[];
+  /** Stops every request still running, except the one at `spare`, whose
+   * body the caller is about to read. */
+  stop(spare?: number): void;
+}
+
+/** Sends one request to the endpoints as a staggered race.
  *
  * The address that answered last time goes first, alone, for `LEAD_MS`.
  * If it has not answered by then, or has failed already, every other
- * address is asked too. Each gets `SLOW_ANSWER_MS`.
+ * address is asked too. Each gets `SLOW_ANSWER_MS`. The race is won by
+ * the first answer `wins` accepts; it ends without a winner when every
+ * address has settled, or when the caller's signal fires.
  *
- * The race is won by the first answer from the backend itself
- * (`isBackendAnswer`), with one exception: a 429. The throttle counts
- * per address, and behind a mirror that is the node's address, so one
- * mirror being over its limit says nothing about the next one. A 429 is
- * kept as an answer, and the race goes on for one that is not. A page
- * from something in front of the backend never wins, for the reason
- * `isGatewayFailure` gives. If nothing better arrives, the first 429, or
- * failing that the first page, is the result, because something did
- * answer.
- *
- * The winner is remembered, as a raced read's is. The rest are stopped
- * as soon as it is in.
- */
-export async function publicRace<T>(path: string, init: RequestInit, trace?: EndpointTrace): Promise<Raced<T>> {
-  const endpoints = await apiEndpoints();
-  const outer = init.signal ?? null;
-  if (endpoints.length === 0 || outer?.aborted) return { result: unreachable(), answered: [] };
-  const request: RequestInit = {
-    ...init,
-    headers: { "Content-Type": "application/json", ...init.headers },
-  };
-
+ * A winner is remembered, offered to the next write (`sendWrite`), and
+ * asked for the address bundle, as a raced read's is. */
+async function staggeredRace(
+  endpoints: string[],
+  path: string,
+  request: RequestInit,
+  wins: (answer: RaceAnswer) => boolean,
+  trace?: EndpointTrace,
+): Promise<Staggered> {
+  const outer = request.signal ?? null;
   const controllers = endpoints.map(() => new AbortController());
   const timedOut = endpoints.map(() => false);
   const timers: ReturnType<typeof setTimeout>[] = [];
   const entries: (TraceEntry | undefined)[] = [];
-  // Every answer, in the order it arrived.
   const answers: RaceAnswer[] = [];
-  let launched = 0;
+  const failed: number[] = [];
   let settled = 0;
   let fannedOut = false;
   let leadTimer: ReturnType<typeof setTimeout> | undefined;
@@ -600,7 +794,6 @@ export async function publicRace<T>(path: string, init: RequestInit, trace?: End
   });
 
   const launch = (i: number) => {
-    launched += 1;
     const startedAt = Date.now();
     entries[i] = beginAttempt(trace, endpoints[i], startedAt);
     timers.push(
@@ -618,9 +811,11 @@ export async function publicRace<T>(path: string, init: RequestInit, trace?: End
           settleAttempt(entries[i], `h${response.status}`);
           const answer: RaceAnswer = { i, response, ms: Date.now() - startedAt, backend: isBackendAnswer(response) };
           answers.push(answer);
-          if (answer.backend && response.status !== 429) decide(answer);
+          if (wins(answer)) decide(answer);
         },
         (err: unknown) => {
+          // Stopped because the race was decided is not a failure.
+          if (!decided) failed.push(i);
           // As in the walk: stopped by the caller's deadline is `budget`,
           // not a transport failure.
           if (timedOut[i] || !outer?.aborted) settleAttempt(entries[i], timedOut[i] ? "timeout" : failureOutcome(err));
@@ -659,24 +854,30 @@ export async function publicRace<T>(path: string, init: RequestInit, trace?: End
   timers.forEach(clearTimeout);
   outer?.removeEventListener("abort", onOuterAbort);
 
-  // The answer that becomes the result: the winner, or failing that the
-  // first 429, or failing that the first page.
-  const kept = winner ?? answers.find((answer) => answer.backend) ?? answers[0];
-  controllers.forEach((c, i) => {
-    if (kept !== undefined && i === kept.i) return;
-    // "cancel" only when somebody won. Without a winner everything has
-    // settled already, or the caller's deadline stopped it, which is
-    // `budget`.
-    if (winner) settleAttempt(entries[i], "cancel");
-    c.abort();
-  });
-  if (kept === undefined) return { result: unreachable(), answered: [] };
-
   if (winner) {
-    void rememberEndpoint(endpoints[winner.i]);
-    void maybeRefreshBundle(endpoints[winner.i]);
+    const base = endpoints[winner.i];
+    void rememberEndpoint(base);
+    noteWinner(base, winner.ms);
+    void maybeRefreshBundle(base);
   }
 
+  const stop = (spare?: number) => {
+    controllers.forEach((c, i) => {
+      if (i === spare) return;
+      // "cancel" only when somebody won. Without a winner everything has
+      // settled already, or the caller's deadline stopped it, which is
+      // `budget`.
+      if (winner) settleAttempt(entries[i], "cancel");
+      c.abort();
+    });
+  };
+  return { winner, answers, failed, stop };
+}
+
+/** Every address that answered a race, in the order a follow-up should
+ * try them: the winner first, then the backend's other answers, then
+ * pages from whatever stands in front of it. Each once. */
+function answeredInOrder(endpoints: string[], winner: RaceAnswer | null, answers: RaceAnswer[]): AnsweredBase[] {
   const ordered = [
     ...(winner ? [winner] : []),
     ...answers.filter((answer) => answer.backend && answer !== winner),
@@ -687,8 +888,99 @@ export async function publicRace<T>(path: string, init: RequestInit, trace?: End
     const base = endpoints[answer.i];
     if (!answered.some((a) => a.base === base)) answered.push({ base, ms: answer.ms });
   }
+  return answered;
+}
 
-  return { result: await resultFrom<T>(kept.response, kept.backend), answered };
+/** Sends one unauthenticated request to the endpoints as a staggered
+ * race (`staggeredRace`), and reports who answered as well as what the
+ * answer was.
+ *
+ * Only for a request that the server does not mind receiving more than
+ * once -- nothing stored, nothing spent, beyond the throttle's count --
+ * and whose every answer is JSON. The sign-in challenge is the reason
+ * this exists. It is minted, signed and handed back without the server
+ * keeping any record of it, so racing it is safe, where racing the
+ * sign-in itself never was (see `fetchAnyEndpoint`).
+ *
+ * The race is won by the first answer from the backend itself
+ * (`isBackendAnswer`), with one exception: a 429. The throttle counts
+ * per address, and behind a mirror that is the node's address, so one
+ * mirror being over its limit says nothing about the next one. A 429 is
+ * kept as an answer, and the race goes on for one that is not. A page
+ * from something in front of the backend never wins, for the reason
+ * `isGatewayFailure` gives. If nothing better arrives, the first 429, or
+ * failing that the first page, is the result, because something did
+ * answer.
+ *
+ * The rest are stopped as soon as the winner is in.
+ */
+export async function publicRace<T>(path: string, init: RequestInit, trace?: EndpointTrace): Promise<Raced<T>> {
+  const endpoints = await apiEndpoints();
+  if (endpoints.length === 0 || init.signal?.aborted) return { result: unreachable(), answered: [] };
+  const request: RequestInit = {
+    ...init,
+    headers: { "Content-Type": "application/json", ...init.headers },
+  };
+
+  const { winner, answers, stop } = await staggeredRace(
+    endpoints,
+    path,
+    request,
+    (answer) => answer.backend && answer.response.status !== 429,
+    trace,
+  );
+
+  // The answer that becomes the result: the winner, or failing that the
+  // first 429, or failing that the first page.
+  const kept = winner ?? answers.find((answer) => answer.backend) ?? answers[0];
+  stop(kept?.i);
+  if (kept === undefined) return { result: unreachable(), answered: [] };
+  return {
+    result: await resultFrom<T>(kept.response, kept.backend),
+    answered: answeredInOrder(endpoints, winner, answers),
+  };
+}
+
+/** Races the health check across `endpoints`, for a write about to be
+ * sent (`sendWrite`): who answered, in answer order; whether the backend
+ * itself was among them; and who failed to answer at all, which a later
+ * round need not ask again.
+ *
+ * Won by the first answer from the backend, whatever its status. Unlike
+ * the sign-in challenge, nothing is wanted from the answer but the fact
+ * of it, and a 429 or a 503 from the backend proves the address reaches
+ * it as well as a 200 does. A page from in front of the backend does not
+ * win, but is still listed, last: something answered there, and if
+ * nothing better does, the write collects that status rather than "could
+ * not reach Neoxify".
+ *
+ * Traced under its own phase, `health`, and the caller's phase put back
+ * after. Every request is stopped once the race is decided; no body is
+ * read. */
+async function raceForHealth(
+  endpoints: string[],
+  signal: AbortSignal | null,
+  trace?: EndpointTrace,
+): Promise<{ answered: AnsweredBase[]; backend: boolean; silent: string[] }> {
+  const phase = trace?.phase;
+  if (trace) trace.phase = "health";
+  try {
+    const { winner, answers, failed, stop } = await staggeredRace(
+      endpoints,
+      HEALTH_PATH,
+      { method: "GET", signal },
+      (answer) => answer.backend,
+      trace,
+    );
+    stop();
+    return {
+      answered: answeredInOrder(endpoints, winner, answers),
+      backend: winner !== null,
+      silent: failed.map((i) => endpoints[i]),
+    };
+  } finally {
+    if (trace && phase !== undefined) trace.phase = phase;
+  }
 }
 
 /** The result a raced answer stands for. A page from in front of the
@@ -797,8 +1089,8 @@ async function authenticatedAttempt(path: string, init?: RequestInit, trace?: En
   try {
     if (trace) trace.phase = "req";
     res = await doFetch(tokens.accessToken);
-  } catch {
-    return { answered: false, failure: unreachable() };
+  } catch (err) {
+    return { answered: false, failure: unansweredFailure(err) };
   }
 
   if (res.status === 401) {
@@ -828,8 +1120,8 @@ async function authenticatedAttempt(path: string, init?: RequestInit, trace?: En
     try {
       if (trace) trace.phase = "retry";
       res = await doFetch(refreshed.tokens.accessToken);
-    } catch {
-      return { answered: false, failure: unreachable() };
+    } catch (err) {
+      return { answered: false, failure: unansweredFailure(err) };
     }
   }
 

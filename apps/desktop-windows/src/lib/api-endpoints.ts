@@ -113,6 +113,29 @@ export async function apiEndpoints(): Promise<string[]> {
   return ordered;
 }
 
+/** The endpoint this process last remembered, held here as well as in
+ * the store. The store's copy is written asynchronously, and a walk that
+ * reads it again between steps (`rememberedEndpoint`) must not miss an
+ * address another request found a moment earlier. */
+let rememberedHere: string | undefined;
+
+/** The endpoint that answered most recently, if one is known.
+ *
+ * Read by a write that is walking addresses one at a time, before each
+ * step. The walk's own list was fixed when it began; another request may
+ * since have found an address that answers. Never throws: not knowing
+ * costs the walk a shortcut, not the request. */
+export async function rememberedEndpoint(): Promise<string | undefined> {
+  if (rememberedHere !== undefined) return rememberedHere;
+  try {
+    const store = await getStore();
+    const remembered = await store.get<string>(KEY);
+    return typeof remembered === "string" && remembered.length > 0 ? remembered : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Records the endpoint that answered.
  *
  * Only ever called on a real response -- including an error response,
@@ -120,6 +143,7 @@ export async function apiEndpoints(): Promise<string[]> {
  * must not be remembered is an endpoint that merely failed slowly.
  */
 export async function rememberEndpoint(url: string): Promise<void> {
+  rememberedHere = url;
   try {
     const store = await getStore();
     await store.set(KEY, url);

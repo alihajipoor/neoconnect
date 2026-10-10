@@ -17,6 +17,14 @@ const sent: { url: string; headers: Record<string, string>; body: unknown }[] = 
 
 vi.mock("@tauri-apps/plugin-http", () => ({
   fetch: (url: string, init?: RequestInit) => {
+    // The health race a write runs first, to find an address that
+    // answers (`sendWrite` in api.ts). Answered everywhere, and not part
+    // of what the contract has the device send.
+    if (new URL(url).pathname === "/health") {
+      return Promise.resolve(
+        new Response(JSON.stringify({ status: "ok" }), { status: 200, headers: { "content-type": "application/json" } }),
+      );
+    }
     sent.push({
       url,
       headers: { ...(init?.headers as Record<string, string>) },
@@ -58,6 +66,7 @@ vi.mock("./session", () => ({
 }));
 
 const { claimSlot, renewSlot, releaseSlot, refusalReport, refusalFrom } = await import("./device-slots");
+const { resetRaceWinnerForTests } = await import("./api");
 const { configureDeviceIdentity } = await import("./device-identity");
 const { onSessionRevoked } = await import("./session-revoked");
 const { failedDial } = await import("./attempts");
@@ -97,6 +106,7 @@ const DEVICE_LIMIT = {
 };
 
 beforeEach(() => {
+  resetRaceWinnerForTests();
   for (const key of Object.keys(replies)) delete replies[key];
   sent.length = 0;
   stored = { accessToken: "access", refreshToken: "refresh" };
