@@ -205,9 +205,10 @@ describe("the endpoint trace", () => {
     expect(renderTrace(trace)).toBe("req: a.example=cancel@0 b.example=h200@0 c.example=cancel@0");
   });
 
-  /** None answered: each address says how it failed. A blackholed one
-   * hits our own deadline; one outside the app's HTTP permission never
-   * left the device; anything else is a transport failure. */
+  /** None answered: each address says how it failed. One that connected
+   * and never answered hits our own deadline, which in a race is twenty
+   * seconds; one outside the app's HTTP permission never left the device;
+   * anything else is a transport failure. */
   it("records how each address failed when none answered", async () => {
     vi.useFakeTimers();
     tauriFetch.mockImplementation((url: string, init?: RequestInit) => {
@@ -219,11 +220,11 @@ describe("the endpoint trace", () => {
     const trace = newTrace();
 
     const pending = publicRequest("/config", undefined, trace);
-    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.advanceTimersByTimeAsync(20_000);
     const result = await pending;
 
     expect(result.ok).toBe(false);
-    expect(renderTrace(trace)).toBe("req: a.example=net@0 b.example=scope@0 c.example=timeout@8000");
+    expect(renderTrace(trace)).toBe("req: a.example=net@0 b.example=scope@0 c.example=timeout@20000");
   });
 
   /** A write goes one address at a time, each found by a health race

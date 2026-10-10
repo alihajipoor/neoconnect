@@ -3,6 +3,7 @@ import { login } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { LogoMark } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
+import { useStillTrying } from "../lib/still-trying";
 import { SocialSignIn } from "../components/SocialSignIn";
 
 export function Login({
@@ -23,6 +24,10 @@ export function Login({
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // A sign-in may take up to forty-five seconds on a network where only a
+  // slow route answers; past eight the button's "Signing in..." gets a
+  // line saying it is still trying.
+  const pendingLong = useStillTrying(pending);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -95,6 +100,7 @@ export function Login({
           <Button type="submit" disabled={pending} className="mt-1 w-full">
             {pending ? t("auth.signingIn") : t("auth.signIn")}
           </Button>
+          {pendingLong ? <p className="text-center text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
         </form>
         {/* Below the button rather than beside the password field: it is
             the exit for a failed sign-in, so it belongs where someone

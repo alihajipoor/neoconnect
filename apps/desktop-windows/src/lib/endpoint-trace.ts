@@ -47,7 +47,11 @@ export type TracePhase = "challenge" | "health" | "req" | "refresh" | "retry";
  * apart.
  *
  * - `h<status>`: an HTTP answer. The address is reachable and is us.
- * - `timeout`: no answer inside `ENDPOINT_TIMEOUT_MS`; aborted by us.
+ * - `timeout`: no answer in the time allowed. Either aborted by us at the
+ *   request's own deadline (eight seconds in a walk, twenty in a race),
+ *   or given up by the HTTP plugin at the connection deadline it is
+ *   passed (`CONNECT_TIMEOUT_MS`, ten seconds), which is what a
+ *   blackholed address now usually shows. See `failedAs` in api.ts.
  * - `scope`: refused before leaving the device, because the address is
  *   not in the app's HTTP permission. A build problem, not a network one.
  * - `cancel`: another address answered first, so this one was stopped.

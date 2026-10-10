@@ -75,7 +75,9 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: Endpo
  * milliseconds unless an account is under attack. A CDN that answers in
  * about twenty seconds, with every mirror blocked, still signs the
  * customer in. A network where nothing answers is told so after the race
- * alone, a little over twenty seconds, without waiting for this. */
+ * alone, without waiting for this: a little over twenty seconds at most,
+ * and about eleven and a half where no address even completes a
+ * connection (`CONNECT_TIMEOUT_MS` in api.ts). */
 const SIGN_IN_DEADLINE_MS = LEAD_MS + 2 * SLOW_ANSWER_MS + 3_500;
 
 /** Sends a sign-in or sign-up, with a proof-of-work solution, where the

@@ -61,6 +61,7 @@ import { LocationPicker } from "@shared/components/LocationPicker";
 import { Sheet } from "@shared/components/Sheet";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
 import { useI18n } from "@shared/lib/i18n";
+import { useStillTrying } from "@shared/lib/still-trying";
 import { sessionGeneration } from "@shared/lib/session-end";
 import {
   loadSnapshot,
@@ -320,6 +321,9 @@ export function Dashboard({
 }) {
   const { t } = useI18n();
   const [loading, setLoading] = useState(true);
+  // The loading screen waits on three reads, each given up to twenty
+  // seconds an address; past eight it says it is still trying.
+  const loadingLong = useStillTrying(loading);
   /** Whether `loadAll` has the screen ready for a pass: the route list and
    * the platform's state in, after the credentials. Not `loading`, which
    * ends as soon as the credentials are in so the screen can be drawn: the
@@ -2393,6 +2397,9 @@ export function Dashboard({
           <Logo />
         </div>
         <p className="text-xs text-muted-foreground">{t("common.loading")}</p>
+        {loadingLong ? (
+          <p className="max-w-xs px-6 text-center text-xs text-muted-foreground">{t("common.stillTrying")}</p>
+        ) : null}
       </div>
     );
   }

@@ -924,6 +924,10 @@ const en = {
     "The usual way an account is lost is not detection -- it is the player telling support. One player lost seven years of progress after mentioning where he was in a support ticket. If you contact a game's support, answer what they ask and do not volunteer your location or that you use a VPN.",
 
   "common.loading": "Loading...",
+  // Under a wait that has passed eight seconds (still-trying.ts). Says
+  // only that the wait is long and not over -- never that Neoxify could
+  // not be reached, which is for when nothing answered at all.
+  "common.stillTrying": "This is taking longer than usual. Still trying...",
 
   // The prominent disclosure shown once, before sign-in, on store
   // builds. Google Play requires an in-app explanation of why the app
@@ -1478,6 +1482,7 @@ const fa: Record<TranslationKey, string> = {
     "حساب‌ها معمولاً به این دلیل از دست نمی‌روند که سازنده‌ی بازی فیلترشکن را تشخیص داده است؛ به این دلیل از دست می‌روند که خودِ بازیکن به پشتیبانی گفته است. یک بازیکن پس از آنکه در یک تیکت پشتیبانی به موقعیت مکانی‌اش اشاره کرد، هفت سال پیشرفتش را از دست داد. اگر با پشتیبانی یک بازی تماس گرفتید، فقط به آنچه می‌پرسند پاسخ دهید و از خودتان درباره‌ی موقعیت مکانی یا استفاده از فیلترشکن چیزی نگویید.",
 
   "common.loading": "در حال بارگذاری...",
+  "common.stillTrying": "بیشتر از معمول طول کشیده است. تلاش ادامه دارد...",
 
   "disclosure.title": "پیش از اتصال",
   "disclosure.subtitle": "این برنامه چه می‌کند و ما چه اطلاعاتی جمع‌آوری می‌کنیم. لطفاً یک بار بخوانید.",

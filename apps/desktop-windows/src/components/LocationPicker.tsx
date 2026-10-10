@@ -11,6 +11,7 @@ import { Button } from "./ui";
 import { Latency } from "./Latency";
 import { Flag } from "./Flag";
 import { useI18n } from "../lib/i18n";
+import { useStillTrying } from "../lib/still-trying";
 
 // Full-screen overlay, not a floating dialog -- this app's window is a
 // fixed 400x640 (see tauri.conf.json), so "sheet slides over the whole
@@ -95,6 +96,12 @@ export function LocationPicker({
   const [error, setError] = useState<string | null>(null);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [switchError, setSwitchError] = useState<string | null>(null);
+  // Both waits are on Neoxify: the list is a read, given up to twenty
+  // seconds an address, and a switch a write that first asks who answers.
+  // Past eight seconds each says it is still trying rather than spinning
+  // in silence.
+  const loadingLong = useStillTrying(loading);
+  const switchingLong = useStillTrying(switchingId !== null);
   /** Measured round-trip per route. Absent means "not measured yet",
    * which renders as "--" -- distinct from a measured failure, which is
    * an explicit null. Both are honest; neither invents a number. */
@@ -120,6 +127,12 @@ export function LocationPicker({
 
   async function load() {
     setError(null);
+    // A wait, when there is nothing on screen to show meanwhile -- the
+    // Retry after an error. Left false there, the list fell through to
+    // "No locations available on your current plan" for as long as the
+    // request took, which is up to twenty seconds an address now, and is
+    // not something anybody had been told.
+    setLoading(routes.length === 0);
     const result = await getAvailableRoutes(subscriptionId);
     if (result.ok) {
       setRoutes(result.data);
@@ -292,8 +305,9 @@ export function LocationPicker({
 
       <div className="flex-1 overflow-y-auto px-3 py-3">
         {loading ? (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
+            {loadingLong ? <p className="text-xs">{t("common.stillTrying")}</p> : null}
           </div>
         ) : error ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
@@ -418,6 +432,7 @@ export function LocationPicker({
           </div>
           </>
         )}
+        {switchingLong ? <p className="px-2 pt-2 text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
         {switchError ? <p className="px-2 pt-2 text-xs text-destructive">{switchError}</p> : null}
       </div>
     </div>

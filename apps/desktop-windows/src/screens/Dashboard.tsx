@@ -113,6 +113,7 @@ import { CommunityLinks } from "../components/CommunityLinks";
 import { RepairNetwork } from "../components/RepairNetwork";
 import { DeviceSlotCard } from "../components/DeviceSlotCard";
 import { useI18n } from "../lib/i18n";
+import { useStillTrying } from "../lib/still-trying";
 
 /** How a ladder pass ended.
  *
@@ -523,6 +524,9 @@ export function Dashboard({
 }) {
   const { t, language } = useI18n();
   const [loading, setLoading] = useState(true);
+  // The loading screen waits on three reads, each given up to twenty
+  // seconds an address; past eight it says it is still trying.
+  const loadingLong = useStillTrying(loading);
   const [error, setError] = useState<string | null>(null);
   const [me, setMe] = useState<Customer | null>(null);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
@@ -3168,6 +3172,9 @@ export function Dashboard({
           <Logo />
         </div>
         <p className="text-xs text-muted-foreground">{t("common.loading")}</p>
+        {loadingLong ? (
+          <p className="max-w-xs px-6 text-center text-xs text-muted-foreground">{t("common.stillTrying")}</p>
+        ) : null}
       </div>
     );
   }

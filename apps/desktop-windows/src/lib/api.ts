@@ -20,10 +20,14 @@ import type { TokenPair } from "./types";
  * reachable, and short enough that walking the whole list stays within
  * what someone will sit through. It only costs anything on the first
  * request, since the winner is remembered.
+ *
+ * Walks only. A race gives every address `SLOW_ANSWER_MS`, because there
+ * nobody waits on a slow address once another has answered.
  */
 const ENDPOINT_TIMEOUT_MS = 8_000;
 
-/** How long each address gets in a race for an answer worth waiting for.
+/** How long each address gets in a race for an answer worth waiting for:
+ * a read's, the sign-in challenge's, a write's health race.
  *
  * Longer than `ENDPOINT_TIMEOUT_MS` because in a race nobody waits for a
  * slow address once another has answered, so a long deadline costs
@@ -32,8 +36,66 @@ const ENDPOINT_TIMEOUT_MS = 8_000;
  * at eight seconds that answer was thrown away, and the screen said it
  * could not reach a server that had in fact replied. That shape fits the
  * testers' reports, but it was modelled in a simulated network, not
- * observed on theirs. */
+ * observed on theirs.
+ *
+ * Reads were the last race still cut off at eight seconds -- the server
+ * list, the account, the pre-connect config refresh -- so on that network
+ * the location picker and the dashboard said Neoxify could not be reached
+ * while the sign-in screen, given twenty, got through. What keeps a
+ * longer deadline from making a blocked network slower to report is
+ * `CONNECT_TIMEOUT_MS`: an address that never completes a connection is
+ * given up on well before this. */
 export const SLOW_ANSWER_MS = 20_000;
+
+/** How long an address gets to complete a connection, passed to the HTTP
+ * plugin with every request.
+ *
+ * reqwest applies it to everything before the request is sent: the name
+ * lookup, the TCP handshake and the TLS handshake. A blackholed address,
+ * which is what filtering in Iran usually makes of a blocked one, never
+ * gets past the TCP handshake, so it fails here at ten seconds instead of
+ * waiting out `SLOW_ANSWER_MS`. A race in which nothing at all is
+ * reachable then ends at about ten seconds, not twenty, while an address
+ * that did connect, and is merely slow to answer, keeps the full twenty.
+ *
+ * Ten seconds is a guess at the slowest handshake worth waiting for, not
+ * a measurement: a TLS handshake throttled past ten seconds is cut off
+ * by it, and so is the request. Whether that happens on the networks this
+ * is for is unverified; the traces will show it as `timeout` at about
+ * ten seconds (`failedAs`), and this is the number to change if they do.
+ *
+ * Ignored by the web portal, whose `fetch` is the browser's and has no
+ * such setting: there an unreachable address takes the full deadline. */
+export const CONNECT_TIMEOUT_MS = 10_000;
+
+/** Sends one request to one address, with the connection deadline.
+ *
+ * The options are put together in a variable rather than as a literal in
+ * the call, because the web portal type-checks this file against the
+ * browser's `fetch`, whose options have no `connectTimeout`; a literal
+ * there would be rejected as an unknown property. */
+function send(base: string, path: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+  const options: RequestInit & { connectTimeout: number } = { ...init, signal, connectTimeout: CONNECT_TIMEOUT_MS };
+  return fetch(`${base}${path}`, options);
+}
+
+/** How a request that got no answer is recorded in the trace.
+ *
+ * `timedOut` is our own deadline. The plugin's connection deadline
+ * (`CONNECT_TIMEOUT_MS`) is the other one, and it fails with the same
+ * sentence as a reset or a refused connection, because reqwest's message
+ * drops the cause. So a transport failure that lands at that deadline,
+ * within the second after it, is taken to be it. Recorded as `net`
+ * instead, every blackholed address would read as one that was refused,
+ * which is the opposite diagnosis -- `timeout` is how a blackhole has
+ * always read in these reports. A reset that happens to land in that same
+ * second is recorded as a timeout; nothing else is. */
+function failedAs(err: unknown, timedOut: boolean, startedAt: number): "timeout" | "scope" | "net" {
+  if (timedOut) return "timeout";
+  const outcome = failureOutcome(err);
+  const elapsed = Date.now() - startedAt;
+  return outcome === "net" && elapsed >= CONNECT_TIMEOUT_MS && elapsed < CONNECT_TIMEOUT_MS + 1_000 ? "timeout" : outcome;
+}
 
 /** How long the first address, the one that answered last time, has a
  * staggered race to itself before the others are asked.
@@ -266,11 +328,12 @@ async function fetchOneEndpointAtATime(
       timedOut = true;
       controller.abort();
     }, timeoutMs);
-    const entry = beginAttempt(trace, base);
+    const startedAt = Date.now();
+    const entry = beginAttempt(trace, base, startedAt);
     const onOuterAbort = () => controller.abort();
     outer?.addEventListener("abort", onOuterAbort);
     try {
-      const response = await fetch(`${base}${path}`, { ...init, signal: controller.signal });
+      const response = await send(base, path, init, controller.signal);
       settleAttempt(entry, `h${response.status}`);
       if (isGatewayFailure(response) && !MAY_HAVE_REACHED_BACKEND.has(response.status)) {
         // Not remembered and not asked for the bundle: it is not the
@@ -286,7 +349,7 @@ async function fetchOneEndpointAtATime(
       // pending, which the trace renders as `budget`. Recording it as a
       // transport failure would say the network refused an address that
       // was simply still being waited for.
-      if (timedOut || !outer?.aborted) settleAttempt(entry, timedOut ? "timeout" : failureOutcome(err));
+      if (timedOut || !outer?.aborted) settleAttempt(entry, failedAs(err, timedOut, startedAt));
       walk.lastError = err;
     } finally {
       clearTimeout(timer);
@@ -336,10 +399,12 @@ function unanswered(walk: Walk, init: RequestInit): Response {
  * The write itself is still sent to one address at a time, and to each
  * at most once, for the reasons `fetchAnyEndpoint` gives. When nothing
  * answers the health race the write is not sent at all, and the result
- * is "could not reach Neoxify" after about twenty seconds rather than
- * after a walk of the whole list. When the backend answered it and then
- * the write got no answer, `StoppedAnswering` is thrown instead: Neoxify
- * was reached moments earlier. */
+ * is "could not reach Neoxify" after twenty seconds at most -- about
+ * eleven and a half where no address completes a connection
+ * (`CONNECT_TIMEOUT_MS`) -- rather than after a walk of the whole list.
+ * When the backend answered it and then the write got no answer,
+ * `StoppedAnswering` is thrown instead: Neoxify was reached moments
+ * earlier. */
 async function sendWrite(
   path: string,
   init: RequestInit,
@@ -496,13 +561,18 @@ async function fetchAnyEndpoint(
   // Which aborts were our own deadline, so the trace can say "timeout"
   // rather than the generic transport failure the abort surfaces as.
   const timedOut = endpoints.map(() => false);
+  // Each address gets `SLOW_ANSWER_MS`, as in every other race, and not a
+  // walk's eight seconds: an answer that took longer than eight seconds
+  // used to be thrown away here, and the screen said Neoxify could not be
+  // reached. An address that cannot even connect still drops out at
+  // `CONNECT_TIMEOUT_MS`.
   const timers = controllers.map((c, i) =>
     setTimeout(() => {
       timedOut[i] = true;
       c.abort();
-    }, ENDPOINT_TIMEOUT_MS),
+    }, SLOW_ANSWER_MS),
   );
-  const entries = endpoints.map((base) => beginAttempt(trace, base));
+  const entries = endpoints.map((base) => beginAttempt(trace, base, startedAt));
   // The caller's signal stops every runner at once. See
   // fetchOneEndpointAtATime for why a caller may bring one.
   const outer = init.signal ?? null;
@@ -516,7 +586,7 @@ async function fetchAnyEndpoint(
   const gateway: { i: number; response: Response }[] = [];
   const attempts = endpoints.map(async (base, i) => {
     try {
-      const response = await fetch(`${base}${path}`, { ...init, signal: controllers[i].signal });
+      const response = await send(base, path, init, controllers[i].signal);
       settleAttempt(entries[i], `h${response.status}`);
       if (isGatewayFailure(response)) {
         gateway.push({ i, response });
@@ -527,7 +597,7 @@ async function fetchAnyEndpoint(
       return { base, response };
     } catch (err) {
       if (!(err instanceof GatewayFailure)) {
-        settleAttempt(entries[i], timedOut[i] ? "timeout" : failureOutcome(err));
+        settleAttempt(entries[i], failedAs(err, timedOut[i], startedAt));
       }
       throw err;
     }
@@ -805,7 +875,7 @@ async function staggeredRace(
     // Started inside a promise, so a fetch that throws rather than
     // rejecting is still one address failing, not the whole race.
     void Promise.resolve()
-      .then(() => fetch(`${endpoints[i]}${path}`, { ...request, signal: controllers[i].signal }))
+      .then(() => send(endpoints[i], path, request, controllers[i].signal))
       .then(
         (response) => {
           settleAttempt(entries[i], `h${response.status}`);
@@ -818,7 +888,7 @@ async function staggeredRace(
           if (!decided) failed.push(i);
           // As in the walk: stopped by the caller's deadline is `budget`,
           // not a transport failure.
-          if (timedOut[i] || !outer?.aborted) settleAttempt(entries[i], timedOut[i] ? "timeout" : failureOutcome(err));
+          if (timedOut[i] || !outer?.aborted) settleAttempt(entries[i], failedAs(err, timedOut[i], startedAt));
         },
       )
       .finally(() => {
