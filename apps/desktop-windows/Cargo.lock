@@ -2698,6 +2698,7 @@ dependencies = [
  "flate2",
  "h2",
  "http",
+ "hyper",
  "neoconnect-ipc",
  "reqwest 0.12.28",
  "ring",

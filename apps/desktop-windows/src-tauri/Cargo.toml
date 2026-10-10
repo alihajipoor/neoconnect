@@ -57,6 +57,11 @@ webpki = { package = "rustls-webpki", version = "0.103", default-features = fals
 ring = "0.17"
 base64 = "0.22"
 flate2 = "1"
+# Named only so the relay can tell hyper's own timeout -- an HTTP/2 PING
+# the box left unanswered -- from the call's (see `went_silent` in
+# relay_http.rs). The hyper reqwest is built on, with no features of its
+# own: this adds no crate and changes nothing it is built with.
+hyper = { version = "1", default-features = false }
 
 [dev-dependencies]
 # relay_http.rs's HTTP/2 test serves h2 over TLS on loopback. All four are

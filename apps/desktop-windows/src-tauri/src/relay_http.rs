@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -74,7 +74,8 @@ pub enum RelayError {
     ConnectTimeout,
     /// No complete answer within the caller's time.
     Timeout,
-    /// The connection failed or was cut without an answer.
+    /// The connection failed, was cut, or went silent (a PING left
+    /// unanswered, `KEEP_ALIVE_TIMEOUT`) without an answer.
     Network,
     /// An answer this cannot read: an encoding it did not ask for, or a
     /// gzip body that does not inflate.
@@ -158,9 +159,32 @@ const MAX_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The box closes a connection that has been idle for 30 seconds. Giving
 /// one up at 20 means a pooled connection is almost never reused just as
-/// the far end is closing it -- and `exchange` retries a GET once for the
+/// the far end is closing it -- and `attempt` retries a GET once for the
 /// rare time it is.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// While a call is open on an HTTP/2 connection and nothing has arrived
+/// on it for this long, the box is sent a PING.
+///
+/// A connection can die without a word: a middlebox stops forwarding the
+/// flow, or a phone moves from Wi-Fi to cellular and leaves it behind.
+/// Nothing is reset, so nothing fails until the operating system gives
+/// up retransmitting, which takes tens of seconds to minutes and on iOS
+/// has no limit set by us at all. Over HTTP/2 every call shares the one
+/// connection, so until then each call would be handed the dead one and
+/// spend its whole time on it. An unanswered PING ends that within this
+/// interval and `KEEP_ALIVE_TIMEOUT`, which is well inside a call's time,
+/// and `attempt` then asks a GET again on a new connection.
+///
+/// No PING is sent while a connection sits idle in the pool: that would
+/// keep a flow to the box alive, and visible, for no call at all. A dead
+/// pooled connection is found by the first call that uses it instead.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long the box has to answer a PING: as long as a new connection
+/// gets for its TCP and TLS handshakes together, which take two round
+/// trips to the PING's one.
+const KEEP_ALIVE_TIMEOUT: Duration = CONNECT_TIMEOUT;
 
 /// The same identity the app's other requests present (tauri-plugin-
 /// http's default, as in health_ip.rs), so the backend behind the box
@@ -496,23 +520,33 @@ struct Relay {
 
 type RelayKey = (SocketAddrV4, Vec<[u8; 32]>);
 
+/// The key a relay is kept under. The same pins in another order are the
+/// same relay.
+fn relay_key(address: SocketAddrV4, pins: &[[u8; 32]]) -> RelayKey {
+    let mut pins = pins.to_vec();
+    pins.sort_unstable();
+    (address, pins)
+}
+
+/// Every relay this process has a client for.
+fn relays() -> MutexGuard<'static, HashMap<RelayKey, Arc<Relay>>> {
+    static RELAYS: OnceLock<Mutex<HashMap<RelayKey, Arc<Relay>>>> = OnceLock::new();
+    // A panic elsewhere while holding the lock leaves a map that is still
+    // whole: every write to it is a single insert, remove or clear.
+    RELAYS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// The client for this address and pin set: one per process, so calls
 /// share its connections. Over HTTP/2, which the box speaks, that is one
 /// connection for every call, and a call after the first costs no
 /// handshake at all -- on a network where each handshake to a foreign
 /// address is a fresh chance to be cut.
 fn relay_for(address: SocketAddrV4, pins: &[[u8; 32]]) -> Result<Arc<Relay>, RelayError> {
-    static RELAYS: OnceLock<Mutex<HashMap<RelayKey, Arc<Relay>>>> = OnceLock::new();
-    // The same pins in another order are the same relay.
-    let mut pins = pins.to_vec();
-    pins.sort_unstable();
-    let key = (address, pins);
-    // A panic elsewhere while holding the lock leaves a map that is still
-    // whole: every write to it is a single insert or clear.
-    let mut relays = RELAYS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = relay_key(address, pins);
+    let mut relays = relays();
     if let Some(relay) = relays.get(&key) {
         return Ok(Arc::clone(relay));
     }
@@ -527,6 +561,16 @@ fn remember<V>(relays: &mut HashMap<RelayKey, V>, key: RelayKey, value: V, limit
         relays.clear();
     }
     relays.insert(key, value);
+}
+
+/// Takes a relay out of the map, so the next call to it builds a new
+/// client and dials a new connection -- but only if it is still the one
+/// there. A call that ran out of time alongside another may find the
+/// other has already replaced it, and the replacement is kept.
+fn forget<V>(relays: &mut HashMap<RelayKey, Arc<V>>, key: &RelayKey, relay: &Arc<V>) {
+    if relays.get(key).is_some_and(|known| Arc::ptr_eq(known, relay)) {
+        relays.remove(key);
+    }
 }
 
 fn build_relay(pins: Vec<[u8; 32]>) -> Result<Relay, RelayError> {
@@ -550,6 +594,11 @@ fn build_relay(pins: Vec<[u8; 32]>) -> Result<Relay, RelayError> {
         .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         .connect_timeout(CONNECT_TIMEOUT)
         .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        // Only while a call is open on the connection: reqwest leaves
+        // `http2_keep_alive_while_idle` off, which is what is wanted (see
+        // `KEEP_ALIVE_INTERVAL`).
+        .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
+        .http2_keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
         .https_only(true)
         .referer(false)
         // The response is inflated here, under the size limit, whatever
@@ -573,7 +622,7 @@ fn build_relay(pins: Vec<[u8; 32]>) -> Result<Relay, RelayError> {
 /// the name is handed over. No session resumption either: a resumed
 /// session skips the certificate entirely, and a ticket links one
 /// connection to the next for anyone holding the box's keys. It also
-/// makes every new connection call the verifier, which is how `exchange`
+/// makes every new connection call the verifier, which is how `attempt`
 /// can tell a reused connection from a new one.
 fn pinned_tls_config(pins: Vec<[u8; 32]>, handshakes: Arc<AtomicU64>) -> ClientConfig {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -666,36 +715,57 @@ fn spki_sha256(cert: &CertificateDer<'_>) -> Option<[u8; 32]> {
     ring::digest::digest(&ring::digest::SHA256, spki.as_ref()).as_ref().try_into().ok()
 }
 
+/// Sends the call and reads the answer, as `attempt` does, and leaves no
+/// connection in doubt behind it.
+///
+/// A call that ran out of time may have done so on a connection that has
+/// gone silent before any PING could say so -- a budget shorter than
+/// `KEEP_ALIVE_INTERVAL` ends first. Over HTTP/2 that connection is the
+/// one every call shares, and the pool hands it out again as fresh each
+/// time a call takes it, so the next call would wait out a PING on it
+/// before a GET could be asked again, and a POST would simply fail. So
+/// the relay's client is dropped after a timeout, and the next call dials
+/// a new connection. Calls already under way keep the old client until
+/// they finish. When the box was only slow, that costs one handshake.
+async fn exchange(call: Call) -> Result<RelayResponse, RelayError> {
+    let deadline = Instant::now() + call.timeout;
+    let relay = relay_for(call.address, &call.pins)?;
+    let answer = attempt(&relay, &call, deadline).await;
+    if answer == Err(RelayError::Timeout) {
+        forget(&mut relays(), &relay_key(call.address, &call.pins), &relay);
+    }
+    answer
+}
+
 /// Sends the call, retrying a GET once if a pooled connection turns out
 /// to be dead, and reads the answer.
 ///
 /// The retry is for one failure only: the request went out on a
 /// connection that was already open, and the connection died before any
-/// answer. That is a connection the box closed while it sat in the pool
-/// -- not a verdict on the network -- and a GET can safely be asked
-/// again. A POST cannot: the box may have passed it on before the
-/// connection died, and a second sign-in or registration is not the
-/// same as the first. (hyper itself already resends a request, POST
-/// included, that it found a pooled connection closed before writing --
-/// one it knows never left this machine.)
+/// answer. That is a connection the box closed while it sat in the pool,
+/// or one that went silent under it (`KEEP_ALIVE_INTERVAL`) -- not a
+/// verdict on the network -- and a GET can safely be asked again. A POST
+/// cannot: the box may have passed it on before the connection died, and
+/// a second sign-in or registration is not the same as the first. (hyper
+/// itself already resends a request, POST included, that it found a
+/// pooled connection closed before writing -- one it knows never left
+/// this machine.)
 ///
 /// "Already open" is known from the handshake count: no handshake during
 /// the attempt means no new connection, and an error that is not a
 /// connect error means the request was dispatched -- so it went out on a
 /// reused one. A handshake by a concurrent call makes this say no, which
 /// only ever means not retrying.
-async fn exchange(call: Call) -> Result<RelayResponse, RelayError> {
-    let deadline = Instant::now() + call.timeout;
-    let relay = relay_for(call.address, &call.pins)?;
+async fn attempt(relay: &Relay, call: &Call, deadline: Instant) -> Result<RelayResponse, RelayError> {
     let handshakes = relay.handshakes.load(Ordering::SeqCst);
-    let response = match send(&relay, &call, remaining(deadline)?).await {
+    let response = match send(relay, call, remaining(deadline)?).await {
         Ok(response) => response,
         Err(err)
             if call.method == Method::GET
                 && died_on_reused_connection(&err)
                 && relay.handshakes.load(Ordering::SeqCst) == handshakes =>
         {
-            send(&relay, &call, remaining(deadline)?).await.map_err(|err| classify(&err))?
+            send(relay, call, remaining(deadline)?).await.map_err(|err| classify(&err))?
         }
         Err(err) => return Err(classify(&err)),
     };
@@ -728,20 +798,42 @@ async fn send(relay: &Relay, call: &Call, timeout: Duration) -> Result<reqwest::
 }
 
 /// The request was dispatched and nothing came back: not a failure to
-/// connect, not out of time, not a TLS refusal.
+/// connect, not the caller's time running out, not a TLS refusal. A
+/// connection that went silent counts (`went_silent`): that is the
+/// connection lost, not the call's time spent.
 fn died_on_reused_connection(err: &reqwest::Error) -> bool {
-    err.is_request() && !err.is_connect() && !err.is_timeout() && rustls_error(err).is_none()
+    err.is_request()
+        && !err.is_connect()
+        && (!err.is_timeout() || went_silent(err))
+        && cause::<rustls::Error>(err).is_none()
+}
+
+/// Whether hyper gave the connection up because a PING went unanswered
+/// (`KEEP_ALIVE_TIMEOUT`).
+///
+/// hyper reports that as a timeout of its own, so reqwest's `is_timeout`
+/// says yes to it as it does to the call's own time running out. They
+/// are told apart by whose error it is: the call's time and the connect
+/// timeout are reqwest's, and on a client hyper has no other timeout
+/// than the PING's.
+fn went_silent(err: &reqwest::Error) -> bool {
+    cause::<hyper::Error>(err).is_some_and(hyper::Error::is_timeout)
 }
 
 /// Which `RelayError` a reqwest failure is. Looks only at the error's
 /// kind and causes, never its text, which carries the URL.
 fn classify(err: &reqwest::Error) -> RelayError {
-    match rustls_error(err) {
+    match cause::<rustls::Error>(err) {
         Some(rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)) => {
             return RelayError::PinMismatch
         }
         Some(_) => return RelayError::Tls,
         None => {}
+    }
+    // Ahead of the timeouts: an unanswered PING is the connection failing
+    // while the caller still had time, which is what `Network` says.
+    if went_silent(err) {
+        return RelayError::Network;
     }
     match (err.is_timeout(), err.is_connect()) {
         (true, true) => RelayError::ConnectTimeout,
@@ -750,7 +842,7 @@ fn classify(err: &reqwest::Error) -> RelayError {
     }
 }
 
-/// The rustls error behind a failure, if there is one.
+/// The error of type `T` behind a failure, if there is one.
 ///
 /// An `io::Error`'s `source` skips the error it wraps, and that is where
 /// rustls's is: tokio-rustls wraps it in one `io::Error` and the TLS
@@ -758,10 +850,10 @@ fn classify(err: &reqwest::Error) -> RelayError {
 /// error: Custom { kind: InvalidData, error: InvalidCertificate(..) } }`).
 /// So every `io::Error` on the way down is opened rather than stepped
 /// over.
-fn rustls_error<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a rustls::Error> {
+fn cause<'a, T: std::error::Error + 'static>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a T> {
     let mut next = Some(err);
     while let Some(err) = next {
-        if let Some(found) = err.downcast_ref::<rustls::Error>() {
+        if let Some(found) = err.downcast_ref::<T>() {
             return Some(found);
         }
         next = match err.downcast_ref::<std::io::Error>().and_then(|io| io.get_ref()) {
@@ -1194,6 +1286,25 @@ mod tests {
         assert_eq!(map.len(), 3);
         remember(&mut map, key(9), 9, 3);
         assert_eq!(map.into_iter().collect::<Vec<_>>(), vec![(key(9), 9)]);
+    }
+
+    #[test]
+    fn forgets_a_relay_only_if_it_is_still_the_one_kept() {
+        let key = relay_key(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 443), &[[2; 32], [1; 32]]);
+        // The key does not depend on the order the pins came in.
+        assert_eq!(key, relay_key(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 443), &[[1; 32], [2; 32]]));
+        let old = Arc::new(1);
+        let replacement = Arc::new(1);
+        let mut map = HashMap::from([(key.clone(), Arc::clone(&replacement))]);
+        // The client that timed out is no longer the one kept: the
+        // replacement a concurrent call made stays.
+        forget(&mut map, &key, &old);
+        assert!(Arc::ptr_eq(&map[&key], &replacement));
+        forget(&mut map, &key, &replacement);
+        assert!(map.is_empty());
+        // Forgetting what is not there is nothing.
+        forget(&mut map, &key, &replacement);
+        assert!(map.is_empty());
     }
 
     /// A certificate made by `openssl req -x509 -newkey ec -pkeyopt
@@ -1826,7 +1937,7 @@ mod tests {
 
     /// The same, for a new connection that follows an earlier one to the
     /// same relay. That is where a resumed TLS session would skip the
-    /// verifier -- and with it the handshake count `exchange` reads -- and
+    /// verifier -- and with it the handshake count `attempt` reads -- and
     /// make a new connection look like a reused one.
     #[test]
     fn a_second_connection_is_new_too() {
@@ -1932,64 +2043,175 @@ mod tests {
         assert!(took >= CONNECT_TIMEOUT - Duration::from_millis(100) && took < CONNECT_TIMEOUT + Duration::from_secs(2), "{took:?}");
     }
 
+    /// An HTTP/2 relay on 127.0.0.1, which is what the box is: TLS 1.3,
+    /// h2 by ALPN, one connection shared by every call. Each answer's body
+    /// names the connection that gave it, counting from 1.
+    ///
+    /// Its first connection answers `first_connection_answers` requests
+    /// (every one, when `None`) and then goes silent: it takes the next
+    /// request and from then on neither answers it nor reads another
+    /// frame, PINGs included, while holding the connection open. That is
+    /// a flow a middlebox has stopped forwarding, or one a phone left
+    /// behind on another network, seen from the client's end -- nothing
+    /// arrives, and nothing says so. Every later connection answers
+    /// everything.
+    struct H2Relay {
+        base: String,
+        pin: String,
+        seen: Arc<Mutex<Seen>>,
+        negotiated: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
+    }
+
+    impl H2Relay {
+        fn start(first_connection_answers: Option<usize>) -> Self {
+            let key = TestKey::fresh();
+            let seen = Arc::new(Mutex::new(Seen::default()));
+            let config = server_config(key.certificate(), &key, &[&rustls::version::TLS13], &[b"h2", b"http/1.1"], Arc::clone(&seen));
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base = format!("https://127.0.0.1:{}/api", listener.local_addr().unwrap().port());
+            let negotiated: Arc<Mutex<Vec<Option<Vec<u8>>>>> = Arc::default();
+            let server_negotiated = Arc::clone(&negotiated);
+            let server_seen = Arc::clone(&seen);
+            tauri::async_runtime::spawn(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let acceptor = tokio_rustls::TlsAcceptor::from(config);
+                let mut silent_after = first_connection_answers;
+                loop {
+                    let Ok((tcp, _)) = listener.accept().await else { return };
+                    let index = {
+                        let mut seen = server_seen.lock().unwrap();
+                        seen.connections += 1;
+                        seen.connections
+                    };
+                    // Only the first connection ever goes silent.
+                    let silent_after = silent_after.take();
+                    let Ok(tls) = acceptor.accept(tcp).await else { continue };
+                    server_negotiated.lock().unwrap().push(tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec));
+                    let seen = Arc::clone(&server_seen);
+                    tauri::async_runtime::spawn(async move {
+                        let Ok(mut connection) = h2::server::handshake(tls).await else { return };
+                        let mut answered = 0;
+                        while let Some(Ok((request, mut respond))) = connection.accept().await {
+                            seen.lock().unwrap().requests.push(SeenRequest {
+                                method: request.method().to_string(),
+                                target: request.uri().path().to_string(),
+                                ..Default::default()
+                            });
+                            if silent_after == Some(answered) {
+                                // Neither the connection nor the stream is
+                                // polled again, and neither is dropped,
+                                // which would reset or close it: the test
+                                // process ends first.
+                                std::future::pending::<()>().await;
+                            }
+                            answered += 1;
+                            let head = http::Response::builder().status(200).header("content-type", "application/json").body(()).unwrap();
+                            let Ok(mut body) = respond.send_response(head, false) else { return };
+                            let _ = body.send_data(bytes::Bytes::from(format!("{{\"connection\":{index}}}")), true);
+                        }
+                    });
+                }
+            });
+            let pin = pin_of(&spki_sha256(&key.certificate()).unwrap());
+            H2Relay { base, pin, seen, negotiated }
+        }
+
+        fn call(&self, method: &str, path: &str, body: Option<&str>, timeout_ms: u64) -> Result<RelayResponse, RelayError> {
+            tauri::async_runtime::block_on(relay_request(
+                self.base.clone(),
+                vec![self.pin.clone()],
+                method.into(),
+                path.into(),
+                None,
+                body.map(str::to_string),
+                timeout_ms,
+            ))
+        }
+
+        fn targets(&self) -> Vec<String> {
+            self.seen.lock().unwrap().requests.iter().map(|r| format!("{} {}", r.method, r.target)).collect()
+        }
+    }
+
+    fn from_connection(n: usize) -> String {
+        format!("{{\"connection\":{n}}}")
+    }
+
     /// The box speaks HTTP/2, and that is what is used: one connection,
     /// negotiated by ALPN, carrying every call -- the pooled client is
     /// one per relay, not one per call.
     #[test]
     fn speaks_http2_and_keeps_one_connection_for_every_call() {
-        let key = TestKey::fresh();
-        let seen = Arc::new(Mutex::new(Seen::default()));
-        let config = server_config(key.certificate(), &key, &[&rustls::version::TLS13], &[b"h2", b"http/1.1"], Arc::clone(&seen));
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let base = format!("https://127.0.0.1:{}/api", listener.local_addr().unwrap().port());
-        let negotiated: Arc<Mutex<Vec<Option<Vec<u8>>>>> = Arc::default();
-        let server_negotiated = Arc::clone(&negotiated);
-        let server_seen = Arc::clone(&seen);
-        tauri::async_runtime::spawn(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            let acceptor = tokio_rustls::TlsAcceptor::from(config);
-            loop {
-                let Ok((tcp, _)) = listener.accept().await else { return };
-                server_seen.lock().unwrap().connections += 1;
-                let Ok(tls) = acceptor.accept(tcp).await else { continue };
-                server_negotiated.lock().unwrap().push(tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec));
-                let seen = Arc::clone(&server_seen);
-                tauri::async_runtime::spawn(async move {
-                    let Ok(mut connection) = h2::server::handshake(tls).await else { return };
-                    while let Some(Ok((request, mut respond))) = connection.accept().await {
-                        seen.lock().unwrap().requests.push(SeenRequest {
-                            method: request.method().to_string(),
-                            target: request.uri().path().to_string(),
-                            ..Default::default()
-                        });
-                        let head = http::Response::builder().status(200).header("content-type", "application/json").body(()).unwrap();
-                        let Ok(mut body) = respond.send_response(head, false) else { return };
-                        let _ = body.send_data(bytes::Bytes::from_static(b"{\"h2\":true}"), true);
-                    }
-                });
-            }
-        });
-
-        let pin = pin_of(&spki_sha256(&key.certificate()).unwrap());
-        let call = || {
-            tauri::async_runtime::block_on(relay_request(
-                base.clone(),
-                vec![pin.clone()],
-                "GET".into(),
-                "/customer/subscriptions".into(),
-                None,
-                None,
-                5_000,
-            ))
-        };
+        let relay = H2Relay::start(None);
         for _ in 0..3 {
-            assert_eq!(call().map(|a| (a.status, a.body)), Ok((200, "{\"h2\":true}".to_string())));
+            let answer = relay.call("GET", "/customer/subscriptions", None, 5_000);
+            assert_eq!(answer.map(|a| (a.status, a.body)), Ok((200, from_connection(1))));
         }
-        let seen = seen.lock().unwrap();
-        assert_eq!(*negotiated.lock().unwrap(), vec![Some(b"h2".to_vec())]);
+        assert_eq!(*relay.negotiated.lock().unwrap(), vec![Some(b"h2".to_vec())]);
+        let seen = relay.seen.lock().unwrap();
         assert_eq!(seen.connections, 1, "{seen:?}");
         assert_eq!(seen.requests.len(), 3);
         assert_eq!(seen.sni, vec![None]);
+    }
+
+    /// The shared connection goes silent between two calls, with no
+    /// reset to say so. The next GET on it does not spend its whole time
+    /// waiting: a PING goes unanswered, the connection is given up, and
+    /// the GET is asked again on a new one -- and the call after that
+    /// does not go back to the dead one.
+    #[test]
+    fn asks_a_get_again_when_a_reused_connection_goes_silent() {
+        let relay = H2Relay::start(Some(1));
+        assert_eq!(relay.call("GET", "/customer/me", None, 5_000).map(|a| a.body), Ok(from_connection(1)));
+        let started = Instant::now();
+        let answer = relay.call("GET", "/customer/subscriptions", None, 15_000);
+        let took = started.elapsed();
+        assert_eq!(answer.map(|a| a.body), Ok(from_connection(2)));
+        // Given up on within one PING interval and one PING timeout, plus
+        // the new connection's handshake; not at the end of the call's time.
+        assert!(took < KEEP_ALIVE_INTERVAL + KEEP_ALIVE_TIMEOUT + Duration::from_secs(2), "{took:?}");
+        assert_eq!(relay.call("GET", "/customer/me", None, 5_000).map(|a| a.body), Ok(from_connection(2)));
+        assert_eq!(relay.seen.lock().unwrap().connections, 2);
+        assert_eq!(
+            relay.targets(),
+            [
+                "GET /api/customer/me",
+                "GET /api/customer/subscriptions",
+                "GET /api/customer/subscriptions",
+                "GET /api/customer/me"
+            ],
+        );
+    }
+
+    /// The same silence under a POST is reported as the connection's
+    /// failure, not as the caller's time running out, and the POST is not
+    /// asked again: the box has it, and may have passed it on. The dead
+    /// connection is not used for the call after.
+    #[test]
+    fn never_asks_a_post_again_on_a_connection_gone_silent() {
+        let relay = H2Relay::start(Some(1));
+        assert_eq!(relay.call("GET", "/customer/me", None, 5_000).map(|a| a.body), Ok(from_connection(1)));
+        let started = Instant::now();
+        assert_eq!(relay.call("POST", "/login-challenge", Some("{\"scope\":\"login\"}"), 15_000), Err(RelayError::Network));
+        assert!(started.elapsed() < KEEP_ALIVE_INTERVAL + KEEP_ALIVE_TIMEOUT + Duration::from_secs(2), "{:?}", started.elapsed());
+        assert_eq!(relay.call("GET", "/customer/me", None, 5_000).map(|a| a.body), Ok(from_connection(2)));
+        assert_eq!(relay.seen.lock().unwrap().connections, 2);
+        assert_eq!(relay.targets(), ["GET /api/customer/me", "POST /api/login-challenge", "GET /api/customer/me"]);
+    }
+
+    /// A call whose own time runs out before any PING has gone unanswered
+    /// still leaves its connection in doubt, and the next call dials a new
+    /// one rather than wait on it. With a budget shorter than the PING
+    /// interval plus its timeout, waiting would mean failing too.
+    #[test]
+    fn a_call_that_ran_out_of_time_leaves_its_connection_behind() {
+        let relay = H2Relay::start(Some(1));
+        assert_eq!(relay.call("GET", "/customer/me", None, 5_000).map(|a| a.body), Ok(from_connection(1)));
+        // Over before the first PING is even due.
+        assert!(Duration::from_millis(800) < KEEP_ALIVE_INTERVAL);
+        assert_eq!(relay.call("GET", "/customer/me", None, 800), Err(RelayError::Timeout));
+        assert_eq!(relay.call("GET", "/customer/me", None, 2_000).map(|a| a.body), Ok(from_connection(2)));
+        assert_eq!(relay.seen.lock().unwrap().connections, 2);
     }
 }
