@@ -49,7 +49,9 @@ type Addendum = { apiEndpoint?: string; reason?: string } | undefined;
 type ProbeOptions = { pathChanging?: boolean };
 const probeAddendum = vi.fn<(entries: unknown[], options?: ProbeOptions) => Promise<Addendum>>();
 const connectStarting = vi.fn();
-vi.mock("./control-plane-probe", () => ({
+vi.mock("./control-plane-probe", async (importOriginal) => ({
+  // Which screen states move the path is the real module's to say.
+  ...(await importOriginal<typeof import("./control-plane-probe")>()),
   probeAddendum: (e: unknown[], o?: ProbeOptions) => probeAddendum(e, o),
   connectStarting: () => connectStarting(),
 }));

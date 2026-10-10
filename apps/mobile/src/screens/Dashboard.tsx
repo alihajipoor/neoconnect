@@ -78,6 +78,7 @@ import {
   rungsFrom,
   type Dial,
 } from "@shared/lib/attempts";
+import { snapshotAge, traceRequests } from "@shared/lib/unanswered-report";
 import {
   createSlotTeardown,
   deviceSlot,
@@ -578,11 +579,19 @@ export function Dashboard({
     const sessionAtStart = sessionGeneration();
     setLoading(true);
     setError(null);
+    // Traced, so a load that nothing answered is reported with the
+    // addresses it tried. See unanswered-report.ts.
+    const requests = traceRequests("dashboard load", connectionState);
     const [meResult, subsResult, usersResult] = await Promise.all([
-      getMe(),
-      getSubscriptions(),
-      getProtocolUsers(),
+      getMe(requests.trace("me")),
+      getSubscriptions(requests.trace("subscriptions")),
+      getProtocolUsers(requests.trace("protocol-users")),
     ]);
+    const unanswered = requests.settle({
+      me: meResult,
+      subscriptions: subsResult,
+      "protocol-users": usersResult,
+    });
 
     if (!meResult.ok || !subsResult.ok || !usersResult.ok) {
       const failed = [meResult, subsResult, usersResult].find((r) => !r.ok);
@@ -595,6 +604,11 @@ export function Dashboard({
       // handed over last time, so fall back to it rather than stranding
       // a paying customer whose nodes are perfectly reachable.
       const cached = await loadSnapshot();
+      unanswered?.(
+        cached
+          ? `showing the cached credentials, ${snapshotAge(cached.savedAt)}`
+          : "showed the load error, with nothing cached to show",
+      );
       if (cached) {
         setSubscription(cached.subscription);
         setProtocolUsers(cached.protocolUsers);
@@ -645,7 +659,9 @@ export function Dashboard({
 
     let currentRoutes: RouteOption[] = [];
     if (sub) {
-      const routesResult = await getAvailableRoutes(sub.id);
+      const routeList = traceRequests("dashboard route list", connectionState);
+      const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));
+      const routesUnanswered = routeList.settle({ routes: routesResult });
       if (routesResult.ok) {
         currentRoutes = routesResult.data;
         setRoutes(currentRoutes);
@@ -658,6 +674,11 @@ export function Dashboard({
         // failed request never blanks a list already showing.
         currentRoutes = await cachedRoutesFor(sub);
         if (currentRoutes.length > 0) setRoutes(currentRoutes);
+        routesUnanswered?.(
+          currentRoutes.length > 0
+            ? `the rest of the load had answered; showing ${currentRoutes.length} servers cached for this plan`
+            : "the rest of the load had answered; no servers cached for this plan to show",
+        );
       }
     }
 

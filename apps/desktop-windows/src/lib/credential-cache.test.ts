@@ -118,7 +118,7 @@ describe("the server list, when only its request fails", () => {
 
     for (const path of ["../screens/Dashboard.tsx", "../../../mobile/src/screens/Dashboard.tsx"]) {
       const screen = readFileSync(new URL(path, import.meta.url), "utf8");
-      const asked = screen.indexOf("const routesResult = await getAvailableRoutes(sub.id);");
+      const asked = screen.indexOf('const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));');
       const write = screen.indexOf("void saveSnapshot(", asked);
       expect(asked, path).toBeGreaterThan(screen.indexOf("async function load"));
       const load = screen.slice(asked, write);

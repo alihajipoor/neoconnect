@@ -1,6 +1,6 @@
 import type { ApiResult } from "./api";
 import { reportAttempt, type AttemptReport } from "./attempts";
-import { connectStarting, probeAddendum } from "./control-plane-probe";
+import { connectStarting, pathChangingIn, probeAddendum } from "./control-plane-probe";
 import { newTrace, renderTrace } from "./endpoint-trace";
 import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
 import { getProtocolUsers } from "./customer";
@@ -276,11 +276,6 @@ const TRIGGER_LABEL: Record<RefreshTrigger, string> = {
   online: "online",
 };
 
-/** Screen states in which a connect or a disconnect is moving the path
- * the control plane is reached over. A probe begun in one would measure
- * the move. Matched as strings: `appState` is whatever the screen held. */
-const PATH_CHANGING: ReadonlySet<string> = new Set(["connecting", "verifying", "disconnecting"]);
-
 /** What `keepLateAnswer` needs to know about the refresh it outlives. */
 interface LateAnswerContext {
   held: ProtocolUser[];
@@ -468,7 +463,7 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   else
     void reportAttempt(
       report,
-      probeAddendum(trace.entries, { pathChanging: appState !== undefined && PATH_CHANGING.has(appState) }),
+      probeAddendum(trace.entries, { pathChanging: pathChangingIn(appState) }),
     );
   // Also on the console, where a beta tester reading their own log can
   // see it without a round trip through the panel.

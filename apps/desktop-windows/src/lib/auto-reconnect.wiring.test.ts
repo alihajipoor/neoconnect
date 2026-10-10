@@ -249,7 +249,7 @@ describe("which screen runs an attempt", () => {
     // exits and with every game's placement Unknown until the next connect.
     const load = body("async function loadAll(preferRouteId?: string) {");
     // Online: once the list has been asked for, answered or not.
-    const asked = load.indexOf("const routesResult = await getAvailableRoutes(sub.id);");
+    const asked = load.indexOf('const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));');
     const said = load.indexOf("} finally {\n      setRouteListLoaded(true);\n    }");
     expect(asked).toBeGreaterThan(0);
     expect(said).toBeGreaterThan(asked);
@@ -461,7 +461,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     const pick = picker.slice(picker.indexOf("async function handlePick(route: RouteOption) {"));
     const told = pick.indexOf("onPicking?.(route.id);");
     expect(told).toBeGreaterThan(0);
-    expect(told).toBeLessThan(pick.indexOf("await switchRoute(subscriptionId, route.id);"));
+    expect(told).toBeLessThan(pick.indexOf('await switchRoute(subscriptionId, route.id, requests.trace("switch"));'));
     // Automatic too, before its own handler.
     const automatic = picker.slice(picker.indexOf("if (automatic || switchingId) return;"));
     expect(automatic.indexOf("onPicking?.(null);")).toBeGreaterThan(0);

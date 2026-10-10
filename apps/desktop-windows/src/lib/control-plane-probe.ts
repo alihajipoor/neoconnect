@@ -144,6 +144,17 @@ export interface ProbeOptions {
   pathChanging?: boolean;
 }
 
+/** Screen states in which a connect or a disconnect is moving the path
+ * the control plane is reached over. A probe begun in one would measure
+ * the move. Matched as strings: `appState` is whatever the screen held. */
+const PATH_CHANGING: ReadonlySet<string> = new Set(["connecting", "verifying", "disconnecting"]);
+
+/** Whether a screen in `appState` is moving the path: `pathChanging`,
+ * for a report made from a screen's state. */
+export function pathChangingIn(appState: string | undefined): boolean {
+  return appState !== undefined && PATH_CHANGING.has(appState);
+}
+
 interface ProbeRun {
   /** The `probe:` section for the report's `apiEndpoint`. */
   section: string;

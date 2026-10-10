@@ -13,6 +13,7 @@ import { Flag } from "./Flag";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
+import { traceRequests } from "../lib/unanswered-report";
 
 // Full-screen overlay, not a floating dialog -- this app's window is a
 // fixed 400x640 (see tauri.conf.json), so "sheet slides over the whole
@@ -134,7 +135,13 @@ export function LocationPicker({
     // request took, which is up to twenty seconds an address now, and is
     // not something anybody had been told.
     setLoading(routes.length === 0);
-    const result = await getAvailableRoutes(subscriptionId);
+    // Traced, so a list that nothing answered is reported with the
+    // addresses it tried, whether or not the customer saw an error for
+    // it. See unanswered-report.ts.
+    const requests = traceRequests("server list");
+    const result = await getAvailableRoutes(subscriptionId, requests.trace("routes"));
+    const unanswered = requests.settle({ routes: result });
+    const throughTunnel = tunnelActive ? "; a tunnel was up" : "";
     if (result.ok) {
       setRoutes(result.data);
       void measureAll(result.data);
@@ -142,6 +149,9 @@ export function LocationPicker({
       // A failed refresh must not blank a list the customer can see and
       // use. It only becomes an error when there is nothing behind it.
       setError(failureText(result, t));
+      unanswered?.(`showed the error, with no servers to list${throughTunnel}`);
+    } else {
+      unanswered?.(`kept the ${routes.length} servers already on screen${throughTunnel}`);
     }
     setLoading(false);
   }
@@ -272,7 +282,12 @@ export function LocationPicker({
     onPicking?.(route.id);
     setSwitchError(null);
     setSwitchingId(route.id);
-    const result = await switchRoute(subscriptionId, route.id);
+    // A switch that nothing answered shows the same sentence as a list
+    // that could not be had -- over rows the customer can see -- and it
+    // left no report either.
+    const requests = traceRequests("server switch");
+    const result = await switchRoute(subscriptionId, route.id, requests.trace("switch"));
+    const unanswered = requests.settle({ switch: result });
     setSwitchingId(null);
     if (result.ok) {
       onSwitched(route.id);
@@ -280,6 +295,9 @@ export function LocationPicker({
     } else {
       onPickFailed?.();
       setSwitchError(failureText(result, t));
+      // Not "nothing was switched": a request whose answer was lost may
+      // still have arrived.
+      unanswered?.(`showed the error and kept the previous choice${tunnelActive ? "; a tunnel was up" : ""}`);
     }
   }
 

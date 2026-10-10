@@ -66,6 +66,7 @@ import { useRefreshOnResume } from "../lib/resume";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
+import { snapshotAge, traceRequests } from "../lib/unanswered-report";
 import {
   deviceSlot,
   slotNoticeStore,
@@ -1258,7 +1259,15 @@ export function Dashboard({
     const sessionAtStart = sessionGeneration();
     setLoading(true);
     setError(null);
-    const [meResult, subsResult, usersResult] = await Promise.all([getMe(), getSubscriptions(), getProtocolUsers()]);
+    // Traced, so a load that nothing answered is reported with the
+    // addresses it tried. See unanswered-report.ts.
+    const requests = traceRequests("dashboard load", connectionState);
+    const [meResult, subsResult, usersResult] = await Promise.all([
+      getMe(requests.trace("me")),
+      getSubscriptions(requests.trace("subscriptions")),
+      getProtocolUsers(requests.trace("protocol-users")),
+    ]);
+    const unanswered = requests.settle({ me: meResult, subscriptions: subsResult, "protocol-users": usersResult });
 
     if (!meResult.ok || !subsResult.ok || !usersResult.ok) {
       const failed = [meResult, subsResult, usersResult].find((r) => !r.ok);
@@ -1276,6 +1285,11 @@ export function Dashboard({
       // Iran and every customer there lost the product entirely -- on
       // every protocol, on every node, none of which were blocked.
       const cached = await loadSnapshot();
+      unanswered?.(
+        cached
+          ? `showing the cached credentials, ${snapshotAge(cached.savedAt)}`
+          : "showed the load error, with nothing cached to show",
+      );
       if (cached) {
         setSubscription(cached.subscription);
         setProtocolUsers(cached.protocolUsers);
@@ -1351,7 +1365,9 @@ export function Dashboard({
     let currentRoutes: RouteOption[] = [];
     try {
       if (sub) {
-        const routesResult = await getAvailableRoutes(sub.id);
+        const routeList = traceRequests("dashboard route list", connectionState);
+        const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));
+        const routesUnanswered = routeList.settle({ routes: routesResult });
         if (routesResult.ok) {
           currentRoutes = routesResult.data;
           setRoutes(currentRoutes);
@@ -1366,6 +1382,11 @@ export function Dashboard({
           // request never blanks a list already showing.
           currentRoutes = await cachedRoutesFor(sub);
           if (currentRoutes.length > 0) setRoutes(currentRoutes);
+          routesUnanswered?.(
+            currentRoutes.length > 0
+              ? `the rest of the load had answered; showing ${currentRoutes.length} servers cached for this plan`
+              : "the rest of the load had answered; no servers cached for this plan to show",
+          );
         }
       }
     } finally {
