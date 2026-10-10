@@ -2868,6 +2868,12 @@ export function Dashboard({
             // degraded states where a tunnel exists but is not
             // trusted yet.
             tunnelActive={connectionState !== "disconnected"}
+            // Already loaded here -- from Neoxify, or from the cache when
+            // it cannot be reached -- so the picker opens on the servers
+            // and refreshes behind them. Without it the list opened empty
+            // and asked again, and with Neoxify out of reach it said
+            // "Could not reach Neoxify" over servers the screen was holding.
+            initialRoutes={routes}
             // Nothing pinned is Automatic, which is what a new install
             // starts on; choosing it clears the pin on this device. Every
             // route is already provisioned, so there is no server call.
