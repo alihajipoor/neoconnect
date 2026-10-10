@@ -33,11 +33,14 @@
  *
  * A sign-in or sign-up has a leg before its request: the race for the
  * proof-of-work challenge, which is also what decides where the request
- * is sent. When nothing answered that race, it is the only leg there is.
+ * is sent. When nothing answered that race, it is the only leg there is;
+ * when the request then got no answer where the race was answered, a
+ * second race over the rest of the list follows it, as a second
+ * `challenge` leg, and a second request where that one is answered.
  *
  * Any other write may have one too: a race for the health check, run
- * when no race has found an answering address in the last minute, to
- * decide where the write is sent (see `sendWrite` in api.ts). It comes
+ * when the backend has not answered anywhere in the last minute and a
+ * half, to decide where the write is sent (see `sendWrite` in api.ts). It comes
  * just before the leg it was run for -- `health: ...; refresh: ...` is
  * the token refresh's. A health check after a leg is the other use: a
  * refused token refresh, checked against the one address that refused

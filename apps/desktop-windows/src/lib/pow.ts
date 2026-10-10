@@ -54,10 +54,17 @@ function leadingZeroBits(bytes: Uint8Array): number {
  * Search for a nonce satisfying the challenge.
  *
  * Yields to the event loop periodically so the page stays responsive.
- * At the difficulties actually issued this finishes in milliseconds;
- * the yield matters only at the top of the escalation range, where an
- * account under sustained attack can be asked for a second or two of
- * work and a frozen UI would look like a crash.
+ * At the difficulties issued to a source and an account with no recent
+ * failures this finishes in milliseconds. It does not at the top of the
+ * escalation range. A digest costs about nineteen microseconds in Node on
+ * the Windows PC (measured on 2026-10-09), so the expected solve at 19 bits
+ * is about ten seconds and at 21 bits about forty, on a desktop; a phone's
+ * webview is likely slower, and neither webview has been measured. The
+ * server asks for those after ten and twenty recent failures, forgotten
+ * half an hour after the last one, per account and per source -- and
+ * behind a node's mirror the source is the node, shared by every customer
+ * on it. The sign-in's deadline does not count this time
+ * (`SIGN_IN_DEADLINE_MS` in auth.ts).
  */
 export async function solve(challenge: Challenge): Promise<Solution> {
   const encoder = new TextEncoder();
@@ -81,22 +88,30 @@ export async function solve(challenge: Challenge): Promise<Solution> {
   }
 }
 
-/** What asking for a challenge found out, besides the challenge. */
-export type ChallengeRace =
-  /** No address gave any HTTP answer. The sign-in would only walk the
-   * same dead list again, so it is not sent at all. */
-  | { reached: false; failure: RequestFailure }
-  | {
-      reached: true;
-      /** Undefined when no usable challenge came back. */
-      solution?: Solution;
-      /** Where to send the attempt: every address that answered, the one
-       * that handed out the challenge first. See `Raced.answered`. */
-      answered: AnsweredBase[];
-    };
+/** What asking for a challenge found out. */
+export interface ChallengeRace {
+  /** The challenge, when a usable one came back. Unsolved: the solving is
+   * the caller's, outside the time it allows the network
+   * (`sendWithChallenge` in auth.ts). */
+  challenge?: Challenge;
+  /** Where to send the attempt: every address the backend itself
+   * answered from, the one that handed out the challenge first, then any
+   * that were over their throttle. See `Raced.answered`. Empty when only
+   * pages from in front of the backend answered, or nothing did. */
+  answered: AnsweredBase[];
+  /** The addresses that answered only with a page. Not sent the attempt:
+   * the backend was not reached through them. */
+  pages: string[];
+  /** The addresses that gave no answer at all. */
+  failed: string[];
+  /** The race's own result, when it was not a challenge: what the sign-in
+   * says if nothing better comes of it -- "could not reach Neoxify" when
+   * nothing answered, a page's status when only a page did. */
+  failure?: RequestFailure;
+}
 
 /**
- * Fetches a challenge as a race across the endpoints, and solves it.
+ * Fetches a challenge as a race across the endpoints.
  *
  * Raced rather than walked. Walked, it was the first of two walks over
  * the same list -- this one, then the sign-in itself -- each giving
@@ -109,29 +124,42 @@ export type ChallengeRace =
  * question the sign-in would otherwise spend its own walk on: which
  * addresses answer on this network.
  *
- * The solution is still best-effort. If a challenge does not come back
- * -- refused, throttled, unreadable -- the attempt goes ahead without
- * one and is judged on its merits, rather than making an anti-abuse
- * measure into one more thing that can lock a customer out of their own
- * account. The server refuses the attempt if it genuinely requires a
- * solution. Only when nothing answered at all is there no attempt to
- * make.
+ * The solution is still best-effort (`solveQuietly`). If a challenge does
+ * not come back -- refused, throttled, unreadable -- the attempt goes
+ * ahead without one and is judged on its merits, rather than making an
+ * anti-abuse measure into one more thing that can lock a customer out of
+ * their own account. The server refuses the attempt if it genuinely
+ * requires a solution. Only when the backend answered nowhere is there no
+ * attempt to make.
+ *
+ * `endpoints` limits the race to those addresses: a second race, over the
+ * addresses the first did not hear from, when the attempt got no answer
+ * where the first was answered.
  */
 export async function raceChallengeFor(
   scope: LoginScope,
   email: string | undefined,
   trace?: EndpointTrace,
   signal?: AbortSignal,
+  endpoints?: string[],
 ): Promise<ChallengeRace> {
-  const { result, answered } = await publicRace<Challenge>(
+  const { result, answered, pages, failed } = await publicRace<Challenge>(
     "/login-challenge",
     { method: "POST", body: JSON.stringify({ scope, email }), signal },
     trace,
+    endpoints,
   );
-  if (!result.ok) return answered.length === 0 ? { reached: false, failure: result } : { reached: true, answered };
+  if (!result.ok) return { answered, pages, failed, failure: result };
+  return { challenge: result.data, answered, pages, failed };
+}
+
+/** `solve`, or undefined when the challenge cannot be solved: the attempt
+ * then goes without a solution, as above. */
+export async function solveQuietly(challenge: Challenge | undefined): Promise<Solution | undefined> {
+  if (challenge === undefined) return undefined;
   try {
-    return { reached: true, solution: await solve(result.data), answered };
+    return await solve(challenge);
   } catch {
-    return { reached: true, answered };
+    return undefined;
   }
 }

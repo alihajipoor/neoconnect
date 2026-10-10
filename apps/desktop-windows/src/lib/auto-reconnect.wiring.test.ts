@@ -256,7 +256,9 @@ describe("which screen runs an attempt", () => {
     expect(load.indexOf("setRoutes(currentRoutes);")).toBeLessThan(said);
     // Cached: with the cached list on screen. And with nothing to dial, at
     // once, as the route memory is.
-    const cached = load.indexOf("setRoutes(cached.routes);\n        setRouteListLoaded(true);");
+    const cached = load.indexOf(
+      "setRoutes(cached.routes);\n        routesShownRef.current = { plan: cached.subscription ? planOf(cached.subscription) : null, load };\n        setRouteListLoaded(true);",
+    );
     expect(cached).toBeGreaterThan(0);
     expect(load.split("setRouteListLoaded(true);").length - 1).toBe(3);
     expect(dashboard.split("setRouteListLoaded(true)").length - 1).toBe(3);

@@ -19,6 +19,7 @@ vi.mock("@tauri-apps/plugin-store", () => ({
     return {
       get: async (key: string) => store.get(key),
       set: async (key: string, value: unknown) => void store.set(key, value),
+      delete: async (key: string) => store.delete(key),
       save: async () => undefined,
     };
   },
@@ -29,7 +30,10 @@ const invoke = vi.fn<(cmd: string, args?: unknown) => Promise<unknown>>();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 
 const publicRequest = vi.fn<(path: string, init?: RequestInit) => Promise<ApiResult<void>>>();
-vi.mock("./api", () => ({ publicRequest: (path: string, init?: RequestInit) => publicRequest(path, init) }));
+vi.mock("./api", () => ({
+  publicRequest: (path: string, init?: RequestInit) => publicRequest(path, init),
+  requestFailed: (status: number) => `Request failed (${status})`,
+}));
 /** The session held right now: whoever is signed in, or nobody. */
 const session: { current: { accessToken: string; refreshToken: string } | null } = { current: null };
 vi.mock("./session", () => ({ getTokens: async () => session.current }));
@@ -98,7 +102,7 @@ describe("the throttle", () => {
     error: "Could not reach Neoxify. Check your internet connection.",
     noResponse: true,
   };
-  const queued = () => (files.get("attempt-reports.json")?.get("queue") as unknown[] | undefined) ?? [];
+  const queued = () => (files.get("attempt-reports.json")?.get("reports") as unknown[] | undefined) ?? [];
 
   beforeEach(() => invoke.mockResolvedValue("windows"));
 
@@ -211,7 +215,7 @@ describe("an addendum that is still being worked out", () => {
     error: "Could not reach Neoxify. Check your internet connection.",
     noResponse: true,
   };
-  const queued = () => (files.get("attempt-reports.json")?.get("queue") as Record<string, unknown>[] | undefined) ?? [];
+  const queued = () => (files.get("attempt-reports.json")?.get("reports") as Record<string, unknown>[] | undefined) ?? [];
   const report = {
     kind: "SIGN_IN" as const,
     outcome: "CONTROL_PLANE_UNREACHABLE" as const,
@@ -336,7 +340,7 @@ describe("the customer a report is filed under", () => {
     error: "Could not reach Neoxify. Check your internet connection.",
     noResponse: true,
   };
-  const queued = () => (files.get("attempt-reports.json")?.get("queue") as Record<string, unknown>[] | undefined) ?? [];
+  const queued = () => (files.get("attempt-reports.json")?.get("reports") as Record<string, unknown>[] | undefined) ?? [];
   const signedIn = (accessToken: string) => ({ accessToken, refreshToken: `${accessToken}-refresh` });
   /** The Authorization each request carried, in order; null for none. */
   const sentAs = () =>
@@ -438,5 +442,162 @@ describe("the customer a report is filed under", () => {
     session.current = signedIn("held-now");
     await attempts.flushAttempts();
     expect(sentAs()).toEqual(["Bearer held-now"]);
+  });
+});
+
+/** An access token as the backend mints one, for what the client reads
+ * of it: the customer (`sub`) and the session (`sid`). Unsigned -- the
+ * client never verifies, only compares. */
+function token(sub: string, sid: string): string {
+  const part = (value: unknown) => btoa(JSON.stringify(value)).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+  return `${part({ alg: "HS256", typ: "JWT" })}.${part({ sub, sid, exp: 1 })}.signature`;
+}
+
+describe("the token a queued report goes out with", () => {
+  const UNREACHABLE: ApiResult<void> = {
+    ok: false,
+    error: "Could not reach Neoxify. Check your internet connection.",
+    noResponse: true,
+  };
+  const unreachable = { kind: "CONNECT" as const, outcome: "CONTROL_PLANE_UNREACHABLE" as const, reason: "r" };
+  const sentAs = () =>
+    publicRequest.mock.calls.map(([, init]) => ((init?.headers ?? {}) as Record<string, string>).Authorization ?? null);
+
+  beforeEach(() => invoke.mockResolvedValue("windows"));
+
+  /** The server counts a report against the session in a token that
+   * verifies, and against the address otherwise; an expired token does
+   * not verify for that. The token a report was made with has usually
+   * expired by the flush, and through a mirror or the tunnel the address
+   * is the node's, shared by everyone on it. Before: sent with the expired
+   * one, and the flush after an outage ran into the node's shared limit. */
+  it("is the token held now when it is the same customer's", async () => {
+    session.current = { accessToken: token("customer-1", "session-1"), refreshToken: "r" };
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    await attempts.reportAttempt(unreachable);
+
+    const renewed = token("customer-1", "session-2");
+    session.current = { accessToken: renewed, refreshToken: "r" };
+    publicRequest.mockReset();
+    publicRequest.mockResolvedValue({ ok: true, data: undefined });
+    await attempts.flushAttempts();
+
+    expect(sentAs()).toEqual([`Bearer ${renewed}`]);
+  });
+
+  it("is still its own when another customer is signed in now", async () => {
+    const alice = token("alice", "a1");
+    session.current = { accessToken: alice, refreshToken: "r" };
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    await attempts.reportAttempt(unreachable);
+
+    session.current = { accessToken: token("bob", "b1"), refreshToken: "r" };
+    publicRequest.mockReset();
+    publicRequest.mockResolvedValue({ ok: true, data: undefined });
+    await attempts.flushAttempts();
+
+    expect(sentAs()).toEqual([`Bearer ${alice}`]);
+  });
+});
+
+describe("a sign-out with reports queued", () => {
+  const queued = () => (files.get("attempt-reports.json")?.get("reports") as Record<string, unknown>[] | undefined) ?? [];
+  const unreachable = { kind: "CONNECT" as const, outcome: "CONTROL_PLANE_UNREACHABLE" as const, reason: "r" };
+
+  beforeEach(() => invoke.mockResolvedValue("windows"));
+
+  /** Before: the session's access token stayed on disk beside each report
+   * until it was sent -- days, on a network that could not reach Neoxify
+   * -- for the next person on the machine to read and use. */
+  it("leaves no access token on disk, and the reports go out under nobody", async () => {
+    session.current = { accessToken: "alice-access", refreshToken: "r" };
+    publicRequest.mockResolvedValue({ ok: false, error: "Could not reach Neoxify.", noResponse: true });
+    await attempts.reportAttempt(unreachable);
+    expect(JSON.stringify(queued())).toContain("alice-access");
+
+    session.current = null;
+    await attempts.forgetQueuedSessions();
+
+    expect(queued()).toHaveLength(1);
+    expect(JSON.stringify([...(files.get("attempt-reports.json")?.values() ?? [])])).not.toContain("alice-access");
+
+    session.current = { accessToken: "bob-access", refreshToken: "r" };
+    publicRequest.mockReset();
+    publicRequest.mockResolvedValue({ ok: true, data: undefined });
+    await attempts.flushAttempts();
+    const headers = (publicRequest.mock.calls[0][1]?.headers ?? {}) as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  /** Read from the source: the sign-out is where it happens. */
+  it("is what ending a session does", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("./session-end.ts", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("export async function endCustomerSession"));
+    expect(body).toContain("await forgetQueuedSessions();");
+    expect(body.indexOf("await forgetQueuedSessions();")).toBeGreaterThan(body.indexOf("await clearTokens();"));
+  });
+});
+
+describe("where the queue is kept", () => {
+  /** A build up to 0.9.47 installed over this one reads the old key and
+   * sends a queued report's every field as the body. Before: it found a
+   * report with its token in, sent the token in the body, was refused
+   * with a 400, and dropped the report as delivered. */
+  it("is not where an older build would read it", async () => {
+    invoke.mockResolvedValue("windows");
+    session.current = { accessToken: "made-with", refreshToken: "r" };
+    publicRequest.mockResolvedValue({ ok: false, error: "Could not reach Neoxify.", noResponse: true });
+    await attempts.reportAttempt({ kind: "CONNECT", outcome: "CONTROL_PLANE_UNREACHABLE", reason: "r" });
+
+    const store = files.get("attempt-reports.json")!;
+    expect(store.get("queue")).toBeUndefined();
+    expect(store.get("reports")).toHaveLength(1);
+  });
+
+  it("takes in what an older build left under the old key", async () => {
+    invoke.mockResolvedValue("windows");
+    const old = { kind: "SIGN_IN", outcome: "CONTROL_PLANE_UNREACHABLE", platform: "windows", appVersion: "0.9.47", occurredAt: new Date().toISOString() };
+    files.set("attempt-reports.json", new Map<string, unknown>([["queue", [old]]]));
+    publicRequest.mockResolvedValue({ ok: false, error: "Could not reach Neoxify.", noResponse: true });
+    await attempts.reportAttempt({ kind: "CONNECT", outcome: "CONTROL_PLANE_UNREACHABLE", reason: "r" });
+
+    const store = files.get("attempt-reports.json")!;
+    expect(store.get("queue")).toBeUndefined();
+    expect((store.get("reports") as unknown[]).length).toBe(2);
+  });
+});
+
+describe("a report only a page answered", () => {
+  const queued = () => (files.get("attempt-reports.json")?.get("reports") as Record<string, unknown>[] | undefined) ?? [];
+  const unreachable = { kind: "CONNECT" as const, outcome: "CONTROL_PLANE_UNREACHABLE" as const, reason: "r" };
+
+  beforeEach(() => invoke.mockResolvedValue("windows"));
+
+  /** During an outage every address answers with a page: the CDN's 521,
+   * a mirror's 502, a bot check's 403. Before: a page with a status
+   * counted as delivered, and every queued unreachable report -- the ones
+   * this queue exists for -- was dropped unseen. */
+  it("is kept when a gateway's page or a bot check answered it", async () => {
+    publicRequest.mockResolvedValue({ ok: false, error: "Request failed (502)", status: 502 });
+    await attempts.reportAttempt(unreachable);
+    expect(queued()).toHaveLength(1);
+
+    publicRequest.mockReset();
+    publicRequest.mockResolvedValue({ ok: false, error: "Request failed (403)", status: 403 });
+    await attempts.flushAttempts();
+    expect(queued()).toHaveLength(1);
+  });
+
+  /** One that will never let a report through is not held for its
+   * fourteen days: a flush stops at the first report it keeps. */
+  it("is not kept for a page that will never take it, nor for the backend's own refusal", async () => {
+    publicRequest.mockResolvedValue({ ok: false, error: "Request failed (404)", status: 404 });
+    await attempts.reportAttempt(unreachable);
+    expect(queued()).toHaveLength(0);
+
+    publicRequest.mockResolvedValue({ ok: false, error: "Internal server error", status: 500 });
+    await attempts.reportAttempt(unreachable);
+    expect(queued()).toHaveLength(0);
   });
 });

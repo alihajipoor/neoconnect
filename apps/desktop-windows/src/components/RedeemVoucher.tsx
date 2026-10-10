@@ -6,6 +6,7 @@ import { formatBytes } from "../lib/utils";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { Button, Card, Input } from "./ui";
+import { StillTrying } from "./StillTrying";
 
 /** Redeeming a code, as a two-step confirm rather than one action.
  *
@@ -135,6 +136,7 @@ export function RedeemVoucher({
         </form>
       )}
 
+      <StillTrying waiting={busy} />
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </Card>
   );

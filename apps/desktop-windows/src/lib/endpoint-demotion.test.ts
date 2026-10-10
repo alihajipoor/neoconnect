@@ -8,28 +8,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /** What the system resolver answers for each name, as `resolve_ipv4`
  * would hand it back; a name not here fails to resolve. */
-const { resolver, lookedUp } = vi.hoisted(() => ({
-  resolver: new Map<string, string[] | "hangs">(),
+const { resolver, lookedUp, askedFor } = vi.hoisted(() => ({
+  resolver: new Map<string, string[] | "hangs" | Promise<string[]>>(),
   lookedUp: [] as string[],
+  askedFor: [] as unknown[],
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (command: string, args: { host: string }) => {
     if (command !== "resolve_ipv4") return Promise.reject(new Error(`unexpected ${command}`));
     lookedUp.push(args.host);
+    askedFor.push(args);
     const answer = resolver.get(args.host);
     if (answer === "hangs") return new Promise(() => undefined);
+    if (answer instanceof Promise) return answer;
     return answer === undefined ? Promise.reject("could not resolve") : Promise.resolve(answer);
   },
 }));
 
 const {
   DEMOTED_FOR_MS,
-  LOOKUP_REUSED_FOR_MS,
   clearDemotion,
   demotedLast,
   demoteEndpoint,
   demoteName,
-  knownOnBlockPage,
+  isDemoted,
   resetDemotionsForTests,
   resolvesToBlockPage,
 } = await import("./endpoint-demotion");
@@ -60,6 +62,7 @@ beforeEach(() => {
   resetNetworkForTests();
   resolver.clear();
   lookedUp.length = 0;
+  askedFor.length = 0;
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -192,7 +195,7 @@ describe("looking at a name's DNS answer", () => {
   it("finds the block page, and demotes the name on this network", async () => {
     resolver.set("m.example", ["10.10.34.35"]);
     expect(await resolvesToBlockPage(MIRROR, 1_000)).toBe(true);
-    expect(knownOnBlockPage("https://m.example/api", 1_000)).toBe(true);
+    expect(isDemoted("https://m.example/api")).toBe(true);
     expect(demotedLast([MIRROR, A]).ordered).toEqual([A, MIRROR]);
   });
 
@@ -201,15 +204,40 @@ describe("looking at a name's DNS answer", () => {
     resolver.set("m.example", ["10.10.34.35"]);
     await resolvesToBlockPage(MIRROR, 1_000);
     clearDemotion("https://m.example/api", 2_000);
-    expect(knownOnBlockPage(MIRROR, 3_000)).toBe(false);
     expect(demotedLast([MIRROR, A], 3_000).ordered).toEqual([MIRROR, A]);
+  });
+
+  /** The answer came first, the look later. Before: the look demoted the
+   * name all the same, and the next race asked last the address that had
+   * answered first -- the shape of a name whose IPv4 answer is the block
+   * page and whose IPv6 answer is real, reached over IPv6. */
+  it("finds nothing when an address under the name answered while it was under way", async () => {
+    let land: (addresses: string[]) => void = () => undefined;
+    resolver.set("m.example", new Promise<string[]>((resolve) => (land = resolve)));
+    const look = resolvesToBlockPage(MIRROR, 1_000);
+    clearDemotion("https://m.example:8443/api", 1_100);
+    land(["10.10.34.35"]);
+    expect(await look).toBe(false);
+    expect(isDemoted(MIRROR)).toBe(false);
+    expect(demotedLast([MIRROR, A]).ordered).toEqual([MIRROR, A]);
   });
 
   it("finds nothing in an ordinary answer", async () => {
     resolver.set("m.example", ["203.0.113.7"]);
     expect(await resolvesToBlockPage(MIRROR, 1_000)).toBe(false);
-    expect(knownOnBlockPage(MIRROR, 1_000)).toBe(false);
+    expect(isDemoted(MIRROR)).toBe(false);
     expect(demotedLast([MIRROR, A]).ordered).toEqual([MIRROR, A]);
+  });
+
+  /** The HTTP plugin's own connection tries a name's IPv6 addresses too,
+   * and the block page has none. Before, only IPv4 was asked for, and a
+   * name whose A record was poisoned had its request stopped before it
+   * could connect over IPv6. */
+  it("asks for IPv6 too, and does not count a name with a real IPv6 address", async () => {
+    resolver.set("m.example", ["10.10.34.34", "2001:db8::7"]);
+    expect(await resolvesToBlockPage(MIRROR, 1_000)).toBe(false);
+    expect(isDemoted(MIRROR)).toBe(false);
+    expect(askedFor).toEqual([{ host: "m.example", timeoutMs: expect.any(Number), withIpv6: true }]);
   });
 
   /** A request is stopped on this answer, so only a name with nowhere
@@ -237,21 +265,33 @@ describe("looking at a name's DNS answer", () => {
   });
 
   /** The dashboard's three reads at once: one lookup. */
-  it("asks the resolver once a minute per name and network", async () => {
+  it("shares a look still under way between races on one network", async () => {
     resolver.set("m.example", ["10.10.34.34"]);
     await Promise.all([resolvesToBlockPage(MIRROR, 1_000), resolvesToBlockPage("https://m.example/api", 1_001)]);
-    await resolvesToBlockPage(MIRROR, 1_000 + LOOKUP_REUSED_FOR_MS - 1);
     expect(lookedUp).toEqual(["m.example"]);
 
-    // A block that has lifted is noticed when the minute is up.
-    resolver.set("m.example", ["203.0.113.7"]);
-    expect(await resolvesToBlockPage(MIRROR, 1_000 + LOOKUP_REUSED_FOR_MS)).toBe(false);
-    expect(knownOnBlockPage(MIRROR, 1_000 + LOOKUP_REUSED_FOR_MS)).toBe(false);
-
-    // And another network looks for itself.
-    onCarrier(64501, 1_000 + LOOKUP_REUSED_FOR_MS);
-    await resolvesToBlockPage(MIRROR, 1_000 + LOOKUP_REUSED_FOR_MS + 1);
+    // And another network looks for itself, even at the same moment.
+    let land: (addresses: string[]) => void = () => undefined;
+    resolver.set("m.example", new Promise<string[]>((resolve) => (land = resolve)));
+    const here = resolvesToBlockPage(MIRROR, 2_000);
+    onCarrier(64501, 2_000);
+    const there = resolvesToBlockPage(MIRROR, 2_001);
+    land(["203.0.113.7"]);
+    await Promise.all([here, there]);
     expect(lookedUp).toEqual(["m.example", "m.example", "m.example"]);
+  });
+
+  /** A look that has landed is not trusted by the next race, however
+   * soon: the path may have changed under it. Before a connect the
+   * resolver gave the block page; through the tunnel, moments later, it
+   * answers for real. A look kept for a minute kept every request in that
+   * minute from being sent. */
+  it("looks again for the next race, and sees a block that has lifted at once", async () => {
+    resolver.set("m.example", ["10.10.34.34"]);
+    expect(await resolvesToBlockPage(MIRROR, 1_000)).toBe(true);
+    resolver.set("m.example", ["203.0.113.7"]);
+    expect(await resolvesToBlockPage(MIRROR, 1_001)).toBe(false);
+    expect(lookedUp).toEqual(["m.example", "m.example"]);
   });
 });
 

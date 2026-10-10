@@ -194,7 +194,11 @@ describe("which endpoints a request is sent to", () => {
   it("does not try another endpoint when the server refuses a write", async () => {
     const seen: string[] = [];
     tauriFetch.mockImplementation(async (url: string) => {
-      if (new URL(url).pathname === "/login") seen.push(new URL(url).origin);
+      const { origin, pathname } = new URL(url);
+      // The backend's public health check says it is up; only a broken
+      // address answers it with a 401 (write-race.test.ts).
+      if (pathname === "/health") return jsonResponse({ status: "ok" });
+      if (pathname === "/login") seen.push(origin);
       return jsonResponse({ message: "wrong password" }, { status: 401 });
     });
 

@@ -68,7 +68,7 @@ async function firstReport<T>(): Promise<T> {
   return reportAttempt.mock.calls[0][0] as T;
 }
 
-const { refreshConnectionConfig, describeConfigDrift } = await import("./connection-config");
+const { refreshConnectionConfig, describeConfigDrift, onLateConfig } = await import("./connection-config");
 const { SNAPSHOT_TTL_MS, isSnapshotStale, saveSnapshot, loadSnapshot } = await import("./credential-cache");
 
 /** A REALITY credential. `serverName` is the decoy SNI -- the field this
@@ -625,6 +625,52 @@ describe("an answer after the budget", () => {
 
     expect((await loadSnapshot())!.protocolUsers).toEqual([theirs]);
     expect(onLateAnswer).not.toHaveBeenCalled();
+  });
+
+  /** A server switch made while the answer was on its way: the load after
+   * it wrote the list with the switched route in it. Before: the late
+   * answer, asked for before the switch, was written over that with a
+   * fresh time on it, and for ten minutes every connect dialled the list
+   * without the pinned route -- on another server. */
+  it("is not written over a snapshot saved after it was asked", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const answer = deferred<ApiResult<ProtocolUser[]>>();
+    fetchUsers.mockReturnValue(answer.promise);
+    const onLateAnswer = vi.fn();
+
+    await refreshConnectionConfig({ held, budgetMs: 30, onLateAnswer });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const switched = [reality("cloudflare.com"), reality("www.microsoft.com", "pu-pinned")];
+    await saveSnapshot({ subscription: null, protocolUsers: switched, routes: [] });
+    answer.resolve({ ok: true, data: [reality("www.samsung.com")] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect((await loadSnapshot())!.protocolUsers).toEqual(switched);
+    expect(onLateAnswer).not.toHaveBeenCalled();
+  });
+
+  /** The dashboard that asked has gone -- Settings was opened and closed
+   * -- and another holds the credentials now. Before: only the one that
+   * asked was told, and the one on screen kept the old values while the
+   * cache said they were fresh. */
+  it("reaches the screen listening when it comes, not only the one that asked", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const answer = deferred<ApiResult<ProtocolUser[]>>();
+    fetchUsers.mockReturnValue(answer.promise);
+    const gone = vi.fn();
+    const stopGone = onLateConfig(gone);
+    await refreshConnectionConfig({ held, budgetMs: 30 });
+    stopGone();
+    const onScreen = vi.fn();
+    const stop = onLateConfig(onScreen);
+
+    answer.resolve({ ok: true, data: [reality("www.samsung.com")] });
+
+    await vi.waitFor(() => expect(onScreen).toHaveBeenCalledWith([reality("www.samsung.com")]));
+    expect(gone).not.toHaveBeenCalled();
+    stop();
   });
 
   /** A late failure or refusal says nothing about the credentials. */

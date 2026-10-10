@@ -9,6 +9,7 @@ import { Logo } from "../components/Logo";
 import { RedeemVoucher } from "../components/RedeemVoucher";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
+import { StillTrying } from "../components/StillTrying";
 
 type Stage =
   | { name: "choosing" }
@@ -234,7 +235,10 @@ export function Plans({
           correctly at the minimum size. */}
       <div className="grid flex-1 content-start gap-3 overflow-y-auto [grid-template-columns:repeat(auto-fit,minmax(260px,1fr))]">
         {plans === null ? (
-          <p className="text-sm text-muted-foreground">{t("plans.loading")}</p>
+          <div>
+            <p className="text-sm text-muted-foreground">{t("plans.loading")}</p>
+            <StillTrying waiting={error === null} className="mt-2 text-left" />
+          </div>
         ) : plans.length === 0 ? (
           <Card>
             <p className="text-sm text-muted-foreground">
@@ -332,6 +336,10 @@ export function Plans({
           ))
         )}
       </div>
+
+      {/* Starting a payment is two writes, each of which first asks who
+          answers. */}
+      <StillTrying waiting={stage.name === "starting"} />
 
       <Button variant="ghost" onClick={onBack} className="w-full justify-center gap-2 border border-white/10">
         <ArrowLeft className="size-4" />

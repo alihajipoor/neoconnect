@@ -262,6 +262,33 @@ describe("where the sign-in is sent", () => {
 });
 
 describe("a slow route", () => {
+  /** The challenge came back at once and the sign-in's own answer took
+   * twelve seconds. Before: cut off at eight, with thirty-eight seconds of
+   * the deadline left and no other address to try -- "stopped responding"
+   * at 8.1 seconds. */
+  it("waits for a slow answer to the sign-in after a fast challenge", async () => {
+    network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/login": answers(12_000, tokens) };
+    for (const origin of [B, C, D]) network[origin] = { "/login-challenge": "reset" };
+
+    const { result, ms } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/customer-auth/login")).toEqual([A]);
+    expect(ms).toBe(12_100);
+  });
+
+  /** And one that took three seconds to hand out the challenge and nine
+   * to answer: before, eight seconds was all it got. */
+  it("waits for it after a slower challenge too", async () => {
+    network[A] = { "/login-challenge": answers(3_000, challenge), "/customer-auth/login": answers(9_000, tokens) };
+    for (const origin of [B, C, D]) network[origin] = { "/login-challenge": "reset" };
+
+    const { result, ms } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result.ok).toBe(true);
+    expect(ms).toBe(12_000);
+  });
+
   /** The CDN answering after nine to twenty seconds while every mirror
    * is blocked: a shape that fits the testers' reports, modelled here,
    * not observed on their networks. Before, the answer was thrown away at
@@ -283,22 +310,49 @@ describe("an answer that stops", () => {
   /** Neoxify was reached seconds earlier, so "could not reach Neoxify --
    * check your internet connection" would send the customer to look at a
    * connection that was working. Before: 32.1 seconds, then that
-   * sentence. */
-  it("says it stopped responding, after one timeout at the address that answered", async () => {
+   * sentence. The sign-in waits the slow answer's twenty seconds at the
+   * only address that answered, and then asks the rest of the list for a
+   * fresh challenge, which nothing answers here. The harness has no
+   * connection deadline, so a blackholed address takes its whole twenty
+   * seconds; on a real network it gives up at ten. */
+  it("says it stopped responding, once the address that answered and the rest have had their chance", async () => {
     network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/login": "hang" };
 
     const { result, ms } = await run(() => login("someone@example.com", "pw"));
 
     expect(result).toEqual({ ok: false, error: STOPPED, noResponse: true });
     expect(sentTo("/customer-auth/login")).toEqual([A]);
-    expect(ms).toBe(100 + 8_000);
+    expect(sentTo("/login-challenge")).toEqual([A, B, C, D]);
+    expect(ms).toBe(100 + 20_000 + 1_500 + 20_000);
 
     // Still an unreachable control plane to whoever reads the report.
     await vi.waitFor(() => expect(reportAttempt).toHaveBeenCalledTimes(1));
     expect(reportAttempt.mock.calls[0][0]).toMatchObject({
       outcome: "CONTROL_PLANE_UNREACHABLE",
-      apiEndpoint: "challenge: a.example=h201@100; req: a.example=timeout@8000",
+      apiEndpoint:
+        "challenge: a.example=h201@100; req: a.example=timeout@20000; " +
+        "challenge: b.example=timeout@20000 c.example=timeout@20000 d.example=timeout@20000",
     });
+  });
+
+  /** A body that never finishes, after headers that did: the race lets go
+   * of the deadline once the headers are in, so nothing bounded the wait
+   * for the body. Before: still "Signing in..." three minutes later. */
+  it("ends by its deadline when the challenge's body never arrives", async () => {
+    const stalled = () =>
+      ({
+        ok: true,
+        status: 201,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: () => new Promise(() => undefined),
+      }) as unknown as Response;
+    network[A] = { "/login-challenge": answers(100, stalled) };
+
+    const { result, ms } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result).toEqual({ ok: false, error: STOPPED, noResponse: true });
+    expect(ms).toBe(46_500);
+    expect(sentTo("/customer-auth/login")).toEqual([]);
   });
 
   /** There was no limit on the whole: the button sat on "Signing in..."
@@ -323,5 +377,81 @@ describe("an answer that stops", () => {
     const trace = String((reportAttempt.mock.calls[0][0] as { apiEndpoint: string }).apiEndpoint);
     // Cut off by the deadline, which is not the network refusing it.
     expect(trace).toContain("req: a.example=timeout@20000 c.example=budget@7500");
+  });
+});
+
+describe("an address that answers the challenge and not the sign-in", () => {
+  /** The remembered address answers the challenge inside its head start,
+   * so nobody else is asked, and then resets the sign-in. Before: "stopped
+   * responding" in a tenth of a second, the sign-in sent only to A, and a
+   * retry did exactly the same -- a reset does not move an address down
+   * the order -- while B would have signed the customer in. */
+  it("asks the rest of the list for a fresh challenge, and signs in where that is answered", async () => {
+    network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/login": "reset" };
+    network[B] = { "/login-challenge": answers(200, challenge), "/customer-auth/login": answers(200, tokens) };
+
+    const { result, ms } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/customer-auth/login")).toEqual([A, B]);
+    expect(sentTo("/login-challenge")).toEqual([A, B]);
+    // Each sign-in carried a solution of its own challenge's.
+    const bodies = sent.filter((s) => s.path === "/customer-auth/login").map((s) => s.body as { challenge?: unknown });
+    expect(bodies.every((body) => body.challenge !== undefined)).toBe(true);
+    expect(ms).toBe(100 + 200 + 200);
+
+    // And a second sign-in goes the same way, rather than failing as the
+    // first used to.
+    sent = [];
+    const again = await run(() => login("someone@example.com", "pw"));
+    expect(again.result.ok).toBe(true);
+  });
+
+  /** Blackholed rather than reset: after its slow-answer wait, the rest. */
+  it("asks the rest after a sign-in that got nothing at the only address that answered", async () => {
+    network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/login": "hang" };
+    network[B] = { "/login-challenge": answers(200, challenge), "/customer-auth/login": answers(200, tokens) };
+
+    const { result, ms } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/customer-auth/login")).toEqual([A, B]);
+    expect(ms).toBe(100 + 20_000 + 200 + 200);
+  });
+});
+
+describe("only a page answers", () => {
+  /** A CDN's bot check, or a mirror's 502, answers the challenge and the
+   * backend answers nowhere. Before: the sign-in was sent to the page's
+   * address, hung there, and the screen said Neoxify had answered and then
+   * stopped responding -- when Neoxify had not answered at all. */
+  it("says what answered, and does not send the sign-in there", async () => {
+    network[A] = { "/login-challenge": answers(50, () => page(403)), "/customer-auth/login": "hang" };
+
+    const { result } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result).toEqual({ ok: false, error: "Request failed (403)", status: 403 });
+    expect(sentTo("/customer-auth/login")).toEqual([]);
+  });
+});
+
+describe("a slow proof of work", () => {
+  /** The server asks for 21 bits after twenty recent failures -- per
+   * account, and per source, which behind a node's mirror is the node,
+   * shared by every customer on it. That averages about forty seconds of
+   * hashing on a desktop. Before: the solve was counted against the
+   * deadline, the sign-in was never sent, and the screen said Neoxify had
+   * stopped responding. Here a solve that takes 47 seconds. */
+  it("does not count the solve against the deadline", async () => {
+    vi.spyOn(crypto.subtle, "digest").mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(new ArrayBuffer(32)), 47_000)),
+    );
+    network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/login": answers(200, tokens) };
+
+    const { result, ms } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/customer-auth/login")).toEqual([A]);
+    expect(ms).toBe(100 + 47_000 + 200);
   });
 });

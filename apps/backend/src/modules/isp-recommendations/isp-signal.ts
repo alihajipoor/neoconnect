@@ -111,6 +111,25 @@ export interface EvidenceRow {
   attemptsJson: unknown;
   sessionSeconds: number | null;
   createdAt: Date;
+  /** When the client says it happened, which for a report it had to queue
+   * is before it arrived. Absent from rows read before it was selected. */
+  occurredAt?: Date | null;
+}
+
+/** When a row's attempt happened, for ordering one customer's dials.
+ *
+ * The client's own time, when it gave a plausible one, and never later
+ * than the row's arrival. A report queued while the control plane was
+ * unreachable arrives on the next contact, after the success that made
+ * the contact -- and since reports sent with an expired token are filed
+ * under their customer, such a late failure was taken as that customer's
+ * latest dial on the route, and the route shown to everyone on the
+ * network as worse than it is. Arrival alone still decides which rows
+ * are in the window: a client's clock cannot keep a row in. */
+function happenedAt(row: EvidenceRow): number {
+  const arrived = row.createdAt.getTime();
+  const said = row.occurredAt?.getTime();
+  return said !== undefined && Number.isFinite(said) && said <= arrived ? said : arrived;
 }
 
 interface Dial {
@@ -150,7 +169,7 @@ export function routeStats(rows: EvidenceRow[], now: Date = new Date()): Map<str
 
   const ordered = rows
     .filter((r) => r.customerId && r.createdAt.getTime() >= since)
-    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    .sort((a, b) => happenedAt(a) - happenedAt(b));
 
   for (const row of ordered) {
     const customer = row.customerId!;

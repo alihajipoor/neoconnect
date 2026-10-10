@@ -107,6 +107,35 @@ describe("per-ISP tags", () => {
     expect(tag(rows)?.code).toBe("failingOnYourIsp");
   });
 
+  /** A failure the client could not report at the time -- the control
+   * plane was unreachable -- goes out queued, on the contact the next
+   * success makes, so it arrives after that success. Before: ordered by
+   * arrival, it became each customer's latest dial, and a route that
+   * worked for all of them was shown as failing. */
+  it("goes by when an attempt happened, not when its report arrived", () => {
+    const rows = Array.from({ length: MIN_CUSTOMERS }, (_, i) => [
+      { ...failed(`w${i}`, hoursAgo(0.9)), occurredAt: hoursAgo(1.5) },
+      connected(`w${i}`, hoursAgo(1)),
+    ]).flat();
+    expect(routeStats(rows, NOW).get(ROUTE)).toMatchObject({ tried: MIN_CUSTOMERS, carried: MIN_CUSTOMERS });
+  });
+
+  /** A client's clock decides the order, never more than that: a time
+   * after the arrival is not believed, and the window is still the
+   * arrival's. */
+  it("does not let a client's clock move an attempt after its arrival, or keep one in the window", () => {
+    const future = Array.from({ length: MIN_CUSTOMERS }, (_, i) => [
+      connected(`w${i}`, hoursAgo(1)),
+      { ...failed(`w${i}`, hoursAgo(0.5)), occurredAt: hoursAgo(-5) },
+    ]).flat();
+    expect(routeStats(future, NOW).get(ROUTE)).toMatchObject({ carried: 0 });
+    const stale = Array.from({ length: 20 }, (_, i) => ({
+      ...connected(`o${i}`, hoursAgo(WINDOW_HOURS + 1)),
+      occurredAt: hoursAgo(1),
+    }));
+    expect(tag(stale)).toBeNull();
+  });
+
   it("flags a route that is failing for most people on the network", () => {
     const rows = [...Array.from({ length: 6 }, (_, i) => failed(`f${i}`)), connected("lucky")];
     expect(tag(rows)).toEqual({ code: "failingOnYourIsp", customers: 6, outOf: 7, windowHours: WINDOW_HOURS });

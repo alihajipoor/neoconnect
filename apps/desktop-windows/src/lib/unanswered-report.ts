@@ -3,6 +3,7 @@ import { reportAttempt } from "./attempts";
 import { pathChangingIn, probeAddendum } from "./control-plane-probe";
 import { newTrace, renderTrace, type EndpointTrace } from "./endpoint-trace";
 import { ladderPass } from "./ladder-pass";
+import { sessionGeneration } from "./session-end";
 import { watchBackground } from "./visibility";
 
 /** A report when nothing answered the screens' own requests to Neoxify.
@@ -31,7 +32,7 @@ import { watchBackground } from "./visibility";
  * report's reason, so rows can be split by what asked. */
 export type RequestSource = "dashboard load" | "dashboard route list" | "server list" | "server switch";
 
-/** At most one report per source per this long, per process.
+/** At most one report per source per this long.
  *
  * The screens ask far more often than the refresh does. The dashboard
  * loads again each time it is shown -- it unmounts whenever Settings
@@ -40,11 +41,62 @@ export type RequestSource = "dashboard load" | "dashboard route list" | "server 
  * report then goes into a queue that keeps only the newest
  * twenty-five, pushing out the sign-in and connect reports that say more.
  * The answer will not have changed in ten minutes. What is not sent is
- * counted, and the next report says how many. */
+ * counted, and the next report says how many.
+ *
+ * Kept in the webview's storage, not only in memory. The phones start a
+ * new process for most opens -- a backgrounded app is killed -- and with a
+ * limit per process every open on a blocked network made a report of its
+ * own, the exact flood the limit was for. Best effort: without storage it
+ * holds for the run, as it did. */
 export const REPORT_INTERVAL_MS = 10 * 60_000;
 
-const lastReportAt = new Map<RequestSource, number>();
-const notSent = new Map<RequestSource, number>();
+const STORAGE_KEY = "neoxify.unansweredReports";
+
+/** When each source last reported, and how many it has held back since. */
+interface Held {
+  at: number;
+  notSent: number;
+}
+
+let held = new Map<RequestSource, Held>();
+let restored = false;
+
+function storage(): Storage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** Restored lazily, once a run. Anything unreadable is dropped: one report
+ * too many costs less than a report never made. */
+function restore(): void {
+  if (restored) return;
+  restored = true;
+  try {
+    const raw = storage()?.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object") return;
+    for (const [source, value] of Object.entries(parsed as Record<string, unknown>)) {
+      const entry = value as Partial<Held> | null;
+      if (entry && typeof entry.at === "number" && Number.isFinite(entry.at)) {
+        held.set(source as RequestSource, { at: entry.at, notSent: typeof entry.notSent === "number" ? entry.notSent : 0 });
+      }
+    }
+  } catch {
+    held = new Map();
+  }
+}
+
+function persist(): void {
+  try {
+    storage()?.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(held)));
+  } catch {
+    // The limit still holds for this run.
+  }
+}
 
 /** Sends the report for requests that went unanswered, saying what the
  * screen did instead -- "showing credentials cached 35 min ago". Returns
@@ -66,15 +118,27 @@ export interface TracedRequests {
 
 /** Starts tracing the requests one screen action makes together.
  *
- * `appState` is what the screen showed as they began. It is not put in
- * the reason: the dashboard's load runs as the screen mounts, before it
- * has asked what is up, and its state then is a default rather than
- * anything it was shown. It only keeps the socket-level probe from
- * running across a connect or a disconnect, as a pass under way also
- * does (`ladderPass`). See control-plane-probe.ts. */
-export function traceRequests(source: RequestSource, appState?: string): TracedRequests {
+ * `appState` is what the screen showed: as they began, or, given as a
+ * function, as it is when asked -- the server list stays open while the
+ * dashboard beneath it connects or disconnects. It is not put in the
+ * reason: the dashboard's load runs as the screen mounts, before it has
+ * asked what is up, and its state then is a default rather than anything
+ * it was shown. It only keeps the socket-level probe from running across
+ * a connect or a disconnect, as a pass under way also does
+ * (`ladderPass`). See control-plane-probe.ts.
+ *
+ * Nothing is reported once the session the requests began in has ended.
+ * A sign-out can land while they are still waiting on a blocked address;
+ * reported after it, the report went out under nobody, or under whoever
+ * had signed in by then, and described a screen that had gone. */
+export function traceRequests(source: RequestSource, appState?: string | (() => string | undefined)): TracedRequests {
   const traces = new Map<string, EndpointTrace>();
   const startedAt = Date.now();
+  const sessionAtStart = sessionGeneration();
+  const stateAt = () => (typeof appState === "function" ? appState() : appState);
+  const stateAtStart = stateAt();
+  // Whether a connect of the app's own was running as they began.
+  const connectingAtStart = ladderPass.inFlight();
   // Whether the app was backgrounded while they ran: on iOS that
   // suspends it, and a timeout then says nothing about the network.
   const backgrounded = watchBackground();
@@ -106,20 +170,30 @@ export function traceRequests(source: RequestSource, appState?: string): TracedR
       });
 
       return (consequence) => {
+        if (sessionGeneration() !== sessionAtStart) return false;
+        restore();
         const now = Date.now();
-        const last = lastReportAt.get(source);
-        if (last !== undefined && now - last < REPORT_INTERVAL_MS) {
-          notSent.set(source, (notSent.get(source) ?? 0) + 1);
+        const last = held.get(source);
+        // A time in the future is a clock set back, not a recent report.
+        if (last !== undefined && now - last.at >= 0 && now - last.at < REPORT_INTERVAL_MS) {
+          held.set(source, { at: last.at, notSent: last.notSent + 1 });
+          persist();
           return false;
         }
-        lastReportAt.set(source, now);
-        const skipped = notSent.get(source) ?? 0;
-        notSent.delete(source);
+        const skipped = last?.notSent ?? 0;
+        held.set(source, { at: now, notSent: 0 });
+        persist();
 
         const names = unanswered.map(([name]) => name);
+        // The requests' own path may have been moving under them: the app's
+        // own connect was dialling -- one started from another screen goes
+        // on while the dashboard loads -- and its failures may be that.
+        const dialling = connectingAtStart || ladderPass.inFlight();
         const reason =
           `${source}: no answer from Neoxify to ${names.join(", ")} after ${settledAt - startedAt}ms; ` +
-          `not a connect, nothing is being dialled; ${consequence}` +
+          (dialling
+            ? `not a connect, but one of the app's own was under way; ${consequence}`
+            : `not a connect, nothing is being dialled; ${consequence}`) +
           // Each request asks every address; one trace says what they all
           // met, and which one it is has to be said when there were more.
           (names.length > 1 ? `; the trace is ${carriedName}'s` : "") +
@@ -136,7 +210,9 @@ export function traceRequests(source: RequestSource, appState?: string): TracedR
             apiEndpoint: tried === "" ? "none dialled" : tried,
             reason,
           },
-          probeAddendum(carried.entries, { pathChanging: pathChangingIn(appState) || ladderPass.inFlight() }),
+          probeAddendum(carried.entries, {
+            pathChanging: pathChangingIn(stateAtStart) || pathChangingIn(stateAt()) || ladderPass.inFlight(),
+          }),
         );
         return true;
       };
@@ -152,8 +228,9 @@ export function snapshotAge(savedAt: number, now = Date.now()): string {
     : "of unknown age";
 }
 
-/** For tests: forget every report, as a fresh process would. */
+/** For tests: forget every report, as a fresh process would. What is in
+ * storage is read again on next use. */
 export function resetUnansweredReportsForTests(): void {
-  lastReportAt.clear();
-  notSent.clear();
+  held = new Map();
+  restored = false;
 }

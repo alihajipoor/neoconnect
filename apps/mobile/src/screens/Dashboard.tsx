@@ -66,10 +66,13 @@ import { useStillTrying } from "@shared/lib/still-trying";
 import { sessionGeneration } from "@shared/lib/session-end";
 import {
   cachedRoutesFor,
+  planOf,
+  standInRoutes,
+  type ShownRoutes,
   loadSnapshot,
   saveSnapshot,
 } from "@shared/lib/credential-cache";
-import { refreshConnectionConfig } from "@shared/lib/connection-config";
+import { onLateConfig, refreshConnectionConfig } from "@shared/lib/connection-config";
 import { useRefreshOnResume } from "@shared/lib/resume";
 import {
   failedDial,
@@ -344,6 +347,9 @@ export function Dashboard({
    * location, the retry button) cannot say the screen has loaded while
    * the newer one is still running. */
   const loadRef = useRef(0);
+  /** Which load put the route list on screen, and for which plan
+   * (`standInRoutes`). */
+  const routesShownRef = useRef<ShownRoutes>({ plan: null, load: 0 });
   const [error, setError] = useState<string | null>(null);
   const [me, setMe] = useState<Customer | null>(null);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
@@ -534,12 +540,16 @@ export function Dashboard({
       // on every foreground past the horizon, so it is most of them.
       trigger,
       appState: connectionState,
-      // An answer after the refresh's budget is the same answer, late.
-      onLateAnswer: adoptRefreshed,
     });
     if (refreshed.source !== "network") return;
     adoptRefreshed(refreshed.protocolUsers);
   });
+
+  // A refresh's answer that comes after its budget is the same answer,
+  // late: held here whichever screen asked for it -- this one, or one that
+  // has since unmounted. Setters only, so the first render's function
+  // serves.
+  useEffect(() => onLateConfig(adoptRefreshed), []);
 
   /** Holds credentials a refresh has just fetched: the list, and the
    * one on screen replaced by its new copy. */
@@ -577,6 +587,9 @@ export function Dashboard({
   async function loadScreen(preferRouteId: string | undefined, ready: () => void) {
     // Which customer session this load is for; see sessionGeneration.
     const sessionAtStart = sessionGeneration();
+    // And which load this is: `loadAll` has just counted it, with nothing
+    // awaited in between (`standInRoutes`).
+    const load = loadRef.current;
     setLoading(true);
     setError(null);
     // Traced, so a load that nothing answered is reported with the
@@ -613,6 +626,7 @@ export function Dashboard({
         setSubscription(cached.subscription);
         setProtocolUsers(cached.protocolUsers);
         setRoutes(cached.routes);
+        routesShownRef.current = { plan: cached.subscription ? planOf(cached.subscription) : null, load };
         const preferred = preferRouteId ?? chosenRouteId;
         setProtocolUser(
           cached.protocolUsers.find((u) => u.routeId === preferred) ??
@@ -665,15 +679,21 @@ export function Dashboard({
       if (routesResult.ok) {
         currentRoutes = routesResult.data;
         setRoutes(currentRoutes);
+        routesShownRef.current = { plan: planOf(sub), load };
       } else {
         // Everything else answered and the list did not, so the one
         // cached for this plan stands in for it -- on screen, and in the
         // snapshot below. Cached as an empty list, it left the next start
         // with Neoxify out of reach no servers to show; see
-        // `cachedRoutesFor`. Not set when there is nothing cached, so a
-        // failed request never blanks a list already showing.
+        // `cachedRoutesFor`. What goes on screen is `standInRoutes`'s to
+        // decide: not over a later load's list, and never another plan's
+        // left standing, which the picker would now open on.
         currentRoutes = await cachedRoutesFor(sub);
-        if (currentRoutes.length > 0) setRoutes(currentRoutes);
+        const standIn = standInRoutes(currentRoutes, routesShownRef.current, planOf(sub), load);
+        if (standIn !== null) {
+          setRoutes(standIn);
+          routesShownRef.current = { plan: planOf(sub), load };
+        }
         routesUnanswered?.(
           currentRoutes.length > 0
             ? `the rest of the load had answered; showing ${currentRoutes.length} servers cached for this plan`
@@ -691,15 +711,19 @@ export function Dashboard({
     // Only once the credentials and the plan have answered, so a partial
     // answer cannot overwrite a good cache with a worse one -- and with the
     // cached route list when only that request failed, never an empty one
-    // in its place.
-    void saveSnapshot(
-      {
-        subscription: sub,
-        protocolUsers: usersResult.data,
-        routes: currentRoutes,
-      },
-      () => sessionGeneration() === sessionAtStart,
-    );
+    // in its place. Not by a load a later one has overtaken: that one
+    // writes its own, and this one's, landing after it, would put the
+    // older list back.
+    if (routesShownRef.current.load <= load) {
+      void saveSnapshot(
+        {
+          subscription: sub,
+          protocolUsers: usersResult.data,
+          routes: currentRoutes,
+        },
+        () => sessionGeneration() === sessionAtStart,
+      );
+    }
 
     await adoptPlatform(sessionAtStart, usersResult.data, sub, ready);
   }
@@ -1712,14 +1736,14 @@ export function Dashboard({
         automatic: options.reconnect !== undefined,
       },
       () =>
+        // An answer after the budget is too late for this pass, which has
+        // dialled what it held by then, but is held for the next one
+        // (`onLateConfig` above): inside the freshness horizon that one
+        // asks nothing and dials what the screen holds.
         refreshConnectionConfig({
           held: protocolUsers.length > 0 ? protocolUsers : [protocolUser!],
           trigger: "connect",
           appState: connectionState,
-          // Too late for this pass, which has dialled what it held by
-          // then, but held for the next one: inside the freshness horizon
-          // that one asks nothing and dials what the screen holds.
-          onLateAnswer: adoptRefreshed,
         }),
     );
     if (refreshed.source === "network") adoptRefreshed(refreshed.protocolUsers);
@@ -2890,6 +2914,9 @@ export function Dashboard({
             // degraded states where a tunnel exists but is not
             // trusted yet.
             tunnelActive={connectionState !== "disconnected"}
+            // As it changes, for the report on a list nothing answered: its
+            // probe must not run across a connect or a disconnect.
+            connectionState={connectionState}
             // Already loaded here -- from Neoxify, or from the cache when
             // it cannot be reached -- so the picker opens on the servers
             // and refreshes behind them. Without it the list opened empty

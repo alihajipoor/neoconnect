@@ -262,7 +262,9 @@ export interface RefreshOptions {
    * because the cache now says it is fresh; written to the cache alone,
    * the late answer would make that connect skip the question and dial
    * the old values anyway. Not called after a sign-out, nor for an answer
-   * that was a refusal. */
+   * that was a refusal, nor for one older than the cache it came back to.
+   * The screens listen with `onLateConfig` instead, which reaches the
+   * screen on display, not only the one that asked. */
   onLateAnswer?: (protocolUsers: ProtocolUser[]) => void;
   now?: number;
 }
@@ -275,6 +277,27 @@ const TRIGGER_LABEL: Record<RefreshTrigger, string> = {
   resume: "resume",
   online: "online",
 };
+
+/** Whoever holds the credentials on screen, told of every late answer
+ * (`onLateConfig`). */
+const lateListeners = new Set<(protocolUsers: ProtocolUser[]) => void>();
+
+/** Tells `listener` the credentials of every refresh answer that comes in
+ * after its budget (`keepLateAnswer`), until the returned function is
+ * called.
+ *
+ * For the screen that holds the credentials, from when it mounts to when
+ * it unmounts. Told only through the refresh that asked, the answer went
+ * to a dashboard that had since unmounted -- Settings opened and closed
+ * while it was on its way -- and the one on screen kept the old values
+ * while the cache, just written, said they were fresh: for the next ten
+ * minutes a connect asked nothing and dialled them. */
+export function onLateConfig(listener: (protocolUsers: ProtocolUser[]) => void): () => void {
+  lateListeners.add(listener);
+  return () => {
+    lateListeners.delete(listener);
+  };
+}
 
 /** What `keepLateAnswer` needs to know about the refresh it outlives. */
 interface LateAnswerContext {
@@ -310,11 +333,14 @@ function keepLateAnswer(request: Promise<ApiResult<ProtocolUser[]>>, context: La
     async (late) => {
       if (!late.ok || !stillCurrent()) return;
       const fresh = late.data;
-      await updateSnapshotProtocolUsers(fresh, stillCurrent);
+      // Not over a snapshot written since it was asked: that one is newer
+      // (`updateSnapshotProtocolUsers`), and so is what the screen holds.
+      if ((await updateSnapshotProtocolUsers(fresh, stillCurrent, askedAt)) === "superseded") return;
       // Asked again: the cache write may have been the last thing to
       // happen before a sign-out.
       if (!stillCurrent()) return;
-      onLateAnswer?.(fresh);
+      // Each once: a screen may both have asked and be listening.
+      for (const tell of new Set([...(onLateAnswer ? [onLateAnswer] : []), ...lateListeners])) tell(fresh);
       const drift = describeConfigDrift(held, fresh);
       if (drift.length === 0) return;
       const after = Date.now() - askedAt;

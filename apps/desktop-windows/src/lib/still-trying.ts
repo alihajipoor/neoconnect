@@ -4,9 +4,9 @@ import { useEffect, useState } from "react";
  *
  * Eight seconds, because that is where every request used to give up.
  * Since reads are given up to twenty seconds an address (`SLOW_ANSWER_MS`
- * in api.ts), and a sign-in up to forty-five in all, a screen can now sit
- * on "Loading..." or "Signing in..." well past the point where it used to
- * show an error. Without a word it reads as frozen, and a frozen app is
+ * in api.ts), and a sign-in up to forty-six and a half on the network, a
+ * screen can now sit on "Loading..." or "Signing in..." well past the
+ * point where it used to show an error. Without a word it reads as frozen, and a frozen app is
  * closed and reopened -- which starts the wait again from nothing. The
  * note says only what is true at that moment: the wait is longer than
  * usual and has not ended. It does not say that nothing answered, which

@@ -4,6 +4,7 @@ import { Button, Card, Input, Label } from "../components/ui";
 import { Logo } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
+import { StillTrying } from "../components/StillTrying";
 
 // `password` is optional: present when this screen follows a fresh
 // register()/login() attempt in the same session (lets us auto-sign-in
@@ -151,6 +152,7 @@ export function VerifyEmail({
           <Button type="submit" disabled={pending || code.length !== 6} className="mt-1 w-full">
             {pending ? t("verify.confirming") : t("verify.confirm")}
           </Button>
+          <StillTrying waiting={pending || resending} />
         </form>
         <button
           type="button"

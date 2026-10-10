@@ -10,14 +10,20 @@ import { describe, expect, it } from "vitest";
  * Read from the source because the screen has no test harness of its own. */
 describe("the phone's screens", () => {
   const dirs = ["../screens", "../components"];
-  const files = dirs.flatMap((dir) =>
-    readdirSync(new URL(`${dir}/`, import.meta.url))
-      .filter((name) => name.endsWith(".tsx"))
-      .map((name) => ({ name, source: readFileSync(new URL(`${dir}/${name}`, import.meta.url), "utf8") })),
-  );
+  const files = [
+    ...dirs.flatMap((dir) =>
+      readdirSync(new URL(`${dir}/`, import.meta.url))
+        .filter((name) => name.endsWith(".tsx"))
+        .map((name) => ({ name, source: readFileSync(new URL(`${dir}/${name}`, import.meta.url), "utf8") })),
+    ),
+    // The app's frame, which puts notices on screens of its own.
+    { name: "App.tsx", source: readFileSync(new URL("../App.tsx", import.meta.url), "utf8") },
+  ];
 
   it("never put a request's own sentence on screen as it is", () => {
-    const raw = /\bset[A-Z]\w*\(\s*\w+\.error\b|\?\s*\w+Result\.error\b/g;
+    // A setter handed `something.error`, a ternary choosing one, or one
+    // spliced into a template string.
+    const raw = /\bset[A-Z]\w*\(\s*\w+\.error\b|\?\s*\w+Result\.error\b|\$\{\s*\w+\.error\s*\}/g;
     const offenders = files.flatMap(({ name, source }) => (source.match(raw) ?? []).map((m) => `${name}: ${m}`));
     expect(offenders).toEqual([]);
   });

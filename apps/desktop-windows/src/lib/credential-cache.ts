@@ -151,11 +151,31 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
       savedAt: typeof stored.savedAt === "number" ? stored.savedAt : 0,
       subscription: stored.subscription ?? null,
       protocolUsers: stored.protocolUsers,
-      routes: Array.isArray(stored.routes) ? stored.routes : [],
+      routes: Array.isArray(stored.routes) ? stored.routes.map(withoutNetworkTag) : [],
     };
   } catch {
     return null;
   }
+}
+
+/** A cached route without its `ispTag`.
+ *
+ * The tag is the server's word on how the route has done for people on
+ * the network the list was fetched from -- worked out from the request's
+ * network attestation -- and a cached list is shown on whatever network
+ * the device is on now. Kept, a list cached on home Wi-Fi told a customer
+ * on mobile data that a server had been failing for most people on their
+ * network, or working, as if it had been measured there, and the
+ * picker's "only what worked on my network" filtered by it; and every
+ * load carried the list forward with a fresh time, so a tag could be days
+ * old. The picker's own refresh is the only source of tags now. Read off
+ * on the way out of the cache, so every use of a cached list -- the
+ * offline start, a failed list's stand-in, the snapshot written from it
+ * -- is without them. */
+function withoutNetworkTag(route: RouteOption): RouteOption {
+  if (route === null || typeof route !== "object" || !("ispTag" in route)) return route;
+  const { ispTag: _measuredElsewhere, ...rest } = route;
+  return rest;
 }
 
 /** Replaces just the credentials, keeping the subscription and routes
@@ -179,14 +199,26 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
  * after a sign-out and the next customer's sign-in, the snapshot this
  * reads is theirs, and without the check one customer's credentials
  * would be written into the other's.
+ *
+ * `askedAt`, when given, is when the credentials were asked for, and a
+ * snapshot saved since then is not written over: it was written by
+ * something that asked later -- a load after a server switch, holding the
+ * credential the switch provisioned. A refresh's answer that came in late,
+ * after a switch made meanwhile, used to put the list from before the
+ * switch back, with a fresh time on it; for the next ten minutes every
+ * connect dialled it without asking, and put the customer on another
+ * server. Returns whether it wrote, or found a newer snapshot and did
+ * not (`superseded`), or had nothing to write into.
  */
 export async function updateSnapshotProtocolUsers(
   protocolUsers: ProtocolUser[],
   stillCurrent?: () => boolean,
-): Promise<void> {
-  if (protocolUsers.length === 0) return;
+  askedAt?: number,
+): Promise<"written" | "superseded" | "skipped"> {
+  if (protocolUsers.length === 0) return "skipped";
   const existing = await loadSnapshot();
-  if (!existing) return;
+  if (!existing) return "skipped";
+  if (askedAt !== undefined && existing.savedAt > askedAt) return "superseded";
   await saveSnapshot(
     {
       subscription: existing.subscription,
@@ -195,6 +227,7 @@ export async function updateSnapshotProtocolUsers(
     },
     stillCurrent,
   );
+  return "written";
 }
 
 /** The cached server list, for a load whose route request failed while
@@ -225,6 +258,39 @@ export async function cachedRoutesFor(subscription: Subscription): Promise<Route
   if (!snapshot || !held) return [];
   if (held.id !== subscription.id || held.planId !== subscription.planId) return [];
   return snapshot.routes;
+}
+
+/** Which plan a route list belongs to: a subscription, and the plan it
+ * is on. A plan change is a new list (`cachedRoutesFor`). */
+export function planOf(subscription: Pick<Subscription, "id" | "planId">): string {
+  return `${subscription.id}:${subscription.planId}`;
+}
+
+/** The route list on a dashboard: which plan it is for, and which of the
+ * screen's loads put it there, by the order they started in. */
+export interface ShownRoutes {
+  plan: string | null;
+  load: number;
+}
+
+/** What a dashboard's load whose route request failed puts on screen, or
+ * null to leave the list there as it is. `cached` is the list cached for
+ * this plan (`cachedRoutesFor`); `load` is this load's place in the order.
+ *
+ *  - A later load has put its own list on screen meanwhile: null. Its list
+ *    is newer than anything this one could find in the cache, which may
+ *    not yet hold it -- it is written without waiting.
+ *  - A list cached for this plan: that.
+ *  - Nothing cached for it: the list on screen stays if it is this plan's,
+ *    and goes if it is another's. A failed request never blanks a list
+ *    the customer can use, but one for another plan cannot be used:
+ *    picked from, it switches to a route the plan does not have, which the
+ *    server refuses. The phone's picker opens on the dashboard's list now,
+ *    as the desktop's does, and would have offered it. */
+export function standInRoutes(cached: RouteOption[], shown: ShownRoutes, plan: string, load: number): RouteOption[] | null {
+  if (shown.load > load) return null;
+  if (cached.length > 0) return cached;
+  return shown.plan === plan ? null : [];
 }
 
 /** Forgets everything. Called on sign-out: leaving one customer's

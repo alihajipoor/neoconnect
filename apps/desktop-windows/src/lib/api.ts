@@ -1,12 +1,12 @@
 import { fetch } from "@tauri-apps/plugin-http";
-import { apiEndpoints, rememberedEndpoint, rememberEndpoint } from "./api-endpoints";
+import { apiEndpoints, forgetEndpoint, rememberedEndpoint, rememberEndpoint } from "./api-endpoints";
 import { deviceHeaders } from "./device-identity";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
 import {
   clearDemotion,
   demotedLast,
   demoteEndpoint,
-  knownOnBlockPage,
+  isDemoted,
   resetDemotionsForTests,
   resolvesToBlockPage,
 } from "./endpoint-demotion";
@@ -72,6 +72,17 @@ export const SLOW_ANSWER_MS = 20_000;
  * is for is unverified; the traces will show it as `timeout` at about
  * ten seconds (`failedAs`), and this is the number to change if they do.
  *
+ * Per name, not per address. The TCP handshake's part of it is shared
+ * among the addresses the name resolves to: hyper-util, under reqwest,
+ * gives each address of one family this divided by how many there are
+ * (`ConnectingTcpRemote::new` in hyper-util 0.1.20). A CDN name with two
+ * IPv4 addresses gives each five seconds to complete its handshake. That
+ * is mostly a gain -- with the first address blackholed the second is
+ * tried at five seconds, where otherwise the whole name would fail at ten
+ * -- and a cost only on a path that needs more than five seconds of
+ * retransmitted handshakes at every address, which is unverified either
+ * way.
+ *
  * Ignored by the web portal, whose `fetch` is the browser's and has no
  * such setting: there an unreachable address takes the full deadline. */
 export const CONNECT_TIMEOUT_MS = 10_000;
@@ -100,6 +111,13 @@ const answeredBy = new WeakMap<object, string>();
  * why a 401 does not count. */
 const servedBackend = new Set<string>();
 
+/** The addresses that have answered the public health check, in this run,
+ * with something the backend never says to it: a 401, a 403 or a 404, or
+ * a page (`provesBackend`). Their 401 is not the backend refusing a token
+ * -- `foreignAnswer` treats it as a page -- until the address serves the
+ * backend's JSON again. */
+const notBackend = new Set<string>();
+
 function noteAnswer(base: string, response: Response): void {
   // Whatever answered, the network let a request through to this
   // address, so it is no longer one to ask last (endpoint-demotion.ts).
@@ -108,7 +126,44 @@ function noteAnswer(base: string, response: Response): void {
   // keyed, and there is nothing to note about it.
   if (typeof response !== "object" || response === null) return;
   answeredBy.set(response, base);
-  if (isBackendAnswer(response) && response.status !== 401) servedBackend.add(base);
+  if (isBackendAnswer(response) && response.status !== 401) {
+    servedBackend.add(base);
+    notBackend.delete(base);
+  }
+}
+
+/** Whether this answer to the public health check proves the address
+ * reaches the backend: its JSON, saying it is up (200), that its database
+ * is not (503), or that the throttle wants a pause (429). Nothing else is
+ * an answer the backend gives there. A 401, 403 or 404 in JSON is a
+ * broken address that answers everything that way, and has been seen to
+ * win the race for it. */
+function provesBackend(response: Response): boolean {
+  return isBackendAnswer(response) && (response.ok || response.status === 503 || response.status === 429);
+}
+
+/** Notes what an answer to the public health check said about `base`. */
+function noteHealth(base: string, response: Response): void {
+  if (!provesBackend(response)) notBackend.add(base);
+}
+
+/** Whether `response`, from `base`, is to be treated as a page from in
+ * front of the backend rather than the backend's own answer: a page
+ * (`isForeignPage`), or a refusal from an address whose health check has
+ * shown it is not the backend (`notBackend`). The second answers faster
+ * than the backend can. Its JSON 401 won every read it answered first,
+ * took the token refresh there and refused it, so every screen said the
+ * session could not be renewed while the backend would have renewed it
+ * one address along. */
+function foreignAnswer(base: string, response: Response): boolean {
+  return isForeignPage(response) || (!response.ok && notBackend.has(base));
+}
+
+/** `foreignAnswer`, for a response already out of the race or the walk
+ * that heard it. */
+function foreignResponse(response: Response): boolean {
+  const base = answeredBy.get(response);
+  return base === undefined ? isForeignPage(response) : foreignAnswer(base, response);
 }
 
 /** How a request that got no answer is recorded in the trace.
@@ -145,6 +200,9 @@ function settleFailure(
 ): void {
   settleAttempt(entry, outcome);
   if (outcome === "timeout") demoteEndpoint(base);
+  // And it is not offered to the next write as the address that answers
+  // (`recentWinner`), whichever request found out.
+  forgetWinner(base);
 }
 
 /** How long the first address, the one that answered last time, has a
@@ -196,15 +254,23 @@ interface Stop {
   timeoutMs: number;
 }
 
-/** How long a race winner is trusted to take a write without asking the
- * endpoints again.
+/** How long an address the backend has just answered from is trusted to
+ * take a write without asking the endpoints again (`recentWinner`).
  *
  * Long enough to cover what follows a read in the ordinary course of
  * things: the token refresh after a read's 401, a route switch after the
- * route list, a report after the screen that failed. Short enough that a
- * network change or a block that has just landed costs a write one
- * timeout at the old address, and then the health race (`sendWrite`). */
-const PROVEN_FOR_MS = 60_000;
+ * route list, a report after the screen that failed. And longer than the
+ * device slot's renewal period (sixty seconds, `DEFAULT_RENEW_EVERY_SEC`
+ * in device-slots.ts), because each answered write renews the trust: while
+ * a tunnel is up and its renewals are answered, the release on Disconnect
+ * has an address to go straight to. At exactly sixty seconds, about half
+ * of all disconnects found the trust lapsed and spent their second and a
+ * half on a health check first; on a link where a fresh connection takes
+ * eight hundred milliseconds that is the whole budget, and the slot stayed
+ * held until it went stale. Short enough that a network change or a block
+ * that has just landed costs a write one timeout at the old address, and
+ * then the health race (`sendWrite`). */
+const PROVEN_FOR_MS = 90_000;
 
 /** What a write asks the endpoints before it is sent, when no race has
  * found an answering address in the last `PROVEN_FOR_MS`. The backend's
@@ -213,21 +279,39 @@ const PROVEN_FOR_MS = 60_000;
  * still proves the address reaches the backend. */
 const HEALTH_PATH = "/health";
 
-/** The last race in which the backend itself answered: where, how fast,
- * and when. Any race counts -- a read's, the sign-in challenge's, a
- * write's health race. */
+/** The last address the backend itself answered from: where, how fast,
+ * and when. Any race's winner counts -- a read's, the sign-in
+ * challenge's, a write's health race -- and so does a write that was
+ * answered. */
 let lastWinner: (AnsweredBase & { at: number }) | null = null;
 
 function noteWinner(base: string, ms: number): void {
   lastWinner = { base, ms, at: Date.now() };
 }
 
-/** The last race winner, if it won within `PROVEN_FOR_MS`. */
+/** Stops offering `base` to the next write: it has just failed a request,
+ * or answered one with a page from in front of the backend.
+ *
+ * Only the write that found the last winner failing used to forget it. A
+ * health race's winner that then timed out on the write, a challenge's
+ * winner whose sign-in got nothing, a read's winner that answered the
+ * next request with a 502 page: each was offered to every write for the
+ * rest of the minute, and each of those writes waited out the same
+ * timeout there, or stopped on the same page, before asking anywhere
+ * else. */
+function forgetWinner(base: string): void {
+  if (lastWinner?.base === base) lastWinner = null;
+}
+
+/** The last winner, if the backend answered there within `PROVEN_FOR_MS`
+ * and the address has not been demoted on this network since -- a
+ * demoted address never leads a race, and does not lead a write either. */
 function recentWinner(): AnsweredBase | null {
   if (lastWinner === null) return null;
   const age = Date.now() - lastWinner.at;
   // A clock set back is not a fresh answer.
   if (age < 0 || age >= PROVEN_FOR_MS) return null;
+  if (isDemoted(lastWinner.base)) return null;
   return { base: lastWinner.base, ms: lastWinner.ms };
 }
 
@@ -244,6 +328,7 @@ function timeoutAt(base: string): number {
 export function resetRaceWinnerForTests(): void {
   lastWinner = null;
   servedBackend.clear();
+  notBackend.clear();
   resetDemotionsForTests();
 }
 
@@ -344,16 +429,29 @@ function isBackendAnswer(response: Response): boolean {
  * answer of last resort, so that a request nothing better answered says
  * what did answer rather than "could not reach Neoxify".
  *
- * A success without JSON is not counted here. The backend's 204s and
- * 304s carry no body and no type at all. */
+ * A success is a page too when it says it carries something other than
+ * JSON: a node's fallback site answers 200 with its HTML to any path.
+ * That one used to win a read in ten milliseconds, be remembered and asked
+ * for the bundle, and then fail the read on its body. A success with no
+ * type at all is not counted: the backend's 204s and 304s carry no body
+ * and no type. */
 export function isForeignPage(response: Response): boolean {
-  return response.status >= 400 && !isBackendAnswer(response);
+  if (isBackendAnswer(response)) return false;
+  if (response.status >= 400) return true;
+  return (response.headers?.get?.("content-type") ?? "") !== "";
 }
 
 /** Thrown for a write whose health race the backend answered, when the
  * write itself then got no answer anywhere it was sent. Neoxify was
  * reached moments earlier, so this is not "could not reach Neoxify". */
 class StoppedAnswering extends Error {}
+
+/** Thrown when nothing answered because every address asked had a name
+ * that resolves to Iran's DNS block page and nothing else
+ * (`resolvesToBlockPage`). The customer's connection works; this network
+ * sends Neoxify's names to the block page, and the screen says that
+ * rather than telling them to check their connection (`BLOCKED_BY_NETWORK`). */
+class OnBlockPage extends Error {}
 
 /** A walk over addresses, one at a time, carried across its stages. */
 interface Walk {
@@ -459,18 +557,24 @@ async function fetchOneEndpointAtATime(
     try {
       const response = await send(base, path, init, controller.signal);
       settleAttempt(entry, `h${response.status}`);
-      if (isForeignPage(response)) {
+      if (foreignAnswer(base, response)) {
         // Never remembered and never asked for the bundle: it is not the
         // service. The CDN's 502 page used to be both, and then led every
-        // write after it. A gateway page that may have come after the
-        // backend acted still ends a write that must not be sent twice;
-        // any other page is kept, and the next address is tried.
+        // write after it. Nor is it offered to the next write any more,
+        // if it had won a race. A gateway page that may have come after
+        // the backend acted still ends a write that must not be sent
+        // twice; any other page is kept, and the next address is tried.
+        forgetWinner(base);
         if (MAY_HAVE_REACHED_BACKEND.has(response.status) && !REPEATABLE_WRITES.has(path)) return response;
         walk.page ??= response;
         continue;
       }
       void rememberEndpoint(base);
       void maybeRefreshBundle(base);
+      // The backend answered here, so the next write may come straight
+      // here too (`recentWinner`). Not on a 401, which an address that is
+      // not the backend can give as well (`refusedByBackend`).
+      if (response.status !== 401) noteWinner(base, Date.now() - startedAt);
       return response;
     } catch (err) {
       // Stopped by the caller's deadline rather than failing: left
@@ -508,34 +612,43 @@ function unanswered(walk: Walk, init: RequestInit): Response {
  * token refresh, the social sign-in exchange, a route switch, an attempt
  * report, and the rest.
  *
- * First, the address a race last heard the backend from, if that was
- * within `PROVEN_FOR_MS` -- the usual case, since writes mostly follow
- * reads. Otherwise, or if that address does not answer, the endpoints not
- * yet tried are raced for the health check (`raceForHealth`), and the
- * write walks only those that answered it, in the order they answered,
- * each given time to answer at the pace it just showed. Throughout, the
- * remembered endpoint is read again before each step
- * (`followRemembered`).
+ * First, the address the backend last answered from, if that was within
+ * `PROVEN_FOR_MS` (`recentWinner`) -- the usual case, since writes mostly
+ * follow reads or other writes. Otherwise, or if that address does not
+ * answer, the endpoints not yet tried are raced for the health check
+ * (`raceForHealth`), and the write walks only those whose answer proved
+ * they reach the backend, in the order they answered, each given time to
+ * answer at the pace it just showed. Throughout, the remembered endpoint
+ * is read again before each step (`followRemembered`).
  *
  * If none of those takes the write, the race is run again over the
  * addresses it has not yet heard from -- the ones stopped when the first
  * answer came in -- and so on until one takes it or nothing more answers.
- * An address that failed a health race, or has been sent the write, is
- * not asked again, so every round is smaller than the one before. Usually
- * there is one round: the address that answered the health check takes
- * the write.
+ * An address that failed a health race, answered it with a page, or has
+ * been sent the write, is not asked again, so every round is smaller than
+ * the one before. Usually there is one round: the address that answered
+ * the health check takes the write.
+ *
+ * An address that answered the health check with a page from in front of
+ * the backend is never sent the write. Its page showed it cannot reach
+ * the backend just now -- a mirror whose upstream is broken answers 502 --
+ * and when it went ahead of the addresses not yet asked, its 502 ended a
+ * write that must not be sent twice (`MAY_HAVE_REACHED_BACKEND`) before
+ * an address that would have taken it was ever asked. Its page is still
+ * the answer if nothing better comes: something did reply, so the write
+ * says what, rather than "could not reach Neoxify".
  *
  * The write itself is still sent to one address at a time, and to each
  * at most once, for the reasons `fetchAnyEndpoint` gives. When nothing
- * answers the health race the write is not sent at all, and the result
- * is "could not reach Neoxify" after about twenty seconds at most --
- * eleven and a half where no address completes a connection
- * (`CONNECT_TIMEOUT_MS`), thirteen when some of them had been demoted
- * and are asked a head start later (`staggeredRace`) -- rather than
- * after a walk of the whole list.
- * When the backend answered it and then the write got no answer,
- * `StoppedAnswering` is thrown instead: Neoxify was reached moments
- * earlier. */
+ * answers the health race the write is not sent at all, and the result is
+ * "could not reach Neoxify" -- after `2 * LEAD_MS + SLOW_ANSWER_MS`,
+ * twenty-three seconds, at most; eleven and a half where no address
+ * completes a connection (`CONNECT_TIMEOUT_MS`); and up to
+ * `SLOW_ANSWER_MS` more when a recent winner was asked first and did not
+ * answer -- rather than after a walk of the whole list. When the backend
+ * answered, the health check or a write within `PROVEN_FOR_MS`, and then
+ * the write got no answer, `StoppedAnswering` is thrown instead: Neoxify
+ * was reached moments earlier, however it was found. */
 async function sendWrite(
   path: string,
   init: RequestInit,
@@ -546,18 +659,23 @@ async function sendWrite(
   const walk = await newWalk();
   // Addresses a health race may still ask.
   let candidates = [...endpoints];
-  // Whether the backend itself answered a health race for this write.
+  // Whether the backend itself has answered, within `PROVEN_FOR_MS`, at an
+  // address this write was then sent to or raced.
   let reached = false;
+  // The first page a health race heard, the answer of last resort.
+  let healthPage: Response | null = null;
+  // Addresses whose answer to the health check was a page.
+  const paged = new Set<string>();
+  // Whether every health race so far ended with every address on the
+  // block page, and nothing else.
+  let onBlockPage = false;
 
   const recent = recentWinner();
   if (recent !== null) {
     const stop = { base: recent.base, timeoutMs: followUpTimeout(recent) };
     const response = await fetchOneEndpointAtATime(path, init, [stop], walk, trace);
     if (response) return response;
-    // The last winner has just failed a write, unless the caller's own
-    // deadline cut it short. It is no longer offered to the next one,
-    // which would otherwise wait out the same timeout before asking.
-    if (lastWinner?.base === recent.base && !outer?.aborted) lastWinner = null;
+    reached ||= walk.tried.has(recent.base);
   }
 
   let stops: Stop[] = [];
@@ -566,17 +684,24 @@ async function sendWrite(
       const response = await fetchOneEndpointAtATime(path, init, stops, walk, trace);
       if (response) return response;
     }
-    candidates = candidates.filter((base) => !walk.tried.has(base));
+    candidates = candidates.filter((base) => !walk.tried.has(base) && !paged.has(base));
     if (candidates.length === 0 || outer?.aborted) break;
     const health = await raceForHealth(candidates, outer, trace);
     reached ||= health.backend;
+    healthPage ??= health.page;
+    onBlockPage = health.blockPage && !reached && healthPage === null;
+    for (const base of health.pages) paged.add(base);
     if (health.answered.length === 0) break;
     candidates = candidates.filter((base) => !health.silent.includes(base));
     stops = health.answered.map((answered) => ({ base: answered.base, timeoutMs: followUpTimeout(answered) }));
   }
   // A write cut off by its caller's own deadline was not left unanswered
   // by the backend: that is the caller's to say, as before.
-  if (reached && !walk.page && !outer?.aborted) throw new StoppedAnswering();
+  if (outer?.aborted) return unanswered(walk, init);
+  if (walk.page) return walk.page;
+  if (reached) throw new StoppedAnswering();
+  if (healthPage) return healthPage;
+  if (onBlockPage) throw new OnBlockPage();
   return unanswered(walk, init);
 }
 
@@ -608,6 +733,14 @@ async function sendWrite(
  * eight seconds on every blocked address before reaching the one that
  * answered a moment ago. A write without `via` finds that out for itself
  * (`sendWrite`).
+ *
+ * The last address in `via` gets `SLOW_ANSWER_MS`, whatever pace it
+ * answered the race at. It is the last address known to answer, and an
+ * address that has just answered in a hundred milliseconds can still be a
+ * slow route the next time: a sign-in whose challenge came back at once
+ * and whose own answer took twelve seconds was cut off at eight, with
+ * most of the sign-in's deadline unused. The caller's own deadline still
+ * bounds it.
  */
 async function fetchAnyEndpoint(
   path: string,
@@ -621,7 +754,10 @@ async function fetchAnyEndpoint(
   // behalf, by any path below.
   if (init.signal?.aborted) throw new Error("the request ran out of time");
   if (via) {
-    const stops = via.map((answered) => ({ base: answered.base, timeoutMs: followUpTimeout(answered) }));
+    const stops = via.map((answered, i) => ({
+      base: answered.base,
+      timeoutMs: i === via.length - 1 ? SLOW_ANSWER_MS : followUpTimeout(answered),
+    }));
     const walk = await newWalk();
     return (await fetchOneEndpointAtATime(path, init, stops, walk, trace)) ?? unanswered(walk, init);
   }
@@ -689,13 +825,13 @@ async function fetchAnyEndpoint(
   if (method !== "GET" && method !== "HEAD") return await sendWrite(path, init, endpoints, trace);
 
   // Won by any answer that is not a page from in front of the backend
-  // (`isForeignPage`): the backend's JSON, whatever its status, and the
+  // (`foreignAnswer`): the backend's JSON, whatever its status, and the
   // bodiless 204s and 304s it sends with no type at all.
-  const { winner, answers, stop } = await staggeredRace(
+  const { winner, answers, stop, blockPage } = await staggeredRace(
     endpoints,
     path,
     init,
-    (answer) => !isForeignPage(answer.response),
+    (answer) => !foreignAnswer(answer.base, answer.response),
     trace,
   );
   if (winner) {
@@ -709,9 +845,12 @@ async function fetchAnyEndpoint(
   const kept = answers[0];
   stop(kept);
   if (kept !== undefined) return kept.response;
+  if (init.signal?.aborted) throw new Error("the request ran out of time");
+  // Every address was on the block page: not the customer's connection.
+  if (blockPage) throw new OnBlockPage();
   // Thrown so the callers keep their "could not reach Neoxify" handling;
   // which address failed how is the trace's to say.
-  throw new Error(init.signal?.aborted ? "the request ran out of time" : "no API endpoint answered");
+  throw new Error("no API endpoint answered");
 }
 
 /** The failure half of every result shape below.
@@ -738,6 +877,13 @@ export type RequestFailure = {
    * request; so does a thrown error nobody classified. Read absent as
    * "not known to have gone unanswered". */
   noResponse?: true;
+  /** Set beside `noResponse` when nothing answered because every address
+   * asked had a name that resolves to Iran's DNS block page and nothing
+   * else (`resolvesToBlockPage` in endpoint-demotion.ts). The connection
+   * works; the network is keeping Neoxify's names from it, and the screen
+   * says so rather than sending the customer to check a connection that
+   * is fine (failure-text.ts). */
+  blockPage?: true;
   /** The server's machine-readable `code`, when its answer carried one
    * (`DEVICE_LIMIT`, `TAKEOVER_LIMIT`, ...).
    *
@@ -766,7 +912,7 @@ export type ApiResult<T> = { ok: true; data: T } | RequestFailure;
  * the panel, inside diagnostics written in English, and the panel is read
  * in English. What a customer is shown is chosen by `noResponse` and the
  * status in failure-text.ts, in their own language. */
-const unreachable = (): RequestFailure => ({
+export const unreachable = (): RequestFailure => ({
   ok: false,
   error: "Could not reach Neoxify. Check your internet connection.",
   noResponse: true,
@@ -783,9 +929,77 @@ const unreachable = (): RequestFailure => ({
  * an unreachable control plane. */
 export const STOPPED_ANSWERING = "Neoxify answered but then stopped responding. Please try again.";
 
-/** The failure for a request that got no answer: see `StoppedAnswering`. */
+/** What a request says when nothing answered and every address it asked
+ * had a name resolving to Iran's DNS block page (`OnBlockPage`). It
+ * begins as `unreachable` does, so a report read by its sentence is still
+ * an unreachable control plane; what the customer is shown is chosen by
+ * `blockPage` (failure-text.ts). */
+export const BLOCKED_BY_NETWORK = "Could not reach Neoxify: this network's DNS sends its addresses to a block page.";
+
+/** What a request says when the backend answered it with a 401 and the
+ * token refresh that followed then got no answer at all. Neoxify was
+ * reached moments earlier, so this is not "could not reach Neoxify"; and
+ * the session is not over, so it is not a sign-out either. */
+export const RENEWAL_UNANSWERED = "Neoxify answered, but renewing your session got no answer. Please try again.";
+
+/** What a request says when its token refresh was answered, but not with
+ * new tokens and not with a refusal of the session: a page from in front of
+ * the backend, the throttle, a server error, or a 401 from an address that
+ * is not the backend. */
+export const RENEWAL_FAILED = "Could not renew your session just now. Try again in a moment.";
+
+/** The failure for a request that got no answer: see `StoppedAnswering`
+ * and `OnBlockPage`. */
 function unansweredFailure(err: unknown): RequestFailure {
-  return err instanceof StoppedAnswering ? { ok: false, error: STOPPED_ANSWERING, noResponse: true } : unreachable();
+  if (err instanceof StoppedAnswering) return { ok: false, error: STOPPED_ANSWERING, noResponse: true };
+  if (err instanceof OnBlockPage) return { ok: false, error: BLOCKED_BY_NETWORK, noResponse: true, blockPage: true };
+  return unreachable();
+}
+
+/** Thrown in place of a body that was still being read when the caller's
+ * own deadline ran out (`readWithin`). */
+class BodyStalled extends Error {}
+
+/** `read`, a response body being read, given up on when `signal` fires.
+ *
+ * A race hands back the winner's response as soon as its headers arrive,
+ * and lets go of the caller's signal then, so that a caller's deadline
+ * firing later cannot cancel the body (`staggeredRace`). That left the
+ * body itself with no limit at all: a challenge whose headers came back
+ * and whose body never finished kept "Signing in..." on screen for good,
+ * deadline or not. This bounds the wait, not the request -- the body is
+ * not cancelled, only no longer waited for. Without a signal, as before. */
+function readWithin<T>(read: Promise<T>, signal: AbortSignal | null | undefined): Promise<T> {
+  if (!signal) return read;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new BodyStalled());
+    if (signal.aborted) {
+      // Settled either way, so nothing is left rejecting unobserved.
+      read.catch(() => undefined);
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    read.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** The failure for an answer whose body could not be had: one the
+ * caller's deadline overtook (`BodyStalled`) -- headers from the backend,
+ * then nothing, which is the backend having stopped responding -- or one
+ * that was not the JSON it said it was. */
+function bodyFailure(err: unknown, res: Response): RequestFailure {
+  if (err instanceof BodyStalled && isBackendAnswer(res)) return { ok: false, error: STOPPED_ANSWERING, noResponse: true };
+  return { ok: false, error: requestFailed(res.status), status: res.status };
 }
 
 /** The sentence for an answer that carried no message of its own: a page
@@ -805,8 +1019,11 @@ export function requestFailed(status: number): string {
  * The body is read once and every part of the answer is kept. Reading it
  * only for its message is what made a 409 indistinguishable from any
  * other failure to every caller. */
-async function failureFrom(res: Response): Promise<RequestFailure> {
-  const body: unknown = await res.json().catch(() => null);
+async function failureFrom(res: Response, signal?: AbortSignal | null, foreign = false): Promise<RequestFailure> {
+  // Not the backend's answer (`foreignResponse`): whatever its body says,
+  // it is not a sentence the backend wrote, nor one of its codes.
+  if (foreign) return { ok: false, error: requestFailed(res.status), status: res.status };
+  const body: unknown = await readWithin(res.json(), signal).catch(() => null);
   const fields = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : null;
   const message = fields?.message;
   const error = Array.isArray(message)
@@ -846,22 +1063,36 @@ export async function publicRequest<T>(
     return unansweredFailure(err);
   }
 
-  if (!res.ok) {
-    return await failureFrom(res);
+  // A page is never a success, whatever its status: a node's fallback
+  // site answers 200 with HTML.
+  const foreign = foreignResponse(res);
+  if (!res.ok || foreign) {
+    return await failureFrom(res, init?.signal, foreign);
   }
   if (res.status === 204) return { ok: true, data: undefined as T };
-  return { ok: true, data: (await res.json()) as T };
+  try {
+    return { ok: true, data: (await readWithin(res.json(), init?.signal)) as T };
+  } catch (err) {
+    return bodyFailure(err, res);
+  }
 }
 
 /** What a race found: the answer, and who else answered. */
 export interface Raced<T> {
   result: ApiResult<T>;
-  /** Every address that gave an HTTP answer, in the order a follow-up
-   * should try them: the one whose answer became `result` first, then
-   * the backend's other answers, then pages from whatever stands in front
-   * of it. Empty only when nothing answered at all, which is also the
-   * only time `result` says Neoxify could not be reached. */
+  /** Every address the backend itself answered from (`isBackendAnswer`),
+   * in the order a follow-up should try them: the one whose answer became
+   * `result` first, then the backend's other answers -- a mirror over its
+   * throttle. Empty when the backend answered nowhere. */
   answered: AnsweredBase[];
+  /** The addresses that answered only with a page from in front of the
+   * backend. Something replied there, so `result` is that page's status
+   * when nothing better came; but the backend was not reached through
+   * them, and a follow-up is not sent there. */
+  pages: string[];
+  /** The addresses that gave no answer at all. Not those stopped because
+   * another answered, nor those the race was decided without asking. */
+  failed: string[];
 }
 
 /** One address's answer in a race. */
@@ -884,6 +1115,9 @@ interface Staggered {
    * unreachable. Not those stopped because the race was decided, and not
    * those the race was decided without asking. */
   failed: string[];
+  /** Whether nothing answered because every address had a name resolving
+   * to Iran's block page and nothing else (`OnBlockPage`). */
+  blockPage: boolean;
   /** Stops every request still running, except `spare`'s, whose body the
    * caller is about to read. */
   stop(spare?: RaceAnswer): void;
@@ -932,9 +1166,9 @@ function stagesOf(count: number, healthy: number): [number, number][] {
  * As each address is asked, its name's DNS answer is looked at too
  * (`resolvesToBlockPage`), and a request whose name turns out to resolve
  * to the block page and nothing else is stopped there and counted as
- * failed, so the next stage need not wait out the head start on it. A
- * name already found there in the last minute is not sent the request
- * at all. Either way the name is demoted on this network.
+ * failed, so the next stage need not wait out the head start on it; the
+ * name is demoted on this network. When every address ends that way, the
+ * race says so (`blockPage`): it is the network, not the connection.
  *
  * A winner is remembered, and asked for the address bundle. One that is
  * the backend's own JSON is also offered to the next write (`sendWrite`);
@@ -951,7 +1185,7 @@ async function staggeredRace(
   // With nothing to ask there is no stage to settle the race; every
   // caller checks first, and this keeps one that did not from waiting for
   // ever.
-  if (ordered.length === 0) return { winner: null, answers: [], failed: [], stop: () => undefined };
+  if (ordered.length === 0) return { winner: null, answers: [], failed: [], blockPage: false, stop: () => undefined };
   const stages = stagesOf(ordered.length, healthy);
   const outer = request.signal ?? null;
   const controllers = ordered.map(() => new AbortController());
@@ -959,8 +1193,9 @@ async function staggeredRace(
   // rather than the generic transport failure the abort surfaces as.
   const timedOut = ordered.map(() => false);
   // Which were stopped, or never sent, because the name resolves to the
-  // block page.
+  // block page, and how many of the failures that makes.
   const blockPage = ordered.map(() => false);
+  let failedOnBlockPage = 0;
   // Which have answered or failed, so a lookup that comes back after
   // either leaves them be.
   const done = ordered.map(() => false);
@@ -1001,15 +1236,12 @@ async function staggeredRace(
       }, SLOW_ANSWER_MS),
     );
     // Its name's DNS answer, looked at beside the request: the block page
-    // stops it, and one found there in the last minute means it is not
-    // sent at all.
-    if (knownOnBlockPage(base)) blockPage[i] = true;
-    else
-      void resolvesToBlockPage(base).then((found) => {
-        if (!found || done[i] || decided) return;
-        blockPage[i] = true;
-        controllers[i].abort();
-      });
+    // stops it, or keeps it from being sent when the answer is in first.
+    void resolvesToBlockPage(base).then((found) => {
+      if (!found || done[i] || decided) return;
+      blockPage[i] = true;
+      controllers[i].abort();
+    });
     // Started inside a promise, so a fetch that throws rather than
     // rejecting is still one address failing, not the whole race.
     void Promise.resolve()
@@ -1029,6 +1261,9 @@ async function staggeredRace(
             backend: isBackendAnswer(response),
           };
           answers.push(answer);
+          // A page from the address the last write went straight to: it is
+          // not offered to the next one (`forgetWinner`).
+          if (foreignAnswer(base, response)) forgetWinner(base);
           if (wins(answer)) decide(answer);
         },
         (err: unknown) => {
@@ -1036,6 +1271,7 @@ async function staggeredRace(
           const outcome = blockPage[i] ? "blockpage" : failedAs(err, timedOut[i], startedAt);
           if (!decided) {
             failed.push(base);
+            if (outcome === "blockpage") failedOnBlockPage += 1;
             settleFailure(entries[i], base, outcome);
             return;
           }
@@ -1120,23 +1356,27 @@ async function staggeredRace(
       c.abort();
     });
   };
-  return { winner, answers, failed, stop };
+  // Every address asked, every one failed, and every failure the block
+  // page: the network's DNS, not the connection.
+  const onBlockPage = winner === null && answers.length === 0 && failedOnBlockPage === ordered.length;
+  return { winner, answers, failed, blockPage: onBlockPage, stop };
 }
 
-/** Every address that answered a race, in the order a follow-up should
- * try them: the winner first, then the backend's other answers, then
- * pages from whatever stands in front of it. Each once. */
-function answeredInOrder(winner: RaceAnswer | null, answers: RaceAnswer[]): AnsweredBase[] {
-  const ordered = [
-    ...(winner ? [winner] : []),
-    ...answers.filter((answer) => answer.backend && answer !== winner),
-    ...answers.filter((answer) => !answer.backend),
-  ];
+/** The addresses in `answers`, in the order a follow-up should try them:
+ * `winner` first, if it is among them, then the rest in the order they
+ * answered. Each once. */
+function inAnswerOrder(winner: RaceAnswer | null, answers: RaceAnswer[]): AnsweredBase[] {
+  const ordered = [...(winner && answers.includes(winner) ? [winner] : []), ...answers.filter((a) => a !== winner)];
   const answered: AnsweredBase[] = [];
   for (const answer of ordered) {
     if (!answered.some((a) => a.base === answer.base)) answered.push({ base: answer.base, ms: answer.ms });
   }
   return answered;
+}
+
+/** Each address once, in the order given. */
+function distinctBases(answers: RaceAnswer[]): string[] {
+  return [...new Set(answers.map((answer) => answer.base))];
 }
 
 /** Sends one unauthenticated request to the endpoints as a staggered
@@ -1160,18 +1400,29 @@ function answeredInOrder(winner: RaceAnswer | null, answers: RaceAnswer[]): Answ
  * failing that the first page, is the result, because something did
  * answer.
  *
- * The rest are stopped as soon as the winner is in.
+ * `endpoints`, when given, replaces the list: a sign-in whose attempt got
+ * no answer where the first race was answered asks the rest of the list
+ * for a fresh challenge (`sendWithChallenge` in auth.ts).
+ *
+ * The rest are stopped as soon as the winner is in. The winner's body is
+ * read within the caller's signal (`readWithin`), which the race itself
+ * has let go of by then.
  */
-export async function publicRace<T>(path: string, init: RequestInit, trace?: EndpointTrace): Promise<Raced<T>> {
-  const endpoints = await apiEndpoints();
-  if (endpoints.length === 0 || init.signal?.aborted) return { result: unreachable(), answered: [] };
+export async function publicRace<T>(
+  path: string,
+  init: RequestInit,
+  trace?: EndpointTrace,
+  endpoints?: string[],
+): Promise<Raced<T>> {
+  const list = endpoints ?? (await apiEndpoints());
+  if (list.length === 0 || init.signal?.aborted) return { result: unreachable(), answered: [], pages: [], failed: [] };
   const request: RequestInit = {
     ...init,
     headers: { "Content-Type": "application/json", ...init.headers },
   };
 
-  const { winner, answers, stop } = await staggeredRace(
-    endpoints,
+  const { winner, answers, failed, blockPage, stop } = await staggeredRace(
+    list,
     path,
     request,
     (answer) => answer.backend && answer.response.status !== 429,
@@ -1182,65 +1433,119 @@ export async function publicRace<T>(path: string, init: RequestInit, trace?: End
   // first 429, or failing that the first page.
   const kept = winner ?? answers.find((answer) => answer.backend) ?? answers[0];
   stop(kept);
-  if (kept === undefined) return { result: unreachable(), answered: [] };
+  if (kept === undefined) {
+    const result = blockPage ? unansweredFailure(new OnBlockPage()) : unreachable();
+    return { result, answered: [], pages: [], failed };
+  }
   return {
-    result: await resultFrom<T>(kept.response, kept.backend),
-    answered: answeredInOrder(winner, answers),
+    result: await resultFrom<T>(kept.response, kept.backend, init.signal),
+    answered: inAnswerOrder(
+      winner,
+      answers.filter((answer) => answer.backend),
+    ),
+    pages: distinctBases(answers.filter((answer) => !answer.backend)),
+    failed,
   };
 }
 
+/** What a health race found (`raceForHealth`). */
+interface HealthRace {
+  /** The addresses whose answer proved they reach the backend
+   * (`provesBackend`), the winner first. */
+  answered: AnsweredBase[];
+  /** Whether the backend itself answered anywhere. */
+  backend: boolean;
+  /** The addresses that answered with anything else: a page, or JSON the
+   * backend never sends to its health check. */
+  pages: string[];
+  /** The first of those answers, kept as the answer of last resort. */
+  page: Response | null;
+  /** The addresses that gave no answer at all, which a later round need
+   * not ask again. */
+  silent: string[];
+  /** Whether every address was on the block page (`OnBlockPage`). */
+  blockPage: boolean;
+}
+
 /** Races the health check across `endpoints`, for a write about to be
- * sent (`sendWrite`): who answered, in answer order; whether the backend
- * itself was among them; and who failed to answer at all, which a later
- * round need not ask again.
+ * sent (`sendWrite`).
  *
- * Won by the first answer from the backend, whatever its status. Unlike
- * the sign-in challenge, nothing is wanted from the answer but the fact
+ * Won by the first answer that proves the address reaches the backend
+ * (`provesBackend`): its JSON saying it is up, that its database is not,
+ * or that it is throttled. Nothing is wanted from the answer but the fact
  * of it, and a 429 or a 503 from the backend proves the address reaches
- * it as well as a 200 does. A page from in front of the backend does not
- * win, but is still listed, last: something answered there, and if
- * nothing better does, the write collects that status rather than "could
- * not reach Neoxify".
+ * it as well as a 200 does. Anything else does not win: a page from in
+ * front of the backend, and JSON the backend never gives its public
+ * health check, a 401 above all. An address that answers JSON 401 to
+ * everything used to win this race, be remembered and asked for the
+ * bundle, and take the write -- a report it then counted as delivered, a
+ * route switch it refused -- while the backend answered a moment later
+ * elsewhere. Such an answer is kept as the answer of last resort, and its
+ * address is not sent the write (`sendWrite`).
  *
  * Traced under its own phase, `health`, and the caller's phase put back
  * after. Every request is stopped once the race is decided; no body is
  * read. */
-async function raceForHealth(
-  endpoints: string[],
-  signal: AbortSignal | null,
-  trace?: EndpointTrace,
-): Promise<{ answered: AnsweredBase[]; backend: boolean; silent: string[] }> {
+async function raceForHealth(endpoints: string[], signal: AbortSignal | null, trace?: EndpointTrace): Promise<HealthRace> {
   const phase = trace?.phase;
   if (trace) trace.phase = "health";
   try {
-    const { winner, answers, failed, stop } = await staggeredRace(
+    const { winner, answers, failed, blockPage, stop } = await staggeredRace(
       endpoints,
       HEALTH_PATH,
       { method: "GET", signal },
-      (answer) => answer.backend,
+      (answer) => provesBackend(answer.response),
       trace,
     );
     stop();
+    for (const answer of answers) noteHealth(answer.base, answer.response);
+    const others = answers.filter((answer) => !provesBackend(answer.response));
     return {
-      answered: answeredInOrder(winner, answers),
+      answered: inAnswerOrder(
+        winner,
+        answers.filter((answer) => provesBackend(answer.response)),
+      ),
       backend: winner !== null,
+      pages: distinctBases(others),
+      page: others[0]?.response ?? null,
       silent: failed,
+      blockPage,
     };
   } finally {
     if (trace && phase !== undefined) trace.phase = phase;
   }
 }
 
+/** The first of `endpoints` whose answer to the health check proves it
+ * reaches the backend (`raceForHealth`), asked in that order as a
+ * staggered race, or null when none does.
+ *
+ * For a request that is not this app's to send: the browser's, which
+ * starts Google and Facebook sign-in (`socialStartBase` in
+ * social-auth.ts). It gets one address and no second try, so it is given
+ * one that has just answered, rather than whatever answered last in some
+ * earlier run on some other network. */
+export async function answeringEndpoint(
+  endpoints: string[],
+  signal?: AbortSignal,
+  trace?: EndpointTrace,
+): Promise<string | null> {
+  if (endpoints.length === 0) return null;
+  const health = await raceForHealth(endpoints, signal ?? null, trace);
+  return health.answered[0]?.base ?? null;
+}
+
 /** The result a raced answer stands for. A page from in front of the
  * backend is never a success, whatever its status: a node's fallback site
- * can answer 200 with HTML to any path. */
-async function resultFrom<T>(res: Response, backend: boolean): Promise<ApiResult<T>> {
-  if (!res.ok || !backend) return await failureFrom(res);
+ * can answer 200 with HTML to any path. The body is read within `signal`,
+ * when the caller brought one (`readWithin`). */
+async function resultFrom<T>(res: Response, backend: boolean, signal?: AbortSignal | null): Promise<ApiResult<T>> {
+  if (!res.ok || !backend) return await failureFrom(res, signal, !backend);
   if (res.status === 204) return { ok: true, data: undefined as T };
   try {
-    return { ok: true, data: (await res.json()) as T };
-  } catch {
-    return { ok: false, error: requestFailed(res.status), status: res.status };
+    return { ok: true, data: (await readWithin(res.json(), signal)) as T };
+  } catch (err) {
+    return bodyFailure(err, res);
   }
 }
 
@@ -1277,10 +1582,14 @@ const REFRESH_REFUSED = 401;
  * heard from anywhere yet. The health check is public, so a 401 to it is
  * not the backend's either.
  *
- * What this does not do is find the backend elsewhere. An address that
- * answers JSON 401 to everything still wins every read it answers first,
- * and each of those reads ends with "could not renew your session"; the
- * customer is not signed out, and the tunnel stays up. */
+ * An address whose 401 is not believed is not the end of the refresh
+ * either. Its health check has just shown it is not the backend
+ * (`notBackend`), so the refresh is sent on to the other addresses
+ * (`refreshTokens`), and from then on its refusals are treated as pages
+ * (`foreignAnswer`): they no longer win a read or end a walk. It used to
+ * win every read it answered first, and every one of them ended with
+ * "could not renew your session" while the backend would have renewed it
+ * one address along. */
 async function refusedByBackend(res: Response, trace?: EndpointTrace): Promise<boolean> {
   if (res.status !== REFRESH_REFUSED || !isBackendAnswer(res)) return false;
   const base = answeredBy.get(res);
@@ -1291,8 +1600,9 @@ async function refusedByBackend(res: Response, trace?: EndpointTrace): Promise<b
 }
 
 /** Sends the health check to one address and waits for the headers. The
- * answer is noted by `send` like any other; nothing else is done with it.
- * Traced under `health`, with the caller's phase put back after. */
+ * answer is noted by `send` like any other, and for what it says about
+ * the address (`noteHealth`); nothing else is done with it. Traced under
+ * `health`, with the caller's phase put back after. */
 async function askForHealth(base: string, trace?: EndpointTrace): Promise<void> {
   const phase = trace?.phase;
   if (trace) trace.phase = "health";
@@ -1307,6 +1617,7 @@ async function askForHealth(base: string, trace?: EndpointTrace): Promise<void> 
   try {
     const response = await send(base, HEALTH_PATH, { method: "GET" }, controller.signal);
     settleAttempt(entry, `h${response.status}`);
+    noteHealth(base, response);
   } catch (err) {
     settleFailure(entry, base, failedAs(err, timedOut, startedAt));
   } finally {
@@ -1323,43 +1634,75 @@ type Refresh =
   | { kind: "refused" }
   /** Nothing stored to refresh -- already signed out, which is not news. */
   | { kind: "none" }
-  /** The refresh could not be completed; the session may well be fine. */
-  | { kind: "unavailable" };
+  /** The refresh could not be completed; the session may well be fine.
+   * `answered` says whether anything answered the refresh at all, which
+   * is the difference between `RENEWAL_FAILED` and `RENEWAL_UNANSWERED`. */
+  | { kind: "unavailable"; answered: boolean };
+
+const REFRESH_PATH = "/customer-auth/refresh";
+
+/** `forgetEndpoint`, which is advisory: a request goes on without it. */
+function forgetRemembered(base: string): void {
+  try {
+    void forgetEndpoint(base).catch(() => undefined);
+  } catch {
+    // Not knowing how to forget costs the next race a head start.
+  }
+}
 
 async function refreshTokens(trace?: EndpointTrace): Promise<Refresh> {
   const current = await getTokens();
   if (!current) return { kind: "none" };
 
+  const init: RequestInit = {
+    method: "POST",
+    body: JSON.stringify({ refreshToken: current.refreshToken }),
+    headers: {
+      "Content-Type": "application/json",
+      // What this device is called on the customer's other devices
+      // ("Neoxify is in use on a Windows PC"). Sent on every refresh
+      // because a session started in the system browser could not send
+      // it, and its first refresh is what names that device. See
+      // device-identity.ts.
+      ...deviceHeaders(),
+    },
+  };
   // Sent through `fetchAnyEndpoint` rather than `publicRequest`, so the
   // response is still in hand to say where a refusal came from.
   let res: Response;
   try {
-    res = await fetchAnyEndpoint(
-      "/customer-auth/refresh",
-      {
-        method: "POST",
-        body: JSON.stringify({ refreshToken: current.refreshToken }),
-        headers: {
-          "Content-Type": "application/json",
-          // What this device is called on the customer's other devices
-          // ("Neoxify is in use on a Windows PC"). Sent on every refresh
-          // because a session started in the system browser could not send
-          // it, and its first refresh is what names that device. See
-          // device-identity.ts.
-          ...deviceHeaders(),
-        },
-      },
-      trace,
-    );
+    res = await fetchAnyEndpoint(REFRESH_PATH, init, trace);
   } catch {
-    return { kind: "unavailable" };
+    return { kind: "unavailable", answered: false };
   }
-  if (await refusedByBackend(res, trace)) return { kind: "refused" };
+  // Addresses whose refusal turned out not to be the backend's. Each round
+  // leaves one more out, so this ends.
+  const excluded = new Set<string>();
+  for (;;) {
+    if (await refusedByBackend(res, trace)) return { kind: "refused" };
+    // JSON that `refusedByBackend` has just shown is not the backend's:
+    // the refresh goes on to the other addresses, which the one that
+    // refused it may have been answering ahead of. It may be sent twice
+    // (`REPEATABLE_WRITES`), and this address never acted on it anyway.
+    const base = answeredBy.get(res);
+    if (base === undefined || !isBackendAnswer(res) || !foreignAnswer(base, res)) break;
+    excluded.add(base);
+    forgetWinner(base);
+    forgetRemembered(base);
+    const rest = (await apiEndpoints()).filter((other) => !excluded.has(other));
+    if (rest.length === 0) break;
+    try {
+      res = await sendWrite(REFRESH_PATH, init, rest, trace);
+    } catch {
+      return { kind: "unavailable", answered: true };
+    }
+  }
 
   // A page from in front of the backend is never a new pair of tokens,
-  // whatever its status.
-  const result = await resultFrom<TokenPair>(res, isBackendAnswer(res));
-  if (!result.ok) return { kind: "unavailable" };
+  // whatever its status, and nor is anything from an address that is not
+  // the backend.
+  const result = await resultFrom<TokenPair>(res, isBackendAnswer(res) && !foreignResponse(res));
+  if (!result.ok) return { kind: "unavailable", answered: true };
   await setTokens(result.data);
   return { kind: "renewed", tokens: result.data };
 }
@@ -1415,18 +1758,22 @@ async function authenticatedAttempt(path: string, init?: RequestInit, trace?: En
     return { answered: false, failure: unansweredFailure(err) };
   }
 
-  // The backend's 401 only. A 401 page from something in front of it is
-  // the answer of last resort -- nothing better replied -- and says
-  // nothing about this session's tokens; it is returned as it is.
-  if (res.status === 401 && isBackendAnswer(res)) {
+  // The backend's 401 only. A 401 page from something in front of it, or
+  // from an address that has shown it is not the backend, is the answer of
+  // last resort -- nothing better replied -- and says nothing about this
+  // session's tokens; it is returned as it is.
+  if (res.status === 401 && isBackendAnswer(res) && !foreignResponse(res)) {
     if (trace) trace.phase = "refresh";
     const refreshed = await refreshTokens(trace);
     if (refreshed.kind === "unavailable") {
       // Not a verdict on the session, so neither the tokens nor the
-      // screen change. The next request tries the refresh again.
+      // screen change. The next request tries the refresh again. In
+      // words of its own, which the screens put in the customer's
+      // language (failure-text.ts): whether the refresh got no answer
+      // at all, or an answer that was not new tokens.
       return {
         answered: false,
-        failure: { ok: false, error: "Could not renew your session just now. Try again in a moment." },
+        failure: { ok: false, error: refreshed.answered ? RENEWAL_FAILED : RENEWAL_UNANSWERED },
       };
     }
     if (refreshed.kind !== "renewed") {
@@ -1445,8 +1792,12 @@ async function authenticatedAttempt(path: string, init?: RequestInit, trace?: En
     try {
       if (trace) trace.phase = "retry";
       res = await doFetch(refreshed.tokens.accessToken);
-    } catch (err) {
-      return { answered: false, failure: unansweredFailure(err) };
+    } catch {
+      // The backend answered this request and renewed its session moments
+      // ago, so a retry that gets nothing is it having stopped responding:
+      // not "could not reach Neoxify", which sends the customer to check
+      // a connection that has just been shown to work.
+      return { answered: false, failure: { ok: false, error: STOPPED_ANSWERING, noResponse: true } };
     }
   }
 
@@ -1464,11 +1815,19 @@ export async function apiRequest<T>(path: string, init?: RequestInit, trace?: En
   if (!attempt.answered) return attempt.failure;
   const res = attempt.res;
 
-  if (!res.ok) {
-    return await failureFrom(res);
+  const foreign = foreignResponse(res);
+  if (!res.ok || foreign) {
+    return await failureFrom(res, null, foreign);
   }
   if (res.status === 204) return { ok: true, data: undefined as T };
-  return { ok: true, data: (await res.json()) as T };
+  // A body that is not the JSON it said it was is a failure with its
+  // status, not a rejection: every caller narrows on `ok`, and none of
+  // them catches.
+  try {
+    return { ok: true, data: (await res.json()) as T };
+  } catch (err) {
+    return bodyFailure(err, res);
+  }
 }
 
 /** The ETag off a response, or null if there isn't one.
@@ -1527,10 +1886,15 @@ export async function apiRequestRevalidated<T>(path: string, etag: string | null
     return { ok: true, notModified: true, etag: readEtag(res) ?? validator };
   }
 
-  if (!res.ok) {
-    return await failureFrom(res);
+  const foreign = foreignResponse(res);
+  if (!res.ok || foreign) {
+    return await failureFrom(res, null, foreign);
   }
   const next = readEtag(res);
   if (res.status === 204) return { ok: true, notModified: false, data: undefined as T, etag: next };
-  return { ok: true, notModified: false, data: (await res.json()) as T, etag: next };
+  try {
+    return { ok: true, notModified: false, data: (await res.json()) as T, etag: next };
+  } catch (err) {
+    return bodyFailure(err, res);
+  }
 }

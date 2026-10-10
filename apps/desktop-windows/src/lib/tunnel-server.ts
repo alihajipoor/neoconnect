@@ -174,14 +174,27 @@ export async function tunnelServerOf(
 
 /** `resolve_ipv4`, given up on a little after its own bound. Unresolvable,
  * a build without the command, or a call that never returns: nothing
- * known. Also how a race looks for Iran's block page behind a name
- * (`resolvesToBlockPage` in endpoint-demotion.ts). */
+ * known. */
 export function resolveIpv4(host: string, timeoutMs: number): Promise<string[]> {
+  return resolveWith(host, timeoutMs, false);
+}
+
+/** The same lookup with the name's IPv6 addresses kept as well -- every
+ * address the HTTP plugin's own connection may try. How a race looks for
+ * Iran's block page behind a name (`resolvesToBlockPage` in
+ * endpoint-demotion.ts), which must not take a name for the block page
+ * when it has a real IPv6 address too. A build whose command predates the
+ * option answers IPv4 only, as before. */
+export function resolveAddresses(host: string, timeoutMs: number): Promise<string[]> {
+  return resolveWith(host, timeoutMs, true);
+}
+
+function resolveWith(host: string, timeoutMs: number, withIpv6: boolean): Promise<string[]> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const stalled = new Promise<string[]>((resolve) => {
     timer = setTimeout(() => resolve([]), timeoutMs + RESOLVE_GRACE_MS);
   });
-  const asked = invoke<unknown>("resolve_ipv4", { host, timeoutMs }).then(
+  const asked = invoke<unknown>("resolve_ipv4", withIpv6 ? { host, timeoutMs, withIpv6 } : { host, timeoutMs }).then(
     (list) => (Array.isArray(list) ? list.filter((a): a is string => typeof a === "string" && a !== "") : []),
     () => [],
   );

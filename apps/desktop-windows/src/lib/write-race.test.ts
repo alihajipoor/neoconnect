@@ -52,7 +52,8 @@ vi.mock("./session", () => ({
   },
 }));
 
-const { apiRequest, publicRequest, resetRaceWinnerForTests } = await import("./api");
+const { apiRequest, publicRequest, resetRaceWinnerForTests, RENEWAL_UNANSWERED } = await import("./api");
+const { demoteName } = await import("./endpoint-demotion");
 const { newTrace, renderTrace } = await import("./endpoint-trace");
 const { onSessionRevoked } = await import("./session-revoked");
 
@@ -62,6 +63,7 @@ onSessionRevoked(() => {
 });
 
 const UNREACHABLE = "Could not reach Neoxify. Check your internet connection.";
+const STOPPED = "Neoxify answered but then stopped responding. Please try again.";
 
 /** How one address treats one request: answers after a delay, never
  * answers (blackholed), or fails at once (reset). A list is used up one
@@ -314,7 +316,12 @@ describe("a write after a read", () => {
 
   /** The read's address then stops answering, and so does everything
    * else. The first write finds that out the slow way; the next, inside
-   * the same minute, does not wait on that address again. */
+   * the same minute, does not wait on that address again.
+   *
+   * The first says Neoxify stopped responding: D answered moments before,
+   * as a health check's answer would have. Before, it said "could not
+   * reach Neoxify -- check your internet connection", where the same
+   * address found by a health race said it had stopped responding. */
   it("does not send the next write where the last one got nothing", async () => {
     network[D] = { "/customer/subscriptions/s1/routes": answers(200, () => json([])) };
     await run(() => apiRequest("/customer/subscriptions/s1/routes"));
@@ -325,7 +332,7 @@ describe("a write after a read", () => {
     const first = await run(switchRoute);
     const second = await run(switchRoute);
 
-    expect(first.result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
+    expect(first.result).toEqual({ ok: false, error: STOPPED, noResponse: true });
     expect(second.result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
     // D's eight seconds, then a health race nothing answers.
     expect(first.ms).toBe(8_000 + 1_500 + 20_000);
@@ -334,16 +341,16 @@ describe("a write after a read", () => {
     expect(sentTo("/customer/subscriptions/s1/route")).toEqual([D]);
   });
 
-  /** A minute on, the answer may be from another network, or the address
-   * blocked since. The write asks again. */
-  it("asks again once the read's answer is a minute old", async () => {
+  /** A minute and a half on, the answer may be from another network, or
+   * the address blocked since. The write asks again. */
+  it("asks again once the read's answer is a minute and a half old", async () => {
     network[D] = {
       "/customer/subscriptions/s1/routes": answers(200, () => json([])),
       "/health": answers(100, healthy),
       "/customer/subscriptions/s1/route": answers(200, () => json({ id: "pu1" })),
     };
     await run(() => apiRequest("/customer/subscriptions/s1/routes"));
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(90_000);
 
     const { result, ms } = await run(() =>
       apiRequest("/customer/subscriptions/s1/route", { method: "POST", body: JSON.stringify({ routeId: "r1" }) }),
@@ -365,7 +372,11 @@ describe("a 401 from something that is not the backend", () => {
   const unauthorized = () => json({ statusCode: 401, message: "Unauthorized" }, 401);
   const pair = () => json({ accessToken: "access2", refreshToken: "refresh2" });
 
-  it("does not sign the customer out when one address answers 401 to everything", async () => {
+  /** And the session is renewed where the backend is. Before: the read
+   * and every read after it ended with "could not renew your session",
+   * A winning each one with its fast 401 and refusing the refresh, while
+   * D would have renewed it. */
+  it("does not sign the customer out when one address answers 401 to everything, and renews elsewhere", async () => {
     network[A] = {
       "/customer/me": answers(50, unauthorized),
       "/customer-auth/refresh": answers(50, unauthorized),
@@ -380,14 +391,25 @@ describe("a 401 from something that is not the backend", () => {
 
     const { result } = await run(() => apiRequest("/customer/me", undefined, trace));
 
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.sessionExpired).toBeFalsy();
-    expect(stored.tokens).toEqual({ accessToken: "access", refreshToken: "refresh" });
+    expect(result).toEqual({ ok: true, data: { id: "c1" } });
+    expect(stored.tokens).toEqual({ accessToken: "access2", refreshToken: "refresh2" });
     expect(announced).toBe(0);
     // The refusal was not believed until the address answered the public
-    // health check as the backend would, and it did not. A answered the
-    // read inside its head start, so nobody else was asked.
-    expect(renderTrace(trace)).toBe("req: a.example=h401@50; refresh: a.example=h401@50; health: a.example=h401@50");
+    // health check as the backend would, and it did not; then the refresh
+    // went on to the rest, and the read again found D past A's 401.
+    expect(renderTrace(trace)).toBe(
+      "req: a.example=h401@50; refresh: a.example=h401@50; " +
+        "health: a.example=h401@50 b.example=cancel@1800 c.example=cancel@300 d.example=h200@300; " +
+        "refresh: d.example=h200@300; " +
+        "retry: a.example=h401@50 b.example=cancel@300 c.example=cancel@300 d.example=h200@300",
+    );
+    expect(sentTo("/customer-auth/refresh")).toEqual([A, D]);
+
+    // A no longer wins a read: its 401 is not the backend's.
+    sent = [];
+    const next = await run(() => apiRequest("/customer/me"));
+    expect(next.result).toEqual({ ok: true, data: { id: "c1" } });
+    expect(sentTo("/customer-auth/refresh")).toEqual([]);
   });
 
   /** Before: the page won the read, and the read failed with "Request
@@ -456,5 +478,195 @@ describe("a write already under way", () => {
     // D's answer.
     expect(write.ms()).toBe(100 + 8_000 + 300);
     expect(renderTrace(trace)).toBe("health: a.example=h200@100; req: a.example=timeout@8000 d.example=h204@300");
+  });
+});
+
+describe("an address that has stopped taking writes", () => {
+  /** The health race's winner, which then goes dark: the write times out
+   * there, and nothing else answers. Before: the next write inside the
+   * minute went to it first, and waited out the same eight seconds there
+   * before asking anyone else. */
+  it("is not sent the next write when it won a health race and then got nothing", async () => {
+    network[A] = { "/health": [answers(100, healthy), "hang"], "/client-attempts": "hang" };
+
+    const first = await run(report);
+    expect(first.result).toEqual({ ok: false, error: STOPPED, noResponse: true });
+
+    // D answers now; A still takes nothing.
+    network[D] = { "/health": answers(300, healthy), "/client-attempts": answers(100, noContent) };
+    sent = [];
+    const second = await run(report);
+    expect(second.result.ok).toBe(true);
+    expect(sentTo("/client-attempts")).toEqual([D]);
+    // A's head start in the health race, and D's answers: not eight
+    // seconds at A first.
+    expect(second.ms).toBe(1_500 + 300 + 100);
+  });
+
+  /** A read's winner whose next answer is a gateway page: a mirror whose
+   * upstream has just broken. Before: every write for a minute went to it
+   * first and ended on its 502, which a write that must not be sent twice
+   * stops at -- B, which would have taken them, was never asked. */
+  it("is not sent the next write when it answered the last one with a gateway page", async () => {
+    network[A] = { "/config": answers(50, () => json({})) };
+    network[B] = { "/health": answers(200, healthy), "/customer/subscriptions/s1/route": answers(100, () => json({ id: "pu1" })) };
+    await run(() => publicRequest("/config"));
+    network[A] = { "/health": answers(50, () => page(502)), "/customer/subscriptions/s1/route": answers(50, () => page(502)) };
+
+    const switchRoute = () =>
+      apiRequest("/customer/subscriptions/s1/route", { method: "POST", body: JSON.stringify({ routeId: "r1" }) });
+    const first = await run(switchRoute);
+    // The first may have reached the backend, so it is not sent on.
+    expect(first.result).toMatchObject({ ok: false, status: 502 });
+
+    sent = [];
+    const second = await run(switchRoute);
+    expect(second.result.ok).toBe(true);
+    expect(sentTo("/customer/subscriptions/s1/route")).toEqual([B]);
+  });
+
+  /** Demoted on this network since it won -- its name found on the block
+   * page -- it does not lead a race, and does not lead a write either. */
+  it("is not sent the next write once it has been demoted", async () => {
+    network[D] = { "/config": answers(100, () => json({})), "/client-attempts": answers(100, noContent) };
+    network[C] = { "/health": answers(100, healthy), "/client-attempts": answers(100, noContent) };
+    await run(() => publicRequest("/config"));
+    demoteName("d.example");
+
+    const { result } = await run(report);
+    expect(result.ok).toBe(true);
+    expect(sentTo("/client-attempts")).toEqual([C]);
+  });
+});
+
+describe("a write that follows a write", () => {
+  /** The device slot is renewed every sixty seconds while connected, and
+   * the release on Disconnect has a second and a half. Before: only a race
+   * renewed the trust in an address, and it lasted sixty seconds, so about
+   * half of all releases began with a health check -- two fresh
+   * connections in a row, past the budget on a slow link. Now an answered
+   * write renews it, for ninety seconds. */
+  it("goes straight to the address the last one was answered at, a minute and more on", async () => {
+    network[D] = {
+      "/config": answers(100, () => json({})),
+      "/customer/vpn/renew": answers(100, () => json({ status: "held" })),
+      "/customer/vpn/release": answers(100, noContent),
+    };
+    await run(() => publicRequest("/config"));
+    await vi.advanceTimersByTimeAsync(50_000);
+    await run(() => apiRequest("/customer/vpn/renew", { method: "POST", body: "{}" }));
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    sent = [];
+    const { result, ms } = await run(() => apiRequest("/customer/vpn/release", { method: "POST", body: "{}" }));
+    expect(result.ok).toBe(true);
+    expect(sentTo("/health")).toEqual([]);
+    expect(ms).toBe(100);
+  });
+});
+
+describe("what a health race will take as the backend", () => {
+  /** GET /health is public: the backend answers it 200, 503 or 429, never
+   * 401. Before: A's JSON 401 won the race, was remembered, and took the
+   * write, which it refused -- and a report refused that way counts as
+   * delivered and is dropped. */
+  it("is not an address that answers its public health check with 401", async () => {
+    const unauthorized = () => json({ statusCode: 401, message: "Unauthorized" }, 401);
+    network[A] = { "/health": answers(50, unauthorized), "/client-attempts": answers(50, unauthorized) };
+    network[D] = { "/health": answers(300, healthy), "/client-attempts": answers(100, noContent) };
+
+    const { result } = await run(report);
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/client-attempts")).toEqual([D]);
+    expect(remembered).not.toContain(A);
+  });
+
+  /** A mirror whose upstream is broken answers the health check with its
+   * 502 page, fast. Before: it was sent the write after the backend's own
+   * answerer reset it, and its 502 ended a write that must not be sent
+   * twice before D, stopped when C answered, was ever asked. */
+  it("does not send the write to an address that answered it with a page", async () => {
+    network[A] = { "/health": "hang" };
+    network[B] = { "/health": answers(20, () => page(502)), "/customer/subscriptions/s1/route": answers(20, () => page(502)) };
+    network[C] = { "/health": answers(100, healthy), "/customer/subscriptions/s1/route": "reset" };
+    network[D] = { "/health": answers(300, healthy), "/customer/subscriptions/s1/route": answers(100, () => json({ id: "pu1" }, 201)) };
+
+    const { result } = await run(() =>
+      apiRequest("/customer/subscriptions/s1/route", { method: "POST", body: JSON.stringify({ routeId: "r1" }) }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/customer/subscriptions/s1/route")).toEqual([C, D]);
+  });
+
+  /** Only a page answered, and the mirrors are blackholed. Before: the
+   * write went to the page's address, failed there in transport, and the
+   * customer was told to check their connection although something had
+   * answered moments earlier. */
+  it("says what answered when only a page did", async () => {
+    network[A] = { "/health": answers(50, () => page(403)), "/client-attempts": "reset" };
+
+    const { result } = await run(report);
+
+    expect(result).toEqual({ ok: false, error: "Request failed (403)", status: 403 });
+    expect(sentTo("/client-attempts")).toEqual([]);
+  });
+});
+
+describe("a read answered by a fallback site", () => {
+  /** A node's fallback site answers 200 with its HTML to any path, in ten
+   * milliseconds. Before: it won the read, was remembered, and the read
+   * then threw on the body -- an exception to a caller that expected a
+   * result. */
+  it("is won by the backend's JSON, not the site's 200", async () => {
+    const site = () => new Response("<html>hello</html>", { status: 200, headers: { "content-type": "text/html" } });
+    network[A] = { "/customer/me": answers(10, site) };
+    network[B] = { "/customer/me": answers(300, () => json({ id: "c1" })) };
+
+    const { result } = await run(() => apiRequest("/customer/me"));
+
+    expect(result).toEqual({ ok: true, data: { id: "c1" } });
+    expect(remembered).toEqual([B]);
+  });
+
+  /** And when it is the only answer, it is a failure with its status, not
+   * a rejection. */
+  it("is a failure, not an exception, when nothing else answers", async () => {
+    const site = () => new Response("<html>hello</html>", { status: 200, headers: { "content-type": "text/html" } });
+    network[A] = { "/customer/me": answers(10, site) };
+
+    const { result } = await run(() => apiRequest("/customer/me"));
+
+    expect(result).toEqual({ ok: false, error: "Request failed (200)", status: 200 });
+  });
+});
+
+describe("a session that cannot be renewed just now", () => {
+  /** The backend answered the read with a 401, and the token refresh then
+   * got no answer anywhere. Before: one English sentence for this and for
+   * a refresh a page answered, with nothing for the screen to translate
+   * by. */
+  it("says the renewal got no answer, in words the screens can translate", async () => {
+    network[D] = { "/customer/me": answers(100, () => json({ message: "Unauthorized" }, 401)) };
+
+    const { result } = await run(() => apiRequest("/customer/me"));
+
+    expect(result).toEqual({ ok: false, error: RENEWAL_UNANSWERED });
+    expect(stored.tokens).toEqual({ accessToken: "access", refreshToken: "refresh" });
+  });
+
+  /** The session was renewed and the retry then got nothing. Before:
+   * "could not reach Neoxify -- check your internet connection", about a
+   * backend that had answered this request twice. */
+  it("says Neoxify stopped responding when the retry after a renewal gets nothing", async () => {
+    network[D] = {
+      "/customer/me": [answers(100, () => json({ message: "Unauthorized" }, 401)), "hang"],
+      "/customer-auth/refresh": answers(100, () => json({ accessToken: "access2", refreshToken: "refresh2" })),
+    };
+
+    const { result } = await run(() => apiRequest("/customer/me"));
+
+    expect(result).toEqual({ ok: false, error: STOPPED, noResponse: true });
   });
 });

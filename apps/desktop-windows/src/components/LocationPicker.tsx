@@ -14,6 +14,7 @@ import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
 import { traceRequests } from "../lib/unanswered-report";
+import { routesToAdopt } from "../lib/picker-routes";
 
 // Full-screen overlay, not a floating dialog -- this app's window is a
 // fixed 400x640 (see tauri.conf.json), so "sheet slides over the whole
@@ -29,7 +30,13 @@ export function LocationPicker({
   onChooseAutomatic,
   onPicking,
   onPickFailed,
+  connectionState,
 }: {
+  /** The connection state the dashboard beneath shows, as it changes. For
+   * the report on a list or a switch nothing answered: its socket-level
+   * probe must not run across a connect or a disconnect, and the list
+   * stays open while the dashboard does either (unanswered-report.ts). */
+  connectionState?: string;
   /** Told the moment a server or Automatic is picked, before anything is
    * awaited -- a server's switch request can take seconds to answer, and
    * `onSwitched` waits for it. Whatever an automatic reconnect was doing
@@ -118,6 +125,27 @@ export function LocationPicker({
   // With Automatic chosen, no server row is "the current one": the ladder
   // decides at connect time, and every row stays a way to pin a server.
   const pinnedRouteId = automatic ? undefined : currentRouteId;
+  // Read when a request settles, not when it began: see `connectionState`.
+  const stateRef = useRef(connectionState);
+  stateRef.current = connectionState;
+  // The rows as the latest render has them, for a request that settles
+  // after the dashboard has offered a list (`routesToAdopt`).
+  const routesRef = useRef(routes);
+  routesRef.current = routes;
+  // Whether this picker's own request for the list has answered.
+  const ownAnswered = useRef(false);
+
+  // A list the dashboard puts on screen after this opened, while this has
+  // nothing to show: its route request was still out when the picker
+  // opened. See `routesToAdopt`.
+  useEffect(() => {
+    const adopted = routesToAdopt(routesRef.current, ownAnswered.current, initialRoutes);
+    if (adopted === null) return;
+    setRoutes(adopted);
+    setError(null);
+    setLoading(false);
+    void measureAll(adopted);
+  }, [initialRoutes]);
 
   useEffect(() => {
     void load();
@@ -134,24 +162,27 @@ export function LocationPicker({
     // "No locations available on your current plan" for as long as the
     // request took, which is up to twenty seconds an address now, and is
     // not something anybody had been told.
-    setLoading(routes.length === 0);
+    setLoading(routesRef.current.length === 0);
     // Traced, so a list that nothing answered is reported with the
     // addresses it tried, whether or not the customer saw an error for
     // it. See unanswered-report.ts.
-    const requests = traceRequests("server list");
+    const requests = traceRequests("server list", () => stateRef.current);
     const result = await getAvailableRoutes(subscriptionId, requests.trace("routes"));
     const unanswered = requests.settle({ routes: result });
     const throughTunnel = tunnelActive ? "; a tunnel was up" : "";
+    // Read now: the dashboard may have offered a list while this waited.
+    const shown = routesRef.current;
     if (result.ok) {
+      ownAnswered.current = true;
       setRoutes(result.data);
       void measureAll(result.data);
-    } else if (routes.length === 0) {
+    } else if (shown.length === 0) {
       // A failed refresh must not blank a list the customer can see and
       // use. It only becomes an error when there is nothing behind it.
       setError(failureText(result, t));
       unanswered?.(`showed the error, with no servers to list${throughTunnel}`);
     } else {
-      unanswered?.(`kept the ${routes.length} servers already on screen${throughTunnel}`);
+      unanswered?.(`kept the ${shown.length} servers already on screen${throughTunnel}`);
     }
     setLoading(false);
   }
@@ -285,7 +316,7 @@ export function LocationPicker({
     // A switch that nothing answered shows the same sentence as a list
     // that could not be had -- over rows the customer can see -- and it
     // left no report either.
-    const requests = traceRequests("server switch");
+    const requests = traceRequests("server switch", () => stateRef.current);
     const result = await switchRoute(subscriptionId, route.id, requests.trace("switch"));
     const unanswered = requests.settle({ switch: result });
     setSwitchingId(null);

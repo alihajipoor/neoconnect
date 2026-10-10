@@ -152,3 +152,22 @@ export async function rememberEndpoint(url: string): Promise<void> {
     // Costs a little time on the next launch, nothing else.
   }
 }
+
+/** Forgets `url` as the endpoint to try first, if it is the one held.
+ *
+ * For an address found not to be the backend after it was remembered: one
+ * that answers JSON 401 to everything, the public health check included,
+ * wins a read with its fast 401 before anything shows it is not us. Kept,
+ * it led every race on every launch. Nothing else is remembered in its
+ * place: the next address to answer is. */
+export async function forgetEndpoint(url: string): Promise<void> {
+  if (rememberedHere === url) rememberedHere = undefined;
+  try {
+    const store = await getStore();
+    if ((await store.get<string>(KEY)) !== url) return;
+    await store.delete(KEY);
+    await store.save();
+  } catch {
+    // The address leads the next race, which it no longer wins.
+  }
+}

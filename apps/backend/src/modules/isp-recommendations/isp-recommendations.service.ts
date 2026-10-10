@@ -25,6 +25,7 @@ const EVIDENCE_SELECT = {
   attemptsJson: true,
   sessionSeconds: true,
   createdAt: true,
+  occurredAt: true,
 } as const;
 
 @Injectable()

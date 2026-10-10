@@ -25,8 +25,9 @@ export function Login({
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  // A sign-in may take up to forty-five seconds on a network where only a
-  // slow route answers; past eight the button's "Signing in..." gets a
+  // A sign-in may spend up to forty-six and a half seconds on the network
+  // where only a slow route answers (`SIGN_IN_DEADLINE_MS` in auth.ts),
+  // more while a hard proof of work is solved; past eight the button's "Signing in..." gets a
   // line saying it is still trying.
   const pendingLong = useStillTrying(pending);
 

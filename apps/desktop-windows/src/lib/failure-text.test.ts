@@ -53,7 +53,7 @@ vi.mock("./session", () => ({
   clearTokens: () => Promise.resolve(),
 }));
 
-const { apiRequest, publicRequest, resetRaceWinnerForTests } = await import("./api");
+const { apiRequest, publicRequest, resetRaceWinnerForTests, BLOCKED_BY_NETWORK } = await import("./api");
 const { failureText } = await import("./failure-text");
 const { DICTIONARIES } = await import("./i18n");
 type Key = keyof (typeof DICTIONARIES)["en"];
@@ -106,6 +106,46 @@ describe("a request nothing answered", () => {
   });
 });
 
+describe("a request whose network blocks Neoxify", () => {
+  /** Every address's name led to the network's DNS block page. Before:
+   * "check your internet connection", about a connection that works. */
+  it("says the network is blocking Neoxify, in Persian when the app is in Persian", () => {
+    const failure = { ok: false as const, error: BLOCKED_BY_NETWORK, noResponse: true as const, blockPage: true as const };
+
+    expect(failureText(failure, fa)).toBe(DICTIONARIES.fa["api.blockedByNetwork"]);
+    expect(failureText(failure, en)).toBe(DICTIONARIES.en["api.blockedByNetwork"]);
+    expect(failureText(failure, en)).not.toMatch(/internet connection/);
+  });
+});
+
+describe("a session that could not be renewed just now", () => {
+  /** The backend answered with a 401, and the token refresh got nothing.
+   * Before: "Could not renew your session just now. Try again in a
+   * moment." in English, in Persian mode too, and the same whether the
+   * refresh got no answer or a page did. */
+  it("says the renewal got no answer, in the customer's language", async () => {
+    replies["/customer/subscriptions"] = [{ status: 401, body: { message: "Unauthorized" } }];
+    replies["/customer-auth/refresh"] = ["unreachable", "unreachable"];
+    const failure = await failureOf(apiRequest("/customer/subscriptions"));
+
+    expect(failure.sessionExpired).toBeFalsy();
+    expect(failureText(failure, fa)).toBe(DICTIONARIES.fa["api.renewalUnanswered"]);
+    expect(failureText(failure, en)).toBe(DICTIONARIES.en["api.renewalUnanswered"]);
+  });
+
+  it("says the renewal did not work when something answered it with an error", async () => {
+    replies["/customer/subscriptions"] = [{ status: 401, body: { message: "Unauthorized" } }];
+    replies["/customer-auth/refresh"] = [
+      { status: 502, html: true },
+      { status: 502, html: true },
+    ];
+    const failure = await failureOf(apiRequest("/customer/subscriptions"));
+
+    expect(failureText(failure, fa)).toBe(DICTIONARIES.fa["api.renewalFailed"]);
+    expect(failureText(failure, en)).not.toBe(DICTIONARIES.en["api.renewalUnanswered"]);
+  });
+});
+
 describe("a request something answered", () => {
   it("says an error answered, with its status, and never that Neoxify could not be reached", async () => {
     // Every address answers with a proxy's 502 page: something replied.
@@ -151,18 +191,29 @@ describe("a request something answered", () => {
  * reading the app in Persian. */
 describe("the screens", () => {
   const dirs = ["../screens", "../components"];
-  const files = dirs.flatMap((dir) =>
-    readdirSync(new URL(`${dir}/`, import.meta.url))
-      .filter((name) => name.endsWith(".tsx"))
-      .map((name) => ({ name: `${dir.slice(3)}/${name}`, source: readFileSync(new URL(`${dir}/${name}`, import.meta.url), "utf8") })),
-  );
+  const files = [
+    ...dirs.flatMap((dir) =>
+      readdirSync(new URL(`${dir}/`, import.meta.url))
+        .filter((name) => name.endsWith(".tsx"))
+        .map((name) => ({ name: `${dir.slice(3)}/${name}`, source: readFileSync(new URL(`${dir}/${name}`, import.meta.url), "utf8") })),
+    ),
+    // The app's frame puts notices on the sign-in screen too: the
+    // verification link's among them, which said "Could not reach Neoxify"
+    // in English in a Persian app, unseen by a check of the two folders.
+    { name: "App.tsx", source: readFileSync(new URL("../App.tsx", import.meta.url), "utf8") },
+  ];
 
   it("never put a request's own sentence on screen as it is", () => {
-    // A setter handed `something.error`, or a ternary choosing one: the
-    // two shapes every one of these sites had.
-    const raw = /\bset[A-Z]\w*\(\s*\w+\.error\b|\?\s*\w+Result\.error\b/g;
+    // A setter handed `something.error`, a ternary choosing one, or one
+    // spliced into a template string: the shapes these sites had.
+    const raw = /\bset[A-Z]\w*\(\s*\w+\.error\b|\?\s*\w+Result\.error\b|\$\{\s*\w+\.error\s*\}/g;
     const offenders = files.flatMap(({ name, source }) => (source.match(raw) ?? []).map((m) => `${name}: ${m}`));
     expect(offenders).toEqual([]);
+  });
+
+  it("words the verification link's notice through failureText", () => {
+    const app = files.find((f) => f.name === "App.tsx")!;
+    expect(app.source).toContain("failureText(result, say)");
   });
 
   it("covers the sign-in, the registration and the server list", () => {

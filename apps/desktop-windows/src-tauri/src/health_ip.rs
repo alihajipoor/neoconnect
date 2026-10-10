@@ -220,8 +220,16 @@ fn plain_hostname(host: &str) -> bool {
 ///
 /// Bounded: the system resolver cannot be interrupted, so it runs on a
 /// thread of its own and is abandoned, not waited for, past the timeout.
+///
+/// `with_ipv6` keeps the name's IPv6 addresses as well, after the IPv4
+/// ones. For the control-plane race's look at Iran's DNS block page
+/// (`resolvesToBlockPage` in endpoint-demotion.ts): the HTTP plugin's own
+/// connection tries a name's IPv6 addresses too, and a name whose IPv4
+/// answer is the block page while its IPv6 answer is real is not one to
+/// stop a request to. Absent, as every caller before it sends, the answer
+/// is IPv4 only.
 #[tauri::command]
-pub async fn resolve_ipv4(host: String, timeout_ms: u64) -> Result<Vec<String>, String> {
+pub async fn resolve_ipv4(host: String, timeout_ms: u64, with_ipv6: Option<bool>) -> Result<Vec<String>, String> {
     let host = host.trim().trim_start_matches('[').trim_end_matches(']').to_string();
     if let Ok(address) = host.parse::<IpAddr>() {
         return Ok(vec![address.to_canonical().to_string()]);
@@ -242,11 +250,23 @@ pub async fn resolve_ipv4(host: String, timeout_ms: u64) -> Result<Vec<String>, 
         .map_err(|_| "no answer in time".to_string())?
         .map_err(|_| "could not resolve".to_string())?;
     let mut addresses: Vec<String> = Vec::new();
-    for address in found {
+    for address in &found {
         if let IpAddr::V4(v4) = address.ip() {
             let text = v4.to_string();
             if !addresses.contains(&text) {
                 addresses.push(text);
+            }
+        }
+    }
+    if with_ipv6 == Some(true) {
+        for address in &found {
+            if let IpAddr::V6(v6) = address.ip() {
+                // An IPv4-mapped answer is the IPv4 address it carries,
+                // which the loop above has already kept if it was there.
+                let text = IpAddr::V6(v6).to_canonical().to_string();
+                if !addresses.contains(&text) {
+                    addresses.push(text);
+                }
             }
         }
     }
@@ -385,7 +405,7 @@ mod tests {
 
         // And it is one of the addresses the name resolves to, which is
         // how a server named by hostname is recognised.
-        let resolved = tauri::async_runtime::block_on(resolve_ipv4("localhost".to_string(), 3_000)).unwrap();
+        let resolved = tauri::async_runtime::block_on(resolve_ipv4("localhost".to_string(), 3_000, None)).unwrap();
         assert!(resolved.contains(&"127.0.0.1".to_string()), "{resolved:?}");
     }
 
@@ -442,7 +462,7 @@ mod tests {
 
     #[test]
     fn resolves_a_literal_to_itself_and_a_name_to_ipv4_only() {
-        let resolve = |host: &str| tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 3_000));
+        let resolve = |host: &str| tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 3_000, None));
         assert_eq!(resolve("192.0.2.1"), Ok(vec!["192.0.2.1".to_string()]));
         assert_eq!(resolve(" 192.0.2.1 "), Ok(vec!["192.0.2.1".to_string()]));
         // An IPv4-mapped literal is the IPv4 address it carries.
@@ -450,16 +470,39 @@ mod tests {
         // `localhost` has an IPv6 answer on Windows too; only IPv4 is kept.
         let local = resolve("localhost").unwrap();
         assert!(!local.is_empty() && local.iter().all(|a| a.parse::<Ipv4Addr>().is_ok()), "{local:?}");
+        // Asked for explicitly, IPv4 is said as well -- and Some(false) is
+        // the same as not asking.
+        let ipv4_only = |host: &str, with: Option<bool>| tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 3_000, with));
+        assert_eq!(ipv4_only("localhost", Some(false)), Ok(local.clone()));
+    }
+
+    /// With IPv6 asked for, a name's IPv6 addresses come back after its
+    /// IPv4 ones, which lead unchanged. The block-page look depends on it:
+    /// a name with a real IPv6 address is not one to stop a request to.
+    #[test]
+    fn keeps_a_names_ipv6_addresses_when_asked() {
+        let resolve = |with: Option<bool>| {
+            tauri::async_runtime::block_on(resolve_ipv4("localhost".to_string(), 3_000, with)).unwrap()
+        };
+        let ipv4 = resolve(None);
+        let both = resolve(Some(true));
+        assert_eq!(&both[..ipv4.len()], &ipv4[..], "{both:?}");
+        assert!(both[ipv4.len()..].iter().all(|a| a.parse::<std::net::Ipv6Addr>().is_ok()), "{both:?}");
+        // Windows answers `localhost` with ::1 as well (see above), so
+        // there the IPv6 half is not empty.
+        if cfg!(windows) {
+            assert!(both.contains(&"::1".to_string()), "{both:?}");
+        }
     }
 
     #[test]
     fn asks_the_resolver_nothing_that_is_not_a_hostname() {
         for host in ["", "a b", "x/y", "http://example.com", "example.com:443", "exa_mple.com"] {
-            let answer = tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 1_000));
+            let answer = tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 1_000, None));
             assert_eq!(answer, Err("not a hostname".to_string()), "{host:?}");
         }
         let long = "a".repeat(MAX_HOSTNAME + 1);
-        assert!(tauri::async_runtime::block_on(resolve_ipv4(long, 1_000)).is_err());
+        assert!(tauri::async_runtime::block_on(resolve_ipv4(long, 1_000, None)).is_err());
     }
 
     #[test]

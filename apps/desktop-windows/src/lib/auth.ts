@@ -1,16 +1,17 @@
-import { apiRequest, LEAD_MS, publicRequest, SLOW_ANSWER_MS, STOPPED_ANSWERING } from "./api";
+import { apiRequest, LEAD_MS, publicRequest, SLOW_ANSWER_MS, STOPPED_ANSWERING, unreachable } from "./api";
+import { apiEndpoints } from "./api-endpoints";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
 import { probeAddendum } from "./control-plane-probe";
 import { newTrace, renderTrace, type EndpointTrace } from "./endpoint-trace";
 import { setTokens } from "./session";
 import { endCustomerSession, type SessionEnd } from "./session-end";
 import { clearGamingProfileCache } from "./customer";
-import { raceChallengeFor, type Solution } from "./pow";
+import { raceChallengeFor, solveQuietly, type Solution } from "./pow";
 import { currentLanguage } from "./i18n";
 import { deviceHeaders } from "./device-identity";
 import { startSocialSignIn } from "./social-auth";
 import type { SocialOutcome, SocialProvider } from "./social-auth";
-import type { ApiResult } from "./api";
+import type { ApiResult, RequestFailure } from "./api";
 import type { AttemptKind } from "./attempts";
 import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from "./types";
 
@@ -60,7 +61,8 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: Endpo
   );
 }
 
-/** How long a sign-in or sign-up may take, all told.
+/** How long a sign-in or sign-up may spend waiting on the network, all
+ * told: 46.5 seconds.
  *
  * There was no limit. The challenge and the attempt were two walks over
  * the same list, eight seconds for every blocked address in each, and the
@@ -71,33 +73,94 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: Endpo
  * asks in stages a head start apart (`LEAD_MS`): the first address, then
  * the rest, then those that recently failed on this network, so the last
  * is asked at most two head starts in, and each gets `SLOW_ANSWER_MS`.
- * The attempt then gets up to that again at the address that answered
- * slowly (see `followUpTimeout` in api.ts); and a few seconds are left
- * for solving the challenge, which takes milliseconds unless an account
- * is under attack. A CDN that answers in about twenty seconds, with every
- * mirror blocked, still signs the customer in, even when it had failed
- * here recently. A network where nothing answers is told so after the
- * race alone, without waiting for this: a little over twenty seconds at
- * most, and about eleven and a half where no address even completes a
- * connection (`CONNECT_TIMEOUT_MS` in api.ts) -- thirteen when some of
- * them were asked a stage late -- and in moments where every name
- * resolves to Iran's block page (`resolvesToBlockPage`). */
+ * The attempt then gets up to that again at the last address that
+ * answered (`via` in api.ts), and three and a half seconds are left over.
+ * A CDN that answers in about twenty seconds, with every mirror blocked,
+ * still signs the customer in, even when it had failed here recently. A
+ * network where nothing answers is told so after the race alone, without
+ * waiting for this: a little over twenty seconds at most, and about
+ * eleven and a half where no address even completes a connection
+ * (`CONNECT_TIMEOUT_MS` in api.ts) -- thirteen when some of them were
+ * asked a stage late -- and in moments where every name resolves to
+ * Iran's block page (`resolvesToBlockPage`).
+ *
+ * Network time only (`NetworkDeadline`). The proof of work is solved with
+ * the clock stopped: the server raises its difficulty as failures add up,
+ * per account and per source address -- and behind a node's mirror the
+ * source is the node's, shared by every customer on it -- and at the top
+ * of that range a solve takes tens of seconds (`solve` in pow.ts). Counted
+ * against this, a slow solve left nothing for the attempt, which was then
+ * never sent, and the screen said Neoxify had stopped responding when it
+ * had answered every request it was asked. */
 const SIGN_IN_DEADLINE_MS = 2 * LEAD_MS + 2 * SLOW_ANSWER_MS + 3_500;
+
+/** A deadline that runs only while it is told to: the sign-in's, which
+ * stops while the proof of work is solved. Its signal fires once the time
+ * it has run adds up to the whole. */
+class NetworkDeadline {
+  private readonly controller = new AbortController();
+  private remaining: number;
+  private runningSince: number | null = null;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+
+  constructor(ms: number) {
+    this.remaining = ms;
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  /** Whether the whole of it has been used. */
+  get spent(): boolean {
+    return this.controller.signal.aborted || (this.runningSince === null && this.remaining <= 0);
+  }
+
+  run(): void {
+    if (this.runningSince !== null || this.spent) return;
+    this.runningSince = Date.now();
+    this.timer = setTimeout(() => this.controller.abort(), this.remaining);
+  }
+
+  pause(): void {
+    if (this.runningSince === null) return;
+    clearTimeout(this.timer);
+    this.remaining = Math.max(0, this.remaining - (Date.now() - this.runningSince));
+    this.runningSince = null;
+  }
+}
 
 /** Sends a sign-in or sign-up, with a proof-of-work solution, where the
  * challenge race says it will be answered.
  *
  * The challenge is raced across the endpoints (`raceChallengeFor`).
- * Nothing answering ends it there, as Neoxify unreachable -- the attempt
- * is not then walked over the same dead list. Otherwise the attempt goes
- * first to the address that handed out the challenge. It has just shown
- * it works, and the server priced the challenge for the source address
- * it saw there, which is the one the attempt will arrive from too. Then
- * it goes to the other addresses that answered. It is still sent to one address at a
- * time, for the reasons `fetchAnyEndpoint` gives: the solution is single
- * use, and sign-in is throttled hard.
+ * Nothing answering ends it there -- as Neoxify unreachable, or with the
+ * status of the page that did answer -- and the attempt is not then walked
+ * over the same dead list. Otherwise the attempt goes first to the address
+ * that handed out the challenge. It has just shown it works, and the
+ * server priced the challenge for the source address it saw there, which
+ * is the one the attempt will arrive from too. Then it goes to the other
+ * addresses the backend answered from. Never to one that answered only
+ * with a page: the backend was not reached through it. It is still sent
+ * to one address at a time, for the reasons `fetchAnyEndpoint` gives: the
+ * solution is single use, and sign-in is throttled hard.
  *
- * The whole thing ends by `SIGN_IN_DEADLINE_MS`.
+ * If none of those answers the attempt, a fresh challenge is raced over
+ * the addresses not yet heard from -- those the first race stopped, or
+ * never asked, because the remembered address answered inside its head
+ * start -- and the attempt goes where that one is answered, with the new
+ * solution. The sign-in used to end there instead: the remembered address
+ * answered the challenge, reset the sign-in, and the customer was told
+ * Neoxify had stopped responding while another address would have signed
+ * them in. Every retry then did the same, because only a timeout moves an
+ * address down the order. A fresh challenge, because the first one's
+ * solution may have reached the server with the attempt that got nothing
+ * back, and a second copy of it would be refused as already used.
+ *
+ * The whole thing ends by `SIGN_IN_DEADLINE_MS` of network time. When the
+ * backend answered and then nothing took the attempt, the result says
+ * Neoxify stopped responding; it says that only when the backend itself
+ * answered, never because a page from in front of it did.
  *
  * Solved before the attempt, not in response to being refused: the
  * server raises the required difficulty as failures accumulate, so
@@ -109,24 +172,50 @@ async function sendWithChallenge<T>(
   init: (solution: Solution | undefined) => RequestInit,
   trace: EndpointTrace,
 ): Promise<ApiResult<T>> {
-  const deadline = new AbortController();
-  const timer = setTimeout(() => deadline.abort(), SIGN_IN_DEADLINE_MS);
+  const deadline = new NetworkDeadline(SIGN_IN_DEADLINE_MS);
+  // Whether the backend itself answered a challenge race.
+  let backendAnswered = false;
+  // What the first race said when the backend did not answer it: Neoxify
+  // unreachable, or a page's status.
+  let failure: RequestFailure | undefined;
+  // The addresses a later race need not ask: sent the attempt, answered
+  // with a page, or silent.
+  const heard = new Set<string>();
+  // Which addresses the next race asks; the whole list the first time.
+  let candidates: string[] | undefined;
   try {
-    trace.phase = "challenge";
-    const race = await raceChallengeFor("customer", email, trace, deadline.signal);
-    trace.phase = "req";
-    if (!race.reached) return race.failure;
-    const result = await publicRequest<T>(
-      path,
-      { ...init(race.solution), signal: deadline.signal },
-      trace,
-      race.answered,
-    );
-    if (!result.ok && result.noResponse) return { ...result, error: STOPPED_ANSWERING };
-    return result;
+    for (;;) {
+      trace.phase = "challenge";
+      deadline.run();
+      const race = await raceChallengeFor("customer", email, trace, deadline.signal, candidates);
+      deadline.pause();
+      for (const base of [...race.answered.map((answered) => answered.base), ...race.pages, ...race.failed]) {
+        heard.add(base);
+      }
+      if (race.answered.length === 0) {
+        if (!backendAnswered) failure ??= race.failure;
+        break;
+      }
+      backendAnswered = true;
+      // With the clock stopped: see `SIGN_IN_DEADLINE_MS`.
+      const solution = await solveQuietly(race.challenge);
+      // Out of time before anything was sent: the attempt is not sent
+      // with no time to be answered in.
+      if (deadline.spent) break;
+      trace.phase = "req";
+      deadline.run();
+      const result = await publicRequest<T>(path, { ...init(solution), signal: deadline.signal }, trace, race.answered);
+      deadline.pause();
+      if (result.ok || !result.noResponse) return result;
+      if (deadline.spent) break;
+      candidates = (await apiEndpoints()).filter((base) => !heard.has(base));
+      if (candidates.length === 0) break;
+    }
   } finally {
-    clearTimeout(timer);
+    deadline.pause();
   }
+  if (backendAnswered) return { ok: false, error: STOPPED_ANSWERING, noResponse: true };
+  return failure ?? unreachable();
 }
 
 /** Never returns a usable session -- see RequiresVerification's doc
@@ -210,15 +299,23 @@ export async function login(email: string, password: string) {
  * Returns `null` when the customer cancelled -- distinct from a failed
  * result, because a cancellation has nothing to report and nothing to
  * show.
+ *
+ * `signal` cancels it: the Cancel beside the buttons, or the screen going
+ * away. Once it has fired no session is stored, whatever comes back. On
+ * Windows the browser cannot be watched, so the flow used to wait out its
+ * five minutes; a customer who gave up and signed in with email meanwhile
+ * could then have a late Google sign-in put another account's tokens
+ * under the dashboard they were already using.
  */
 export async function socialSignIn(
   provider: SocialProvider,
+  signal?: AbortSignal,
 ): Promise<ApiResult<TokenPair> | null> {
   const locale = currentLanguage();
 
   let outcome: SocialOutcome | null;
   try {
-    outcome = await startSocialSignIn(provider, locale);
+    outcome = await startSocialSignIn(provider, locale, signal);
   } catch (err) {
     // A provider that refused, a browser that would not open, a message
     // the server wrote for this customer. None of these reached an
@@ -229,7 +326,7 @@ export async function socialSignIn(
     reportAuth("SIGN_IN", result);
     return result;
   }
-  if (outcome === null) return null;
+  if (outcome === null || signal?.aborted) return null;
 
   const trace = newTrace();
   const result =
@@ -245,6 +342,9 @@ export async function socialSignIn(
         )
       : await exchangeHandoff(outcome.code, outcome.verifier, trace);
 
+  // Cancelled while the exchange ran: the session it collected is not
+  // stored. It is one unused session on the server, which lapses.
+  if (signal?.aborted) return null;
   if (result.ok) {
     // Same reasoning as login(): before the tokens, so a stale
     // entitlement from the previous customer is never read as this
@@ -329,11 +429,12 @@ export async function resendVerification(email: string) {
 
 /** How long a sign-out waits for the server to hear about it.
  *
- * The request is a POST, so it walks the endpoints one at a time at up
- * to eight seconds each -- on a filtered network, over a minute -- and
- * the tunnel stays up for all of it, because the tunnel comes down after
- * this call and not before. One endpoint's worth is what the customer
- * waits; the request carries on unwatched after that. */
+ * The request is a write, so it goes to the address the backend last
+ * answered from, or else asks who answers first (`sendWrite` in api.ts):
+ * on a filtered network that can take twenty seconds or more, and the
+ * tunnel stays up for all of it, because the tunnel comes down after this
+ * call and not before. Eight seconds is what the customer waits; the
+ * request carries on unwatched after that. */
 const LOGOUT_SERVER_BUDGET_MS = 8_000;
 
 export async function logout(): Promise<SessionEnd> {

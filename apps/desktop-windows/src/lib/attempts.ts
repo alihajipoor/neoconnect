@@ -1,7 +1,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
-import { publicRequest } from "./api";
+import { publicRequest, requestFailed } from "./api";
 import { API_ENDPOINT_MAX, clipTrace, LEGACY_API_ENDPOINT_MAX } from "./endpoint-trace";
 import { getTokens } from "./session";
 import { currentAttestation } from "./network-identity";
@@ -125,7 +125,9 @@ interface QueuedReport extends AttemptReport {
    * filing the report and nothing else (client-attempts.controller.ts).
    *
    * Kept beside the report in the same per-user data directory as the
-   * session itself (session.ts), and gone with the report.
+   * session itself (session.ts), and gone with the report -- or at
+   * sign-out, when it is set to null (`forgetQueuedSessions`): a live
+   * access token left on disk after a sign-out is a leak.
    *
    * Absent on a report queued by a build from before it was kept. Those
    * go out with the token held at delivery, as they always did. */
@@ -199,7 +201,20 @@ const MAX_QUEUED = 25;
  */
 const MAX_AGE_MS = 14 * 86_400_000;
 
-const KEY = "queue";
+/** Where the queue is kept.
+ *
+ * Not where builds up to 0.9.47 kept it (`LEGACY_KEY`). A report queued
+ * now carries the access token it was made with (`bearer`), and those
+ * builds send a queued report's every field as the body: one installed
+ * over this build would have put the token in the body, been refused for
+ * an unknown field with a 400, counted that as delivered, and dropped the
+ * report. Under a key of its own, an older build finds nothing of this
+ * build's to send. */
+const KEY = "reports";
+
+/** Where builds up to 0.9.47 kept the queue. Read, and moved under `KEY`
+ * at the next write, so nothing they queued is lost on the upgrade. */
+const LEGACY_KEY = "queue";
 
 /** The status the server's throttle answers with. See `send`. */
 const THROTTLED = 429;
@@ -225,8 +240,11 @@ function appVersion(): Promise<string> {
 
 async function readQueue(): Promise<QueuedReport[]> {
   try {
-    const stored = await (await getStore()).get<QueuedReport[]>(KEY);
-    return Array.isArray(stored) ? stored : [];
+    const store = await getStore();
+    const stored = await store.get<QueuedReport[]>(KEY);
+    const legacy = await store.get<QueuedReport[]>(LEGACY_KEY);
+    // The older build's first: they were made first.
+    return [...(Array.isArray(legacy) ? legacy : []), ...(Array.isArray(stored) ? stored : [])];
   } catch {
     return [];
   }
@@ -236,9 +254,79 @@ async function writeQueue(queue: QueuedReport[]): Promise<void> {
   try {
     const store = await getStore();
     await store.set(KEY, queue);
+    // What was under the old key is in `queue` now, read with the rest.
+    if ((await store.get(LEGACY_KEY)) !== undefined) await store.delete(LEGACY_KEY);
     await store.save();
   } catch {
     // Losing the queue costs diagnostics, nothing the customer can see.
+  }
+}
+
+/** The claims in an access token, read without verifying it -- only to
+ * tell whether two tokens are the same customer's. Null for anything that
+ * is not a readable JWT. */
+function claimsOf(token: string): { sub?: unknown } | null {
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+  try {
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const parsed: unknown = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "=")));
+    return parsed !== null && typeof parsed === "object" ? (parsed as { sub?: unknown }) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The token a queued report goes out with.
+ *
+ * Its own (`bearer`), unless the token held now is the same customer's:
+ * then the one held now, which has usually not expired. The report is
+ * filed under the same customer either way. But the server counts a
+ * report against the session in a token that verifies, and against the
+ * request's address otherwise -- and an expired one does not verify for
+ * that. Behind a node's mirror, and through the tunnel, the address is the
+ * node's, so every customer on the node flushing a queue after an outage
+ * shared twenty reports a minute, which counting per session was there to
+ * stop.
+ *
+ * Nobody's, with nobody signed in when it was made. The token held at
+ * delivery for a report an older build queued, which kept none. */
+async function deliveryToken(bearer: string | null | undefined): Promise<string | null | undefined> {
+  const current = (await getTokens())?.accessToken;
+  if (bearer === undefined) return current;
+  if (bearer === null || current === undefined) return bearer;
+  const made = claimsOf(bearer)?.sub;
+  return typeof made === "string" && claimsOf(current)?.sub === made ? current : bearer;
+}
+
+/** Whether a failed delivery was answered by a page from in front of the
+ * backend saying it could not get the report there: a CDN's bot check, or
+ * a gateway's 5xx. Such a report never reached the backend, and is kept.
+ * Read as failure-text.ts reads a page: a status and no message of the
+ * backend's own. Not any page: one that will never let a report through
+ * -- a 404 from a node's fallback site -- would hold the queue up for its
+ * fourteen days, since a flush stops at the first report it keeps. */
+function stoppedByPage(result: { error: string; status?: number }): boolean {
+  if (result.status === undefined || result.error !== requestFailed(result.status)) return false;
+  return result.status === 403 || result.status >= 500;
+}
+
+/** Takes the access tokens out of the queue at sign-out, leaving the
+ * reports to go out under nobody.
+ *
+ * A queued report kept its session's token on disk until it was sent,
+ * which could be days; the next person on the account could read it and,
+ * for the rest of its fifteen minutes, use it -- the customer API does not
+ * check a token against a revoked session. A report queued by an older
+ * build, which kept no token, would have gone out with whoever signed in
+ * next, and goes out under nobody too. Never rejects. */
+export async function forgetQueuedSessions(): Promise<void> {
+  try {
+    const queue = await readQueue();
+    if (queue.every((report) => report.bearer === null)) return;
+    await writeQueue(queue.map((report) => ({ ...report, bearer: null })));
+  } catch {
+    // The reports are diagnostics; the sign-out goes on regardless.
   }
 }
 
@@ -248,7 +336,9 @@ async function writeQueue(queue: QueuedReport[]): Promise<void> {
  * Any other rejection *from* the server -- a 400, a 5xx, anything with a
  * status -- counts as delivered. It means we reached it and it did not
  * want this, and retrying forever would turn one malformed report into
- * a permanent background load.
+ * a permanent background load. A page from in front of the server saying
+ * it could not get the report there is not the server's rejection, and
+ * is kept (`stoppedByPage`).
  *
  * The throttle is the exception, because it is about timing and not the
  * report. The endpoint allows twenty a minute per address, and one
@@ -274,7 +364,7 @@ async function send(queued: QueuedReport): Promise<boolean> {
   // the server files the report under its customer if it verifies, and
   // anonymously if it does not.
   const { bearer, ...report } = queued;
-  const accessToken = bearer === undefined ? (await getTokens())?.accessToken : bearer;
+  const accessToken = await deliveryToken(bearer);
   const post = (body: Omit<QueuedReport, "bearer">) =>
     publicRequest<void>("/client-attempts", {
       method: "POST",
@@ -289,6 +379,12 @@ async function send(queued: QueuedReport): Promise<boolean> {
 
   if (result.ok) return true;
   if (result.status === THROTTLED) return false;
+  // Kept when only a page answered it, which the backend never saw
+  // (`stoppedByPage`). Such a page is a request's answer of last resort,
+  // and was counted as delivered: during an outage every address answers
+  // with one -- the CDN's 521, a mirror's 502 -- and every queued
+  // unreachable report was dropped unseen.
+  if (stoppedByPage(result)) return false;
   // Kept when no endpoint answered this request at all. Read from
   // `noResponse`, not from the sentence: a report whose health race was
   // answered and whose own request then was not is told it in other

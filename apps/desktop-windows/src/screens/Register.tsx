@@ -27,8 +27,9 @@ export function Register({
   const [referralCode, setReferralCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  // Sign-up is raced and timed as sign-in is (auth.ts): up to forty-five
-  // seconds, with a line past eight saying it is still trying.
+  // Sign-up is raced and timed as sign-in is (auth.ts): up to forty-six
+  // and a half seconds on the network, with a line past eight saying it is
+  // still trying.
   const pendingLong = useStillTrying(pending);
 
   async function handleSubmit(e: React.FormEvent) {

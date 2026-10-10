@@ -70,7 +70,7 @@ describe("the server list", () => {
 
   it("reports a refresh nothing answered, with the error on screen or with its rows kept", () => {
     const load = body(picker, "  async function load() {");
-    expect(load).toContain('const requests = traceRequests("server list");');
+    expect(load).toContain('const requests = traceRequests("server list", () => stateRef.current);');
     expect(load).toContain('const result = await getAvailableRoutes(subscriptionId, requests.trace("routes"));');
     expect(load).toContain("const unanswered = requests.settle({ routes: result });");
     const shown = load.indexOf("setError(failureText(result, t));");
@@ -79,13 +79,13 @@ describe("the server list", () => {
     // One with the error it showed, and one where the rows stood.
     expect(reports[0]).toBeGreaterThan(shown);
     expect(load.slice(reports[0])).toContain("showed the error, with no servers to list");
-    expect(load.slice(reports[1])).toContain("kept the ${routes.length} servers already on screen");
+    expect(load.slice(reports[1])).toContain("kept the ${shown.length} servers already on screen");
     expect(reports[0]).toBeGreaterThan(load.indexOf("if (result.ok) {"));
   });
 
   it("reports a switch nothing answered", () => {
     const pick = body(picker, "  async function handlePick(route: RouteOption) {");
-    expect(pick).toContain('const requests = traceRequests("server switch");');
+    expect(pick).toContain('const requests = traceRequests("server switch", () => stateRef.current);');
     expect(pick).toContain('const result = await switchRoute(subscriptionId, route.id, requests.trace("switch"));');
     expect(pick).toContain("const unanswered = requests.settle({ switch: result });");
     const reported = pick.indexOf("unanswered?.(");

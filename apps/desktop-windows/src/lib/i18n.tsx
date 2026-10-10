@@ -43,6 +43,9 @@ const en = {
   // this sentence has to change with it.
   "auth.socialNeedsCloudflare":
     "Google and Facebook sign-in returns to the app through Cloudflare, which some networks block. If the sign-in page does not load, close it and use your email and password below.",
+  // Ends a Google or Facebook sign-in still waiting on the browser, on
+  // Windows, where closing the browser tells the app nothing.
+  "auth.socialCancel": "Cancel",
   "auth.signInToConnect": "Sign in to connect.",
   "auth.noCardRequired": "No credit card required to get started.",
   "verify.noCode": "Didn't get a code? Resend it",
@@ -81,6 +84,11 @@ const en = {
   // changed, account removed). Says nothing about the VPN: that it is
   // off is what reaching this screen without the line above means.
   "signout.sessionEnded": "Your session ended. Sign in again to continue.",
+  // The sign-in screen's notice after the verification email's "Open in
+  // Neoxify" link. The reason is a failed request's own text, already in
+  // the customer's language (failure-text.ts).
+  "auth.emailVerifiedNotice": "Email verified! Sign in to continue.",
+  "auth.verifyLinkFailed": "Couldn't verify your email: {reason}",
 
   "auth.welcomeBack": "Welcome back",
   "auth.signIn": "Sign in",
@@ -955,6 +963,18 @@ const en = {
   // something replied; and not said to be Neoxify's own answer, because
   // it may not have been.
   "api.serverError": "The server answered with an error ({status}). Please try again in a moment.",
+  // Nothing answered because every one of Neoxify's addresses resolved to
+  // the network's DNS block page (10.10.34.x) and nowhere else. The
+  // connection works; the network is keeping Neoxify's names from it, so
+  // this does not send the customer to check their connection.
+  "api.blockedByNetwork": "Your network is blocking Neoxify: its addresses lead to a block page.",
+  // Neoxify answered the request with "your access has expired", and
+  // renewing the session then got no answer. Not a sign-out: the session
+  // may be fine, and the next request tries again.
+  "api.renewalUnanswered": "Neoxify answered, but renewing your session got no answer. Please try again.",
+  // Renewing the session was answered, but not with a renewal: a page in
+  // front of Neoxify, its throttle, a server error.
+  "api.renewalFailed": "Could not renew your session just now. Please try again in a moment.",
 
   // The prominent disclosure shown once, before sign-in, on store
   // builds. Google Play requires an in-app explanation of why the app
@@ -1001,6 +1021,7 @@ const fa: Record<TranslationKey, string> = {
   "auth.appleNoAccount": "ابتدا در تنظیمات وارد حساب اپل خود شوید، سپس دوباره تلاش کنید.",
   "auth.socialNeedsCloudflare":
     "ورود با گوگل و فیسبوک از طریق کلادفلر (Cloudflare) به برنامه برمی‌گردد که در برخی شبکه‌ها مسدود است. اگر صفحه ورود باز نشد، آن را ببندید و با ایمیل و رمز عبور خود در فرم پایین ادامه دهید.",
+  "auth.socialCancel": "انصراف",
   "auth.signInToConnect": "برای اتصال وارد شوید.",
   "auth.noCardRequired": "برای شروع نیازی به کارت بانکی نیست.",
   "verify.noCode": "کد را دریافت نکردید؟ ارسال دوباره",
@@ -1024,6 +1045,8 @@ const fa: Record<TranslationKey, string> = {
   "signout.tunnelUnconfirmed":
     "از حساب خارج شدید، اما برنامه نتوانست خاموش شدن VPN را تأیید کند. برای اطمینان، Neoxify یا این دستگاه را دوباره راه‌اندازی کنید.",
   "signout.sessionEnded": "نشست شما به پایان رسید. برای ادامه دوباره وارد شوید.",
+  "auth.emailVerifiedNotice": "ایمیل شما تأیید شد! برای ادامه وارد شوید.",
+  "auth.verifyLinkFailed": "تأیید ایمیل شما انجام نشد: {reason}",
 
   "auth.welcomeBack": "خوش آمدید",
   "auth.signIn": "ورود",
@@ -1516,6 +1539,9 @@ const fa: Record<TranslationKey, string> = {
   "api.unreachable": "نتوانستیم به نئوکسیفای دسترسی پیدا کنیم. اتصال اینترنت خود را بررسی کنید.",
   "api.stoppedAnswering": "نئوکسیفای پاسخ داد، اما بعد دیگر پاسخی نداد. لطفاً دوباره تلاش کنید.",
   "api.serverError": "سرور با خطا پاسخ داد ({status}). لطفاً کمی بعد دوباره تلاش کنید.",
+  "api.blockedByNetwork": "شبکهٔ شما نئوکسیفای را مسدود کرده است: نشانی‌های آن به صفحهٔ مسدودسازی می‌رسند.",
+  "api.renewalUnanswered": "نئوکسیفای پاسخ داد، اما برای تمدید نشست شما پاسخی نیامد. لطفاً دوباره تلاش کنید.",
+  "api.renewalFailed": "تمدید نشست شما الان ممکن نشد. لطفاً کمی بعد دوباره تلاش کنید.",
 
   "disclosure.title": "پیش از اتصال",
   "disclosure.subtitle": "این برنامه چه می‌کند و ما چه اطلاعاتی جمع‌آوری می‌کنیم. لطفاً یک بار بخوانید.",
@@ -1587,15 +1613,59 @@ function detectLanguage(): Language {
  * best-effort and quick to give up: this decides a default that is one
  * tap to change, and must never delay or block the first screen. A
  * blocked network, an old server that does not return the field, or a
- * request that took too long all mean "unknown", which means English.
+ * request that took longer than `COUNTRY_BUDGET_MS` all mean "unknown",
+ * which means English.
  */
-async function detectCountry(): Promise<string | undefined> {
+export async function detectCountry(budgetMs = COUNTRY_BUDGET_MS): Promise<string | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), budgetMs);
+  });
+  const asked = publicRequest<{ ip: string; country?: string }>("/health/ip").then(
+    (result) => (result.ok ? result.data.country : undefined),
+    () => undefined,
+  );
   try {
-    const result = await publicRequest<{ ip: string; country?: string }>("/health/ip");
-    return result.ok ? result.data.country : undefined;
-  } catch {
-    return undefined;
+    return await Promise.race([asked, late]);
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+/** How long the country is waited for before English stands: eight
+ * seconds, where every request used to give up.
+ *
+ * Reads now wait up to twenty seconds an address, and this one with them:
+ * on a network where only the CDN answers, after fifteen seconds, the
+ * answer used to arrive while the customer was typing on the sign-in
+ * screen and turn the whole app Persian and right-to-left under their
+ * hands. A default is worth having only before anything has been read. */
+export const COUNTRY_BUDGET_MS = 8_000;
+
+/** Whether the customer has chosen a language in this run. Set by
+ * `setLanguage`; read by `detectedLanguage`, which must not overrule a
+ * choice made while it waited. */
+let chosenThisRun = false;
+
+/** Records that the customer chose a language just now. */
+export function noteLanguageChosen(): void {
+  chosenThisRun = true;
+}
+
+/** The language the network suggests for a customer who has never chosen
+ * one: Persian in Iran, otherwise nothing to change. Nothing, too, when
+ * the customer has chosen one in this run while the question was out --
+ * the answer can arrive seconds after the switch, and putting the app back
+ * into Persian then reads as the app ignoring them. */
+export async function detectedLanguage(): Promise<Language | undefined> {
+  const country = await detectCountry();
+  if (chosenThisRun) return undefined;
+  return country === "IR" ? "fa" : undefined;
+}
+
+/** For tests: a fresh run, in which nothing has been chosen. */
+export function resetLanguageChoiceForTests(): void {
+  chosenThisRun = false;
 }
 
 /** The language the interface is showing, readable from outside React.
@@ -1662,8 +1732,8 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
       // and no reason to spend a request finding out.
       if (detectLanguage() === "fa") return;
 
-      const country = await detectCountry();
-      if (country === "IR") setLanguageState("fa");
+      const detected = await detectedLanguage();
+      if (detected) setLanguageState(detected);
     })();
   }, []);
 
@@ -1687,6 +1757,7 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   }, [language, dir]);
 
   const setLanguage = useCallback((next: Language) => {
+    noteLanguageChosen();
     setLanguageState(next);
     current = next;
     void (async () => {

@@ -62,9 +62,9 @@ const BLOCK_PAGE = ["10.10.34.34"];
 
 const { publicRequest, resetRaceWinnerForTests, CONNECT_TIMEOUT_MS, LEAD_MS } = await import("./api");
 const { newTrace, renderTrace } = await import("./endpoint-trace");
-const { LOOKUP_REUSED_FOR_MS } = await import("./endpoint-demotion");
 
 const UNREACHABLE = "Could not reach Neoxify. Check your internet connection.";
+const BLOCKED = "Could not reach Neoxify: this network's DNS sends its addresses to a block page.";
 const ROUTES = "/customer/routes";
 
 /** What one address does with a request: by origin, or by origin and
@@ -243,7 +243,8 @@ describe("an address that timed out", () => {
 
   /** A write times out too: here at the address that had just answered a
    * read, and so leads the list. Nothing else answers the health race the
-   * write then runs, so nothing replaces it as the last to answer. */
+   * write then runs, so nothing replaces it as the last to answer. B had
+   * answered moments before, so the write says Neoxify stopped responding. */
   it("does not lead the next read when the timeout was a write's", async () => {
     network[B] = answers(200);
     network[B + "/client-attempts"] = "stall";
@@ -252,7 +253,11 @@ describe("an address that timed out", () => {
     expect(remembered).toEqual([B]);
 
     const write = await run(() => publicRequest("/client-attempts", { method: "POST", body: "{}" }));
-    expect(write.result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
+    expect(write.result).toEqual({
+      ok: false,
+      error: "Neoxify answered but then stopped responding. Please try again.",
+      noResponse: true,
+    });
 
     network[A] = answers(300);
     const { ms, sent } = await read();
@@ -343,8 +348,7 @@ describe("an address whose name resolves to the block page", () => {
     await read();
     expect(remembered).toEqual([C]);
 
-    // A while later, past the minute the last look at its name is good for.
-    vi.advanceTimersByTime(LOOKUP_REUSED_FOR_MS);
+    // A while later.
     resolver.set("c.example", BLOCK_PAGE);
     network[C] = "stall";
     network[A] = answers(300);
@@ -363,8 +367,12 @@ describe("an address whose name resolves to the block page", () => {
    * resolves to the block page, whose handshake hangs. Before: each read
    * that waited out the CDN's head start asked every mirror again, and
    * they were stopped, not failed, when the CDN answered -- so nothing
-   * learned that they could never answer. */
-  it("is found once, and then not sent the request at all", async () => {
+   * learned that they could never answer. Now each race looks at their
+   * names again, which the resolver answers from its cache, and stops them
+   * at once: asked last, they cost the race nothing. A look is not kept
+   * from one race to the next, because the next may be on another path
+   * (see the tunnel case below). */
+  it("is found by every race, demoted, and stopped at once", async () => {
     network[A] = answers(5_000);
     network[B] = "reset";
     for (const base of [C, D, E, F]) {
@@ -381,23 +389,61 @@ describe("an address whose name resolves to the block page", () => {
 
     expect(second.result.ok).toBe(true);
     expect(second.ms).toBe(5_000);
-    expect(second.sent).toEqual([A, B]);
+    expect(second.sent).toEqual([A, B, C, D, E, F]);
     expect(renderTrace(trace)).toBe(
       "req: a.example=h200@5000 b.example=net@0 c.example=blockpage@0 d.example=blockpage@0 " +
         "e.example=blockpage@0 f.example=blockpage@0",
     );
   });
 
-  /** Nowhere to go but the block page: said at once, and as what it is --
-   * nothing answered. */
-  it("ends a race in which nothing else answers without waiting on it", async () => {
+  /** Nowhere to go but the block page: said at once, and as what it is.
+   * Before, "Could not reach Neoxify. Check your internet connection." --
+   * for a connection that works, on a network keeping Neoxify's names
+   * from it. */
+  it("ends a race in which nothing else answers without waiting on it, and says why", async () => {
     for (const base of ENDPOINTS) {
       network[base] = "stall";
       resolver.set(new URL(base).hostname, BLOCK_PAGE);
     }
     const { result, ms } = await read();
-    expect(result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
+    expect(result).toEqual({ ok: false, error: BLOCKED, noResponse: true, blockPage: true });
     expect(ms).toBe(0);
+  });
+
+  /** One name that resolves for real is enough to say nothing about the
+   * block page: then the network is not keeping all of Neoxify away, and
+   * the race that found nothing says what it always has. */
+  it("does not say the network blocks Neoxify when one name resolved somewhere real", async () => {
+    for (const base of ENDPOINTS) {
+      network[base] = "stall";
+      resolver.set(new URL(base).hostname, BLOCK_PAGE);
+    }
+    network[F] = "reset";
+    resolver.set("f.example", ["203.0.113.10"]);
+    const { result } = await read();
+    expect(result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
+  });
+
+  /** Before a connect the resolver answers every name with the block page;
+   * once the tunnel is up it answers for real. A look that found the block
+   * page used to be trusted for a minute, and every request in that
+   * minute -- the slot claim through the tunnel, a server switch -- was not
+   * sent at all, and said Neoxify could not be reached. */
+  it("looks again once the resolver answers for real, as through a tunnel just up", async () => {
+    for (const base of ENDPOINTS) {
+      network[base] = "stall";
+      resolver.set(new URL(base).hostname, BLOCK_PAGE);
+    }
+    const before = await read();
+    expect(before.result.ok).toBe(false);
+
+    // Ten seconds later, through the tunnel.
+    vi.advanceTimersByTime(10_000);
+    for (const base of ENDPOINTS) resolver.set(new URL(base).hostname, ["203.0.113.10"]);
+    network[A] = answers(200);
+    const after = await read();
+    expect(after.result.ok).toBe(true);
+    expect(after.sent).toContain(A);
   });
 
   /** An ordinary answer from the resolver changes nothing. */

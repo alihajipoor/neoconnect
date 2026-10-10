@@ -4,6 +4,7 @@ import { Button, Card, Input, Label } from "../components/ui";
 import { LogoMark } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
+import { StillTrying } from "../components/StillTrying";
 
 /** Getting back in after forgetting the password.
  *
@@ -92,6 +93,7 @@ export function ForgotPassword({ onDone, onCancel }: { onDone: (notice: string) 
             <Button type="submit" disabled={pending} className="mt-1 w-full">
               {pending ? t("forgot.sending") : t("forgot.sendCode")}
             </Button>
+            <StillTrying waiting={pending} />
           </form>
         ) : (
           <form onSubmit={handleReset} className="flex flex-col gap-4">
@@ -146,6 +148,7 @@ export function ForgotPassword({ onDone, onCancel }: { onDone: (notice: string) 
             <Button type="submit" disabled={pending} className="mt-1 w-full">
               {pending ? t("forgot.submitting") : t("forgot.submit")}
             </Button>
+            <StillTrying waiting={pending} />
           </form>
         )}
 

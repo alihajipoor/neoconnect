@@ -1,6 +1,6 @@
 import { isKnownBlockPage } from "./endpoint-bundle-store";
 import { networkKeyFromAsn } from "./network-identity";
-import { isAddressLiteral, resolveIpv4, RESOLVE_TIMEOUT_MS } from "./tunnel-server";
+import { isAddressLiteral, resolveAddresses, RESOLVE_TIMEOUT_MS } from "./tunnel-server";
 
 /** Which control-plane addresses have recently failed on this network,
  * so that a race asks them last.
@@ -57,16 +57,6 @@ import { isAddressLiteral, resolveIpv4, RESOLVE_TIMEOUT_MS } from "./tunnel-serv
 
 /** How long an address that failed stays at the back of the order. */
 export const DEMOTED_FOR_MS = 30 * 60_000;
-
-/** How long one look at a name's DNS answer (`resolvesToBlockPage`) is
- * taken as the answer on the same network.
- *
- * A race that has gone past its first address looks at the name of every
- * address it asks, and on a filtered network that is most races. A minute
- * keeps the dashboard's three reads, a resume refresh and the picker from
- * each asking the resolver about the same sixteen names, while a block
- * that lands or lifts is noticed within it. */
-export const LOOKUP_REUSED_FOR_MS = 60_000;
 
 const STORAGE_KEY = "neoxify.endpointDemotions";
 
@@ -198,10 +188,15 @@ export function demoteName(host: string, now = Date.now()): void {
 export function clearDemotion(base: string, now = Date.now()): void {
   restore();
   const name = nameOf(base);
-  // A look at the name that found the block page is out of date too, and
-  // would otherwise keep the race from sending to the name for the rest
-  // of its minute (`knownOnBlockPage`).
-  if (name !== null && currentLookup(base, now)?.found === true) lookups.delete(`${networkNow(now)} ${name}`);
+  // A look at the name still under way is out of date before it lands:
+  // whatever it finds, the name has just been reached. Left to land, a
+  // look that found the block page demoted the name, and the next race
+  // asked last the address that had answered first -- the shape of a name
+  // whose IPv4 answer is the block page and whose IPv6 answer is real, on
+  // a network that reaches it over IPv6.
+  if (name !== null) {
+    for (const look of lookups.values()) if (look.name === name) look.overruled = true;
+  }
   const failures = memory[networkNow(now)];
   if (failures === undefined) return;
   const hadBase = base in failures.bases;
@@ -221,47 +216,36 @@ export function clearDemotion(base: string, now = Date.now()): void {
  * whole list, in the order given. That is a network on which nothing has
  * answered lately, and the list's own order is as good a guess as any. */
 export function demotedLast(endpoints: readonly string[], now = Date.now()): { ordered: string[]; healthy: number } {
-  restore();
-  const failures = memory[networkNow(now)];
-  const demoted = (base: string) => {
-    if (failures === undefined) return false;
-    const name = nameOf(base);
-    return stands(failures.bases[base], now) || (name !== null && stands(failures.names[name], now));
-  };
+  const demoted = (base: string) => isDemoted(base, now);
   const healthy = endpoints.filter((base) => !demoted(base));
   if (healthy.length === 0) return { ordered: [...endpoints], healthy: endpoints.length };
   return { ordered: [...healthy, ...endpoints.filter(demoted)], healthy: healthy.length };
 }
 
-/** One look at a name's DNS answer: when, and what it found -- or will
- * find, while it is still under way. */
-interface Lookup {
-  at: number;
-  blocked: Promise<boolean>;
-  /** Set once the answer is in. */
-  found?: boolean;
-}
-
-/** Recent looks, by network and name. */
-const lookups = new Map<string, Lookup>();
-
-/** The look at `base`'s name that is still current on this network, if
- * there is one. */
-function currentLookup(base: string, now: number): Lookup | undefined {
+/** Whether `base` is demoted on this network: it timed out here in the
+ * last `DEMOTED_FOR_MS`, or its name was found on the block page. */
+export function isDemoted(base: string, now = Date.now()): boolean {
+  restore();
+  const failures = memory[networkNow(now)];
+  if (failures === undefined) return false;
   const name = nameOf(base);
-  if (name === null) return undefined;
-  const look = lookups.get(`${networkNow(now)} ${name}`);
-  if (look === undefined || now - look.at < 0 || now - look.at >= LOOKUP_REUSED_FOR_MS) return undefined;
-  return look;
+  return stands(failures.bases[base], now) || (name !== null && stands(failures.names[name], now));
 }
 
-/** Whether a look at `base`'s name made in the last
- * `LOOKUP_REUSED_FOR_MS` on this network has already found the block page
- * and nothing else (`resolvesToBlockPage`). Then the race does not send
- * the request at all: it would only open a connection to the block page. */
-export function knownOnBlockPage(base: string, now = Date.now()): boolean {
-  return currentLookup(base, now)?.found === true;
+/** One look at a name's DNS answer, while it is under way. */
+interface Lookup {
+  name: string;
+  blocked: Promise<boolean>;
+  /** Set when an address under the name answers before the look lands
+   * (`clearDemotion`). The look then finds nothing, whatever the resolver
+   * said. */
+  overruled: boolean;
 }
+
+/** Looks under way, by network and name. Only while under way: a race
+ * that asks about a name another race is already asking about shares the
+ * look, and once it has landed the next race looks again. */
+const lookups = new Map<string, Lookup>();
 
 /** Whether `base`'s name resolves, on this network, to Iran's block page
  * and nothing else (`isKnownBlockPage`). When it does, the name is
@@ -280,36 +264,61 @@ export function knownOnBlockPage(base: string, now = Date.now()): boolean {
  * lookup asks moments earlier or later (`resolve_ipv4`), so it sends
  * nothing a censor has not already seen and is usually answered from the
  * resolver's cache. Only whether the answer is the block page is kept,
- * never the addresses. Nothing but the block page, rather than any of it,
- * because a request is stopped on this answer, and a name that also
- * resolves somewhere real might still be reached there.
+ * never the addresses.
+ *
+ * Nothing but the block page, rather than any of it, because a request is
+ * stopped on this answer, and a name that also resolves somewhere real
+ * might still be reached there. Its IPv6 addresses count: the HTTP plugin
+ * tries them too, and the block page has none. Only IPv4 was looked at
+ * before, so a name whose A record was poisoned and whose AAAA record was
+ * not had its request stopped before it could connect over IPv6. Whether
+ * Iran's injector leaves IPv6 alone is not known; where it does, such a
+ * name is left to the request to find out about, as every name was before
+ * the lookup existed.
+ *
+ * Looked at afresh by every race, never remembered once it has landed. A
+ * look from a minute ago may describe another path. Before a tunnel comes
+ * up the resolver answers with the block page; through the tunnel it
+ * answers for real. Remembered for a minute, a look that had found the
+ * block page before a connect kept every request for the minute after it
+ * from being sent at all -- the slot claim through the tunnel, a server
+ * switch -- and the screen said Neoxify could not be reached with nothing
+ * dialled. Looked at again, the answer is what the resolver says now,
+ * which is also what the request's own lookup is about to be told: from
+ * the resolver's cache, usually, so the cost is a call into the app and
+ * not a query on the network. Two races asking about one name at once
+ * share the look.
  *
  * Never rejects. False for an address literal, a build without the
- * command (the web portal), and a lookup that fails or takes longer than
- * `RESOLVE_TIMEOUT_MS`: nothing known. One look is reused for
- * `LOOKUP_REUSED_FOR_MS` on the same network, including while it is still
- * under way. */
+ * command (the web portal), a lookup that fails or takes longer than
+ * `RESOLVE_TIMEOUT_MS`, and a look overtaken by an answer from an address
+ * under the name: nothing known. */
 export function resolvesToBlockPage(base: string, now = Date.now()): Promise<boolean> {
   const name = nameOf(base);
   if (name === null || isAddressLiteral(name)) return Promise.resolve(false);
-  const held = currentLookup(base, now);
-  if (held !== undefined) return held.blocked;
-  for (const [key, look] of lookups) {
-    if (now - look.at < 0 || now - look.at >= LOOKUP_REUSED_FOR_MS) lookups.delete(key);
-  }
   const network = networkNow(now);
-  const look: Lookup = { at: now, blocked: Promise.resolve(false) };
-  look.blocked = resolveIpv4(name, RESOLVE_TIMEOUT_MS).then(
+  const key = `${network} ${name}`;
+  const held = lookups.get(key);
+  if (held !== undefined) return held.blocked;
+  const look: Lookup = { name, blocked: Promise.resolve(false), overruled: false };
+  const landed = () => {
+    if (lookups.get(key) === look) lookups.delete(key);
+  };
+  look.blocked = resolveAddresses(name, RESOLVE_TIMEOUT_MS).then(
     (addresses) => {
+      landed();
+      if (look.overruled) return false;
       const found = addresses.length > 0 && addresses.every((address) => isKnownBlockPage(address));
-      look.found = found;
       // Filed under the network the lookup was made on.
       if (found) record(network, "names", name, Date.now());
       return found;
     },
-    () => false,
+    () => {
+      landed();
+      return false;
+    },
   );
-  lookups.set(`${network} ${name}`, look);
+  lookups.set(key, look);
   return look.blocked;
 }
 

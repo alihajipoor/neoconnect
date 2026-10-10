@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 
 import { AppleIcon, FacebookIcon, GoogleIcon } from "./BrandIcons";
 import { useI18n } from "../lib/i18n";
@@ -7,6 +7,7 @@ import { socialSignIn } from "../lib/auth";
 import {
   appleSignInAvailable,
   finishesBehindCloudflare,
+  isMobile,
   socialSignInAvailable,
   type SocialProvider,
 } from "../lib/social-auth";
@@ -69,6 +70,13 @@ export function SocialSignIn({
   // shows it. An answer of any kind, an error included, means the browser
   // got back, and the line goes.
   const [cloudflareNote, setCloudflareNote] = useState(false);
+  // The sign-in under way, to cancel. On Windows the browser is not the
+  // app's: closing it, as the note says to, tells the app nothing, and the
+  // buttons used to spin for the five minutes the flow waits. And when the
+  // screen goes -- an email sign-in that succeeded meanwhile -- a callback
+  // that comes later must not store a second session over the first.
+  const flow = useRef<AbortController | null>(null);
+  useEffect(() => () => flow.current?.abort(), []);
 
   if (providers.length === 0) return null;
 
@@ -76,8 +84,10 @@ export function SocialSignIn({
     setError(null);
     setBusy(provider);
     setCloudflareNote(finishesBehindCloudflare(provider));
+    const controller = new AbortController();
+    flow.current = controller;
     try {
-      const result = await socialSignIn(provider);
+      const result = await socialSignIn(provider, controller.signal);
       // A cancelled sheet is not a failure and must not show an error --
       // the customer knows what they just did, and telling them it went
       // wrong is both wrong and alarming. The note stays: it does not say
@@ -93,6 +103,7 @@ export function SocialSignIn({
       setCloudflareNote(false);
       setError(err instanceof Error ? err.message : t("auth.socialFailed"));
     } finally {
+      if (flow.current === controller) flow.current = null;
       setBusy(null);
     }
   }
@@ -137,6 +148,18 @@ export function SocialSignIn({
         <p role="status" className="mt-2 text-xs text-muted-foreground">
           {t("auth.socialNeedsCloudflare")}
         </p>
+      ) : null}
+
+      {/* Windows only: a phone's sign-in sheet is the system's, and closing
+          it ends the wait by itself. */}
+      {busy !== null && !isMobile() ? (
+        <button
+          type="button"
+          onClick={() => flow.current?.abort()}
+          className="mt-2 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+        >
+          {t("auth.socialCancel")}
+        </button>
       ) : null}
 
       {error ? (

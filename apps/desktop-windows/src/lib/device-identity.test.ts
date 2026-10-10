@@ -22,7 +22,8 @@ vi.mock("./attempts", async (original) => {
   return { ...real, reportAttempt: vi.fn() };
 });
 vi.mock("./pow", () => ({
-  raceChallengeFor: async () => ({ reached: true, answered: [{ base: "https://api.example.net/api", ms: 100 }] }),
+  raceChallengeFor: async () => ({ answered: [{ base: "https://api.example.net/api", ms: 100 }], pages: [], failed: [] }),
+  solveQuietly: async () => undefined,
 }));
 vi.mock("./session", () => ({ setTokens: vi.fn() }));
 vi.mock("./session-end", () => ({ endCustomerSession: vi.fn() }));

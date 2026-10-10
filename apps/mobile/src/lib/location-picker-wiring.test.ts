@@ -15,9 +15,11 @@ describe("the phone's server list", () => {
     expect(picker).toContain("initialRoutes={routes}");
     // And `routes` is what the load put on screen -- the cached list on
     // the offline path, and on the online one when only the list's own
-    // request failed.
+    // request failed, as `standInRoutes` decides: never over a later
+    // load's list, and never another plan's left standing.
     expect(dashboard).toContain("const [routes, setRoutes] = useState<RouteOption[]>([]);");
     expect(dashboard).toContain("setRoutes(cached.routes);");
-    expect(dashboard).toContain("if (currentRoutes.length > 0) setRoutes(currentRoutes);");
+    expect(dashboard).toContain("const standIn = standInRoutes(currentRoutes, routesShownRef.current, planOf(sub), load);");
+    expect(dashboard).toContain("if (standIn !== null) {");
   });
 });
