@@ -232,6 +232,16 @@ export function isDemoted(base: string, now = Date.now()): boolean {
   return stands(failures.bases[base], now) || (name !== null && stands(failures.names[name], now));
 }
 
+/** Whether `base`'s name was found on the block page on this network in
+ * the last `DEMOTED_FOR_MS`: a name a request is not sent to before it has
+ * been looked at again (`blockPageLook` in api.ts). */
+export function isNameDemoted(base: string, now = Date.now()): boolean {
+  restore();
+  const failures = memory[networkNow(now)];
+  const name = nameOf(base);
+  return failures !== undefined && name !== null && stands(failures.names[name], now);
+}
+
 /** One look at a name's DNS answer, while it is under way. */
 interface Lookup {
   name: string;

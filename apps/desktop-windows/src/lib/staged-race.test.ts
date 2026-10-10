@@ -243,8 +243,8 @@ describe("an address that timed out", () => {
 
   /** A write times out too: here at the address that had just answered a
    * read, and so leads the list. Nothing else answers the health race the
-   * write then runs, so nothing replaces it as the last to answer. B had
-   * answered moments before, so the write says Neoxify stopped responding. */
+   * write then runs, so nothing replaces it as the last to answer, and
+   * nothing answered the write: Neoxify could not be reached. */
   it("does not lead the next read when the timeout was a write's", async () => {
     network[B] = answers(200);
     network[B + "/client-attempts"] = "stall";
@@ -253,11 +253,7 @@ describe("an address that timed out", () => {
     expect(remembered).toEqual([B]);
 
     const write = await run(() => publicRequest("/client-attempts", { method: "POST", body: "{}" }));
-    expect(write.result).toEqual({
-      ok: false,
-      error: "Neoxify answered but then stopped responding. Please try again.",
-      noResponse: true,
-    });
+    expect(write.result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
 
     network[A] = answers(300);
     const { ms, sent } = await read();
@@ -389,7 +385,10 @@ describe("an address whose name resolves to the block page", () => {
 
     expect(second.result.ok).toBe(true);
     expect(second.ms).toBe(5_000);
-    expect(second.sent).toEqual([A, B, C, D, E, F]);
+    // Looked at before anything was sent, and nothing was. Before, every
+    // one of them was sent the read -- a handshake naming a blocked host,
+    // to the block page -- and stopped when the look caught up.
+    expect(second.sent).toEqual([A, B]);
     expect(renderTrace(trace)).toBe(
       "req: a.example=h200@5000 b.example=net@0 c.example=blockpage@0 d.example=blockpage@0 " +
         "e.example=blockpage@0 f.example=blockpage@0",
@@ -454,5 +453,49 @@ describe("an address whose name resolves to the block page", () => {
     expect(result.ok).toBe(true);
     expect(ms).toBe(1_000);
     expect(sent).toEqual([A]);
+  });
+});
+
+describe("a block page that refuses the connection outright", () => {
+  /** Every name resolves to the block page, and the page resets each
+   * connection at once -- before the look at the name comes back. Before:
+   * each failure was recorded as a plain refusal, and the customer was
+   * told to check a connection that works; which of the two they were
+   * told depended on which came back first. */
+  it("still says the network sends Neoxify to the block page", async () => {
+    for (const base of ENDPOINTS) {
+      network[base] = "reset";
+      resolver.set(new URL(base).hostname, BLOCK_PAGE);
+    }
+    const trace = newTrace();
+    const { result } = await read(trace);
+
+    expect(result).toEqual({ ok: false, error: BLOCKED, noResponse: true, blockPage: true });
+    expect(renderTrace(trace)).not.toContain("net@");
+  });
+});
+
+describe("a write sent straight to the address that answered last", () => {
+  /** Connected, reads went through the tunnel to D, which became the
+   * address the next write goes straight to. The tunnel drops, and on the
+   * carrier's network D's name resolves to the block page, where the
+   * connection hangs. Before: the write waited out D's eight seconds
+   * there -- the whole of a slot claim's budget -- before asking anyone
+   * else. */
+  it("is stopped as soon as the address's name turns out to be on the block page", async () => {
+    resolver.set("d.example", ["203.0.113.10"]);
+    network[D] = answers(100);
+    await read();
+    expect(remembered).toEqual([D]);
+
+    resolver.set("d.example", BLOCK_PAGE);
+    network[D] = "stall";
+    network[C] = answers(100);
+    const trace = newTrace();
+    const { result, ms } = await run(() => publicRequest("/client-attempts", { method: "POST", body: "{}" }, trace));
+
+    expect(result.ok).toBe(true);
+    expect(ms).toBeLessThan(5_000);
+    expect(renderTrace(trace)).toMatch(/^req: d\.example=blockpage@0; health: /);
   });
 });

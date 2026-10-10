@@ -7,6 +7,7 @@ import {
   demotedLast,
   demoteEndpoint,
   isDemoted,
+  isNameDemoted,
   resetDemotionsForTests,
   resolvesToBlockPage,
 } from "./endpoint-demotion";
@@ -106,17 +107,34 @@ async function send(base: string, path: string, init: RequestInit, signal: Abort
  * a refused token refresh was refused by the backend (`refusedByBackend`). */
 const answeredBy = new WeakMap<object, string>();
 
-/** The addresses the backend has answered from in this run with something
- * other than a 401: JSON, of any other status. See `refusedByBackend` for
- * why a 401 does not count. */
+/** The addresses the backend has answered from in this run, as far as
+ * an answer can show it (`servesBackend`). See `refusedByBackend` for why
+ * a 401 does not count. */
 const servedBackend = new Set<string>();
 
-/** The addresses that have answered the public health check, in this run,
- * with something the backend never says to it: a 401, a 403 or a 404, or
- * a page (`provesBackend`). Their 401 is not the backend refusing a token
- * -- `foreignAnswer` treats it as a page -- until the address serves the
- * backend's JSON again. */
+/** The addresses that have answered a public request, in this run, with
+ * JSON the backend never gives one: a 401, a 403 or a 404 to the health
+ * check or the sign-in challenge (`notePublicAnswer`). Their refusals are
+ * not the backend's -- `foreignAnswer` treats them as pages -- until the
+ * address serves the backend's JSON again. */
 const notBackend = new Set<string>();
+
+/** The JSON statuses an address that is not the backend has been seen
+ * answering every request with. The backend gives them too -- an expired
+ * token, a forbidden route, a missing one -- so one of them, alone, proves
+ * neither that an address is the backend nor that it is not. */
+const DOUBTFUL_STATUSES = new Set([401, 403, 404]);
+
+/** Whether `response` is JSON in one of the `DOUBTFUL_STATUSES`. */
+function isDoubtful(response: Response): boolean {
+  return isBackendAnswer(response) && DOUBTFUL_STATUSES.has(response.status);
+}
+
+/** Whether `response` shows that its address reaches the backend: its
+ * JSON, in any status but the doubtful ones. */
+function servesBackend(response: Response): boolean {
+  return isBackendAnswer(response) && !DOUBTFUL_STATUSES.has(response.status);
+}
 
 function noteAnswer(base: string, response: Response): void {
   // Whatever answered, the network let a request through to this
@@ -126,7 +144,12 @@ function noteAnswer(base: string, response: Response): void {
   // keyed, and there is nothing to note about it.
   if (typeof response !== "object" || response === null) return;
   answeredBy.set(response, base);
-  if (isBackendAnswer(response) && response.status !== 401) {
+  // Not a 403 or a 404 either. An address answering JSON 404 to the
+  // public health check used to be counted here by that very answer, and
+  // its JSON 401 to the token refresh was then believed: the customer was
+  // signed out, and the tunnel taken down, by an address the health check
+  // had just shown was not the backend.
+  if (servesBackend(response)) {
     servedBackend.add(base);
     notBackend.delete(base);
   }
@@ -142,9 +165,21 @@ function provesBackend(response: Response): boolean {
   return isBackendAnswer(response) && (response.ok || response.status === 503 || response.status === 429);
 }
 
-/** Notes what an answer to the public health check said about `base`. */
-function noteHealth(base: string, response: Response): void {
-  if (!provesBackend(response)) notBackend.add(base);
+/** Notes what an answer to a public request -- the health check, the
+ * sign-in challenge -- said about `base`: JSON the backend never gives
+ * there (`isDoubtful`) shows the address is not the backend.
+ *
+ * Nothing else does. A page is what is in front of the backend speaking
+ * (`isForeignPage`), and says nothing about what is behind it: a CDN's 521
+ * or a mirror's 502 during a deploy is an address that reaches the backend
+ * whenever the backend is up. Counted here, such a page outlived the deploy
+ * that caused it: the address's JSON 401 was a page from then on, an
+ * expired access token was never renewed, and every screen said "Request
+ * failed (401)" until some write happened to check the address again. */
+function notePublicAnswer(base: string, response: Response): void {
+  if (!isDoubtful(response)) return;
+  notBackend.add(base);
+  servedBackend.delete(base);
 }
 
 /** Whether `response`, from `base`, is to be treated as a page from in
@@ -252,6 +287,10 @@ function followUpTimeout(answered: AnsweredBase): number {
 interface Stop {
   base: string;
   timeoutMs: number;
+  /** Whether its name's DNS answer is looked at beside the request, as a
+   * race does for every address (`blockPageLook`): for a write sent
+   * straight to an address before any race (`recentStop`). */
+  blockPageLook?: boolean;
 }
 
 /** How long an address the backend has just answered from is trusted to
@@ -282,11 +321,17 @@ const HEALTH_PATH = "/health";
 /** The last address the backend itself answered from: where, how fast,
  * and when. Any race's winner counts -- a read's, the sign-in
  * challenge's, a write's health race -- and so does a write that was
- * answered. */
-let lastWinner: (AnsweredBase & { at: number }) | null = null;
+ * answered.
+ *
+ * `refusal` marks a read won by a JSON 401. That is the backend's answer
+ * to an expired access token, and the token refresh that follows it goes
+ * straight there; but an address that is not the backend answers 401 to
+ * everything, so no other write is sent on the strength of it
+ * (`recentWinner`). */
+let lastWinner: (AnsweredBase & { at: number; refusal: boolean }) | null = null;
 
-function noteWinner(base: string, ms: number): void {
-  lastWinner = { base, ms, at: Date.now() };
+function noteWinner(base: string, ms: number, refusal = false): void {
+  lastWinner = { base, ms, at: Date.now(), refusal };
 }
 
 /** Stops offering `base` to the next write: it has just failed a request,
@@ -305,13 +350,21 @@ function forgetWinner(base: string): void {
 
 /** The last winner, if the backend answered there within `PROVEN_FOR_MS`
  * and the address has not been demoted on this network since -- a
- * demoted address never leads a race, and does not lead a write either. */
-function recentWinner(): AnsweredBase | null {
+ * demoted address never leads a race, and does not lead a write either.
+ *
+ * Nor an address shown since not to be the backend (`notBackend`), nor,
+ * for any write but the token refresh, one whose winning answer was a 401.
+ * An address answering JSON 401 to everything won the launch's public
+ * read, and the attempt report that followed went there alone, with no
+ * health check: its 401 counted the report as delivered, and the report
+ * was dropped while the backend answered one address along. */
+function recentWinner(forRefresh = false): AnsweredBase | null {
   if (lastWinner === null) return null;
   const age = Date.now() - lastWinner.at;
   // A clock set back is not a fresh answer.
   if (age < 0 || age >= PROVEN_FOR_MS) return null;
-  if (isDemoted(lastWinner.base)) return null;
+  if (isDemoted(lastWinner.base) || notBackend.has(lastWinner.base)) return null;
+  if (lastWinner.refusal && !forRefresh) return null;
   return { base: lastWinner.base, ms: lastWinner.ms };
 }
 
@@ -354,6 +407,13 @@ const GATEWAY_STATUSES = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525, 5
  * as it does after any other page from in front of the backend
  * (`isForeignPage`), none of which got as far as the backend either. */
 const MAY_HAVE_REACHED_BACKEND = new Set([502, 504, 520, 524]);
+
+/** Whether a page with this status may have come after the backend acted
+ * on the request (`MAY_HAVE_REACHED_BACKEND`). For a sign-up, which must
+ * not be sent twice (`mayTryAgain` in auth.ts). */
+export function mayHaveReachedBackend(status: number | undefined): boolean {
+  return status !== undefined && MAY_HAVE_REACHED_BACKEND.has(status);
+}
 
 /** The writes that may go on to the next address even after a page that
  * says the backend may have been reached (`MAY_HAVE_REACHED_BACKEND`),
@@ -466,6 +526,10 @@ interface Walk {
   lastError: unknown;
   /** The remembered endpoint as the walk last read it. */
   remembered: string | undefined;
+  /** Whether the walk ends at the first address that took the request and
+   * then did not answer in time: a sign-in's, whose single-use solution
+   * that address may already have spent (`fetchAnyEndpoint`). */
+  endOnTimeout?: boolean;
 }
 
 /** `rememberedEndpoint`, which is advisory: a walk goes on without it. */
@@ -554,7 +618,23 @@ async function fetchOneEndpointAtATime(
     const entry = beginAttempt(trace, base, startedAt);
     const onOuterAbort = () => controller.abort();
     outer?.addEventListener("abort", onOuterAbort);
+    // Whether the name's DNS answer, looked at beside the request, was the
+    // block page (`blockPageLook`), and whether the request has settled.
+    let onBlockPage = false;
+    let over = false;
     try {
+      if (stop.blockPageLook) {
+        const look = blockPageLook(base);
+        if (await look.beforeSending) {
+          onBlockPage = true;
+          throw new Error("on the block page");
+        }
+        void look.found.then((found) => {
+          if (!found || over) return;
+          onBlockPage = true;
+          controller.abort();
+        });
+      }
       const response = await send(base, path, init, controller.signal);
       settleAttempt(entry, `h${response.status}`);
       if (foreignAnswer(base, response)) {
@@ -570,20 +650,29 @@ async function fetchOneEndpointAtATime(
         continue;
       }
       void rememberEndpoint(base);
-      void maybeRefreshBundle(base);
       // The backend answered here, so the next write may come straight
-      // here too (`recentWinner`). Not on a 401, which an address that is
-      // not the backend can give as well (`refusedByBackend`).
-      if (response.status !== 401) noteWinner(base, Date.now() - startedAt);
+      // here too (`recentWinner`), and the address bundle may be asked
+      // for here. Not on a JSON 401, 403 or 404, which an address that is
+      // not the backend gives as well (`isDoubtful`): one such answer
+      // renewed that address's trust for the next write, and spent the
+      // run's only bundle refresh on an address that could not serve it.
+      if (!isDoubtful(response)) {
+        void maybeRefreshBundle(base);
+        noteWinner(base, Date.now() - startedAt);
+      }
       return response;
     } catch (err) {
       // Stopped by the caller's deadline rather than failing: left
       // pending, which the trace renders as `budget`. Recording it as a
       // transport failure would say the network refused an address that
       // was simply still being waited for.
-      if (timedOut || !outer?.aborted) settleFailure(entry, base, failedAs(err, timedOut, startedAt));
+      if (timedOut || !outer?.aborted) {
+        settleFailure(entry, base, onBlockPage ? "blockpage" : failedAs(err, timedOut, startedAt));
+      }
       walk.lastError = err;
+      if (timedOut && walk.endOnTimeout) break;
     } finally {
+      over = true;
       clearTimeout(timer);
       outer?.removeEventListener("abort", onOuterAbort);
     }
@@ -600,6 +689,34 @@ function unanswered(walk: Walk, init: RequestInit): Response {
   throw walk.lastError ?? new Error(init.signal?.aborted ? "the request ran out of time" : "no API endpoint answered");
 }
 
+/** Where a write goes before anything is asked, if anywhere: the address
+ * the backend last answered from (`recentWinner`) -- or, for a write with
+ * a deadline of its own, the remembered endpoint when no race has been won
+ * lately.
+ *
+ * Those writes are the device slot's: the claim before a dial has three
+ * seconds, the release on Disconnect a second and a half. A health check
+ * and then the write is two fresh connections in a row, because the HTTP
+ * plugin builds a new client for every request; on a link where one takes
+ * a second and a half the claim spent its three seconds and was never
+ * sent, where going straight to the remembered address, as every write did
+ * before the health race, was granted in half that. A deadline that short
+ * leaves the health race no time after a dead address either, so the
+ * address that answered last is the better bet -- even one demoted on this
+ * network since, which is how a timeout through a failing tunnel left the
+ * release on Disconnect a health race whose first stage alone outlasted
+ * it. Not an address shown not to be the backend (`notBackend`). Either
+ * way the address's name is looked at beside the request
+ * (`blockPageLook`), so one this network sends to the block page holds up
+ * nothing. */
+function recentStop(path: string, outer: AbortSignal | null, walk: Walk): Stop | null {
+  const recent = recentWinner(path === REFRESH_PATH);
+  if (recent !== null) return { base: recent.base, timeoutMs: followUpTimeout(recent), blockPageLook: true };
+  const remembered = walk.remembered;
+  if (outer === null || remembered === undefined || notBackend.has(remembered)) return null;
+  return { base: remembered, timeoutMs: timeoutAt(remembered), blockPageLook: true };
+}
+
 /** Sends a write -- anything but a plain read -- to one address at a
  * time, and only to addresses that have just answered.
  *
@@ -614,12 +731,13 @@ function unanswered(walk: Walk, init: RequestInit): Response {
  *
  * First, the address the backend last answered from, if that was within
  * `PROVEN_FOR_MS` (`recentWinner`) -- the usual case, since writes mostly
- * follow reads or other writes. Otherwise, or if that address does not
- * answer, the endpoints not yet tried are raced for the health check
- * (`raceForHealth`), and the write walks only those whose answer proved
- * they reach the backend, in the order they answered, each given time to
- * answer at the pace it just showed. Throughout, the remembered endpoint
- * is read again before each step (`followRemembered`).
+ * follow reads or other writes -- or, for a write with a short deadline of
+ * its own, the remembered endpoint (`recentStop`). Otherwise, or if that
+ * address does not answer, the endpoints not yet tried are raced for the
+ * health check (`raceForHealth`), and the write walks only those whose
+ * answer proved they reach the backend, in the order they answered, each
+ * given time to answer at the pace it just showed. Throughout, the
+ * remembered endpoint is read again before each step (`followRemembered`).
  *
  * If none of those takes the write, the race is run again over the
  * addresses it has not yet heard from -- the ones stopped when the first
@@ -646,9 +764,10 @@ function unanswered(walk: Walk, init: RequestInit): Response {
  * completes a connection (`CONNECT_TIMEOUT_MS`); and up to
  * `SLOW_ANSWER_MS` more when a recent winner was asked first and did not
  * answer -- rather than after a walk of the whole list. When the backend
- * answered, the health check or a write within `PROVEN_FOR_MS`, and then
- * the write got no answer, `StoppedAnswering` is thrown instead: Neoxify
- * was reached moments earlier, however it was found. */
+ * answered this write's health race, and then the write got no answer,
+ * `StoppedAnswering` is thrown instead: Neoxify was reached moments
+ * earlier. Not when only an earlier answer, to another request, sent the
+ * write where it got nothing: nothing answered this write. */
 async function sendWrite(
   path: string,
   init: RequestInit,
@@ -659,8 +778,7 @@ async function sendWrite(
   const walk = await newWalk();
   // Addresses a health race may still ask.
   let candidates = [...endpoints];
-  // Whether the backend itself has answered, within `PROVEN_FOR_MS`, at an
-  // address this write was then sent to or raced.
+  // Whether the backend itself answered one of this write's health races.
   let reached = false;
   // The first page a health race heard, the answer of last resort.
   let healthPage: Response | null = null;
@@ -670,12 +788,15 @@ async function sendWrite(
   // block page, and nothing else.
   let onBlockPage = false;
 
-  const recent = recentWinner();
-  if (recent !== null) {
-    const stop = { base: recent.base, timeoutMs: followUpTimeout(recent) };
-    const response = await fetchOneEndpointAtATime(path, init, [stop], walk, trace);
+  // Not `reached` when it fails. Its answer was to another request, up to
+  // a minute and a half ago and perhaps on another network; a write that
+  // then got nothing there or anywhere else was answered by nothing, and
+  // said that Neoxify had stopped responding where the next write, on the
+  // same network a moment later, said it could not be reached.
+  const first = recentStop(path, outer, walk);
+  if (first !== null) {
+    const response = await fetchOneEndpointAtATime(path, init, [first], walk, trace);
     if (response) return response;
-    reached ||= walk.tried.has(recent.base);
   }
 
   let stops: Stop[] = [];
@@ -734,13 +855,20 @@ async function sendWrite(
  * answered a moment ago. A write without `via` finds that out for itself
  * (`sendWrite`).
  *
- * The last address in `via` gets `SLOW_ANSWER_MS`, whatever pace it
- * answered the race at. It is the last address known to answer, and an
- * address that has just answered in a hundred milliseconds can still be a
- * slow route the next time: a sign-in whose challenge came back at once
- * and whose own answer took twelve seconds was cut off at eight, with
- * most of the sign-in's deadline unused. The caller's own deadline still
- * bounds it.
+ * Every address in `via` gets `SLOW_ANSWER_MS`, whatever pace it answered
+ * the race at: an address that has just answered in a hundred
+ * milliseconds can still be a slow route the next time. Only the last one
+ * used to, so a sign-in whose challenge race had also heard a throttled
+ * mirror cut the address that handed out the challenge off at eight
+ * seconds, when its answer took twelve. And the walk ends at the first
+ * address that took the request and did not answer in that time. The
+ * sign-in carries a single-use solution, which that address may already
+ * have spent: sent on with it, the sign-in was refused by the throttled
+ * mirror as a security check already used, for a sign-in that had gone
+ * through. A sign-in may be tried again with a fresh challenge
+ * (`sendWithChallenge` in auth.ts); a transport failure that came sooner
+ * still goes on to the next address, as it always has. The caller's own
+ * deadline bounds all of it.
  */
 async function fetchAnyEndpoint(
   path: string,
@@ -754,11 +882,8 @@ async function fetchAnyEndpoint(
   // behalf, by any path below.
   if (init.signal?.aborted) throw new Error("the request ran out of time");
   if (via) {
-    const stops = via.map((answered, i) => ({
-      base: answered.base,
-      timeoutMs: i === via.length - 1 ? SLOW_ANSWER_MS : followUpTimeout(answered),
-    }));
-    const walk = await newWalk();
+    const stops = via.map((answered) => ({ base: answered.base, timeoutMs: SLOW_ANSWER_MS }));
+    const walk: Walk = { ...(await newWalk()), endOnTimeout: true };
     return (await fetchOneEndpointAtATime(path, init, stops, walk, trace)) ?? unanswered(walk, init);
   }
 
@@ -884,6 +1009,14 @@ export type RequestFailure = {
    * says so rather than sending the customer to check a connection that
    * is fine (failure-text.ts). */
   blockPage?: true;
+  /** Set when what answered was not the backend: a page from in front of
+   * it (`isForeignPage`), or an answer from an address shown not to be the
+   * backend (`foreignAnswer`). Something replied, so this is not
+   * `noResponse`; but the backend was not reached through it, which is
+   * what decides whether a sign-in may be tried again elsewhere
+   * (`sendWithChallenge` in auth.ts) and whether a failed screen load is
+   * reported as one that never reached Neoxify (unanswered-report.ts). */
+  page?: true;
   /** The server's machine-readable `code`, when its answer carried one
    * (`DEVICE_LIMIT`, `TAKEOVER_LIMIT`, ...).
    *
@@ -1022,7 +1155,7 @@ export function requestFailed(status: number): string {
 async function failureFrom(res: Response, signal?: AbortSignal | null, foreign = false): Promise<RequestFailure> {
   // Not the backend's answer (`foreignResponse`): whatever its body says,
   // it is not a sentence the backend wrote, nor one of its codes.
-  if (foreign) return { ok: false, error: requestFailed(res.status), status: res.status };
+  if (foreign) return { ok: false, error: requestFailed(res.status), status: res.status, page: true };
   const body: unknown = await readWithin(res.json(), signal).catch(() => null);
   const fields = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : null;
   const message = fields?.message;
@@ -1123,6 +1256,34 @@ interface Staggered {
   stop(spare?: RaceAnswer): void;
 }
 
+/** Thrown in place of a request a race decided without: its address was
+ * still having its name looked at when an answer came in (`blockPageLook`). */
+class NotSent extends Error {}
+
+/** A look at `base`'s name, for a request about to go there
+ * (`resolvesToBlockPage` in endpoint-demotion.ts).
+ *
+ * `found` is whether the name resolves to Iran's block page and nothing
+ * else; a request already sent is stopped when it says so.
+ * `beforeSending` is what to wait for before sending at all: the look
+ * itself, for a name this network has sent to the block page in the last
+ * half hour (`isNameDemoted`), and nothing for any other name, which is
+ * asked at once.
+ *
+ * Such a name used to be sent a request anyway. The look starts beside the
+ * request, and the request was queued before any look could land, so every
+ * race asked every name the race before had just found on the block page:
+ * a TCP handshake and a TLS hello naming a blocked host, to the block page,
+ * before the look caught up and stopped it. Waiting for the look is a call
+ * into the app, answered from the resolver's cache, and never longer than
+ * `RESOLVE_TIMEOUT_MS`. It is looked at again rather than trusted, because
+ * the path may have changed since: through a tunnel just up, the name
+ * resolves for real. */
+function blockPageLook(base: string): { found: Promise<boolean>; beforeSending: Promise<boolean> } {
+  const found = resolvesToBlockPage(base);
+  return { found, beforeSending: isNameDemoted(base) ? found : Promise.resolve(false) };
+}
+
 /** The stages a race over `count` addresses asks them in, as [from, to)
  * ranges of its order, when the first `healthy` of them have not been
  * demoted: the first address alone; the rest of those not demoted; the
@@ -1167,8 +1328,11 @@ function stagesOf(count: number, healthy: number): [number, number][] {
  * (`resolvesToBlockPage`), and a request whose name turns out to resolve
  * to the block page and nothing else is stopped there and counted as
  * failed, so the next stage need not wait out the head start on it; the
- * name is demoted on this network. When every address ends that way, the
- * race says so (`blockPage`): it is the network, not the connection.
+ * name is demoted on this network. A name already demoted that way is
+ * looked at before anything is sent to it, and not sent anything if it is
+ * still on the block page (`blockPageLook`). When every address ends that
+ * way, the race says so (`blockPage`): it is the network, not the
+ * connection.
  *
  * A winner is remembered, and asked for the address bundle. One that is
  * the backend's own JSON is also offered to the next write (`sendWrite`);
@@ -1236,8 +1400,10 @@ async function staggeredRace(
       }, SLOW_ANSWER_MS),
     );
     // Its name's DNS answer, looked at beside the request: the block page
-    // stops it, or keeps it from being sent when the answer is in first.
-    void resolvesToBlockPage(base).then((found) => {
+    // stops it -- or keeps it from being sent at all, for a name this
+    // network has sent there lately (`blockPageLook`).
+    const look = blockPageLook(base);
+    void look.found.then((found) => {
       if (!found || done[i] || decided) return;
       blockPage[i] = true;
       controllers[i].abort();
@@ -1245,8 +1411,13 @@ async function staggeredRace(
     // Started inside a promise, so a fetch that throws rather than
     // rejecting is still one address failing, not the whole race.
     void Promise.resolve()
-      .then(() => {
+      .then(async () => {
+        if (await look.beforeSending) blockPage[i] = true;
         if (blockPage[i]) throw new Error("on the block page");
+        // Decided while its name was looked at -- an answer came in, or the
+        // caller's deadline ran out -- so it is not sent, and the trace is
+        // left for `stop` to mark, as for an address asked and stopped.
+        if (decided) throw new NotSent();
         return send(base, path, request, controllers[i].signal);
       })
       .then(
@@ -1266,7 +1437,18 @@ async function staggeredRace(
           if (foreignAnswer(base, response)) forgetWinner(base);
           if (wins(answer)) decide(answer);
         },
-        (err: unknown) => {
+        async (err: unknown) => {
+          if (err instanceof NotSent) {
+            done[i] = true;
+            return;
+          }
+          // A failure that came back before the name's look did -- a
+          // connection to the block page reset in milliseconds -- waits for
+          // the look, which is bounded (`RESOLVE_TIMEOUT_MS`). Settled
+          // without it, it was recorded as a plain transport failure, and a
+          // network sending every name to the block page was told, or not,
+          // depending on which of the two came back first.
+          if (!blockPage[i] && !decided && !timedOut[i] && (await look.found)) blockPage[i] = true;
           done[i] = true;
           const outcome = blockPage[i] ? "blockpage" : failedAs(err, timedOut[i], startedAt);
           if (!decided) {
@@ -1338,10 +1520,17 @@ async function staggeredRace(
     // Remembered so the next request starts here and need ask nobody
     // else. The address bundle is asked for too: this is the only trigger
     // it has, and without it a published rotation never reaches a single
-    // client.
+    // client -- but not on a JSON 401, 403 or 404 (`isDoubtful`), which
+    // spent the run's one refresh on an address that may not be the
+    // backend at all. A JSON 401 is offered to the token refresh it
+    // causes and to no other write (`recentWinner`).
     void rememberEndpoint(winner.base);
-    if (winner.backend) noteWinner(winner.base, winner.ms);
-    void maybeRefreshBundle(winner.base);
+    if (!isDoubtful(winner.response)) {
+      if (winner.backend) noteWinner(winner.base, winner.ms);
+      void maybeRefreshBundle(winner.base);
+    } else if (winner.response.status === 401) {
+      noteWinner(winner.base, winner.ms, true);
+    }
   }
 
   const stop = (spare?: RaceAnswer) => {
@@ -1385,7 +1574,9 @@ function distinctBases(answers: RaceAnswer[]): string[] {
  *
  * Only for a request that the server does not mind receiving more than
  * once -- nothing stored, nothing spent, beyond the throttle's count --
- * and whose every answer is JSON. The sign-in challenge is the reason
+ * whose every answer is JSON, and which is public: the backend never
+ * answers it 401, 403 or 404, so an address that does is not the backend
+ * (`notePublicAnswer`). The sign-in challenge is the reason
  * this exists. It is minted, signed and handed back without the server
  * keeping any record of it, so racing it is safe, where racing the
  * sign-in itself never was (see `fetchAnyEndpoint`).
@@ -1421,29 +1612,39 @@ export async function publicRace<T>(
     headers: { "Content-Type": "application/json", ...init.headers },
   };
 
+  // The backend's own answer: its JSON, and neither a JSON 401, 403 or 404
+  // (`isDoubtful`), which it never gives a public request like this one,
+  // nor anything from an address already shown not to be the backend
+  // (`foreignAnswer`). An address answering JSON 401 to everything used to
+  // win this race inside its head start, be remembered, and be sent the
+  // sign-in alone; the customer was told "Unauthorized", which reads like
+  // a wrong password, and every retry did the same while the backend
+  // would have answered one address along. Such an answer is a page here.
+  const fromBackend = (answer: RaceAnswer) =>
+    answer.backend && !isDoubtful(answer.response) && !foreignAnswer(answer.base, answer.response);
   const { winner, answers, failed, blockPage, stop } = await staggeredRace(
     list,
     path,
     request,
-    (answer) => answer.backend && answer.response.status !== 429,
+    (answer) => {
+      notePublicAnswer(answer.base, answer.response);
+      return fromBackend(answer) && answer.response.status !== 429;
+    },
     trace,
   );
 
   // The answer that becomes the result: the winner, or failing that the
   // first 429, or failing that the first page.
-  const kept = winner ?? answers.find((answer) => answer.backend) ?? answers[0];
+  const kept = winner ?? answers.find(fromBackend) ?? answers[0];
   stop(kept);
   if (kept === undefined) {
     const result = blockPage ? unansweredFailure(new OnBlockPage()) : unreachable();
     return { result, answered: [], pages: [], failed };
   }
   return {
-    result: await resultFrom<T>(kept.response, kept.backend, init.signal),
-    answered: inAnswerOrder(
-      winner,
-      answers.filter((answer) => answer.backend),
-    ),
-    pages: distinctBases(answers.filter((answer) => !answer.backend)),
+    result: await resultFrom<T>(kept.response, fromBackend(kept), init.signal),
+    answered: inAnswerOrder(winner, answers.filter(fromBackend)),
+    pages: distinctBases(answers.filter((answer) => !fromBackend(answer))),
     failed,
   };
 }
@@ -1498,7 +1699,7 @@ async function raceForHealth(endpoints: string[], signal: AbortSignal | null, tr
       trace,
     );
     stop();
-    for (const answer of answers) noteHealth(answer.base, answer.response);
+    for (const answer of answers) notePublicAnswer(answer.base, answer.response);
     const others = answers.filter((answer) => !provesBackend(answer.response));
     return {
       answered: inAnswerOrder(
@@ -1601,7 +1802,7 @@ async function refusedByBackend(res: Response, trace?: EndpointTrace): Promise<b
 
 /** Sends the health check to one address and waits for the headers. The
  * answer is noted by `send` like any other, and for what it says about
- * the address (`noteHealth`); nothing else is done with it. Traced under
+ * the address (`notePublicAnswer`); nothing else is done with it. Traced under
  * `health`, with the caller's phase put back after. */
 async function askForHealth(base: string, trace?: EndpointTrace): Promise<void> {
   const phase = trace?.phase;
@@ -1617,7 +1818,7 @@ async function askForHealth(base: string, trace?: EndpointTrace): Promise<void> 
   try {
     const response = await send(base, HEALTH_PATH, { method: "GET" }, controller.signal);
     settleAttempt(entry, `h${response.status}`);
-    noteHealth(base, response);
+    notePublicAnswer(base, response);
   } catch (err) {
     settleFailure(entry, base, failedAs(err, timedOut, startedAt));
   } finally {

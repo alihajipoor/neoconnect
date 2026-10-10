@@ -67,9 +67,9 @@ export type TracePhase = "challenge" | "health" | "req" | "refresh" | "retry";
  *   socket-level probe in control-plane-probe.ts, whose answer follows
  *   the trace as a `probe:` section when it ran.
  * - `blockpage`: the address's name resolves to Iran's DNS block page and
- *   nothing else, so a race stopped the request, or did not send it (see
- *   `resolvesToBlockPage` in endpoint-demotion.ts). Found by a lookup of
- *   its own beside the request's, through the same system resolver.
+ *   nothing else, so a race, or a write's first try, stopped the request
+ *   or did not send it (see `blockPageLook` in api.ts). Found by a lookup
+ *   of its own beside the request's, through the same system resolver.
  * - `pending`: not settled yet. Rendered as `budget` when a caller gives
  *   up waiting -- see `renderTrace`.
  */

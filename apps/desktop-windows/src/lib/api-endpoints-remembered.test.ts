@@ -59,3 +59,28 @@ describe("the remembered endpoint", () => {
     await expect(endpoints.rememberedEndpoint()).resolves.toBeUndefined();
   });
 });
+
+vi.mock("./endpoint-bundle-store", () => ({ bundledBases: async () => [] }));
+vi.mock("./credential-cache", () => ({ loadSnapshot: async () => null }));
+
+describe("the list's lead", () => {
+  /** A race whose lead was dead found another address, and the next race
+   * began before the store had that one. Before: it was led by the dead
+   * address again, and waited out its head start a second time. */
+  it("is the address this process remembered, before the store has it", async () => {
+    files.set("api-endpoints.json", new Map([["lastGood", "https://a.example/api"]]));
+    store.pending = true;
+    void endpoints.rememberEndpoint("https://d.example/api");
+
+    expect((await endpoints.apiEndpoints())[0]).toBe("https://d.example/api");
+  });
+
+  /** Found not to be the backend and forgotten, while the store still
+   * holds it. */
+  it("is not an address this process has forgotten, though the store still has it", async () => {
+    files.set("api-endpoints.json", new Map([["lastGood", "https://m.example/api"]]));
+    await endpoints.forgetEndpoint("https://m.example/api");
+
+    expect((await endpoints.apiEndpoints())[0]).not.toBe("https://m.example/api");
+  });
+});

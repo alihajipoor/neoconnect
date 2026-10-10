@@ -235,7 +235,8 @@ describe("gaming profile revalidation", () => {
     replies.push({ kind: "respond", status: 500 });
     const result = await getGamingProfile();
     expect(result.ok).toBe(false);
-    expect(result).toEqual({ ok: false, error: "Request failed (500)", status: 500 });
+    // No body, so not the backend's JSON: a page from in front of it.
+    expect(result).toEqual({ ok: false, error: "Request failed (500)", status: 500, page: true });
   });
 
   it("refuses a 304 that answers a request which asked nothing conditional", async () => {

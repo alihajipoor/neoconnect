@@ -1,4 +1,12 @@
-import { apiRequest, LEAD_MS, publicRequest, SLOW_ANSWER_MS, STOPPED_ANSWERING, unreachable } from "./api";
+import {
+  apiRequest,
+  LEAD_MS,
+  mayHaveReachedBackend,
+  publicRequest,
+  SLOW_ANSWER_MS,
+  STOPPED_ANSWERING,
+  unreachable,
+} from "./api";
 import { apiEndpoints } from "./api-endpoints";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
 import { probeAddendum } from "./control-plane-probe";
@@ -73,8 +81,8 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: Endpo
  * asks in stages a head start apart (`LEAD_MS`): the first address, then
  * the rest, then those that recently failed on this network, so the last
  * is asked at most two head starts in, and each gets `SLOW_ANSWER_MS`.
- * The attempt then gets up to that again at the last address that
- * answered (`via` in api.ts), and three and a half seconds are left over.
+ * The attempt then gets up to that again at an address that answered
+ * (`via` in api.ts), and three and a half seconds are left over.
  * A CDN that answers in about twenty seconds, with every mirror blocked,
  * still signs the customer in, even when it had failed here recently. A
  * network where nothing answers is told so after the race alone, without
@@ -145,22 +153,26 @@ class NetworkDeadline {
  * to one address at a time, for the reasons `fetchAnyEndpoint` gives: the
  * solution is single use, and sign-in is throttled hard.
  *
- * If none of those answers the attempt, a fresh challenge is raced over
- * the addresses not yet heard from -- those the first race stopped, or
- * never asked, because the remembered address answered inside its head
- * start -- and the attempt goes where that one is answered, with the new
- * solution. The sign-in used to end there instead: the remembered address
- * answered the challenge, reset the sign-in, and the customer was told
- * Neoxify had stopped responding while another address would have signed
- * them in. Every retry then did the same, because only a timeout moves an
- * address down the order. A fresh challenge, because the first one's
- * solution may have reached the server with the attempt that got nothing
- * back, and a second copy of it would be refused as already used.
+ * If none of those answers the attempt, or only a page from in front of
+ * the backend does, a fresh challenge is raced over the addresses not yet
+ * heard from -- those the first race stopped, or never asked, because the
+ * remembered address answered inside its head start -- and the attempt
+ * goes where that one is answered, with the new solution (`mayTryAgain`
+ * says when). The sign-in used to end there instead: the remembered
+ * address answered the challenge, reset the sign-in or answered it with a
+ * CDN's 521 or a WAF's 403 page, and the customer was told so while
+ * another address would have signed them in. Every retry then did the
+ * same, because only a timeout moves an address down the order. A fresh
+ * challenge, because the first one's solution may have reached the server
+ * with the attempt that got nothing back, and a second copy of it would
+ * be refused as already used.
  *
- * The whole thing ends by `SIGN_IN_DEADLINE_MS` of network time. When the
- * backend answered and then nothing took the attempt, the result says
- * Neoxify stopped responding; it says that only when the backend itself
- * answered, never because a page from in front of it did.
+ * The whole thing ends by `SIGN_IN_DEADLINE_MS` of network time. A page
+ * that answered an attempt is the result if nothing better comes, because
+ * something did answer. Otherwise, when the backend answered and then
+ * nothing took the attempt, the result says Neoxify stopped responding; it
+ * says that only when the backend itself answered, never because a page
+ * from in front of it did.
  *
  * Solved before the attempt, not in response to being refused: the
  * server raises the required difficulty as failures accumulate, so
@@ -178,6 +190,8 @@ async function sendWithChallenge<T>(
   // What the first race said when the backend did not answer it: Neoxify
   // unreachable, or a page's status.
   let failure: RequestFailure | undefined;
+  // The first page that answered an attempt.
+  let page: RequestFailure | undefined;
   // The addresses a later race need not ask: sent the attempt, answered
   // with a page, or silent.
   const heard = new Set<string>();
@@ -206,7 +220,13 @@ async function sendWithChallenge<T>(
       deadline.run();
       const result = await publicRequest<T>(path, { ...init(solution), signal: deadline.signal }, trace, race.answered);
       deadline.pause();
-      if (result.ok || !result.noResponse) return result;
+      // The backend's own answer, whatever it says, is the end of it.
+      if (result.ok || !(result.noResponse || result.page)) return result;
+      if (!mayTryAgain(path, result)) {
+        if (result.page) return result;
+        break;
+      }
+      if (result.page) page ??= result;
       if (deadline.spent) break;
       candidates = (await apiEndpoints()).filter((base) => !heard.has(base));
       if (candidates.length === 0) break;
@@ -214,8 +234,34 @@ async function sendWithChallenge<T>(
   } finally {
     deadline.pause();
   }
+  if (page) return page;
   if (backendAnswered) return { ok: false, error: STOPPED_ANSWERING, noResponse: true };
   return failure ?? unreachable();
+}
+
+const SIGN_IN_PATH = "/customer-auth/login";
+
+/** Whether an attempt that got `result` -- a page from in front of the
+ * backend, or no answer at all -- is raced for a fresh challenge at the
+ * addresses not yet heard from (`sendWithChallenge`).
+ *
+ * A sign-in, after either. A second copy of it creates nothing, and with a
+ * fresh challenge it is not refused as a security check already used --
+ * even after a gateway page that says the backend may have acted on the
+ * first (`mayHaveReachedBackend` in api.ts), which used to end it.
+ *
+ * A sign-up only after a page that says the backend was never reached: a
+ * CDN's 521, a WAF's 403, a fallback site's 404. Not after one that says
+ * it may have been, nor after no answer at all, which is what a sign-up
+ * the server took and then answered too slowly looks like -- the password
+ * is hashed and the verification email sent before it answers. A second
+ * copy with a new, valid solution was then told the email was already
+ * registered, about the account the first copy had just made. Stopped
+ * instead, it says Neoxify stopped responding, and the customer's next try
+ * is told the truth either way. */
+function mayTryAgain(path: string, result: RequestFailure): boolean {
+  if (path === SIGN_IN_PATH) return true;
+  return result.page === true && !mayHaveReachedBackend(result.status);
 }
 
 /** Never returns a usable session -- see RequiresVerification's doc

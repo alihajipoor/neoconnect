@@ -51,6 +51,7 @@ vi.mock("./i18n", () => ({ currentLanguage: () => "en" }));
 vi.mock("./social-auth", () => ({ startSocialSignIn: vi.fn() }));
 
 const { login, register } = await import("./auth");
+const { resetRaceWinnerForTests } = await import("./api");
 
 const UNREACHABLE = "Could not reach Neoxify. Check your internet connection.";
 const STOPPED = "Neoxify answered but then stopped responding. Please try again.";
@@ -114,6 +115,9 @@ beforeEach(() => {
   network = {};
   sent = [];
   remembered.length = 0;
+  // What one test's answers showed about an address -- not the backend,
+  // demoted, the last to answer -- is not the next test's to go on.
+  resetRaceWinnerForTests();
   reportAttempt.mockReset();
   tauriFetch.mockImplementation((url: string, init?: RequestInit) => {
     const { origin, pathname } = new URL(url);
@@ -369,14 +373,16 @@ describe("an answer that stops", () => {
     // the demoted addresses wait out behind the rest -- two slow answers'
     // worth, and slack.
     expect(ms).toBe(46_500);
-    // A got its twenty seconds, C what was left of its eight, D never
-    // started.
-    expect(sentTo("/customer-auth/login")).toEqual([A, C]);
+    // A got its twenty seconds. Not C after it: A may have spent the
+    // solution, and C would refuse it as already used. Before, C was sent
+    // it, with what was left of its eight seconds.
+    expect(sentTo("/customer-auth/login")).toEqual([A]);
 
     await vi.waitFor(() => expect(reportAttempt).toHaveBeenCalledTimes(1));
     const trace = String((reportAttempt.mock.calls[0][0] as { apiEndpoint: string }).apiEndpoint);
-    // Cut off by the deadline, which is not the network refusing it.
-    expect(trace).toContain("req: a.example=timeout@20000 c.example=budget@7500");
+    // Then a fresh challenge from B, the one address not yet heard from,
+    // cut off by the deadline -- which is not the network refusing it.
+    expect(trace).toContain("req: a.example=timeout@20000; challenge: b.example=budget@7500");
   });
 });
 
@@ -430,7 +436,7 @@ describe("only a page answers", () => {
 
     const { result } = await run(() => login("someone@example.com", "pw"));
 
-    expect(result).toEqual({ ok: false, error: "Request failed (403)", status: 403 });
+    expect(result).toEqual({ ok: false, error: "Request failed (403)", status: 403, page: true });
     expect(sentTo("/customer-auth/login")).toEqual([]);
   });
 });
@@ -453,5 +459,133 @@ describe("a slow proof of work", () => {
     expect(result.ok).toBe(true);
     expect(sentTo("/customer-auth/login")).toEqual([A]);
     expect(ms).toBe(100 + 47_000 + 200);
+  });
+});
+
+describe("an address that answers JSON 401 to everything", () => {
+  const unauthorized = () => json({ statusCode: 401, message: "Unauthorized" }, 401);
+
+  /** The backend never answers the public challenge 401. Before: A's 401
+   * won the race inside its head start, A was remembered, the sign-in went
+   * to A alone and the customer was told "Unauthorized" -- which reads
+   * like a wrong password -- while B would have signed them in. */
+  it("does not win the challenge, and is not remembered or sent the sign-in", async () => {
+    network[A] = { "/login-challenge": answers(50, unauthorized), "/customer-auth/login": answers(50, unauthorized) };
+    network[B] = { "/login-challenge": answers(300, challenge), "/customer-auth/login": answers(300, tokens) };
+
+    const { result } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/customer-auth/login")).toEqual([B]);
+    expect(remembered).not.toContain(A);
+  });
+
+  /** And when nothing else answers, it is something that answered, not the
+   * backend refusing a password. */
+  it("is told as what it is when nothing else answers", async () => {
+    network[A] = { "/login-challenge": answers(50, unauthorized), "/customer-auth/login": answers(50, unauthorized) };
+    for (const origin of [B, C, D]) network[origin] = { "/login-challenge": "reset" };
+
+    const { result } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result).toEqual({ ok: false, error: "Request failed (401)", status: 401, page: true });
+    expect(sentTo("/customer-auth/login")).toEqual([]);
+  });
+});
+
+describe("a page that answers the sign-in itself", () => {
+  /** The remembered address hands out the challenge inside its head start,
+   * so nobody else is asked, and then a page answers the sign-in: a CDN
+   * whose origin is unreachable (521), a WAF's 403, a mirror's 502. Before:
+   * "Request failed (521)" at once, B never asked, and every retry the
+   * same. A 502 may have come after the backend acted; a second sign-in,
+   * with a fresh challenge, creates nothing. */
+  it.each([403, 502, 521])("asks the rest for a fresh challenge after a %i page", async (status) => {
+    network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/login": answers(50, () => page(status)) };
+    network[B] = { "/login-challenge": answers(200, challenge), "/customer-auth/login": answers(200, tokens) };
+
+    const { result } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/customer-auth/login")).toEqual([A, B]);
+    expect(sentTo("/login-challenge")).toEqual([A, B]);
+  });
+
+  /** When nothing else answers, the page is what the customer is told:
+   * something did answer the sign-in. */
+  it("says what answered when no other address does", async () => {
+    network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/login": answers(50, () => page(521)) };
+    for (const origin of [B, C, D]) network[origin] = { "/login-challenge": "reset" };
+
+    const { result } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result).toEqual({ ok: false, error: "Request failed (521)", status: 521, page: true });
+  });
+
+  /** A sign-up behind a page that says the backend was never reached is
+   * safe to send again. */
+  it("does the same for a sign-up behind a page that never reached the backend", async () => {
+    const created = () => json({ requiresVerification: true, email: "x" });
+    network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/register": answers(50, () => page(521)) };
+    network[B] = { "/login-challenge": answers(200, challenge), "/customer-auth/register": answers(200, created) };
+
+    const { result } = await run(() => register("someone@example.com", "password1"));
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/customer-auth/register")).toEqual([A, B]);
+  });
+
+  /** But not behind one that says it may have been reached: the account
+   * may already exist, and a second sign-up would be told the email is
+   * taken -- by the account the first one made. */
+  it("does not send a sign-up again after a page that may have come after the backend acted", async () => {
+    const created = () => json({ requiresVerification: true, email: "x" });
+    network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/register": answers(50, () => page(502)) };
+    network[B] = { "/login-challenge": answers(200, challenge), "/customer-auth/register": answers(200, created) };
+
+    const { result } = await run(() => register("someone@example.com", "password1"));
+
+    expect(result).toEqual({ ok: false, error: "Request failed (502)", status: 502, page: true });
+    expect(sentTo("/customer-auth/register")).toEqual([A]);
+  });
+});
+
+describe("a sign-up that got no answer", () => {
+  /** The server hashes the password and sends the verification email
+   * before it answers, so a sign-up that timed out, or whose connection
+   * was reset, may have created the account. Before: a fresh challenge
+   * from B and a second sign-up with a valid solution, which was told the
+   * email was already registered -- by the account the first had made. */
+  it.each(["hang", "reset"] as const)("is not sent again after it got %s", async (behaviour) => {
+    const created = () => json({ requiresVerification: true, email: "x" });
+    network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/register": behaviour };
+    network[B] = { "/login-challenge": answers(200, challenge), "/customer-auth/register": answers(200, created) };
+
+    const { result } = await run(() => register("someone@example.com", "password1"));
+
+    expect(result).toEqual({ ok: false, error: STOPPED, noResponse: true });
+    expect(sentTo("/customer-auth/register")).toEqual([A]);
+    expect(sentTo("/login-challenge")).toEqual([A]);
+  });
+});
+
+describe("a throttled mirror beside the address that hands out the challenge", () => {
+  /** A answers the challenge with its throttle's 429 and B hands one out;
+   * B's answer to the sign-in then takes twelve seconds. Before: B, not
+   * last in the list, got eight seconds, and the sign-in was sent on to A
+   * with the same solution, which B had spent: "This security check was
+   * already used", for a sign-in that had gone through. */
+  it("waits for the slow answer, and never sends the same solution on", async () => {
+    const used = () => json({ statusCode: 400, message: "This security check was already used. Please try again." }, 400);
+    network[A] = { "/login-challenge": answers(50, throttled), "/customer-auth/login": answers(50, used) };
+    network[B] = { "/login-challenge": answers(300, challenge), "/customer-auth/login": answers(12_000, tokens) };
+
+    const { result, ms } = await run(() => login("someone@example.com", "pw"));
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/customer-auth/login")).toEqual([B]);
+    // A's 429, which settles everything asked so far, then B's challenge
+    // and its slow answer.
+    expect(ms).toBe(50 + 300 + 12_000);
   });
 });

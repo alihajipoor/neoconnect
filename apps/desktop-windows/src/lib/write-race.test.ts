@@ -318,10 +318,12 @@ describe("a write after a read", () => {
    * else. The first write finds that out the slow way; the next, inside
    * the same minute, does not wait on that address again.
    *
-   * The first says Neoxify stopped responding: D answered moments before,
-   * as a health check's answer would have. Before, it said "could not
-   * reach Neoxify -- check your internet connection", where the same
-   * address found by a health race said it had stopped responding. */
+   * Both say Neoxify could not be reached, because nothing answered either
+   * of them. Before, the first said it had stopped responding, on the
+   * strength of an answer to another request up to a minute and a half
+   * old -- perhaps on the network the laptop had just left -- and the
+   * second, on the same network a moment later, said it could not be
+   * reached. */
   it("does not send the next write where the last one got nothing", async () => {
     network[D] = { "/customer/subscriptions/s1/routes": answers(200, () => json([])) };
     await run(() => apiRequest("/customer/subscriptions/s1/routes"));
@@ -332,7 +334,7 @@ describe("a write after a read", () => {
     const first = await run(switchRoute);
     const second = await run(switchRoute);
 
-    expect(first.result).toEqual({ ok: false, error: STOPPED, noResponse: true });
+    expect(first.result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
     expect(second.result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
     // D's eight seconds, then a health race nothing answers.
     expect(first.ms).toBe(8_000 + 1_500 + 20_000);
@@ -609,7 +611,7 @@ describe("what a health race will take as the backend", () => {
 
     const { result } = await run(report);
 
-    expect(result).toEqual({ ok: false, error: "Request failed (403)", status: 403 });
+    expect(result).toEqual({ ok: false, error: "Request failed (403)", status: 403, page: true });
     expect(sentTo("/client-attempts")).toEqual([]);
   });
 });
@@ -638,7 +640,7 @@ describe("a read answered by a fallback site", () => {
 
     const { result } = await run(() => apiRequest("/customer/me"));
 
-    expect(result).toEqual({ ok: false, error: "Request failed (200)", status: 200 });
+    expect(result).toEqual({ ok: false, error: "Request failed (200)", status: 200, page: true });
   });
 });
 
@@ -668,5 +670,127 @@ describe("a session that cannot be renewed just now", () => {
     const { result } = await run(() => apiRequest("/customer/me"));
 
     expect(result).toEqual({ ok: false, error: STOPPED, noResponse: true });
+  });
+});
+
+describe("a page on the health check during an outage", () => {
+  const unauthorized = () => json({ statusCode: 401, message: "Unauthorized" }, 401);
+  const pair = () => json({ accessToken: "access2", refreshToken: "refresh2" });
+
+  /** A deploy: the only address this network reaches answers a report's
+   * health check with its gateway page. Then the backend is back and the
+   * access token has expired. Before: the page had marked the address as
+   * not the backend, so its JSON 401 was a page too, no refresh was sent,
+   * and every screen said "Request failed (401)" until some write
+   * happened to check the address again. */
+  it("does not keep the backend's own 401 from renewing the session afterwards", async () => {
+    network[A] = { "/health": answers(50, () => page(502)) };
+    const outage = await run(report);
+    expect(outage.result).toMatchObject({ ok: false, status: 502 });
+
+    network[A] = {
+      "/customer/me": [answers(100, unauthorized), answers(100, () => json({ id: "c1" }))],
+      "/customer-auth/refresh": answers(100, pair),
+    };
+    sent = [];
+    const { result } = await run(() => apiRequest("/customer/me"));
+
+    expect(result).toEqual({ ok: true, data: { id: "c1" } });
+    expect(sentTo("/customer-auth/refresh")).toEqual([A]);
+    expect(stored.tokens).toEqual({ accessToken: "access2", refreshToken: "refresh2" });
+  });
+});
+
+describe("an address that answers its public health check with a 403 or 404", () => {
+  /** It is not the backend, which never says either there. Before: that
+   * very answer counted the address as one the backend answered from, so
+   * its JSON 401 to the token refresh was believed -- the customer was
+   * signed out and the tunnel taken down by something that was not us. */
+  it.each([403, 404])("is not believed when it refuses the token refresh (health %i)", async (status) => {
+    network[A] = {
+      "/customer/me": answers(50, () => json({ statusCode: 401, message: "Unauthorized" }, 401)),
+      "/customer-auth/refresh": answers(50, () => json({ statusCode: 401, message: "Refresh token has been revoked" }, 401)),
+      "/health": answers(50, () => json({ statusCode: status, message: "Nope" }, status)),
+    };
+
+    const { result } = await run(() => apiRequest("/customer/me"));
+
+    expect(result).not.toHaveProperty("sessionExpired");
+    expect(announced).toBe(0);
+    expect(stored.tokens).toEqual({ accessToken: "access", refreshToken: "refresh" });
+  });
+});
+
+describe("a read won by a JSON 401", () => {
+  /** An address answering JSON 401 to everything wins the launch's public
+   * read before anything shows it is not the backend. Before: the attempt
+   * report that followed went there alone, with no health check; its 401
+   * counted the report as delivered, and the report was dropped while D
+   * was healthy. A 401 is offered only to the token refresh it causes. */
+  it("is not where the next write goes, other than the token refresh", async () => {
+    const unauthorized = () => json({ statusCode: 401, message: "Unauthorized" }, 401);
+    network[A] = { "/health/ip": answers(50, unauthorized), "/health": answers(50, unauthorized), "/client-attempts": answers(50, unauthorized) };
+    network[D] = { "/health": answers(300, healthy), "/client-attempts": answers(100, noContent) };
+    await run(() => publicRequest("/health/ip"));
+
+    sent = [];
+    const { result } = await run(report);
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/client-attempts")).toEqual([D]);
+  });
+});
+
+describe("a write with a deadline of its own", () => {
+  /** The device-slot claim before a dial has three seconds. Here every
+   * fresh request to the address that works takes 1.6 seconds, and the
+   * dashboard's read was answered there two minutes ago. Before: the
+   * trust had lapsed, so the claim ran a health race first -- two fresh
+   * connections in a row, led by a dead address -- and its three seconds
+   * ran out before the claim was sent. */
+  it("goes straight to the remembered address once the trust has lapsed", async () => {
+    network[D] = {
+      "/customer/me": answers(1_600, () => json({ id: "c1" })),
+      "/health": answers(1_600, healthy),
+      "/customer/vpn/claim": answers(1_600, () => json({ granted: true })),
+    };
+    await run(() => apiRequest("/customer/me"));
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    sent = [];
+    const budget = new AbortController();
+    setTimeout(() => budget.abort(), 3_000);
+    const { result, ms } = await run(() =>
+      apiRequest("/customer/vpn/claim", { method: "POST", body: "{}", signal: budget.signal }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(ms).toBe(1_600);
+    expect(sentTo("/health")).toEqual([]);
+  });
+
+  /** A read through a failing tunnel timed out at the address the slot was
+   * renewed at, and demoted it. Then Disconnect: the release has a second
+   * and a half. Before: no address was trusted, so the release ran a
+   * health race in which the demoted address was asked last, three
+   * seconds in, and the slot stayed held until it went stale. */
+  it("goes there even when a timeout has demoted it since", async () => {
+    network[D] = { "/customer/me": answers(100, () => json({ id: "c1" })) };
+    await run(() => apiRequest("/customer/me"));
+    // Only D times out; the rest refuse at once, which demotes nothing.
+    network[D] = { "/customer/me": "hang" };
+    for (const origin of [A, B, C]) network[origin] = { "/customer/me": "reset" };
+    await run(() => apiRequest("/customer/me"));
+    network[D] = { "/customer/vpn/release": answers(100, noContent) };
+
+    sent = [];
+    const budget = new AbortController();
+    setTimeout(() => budget.abort(), 1_500);
+    const { result } = await run(() =>
+      apiRequest("/customer/vpn/release", { method: "POST", body: "{}", signal: budget.signal }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(sentTo("/customer/vpn/release")).toEqual([D]);
   });
 });
