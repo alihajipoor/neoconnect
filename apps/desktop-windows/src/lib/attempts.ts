@@ -238,13 +238,41 @@ function appVersion(): Promise<string> {
   return versionPromise;
 }
 
+/** Every access token a report in hand has carried in this run: one made
+ * here (`reportAttempt`), or read back from the queue (`readQueue`). When
+ * the session ends they are all its tokens, or older ones. */
+const carried = new Set<string>();
+
+/** The tokens of sessions that have ended in this run
+ * (`forgetQueuedSessions`).
+ *
+ * The sign-out cleans the queue as it finds it, but a report can still be
+ * in hand: one whose own send was walking the addresses when the customer
+ * signed out -- a minute and more on a blocked network, against the
+ * sign-out's eight seconds -- a probe's follow-up, or a flush holding its
+ * copy of the queue. Each of them wrote its copy afterwards, token
+ * included, and the signed-out session's access token was back on disk.
+ * Every write takes these out (`writeQueue`), and no send uses them. */
+const ended = new Set<string>();
+
+/** `report`'s token, unless its session has ended (`ended`). */
+function liveBearer(report: QueuedReport): string | null | undefined {
+  return typeof report.bearer === "string" && ended.has(report.bearer) ? null : report.bearer;
+}
+
+function noteCarried(report: QueuedReport): void {
+  if (typeof report.bearer === "string") carried.add(report.bearer);
+}
+
 async function readQueue(): Promise<QueuedReport[]> {
   try {
     const store = await getStore();
     const stored = await store.get<QueuedReport[]>(KEY);
     const legacy = await store.get<QueuedReport[]>(LEGACY_KEY);
     // The older build's first: they were made first.
-    return [...(Array.isArray(legacy) ? legacy : []), ...(Array.isArray(stored) ? stored : [])];
+    const queue = [...(Array.isArray(legacy) ? legacy : []), ...(Array.isArray(stored) ? stored : [])];
+    queue.forEach(noteCarried);
+    return queue;
   } catch {
     return [];
   }
@@ -253,7 +281,11 @@ async function readQueue(): Promise<QueuedReport[]> {
 async function writeQueue(queue: QueuedReport[]): Promise<void> {
   try {
     const store = await getStore();
-    await store.set(KEY, queue);
+    // Never a token whose session has ended, whenever this copy was taken.
+    await store.set(
+      KEY,
+      queue.map((report) => (liveBearer(report) === report.bearer ? report : { ...report, bearer: null })),
+    );
     // What was under the old key is in `queue` now, read with the rest.
     if ((await store.get(LEGACY_KEY)) !== undefined) await store.delete(LEGACY_KEY);
     await store.save();
@@ -321,8 +353,14 @@ function stoppedByPage(result: { error: string; status?: number }): boolean {
  * build, which kept no token, would have gone out with whoever signed in
  * next, and goes out under nobody too. Never rejects. */
 export async function forgetQueuedSessions(): Promise<void> {
+  // Before anything is awaited, so a write that lands meanwhile is cleaned
+  // too: every token in hand belongs to the session that is ending, or to
+  // an older one.
+  for (const bearer of carried) ended.add(bearer);
   try {
     const queue = await readQueue();
+    for (const bearer of carried) ended.add(bearer);
+    carried.clear();
     if (queue.every((report) => report.bearer === null)) return;
     await writeQueue(queue.map((report) => ({ ...report, bearer: null })));
   } catch {
@@ -363,8 +401,8 @@ async function send(queued: QueuedReport): Promise<boolean> {
   // out. The token is the one the report was made with (see `bearer`);
   // the server files the report under its customer if it verifies, and
   // anonymously if it does not.
-  const { bearer, ...report } = queued;
-  const accessToken = await deliveryToken(bearer);
+  const { bearer: _own, ...report } = queued;
+  const accessToken = await deliveryToken(liveBearer(queued));
   const post = (body: Omit<QueuedReport, "bearer">) =>
     publicRequest<void>("/client-attempts", {
       method: "POST",
@@ -552,6 +590,8 @@ export async function reportAttempt(
       // is the one held. See `bearer`.
       bearer: (await getTokens())?.accessToken ?? null,
     };
+    // Before it is sent: a sign-out while it is in hand must find it.
+    noteCarried(queued);
 
     if (await send(queued)) {
       // Reaching the server is also the signal that anything held back

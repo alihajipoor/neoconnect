@@ -1,4 +1,4 @@
-import type { ApiResult } from "./api";
+import { RENEWAL_UNANSWERED, type ApiResult } from "./api";
 import { reportAttempt } from "./attempts";
 import { pathChangingIn, probeAddendum } from "./control-plane-probe";
 import { newTrace, renderTrace, type EndpointTrace } from "./endpoint-trace";
@@ -24,9 +24,29 @@ import { watchBackground } from "./visibility";
  * a kind of its own would need a schema migration -- and a backend that
  * predates it would refuse the report with a 400, which counts as
  * delivered. Its reason says which screen asked and that nothing was
- * being dialled. Made only when no address gave any HTTP answer to one of
- * the requests (`noResponse`): a screen that was answered with an error
- * did reach Neoxify, and is not reported as having failed to. */
+ * being dialled. Made only when one of the requests did not reach the
+ * backend (`unreachedHow`): no address gave any HTTP answer, only pages
+ * from in front of the backend did, or the backend's 401 was followed by a
+ * token refresh nothing answered. A screen the backend answered with an
+ * error did reach Neoxify, and is not reported as having failed to. */
+
+/** How a request failed to reach the backend, in a report's words, or
+ * null when it did reach it -- or succeeded.
+ *
+ * Not only when nothing answered. Pages answering every address -- a CDN's
+ * bot check, its 521, a mirror's 502 -- are the backend not being reached
+ * as surely as silence is: attempts.ts keeps a report such a page answered
+ * for the same reason. And a load whose 401 was followed by a token
+ * refresh nothing answered never got its answer either; the trace already
+ * holds the unanswered refresh. Both used to leave no row, with the
+ * dashboard falling back to its cache. */
+function unreachedHow(result: ApiResult<unknown>): "none" | "page" | "renewal" | null {
+  if (result.ok) return null;
+  if (result.noResponse) return "none";
+  if (result.page) return "page";
+  if (result.error === RENEWAL_UNANSWERED) return "renewal";
+  return null;
+}
 
 /** Which screen's requests went unanswered. The opening words of the
  * report's reason, so rows can be split by what asked. */
@@ -158,16 +178,28 @@ export function traceRequests(source: RequestSource, appState?: string | (() => 
       const settledAt = Date.now();
 
       const named = Object.entries(results);
-      const unanswered = named.filter(([name, result]) => !result.ok && result.noResponse && traces.has(name));
+      const unanswered = named.filter(([name, result]) => unreachedHow(result) !== null && traces.has(name));
       if (unanswered.length === 0) return null;
-      // Rendered now, while they still describe what happened.
-      const [carriedName] = unanswered[0];
+      // Rendered now, while they still describe what happened. The trace
+      // of one nothing answered at all, where there is one.
+      const [carriedName] =
+        unanswered.find(([, result]) => unreachedHow(result) === "none") ?? unanswered[0];
       const carried = traces.get(carriedName)!;
       const tried = renderTrace(carried, settledAt);
       const others = named.flatMap(([name, result]) => {
-        if (result.ok || result.noResponse) return [];
+        if (result.ok || unanswered.some(([other]) => other === name)) return [];
         return [result.status !== undefined ? `${name} answered ${result.status}` : `${name} failed: ${result.error}`];
       });
+      // What each kind of failure was, in the reason's opening words.
+      const namesOf = (how: string) =>
+        unanswered.filter(([, result]) => unreachedHow(result) === how).map(([name, result]) =>
+          how === "page" && !result.ok && result.status !== undefined ? `${name} (${result.status})` : name,
+        );
+      const what = [
+        ...(namesOf("none").length > 0 ? [`no answer from Neoxify to ${namesOf("none").join(", ")}`] : []),
+        ...(namesOf("page").length > 0 ? [`only pages from in front of Neoxify answered ${namesOf("page").join(", ")}`] : []),
+        ...(namesOf("renewal").length > 0 ? [`no answer to the session renewal for ${namesOf("renewal").join(", ")}`] : []),
+      ].join("; ");
 
       return (consequence) => {
         if (sessionGeneration() !== sessionAtStart) return false;
@@ -190,7 +222,7 @@ export function traceRequests(source: RequestSource, appState?: string | (() => 
         // on while the dashboard loads -- and its failures may be that.
         const dialling = connectingAtStart || ladderPass.inFlight();
         const reason =
-          `${source}: no answer from Neoxify to ${names.join(", ")} after ${settledAt - startedAt}ms; ` +
+          `${source}: ${what} after ${settledAt - startedAt}ms; ` +
           (dialling
             ? `not a connect, but one of the app's own was under way; ${consequence}`
             : `not a connect, nothing is being dialled; ${consequence}`) +

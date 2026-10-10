@@ -529,6 +529,54 @@ describe("a sign-out with reports queued", () => {
     expect(headers.Authorization).toBeUndefined();
   });
 
+  /** A report whose own send was still walking the addresses when the
+   * customer signed out -- a minute and more on a blocked network, against
+   * the sign-out's eight seconds. Before: the sign-out found nothing to
+   * clean, and the send then failed and queued the report with the
+   * signed-out session's token. */
+  it("leaves no access token on disk from a report still being sent at sign-out", async () => {
+    session.current = { accessToken: "alice-access", refreshToken: "r" };
+    let answer!: (result: ApiResult<void>) => void;
+    publicRequest.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    const done = attempts.reportAttempt(unreachable);
+    await vi.waitFor(() => expect(publicRequest).toHaveBeenCalledTimes(1));
+
+    session.current = null;
+    await attempts.forgetQueuedSessions();
+    answer({ ok: false, error: "Could not reach Neoxify.", noResponse: true });
+    await done;
+
+    expect(queued()).toHaveLength(1);
+    expect(JSON.stringify([...(files.get("attempt-reports.json")?.values() ?? [])])).not.toContain("alice-access");
+  });
+
+  /** A flush holds its copy of the queue while it sends. Before: one sent
+   * and the next kept, it wrote that copy back after the sign-out had
+   * cleaned the queue, token and all. */
+  it("leaves no access token on disk from a flush under way at sign-out", async () => {
+    session.current = { accessToken: "alice-access", refreshToken: "r" };
+    publicRequest.mockResolvedValue({ ok: false, error: "Could not reach Neoxify.", noResponse: true });
+    await attempts.reportAttempt({ ...unreachable, reason: "one" });
+    await attempts.reportAttempt({ ...unreachable, reason: "two" });
+    expect(queued()).toHaveLength(2);
+
+    let answer!: (result: ApiResult<void>) => void;
+    publicRequest.mockReset();
+    publicRequest
+      .mockReturnValueOnce(new Promise((resolve) => (answer = resolve)))
+      .mockResolvedValue({ ok: false, error: "Could not reach Neoxify.", noResponse: true });
+    const flushing = attempts.flushAttempts();
+    await vi.waitFor(() => expect(publicRequest).toHaveBeenCalledTimes(1));
+
+    session.current = null;
+    await attempts.forgetQueuedSessions();
+    answer({ ok: true, data: undefined });
+    await flushing;
+
+    expect(queued()).toHaveLength(1);
+    expect(JSON.stringify([...(files.get("attempt-reports.json")?.values() ?? [])])).not.toContain("alice-access");
+  });
+
   /** Read from the source: the sign-out is where it happens. */
   it("is what ending a session does", async () => {
     const { readFileSync } = await import("node:fs");

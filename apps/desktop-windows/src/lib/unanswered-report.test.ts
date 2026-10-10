@@ -124,6 +124,39 @@ describe("a server list that nothing answered", () => {
     expect(reportAttempt).not.toHaveBeenCalled();
   });
 
+  /** Every address answered with a page from in front of the backend --
+   * the CDN's bot check here. The backend was not reached any more than if
+   * nothing had answered. Before: no row, and the screen fell back to its
+   * cache. */
+  it("is reported when only pages from in front of the backend answered", async () => {
+    network = () =>
+      Promise.resolve(new Response("<html>Attention required</html>", { status: 403, headers: { "content-type": "text/html" } }));
+    const requests = traceRequests("server list");
+    const result = await getAvailableRoutes("sub-1", requests.trace("routes"));
+    expect(result).toMatchObject({ ok: false, status: 403, page: true });
+
+    expect(requests.settle({ routes: result })!("kept the cached servers")).toBe(true);
+    expect(theReport().reason).toMatch(/^server list: only pages from in front of Neoxify answered routes \(403\) after \d+ms; /);
+  });
+
+  /** The backend refused an expired access token, and the token refresh
+   * that followed got no answer anywhere. Before: no row, because the load
+   * itself had been answered. */
+  it("is reported when the session renewal after the backend's 401 got no answer", async () => {
+    network = (url) =>
+      url.includes("/customer-auth/refresh") || url.endsWith("/health")
+        ? Promise.reject(`error sending request for url (${url})`)
+        : Promise.resolve(json({ statusCode: 401, message: "Unauthorized" }, 401));
+    const requests = traceRequests("server list");
+    const result = await getAvailableRoutes("sub-1", requests.trace("routes"));
+    expect(result.ok).toBe(false);
+
+    expect(requests.settle({ routes: result })!("kept the cached servers")).toBe(true);
+    const sent = theReport();
+    expect(sent.reason).toMatch(/^server list: no answer to the session renewal for routes after \d+ms; /);
+    expect(sent.apiEndpoint).toContain("refresh: ");
+  });
+
   it("is not reported when it answered", async () => {
     network = () => Promise.resolve(json([]));
     const requests = traceRequests("server list");
