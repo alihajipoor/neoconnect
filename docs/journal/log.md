@@ -5848,3 +5848,72 @@ alone and force-pushed; the CI runs on the dropped commit were cancelled.
 The hostnames are in every shipped installer, but the repo is meant not to
 list them. When bumping: test first, `git checkout --` the file, apply only
 `"version"`, and read `git diff --cached` of it before committing.
+
+## 2026-10-09 — control-plane resilience (branch `claude/control-plane-resilience`, not merged)
+
+**Status:** code done, unreleased -- needs the VM, a filtered network, phones
+**Touches:** `apps/desktop-windows/src/lib/api.ts` and its neighbours
+(`auth.ts`, `pow.ts`, `endpoint-demotion.ts`, `attempts.ts`,
+`unanswered-report.ts`, `connection-config.ts`, `credential-cache.ts`,
+`social-auth.ts`, `failure-text.ts`, `i18n.tsx`), both dashboards, the
+shared picker and auth screens, `health_ip.rs` (`resolve_ipv4` gains an
+IPv6 option), backend `client-attempts` and `isp-recommendations`.
+
+What the branch does, for customers whose API addresses are filtered:
+
+- **Sign-in** races the proof-of-work challenge (remembered address alone
+  for 1.5 s, then the rest, then the demoted) and sends the attempt only
+  where the backend answered it; if nothing takes it, a fresh challenge is
+  raced over the addresses not yet heard from. 46.5 s of *network* time at
+  most -- the solve is not counted -- and the last answering address gets
+  20 s for a slow answer. Only a backend answer counts as "Neoxify
+  answered"; a page answering alone is reported as that page's status.
+- **Writes** go to the address the backend answered from in the last 90 s
+  (answered writes renew it, so a connected session's slot release goes
+  straight there), else race `GET /health` and walk only addresses whose
+  answer proves the backend (200/503/429 JSON). A failing or page-answering
+  winner is forgotten; pages are never sent the write but are the answer of
+  last resort.
+- **Reads** are staged races with a 20 s answer deadline and a 10 s connect
+  deadline; addresses that timed out, or whose names resolve only to the
+  10.10.34.x block page, are demoted per network for 30 min and asked last.
+  The block-page lookup is fresh per race (a lookup made before a connect
+  used to be trusted for a minute after the tunnel came up), counts IPv6
+  answers, and is overruled by an answer from the name. All addresses on
+  the block page now says so ("your network is blocking Neoxify").
+- **Non-backend answers** (HTML pages of any status, and JSON 401s from an
+  address whose public `/health` answered 401) never win, never get
+  remembered, never sign anyone out; a token refresh refused by such an
+  address goes on to the others.
+- **Screens**: failures in the customer's language (verify link included),
+  session-renewal failures say whether anything answered, a "still trying"
+  line on every wait on Neoxify, social sign-in starts where Neoxify
+  answers now (CDN asked first) and can be cancelled on Windows, the late
+  config answer reaches whichever dashboard is mounted and never overwrites
+  a newer snapshot, cached route lists drop their per-network ISP tags.
+- **Telemetry**: dashboard/server-list unreachable reports (rate-limited
+  across restarts, skipped after a sign-out), queued reports attributed to
+  the session they were made in but sent with the current token when it is
+  the same customer's, tokens stripped from the queue at sign-out, a new
+  queue key so a downgrade cannot send a token in a body, page-answered
+  reports kept; backend orders per-ISP dials by when they happened.
+
+**Proven -- tests on this PC:** desktop `pnpm test` 1238 / 72 files and
+`pnpm typecheck`; mobile 239 / 16 and `tsc`; web portal 2 / 1 and `tsc`;
+backend isp-recommendations and client-attempts 60 / 5; `cargo check
+--workspace --all-targets` and `cargo test --workspace`. Every fix in the
+second review round has a test that fails without it (checked by stashing
+the sources); the network is simulated per address on a fake clock.
+
+**Unverified:** all of it on a real Iranian network; the VM; Android and
+iPhone; the proof-of-work solve rate in WebView2 and on phones; whether
+Iran's injector answers AAAA queries; the 10 s connect deadline against a
+throttled TLS handshake. Deploy the backend (expired-token attribution on
+`/client-attempts`) before releasing a client from this branch.
+
+**Left as is, with reasons in the commit:** the offline dashboard still
+waits for its reads (11.5-23 s) before showing cached credentials; the web
+portal has no connect deadline; the demotion key is the baseline ASN, and
+answers through a tunnel can lift a carrier-network demotion; a write
+after 90 s idle pays one health round trip; a social start through a
+mirror (only when the CDN does not answer) shares that node's throttle.
