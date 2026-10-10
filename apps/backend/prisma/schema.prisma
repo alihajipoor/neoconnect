@@ -1790,10 +1790,13 @@ model GamingResolverToken {
 model EndpointBundleState {
   id String @id @default(uuid())
 
-  /// Panel base URLs the operator has configured, as a JSON array of
-  /// { url, pin?, region? }. Node mirrors are not stored here -- they are
-  /// derived from the nodes table at draft time, so adding a node cannot
-  /// leave the two lists disagreeing.
+  /// Entries the operator has configured, as a JSON array of
+  /// { kind?: "panel", url, pin?, region? } or
+  /// { kind: "lastResort", url, pins, region? }. An entry without kind is
+  /// a panel base, which is every value stored before lastResort existed.
+  /// Node mirrors are not stored here -- they are derived from the nodes
+  /// table at draft time, so adding a node cannot leave the two lists
+  /// disagreeing.
   panelBasesJson String @default("[]")
 
   /// The signed envelope, verbatim. Null until the first upload.
