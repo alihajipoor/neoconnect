@@ -59,6 +59,12 @@ const MAX_PINS = 3;
 
 const PIN_PREFIX = "sha256/";
 
+/** An IPv4 address the way a person reads one: four decimal numbers from
+ * 0 to 255, none with a leading zero. Every other spelling the URL parser
+ * accepts means something other than it appears to -- a leading zero is
+ * octal, a short form is packed -- so this is checked on the text. */
+const DOTTED_QUAD = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+
 /** Whether the URL's host is an IP address rather than a name.
  *
  * Read from the parsed hostname, not the string as typed: the URL parser
@@ -129,9 +135,14 @@ function lastResortProblem(e: Record<string, unknown>): string | null {
   } catch {
     return "url is not a valid URL";
   }
-  if (url.username !== "" || url.password !== "") return "url must not carry userinfo";
+  // The authority as typed, up to the first character the parser treats
+  // as the end of it ("\" counts as "/" in an https URL).
+  const authority = raw.slice("https://".length).split(/[/\\?#]/)[0];
   // The raw text as well as the parsed parts, because the parser drops an
-  // empty "?" or "#" and the entry is signed and compared as typed.
+  // empty "@", "?" or "#" and the entry is signed and compared as typed.
+  if (url.username !== "" || url.password !== "" || authority.includes("@")) {
+    return "url must not carry userinfo";
+  }
   if (url.search !== "" || raw.includes("?")) return "url must not carry a query";
   if (url.hash !== "" || raw.includes("#")) return "url must not carry a fragment";
   if (isIP(url.hostname) !== 4) {
@@ -140,12 +151,27 @@ function lastResortProblem(e: Record<string, unknown>): string | null {
       "no SNI, and its certificate is checked by pin rather than by name"
     );
   }
+  // The parser has said this is an address, but not necessarily the one
+  // the text shows: it reads 192.0.2.010 as 192.0.2.8 and 192.0.2 as
+  // 192.0.0.2. Its reading is deliberately not offered as the fix. An
+  // operator who copied it would configure a different server, and with
+  // the right pin the relay would then refuse every connection while
+  // looking correctly configured. Only the text can say what was meant.
+  const typedHost = authority.split(":")[0];
+  if (!DOTTED_QUAD.test(typedHost)) {
+    return (
+      "url host must be an IPv4 address written as four decimal numbers from 0 to 255 " +
+      `with no leading zeros, not ${JSON.stringify(typedHost)}: other spellings are read ` +
+      "as a different address than they appear to name"
+    );
+  }
   if (url.pathname !== "/api") return "url path must be /api";
-  // Everything above passing still leaves spellings the parser rewrites:
-  // an address in decimal or with leading zeros, an explicit :443, an
-  // empty "@". The signed bundle must carry the one form a client and a
-  // reviewer both read the same way, so anything else is refused with
-  // that form named rather than silently rewritten.
+  // With the host already exactly as typed, what is left for the parser to
+  // rewrite is the port and separators: an explicit :443, an empty port, a
+  // "\" for the "/". Each names the same server as the form below, so that
+  // form can be named safely. The signed bundle must carry the one form a
+  // client and a reviewer both read the same way, so anything else is
+  // refused rather than silently rewritten.
   const canonical = `https://${url.host}/api`;
   if (raw !== canonical) return `url must be written as ${canonical}`;
 
@@ -169,14 +195,24 @@ function lastResortProblem(e: Record<string, unknown>): string | null {
  * reason it may not.
  *
  * Shared by the write (which refuses) and the draft (which skips), so a
- * value stored before these rules existed is held to them too.
+ * value stored before these rules existed is held to them too. `stored`
+ * says the entry was read back from panelBasesJson rather than sent now.
  */
-function configuredEntry(raw: unknown): StandardEntry | LastResortEntry | string {
+function configuredEntry(raw: unknown, stored = false): StandardEntry | LastResortEntry | string {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return "each entry must be an object";
   }
   const e = raw as Record<string, unknown>;
-  const kind = e.kind ?? "panel";
+  const declared = e.kind ?? "panel";
+  // The write before lastResort took kind "panel" or "mirror" and stored
+  // the body as sent, and the draft then emitted every stored entry as a
+  // panel. A stored "mirror" is therefore a panel base already in the
+  // bundle, and leaving it out would drop it from the next one with only
+  // a log line to say so. It is still held to the panel rules, so an
+  // address under it is skipped. Unknown kinds are not read this way: the
+  // old type never allowed them, and one could be a later kind left
+  // behind by a rollback, which must not become a panel.
+  const kind = stored && declared === "mirror" ? "panel" : declared;
 
   if (kind === "panel") {
     if (typeof e.url !== "string") return "url must be a string";
@@ -247,7 +283,7 @@ export class EndpointsService {
       const parsed: unknown = JSON.parse(state.panelBasesJson);
       if (Array.isArray(parsed)) {
         for (const raw of parsed) {
-          const entry = configuredEntry(raw);
+          const entry = configuredEntry(raw, true);
           if (typeof entry === "string") {
             // Skipped rather than thrown, for the same reason as a
             // malformed setting below. It can only be a value stored

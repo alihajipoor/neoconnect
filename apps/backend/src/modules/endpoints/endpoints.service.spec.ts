@@ -258,9 +258,31 @@ describe("EndpointsService lastResort in the draft", () => {
       panelBasesJson: JSON.stringify([
         relay({ pins: [] }),
         relay({ url: "https://relay.example.com/api" }),
-        { kind: "mirror", url: "https://mirror.example.com:2053/api" },
         { kind: "somethingElse", url: "https://other.example.com/api" },
       ]),
+    });
+    expect((await service.draft()).endpoints).toEqual([]);
+  });
+
+  // The previous POST body was typed with kind "panel" or "mirror" and
+  // stored verbatim, and the previous draft emitted every stored entry as
+  // a panel. A stored "mirror" is therefore a panel base that is in the
+  // bundle today, and dropping it would take it out of the next one with
+  // nothing but a log line to say so.
+  it("drafts a stored kind mirror with a DNS host as a panel, as before", async () => {
+    const { service } = build({
+      panelBasesJson: JSON.stringify([
+        { kind: "mirror", url: "https://mirror.example.com:2053/api", region: "de" },
+      ]),
+    });
+    expect((await service.draft()).endpoints).toEqual([
+      { kind: "panel", url: "https://mirror.example.com:2053/api", pin: undefined, region: "de" },
+    ]);
+  });
+
+  it("still skips a stored kind mirror addressed by IP", async () => {
+    const { service } = build({
+      panelBasesJson: JSON.stringify([{ kind: "mirror", url: "https://198.51.100.7:2053/api" }]),
     });
     expect((await service.draft()).endpoints).toEqual([]);
   });
@@ -433,14 +455,50 @@ describe("EndpointsService setPanelBases", () => {
     ["the root path", "https://192.0.2.10/", /path must be \/api/],
     ["a trailing slash", "https://192.0.2.10/api/", /path must be \/api/],
     ["another path", "https://192.0.2.10/v2/api", /path must be \/api/],
-    ["a decimal address", "https://3221225994/api", /must be written as https:\/\/192\.0\.2\.10\/api/],
-    ["a leading zero", "https://192.0.2.010/api", /must be written as https:\/\/192\.0\.2\.8\/api/],
     ["an explicit :443", "https://192.0.2.10:443/api", /must be written as https:\/\/192\.0\.2\.10\/api/],
-    ["an empty userinfo", "https://@192.0.2.10/api", /must be written as https:\/\/192\.0\.2\.10\/api/],
+    ["an empty port", "https://192.0.2.10:/api", /must be written as https:\/\/192\.0\.2\.10\/api/],
+    ["a backslash for the slash", "https://192.0.2.10\\api", /must be written as https:\/\/192\.0\.2\.10\/api/],
+    ["an empty userinfo", "https://@192.0.2.10/api", /must not carry userinfo/],
     ["no host", "https://", /not a valid URL/],
   ])("refuses a lastResort url with %s", async (_name, url, reason) => {
     const { service, updates } = build();
     await expect(service.setPanelBases([relay({ url })])).rejects.toThrow(reason);
     expect(updates).toHaveLength(0);
+  });
+
+  // The URL parser reads these as an IPv4 address, but not the one a
+  // reader would take from the text: a leading zero is octal, so
+  // 192.0.2.010 is 192.0.2.8, and a short form is packed, so 192.0.2 is
+  // 192.0.0.2. Naming the parser's reading as the fix would send an
+  // operator who copied it to a different server, where a correct pin
+  // would fail every connection. So the rule is stated and no address is
+  // proposed.
+  it.each<[string, string, string]>([
+    ["a leading zero", "https://192.0.2.010/api", "192.0.2.8"],
+    ["a leading zero and a port","https://192.0.2.010:8443/api", "192.0.2.8"],
+    ["a short form", "https://192.0.2/api", "192.0.0.2"],
+    ["a two-part form", "https://192.2/api", "192.0.0.2"],
+    ["one decimal number", "https://3221225994/api", "192.0.2.10"],
+    ["a hex octet", "https://0xc0.0.2.10/api", "192.0.2.10"],
+    ["a trailing dot", "https://192.0.2.10./api", "https://192.0.2.10/"],
+    ["a percent-encoded digit", "https://192.0.2.1%30/api", "192.0.2.10"],
+  ])("refuses a lastResort address with %s without proposing another", async (_name, url, parsed) => {
+    const { service, updates } = build();
+    const refusal = service.setPanelBases([relay({ url })]);
+    await expect(refusal).rejects.toThrow(
+      /url host must be an IPv4 address written as four decimal numbers from 0 to 255 with no leading zeros/,
+    );
+    const message = await refusal.catch((err: Error) => err.message);
+    // `parsed` is the parser's reading, or a URL built from it where the
+    // reading is also a substring of what was typed.
+    expect(message).not.toContain(parsed);
+    expect(message).not.toMatch(/must be written as/);
+    expect(updates).toHaveLength(0);
+  });
+
+  it("accepts a zero octet, which has no leading zero", async () => {
+    const { service, updates } = build();
+    await service.setPanelBases([relay({ url: "https://192.0.2.0/api", pins: [PIN_A] })]);
+    expect(JSON.parse(updates[0].panelBasesJson as string)[0].url).toBe("https://192.0.2.0/api");
   });
 });
