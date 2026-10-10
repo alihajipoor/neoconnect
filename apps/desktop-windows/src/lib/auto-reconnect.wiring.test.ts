@@ -254,13 +254,15 @@ describe("which screen runs an attempt", () => {
     expect(asked).toBeGreaterThan(0);
     expect(said).toBeGreaterThan(asked);
     expect(load.indexOf("setRoutes(currentRoutes);")).toBeLessThan(said);
-    // Cached: with the cached list on screen. And with nothing to dial, at
-    // once, as the route memory is.
-    const cached = load.indexOf(
-      "setRoutes(cached.routes);\n        routesShownRef.current = { plan: cached.subscription ? planOf(cached.subscription) : null, load };\n        setRouteListLoaded(true);",
-    );
+    // Cached: with the cached list on screen, whichever way the load came
+    // to it (`showCached`). And with nothing to dial, at once, as the route
+    // memory is.
+    const shown = body("async function showCached(");
+    const cached = shown.indexOf("setRoutes(cached.routes);");
     expect(cached).toBeGreaterThan(0);
-    expect(load.split("setRouteListLoaded(true);").length - 1).toBe(3);
+    expect(shown.indexOf("setRouteListLoaded(true);")).toBeGreaterThan(cached);
+    expect(load).toContain("await showCached(cached, preferRouteId, load, reason);");
+    expect(load.split("setRouteListLoaded(true);").length - 1).toBe(2);
     expect(dashboard.split("setRouteListLoaded(true)").length - 1).toBe(3);
   });
 
@@ -280,7 +282,12 @@ describe("which screen runs an attempt", () => {
     expect(dashboard.split("loadLastGood()").length - 1).toBe(1);
     expect(dashboard.split("loadConnectHistory()").length - 1).toBe(1);
     const load = body("async function loadAll(preferRouteId?: string) {");
-    expect(load.split("loadRouteMemory();").length - 1).toBe(3);
+    // The screen with nothing to dial, and the online one -- once, not
+    // again when the snapshot went up first while it waited.
+    expect(load.split("loadRouteMemory();").length - 1).toBe(2);
+    expect(load).toContain("if (!shownWhileWaiting) loadRouteMemory();");
+    // And the cached one, whichever way the load came to it.
+    expect(body("async function showCached(").split("loadRouteMemory();").length - 1).toBe(1);
   });
 
   it("on a screen that loaded nothing to dial, ends the episode rather than spending its attempts", () => {

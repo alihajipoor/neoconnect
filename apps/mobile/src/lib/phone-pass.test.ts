@@ -657,8 +657,12 @@ describe("the phone dashboard's wiring", () => {
     // Both ways a load ends with something to dial read the platform with
     // what they loaded -- the cached one too, which never did.
     const screen = body("async function loadScreen(preferRouteId: string | undefined, ready: () => void) {");
-    const cached = screen.slice(screen.indexOf("if (cached) {"), screen.indexOf("setError(\n"));
-    expect(cached).toContain("await adoptPlatform(sessionAtStart, cached.protocolUsers, cached.subscription, ready);");
+    // The cached one whichever way the load comes to it: failed, or still
+    // waiting past eight seconds (`showCached`).
+    const cached = screen.slice(screen.indexOf("if (cached) {"), screen.indexOf("setError(!meResult.ok"));
+    expect(cached).toContain("await showCached(cached, preferRouteId, load, reason, sessionAtStart, ready);");
+    const shown = body("async function showCached(");
+    expect(shown).toContain("await adoptPlatform(sessionAtStart, cached.protocolUsers, cached.subscription, ready);");
     expect(screen).toContain("await adoptPlatform(sessionAtStart, usersResult.data, sub, ready);");
     // And over a pass under way, said at once, so a pass that ends between
     // that and the load's end is still read by the listener.

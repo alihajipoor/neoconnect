@@ -27,7 +27,9 @@ describe("the Windows dashboard's load", () => {
   const load = body(dashboard, "  async function loadAll(preferRouteId?: string) {");
 
   it("traces each of its three requests and settles them together", () => {
-    expect(load).toContain('const requests = traceRequests("dashboard load", connectionState);');
+    // The state when the report is made, not when the load began: the
+    // screen may be in use on the cached snapshot by then.
+    expect(load).toContain('const requests = traceRequests("dashboard load", () => connectionStateRef.current);');
     expect(load).toContain('getMe(requests.trace("me")),');
     expect(load).toContain('getSubscriptions(requests.trace("subscriptions")),');
     expect(load).toContain('getProtocolUsers(requests.trace("protocol-users")),');
@@ -54,13 +56,19 @@ describe("the Windows dashboard's load", () => {
 
   it("reports its route list when that alone went unanswered", () => {
     const asked = load.indexOf('const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));');
-    expect(asked).toBeGreaterThan(load.indexOf('const routeList = traceRequests("dashboard route list", connectionState);'));
+    // With the state as it is when the report is made: a Disconnect
+    // pressed while the list waited is not "nothing is being dialled".
+    expect(asked).toBeGreaterThan(
+      load.indexOf('const routeList = traceRequests("dashboard route list", () => connectionStateRef.current);'),
+    );
     expect(load).toContain("const routesUnanswered = routeList.settle({ routes: routesResult });");
     const failed = load.indexOf("} else {", load.indexOf("if (routesResult.ok) {"));
     const reported = load.indexOf("routesUnanswered?.(");
     expect(reported).toBeGreaterThan(failed);
-    // After the cached list is in hand, so the report can say what it held.
-    expect(reported).toBeGreaterThan(load.indexOf("currentRoutes = await cachedRoutesFor(sub);"));
+    // After the list it holds is known, so the report can say what that is.
+    expect(reported).toBeGreaterThan(
+      load.indexOf("currentRoutes = routesForSnapshot(standIn, shown, planOf(sub), cachedRoutes);"),
+    );
   });
 });
 
@@ -71,9 +79,9 @@ describe("the server list", () => {
   it("reports a refresh nothing answered, with the error on screen or with its rows kept", () => {
     const load = body(picker, "  async function load() {");
     expect(load).toContain('const requests = traceRequests("server list", () => stateRef.current);');
-    expect(load).toContain('const result = await getAvailableRoutes(subscriptionId, requests.trace("routes"));');
+    expect(load).toContain('const result = await getAvailableRoutes(subscriptionId, requests.trace("routes")).finally(() => {');
     expect(load).toContain("const unanswered = requests.settle({ routes: result });");
-    const shown = load.indexOf("setError(failureText(result, t));");
+    const shown = load.indexOf("setError(result);");
     const reports = [...load.matchAll(/unanswered\?\.\(/g)].map((m) => m.index!);
     expect(reports).toHaveLength(2);
     // One with the error it showed, and one where the rows stood.
@@ -89,6 +97,6 @@ describe("the server list", () => {
     expect(pick).toContain('const result = await switchRoute(subscriptionId, route.id, requests.trace("switch"));');
     expect(pick).toContain("const unanswered = requests.settle({ switch: result });");
     const reported = pick.indexOf("unanswered?.(");
-    expect(reported).toBeGreaterThan(pick.indexOf("setSwitchError(failureText(result, t));"));
+    expect(reported).toBeGreaterThan(pick.indexOf("setSwitchError(result);"));
   });
 });

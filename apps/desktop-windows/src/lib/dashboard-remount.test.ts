@@ -155,13 +155,18 @@ describe("the Dashboard's wiring", () => {
   });
 
   it("asks the service before leaving the loading state when our API is unreachable", () => {
+    // The cached path, whichever way the load comes to it: failed, or
+    // still waiting past eight seconds (`showCached`).
     const offlineStart = loadAll.indexOf("if (cached) {");
     const offlineEnd = loadAll.indexOf("return;", offlineStart);
     const offline = loadAll.slice(offlineStart, offlineEnd);
     expect(offlineStart).toBeGreaterThan(0);
-    const asked = offline.indexOf("await adoptServiceState(cached.subscription)");
+    expect(offline).toContain("await showCached(cached, preferRouteId, load, reason);");
+    const start = dashboard.indexOf("async function showCached(");
+    const shown = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
+    const asked = shown.indexOf("await adoptServiceState(cached.subscription)");
     expect(asked).toBeGreaterThan(0);
-    expect(asked).toBeLessThan(offline.indexOf("setLoading(false)"));
+    expect(asked).toBeLessThan(shown.indexOf("setLoading(false)"));
   });
 
   it("asks the service before drawing the online screen, not after the route list", () => {

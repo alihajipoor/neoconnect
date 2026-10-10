@@ -18,8 +18,18 @@ describe("a list the dashboard offers after the picker opened", () => {
     expect(routesToAdopt([], false, [germany, finland])).toEqual([germany, finland]);
   });
 
-  it("is not taken over rows the picker is showing", () => {
-    expect(routesToAdopt([germany], false, [finland])).toBeNull();
+  /** Until the picker's own request answers, its rows are a list the
+   * dashboard offered earlier, and the newer offer knows more. Before: the
+   * picker kept rows it was showing, so the old plan's servers stayed in an
+   * open picker after the dashboard had learned the plan changed and taken
+   * them away, and a pick asked for a route the new plan does not have. */
+  it("is taken over rows the dashboard offered earlier, an empty list included", () => {
+    expect(routesToAdopt([germany], false, [finland])).toEqual([finland]);
+    expect(routesToAdopt([germany], false, [])).toEqual([]);
+  });
+
+  it("changes nothing when it is the list already shown", () => {
+    expect(routesToAdopt([germany, finland], false, [germany, finland])).toBeNull();
   });
 
   /** Its own answer is newer than anything the dashboard holds -- an
@@ -70,5 +80,34 @@ describe("the dashboards", () => {
       expect(screen, path).toContain("useEffect(() => onLateConfig(adoptRefreshed), []);");
       expect(screen, path).not.toContain("onLateAnswer:");
     }
+  });
+});
+
+/** The picker's own answer, which used to stay in the picker. */
+describe("the list the picker's own request was answered with", () => {
+  /** First session after sign-in, nothing cached: the dashboard's route
+   * request failed, and the picker's own succeeded. Before: the list stayed
+   * in the picker, and every later load whose request failed wrote an empty
+   * list into the snapshot again. */
+  it("goes back to the dashboard beneath, on both clients", () => {
+    const source = readFileSync(new URL("../components/LocationPicker.tsx", import.meta.url), "utf8");
+    expect(source).toMatch(/ownAnswered\.current = true;\s*setRoutes\(result\.data\);\s*onRoutes\?\.\(subscriptionId, result\.data\);/);
+    for (const path of ["../screens/Dashboard.tsx", "../../../mobile/src/screens/Dashboard.tsx"]) {
+      const screen = readFileSync(new URL(path, import.meta.url), "utf8");
+      const picker = screen.slice(screen.indexOf("<LocationPicker"));
+      expect(picker.slice(0, 2500), path).toContain("onRoutes={adoptPickerRoutes}");
+      const adopt = screen.slice(screen.indexOf("function adoptPickerRoutes("));
+      expect(adopt, path).toContain("if (!sub || sub.id !== subscriptionId) return;");
+      expect(adopt, path).toMatch(/routesShownRef\.current = \{ plan: planOf\(sub\), load: \w+\.current, routes: list, answered: true \};/);
+      expect(adopt, path).toContain("void updateSnapshotRoutes(sub, list, () => sessionGeneration() === sessionAtStart);");
+    }
+  });
+});
+
+/** An open picker whose rows the dashboard has taken away. */
+describe("an open picker whose rows are withdrawn", () => {
+  it("waits for its own request, or asks again, rather than showing nothing as the plan's list", () => {
+    const source = readFileSync(new URL("../components/LocationPicker.tsx", import.meta.url), "utf8");
+    expect(source).toMatch(/if \(ownPending\.current\) setLoading\(true\);\s*else void load\(\);/);
   });
 });

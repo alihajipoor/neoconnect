@@ -61,8 +61,19 @@ describe("the screens that use the shared line", () => {
       "../screens/Support.tsx",
       ["<StillTrying waiting={!error} />", '<StillTrying waiting={busy} className="text-left" />', "<StillTrying waiting />", "<StillTrying waiting={busy} />"],
     ],
+    // A password change and an account deletion, each a write that asks
+    // who answers first; the gaming profile's load; and the referral
+    // screen's, which showed nothing at all while it waited.
+    ["../screens/Settings.tsx", ["<StillTrying waiting={busy} />"]],
+    ["../components/GamingModeCard.tsx", ["<StillTrying waiting={loading} />"]],
+    ["../screens/Referrals.tsx", ["<StillTrying waiting />"]],
   ])("%s says it", (path, uses) => {
     const text = source(path);
     for (const use of uses) expect(text, use).toContain(use);
+  });
+
+  /** Both of the settings screen's writes, not one of them. */
+  it("says it under both of the settings screen's writes", () => {
+    expect(source("../screens/Settings.tsx").split("<StillTrying waiting={busy} />")).toHaveLength(3);
   });
 });

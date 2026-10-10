@@ -31,6 +31,10 @@ export interface ConnectionSnapshot {
    * on the next successful fetch. */
   version: 1;
   savedAt: number;
+  /** When the credentials in it were asked for: what decides whether a
+   * refresh's late answer is newer (`updateSnapshotProtocolUsers`). The
+   * time it was saved, for a snapshot from before it was kept. */
+  askedAt?: number;
   subscription: Subscription | null;
   protocolUsers: ProtocolUser[];
   routes: RouteOption[];
@@ -121,7 +125,8 @@ export async function saveSnapshot(
   try {
     const store = await getStore();
     if (stillCurrent && !stillCurrent()) return;
-    await store.set(KEY, { ...snapshot, version: VERSION, savedAt: Date.now() });
+    const savedAt = Date.now();
+    await store.set(KEY, { ...snapshot, version: VERSION, savedAt, askedAt: snapshot.askedAt ?? savedAt });
     await store.save();
   } catch {
     // Nothing to do and nothing worth telling the customer: the app is
@@ -146,9 +151,11 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
     // one that got that far would fail with a missing-field error rather
     // than an honest "no saved servers".
     if (!stored.protocolUsers.every((u) => u && u.connection && u.protocol)) return null;
+    const savedAt = typeof stored.savedAt === "number" ? stored.savedAt : 0;
     return {
       version: VERSION,
-      savedAt: typeof stored.savedAt === "number" ? stored.savedAt : 0,
+      savedAt,
+      askedAt: typeof stored.askedAt === "number" ? stored.askedAt : savedAt,
       subscription: stored.subscription ?? null,
       protocolUsers: stored.protocolUsers,
       routes: Array.isArray(stored.routes) ? stored.routes.map(withoutNetworkTag) : [],
@@ -200,34 +207,70 @@ function withoutNetworkTag(route: RouteOption): RouteOption {
  * reads is theirs, and without the check one customer's credentials
  * would be written into the other's.
  *
- * `askedAt`, when given, is when the credentials were asked for, and a
- * snapshot saved since then is not written over: it was written by
- * something that asked later -- a load after a server switch, holding the
+ * `askedAt`, when given, is when the credentials were asked for, and
+ * credentials asked for since then are not written over: they were asked
+ * for by something later -- a load after a server switch, holding the
  * credential the switch provisioned. A refresh's answer that came in late,
  * after a switch made meanwhile, used to put the list from before the
  * switch back, with a fresh time on it; for the next ten minutes every
  * connect dialled it without asking, and put the customer on another
- * server. Returns whether it wrote, or found a newer snapshot and did
+ * server. Returns whether it wrote, or found newer credentials and did
  * not (`superseded`), or had nothing to write into.
- */
+ *
+ * Newer by when they were asked for, not by when they were written.
+ * Compared with the snapshot's save time, the first of two late answers to
+ * land, which was the older, wrote it, and the newer was then thrown away
+ * as superseded. And compared with what is in hand as well as what is on
+ * disk (`noteCredentialsShown`): a newer answer's write is not awaited by
+ * whoever adopts it, and an older late answer read the snapshot before
+ * that write had landed, passed, and was put on screen over the newer one. */
 export async function updateSnapshotProtocolUsers(
   protocolUsers: ProtocolUser[],
   stillCurrent?: () => boolean,
   askedAt?: number,
 ): Promise<"written" | "superseded" | "skipped"> {
   if (protocolUsers.length === 0) return "skipped";
+  // Before anything is awaited, so whatever happens meanwhile is ordered
+  // against these.
+  if (askedAt !== undefined) {
+    if (askedAt < newestShown) return "superseded";
+    noteCredentialsShown(askedAt);
+  }
   const existing = await loadSnapshot();
   if (!existing) return "skipped";
-  if (askedAt !== undefined && existing.savedAt > askedAt) return "superseded";
+  if (askedAt !== undefined && (existing.askedAt ?? existing.savedAt) > askedAt) return "superseded";
   await saveSnapshot(
     {
       subscription: existing.subscription,
       protocolUsers,
       routes: existing.routes,
+      ...(askedAt !== undefined ? { askedAt } : {}),
     },
     stillCurrent,
   );
   return "written";
+}
+
+/** When the newest credentials adopted in this run were asked for: put on
+ * a screen by a load, or kept from a refresh (`noteCredentialsShown`). */
+let newestShown = -Infinity;
+
+/** Records that credentials asked for at `askedAt` are now what a screen
+ * holds, or what the cache is about to: a refresh's late answer asked for
+ * before them is older, and is neither written nor put on a screen
+ * (`updateSnapshotProtocolUsers`). Called by a dashboard's load the moment
+ * it puts its answer on screen, which is before it writes the snapshot --
+ * the route list is asked for in between, for up to twenty seconds. A late
+ * answer from before a server switch, landing in that window, replaced the
+ * switched list on screen, and the next connect inside the freshness
+ * horizon dialled it, without the route the switch had provisioned. */
+export function noteCredentialsShown(askedAt: number): void {
+  if (askedAt > newestShown) newestShown = askedAt;
+}
+
+/** For tests: forget what this run has adopted, as a fresh process would. */
+export function resetShownCredentialsForTests(): void {
+  newestShown = -Infinity;
 }
 
 /** The cached server list, for a load whose route request failed while
@@ -266,11 +309,61 @@ export function planOf(subscription: Pick<Subscription, "id" | "planId">): strin
   return `${subscription.id}:${subscription.planId}`;
 }
 
-/** The route list on a dashboard: which plan it is for, and which of the
- * screen's loads put it there, by the order they started in. */
+/** The route list on a dashboard: which plan it is for, which of the
+ * screen's loads put it there, by the order they started in, the list
+ * itself, and whether the server answered with it or it came from the
+ * cache. */
 export interface ShownRoutes {
   plan: string | null;
   load: number;
+  routes: RouteOption[];
+  answered: boolean;
+}
+
+/** A dashboard's route list before any load has put one there. */
+export const NO_ROUTES_SHOWN: ShownRoutes = { plan: null, load: 0, routes: [], answered: false };
+
+/** Whether a load whose route request was answered puts that list on
+ * screen: unless a later load has already put one there that the server
+ * answered with.
+ *
+ * Every answered list used to go on screen. A mount's load whose route
+ * request was slow -- twenty seconds an address now -- answered after the
+ * load a server switch had started, and its list from before the switch
+ * replaced the newer one. A list a later load put there from the cache is
+ * replaced: an answer is newer than anything cached. */
+export function takesRouteList(shown: ShownRoutes, load: number): boolean {
+  return !(shown.answered && shown.load > load);
+}
+
+/** The route list a load whose route request failed writes into the
+ * snapshot, beside its fresh credentials: what is on screen for this plan.
+ * `standIn` is what `standInRoutes` put on screen, or null for nothing.
+ *
+ * It wrote the cached list, which is not always what the screen held: with
+ * the screen keeping this plan's list from an earlier load and nothing
+ * readable cached for it -- the earlier load's write failed, or had not
+ * landed -- the snapshot was written with no servers, and the next start
+ * with Neoxify out of reach opened the picker on none. */
+export function routesForSnapshot(
+  standIn: RouteOption[] | null,
+  shown: ShownRoutes,
+  plan: string,
+  cached: RouteOption[],
+): RouteOption[] {
+  if (standIn !== null) return standIn;
+  return shown.plan === plan ? shown.routes : cached;
+}
+
+/** Whether a load may write the snapshot: unless a later one has written
+ * it already. `newestWriter` is the latest load that has.
+ *
+ * Asked of which load last *wrote*, not which last put a list on screen. A
+ * load that fell back to the cache writes nothing, and an earlier load
+ * whose credentials were fresh, overtaken by such a load, used to be kept
+ * from writing them at all, so the next offline start had older ones. */
+export function maySaveSnapshot(newestWriter: number, load: number): boolean {
+  return load >= newestWriter;
 }
 
 /** What a dashboard's load whose route request failed puts on screen, or
@@ -280,6 +373,10 @@ export interface ShownRoutes {
  *  - A later load has put its own list on screen meanwhile: null. Its list
  *    is newer than anything this one could find in the cache, which may
  *    not yet hold it -- it is written without waiting.
+ *  - This plan's list, already on screen: null, and it stays. An earlier
+ *    load of this screen put it there, and it is at least as new as the
+ *    cache, which may not hold it yet: the cached list used to replace it,
+ *    and an older one went on screen, and into the snapshot, over it.
  *  - A list cached for this plan: that.
  *  - Nothing cached for it: the list on screen stays if it is this plan's,
  *    and goes if it is another's. A failed request never blanks a list
@@ -289,8 +386,34 @@ export interface ShownRoutes {
  *    as the desktop's does, and would have offered it. */
 export function standInRoutes(cached: RouteOption[], shown: ShownRoutes, plan: string, load: number): RouteOption[] | null {
   if (shown.load > load) return null;
+  if (shown.plan === plan && shown.routes.length > 0) return null;
   if (cached.length > 0) return cached;
   return shown.plan === plan ? null : [];
+}
+
+/** Replaces just the route list, for the subscription the snapshot holds:
+ * a list the server list's own request was answered with
+ * (`LocationPicker`'s `onRoutes`). Nothing for a snapshot of another
+ * subscription or plan, whose servers these are not (`cachedRoutesFor`),
+ * nor where nothing is cached. `stillCurrent` is `saveSnapshot`'s. */
+export async function updateSnapshotRoutes(
+  subscription: Pick<Subscription, "id" | "planId">,
+  routes: RouteOption[],
+  stillCurrent?: () => boolean,
+): Promise<"written" | "skipped"> {
+  const existing = await loadSnapshot();
+  const held = existing?.subscription;
+  if (!existing || !held || planOf(held) !== planOf(subscription)) return "skipped";
+  await saveSnapshot(
+    {
+      subscription: existing.subscription,
+      protocolUsers: existing.protocolUsers,
+      routes,
+      ...(existing.askedAt !== undefined ? { askedAt: existing.askedAt } : {}),
+    },
+    stillCurrent,
+  );
+  return "written";
 }
 
 /** Forgets everything. Called on sign-out: leaving one customer's

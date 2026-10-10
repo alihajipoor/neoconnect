@@ -28,10 +28,12 @@ describe("the phone's screens", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("words the dashboard's failed load through failureText", () => {
+  it("words the dashboard's failed load through failureText, as it is drawn", () => {
     const dashboard = files.find((f) => f.name === "Dashboard.tsx");
     expect(dashboard).toBeDefined();
-    expect(dashboard!.source).toContain("failureText(meResult, t)");
-    expect(dashboard!.source).toContain("failureText(subsResult, t)");
+    // Kept as it came, and worded in the language the app is in when it is
+    // drawn -- not the one it was in when the load began.
+    expect(dashboard!.source).toContain('setError(!meResult.ok ? meResult : !subsResult.ok ? subsResult : "loadFailed");');
+    expect(dashboard!.source).toContain('{error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}');
   });
 });

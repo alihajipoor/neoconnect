@@ -62,9 +62,16 @@ import { gamingDisarm, loadGaming, saveGaming, type AppMode } from "../lib/gamin
 import {
   cachedRoutesFor,
   loadSnapshot,
+  maySaveSnapshot,
+  NO_ROUTES_SHOWN,
+  noteCredentialsShown,
   planOf,
+  routesForSnapshot,
   saveSnapshot,
   standInRoutes,
+  takesRouteList,
+  updateSnapshotRoutes,
+  type ConnectionSnapshot,
   type ShownRoutes,
 } from "../lib/credential-cache";
 import { sessionGeneration } from "../lib/session-end";
@@ -121,8 +128,8 @@ import { CommunityLinks } from "../components/CommunityLinks";
 import { RepairNetwork } from "../components/RepairNetwork";
 import { DeviceSlotCard } from "../components/DeviceSlotCard";
 import { useI18n } from "../lib/i18n";
-import { failureText } from "../lib/failure-text";
-import { useStillTrying } from "../lib/still-trying";
+import { failureText, offlineReason as reasonFor, offlineText, type OfflineReason, type ShownFailure } from "../lib/failure-text";
+import { STILL_TRYING_AFTER_MS, useStillTrying } from "../lib/still-trying";
 
 /** How a ladder pass ended.
  *
@@ -536,7 +543,10 @@ export function Dashboard({
   // The loading screen waits on three reads, each given up to twenty
   // seconds an address; past eight it says it is still trying.
   const loadingLong = useStillTrying(loading);
-  const [error, setError] = useState<string | null>(null);
+  // Kept as it came, and worded as the screen renders (`ShownFailure`):
+  // worded when it came in, it was in the language the app was in when the
+  // load began, which country detection may have changed since.
+  const [error, setError] = useState<ShownFailure | "loadFailed" | null>(null);
   const [me, setMe] = useState<Customer | null>(null);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   /** The same, for callbacks registered once that run much later -- an
@@ -582,7 +592,14 @@ export function Dashboard({
   /** How many loads this screen has started, and which of them put the
    * route list on screen, for which plan (`standInRoutes`). */
   const loadSeqRef = useRef(0);
-  const routesShownRef = useRef<ShownRoutes>({ plan: null, load: 0 });
+  const routesShownRef = useRef<ShownRoutes>(NO_ROUTES_SHOWN);
+  /** The latest of this screen's loads to have written the snapshot
+   * (`maySaveSnapshot`). */
+  const snapshotWriterRef = useRef(0);
+  /** Whether this screen has shown the dashboard yet, from an answer or
+   * from the cache: a load before then puts the snapshot on screen while it
+   * waits (`loadAll`). */
+  const shownOnceRef = useRef(false);
   /** Names the protocol we ended up on when it is not the one we
    * started with. Landing somewhere else without saying so is the same
    * dishonesty as a false "Connected". */
@@ -806,6 +823,8 @@ export function Dashboard({
    * exactly the kind of quiet wrongness the rest of this screen exists
    * to avoid. */
   const [offlineSince, setOfflineSince] = useState<number | null>(null);
+  /** Why the screen is on the snapshot, as the banner says it. */
+  const [offlineReason, setOfflineReason] = useState<OfflineReason>("unreached");
 
   /** Whether a ladder pass could still be running.
    *
@@ -1272,6 +1291,57 @@ export function Dashboard({
     ]).finally(() => setRouteMemoryLoaded(true));
   }
 
+  /** The server list's own answer, newer than anything this screen holds:
+   * put on screen, as the list a later load whose route request fails
+   * keeps (`standInRoutes`), and into the snapshot, so the next start with
+   * Neoxify out of reach has it (`updateSnapshotRoutes`). Only for the
+   * subscription on screen. */
+  function adoptPickerRoutes(subscriptionId: string, list: RouteOption[]) {
+    const sub = subscriptionRef.current;
+    if (!sub || sub.id !== subscriptionId) return;
+    setRoutes(list);
+    routesShownRef.current = { plan: planOf(sub), load: loadSeqRef.current, routes: list, answered: true };
+    const sessionAtStart = sessionGeneration();
+    void updateSnapshotRoutes(sub, list, () => sessionGeneration() === sessionAtStart);
+  }
+
+  /** Puts a cached snapshot on screen, for a load that has nothing fresher
+   * to show: one that failed, or one still waiting past the point where it
+   * used to give up (`loadAll`). `reason` is what the banner says
+   * (`offlineText`). Run to the end even when the load answers while it
+   * waits on the service: the load then leaves the service, the route
+   * memory and the baselines to this, so each is done once. */
+  async function showCached(
+    cached: ConnectionSnapshot,
+    preferRouteId: string | undefined,
+    load: number,
+    reason: OfflineReason,
+  ): Promise<void> {
+    setSubscription(cached.subscription);
+    setProtocolUsers(cached.protocolUsers);
+    setRoutes(cached.routes);
+    routesShownRef.current = {
+      plan: cached.subscription ? planOf(cached.subscription) : null,
+      load,
+      routes: cached.routes,
+      answered: false,
+    };
+    setRouteListLoaded(true);
+    const preferred = preferRouteId ?? chosenRouteId;
+    setProtocolUser(cached.protocolUsers.find((u) => u.routeId === preferred) ?? cached.protocolUsers[0] ?? null);
+    setOfflineSince(cached.savedAt);
+    setOfflineReason(reason);
+    setError(null);
+    // The service, before the screen claims anything. This path is the one
+    // that matters most: our API unreachable is the ordinary state of a
+    // censored network, tunnel or no tunnel.
+    const adopted = await adoptServiceState(cached.subscription);
+    setLoading(false);
+    shownOnceRef.current = true;
+    loadRouteMemory();
+    if (adopted === "disconnected") await captureBaselinesWhileDown(cached.protocolUsers);
+  }
+
   async function loadAll(preferRouteId?: string) {
     // Which customer session this load is for. See sessionGeneration: a
     // sign-out bumps it before it clears anything.
@@ -1279,16 +1349,46 @@ export function Dashboard({
     // And its place among this screen's loads: a server switch starts one
     // while the mount's may still be waiting (`standInRoutes`).
     const load = ++loadSeqRef.current;
+    // When the credentials were asked for: a refresh's late answer asked
+    // for before this is older than what this load puts on screen
+    // (`noteCredentialsShown`).
+    const askedAt = Date.now();
     setLoading(true);
     setError(null);
     // Traced, so a load that nothing answered is reported with the
-    // addresses it tried. See unanswered-report.ts.
-    const requests = traceRequests("dashboard load", connectionState);
+    // addresses it tried. See unanswered-report.ts. The state as it is
+    // when the report is made, not as it was when the load began: the
+    // screen may be in use on the cached snapshot by then.
+    const requests = traceRequests("dashboard load", () => connectionStateRef.current);
+    // Past the point where every address used to be given up on, with a
+    // snapshot to show and nothing else on screen yet: the snapshot goes
+    // on screen, and Connect with it, while this goes on waiting. On a
+    // network where every address is blackholed the reads take eleven and
+    // a half seconds to fail, and twenty-three where the filter lets the
+    // handshake through and then stalls; the start sat on "Loading..." for
+    // all of it, holding credentials that would have connected at eight.
+    // Only before the screen has shown anything: a load after a server
+    // switch holds a newer choice than the cache does.
+    let settled = false;
+    let shownWhileWaiting = false;
+    const waiting = shownOnceRef.current
+      ? undefined
+      : setTimeout(() => {
+          void (async () => {
+            const cached = await loadSnapshot();
+            if (settled || !cached || loadSeqRef.current !== load || sessionGeneration() !== sessionAtStart) return;
+            shownWhileWaiting = true;
+            await showCached(cached, preferRouteId, load, "trying");
+          })();
+        }, STILL_TRYING_AFTER_MS);
     const [meResult, subsResult, usersResult] = await Promise.all([
       getMe(requests.trace("me")),
       getSubscriptions(requests.trace("subscriptions")),
       getProtocolUsers(requests.trace("protocol-users")),
-    ]);
+    ]).finally(() => {
+      settled = true;
+      clearTimeout(waiting);
+    });
     const unanswered = requests.settle({ me: meResult, subscriptions: subsResult, "protocol-users": usersResult });
 
     if (!meResult.ok || !subsResult.ok || !usersResult.ok) {
@@ -1312,35 +1412,22 @@ export function Dashboard({
           ? `showing the cached credentials, ${snapshotAge(cached.savedAt)}`
           : "showed the load error, with nothing cached to show",
       );
+      // Said as what happened: nothing answered, or something answered
+      // with an error (`offlineReason`).
+      const reason = failed && !failed.ok ? reasonFor(failed) : "unreached";
+      if (shownWhileWaiting) {
+        // Already on screen, and perhaps in use: only the banner changes.
+        setOfflineReason(reason);
+        return;
+      }
       if (cached) {
-        setSubscription(cached.subscription);
-        setProtocolUsers(cached.protocolUsers);
-        setRoutes(cached.routes);
-        routesShownRef.current = { plan: cached.subscription ? planOf(cached.subscription) : null, load };
-        setRouteListLoaded(true);
-        const preferred = preferRouteId ?? chosenRouteId;
-        setProtocolUser(
-          cached.protocolUsers.find((u) => u.routeId === preferred) ?? cached.protocolUsers[0] ?? null,
-        );
-        setOfflineSince(cached.savedAt);
-        setError(null);
-        // The service, before the screen claims anything. This path is
-        // the one that matters most: our API unreachable is the ordinary
-        // state of a censored network, tunnel or no tunnel.
-        const adopted = await adoptServiceState(cached.subscription);
-        setLoading(false);
-        loadRouteMemory();
-        if (adopted === "disconnected") await captureBaselinesWhileDown(cached.protocolUsers);
+        await showCached(cached, preferRouteId, load, reason);
         return;
       }
 
-      setError(
-        !meResult.ok
-          ? failureText(meResult, t)
-          : !subsResult.ok
-            ? failureText(subsResult, t)
-            : t("dash.loadFailed"),
-      );
+      // Kept as it came and worded as the screen renders, so it is in the
+      // language the app is in then (`ShownFailure`).
+      setError(!meResult.ok ? meResult : !subsResult.ok ? subsResult : "loadFailed");
       setLoading(false);
       // Nothing here to dial with, but an attempt held for this screen
       // waits for the memory and the list too, and is ended by the runner
@@ -1358,6 +1445,10 @@ export function Dashboard({
     const sub = usableSubscription(subsResult.data);
     setSubscription(sub);
     setProtocolUsers(usersResult.data);
+    // From now on a refresh's late answer asked for before this load is
+    // older than what is on screen, though the snapshot is written only
+    // once the route list below has answered.
+    noteCredentialsShown(askedAt);
     // Which credential the screen represents. It used to be whichever
     // the API happened to list first, so choosing a server from the list
     // changed nothing visible: the protocol tile kept naming the old one
@@ -1366,15 +1457,26 @@ export function Dashboard({
     // current. Reported as "clicking a location doesn't show that the
     // change worked" -- and it hadn't, on screen; only the connect
     // itself honoured the choice.
+    //
+    // Not when the screen has been in use on the cached snapshot while
+    // this waited: the credential it holds -- perhaps the one a tunnel is
+    // up on -- is replaced by its new copy, as a refresh's are.
     const chosen = preferRouteId ?? chosenRouteId;
-    setProtocolUser(usersResult.data.find((u) => u.routeId === chosen) ?? usersResult.data[0] ?? null);
+    if (shownWhileWaiting) {
+      setProtocolUser((current) => usersResult.data.find((u) => u.id === current?.id) ?? current);
+    } else {
+      setProtocolUser(usersResult.data.find((u) => u.routeId === chosen) ?? usersResult.data[0] ?? null);
+    }
     // The tunnel outlives the app: the helper service keeps it up if the
     // window is closed, so on open the UI has to adopt whatever is
     // actually running rather than assuming disconnected -- and before
     // the screen is drawn, not after the route list below has answered.
-    const adopted = await adoptServiceState(sub);
+    // Asked already, with the snapshot on screen, if that went first: the
+    // screen has been watching the service since.
+    const adopted = shownWhileWaiting ? null : await adoptServiceState(sub);
     setLoading(false);
-    loadRouteMemory();
+    shownOnceRef.current = true;
+    if (!shownWhileWaiting) loadRouteMemory();
 
     // Purely to name the server the customer is actually on -- the
     // protocol-user row carries a routeId but no human-readable
@@ -1388,33 +1490,43 @@ export function Dashboard({
     let currentRoutes: RouteOption[] = [];
     try {
       if (sub) {
-        const routeList = traceRequests("dashboard route list", connectionState);
+        // The state as it is when a report is made, which the route list's
+        // wait can outlast: a Disconnect pressed meanwhile breaks the
+        // request, and its report must not say nothing was being dialled.
+        const routeList = traceRequests("dashboard route list", () => connectionStateRef.current);
         const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));
         const routesUnanswered = routeList.settle({ routes: routesResult });
         if (routesResult.ok) {
           currentRoutes = routesResult.data;
-          setRoutes(currentRoutes);
-          routesShownRef.current = { plan: planOf(sub), load };
+          // Not over a list a later load has put there from an answer of
+          // its own (`takesRouteList`).
+          if (takesRouteList(routesShownRef.current, load)) {
+            setRoutes(currentRoutes);
+            routesShownRef.current = { plan: planOf(sub), load, routes: currentRoutes, answered: true };
+          }
         } else {
-          // Everything else answered and the list did not, so the one
-          // cached for this plan stands in for it -- on screen, and in
-          // the snapshot below. Cached as an empty list, it left the next
-          // start with Neoxify out of reach no servers to show; see
+          // Everything else answered and the list did not, so the list
+          // this plan already has stands in for it -- on screen, and in the
+          // snapshot below. Cached as an empty list, it left the next start
+          // with Neoxify out of reach no servers to show; see
           // `cachedRoutesFor`. On screen it gives the picker rows to open
           // on, and a reconnect's pass the exits and egress it reads from
           // them. What goes on screen is `standInRoutes`'s to decide: not
-          // over a later load's list, and never another plan's left
-          // standing.
-          currentRoutes = await cachedRoutesFor(sub);
-          const standIn = standInRoutes(currentRoutes, routesShownRef.current, planOf(sub), load);
+          // over a later load's list, not over this plan's list already
+          // there, and never another plan's left standing. What is written
+          // is what the screen then holds for this plan (`routesForSnapshot`).
+          const cachedRoutes = await cachedRoutesFor(sub);
+          const shown = routesShownRef.current;
+          const standIn = standInRoutes(cachedRoutes, shown, planOf(sub), load);
+          currentRoutes = routesForSnapshot(standIn, shown, planOf(sub), cachedRoutes);
           if (standIn !== null) {
             setRoutes(standIn);
-            routesShownRef.current = { plan: planOf(sub), load };
+            routesShownRef.current = { plan: planOf(sub), load, routes: standIn, answered: false };
           }
           routesUnanswered?.(
             currentRoutes.length > 0
-              ? `the rest of the load had answered; showing ${currentRoutes.length} servers cached for this plan`
-              : "the rest of the load had answered; no servers cached for this plan to show",
+              ? `the rest of the load had answered; showing ${currentRoutes.length} servers already held for this plan`
+              : "the rest of the load had answered; no servers held for this plan to show",
           );
         }
       }
@@ -1431,17 +1543,20 @@ export function Dashboard({
 
     // Written only once the credentials and the plan have answered, so a
     // partial answer can never overwrite a good cache with a worse one --
-    // and with the cached route list when only that request failed, never
-    // an empty one in its place. Asked again at the moment of writing,
-    // for a sign-out that lands in between. Not by a load a later one has
-    // overtaken: that one writes its own, and this one's, landing after
-    // it, would put the older list back.
-    if (routesShownRef.current.load <= load) {
+    // and with the route list this plan already had when only that request
+    // failed, never an empty one in its place. Asked again at the moment of
+    // writing, for a sign-out that lands in between. Not by a load after a
+    // later one has written (`maySaveSnapshot`): this one's, landing after
+    // it, would put the older answer back. A later load that fell back to
+    // the cache writes nothing, and does not keep this one from writing.
+    if (maySaveSnapshot(snapshotWriterRef.current, load)) {
+      snapshotWriterRef.current = load;
       void saveSnapshot(
         {
           subscription: sub,
           protocolUsers: usersResult.data,
           routes: currentRoutes,
+          askedAt,
         },
         () => sessionGeneration() === sessionAtStart,
       );
@@ -3290,7 +3405,7 @@ export function Dashboard({
 
       {error ? (
         <Card className="animate-rise">
-          <p className="text-sm text-destructive">{error}</p>
+          <p className="text-sm text-destructive">{error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}</p>
           <Button onClick={() => void loadAll()} className="mt-3">
             {t("dash.retry")}
           </Button>
@@ -3306,7 +3421,10 @@ export function Dashboard({
               "Connected". */}
           {offlineSince !== null ? (
             <div className="animate-rise rounded-lg border border-warning/30 bg-warning/10 px-3 py-2">
-              <p className="text-xs font-medium text-warning">{t("dash.offlineTitle")}</p>
+              <p className="text-xs font-medium text-warning">{offlineText(offlineReason, t).title}</p>
+              {offlineText(offlineReason, t).detail !== null ? (
+                <p className="mt-0.5 text-[11px] text-muted-foreground">{offlineText(offlineReason, t).detail}</p>
+              ) : null}
               <p className="mt-0.5 text-[11px] text-muted-foreground">
                 {t("dash.offlineHint", { when: new Date(offlineSince).toLocaleString() })}
               </p>
@@ -3916,6 +4034,8 @@ export function Dashboard({
           // Already loaded here, so the picker opens on real content
           // instead of a spinner.
           initialRoutes={routes}
+          // And what its own request is answered with comes back here.
+          onRoutes={adoptPickerRoutes}
           // Nothing pinned is Automatic, and it is what a new install
           // starts on. Choosing it clears the pin on this device; there is
           // no server call, because every route's credential is already

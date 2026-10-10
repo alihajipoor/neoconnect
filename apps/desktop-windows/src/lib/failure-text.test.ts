@@ -223,7 +223,72 @@ describe("the screens", () => {
     for (const name of ["screens/Login.tsx", "screens/Register.tsx", "components/LocationPicker.tsx"]) {
       const file = files.find((f) => f.name === name);
       expect(file, name).toBeDefined();
-      expect(file!.source, name).toContain("failureText(result, t)");
+      expect(file!.source, name).toContain("failureText(error, t)");
+    }
+  });
+
+  /** Worded as the screen renders, not when the failure came in. A
+   * sign-in sent while the app was still in English, and switched to
+   * Persian by country detection while it waited, failed in English under
+   * a right-to-left Persian screen; so did the dashboard's first load, and
+   * the server list. Kept as it came, the failure is worded in whatever
+   * language the app is in when it is drawn. */
+  it("is worded when it is drawn, in the language the app is in then", () => {
+    const sites = [
+      ...["screens/Login.tsx", "screens/Register.tsx", "components/LocationPicker.tsx", "screens/Dashboard.tsx"].map(
+        (name) => files.find((f) => f.name === name)!,
+      ),
+      { name: "mobile Dashboard", source: readFileSync(new URL("../../../mobile/src/screens/Dashboard.tsx", import.meta.url), "utf8") },
+    ];
+    for (const { name, source } of sites) {
+      expect(source, name).not.toMatch(/set(Error|SwitchError)\(\s*failureText\(/);
+      expect(source, name).not.toMatch(/\?\s*failureText\(\w+Result, t\)/);
+    }
+    for (const name of ["screens/Dashboard.tsx", "mobile Dashboard"]) {
+      const { source } = sites.find((site) => site.name === name)!;
+      expect(source, name).toContain('{error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}');
+    }
+  });
+});
+
+describe("the dashboard's banner over the cached snapshot", () => {
+  /** Every address answered the load with a page from in front of the
+   * backend, or the backend answered it with its own error. Something
+   * replied. Before: "Can't reach Neoxify right now", the sentence for
+   * nothing having answered. */
+  it("says the load was answered with an error, and what it was, when something answered", async () => {
+    replies["/customer/me"] = [{ status: 502, html: true }, { status: 502, html: true }];
+    const failure = await failureOf(apiRequest("/customer/me"));
+    const { offlineReason, offlineText } = await import("./failure-text");
+
+    const said = offlineText(offlineReason(failure), fa);
+    expect(said.title).toBe(DICTIONARIES.fa["dash.offlineAnswered"]);
+    expect(said.title).not.toBe(DICTIONARIES.fa["dash.offlineTitle"]);
+    expect(said.detail).toBe(failureText(failure, fa));
+  });
+
+  it("says Neoxify cannot be reached only when nothing answered", async () => {
+    replies["/customer/me"] = ["unreachable", "unreachable"];
+    const failure = await failureOf(apiRequest("/customer/me"));
+    const { offlineReason, offlineText } = await import("./failure-text");
+
+    expect(offlineText(offlineReason(failure), en)).toEqual({ title: DICTIONARIES.en["dash.offlineTitle"], detail: null });
+  });
+
+  /** On screen while the load still waits: nothing has answered yet, and
+   * nothing has given up either. */
+  it("says it is still trying while the load waits", async () => {
+    const { offlineText } = await import("./failure-text");
+    expect(offlineText("trying", fa)).toEqual({ title: DICTIONARIES.fa["dash.offlineTrying"], detail: null });
+  });
+
+  /** Read from the source, for both clients. */
+  it("is what both clients' dashboards draw", () => {
+    for (const path of ["../screens/Dashboard.tsx", "../../../mobile/src/screens/Dashboard.tsx"]) {
+      const screen = readFileSync(new URL(path, import.meta.url), "utf8");
+      expect(screen, path).toContain("{offlineText(offlineReason, t).title}");
+      expect(screen, path).not.toContain('{t("dash.offlineTitle")}');
+      expect(screen, path).toContain('const reason = failed && !failed.ok ? reasonFor(failed) : "unreached";');
     }
   });
 });

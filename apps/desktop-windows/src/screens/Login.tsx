@@ -3,7 +3,7 @@ import { login } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { LogoMark } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
-import { failureText } from "../lib/failure-text";
+import { failureText, type ShownFailure } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
 import { SocialSignIn } from "../components/SocialSignIn";
 
@@ -23,7 +23,8 @@ export function Login({
   const { t } = useI18n();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  // Kept as it came, and worded as the screen renders (`ShownFailure`).
+  const [error, setError] = useState<ShownFailure | null>(null);
   const [pending, setPending] = useState(false);
   // A sign-in may spend up to forty-six and a half seconds on the network
   // where only a slow route answers (`SIGN_IN_DEADLINE_MS` in auth.ts),
@@ -38,7 +39,7 @@ export function Login({
     const result = await login(email, password);
     setPending(false);
     if (!result.ok) {
-      setError(failureText(result, t));
+      setError(result);
       return;
     }
     if ("requiresVerification" in result.data) {
@@ -96,7 +97,7 @@ export function Login({
           </div>
           {error ? (
             <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {error}
+              {failureText(error, t)}
             </p>
           ) : null}
           <Button type="submit" disabled={pending} className="mt-1 w-full">

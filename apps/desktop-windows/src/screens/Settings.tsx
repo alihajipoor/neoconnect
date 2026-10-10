@@ -18,6 +18,7 @@ import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { Button, Card, Input, Label } from "../components/ui";
 import { RepairNetwork } from "../components/RepairNetwork";
+import { StillTrying } from "../components/StillTrying";
 import { cn } from "../lib/utils";
 
 /** The app's settings surface.
@@ -356,6 +357,9 @@ function PasswordSection() {
           {busy ? <Loader2 className="size-4 animate-spin" /> : null}
           {busy ? t("settings.changing") : t("settings.changePassword")}
         </Button>
+        {/* A write asks who answers first, so this can take half a minute
+            where only a slow route answers. */}
+        <StillTrying waiting={busy} />
       </form>
     </Card>
   );
@@ -459,6 +463,7 @@ function DeleteAccountSection({ onDeleted }: { onDeleted: () => void }) {
               {busy ? t("settings.deleting") : t("settings.deleteConfirm")}
             </Button>
           </div>
+          <StillTrying waiting={busy} />
         </form>
       ) : (
         <Button

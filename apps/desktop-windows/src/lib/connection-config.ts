@@ -333,8 +333,9 @@ function keepLateAnswer(request: Promise<ApiResult<ProtocolUser[]>>, context: La
     async (late) => {
       if (!late.ok || !stillCurrent()) return;
       const fresh = late.data;
-      // Not over a snapshot written since it was asked: that one is newer
-      // (`updateSnapshotProtocolUsers`), and so is what the screen holds.
+      // Not over credentials asked for since it was: they are newer
+      // (`updateSnapshotProtocolUsers`), whether written yet or only on a
+      // screen.
       if ((await updateSnapshotProtocolUsers(fresh, stillCurrent, askedAt)) === "superseded") return;
       // Asked again: the cache write may have been the last thing to
       // happen before a sign-out.
@@ -408,8 +409,10 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     const fresh = answered.data;
     const drift = describeConfigDrift(held, fresh);
     // Written before returning so the values that were just dialled are
-    // also the ones an offline start would come back to.
-    void updateSnapshotProtocolUsers(fresh, stillCurrent);
+    // also the ones an offline start would come back to. With when they
+    // were asked for, which orders a late answer to an earlier refresh
+    // against them, from the moment this is called.
+    void updateSnapshotProtocolUsers(fresh, stillCurrent, askedAt);
     if (drift.length > 0) {
       // Worth a line even though nothing failed. A server whose
       // parameters moved is the single most likely explanation for a

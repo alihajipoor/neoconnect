@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { ArrowLeft, Check, Copy, Gift, Users } from "lucide-react";
+import { ArrowLeft, Check, Copy, Gift, Loader2, Users } from "lucide-react";
 import { getReferrals } from "../lib/customer";
 import type { ReferralOverview } from "../lib/types";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { Button, Card } from "../components/ui";
+import { StillTrying } from "../components/StillTrying";
 
 /** Invite friends, earn free time.
  *
@@ -57,6 +58,16 @@ export function Referrals({ onBack }: { onBack: () => void }) {
           <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {error}
           </p>
+        ) : null}
+
+        {/* Waiting. The screen used to stay empty, with nothing on it at
+            all, for as long as the read took -- up to twenty seconds an
+            address now. */}
+        {data === null && error === null ? (
+          <Card className="flex flex-col items-center justify-center gap-2 py-8 text-muted-foreground">
+            <Loader2 className="size-5 animate-spin" />
+            <StillTrying waiting />
+          </Card>
         ) : null}
 
         {data && !data.enabled ? (

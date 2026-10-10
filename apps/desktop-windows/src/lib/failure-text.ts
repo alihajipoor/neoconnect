@@ -1,6 +1,14 @@
 import { RENEWAL_FAILED, RENEWAL_UNANSWERED, requestFailed, STOPPED_ANSWERING, type RequestFailure } from "./api";
 import type { TranslationKey } from "./i18n";
 
+/** A failure as `failureText` reads it. A screen keeps one of these, not
+ * the sentence, and words it as it renders: worded when the failure came
+ * in, it was in the language the app was in when the request was sent,
+ * and a sign-in sent in English while country detection switched the app
+ * to Persian failed in English under a right-to-left Persian screen. */
+export type ShownFailure = Pick<RequestFailure, "error"> &
+  Partial<Pick<RequestFailure, "noResponse" | "status" | "blockPage">>;
+
 /** `t` from `useI18n()`, or anything shaped like it. */
 type Translate = (key: TranslationKey, vars?: Record<string, string | number>) => string;
 
@@ -35,10 +43,7 @@ type Translate = (key: TranslationKey, vars?: Record<string, string | number>) =
  * Takes any failure with an `error`; the flags are optional, so a result
  * from outside the API layer (a store purchase, a provider's refusal)
  * shows its own sentence, as before. */
-export function failureText(
-  failure: Pick<RequestFailure, "error"> & Partial<Pick<RequestFailure, "noResponse" | "status" | "blockPage">>,
-  t: Translate,
-): string {
+export function failureText(failure: ShownFailure, t: Translate): string {
   if (failure.noResponse) {
     if (failure.blockPage) return t("api.blockedByNetwork");
     return t(failure.error === STOPPED_ANSWERING ? "api.stoppedAnswering" : "api.unreachable");
@@ -49,4 +54,26 @@ export function failureText(
     return t("api.serverError", { status: failure.status });
   }
   return failure.error;
+}
+
+/** Why a dashboard is running on its cached snapshot, which its banner
+ * says: still waiting for its load (`trying`), nothing answered the load
+ * (`unreached`), or the load was answered with an error, kept as it came. */
+export type OfflineReason = "trying" | "unreached" | ShownFailure;
+
+/** The banner's reason for a load that failed. "Can't reach Neoxify" only
+ * when nothing answered it; an error answer -- the backend's, or a page
+ * from in front of it -- is said as an error, with what it was. The banner
+ * used to say Neoxify could not be reached for any failed load, a 500 from
+ * the backend and a CDN's 502 page included. */
+export function offlineReason(failure: ShownFailure): OfflineReason {
+  return failure.noResponse ? "unreached" : failure;
+}
+
+/** The banner's words for `reason`: its title, and the failure in the
+ * customer's language when the load was answered with one. */
+export function offlineText(reason: OfflineReason, t: Translate): { title: string; detail: string | null } {
+  if (reason === "trying") return { title: t("dash.offlineTrying"), detail: null };
+  if (reason === "unreached") return { title: t("dash.offlineTitle"), detail: null };
+  return { title: t("dash.offlineAnswered"), detail: failureText(reason, t) };
 }

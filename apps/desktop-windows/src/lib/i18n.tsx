@@ -527,6 +527,12 @@ const en = {
   // running on the cached snapshot. Names the age of the data, because
   // the alternative is presenting a stale usage total as today's.
   "dash.offlineTitle": "Can't reach Neoxify right now — you can still connect.",
+  // Shown instead while the load is still waiting, past the point where it
+  // used to give up: nothing has answered yet, and it has not stopped.
+  "dash.offlineTrying": "Still trying to reach Neoxify — you can connect with your saved servers meanwhile.",
+  // Shown instead when the load was answered, with an error: Neoxify, or
+  // something in front of it, did reply. The error follows on its own line.
+  "dash.offlineAnswered": "Neoxify couldn't load your account just now — you can still connect.",
   "dash.offlineHint":
     "Using your saved servers. Data usage and expiry were last updated {when} and may be out of date.",
   "dash.androidWireguardOnly":
@@ -1293,6 +1299,8 @@ const fa: Record<TranslationKey, string> = {
   "settings.customGameWholeApp":
     "همه‌ی ترافیک این برنامه‌ها از وی‌پی‌ان عبور می‌کند. نئوکسیفای فهرست کامل نشانی سرورهای این بازی را ندارد، و عبور دادن بخشی از آن بدتر از عبور ندادن است.",
   "dash.offlineTitle": "در حال حاضر به Neoxify دسترسی نیست — همچنان می‌توانید متصل شوید.",
+  "dash.offlineTrying": "هنوز در تلاش برای دسترسی به نئوکسیفای هستیم — در این فاصله می‌توانید با سرورهای ذخیره‌شده متصل شوید.",
+  "dash.offlineAnswered": "نئوکسیفای الان نتوانست حساب شما را بارگذاری کند — همچنان می‌توانید متصل شوید.",
   "dash.offlineHint":
     "از سرورهای ذخیره‌شده استفاده می‌شود. مصرف داده و تاریخ انقضا آخرین بار در {when} به‌روز شده و ممکن است دقیق نباشد.",
   "dash.androidWireguardOnly":

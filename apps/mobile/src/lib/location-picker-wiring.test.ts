@@ -19,7 +19,7 @@ describe("the phone's server list", () => {
     // load's list, and never another plan's left standing.
     expect(dashboard).toContain("const [routes, setRoutes] = useState<RouteOption[]>([]);");
     expect(dashboard).toContain("setRoutes(cached.routes);");
-    expect(dashboard).toContain("const standIn = standInRoutes(currentRoutes, routesShownRef.current, planOf(sub), load);");
+    expect(dashboard).toContain("const standIn = standInRoutes(cachedRoutes, shown, planOf(sub), load);");
     expect(dashboard).toContain("if (standIn !== null) {");
   });
 });

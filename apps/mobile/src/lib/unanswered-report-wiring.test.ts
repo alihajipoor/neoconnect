@@ -14,7 +14,7 @@ describe("the phone's dashboard load", () => {
 
   it("traces each of its three requests and settles them together", () => {
     expect(start).toBeGreaterThan(0);
-    expect(load).toContain('const requests = traceRequests("dashboard load", connectionState);');
+    expect(load).toContain('const requests = traceRequests("dashboard load", () => connectionStateRef.current);');
     expect(load).toContain('getMe(requests.trace("me")),');
     expect(load).toContain('getSubscriptions(requests.trace("subscriptions")),');
     expect(load).toContain('getProtocolUsers(requests.trace("protocol-users")),');
@@ -31,7 +31,9 @@ describe("the phone's dashboard load", () => {
   });
 
   it("reports its route list when that alone went unanswered", () => {
-    expect(load).toContain('const routeList = traceRequests("dashboard route list", connectionState);');
+    // With the state as it is when the report is made: a Disconnect
+    // pressed while the list waited is not "nothing is being dialled".
+    expect(load).toContain('const routeList = traceRequests("dashboard route list", () => connectionStateRef.current);');
     expect(load).toContain('const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));');
     expect(load).toContain("const routesUnanswered = routeList.settle({ routes: routesResult });");
     const failed = load.indexOf("} else {", load.indexOf("if (routesResult.ok) {"));
