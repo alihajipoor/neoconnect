@@ -11,10 +11,13 @@
 //!   turn that into a clear message instead of an opaque engine exit.
 //! * Routing `0.0.0.0/0` into the TUN naively causes an infinite loop,
 //!   because Xray's own outbound to the node has to reach the internet
-//!   like anything else. `autoSystemRoutingTable` installs the system
-//!   routes and `autoOutboundsInterface` pins outbound traffic to the
-//!   real physical interface, which is upstream's own answer to that
-//!   loop rather than something improvised here.
+//!   like anything else. The config asks for upstream's answer to that
+//!   -- `autoSystemRoutingTable` and `autoOutboundsInterface` -- but the
+//!   bundled xray.exe (26.1.23) does not appear to read either key:
+//!   neither is among its strings (sites diagnosis, 2026-10-11). What
+//!   actually keeps the engine's connection off the tunnel is the host
+//!   route to the node that `routing::install_full_tunnel` adds through
+//!   the uplink [`plan_uplink`] picks.
 
 use std::ffi::OsStr;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
@@ -286,9 +289,10 @@ impl Outbound<'_> {
 /// the customer would ask for one game and get their whole machine
 /// tunnelled.
 ///
-/// `autoOutboundsInterface` stays on either way. It pins Xray's own
-/// connection to the node onto the physical link, which is what stops
-/// the engine's uplink being carried through the tunnel it is creating.
+/// `autoOutboundsInterface` stays on either way. It is meant to pin
+/// Xray's own connection to the node onto the physical link; the bundled
+/// binary does not appear to read it (see the module comment), and the
+/// host route to the node is what does that job in a full tunnel.
 fn build_config_for(outbound: &Outbound, passive: bool) -> String {
     build_multi_exit_config(outbound, &[], passive)
 }
@@ -661,29 +665,43 @@ fn resolve_server(
         .ok_or_else(|| format!("{host} has no IPv4 address to route around the tunnel"))
 }
 
+/// The server's address and the way out to it, for a full tunnel.
+pub struct UplinkPlan {
+    pub server: Ipv4Addr,
+    pub uplink: adapters::Uplink,
+}
+
+/// Where the engine's own connection to the server must leave the
+/// machine, asked before xray.exe starts.
+///
+/// Before the engine, not after it: nothing of ours is routed yet, so
+/// Windows' best route to the server is the physical one, and a machine
+/// with no way out fails here without an engine having been started and
+/// killed. Asked of Windows rather than taken as the first adapter with a
+/// gateway -- see `adapters::best_uplink_for`.
+pub fn plan_uplink(outbound: &Outbound, limits: &crate::lifecycle::budget::Limits) -> Result<UplinkPlan, String> {
+    let server = resolve_server(outbound.host(), outbound.port(), limits)?;
+    let uplink = adapters::best_uplink_for(server, &super::OUR_ADAPTER_NAMES)
+        .map_err(|e| format!("could not enumerate network adapters: {e}"))?
+        .ok_or_else(|| "no network connection with a gateway was found".to_string())?;
+    Ok(UplinkPlan { server, uplink })
+}
+
 /// Brings up the routes that actually put traffic through the tunnel.
 ///
 /// Split out from `connect` so a routing failure can tear down the engine
 /// it belongs to -- a running Xray with no routes is the exact state that
 /// previously looked connected while changing nothing.
+///
+/// `plan` was taken before the engine started: afterwards the best route
+/// to the server would be the tunnel itself, and the bypass would point
+/// into the loop it exists to prevent.
 pub fn install_routes(
-    outbound: &Outbound,
+    plan: UplinkPlan,
     ops: std::sync::Arc<dyn super::route_table::RouteOps>,
     owed: super::route_table::OwedRoutes,
     limits: &crate::lifecycle::budget::Limits,
 ) -> Result<InstalledRoutes, String> {
-    let server_ip = resolve_server(outbound.host(), outbound.port(), limits)?;
-
-    // Captured before the tunnel takes over: afterwards the best route to
-    // the server would be the tunnel itself, and the bypass would point
-    // into the loop it exists to prevent.
-    let uplink = adapters::physical_uplink(&[ADAPTER_NAME])
-        .map_err(|e| format!("could not enumerate network adapters: {e}"))?
-        .ok_or_else(|| "no network connection with a gateway was found".to_string())?;
-    let gateway = uplink
-        .gateway
-        .ok_or_else(|| "the active network connection has no gateway".to_string())?;
-
     let tun_index = wait_for_adapter(limits)?;
     let tun_gateway: Ipv4Addr = TUN_GATEWAY
         .split('/')
@@ -700,7 +718,7 @@ pub fn install_routes(
     configure_adapter(tun_gateway, false, limits)?;
     wait_for_address(tun_gateway, limits)?;
 
-    routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index, ops, owed)
+    routing::install_full_tunnel(tun_gateway, tun_index, plan.server, plan.uplink.next_hop, plan.uplink.index, ops, owed)
 }
 
 /// Everything `install_routes` does except install the routes.

@@ -975,6 +975,11 @@ impl Engines {
                     extra.push((exit.exit.clone(), exit_outbound));
                 }
 
+                // The way out to the server, while nothing of ours is
+                // routed yet -- see `xray::plan_uplink`. Custom mode
+                // routes nothing around the tunnel, so it asks nothing.
+                let uplink = if passive { None } else { Some(xray::plan_uplink(&outbound, limits)?) };
+
                 let (mut child, table) =
                     xray::connect_returning_exits(self, &outbound, &extra, passive)?;
                 // Registered before the routes and before the session
@@ -991,10 +996,9 @@ impl Engines {
                 // given an address -- a socket pinned to an interface
                 // with none has no source to send from -- but nothing is
                 // routed into it.
-                let prepared = if passive {
-                    xray::prepare_passive(&outbound, limits).map(|_| InstalledRoutes::none())
-                } else {
-                    xray::install_routes(&outbound, Arc::clone(&self.route_ops), self.owed_routes(), limits)
+                let prepared = match uplink {
+                    None => xray::prepare_passive(&outbound, limits).map(|_| InstalledRoutes::none()),
+                    Some(plan) => xray::install_routes(plan, Arc::clone(&self.route_ops), self.owed_routes(), limits),
                 };
                 let routes = match prepared {
                     Ok(routes) => routes,
@@ -2092,10 +2096,16 @@ fn our_interfaces() -> Vec<u32> {
         .unwrap_or_default()
 }
 
-/// The physical adapter the machine's traffic leaves by, as an interface
+/// The physical adapter traffic to `toward` leaves by, as an interface
 /// index, for an engine that routes its own way around the tunnel.
-fn uplink_index() -> Option<u32> {
-    adapters::physical_uplink(&OUR_ADAPTER_NAMES).ok().flatten().map(|a| a.index)
+/// Windows' own answer when there is an address to ask about -- see
+/// `adapters::best_uplink_for` -- and the first adapter with a gateway
+/// when there is not.
+fn uplink_index(toward: Option<Ipv4Addr>) -> Option<u32> {
+    match toward {
+        Some(dest) => adapters::best_uplink_for(dest, &OUR_ADAPTER_NAMES).ok().flatten().map(|u| u.index),
+        None => adapters::physical_uplink(&OUR_ADAPTER_NAMES).ok().flatten().map(|a| a.index),
+    }
 }
 
 /// The network adapter a given protocol's engine creates.

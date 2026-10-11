@@ -591,7 +591,7 @@ pub fn connect(
     // nothing to watch for.
     let watch = (!passive).then(|| {
         let remote = profile.endpoint.rsplit_once(':').and_then(|(host, _)| host.parse().ok());
-        HostRouteWatch::begin(&*engines.route_ops, super::uplink_index(), remote, super::our_interfaces())
+        HostRouteWatch::begin(&*engines.route_ops, super::uplink_index(remote), remote, super::our_interfaces())
     });
 
     let log_path = engines.config_path(LOG_FILE);

@@ -334,7 +334,7 @@ pub(super) fn raw_ipv4_table() -> Result<Vec<MIB_IPFORWARD_ROW2>, String> {
 }
 
 /// One API row as a [`RouteRow`].
-pub(super) fn row_from(route: &MIB_IPFORWARD_ROW2) -> RouteRow {
+pub(crate) fn row_from(route: &MIB_IPFORWARD_ROW2) -> RouteRow {
     // SAFETY: every row this is given came from an AF_INET table (or was
     // built as one), so the IPv4 arm of both unions is the live one. The
     // addresses are in network byte order, so their in-memory bytes are
