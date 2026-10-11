@@ -102,7 +102,7 @@ describe("the ladder's guard, outside the screen", () => {
 
 describe("the Dashboard's wiring", () => {
   const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
-  const loadStart = dashboard.indexOf("  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<boolean> {");
+  const loadStart = dashboard.indexOf("  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<OfflineLoadOutcome> {");
   const loadEnd = dashboard.indexOf("\n  }\n", loadStart);
   const loadAll = dashboard.slice(loadStart, loadEnd);
 

@@ -4,6 +4,7 @@ import {
   DEFAULT_RENEW_EVERY_SEC,
   DEFAULT_STALE_AFTER_SEC,
   LATE_CLAIM_BUDGET_MS,
+  RELEASE_BUDGET_MS,
   releaseSlot,
   RENEW_BUDGET_MS,
   renewSlot,
@@ -12,6 +13,7 @@ import {
   type ClaimOutcome,
   type ClaimRequest,
   type DeviceLimitRefusal,
+  type ReleaseHow,
   type RenewOutcome,
   type SlotDevice,
   type SlotGrant,
@@ -170,30 +172,44 @@ export interface DeviceSlotSession {
 
 /** How a release on Disconnect is sent.
  *
- * `tunnelGone` settles once the teardown that follows the press is over.
- * The release goes first, while the tunnel is still up -- on a filtered
- * network the tunnel is the likeliest way to reach the API at all -- and
- * the teardown does not wait for it (docs/device-slots.md, 8). But the
- * teardown is under way within milliseconds, and the request, which needs
- * a TCP and a TLS handshake through the tunnel before it is even sent,
- * goes down with it: on the test VM no release on Disconnect ever got an
- * answer, in four runs out of four, and the panel host's access log shows
- * only two of the four arriving -- none from the run where only the tunnel
- * could reach Neoxify. So a
- * release that got no answer is sent once more when the teardown is over,
- * on the bare line, with its own budget. It names the same grant, so if
+ * `tunnelGone` settles once the teardown that follows the press is over,
+ * with whether the platform then confirmed the tunnel gone. The release
+ * goes first, on the press, while the tunnel is still up -- on a filtered
+ * network the tunnel is the likeliest way to reach the API at all, and the
+ * contract asks for the release on the press (docs/device-slots.md, 8) --
+ * and the teardown does not wait for it. But the teardown is under way
+ * within milliseconds, and the request, which needs a TCP and a TLS
+ * handshake through the tunnel before it is even sent, usually goes down
+ * with it: on the test VM no release on Disconnect ever got an answer, in
+ * four runs out of four, and the panel host's access log shows only two of
+ * the four arriving -- none from the run where only the tunnel could reach
+ * Neoxify. Holding the teardown until the release is out would make it
+ * arrive; it would also keep the customer's traffic in a tunnel they have
+ * asked to leave, which the contract rules out.
+ *
+ * So a release that has no answer by the time the teardown is over is sent
+ * once more then, on the bare line, with its own budget. At once: the first
+ * is not waited out, because its connection went down with the tunnel and
+ * waiting only pushed the second, and any Connect pressed meanwhile, a
+ * second and a half later. Only when the tunnel is confirmed gone: a
+ * teardown that gave up with it still reported up leaves the second going
+ * the way the first went, which buys nothing. And as a release after a
+ * teardown (`afterTeardown` in device-slots.ts), so that the address the
+ * backend last answered from -- through the tunnel -- does not take the
+ * whole budget on a bare line that drops it. It names the same grant, so if
  * the first did arrive, or a Connect pressed since has been granted the
  * slot under a new handle, it frees nothing; and it is not sent at all once
  * anything has started since. */
 export interface ReleaseOptions {
-  tunnelGone?: Promise<unknown>;
+  tunnelGone?: Promise<boolean>;
 }
 
 /** A `tunnelGone` for a Disconnect, and the function that settles it:
- * called once the teardown is over, whichever way it ended. */
-export function teardownSignal(): { over: Promise<void>; done: () => void } {
-  let done: () => void = () => undefined;
-  const over = new Promise<void>((resolve) => {
+ * called once the teardown is over, whichever way it ended, with whether
+ * the platform confirmed the tunnel gone. */
+export function teardownSignal(): { over: Promise<boolean>; done: (gone: boolean) => void } {
+  let done: (gone: boolean) => void = () => undefined;
+  const over = new Promise<boolean>((resolve) => {
     done = resolve;
   });
   return { over, done };
@@ -317,11 +333,13 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
    * answers that settled after a Disconnect named more than one; each
    * frees the slot only if it is still held under that grant. Says
    * whether the backend answered every one (`releaseSlot`). */
-  function sendRelease(target: string, handles: string[]): Promise<boolean> {
+  function sendRelease(target: string, handles: string[], how: ReleaseHow = {}): Promise<boolean> {
     const sent: Promise<boolean> = (async () => {
       let answered = true;
       for (const handle of handles) {
-        if ((await release({ subscriptionId: target, handle }).catch(() => false)) !== true) answered = false;
+        const request = { subscriptionId: target, handle };
+        const reply = how.afterTeardown ? release(request, RELEASE_BUDGET_MS, how) : release(request);
+        if ((await reply.catch(() => false)) !== true) answered = false;
       }
       return answered;
     })().finally(() => {
@@ -447,14 +465,27 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     // the slot of a Connect pressed in the meantime instead.
     const handle = knownHandle(target);
     if (!held || handle === null) return;
-    const answered = await sendRelease(target, [handle]);
+    const first = sendRelease(target, [handle]);
+    if (options.tunnelGone === undefined) {
+      await first;
+      return;
+    }
     // Taken down with the tunnel it was sent through: once more on the
-    // bare line, when the teardown is over (`ReleaseOptions`). Not over a
-    // connect started since, whose slot this is not.
-    if (answered || options.tunnelGone === undefined) return;
-    await options.tunnelGone.catch(() => undefined);
-    if (epoch !== releasedIn) return;
-    await sendRelease(target, [handle]);
+    // bare line, the moment the teardown is over (`ReleaseOptions`) --
+    // unless it has been answered by then. Not over a connect or a
+    // sign-out started since, whose slot this is not, and not over a
+    // tunnel the teardown could not confirm gone.
+    let firstAnswered = false;
+    void first.then((answered) => {
+      firstAnswered = answered;
+    });
+    const gone = options.tunnelGone.then(
+      (confirmed) => confirmed === true,
+      () => false,
+    );
+    if (await Promise.race([first, gone.then(() => false)])) return;
+    if (!(await gone) || firstAnswered || epoch !== releasedIn) return;
+    await sendRelease(target, [handle], { afterTeardown: true });
   }
 
   async function claimNow(protocolUserId: string | null, budgetMs: number): Promise<ClaimSettled> {

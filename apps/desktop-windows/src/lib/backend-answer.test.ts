@@ -26,6 +26,7 @@ vi.mock("./endpoint-bundle-store", () => ({
 }));
 
 let api: typeof import("./api");
+type BackendAnswer = import("./api").BackendAnswer;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -98,6 +99,34 @@ describe("what counts as the backend answering", () => {
     stop();
     await api.publicRequest("/config");
     expect(count).toBe(1);
+  });
+
+  /** A dashboard on its snapshot asks again at once when Neoxify answers
+   * something -- but not for its own load's answers, which are reads: a
+   * load answered in part would otherwise start the next the moment it
+   * failed, with no backoff (offline-retry.ts). */
+  it("says whether the request answered was a read", async () => {
+    tauriFetch.mockResolvedValue(answer(200, "application/json", JSON.stringify({ ok: true })));
+    const told = async (send: () => Promise<unknown>) => {
+      const answers: BackendAnswer[] = [];
+      const stop = api.onBackendAnswer((a) => answers.push(a));
+      try {
+        await send();
+      } finally {
+        stop();
+      }
+      return answers;
+    };
+    expect(await told(() => api.publicRequest("/config"))).toEqual([{ read: true }]);
+    // A write: the health check its race asks first is a read, and the
+    // write itself is not.
+    const write = await told(() => api.publicRequest("/customer/vpn/release", { method: "POST", body: "{}" }));
+    expect(write[write.length - 1]).toEqual({ read: false });
+    expect(write.slice(0, -1).every((a) => a.read)).toBe(true);
+    // The token refresh is sent for whatever request needed it, a load's
+    // reads included.
+    const refresh = await told(() => api.publicRequest("/customer-auth/refresh", { method: "POST", body: "{}" }));
+    expect(refresh.every((a) => a.read)).toBe(true);
   });
 
   it("goes on with the request when a listener throws", async () => {

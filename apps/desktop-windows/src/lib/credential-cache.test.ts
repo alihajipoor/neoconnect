@@ -89,7 +89,7 @@ describe("a snapshot written for a session that has ended", () => {
     for (const path of ["../screens/Dashboard.tsx", "../../../mobile/src/screens/Dashboard.tsx"]) {
       const screen = readFileSync(new URL(path, import.meta.url), "utf8");
       const write = screen.indexOf("void saveSnapshot(");
-      const guard = screen.lastIndexOf("if (sessionGeneration() !== sessionAtStart) return true;", write);
+      const guard = screen.lastIndexOf('if (sessionGeneration() !== sessionAtStart) return "answered";', write);
       expect(guard, path).toBeGreaterThan(screen.indexOf("async function loadAll("));
       expect(screen.slice(write, write + 400), path).toContain("() => sessionGeneration() === sessionAtStart");
     }

@@ -13,8 +13,8 @@ import { describe, expect, it } from "vitest";
  * their own (see dashboard-remount.test.ts). */
 
 const screens = [
-  ["Windows", "../screens/Dashboard.tsx", "  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<boolean> {"],
-  ["phone", "../../../mobile/src/screens/Dashboard.tsx", "  async function loadScreen(preferRouteId: string | undefined, ready: () => void, retry: OfflineRetryTrigger | null = null): Promise<boolean> {"],
+  ["Windows", "../screens/Dashboard.tsx", "  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<OfflineLoadOutcome> {"],
+  ["phone", "../../../mobile/src/screens/Dashboard.tsx", "  async function loadScreen(preferRouteId: string | undefined, ready: () => void, retry: OfflineRetryTrigger | null = null): Promise<OfflineLoadOutcome> {"],
 ] as const;
 
 describe.each(screens)("the %s dashboard's first load", (_name, path, signature) => {
@@ -50,7 +50,7 @@ describe.each(screens)("the %s dashboard's first load", (_name, path, signature)
   it("leaves what the screen is doing alone when the load ends after it", () => {
     const failed = load.slice(load.indexOf("if (!meResult.ok || !subsResult.ok || !usersResult.ok) {"));
     expect(failed).toMatch(
-      /if \(shownWhileWaiting\) \{(\s*\/\/[^\n]*\n)+\s*setOfflineReason\(reason\);\s*offlineRetry\.start\(\);\s*return false;\s*\}/,
+      /if \(shownWhileWaiting\) \{(\s*\/\/[^\n]*\n)+\s*setOfflineReason\(reason\);\s*offlineRetry\.start\(\);\s*return "unanswered";\s*\}/,
     );
     expect(load).toContain(
       "setProtocolUser((current) => usersResult.data.find((u) => u.id === current?.id) ?? current);",
@@ -60,7 +60,7 @@ describe.each(screens)("the %s dashboard's first load", (_name, path, signature)
 
 describe("the Windows dashboard's load that answers after the snapshot went up", () => {
   const screen = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
-  const start = screen.indexOf("  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<boolean> {");
+  const start = screen.indexOf("  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<OfflineLoadOutcome> {");
   const load = screen.slice(start, screen.indexOf("\n  }\n", start));
 
   it("does not ask the service again, or capture baselines over a tunnel the screen may have brought up", () => {
@@ -98,8 +98,10 @@ describe.each(screens)("the %s dashboard on its snapshot", (_name, path, signatu
   it("starts asking again wherever a load falls back to the snapshot, and stops where one is answered", () => {
     expect(screen).toContain("const offlineRetry = useOfflineRetry({");
     // Already on screen while the load waited, and put there now.
-    expect(failed).toMatch(/setOfflineReason\(reason\);\s*offlineRetry\.start\(\);\s*return false;/);
-    expect(failed).toMatch(/await showCached\(cached, preferRouteId, load, reason[^)]*\);\s*offlineRetry\.start\(\);\s*return false;/);
+    expect(failed).toMatch(/setOfflineReason\(reason\);\s*offlineRetry\.start\(\);\s*return "unanswered";/);
+    expect(failed).toMatch(
+      /await showCached\(cached, preferRouteId, load, reason[^)]*\);\s*offlineRetry\.start\(\);\s*return "unanswered";/,
+    );
     // Answered: the banner goes, and nothing more is asked.
     expect(load).toMatch(/setOfflineSince\(null\);\s*offlineRetry\.stop\(\);/);
   });
@@ -109,23 +111,60 @@ describe.each(screens)("the %s dashboard on its snapshot", (_name, path, signatu
     expect(load).toMatch(/if \(!background\) \{\s*setLoading\(true\);\s*setError\(null\);\s*\}/);
     expect(load).toContain("let shownWhileWaiting = background;");
     // And leaves a server switch begun meanwhile to put its own answer up.
-    expect(load).toContain("if (background && ");
-    expect(screen).toMatch(/function loadInBackground\(why: OfflineRetryTrigger\): Promise<boolean> \{/);
+    expect(screen).toMatch(/function loadInBackground\(why: OfflineRetryTrigger\): Promise<OfflineLoadOutcome> \{/);
+  });
+
+  /** A background load in flight when a server switch's load begins, and
+   * that load is answered; the background one then fails. It used to put
+   * its failure on the banner and start the retrying again on a screen no
+   * longer on its snapshot. */
+  it("leaves a load of the screen's own begun meanwhile to say what is on screen, answered or not", () => {
+    const sequence = path.includes("mobile") ? "loadRef" : "loadSeqRef";
+    expect(load).toContain(`if (background && ${sequence}.current !== load) return "superseded";`);
+    const superseded = failed.indexOf(`const superseded = background && ${sequence}.current !== load;`);
+    expect(superseded).toBeGreaterThan(0);
+    const out = failed.indexOf('if (superseded) return "superseded";');
+    expect(out).toBeGreaterThan(superseded);
+    // Before anything on the banner or the retrying.
+    expect(out).toBeLessThan(failed.indexOf("setOfflineReason(reason);"));
+    expect(out).toBeLessThan(failed.indexOf("offlineRetry.start();"));
   });
 
   it("never makes it beside a load of the screen's own", () => {
-    expect(screen).toContain("busy: () => loadsInFlightRef.current > 0,");
+    expect(screen).not.toContain("loadsInFlightRef");
     const own = screen.slice(screen.indexOf("  async function loadAll(preferRouteId?: string)"));
-    expect(own).toMatch(/loadsInFlightRef\.current \+= 1;\s*try \{/);
-    expect(own).toMatch(/\} finally \{\s*(ready\(\);\s*)?loadsInFlightRef\.current -= 1;/);
+    expect(own.slice(0, own.indexOf("\n  }\n"))).toContain("offlineRetry.ownLoad(");
+    // Nor between a server switch being sent and its load beginning: the
+    // switch's own answer is one of Neoxify's.
+    const picking = screen.slice(screen.indexOf("  function pickingLocation(routeId: string | null) {"));
+    expect(picking.slice(0, picking.indexOf("\n  }\n"))).toContain("if (routeId !== null) expectSwitchLoad();");
+    expect(screen).toContain("switchLoadExpectedRef.current = offlineRetry.expectOwnLoad();");
+    const listed = screen.slice(screen.indexOf("<LocationPicker"));
+    const onFailed = listed.slice(listed.indexOf("onPickFailed={() => {"));
+    expect(onFailed.slice(0, onFailed.indexOf("}}"))).toContain("switchLoadSettled();");
+    const onSwitched = listed.slice(listed.indexOf("onSwitched={(routeId) => {"));
+    expect(onSwitched.slice(0, onSwitched.indexOf("}}"))).toMatch(/void loadAll\(shown \?\? undefined\);(\s*\/\/[^\n]*\n)*\s*switchLoadSettled\(\);/);
   });
 
   it("takes any answer from Neoxify as the last word on the banner, and asks again at once", () => {
-    const heard = screen.slice(screen.indexOf("onBackendAnswer(() => {"));
+    const heard = screen.slice(screen.indexOf("onBackendAnswer((answer) => {"));
     expect(heard).toMatch(
-      /onBackendAnswer\(\(\) => \{\s*if \(offlineSinceRef\.current === null\) return;\s*setOfflineReason\("reached"\);\s*offlineRetry\.trigger\("answered"\);/,
+      /onBackendAnswer\(\(answer\) => \{\s*answersHeardRef\.current \+= 1;\s*if \(offlineSinceRef\.current === null\) return;\s*setOfflineReason\("reached"\);\s*offlineRetry\.trigger\("answered", \{ ifLoading: answer\.read \? "drop" : "keep" \}\);/,
     );
     expect(screen).toContain('if (connectionState === "connected") offlineRetry.trigger("tunnel");');
+  });
+
+  /** A load that began on the bare line failed after a tunnel's claim and
+   * reports had been answered, and put "Can't reach Neoxify right now"
+   * back up above "You're protected". */
+  it("does not let a load that failed say Neoxify is out of reach when it answered after that load began", () => {
+    expect(load).toContain("const answersAtStart = answersHeardRef.current;");
+    expect(load.indexOf("const answersAtStart = answersHeardRef.current;")).toBeLessThan(
+      load.indexOf('getMe(requests.trace("me")),'),
+    );
+    expect(failed).toMatch(
+      /const reason = reasonAfterUnansweredLoad\(\s*failed && !failed\.ok \? reasonFor\(failed\) : "unreached",\s*answersHeardRef\.current !== answersAtStart,\s*\);/,
+    );
   });
 
   it("says no title over the saved copy once Neoxify has answered", () => {

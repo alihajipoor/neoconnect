@@ -98,7 +98,7 @@ export const CONNECT_TIMEOUT_MS = 10_000;
 async function send(base: string, path: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
   const options: RequestInit & { connectTimeout: number } = { ...init, signal, connectTimeout: CONNECT_TIMEOUT_MS };
   const response = await fetch(`${base}${path}`, options);
-  noteAnswer(base, response);
+  noteAnswer(base, response, { read: isRead(path, init) });
   return response;
 }
 
@@ -136,7 +136,7 @@ function servesBackend(response: Response): boolean {
   return isBackendAnswer(response) && !DOUBTFUL_STATUSES.has(response.status);
 }
 
-function noteAnswer(base: string, response: Response): void {
+function noteAnswer(base: string, response: Response, answer: BackendAnswer): void {
   // Whatever answered, the network let a request through to this
   // address, so it is no longer one to ask last (endpoint-demotion.ts).
   clearDemotion(base);
@@ -153,7 +153,25 @@ function noteAnswer(base: string, response: Response): void {
     servedBackend.add(base);
     notBackend.delete(base);
   }
-  if (servesBackend(response) || bodilessSuccess(response)) announceBackendAnswer();
+  if (servesBackend(response) || bodilessSuccess(response)) announceBackendAnswer(answer);
+}
+
+/** What a listener is told about an answer (`onBackendAnswer`). */
+export interface BackendAnswer {
+  /** Whether the request that was answered only read: a GET -- the
+   * account, the plan, the credentials, the server list, the health check
+   * a write's race sends first -- or the token refresh, which any request
+   * may need before it is sent. A dashboard's load is made of nothing
+   * else, so an answer like this while one is under way is most likely
+   * that load's own; anything else -- a claim, a renewal, a report, a
+   * release, a server switch -- was sent by something else. */
+  read: boolean;
+}
+
+/** Whether a request to `path` is a read, as `BackendAnswer` means it. */
+function isRead(path: string, init: RequestInit): boolean {
+  const method = (init.method ?? "GET").toUpperCase();
+  return method === "GET" || method === "HEAD" || path === REFRESH_PATH;
 }
 
 /** An answer with no body and no type that the rest of this file takes as
@@ -164,7 +182,7 @@ function bodilessSuccess(response: Response): boolean {
 }
 
 /** Who is told when the backend answers. See `onBackendAnswer`. */
-const answerListeners = new Set<() => void>();
+const answerListeners = new Set<(answer: BackendAnswer) => void>();
 
 /** Calls `listener` whenever the backend answers any request this app
  * sends, through any address, whatever the request was: its JSON in any
@@ -178,18 +196,21 @@ const answerListeners = new Set<() => void>();
  * own next request happens to go out. On the test VM the dashboard's
  * banner went on saying "Can't reach Neoxify" for a minute after the
  * claim and the queued reports had been answered through the tunnel
- * (offline-retry.ts). */
-export function onBackendAnswer(listener: () => void): () => void {
+ * (offline-retry.ts).
+ *
+ * The listener is told whether the request was a read (`BackendAnswer`),
+ * so that a screen can tell its own load's answers from the rest. */
+export function onBackendAnswer(listener: (answer: BackendAnswer) => void): () => void {
   answerListeners.add(listener);
   return () => {
     answerListeners.delete(listener);
   };
 }
 
-function announceBackendAnswer(): void {
+function announceBackendAnswer(answer: BackendAnswer): void {
   for (const listener of [...answerListeners]) {
     try {
-      listener();
+      listener(answer);
     } catch {
       // A screen's handler failing is no reason for this request to.
     }
@@ -744,6 +765,18 @@ function unanswered(walk: Walk, init: RequestInit): Response {
   throw walk.lastError ?? new Error(init.signal?.aborted ? "the request ran out of time" : "no API endpoint answered");
 }
 
+/** A request's options, and how it is to be walked.
+ *
+ * `afterPathChange`: the path this machine takes to the API has just
+ * changed under the request -- a tunnel has come down -- so what answered
+ * last, by the old path, is not where a write goes first, and its health
+ * race does not lead with the address that answered last alone; every
+ * address not demoted on this network is asked at once (`stagesOf`). For
+ * the device slot's release sent again after a teardown (`ReleaseHow` in
+ * device-slots.ts), whose second and a half the lone lead would otherwise
+ * spend on an address the bare line may drop. Never sent. */
+export type ApiInit = RequestInit & { afterPathChange?: boolean };
+
 /** Where a write goes before anything is asked, if anywhere: the address
  * the backend last answered from (`recentWinner`) -- or, for a write with
  * a deadline of its own, the remembered endpoint when no race has been won
@@ -828,6 +861,7 @@ async function sendWrite(
   init: RequestInit,
   endpoints: string[],
   trace?: EndpointTrace,
+  afterPathChange = false,
 ): Promise<Response> {
   const outer = init.signal ?? null;
   const walk = await newWalk();
@@ -848,7 +882,10 @@ async function sendWrite(
   // then got nothing there or anywhere else was answered by nothing, and
   // said that Neoxify had stopped responding where the next write, on the
   // same network a moment later, said it could not be reached.
-  const first = recentStop(path, outer, walk);
+  //
+  // Nor after the path to the API has changed under it (`afterPathChange`):
+  // what answered last answered by the old path.
+  const first = afterPathChange ? null : recentStop(path, outer, walk);
   if (first !== null) {
     const response = await fetchOneEndpointAtATime(path, init, [first], walk, trace);
     if (response) return response;
@@ -862,7 +899,7 @@ async function sendWrite(
     }
     candidates = candidates.filter((base) => !walk.tried.has(base) && !paged.has(base));
     if (candidates.length === 0 || outer?.aborted) break;
-    const health = await raceForHealth(candidates, outer, trace);
+    const health = await raceForHealth(candidates, outer, trace, undefined, !afterPathChange);
     reached ||= health.backend;
     healthPage ??= health.page;
     onBlockPage = health.blockPage && !reached && healthPage === null;
@@ -931,10 +968,12 @@ async function sendWrite(
  */
 async function fetchAnyEndpoint(
   path: string,
-  init: RequestInit,
+  given: ApiInit,
   trace?: EndpointTrace,
   via?: AnsweredBase[],
 ): Promise<Response> {
+  // Not sent: it says how the write is walked, not what it asks.
+  const { afterPathChange = false, ...init } = given;
   const endpoints = via ? via.map((answered) => answered.base) : await apiEndpoints();
   if (endpoints.length === 0) throw new Error("no API endpoint is configured");
   // A caller whose deadline has already passed gets nothing sent on its
@@ -1006,7 +1045,7 @@ async function fetchAnyEndpoint(
   // never safe. Which addresses the write is walked over, and in what
   // order, is `sendWrite`'s to decide.
   const method = (init.method ?? "GET").toUpperCase();
-  if (method !== "GET" && method !== "HEAD") return await sendWrite(path, init, endpoints, trace);
+  if (method !== "GET" && method !== "HEAD") return await sendWrite(path, init, endpoints, trace, afterPathChange);
 
   // Won by any answer that is not a page from in front of the backend
   // (`foreignAnswer`): the backend's JSON, whatever its status, and the
@@ -1347,11 +1386,16 @@ function blockPageLook(base: string): { found: Promise<boolean>; beforeSending: 
  * ranges of its order, when the first `healthy` of them have not been
  * demoted: the first address alone; the rest of those not demoted; the
  * demoted. Empty stages are left out, so with nothing demoted, or nothing
- * but the first address undemoted, there are two. */
-function stagesOf(count: number, healthy: number): [number, number][] {
+ * but the first address undemoted, there are two.
+ *
+ * Without `leadAlone`, the first is asked with the rest of those not
+ * demoted: for a write sent after the path to the API has changed
+ * (`afterPathChange`), where the address that answered last says nothing
+ * about the path now in use. */
+function stagesOf(count: number, healthy: number, leadAlone = true): [number, number][] {
   const stages: [number, number][] = [];
   let from = 0;
-  for (const to of [1, healthy, count]) {
+  for (const to of leadAlone ? [1, healthy, count] : [healthy, count]) {
     if (to > from) {
       stages.push([from, to]);
       from = to;
@@ -1410,13 +1454,14 @@ async function staggeredRace(
   wins: (answer: RaceAnswer) => boolean,
   trace?: EndpointTrace,
   giveUp?: GiveUp,
+  leadAlone = true,
 ): Promise<Staggered> {
   const { ordered, healthy } = demotedLast(endpoints);
   // With nothing to ask there is no stage to settle the race; every
   // caller checks first, and this keeps one that did not from waiting for
   // ever.
   if (ordered.length === 0) return { winner: null, answers: [], failed: [], blockPage: false, stop: () => undefined };
-  const stages = stagesOf(ordered.length, healthy);
+  const stages = stagesOf(ordered.length, healthy, leadAlone);
   const outer = request.signal ?? null;
   const controllers = ordered.map(() => new AbortController());
   // Which aborts were our own deadline, so the trace can say "timeout"
@@ -1759,6 +1804,7 @@ async function raceForHealth(
   signal: AbortSignal | null,
   trace?: EndpointTrace,
   choosy?: { wins: (response: Response) => boolean; giveUp?: GiveUp },
+  leadAlone = true,
 ): Promise<HealthRace> {
   const phase = trace?.phase;
   if (trace) trace.phase = "health";
@@ -1770,6 +1816,7 @@ async function raceForHealth(
       (answer) => provesBackend(answer.response) && (choosy?.wins(answer.response) ?? true),
       trace,
       choosy?.giveUp,
+      leadAlone,
     );
     stop();
     for (const answer of answers) notePublicAnswer(answer.base, answer.response);
@@ -2026,7 +2073,7 @@ type Attempt = { answered: true; res: Response } | { answered: false; failure: R
  * With a `trace`, each leg is recorded under its own phase -- the
  * request, the token refresh, the retry -- because which of them a
  * failure happened in is the first thing to know about it. */
-async function authenticatedAttempt(path: string, init?: RequestInit, trace?: EndpointTrace): Promise<Attempt> {
+async function authenticatedAttempt(path: string, init?: ApiInit, trace?: EndpointTrace): Promise<Attempt> {
   const tokens = await getTokens();
   if (!tokens) {
     return { answered: false, failure: { ok: false, error: "Not signed in.", sessionExpired: true } };
@@ -2106,7 +2153,7 @@ async function authenticatedAttempt(path: string, init?: RequestInit, trace?: En
  * A refusal keeps its status and code. Only a 401 whose refresh the
  * server refused is a sign-out (`sessionExpired`); a 409 is an answer,
  * and the caller decides what it means. */
-export async function apiRequest<T>(path: string, init?: RequestInit, trace?: EndpointTrace): Promise<ApiResult<T>> {
+export async function apiRequest<T>(path: string, init?: ApiInit, trace?: EndpointTrace): Promise<ApiResult<T>> {
   const attempt = await authenticatedAttempt(path, init, trace);
   if (!attempt.answered) return attempt.failure;
   const res = attempt.res;

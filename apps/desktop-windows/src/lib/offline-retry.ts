@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { OfflineReason } from "./failure-text";
 
 /** Asking Neoxify again while a dashboard is running on its cached
  * snapshot.
@@ -35,6 +36,20 @@ import { useEffect, useRef, useState } from "react";
  * most likely to follow, and waiting two minutes after one is the stale
  * banner over again.
  *
+ * **A reason that comes while a load is under way is kept, not dropped.**
+ * It used to be dropped, and that brought the VM's banner back in a
+ * narrower race: a background load sent on the bare line, which filters
+ * Neoxify; a Connect meanwhile, whose tunnel is verified and whose claim
+ * and reports Neoxify answers through it; then the old load fails, its
+ * "Can't reach Neoxify right now" goes up above "You're protected", and
+ * the next ask is up to two minutes away, the tunnel's and the answer's
+ * reasons having been thrown away while the old load ran. Now the newest
+ * such reason waits for the load under way to end and, if that load got
+ * no answer, is asked about at once. A load that begins after it -- the
+ * screen's own, or a background one -- is the asking again, and clears
+ * it. (What the failing load may say on the banner is
+ * `reasonAfterUnansweredLoad`'s.)
+ *
  * A load that gets its answer ends the retrying; the screen leaves the
  * snapshot then. One that does not puts the next one at the next step of
  * the backoff, whatever started it. */
@@ -52,8 +67,28 @@ export const OFFLINE_RETRY_EVERY_MS = 120_000;
  * network, a tunnel or Neoxify itself, and are not held back. */
 export const RESUME_RETRY_GAP_MS = 10_000;
 
+/** The longest a load of the screen's own is waited for once it has been
+ * announced (`expectOwnLoad`) and has neither begun nor been called off.
+ * A server switch's request is answered within about twenty-three seconds
+ * at most (`sendWrite` in api.ts); this is only there so that a picker
+ * that never says how its switch ended cannot stop the retrying for good. */
+export const OWN_LOAD_EXPECTED_MS = 45_000;
+
 /** What started a background load. */
 export type OfflineRetryTrigger = "timer" | "online" | "resume" | "tunnel" | "answered";
+
+/** What a background load came to. */
+export type OfflineLoadOutcome =
+  /** The screen has its answer, and has left the snapshot. */
+  | "answered"
+  /** Nothing answered it, or not all of it: the screen is still on its
+   * snapshot. */
+  | "unanswered"
+  /** A load of the screen's own began while it ran -- a server switch's --
+   * and that load's outcome is the screen's, not this one's. Neither an
+   * answer nor a failure: the backoff stays where it is, and the screen's
+   * own load stops the retrying or starts it, as it ends. */
+  | "superseded";
 
 /** The wait before the next background load, after `failures` of them
  * have gone unanswered. */
@@ -61,19 +96,45 @@ export function offlineRetryDelay(failures: number): number {
   return OFFLINE_RETRY_BACKOFF_MS[failures] ?? OFFLINE_RETRY_EVERY_MS;
 }
 
+/** What the banner says after a load that got no answer, given what that
+ * load found (`offlineReason` in failure-text.ts) and whether Neoxify has
+ * answered anything this app sent since the load began.
+ *
+ * Nothing answering a load is an observation about the moment its
+ * requests went out. An answer that arrived after that -- a claim or a
+ * report through a tunnel brought up meanwhile, or part of the load itself
+ * -- is a newer one, and the banner says the newest: Neoxify has been
+ * reached, and what is on screen is the saved copy (`reached`). A load
+ * that began on the bare line, which drops Neoxify's addresses, failed
+ * eleven seconds in and put "Can't reach Neoxify right now" back up above
+ * "You're protected" a few seconds after the tunnel's reports had been
+ * answered.
+ *
+ * Only `unreached` gives way. A load answered with an error says what
+ * the backend said, which is itself an answer, and a newer one than
+ * anything that came before it reached the screen. */
+export function reasonAfterUnansweredLoad(found: OfflineReason, heardSinceItBegan: boolean): OfflineReason {
+  return found === "unreached" && heardSinceItBegan ? "reached" : found;
+}
+
 export interface OfflineRetryDeps {
-  /** Makes one background load. Resolves true when it got its answer --
-   * the screen has left the snapshot, or a newer load of its own will put
-   * an answer on screen -- and false when it did not. */
-  load(trigger: OfflineRetryTrigger): Promise<boolean>;
-  /** Whether a load of the screen's own is under way: the mount's, still
-   * waiting behind the snapshot, or a server switch's. */
-  busy(): boolean;
+  /** Makes one background load, and says what it came to. */
+  load(trigger: OfflineRetryTrigger): Promise<OfflineLoadOutcome>;
   /** Whether the app is out of sight. */
   hidden(): boolean;
   now(): number;
   setTimer(fn: () => void, ms: number): unknown;
   clearTimer(handle: unknown): void;
+}
+
+/** How a reason to ask is treated when a load is already under way. */
+export interface TriggerOptions {
+  /** `drop` for a reason the load under way is itself the likeliest
+   * source of: an answer to a read, which the screen's loads are made of.
+   * Kept, it would start the next load the moment this one failed, and a
+   * load that Neoxify answers only in part -- the account but not the plan
+   * -- would be made again and again with no backoff at all. */
+  ifLoading?: "keep" | "drop";
 }
 
 /** The background loads of one dashboard. Pure apart from what it is
@@ -87,12 +148,23 @@ export class OfflineRetry {
   private active = false;
   private failures = 0;
   private timer: unknown = undefined;
+  /** Whether a background load is under way. */
   private running = false;
+  /** How many of the screen's own loads are under way (`ownLoad`). */
+  private ownLoads = 0;
+  /** Until when a load of the screen's own that has been announced, and
+   * has not begun, is waited for (`expectOwnLoad`). */
+  private expectingUntil = Number.NEGATIVE_INFINITY;
   /** When the last background load began, for `RESUME_RETRY_GAP_MS`. */
   private lastStartedAt = Number.NEGATIVE_INFINITY;
   /** A load fell due while the app was hidden and was not made. The
    * resume makes it, whatever the gap. */
   private dueWhileHidden = false;
+  /** The newest reason to ask at once that came while a load was under
+   * way, or while the app was hidden. Asked about when that load ends
+   * without an answer, or on the resume; cleared by any load that begins
+   * after it, which is the asking again. */
+  private pending: Exclude<OfflineRetryTrigger, "timer"> | null = null;
 
   constructor(private readonly deps: OfflineRetryDeps) {}
 
@@ -102,14 +174,19 @@ export class OfflineRetry {
   }
 
   /** The screen has fallen back to its snapshot. The first background
-   * load is due after the first step of the backoff; a screen already
-   * retrying keeps its place in it. */
+   * load is due after the first step of the backoff -- or at once, once
+   * nothing is under way, when a reason to ask came while the load that
+   * fell back was waiting. A screen already retrying keeps its place in
+   * the backoff. */
   start(): void {
-    if (this.active || !this.attached) return;
-    this.active = true;
-    this.failures = 0;
-    this.dueWhileHidden = false;
-    this.schedule();
+    if (!this.attached) return;
+    if (!this.active) {
+      this.active = true;
+      this.failures = 0;
+      this.dueWhileHidden = false;
+      this.schedule();
+    }
+    this.askIfOwed();
   }
 
   /** The screen has its answer, or is going away. A load still under way
@@ -117,6 +194,7 @@ export class OfflineRetry {
   stop(): void {
     this.active = false;
     this.dueWhileHidden = false;
+    this.pending = null;
     this.cancelTimer();
   }
 
@@ -133,15 +211,99 @@ export class OfflineRetry {
     this.stop();
   }
 
-  /** Something suggests the answer may have changed: ask now, unless a
-   * load is already under way, the app is hidden, or it is only the app
-   * coming back to the front again so soon after the last load. */
-  trigger(why: Exclude<OfflineRetryTrigger, "timer">): void {
-    if (!this.active || this.running || this.deps.busy() || this.deps.hidden()) return;
-    if (why === "resume" && !this.dueWhileHidden && this.deps.now() - this.lastStartedAt < RESUME_RETRY_GAP_MS) {
+  /** Runs one of the screen's own loads -- the mount's, a server
+   * switch's, the error card's retry -- and counts it while it runs, so no
+   * background load starts beside it. It is itself the asking again for
+   * any reason that came before it began. When it ends, a reason that came
+   * while it ran is asked about, if the screen is still on its snapshot:
+   * a load that fell back to it calls `start` before it returns. */
+  async ownLoad<T>(load: () => Promise<T>): Promise<T> {
+    this.ownLoads += 1;
+    this.pending = null;
+    try {
+      return await load();
+    } finally {
+      this.ownLoads -= 1;
+      this.askIfOwed();
+    }
+  }
+
+  /** A load of the screen's own is about to begin: a server switch has
+   * been sent, and its answer starts one. Until it begins, or the switch
+   * fails, nothing starts in the background -- the switch's own answer is
+   * one of Neoxify's, and asked about at once, it started a background
+   * load a moment before the switch's load began beside it. Returns the
+   * function that says the wait is over: called once the screen's load
+   * has begun, or when the switch has failed. At most
+   * `OWN_LOAD_EXPECTED_MS` either way. */
+  expectOwnLoad(): () => void {
+    const until = this.deps.now() + OWN_LOAD_EXPECTED_MS;
+    this.expectingUntil = until;
+    let over = false;
+    return () => {
+      if (over) return;
+      over = true;
+      if (this.expectingUntil === until) this.expectingUntil = Number.NEGATIVE_INFINITY;
+      this.askIfOwed();
+    };
+  }
+
+  /** Something suggests the answer may have changed: ask now -- or, when
+   * a load is already under way or the app is hidden, as soon as that
+   * load has ended without an answer or the app is back in front. Not
+   * when it is only the app coming back to the front again so soon after
+   * the last load. */
+  trigger(why: Exclude<OfflineRetryTrigger, "timer">, options: TriggerOptions = {}): void {
+    if (!this.attached) return;
+    const loading = this.loading();
+    // Not on the snapshot, and nothing under way that could leave the
+    // screen on it: nothing to ask again.
+    if (!this.active && !loading) return;
+    if (loading) {
+      if (options.ifLoading !== "drop") this.pending = why;
+      return;
+    }
+    if (this.deps.hidden()) {
+      this.pending = why;
+      return;
+    }
+    if (
+      why === "resume" &&
+      !this.dueWhileHidden &&
+      this.pending === null &&
+      this.deps.now() - this.lastStartedAt < RESUME_RETRY_GAP_MS
+    ) {
       return;
     }
     this.run(why);
+  }
+
+  /** Whether a load is under way, or one of the screen's own is about to
+   * begin. */
+  private loading(): boolean {
+    return this.running || this.ownLoads > 0 || this.deps.now() < this.expectingUntil;
+  }
+
+  /** Asks now if a reason to is owed and nothing is in the way; otherwise
+   * makes sure the schedule goes on. Called whenever a load ends. */
+  private askIfOwed(): void {
+    if (this.loading()) return;
+    if (!this.active) {
+      this.pending = null;
+      return;
+    }
+    if (this.deps.hidden()) return;
+    if (this.pending !== null) {
+      this.run(this.pending);
+      return;
+    }
+    // Nothing pending and nothing scheduled: a due time passed while the
+    // app was hidden, and the resume that should have made it was held up
+    // by a load. Made now, rather than leaving the retrying with no timer.
+    if (this.timer === undefined) {
+      if (this.dueWhileHidden) this.run("resume");
+      else this.schedule();
+    }
   }
 
   private schedule(): void {
@@ -163,7 +325,7 @@ export class OfflineRetry {
     // A load of the screen's own is answering the same question. If it
     // fails, the screen is still on its snapshot and this comes round
     // again; if it succeeds, the screen stops this.
-    if (this.running || this.deps.busy()) {
+    if (this.loading()) {
       this.schedule();
       return;
     }
@@ -173,20 +335,25 @@ export class OfflineRetry {
   private run(why: OfflineRetryTrigger): void {
     this.cancelTimer();
     this.running = true;
+    this.pending = null;
     this.dueWhileHidden = false;
     this.lastStartedAt = this.deps.now();
     void this.deps
       .load(why)
-      .catch(() => false)
-      .then((answered) => {
+      .catch((): OfflineLoadOutcome => "unanswered")
+      .then((outcome) => {
         this.running = false;
-        if (!this.active) return;
-        if (answered) {
+        if (!this.active) {
+          this.pending = null;
+          return;
+        }
+        if (outcome === "answered") {
           this.stop();
           return;
         }
-        this.failures += 1;
+        if (outcome === "unanswered") this.failures += 1;
         this.schedule();
+        this.askIfOwed();
       });
   }
 
@@ -203,16 +370,15 @@ export class OfflineRetry {
  * from the tray does not always change visibility). Stopped when the
  * screen unmounts.
  *
- * `load` and `busy` are read through a ref, so the screen can pass inline
- * closures over its current render. */
-export function useOfflineRetry(deps: Pick<OfflineRetryDeps, "load" | "busy">): OfflineRetry {
+ * `load` is read through a ref, so the screen can pass an inline closure
+ * over its current render. */
+export function useOfflineRetry(deps: Pick<OfflineRetryDeps, "load">): OfflineRetry {
   const latest = useRef(deps);
   latest.current = deps;
   const [retry] = useState(
     () =>
       new OfflineRetry({
         load: (why) => latest.current.load(why),
-        busy: () => latest.current.busy(),
         hidden: () => typeof document !== "undefined" && document.visibilityState === "hidden",
         now: () => Date.now(),
         setTimer: (fn, ms) => setTimeout(fn, ms),

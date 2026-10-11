@@ -314,7 +314,7 @@ describe("the phone dashboard's wiring", () => {
     // ended, and never by a load a newer one replaced.
     const load = dashboard.slice(
       dashboard.indexOf("async function loadAll(preferRouteId?: string) {"),
-      dashboard.indexOf("async function loadScreen(preferRouteId: string | undefined, ready: () => void, retry: OfflineRetryTrigger | null = null): Promise<boolean> {"),
+      dashboard.indexOf("async function loadScreen(preferRouteId: string | undefined, ready: () => void, retry: OfflineRetryTrigger | null = null): Promise<OfflineLoadOutcome> {"),
     );
     expect(load).toContain("const load = ++loadRef.current;");
     expect(load.indexOf("setLoaded(false);")).toBeLessThan(load.indexOf("await loadScreen(preferRouteId, ready);"));
@@ -571,9 +571,9 @@ describe("the phone dashboard's wiring", () => {
     expect(picking).toContain('if (choice === "stopPass") void stopPass();');
     expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain("onPicking={pickingLocation}");
     // A switch that fails puts back what the pick decided ahead of it.
-    expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain(
-      "onPickFailed={() => autoReconnect.pickFailed()}",
-    );
+    const listed = dashboard.slice(dashboard.indexOf("<LocationPicker"));
+    const onFailed = listed.slice(listed.indexOf("onPickFailed={() => {"));
+    expect(onFailed.slice(0, onFailed.indexOf("}}"))).toContain("autoReconnect.pickFailed();");
     // Kept up only over a tunnel the screen shows: armed beneath a screen
     // saying "disconnected" -- the platform unasked -- the choice's reload
     // took the tunnel's absence for a drop it had missed, and redialled the

@@ -244,17 +244,21 @@ export const DEMOTED_BASELINE_MS = 2_000;
  * as no answer at once; a name this network has already sent there is
  * looked at before anything is sent, and sent nothing if it still is
  * (`baselineBlockPage`). An address that failed here lately gets
- * `DEMOTED_BASELINE_MS`. An address that answers has its demotion lifted,
- * as an answer to any of the API's requests lifts it. Nothing here
- * demotes anything, by a timeout or by the block page: what the API's
- * requests are sent to is theirs to learn, with their own deadlines and
- * their own look -- which, unlike this one, has to ask about a proxy. */
-const BARE_WALK: Pick<WalkOptions, "look" | "timeoutFor" | "answered"> = {
+ * `DEMOTED_BASELINE_MS`, and those addresses, which come last, are asked
+ * together rather than a hedge apart (`together`). An address whose
+ * answer the walk keeps -- this machine's own address, which only a
+ * request on the bare line can bring back -- has its demotion lifted, as
+ * an answer to any of the API's requests lifts it. Nothing here demotes
+ * anything, by a timeout or by the block page: what the API's requests
+ * are sent to is theirs to learn, with their own deadlines and their own
+ * look -- which, unlike this one, has to ask about a proxy. */
+const BARE_WALK: Pick<WalkOptions, "look" | "timeoutFor" | "together" | "answered"> = {
   look: (base) => {
     const found = baselineBlockPage(base);
     return { found, beforeSending: isNameDemoted(base) ? found : Promise.resolve(false) };
   },
   timeoutFor: (base, timeoutMs) => (isDemoted(base) ? Math.min(timeoutMs, DEMOTED_BASELINE_MS) : timeoutMs),
+  together: (base) => isDemoted(base),
   answered: (base) => clearDemotion(base),
 };
 
@@ -444,7 +448,15 @@ type WalkOptions = {
   look?: (base: string) => { found: Promise<boolean>; beforeSending: Promise<boolean> };
   /** How long `base` gets, out of the walk's `timeoutMs`. */
   timeoutFor?: (base: string, timeoutMs: number) => number;
-  /** Told of every endpoint that gave an HTTP answer. */
+  /** Whether `base`, reached in a hedged walk, is asked at once with the
+   * one before it when that one was too, rather than a hedge later. See
+   * `readHedged`. */
+  together?: (base: string) => boolean;
+  /** Told of every endpoint whose reading the walk keeps. Not of one that
+   * answered with something the walk passes over: a node's address, a
+   * mirror describing itself, an error page. Any of those can come through
+   * a tunnel not yet gone, and says nothing about the network the walk is
+   * asking about. */
   answered?: (base: string) => void;
 };
 
@@ -460,13 +472,33 @@ type OneAnswer = { reading: IpReading | null; body?: Record<string, unknown>; an
  *
  * With a `look`, the name's block page ends the wait as no answer -- the
  * request itself is left to time out on its own, unread -- or, for a name
- * already found there, keeps it from being sent. */
+ * already found there, keeps it from being sent.
+ *
+ * That look before sending comes out of `budget`, as the request does.
+ * It is a lookup through this machine's resolver, which on a network the
+ * device has just moved to can be slow or silent, and it used to be waited
+ * for on top of the budget: up to three seconds past the deadline the
+ * walk had promised no request would outlive. A look that has not
+ * answered by the end of the budget leaves nothing to send. */
 async function askOne(base: string, budget: number, options: WalkOptions): Promise<OneAnswer> {
   const look = options.look?.(base);
   if (look === undefined) return await askAndJudge(base, budget, options);
-  if (await look.beforeSending) return NO_ANSWER;
-  const asked = askAndJudge(base, budget, options);
+  const started = Date.now();
+  if (await lookWithin(look.beforeSending, budget)) return NO_ANSWER;
+  const left = budget - (Date.now() - started);
+  if (left < MIN_REQUEST_MS) return NO_ANSWER;
+  const asked = askAndJudge(base, left, options);
   return await Promise.race([asked, look.found.then((found) => (found ? NO_ANSWER : asked))]);
+}
+
+/** `look`, or true -- "nothing to send" -- once `ms` has passed without
+ * its answer. Never rejects. */
+function lookWithin(look: Promise<boolean>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const out = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(true), ms);
+  });
+  return Promise.race([look.catch(() => false), out]).finally(() => clearTimeout(timer));
 }
 
 async function askAndJudge(
@@ -476,7 +508,6 @@ async function askAndJudge(
 ): Promise<OneAnswer> {
   try {
     const res = await transport(base, budget);
-    answered?.(base);
     const peer = typeof res.peer === "string" && res.peer ? plainAddress(res.peer.trim()) : undefined;
     // The tunnel's own server, reached around the tunnel: not even "an
     // answer" in the sense below. Packets that never entered the tunnel
@@ -504,6 +535,7 @@ async function askAndJudge(
       // Before `onBody`, too: what such an endpoint says about the
       // network is about the node's, not the customer's.
       if (ip && !selfReport && !skip?.(ip)) {
+        answered?.(base);
         return {
           reading: { ip, from: base, ...(peer !== undefined ? { peer } : {}) },
           body: body as Record<string, unknown>,
@@ -566,6 +598,17 @@ async function readFrom(bases: string[], timeoutMs: number, options: WalkOptions
  * -- spends a whole endpoint timeout on each before it reaches one that
  * answers, and the settle's ceiling ran out on the second. Hedged, the
  * same walk reaches the first working mirror a second or two in.
+ *
+ * Addresses for which `together` is true are not given a hedge each once
+ * the walk reaches them: the first is launched when the hedge would have
+ * launched it, and every one straight after it with it. For a baseline
+ * they are the addresses this network has lately failed, which come last
+ * and get `DEMOTED_BASELINE_MS` each; a hedge apart, they were launched
+ * one a second, and on a network where every address hangs -- SNI or DPI
+ * dropping the handshake, the addresses blackholed, and every one demoted
+ * by the dashboard's failed load -- a walk of ten took eleven seconds
+ * before the first rung and again before every rung after a teardown.
+ * Together, it takes their two.
  */
 function readHedged(
   bases: string[],
@@ -589,27 +632,32 @@ function readHedged(
     const launch = () => {
       clearTimeout(hedge);
       if (done) return;
-      const budget =
-        next < bases.length
-          ? budgetFor(options.timeoutFor?.(bases[next], timeoutMs) ?? timeoutMs, options.deadline)
-          : null;
-      if (budget === null) {
-        // Nothing more may be asked: the list is spent or the deadline
-        // is. Whatever is still in flight may yet answer.
-        next = bases.length;
-        if (inFlight === 0) finish(null);
-        return;
+      for (;;) {
+        const budget =
+          next < bases.length
+            ? budgetFor(options.timeoutFor?.(bases[next], timeoutMs) ?? timeoutMs, options.deadline)
+            : null;
+        if (budget === null) {
+          // Nothing more may be asked: the list is spent or the deadline
+          // is. Whatever is still in flight may yet answer.
+          next = bases.length;
+          if (inFlight === 0) finish(null);
+          return;
+        }
+        const base = bases[next++];
+        inFlight += 1;
+        void askOne(base, budget, options).then((one) => {
+          inFlight -= 1;
+          if (one.answered) answered = true;
+          if (one.reading !== null) finish(one);
+          // This one is done without a reading, so the next starts now
+          // rather than when the hedge would have started it.
+          else launch();
+        });
+        // The next goes with this one when both are to be asked together.
+        if (next < bases.length && options.together?.(base) && options.together(bases[next])) continue;
+        break;
       }
-      const base = bases[next++];
-      inFlight += 1;
-      void askOne(base, budget, options).then((one) => {
-        inFlight -= 1;
-        if (one.answered) answered = true;
-        if (one.reading !== null) finish(one);
-        // This one is done without a reading, so the next starts now
-        // rather than when the hedge would have started it.
-        else launch();
-      });
       hedge = setTimeout(launch, hedgeMs);
     };
     launch();

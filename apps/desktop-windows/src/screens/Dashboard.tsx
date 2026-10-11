@@ -131,7 +131,7 @@ import { useI18n } from "../lib/i18n";
 import { failureText, offlineReason as reasonFor, offlineText, type OfflineReason, type ShownFailure } from "../lib/failure-text";
 import { STILL_TRYING_AFTER_MS, useStillTrying } from "../lib/still-trying";
 import { onBackendAnswer } from "../lib/api";
-import { useOfflineRetry, type OfflineRetryTrigger } from "../lib/offline-retry";
+import { reasonAfterUnansweredLoad, useOfflineRetry, type OfflineLoadOutcome, type OfflineRetryTrigger } from "../lib/offline-retry";
 
 /** How a ladder pass ended.
  *
@@ -742,18 +742,24 @@ export function Dashboard({
   offlineSinceRef.current = offlineSince;
   /** Why the screen is on the snapshot, as the banner says it. */
   const [offlineReason, setOfflineReason] = useState<OfflineReason>("unreached");
-  /** How many of the screen's own loads are under way: the mount's, the
-   * one after a server switch, the error card's retry. A background load
-   * waits for them (`offlineRetry`). */
-  const loadsInFlightRef = useRef(0);
+  /** How many times Neoxify has answered anything this app sent, while
+   * this screen has been mounted (`onBackendAnswer`). A load that got no
+   * answer compares it with the count when it began: an answer since then
+   * is newer than its failure, and the banner says that instead
+   * (`reasonAfterUnansweredLoad`). */
+  const answersHeardRef = useRef(0);
   /** While the screen is on its snapshot, the load is made again in the
    * background, and at once when there is a reason to think it would now
    * be answered. See offline-retry.ts. Started where a load falls back to
-   * the snapshot, stopped where one gets its answer. */
+   * the snapshot, stopped where one gets its answer. The screen's own
+   * loads run through it (`loadAll`), so the two never overlap. */
   const offlineRetry = useOfflineRetry({
     load: (why) => loadInBackground(why),
-    busy: () => loadsInFlightRef.current > 0,
   });
+  /** Says that the load a server switch starts has begun, or that the
+   * switch failed and none will (`expectOwnLoad`). Set while a switch is
+   * out. */
+  const switchLoadExpectedRef = useRef<(() => void) | null>(null);
 
   /** Whether a ladder pass could still be running.
    *
@@ -1272,25 +1278,23 @@ export function Dashboard({
   }
 
   /** One of the screen's own loads -- the mount's, a server switch's, the
-   * error card's retry -- counted while it runs, so a background load
-   * waits for it (`offlineRetry`). */
+   * error card's retry -- run through `offlineRetry`, so no background
+   * load starts beside it, and a reason to ask again that comes while it
+   * runs is asked about once it has failed. Says whether it got its
+   * answer. */
   async function loadAll(preferRouteId?: string): Promise<boolean> {
-    loadsInFlightRef.current += 1;
-    try {
-      return await loadScreen(preferRouteId, null);
-    } finally {
-      loadsInFlightRef.current -= 1;
-    }
+    return (await offlineRetry.ownLoad(() => loadScreen(preferRouteId, null))) === "answered";
   }
 
   /** The load again, in the background, while the screen is on its cached
    * snapshot (`offlineRetry`). */
-  function loadInBackground(why: OfflineRetryTrigger): Promise<boolean> {
+  function loadInBackground(why: OfflineRetryTrigger): Promise<OfflineLoadOutcome> {
     return loadScreen(undefined, why);
   }
 
-  /** Loads the screen, and says whether it got its answer: the
-   * credentials and the plan.
+  /** Loads the screen, and says what that came to: answered (the
+   * credentials and the plan), unanswered, or, for a background load,
+   * superseded by a load of the screen's own begun meanwhile.
    *
    * `retry` names what started a load made in the background while the
    * screen is on its cached snapshot and in use (`offlineRetry`), and is
@@ -1303,7 +1307,7 @@ export function Dashboard({
    * reported as the mount's load is -- at most once in ten minutes
    * (unanswered-report.ts), so the retries add a row now and then, not one
    * each. */
-  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<boolean> {
+  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<OfflineLoadOutcome> {
     const background = retry !== null;
     // Which customer session this load is for. See sessionGeneration: a
     // sign-out bumps it before it clears anything.
@@ -1311,6 +1315,8 @@ export function Dashboard({
     // And its place among this screen's loads: a server switch starts one
     // while the mount's may still be waiting (`standInRoutes`).
     const load = ++loadSeqRef.current;
+    // What Neoxify had answered when this began. See `answersHeardRef`.
+    const answersAtStart = answersHeardRef.current;
     // When the credentials were asked for: a refresh's late answer asked
     // for before this is older than what this load puts on screen
     // (`noteCredentialsShown`).
@@ -1360,7 +1366,7 @@ export function Dashboard({
       const failed = [meResult, subsResult, usersResult].find((r) => !r.ok);
       if (failed && !failed.ok && failed.sessionExpired) {
         onLoggedOut();
-        return false;
+        return "unanswered";
       }
 
       // The control plane is unreachable, which is not the same as the
@@ -1372,26 +1378,39 @@ export function Dashboard({
       // Iran and every customer there lost the product entirely -- on
       // every protocol, on every node, none of which were blocked.
       const cached = await loadSnapshot();
+      // A load of the screen's own began while this one waited in the
+      // background -- a server switch -- and what that one finds is the
+      // screen's to show. Said here, it would put this older failure on
+      // the banner over a newer answer, and start the retrying again on a
+      // screen that load may already have taken off its snapshot.
+      const superseded = background && loadSeqRef.current !== load;
       unanswered?.(
-        cached
-          ? `${background ? `asked again in the background (${retry}); still ` : ""}showing the cached credentials, ${snapshotAge(cached.savedAt)}`
-          : "showed the load error, with nothing cached to show",
+        superseded
+          ? `asked again in the background (${retry}); a load of the screen's own had begun meanwhile`
+          : cached
+            ? `${background ? `asked again in the background (${retry}); still ` : ""}showing the cached credentials, ${snapshotAge(cached.savedAt)}`
+            : "showed the load error, with nothing cached to show",
       );
+      if (superseded) return "superseded";
       // Said as what happened: nothing answered, or something answered
-      // with an error (`offlineReason`).
-      const reason = failed && !failed.ok ? reasonFor(failed) : "unreached";
+      // with an error (`offlineReason`) -- unless Neoxify has answered
+      // something since this load began, which is the newer word on it.
+      const reason = reasonAfterUnansweredLoad(
+        failed && !failed.ok ? reasonFor(failed) : "unreached",
+        answersHeardRef.current !== answersAtStart,
+      );
       if (shownWhileWaiting) {
         // Already on screen, and perhaps in use: only the banner changes,
-        // to what this load found -- the last word on it -- and the load
-        // is made again later (`offlineRetry`).
+        // to what was heard last, and the load is made again later
+        // (`offlineRetry`).
         setOfflineReason(reason);
         offlineRetry.start();
-        return false;
+        return "unanswered";
       }
       if (cached) {
         await showCached(cached, preferRouteId, load, reason);
         offlineRetry.start();
-        return false;
+        return "unanswered";
       }
 
       // Kept as it came and worded as the screen renders, so it is in the
@@ -1403,13 +1422,13 @@ export function Dashboard({
       // once it runs.
       setRouteListLoaded(true);
       loadRouteMemory();
-      return false;
+      return "unanswered";
     }
 
     // A load of the screen's own began while this one waited in the
     // background -- a server switch -- and puts its own answer on screen,
     // with the choice it was made for.
-    if (background && loadSeqRef.current !== load) return true;
+    if (background && loadSeqRef.current !== load) return "superseded";
 
     // Reached the server, so anything remembered about being offline is
     // stale, and there is nothing more to ask again.
@@ -1514,7 +1533,7 @@ export function Dashboard({
     // returns. Everything below is for a session that has ended: the
     // snapshot above all, which would write the signed-out customer's
     // credentials back to disk after the sign-out cleared them.
-    if (sessionGeneration() !== sessionAtStart) return true;
+    if (sessionGeneration() !== sessionAtStart) return "answered";
 
     // Written only once the credentials and the plan have answered, so a
     // partial answer can never overwrite a good cache with a worse one --
@@ -1541,7 +1560,7 @@ export function Dashboard({
     // and a baseline captured through a tunnel we simply could not ask
     // about turns every later comparison into a false leak report.
     if (adopted === "disconnected") await captureBaselinesWhileDown(usersResult.data);
-    return true;
+    return "answered";
   }
 
   // Neoxify answered something while the screen says it cannot be reached
@@ -1552,12 +1571,19 @@ export function Dashboard({
   // "Can't reach Neoxify right now" above "You're protected" a minute
   // after the claim and the reports had been answered. Through the ref:
   // registered once, for the life of the screen.
+  //
+  // Counted whether or not the screen is on its snapshot, for a load that
+  // fails after it (`answersHeardRef`). An answer to a read that comes
+  // while a load is under way is most likely that load's own, and asks
+  // nothing more: that load's outcome is the one that counts, and kept, a
+  // load answered only in part would be made again the moment it failed.
   useEffect(
     () =>
-      onBackendAnswer(() => {
+      onBackendAnswer((answer) => {
+        answersHeardRef.current += 1;
         if (offlineSinceRef.current === null) return;
         setOfflineReason("reached");
-        offlineRetry.trigger("answered");
+        offlineRetry.trigger("answered", { ifLoading: answer.read ? "drop" : "keep" });
       }),
     [],
   );
@@ -2128,16 +2154,18 @@ export function Dashboard({
     cancelRef.current = true;
     // The pass may already hold a slot. Given back fire and forget,
     // never in front of the teardown (docs/device-slots.md, 8) -- and
-    // again once it is over, if the teardown took the first one with it.
+    // again once it is over, if the teardown took the first one with it
+    // and the service says the tunnel is gone.
     const teardown = teardownSignal();
     void deviceSlot.release({ tunnelGone: teardown.over });
     setSlotNotice(null);
     setConnectionState("disconnecting");
+    let gone = false;
     try {
       await serviceDisconnect().catch(() => undefined);
-      await confirmTornDown();
+      gone = (await confirmTornDown()) === "disconnected";
     } finally {
-      teardown.done();
+      teardown.done(gone);
     }
     endIntent(generation);
   }
@@ -2189,6 +2217,25 @@ export function Dashboard({
   function pickingLocation(routeId: string | null) {
     const choice = autoReconnect.choosing({ routeId, tunnelShown: connectionStateRef.current !== "disconnected" });
     if (choice === "stopPass") void stopPass();
+    if (routeId !== null) expectSwitchLoad();
+  }
+
+  /** A server's switch request is going out, and its answer starts a load
+   * of the screen's own. Until that load has begun, or the switch has
+   * failed, nothing is asked in the background (`expectOwnLoad`): the
+   * switch's answer is one of Neoxify's, and asked about at once it
+   * started a background load a moment before the switch's load began
+   * beside it -- two copies of the account, the plan and the credentials
+   * on a censored network. */
+  function expectSwitchLoad() {
+    switchLoadExpectedRef.current?.();
+    switchLoadExpectedRef.current = offlineRetry.expectOwnLoad();
+  }
+
+  /** The switch's load has begun, or the switch failed and none will. */
+  function switchLoadSettled() {
+    switchLoadExpectedRef.current?.();
+    switchLoadExpectedRef.current = null;
   }
 
   /** Every press does something, and no press can leave the app worse
@@ -2249,12 +2296,14 @@ export function Dashboard({
         // way to reach the API at all. The teardown is under way before
         // that request can finish its handshakes, though, and on the test
         // VM it took every one down with it: so a release that got no
-        // answer goes again on the bare line once the teardown is over
-        // (`ReleaseOptions` in device-slot-session.ts).
+        // answer goes again on the bare line once the teardown is over and
+        // the service says the tunnel is gone (`ReleaseOptions` in
+        // device-slot-session.ts).
         const teardown = teardownSignal();
         void deviceSlot.release({ tunnelGone: teardown.over });
         setSlotNotice(null);
         setConnectionState("disconnecting");
+        let gone = false;
         try {
           await serviceDisconnect();
           // Acknowledged is not the same as finished, so the state comes
@@ -2263,7 +2312,7 @@ export function Dashboard({
           // survives it is a thing the customer needs to know about, and
           // setting "disconnected" here on the strength of an ack is
           // exactly how that would be hidden.
-          await confirmTornDown();
+          gone = (await confirmTornDown()) === "disconnected";
         } catch (err) {
           // A teardown that never answered is not a teardown that
           // failed. The engines may well be gone -- that is how the app
@@ -2279,9 +2328,9 @@ export function Dashboard({
           );
           // Not back to "connected": the tunnel may be down, may be up,
           // and this press produced no evidence either way. Ask.
-          await confirmTornDown();
+          gone = (await confirmTornDown()) === "disconnected";
         } finally {
-          teardown.done();
+          teardown.done(gone);
         }
         endIntent(generation);
         return;
@@ -4068,7 +4117,10 @@ export function Dashboard({
           onPicking={pickingLocation}
           // A switch that failed chose nothing: the reconnect leads with
           // what it led with before the pick.
-          onPickFailed={() => autoReconnect.pickFailed()}
+          onPickFailed={() => {
+            autoReconnect.pickFailed();
+            switchLoadSettled();
+          }}
           onChooseAutomatic={() => {
             // A new choice while a reconnect waits ends the reconnect:
             // its next attempt would lead with the old route regardless.
@@ -4104,6 +4156,9 @@ export function Dashboard({
             // the route it is on: naming the choice there would name a
             // server the traffic is not leaving from.
             void loadAll(shown ?? undefined);
+            // Begun: the wait for it is over, and nothing in the background
+            // starts beside it.
+            switchLoadSettled();
           }}
         />
       ) : null}

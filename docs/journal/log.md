@@ -6112,3 +6112,66 @@ and real DNS injection; real DPI or SNI filtering; a slow-but-answering
 CDN (nothing in the rig reached the 20 s answer deadline); real Psiphon,
 v2rayN or Clash; any IPv6 path; Android and iPhone; whether the second
 release arrives from a line where only the tunnel reached Neoxify.
+
+## 2026-10-10 (night) — review of the three VM fixes, and what it changed (same branch, not merged)
+
+**Status:** fixed in code and in tests on this PC; none of it rerun in the
+VM
+
+Four reviewers read af99cce..5cb9e0d. Each had found the fixes incomplete:
+
+- **The banner could still lie (S4).** A reason to ask again that came
+  while a background load ran -- a tunnel verified, a claim or report
+  answered through it -- was dropped. When the old load, sent on the bare
+  line, then failed, it put "Can't reach Neoxify right now" back above
+  "You're protected", and the next ask was up to two minutes away (a
+  probe against the real class measured 120 s). The same happened through
+  the first load, before any retrying had started. Now the newest such
+  reason is kept and asked about the moment that load ends unanswered; a
+  load that fails after Neoxify answered anything since it began says
+  "reached", not "can't reach"; the screen's own loads run through the
+  retry, so a background load never starts beside one, nor between a
+  server switch being sent and its load beginning; a background load
+  overtaken by the screen's own writes nothing on the banner and does not
+  restart the retrying; and the schedule is no longer left with no timer
+  when the resume after a hidden due time arrives during a load. Answers
+  to reads, which a load is made of, do not queue another load, so a load
+  answered in part cannot repeat with no backoff.
+- **The baseline still took 11 s where every address hangs (S2b).** The
+  hedge launched one address a second, so two seconds each for demoted
+  addresses saved one second of the walk. The demoted addresses, which
+  come last, now go together. On the fake-clock model with ten hanging,
+  demoted addresses: 11,000 ms before the first rung becomes 2,000 ms, and
+  every rung after a teardown 4,400 ms instead of 11,000 (2.5 s budget);
+  with two undemoted hanging ahead of them, 11,000 becomes 7,000. The look
+  before sending is now held to the request's budget (5,000 ms became at
+  most 2,500 against a 2.5 s deadline with a silent resolver), and only a
+  reading the walk keeps lifts an address's demotion, not an answer
+  through a tunnel not yet gone.
+- **The slot release.** The first release still goes on the press,
+  through the tunnel, as obligation 8 asks: holding the teardown until it
+  is out would keep traffic in a tunnel the customer has left. The second
+  now goes the moment the teardown confirms the tunnel gone, rather than
+  after the first's 1.5 s; not at all when the teardown could not confirm
+  it, since it would go the way the first went; and with a health race
+  that asks every undemoted address at once, instead of leading for its
+  whole 1.5 s with the address that answered last through the tunnel.
+
+Not done: the startup token refresh stays three concurrent requests. Making
+it single-flight would hand joining requests a "refused" they announce as a
+sign-out, and leave their traces without the renewal leg the unanswered
+reports are built from; the backend does no reuse detection, so the cost
+is requests, not sessions.
+
+**Proven -- tests on this PC:** desktop `pnpm test` 1395 / 77 files and
+`pnpm typecheck`; mobile 239 / 16 and `tsc`; desktop `cargo check
+--workspace --all-targets` and `cargo test --workspace` (49, 58, 487; no
+Rust changed). Each new test fails against the previous source.
+
+**Unverified:** all of this in the VM, and everything listed above as
+unverified. Two gaps measured rather than fixed: with nothing yet known
+about a network and every address hanging, the baseline still takes its
+12 s ceiling, since nothing says which address is dead; and the 2 s
+given to a demoted address can turn a provable "You're protected" into
+"Connected, not confirmed" on a throttled link where that address answers
+in 2.5 to 5 s -- honest, but less proof, and no rig has such a link.

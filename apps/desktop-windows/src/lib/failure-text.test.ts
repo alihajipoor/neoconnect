@@ -297,7 +297,9 @@ describe("the dashboard's banner over the cached snapshot", () => {
       const screen = readFileSync(new URL(path, import.meta.url), "utf8");
       expect(screen, path).toContain("{offlineText(offlineReason, t).title}");
       expect(screen, path).not.toContain('{t("dash.offlineTitle")}');
-      expect(screen, path).toContain('const reason = failed && !failed.ok ? reasonFor(failed) : "unreached";');
+      expect(screen, path).toMatch(
+        /const reason = reasonAfterUnansweredLoad\(\s*failed && !failed\.ok \? reasonFor\(failed\) : "unreached",\s*answersHeardRef\.current !== answersAtStart,\s*\);/,
+      );
     }
   });
 });

@@ -4,7 +4,10 @@ import {
   OFFLINE_RETRY_EVERY_MS,
   OfflineRetry,
   offlineRetryDelay,
+  OWN_LOAD_EXPECTED_MS,
+  reasonAfterUnansweredLoad,
   RESUME_RETRY_GAP_MS,
+  type OfflineLoadOutcome,
   type OfflineRetryTrigger,
 } from "./offline-retry";
 
@@ -16,24 +19,24 @@ import {
  * their own, with loads that answer when the test says so. */
 
 /** A clock and a timer queue, run by hand. */
-function harness(options: { hidden?: boolean; busy?: boolean } = {}) {
+function harness(options: { hidden?: boolean } = {}) {
   let now = 0;
   let nextId = 1;
   const timers = new Map<number, { at: number; fn: () => void }>();
-  const state = { hidden: options.hidden ?? false, busy: options.busy ?? false };
-  /** Every load made, with what started it, when, and how to end it. */
+  const state = { hidden: options.hidden ?? false };
+  /** Every background load made, with what started it, when, and how to
+   * end it. */
   const loads: {
     why: OfflineRetryTrigger;
     at: number;
-    end: (answered: boolean) => void;
+    end: (outcome: OfflineLoadOutcome) => void;
     fail: (err: Error) => void;
   }[] = [];
   const retry = new OfflineRetry({
     load: (why) =>
-      new Promise<boolean>((resolve, reject) => {
+      new Promise<OfflineLoadOutcome>((resolve, reject) => {
         loads.push({ why, at: now, end: resolve, fail: reject });
       }),
-    busy: () => state.busy,
     hidden: () => state.hidden,
     now: () => now,
     setTimer: (fn, ms) => {
@@ -60,15 +63,45 @@ function harness(options: { hidden?: boolean; busy?: boolean } = {}) {
   }
   /** Lets a load's answer reach the schedule. */
   async function settle() {
-    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
   }
-  /** Ends the load in flight. */
-  async function answer(answered: boolean) {
+  /** Ends the background load in flight. */
+  async function answer(answered: boolean | OfflineLoadOutcome) {
     const last = loads[loads.length - 1];
-    last.end(answered);
+    last.end(answered === true ? "answered" : answered === false ? "unanswered" : answered);
     await settle();
   }
-  return { retry, loads, state, advance, answer, settle, pending: () => timers.size, now: () => now };
+  /** Begins one of the screen's own loads, as `loadAll` does, and returns
+   * how to end it: with `fellBack`, the way a load that fell back to the
+   * snapshot ends -- `start()` called before it returns -- and otherwise
+   * as one that was answered, which calls `stop()`. */
+  function own() {
+    let finish: () => void = () => undefined;
+    let fellBack = false;
+    const done = retry.ownLoad(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }).then(() => {
+          if (fellBack) retry.start();
+          else retry.stop();
+        }),
+    );
+    return {
+      async fail() {
+        fellBack = true;
+        finish();
+        await done;
+        await settle();
+      },
+      async succeed() {
+        finish();
+        await done;
+        await settle();
+      },
+    };
+  }
+  return { retry, loads, state, advance, answer, own, settle, pending: () => timers.size, now: () => now };
 }
 
 describe("the schedule", () => {
@@ -145,20 +178,19 @@ describe("never more than one load", () => {
     h.retry.trigger("online");
     h.retry.trigger("tunnel");
     h.retry.trigger("resume");
-    await h.advance(600_000);
+    await h.advance(5_000);
     expect(h.loads).toHaveLength(1);
   });
 
   it("waits for a load of the screen's own, and does not count that as a failure", async () => {
     const h = harness();
     h.retry.start();
-    h.state.busy = true;
+    const load = h.own();
     await h.advance(15_000);
     expect(h.loads).toHaveLength(0);
-    h.retry.trigger("online");
+    await load.fail();
+    // Rescheduled at the same step when it fell due, not the next one.
     expect(h.loads).toHaveLength(0);
-    h.state.busy = false;
-    // Rescheduled at the same step, not the next one.
     await h.advance(15_000);
     expect(h.loads).toHaveLength(1);
     expect(h.loads[0].at).toBe(30_000);
@@ -172,6 +204,216 @@ describe("never more than one load", () => {
     await h.settle();
     expect(h.retry.isActive()).toBe(true);
     await h.advance(30_000);
+    expect(h.loads).toHaveLength(2);
+  });
+
+  /** A server switch's answer is one of Neoxify's. Asked about at once, it
+   * started a background load a moment before the switch's own load began
+   * beside it: two copies of the account, the plan and the credentials on
+   * a censored network. */
+  it("starts nothing between a server switch being sent and its load beginning", async () => {
+    const h = harness();
+    h.retry.start();
+    await h.advance(1_000);
+    const switched = h.retry.expectOwnLoad();
+    h.retry.trigger("answered"); // the switch's answer
+    expect(h.loads).toHaveLength(0);
+    // Its load begins, and only then is the wait called over.
+    const load = h.own();
+    switched();
+    expect(h.loads).toHaveLength(0);
+    // That load is the asking again for the switch's answer: answered, it
+    // ends the retrying, and nothing more goes out.
+    await load.succeed();
+    await h.advance(600_000);
+    expect(h.loads).toHaveLength(0);
+    expect(h.retry.isActive()).toBe(false);
+  });
+
+  it("asks at once when the switch fails, for what came while it was out", async () => {
+    const h = harness();
+    h.retry.start();
+    await h.advance(1_000);
+    const switched = h.retry.expectOwnLoad();
+    h.retry.trigger("tunnel");
+    expect(h.loads).toHaveLength(0);
+    await h.advance(2_000);
+    switched(); // failed: no load of the screen's own follows
+    expect(h.loads.map((l) => [l.why, l.at])).toEqual([["tunnel", 3_000]]);
+  });
+
+  it("does not wait for a switch that never says how it ended for longer than its limit", async () => {
+    const h = harness();
+    h.retry.start();
+    h.retry.expectOwnLoad();
+    await h.advance(OWN_LOAD_EXPECTED_MS - 1);
+    expect(h.loads).toHaveLength(0);
+    await h.advance(15_001);
+    expect(h.loads).toHaveLength(1);
+  });
+});
+
+/** The VM's banner, back in a narrower race. A background load is sent
+ * on the bare line, which drops Neoxify's addresses; a Connect meanwhile
+ * is verified and its reports are answered through the tunnel; the old
+ * load then fails. The tunnel's and the answer's reasons to ask were
+ * dropped while it ran, and the next ask was up to two minutes away. */
+describe("a reason to ask that comes while a load is under way", () => {
+  it("is asked about the moment that load ends unanswered", async () => {
+    const h = harness();
+    h.retry.start();
+    // Deep in the backoff, as a screen that has been on its snapshot for
+    // a few minutes is: the next step is two minutes.
+    for (const wait of [15_000, 30_000, 60_000]) {
+      await h.advance(wait);
+      await h.answer(false);
+    }
+    await h.advance(120_000);
+    expect(h.loads).toHaveLength(4);
+    const x = h.now();
+    await h.advance(8_000);
+    h.retry.trigger("tunnel");
+    await h.advance(1_000);
+    h.retry.trigger("answered");
+    await h.advance(2_500);
+    expect(h.loads).toHaveLength(4);
+    await h.answer(false); // the bare-line load, at X + 11.5 s
+    expect(h.loads).toHaveLength(5);
+    expect(h.loads[4].at).toBe(x + 11_500);
+    // The newest reason, once: not one load for each.
+    expect(h.loads[4].why).toBe("answered");
+    await h.answer(true);
+    expect(h.retry.isActive()).toBe(false);
+    await h.advance(600_000);
+    expect(h.loads).toHaveLength(5);
+  });
+
+  it("is dropped when the load under way is answered", async () => {
+    const h = harness();
+    h.retry.start();
+    await h.advance(15_000);
+    h.retry.trigger("tunnel");
+    await h.answer(true);
+    await h.advance(600_000);
+    expect(h.loads).toHaveLength(1);
+    expect(h.pending()).toBe(0);
+  });
+
+  it("is dropped, when it is an answer to a read, as the load's own", async () => {
+    const h = harness();
+    h.retry.start();
+    await h.advance(15_000);
+    // The account answered and the plan did not: the load fails, and the
+    // account's answer is no reason to make it again before the backoff.
+    h.retry.trigger("answered", { ifLoading: "drop" });
+    await h.answer(false);
+    await h.advance(29_999);
+    expect(h.loads).toHaveLength(1);
+    await h.advance(1);
+    expect(h.loads).toHaveLength(2);
+  });
+
+  it("is asked about when the screen's own load ends unanswered, while already retrying", async () => {
+    const h = harness();
+    h.retry.start();
+    await h.advance(1_000);
+    const load = h.own();
+    h.retry.trigger("tunnel");
+    await h.advance(5_000);
+    expect(h.loads).toHaveLength(0);
+    await load.fail();
+    expect(h.loads.map((l) => [l.why, l.at])).toEqual([["tunnel", 6_000]]);
+  });
+
+  /** At launch the snapshot goes up while the first load still waits on a
+   * filtered path, and the customer connects. The claim is answered and
+   * the tunnel verified while that load runs, before any retrying has
+   * started; when it fails, the first ask used to be fifteen seconds
+   * away. */
+  it("is kept through the first load, before the retrying has started", async () => {
+    const h = harness();
+    const first = h.own();
+    await h.advance(8_000);
+    h.retry.trigger("answered");
+    h.retry.trigger("tunnel");
+    expect(h.loads).toHaveLength(0);
+    await h.advance(15_000);
+    await first.fail();
+    expect(h.loads.map((l) => [l.why, l.at])).toEqual([["tunnel", 23_000]]);
+  });
+
+  it("is dropped when the screen's own load is answered", async () => {
+    const h = harness();
+    const first = h.own();
+    h.retry.trigger("tunnel");
+    await first.succeed();
+    await h.advance(600_000);
+    expect(h.loads).toHaveLength(0);
+    // Nor kept for a later fall back to the snapshot.
+    h.retry.start();
+    expect(h.loads).toHaveLength(0);
+  });
+
+  it("is cleared by a load that begins after it, which is the asking again", async () => {
+    const h = harness();
+    h.retry.start();
+    await h.advance(15_000);
+    h.retry.trigger("tunnel");
+    // A server switch's load begins while the background one still runs.
+    const load = h.own();
+    await h.answer("superseded");
+    await load.fail();
+    // Nothing at once: the switch's load began after the tunnel and was
+    // not answered either. The backoff, at the step it was at.
+    expect(h.loads).toHaveLength(1);
+    await h.advance(15_000);
+    expect(h.loads).toHaveLength(2);
+  });
+
+  it("is kept while the app is hidden, and asked about on coming back, whatever the gap", async () => {
+    const h = harness();
+    h.retry.start();
+    await h.advance(15_000);
+    await h.answer(false);
+    h.state.hidden = true;
+    await h.advance(1_000);
+    h.retry.trigger("tunnel");
+    expect(h.loads).toHaveLength(1);
+    await h.advance(1_000);
+    h.state.hidden = false;
+    // Two seconds after the last load began: a resume alone would not ask.
+    h.retry.trigger("resume");
+    expect(h.loads).toHaveLength(2);
+  });
+});
+
+describe("a load superseded by one of the screen's own", () => {
+  /** A background load in flight; the customer switches server, and the
+   * switch's load is answered and stops the retrying. The background
+   * load, sent to a slow mirror, then fails -- and used to start the
+   * retrying again on a screen no longer on its snapshot. */
+  it("does not start the retrying again after the screen's own load was answered", async () => {
+    const h = harness();
+    h.retry.start();
+    await h.advance(15_000);
+    const load = h.own();
+    await load.succeed();
+    expect(h.retry.isActive()).toBe(false);
+    await h.answer("superseded");
+    expect(h.retry.isActive()).toBe(false);
+    await h.advance(600_000);
+    expect(h.loads).toHaveLength(1);
+  });
+
+  it("is not counted as a failure", async () => {
+    const h = harness();
+    h.retry.start();
+    await h.advance(15_000);
+    const load = h.own();
+    await h.answer("superseded");
+    await load.fail();
+    // Still at the first step: fifteen seconds, not thirty.
+    await h.advance(15_000);
     expect(h.loads).toHaveLength(2);
   });
 });
@@ -209,6 +451,9 @@ describe("asking at once", () => {
     h.retry.trigger("answered");
     h.retry.trigger("tunnel");
     h.retry.trigger("online");
+    expect(h.loads).toHaveLength(0);
+    // And keeps none of them for later.
+    h.retry.start();
     expect(h.loads).toHaveLength(0);
   });
 
@@ -260,6 +505,29 @@ describe("while hidden", () => {
     await h.advance(60_000);
     expect(h.loads).toHaveLength(3);
   });
+
+  /** The resume that should make the load due while hidden arrives while
+   * a load of the screen's own runs. It used to be refused, and the
+   * retrying was left with no timer at all once that load failed. */
+  it("makes the load due while hidden once a load of the screen's own that held up the resume ends", async () => {
+    const h = harness();
+    h.retry.start();
+    await h.advance(15_000);
+    await h.answer(false);
+    h.state.hidden = true;
+    await h.advance(300_000);
+    expect(h.pending()).toBe(0);
+    const load = h.own();
+    h.state.hidden = false;
+    h.retry.trigger("resume");
+    expect(h.loads).toHaveLength(1);
+    await h.advance(3_000);
+    await load.fail();
+    expect(h.loads.map((l) => [l.why, l.at])).toEqual([
+      ["timer", 15_000],
+      ["resume", 318_000],
+    ]);
+  });
 });
 
 describe("after the screen has gone", () => {
@@ -283,10 +551,26 @@ describe("after the screen has gone", () => {
     const h = harness();
     h.retry.start();
     await h.advance(15_000);
+    h.retry.trigger("tunnel");
     h.retry.detach();
     await h.answer(false);
     await h.advance(600_000);
     expect(h.loads).toHaveLength(1);
     expect(h.pending()).toBe(0);
+  });
+});
+
+describe("what the banner says after a load nothing answered", () => {
+  it("says Neoxify was reached when it answered anything after the load began", () => {
+    expect(reasonAfterUnansweredLoad("unreached", true)).toBe("reached");
+  });
+
+  it("says it could not be reached when nothing has answered since", () => {
+    expect(reasonAfterUnansweredLoad("unreached", false)).toBe("unreached");
+  });
+
+  it("keeps an error the backend answered the load with, which is itself the newest answer", () => {
+    const failure = { error: "Server error", status: 500 };
+    expect(reasonAfterUnansweredLoad(failure, true)).toBe(failure);
   });
 });

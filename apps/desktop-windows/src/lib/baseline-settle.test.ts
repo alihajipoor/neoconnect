@@ -41,6 +41,9 @@ const net = {
   answering: new Set<string>(),
   /** Endpoints refused at once. The rest hang for their whole budget. */
   refused: new Set<string>(),
+  /** Whether the resolver never answers: a device moved to a network
+   * whose resolver is slow or silent. */
+  resolverSilent: false,
 };
 /** Every `/health/ip` request sent, in order. */
 const sent: string[] = [];
@@ -53,6 +56,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       const host = args?.host ?? "";
       lookups.push({ host, unlessProxied: args?.unlessProxied === true });
       if (args?.unlessProxied && net.proxied) return Promise.reject("proxied");
+      if (net.resolverSilent) return new Promise<string[]>(() => undefined);
       return Promise.resolve(net.blockPage.has(host) ? ["10.10.34.35"] : ["198.51.100.7"]);
     }
     return Promise.reject(new Error(`not registered: ${command}`));
@@ -62,7 +66,7 @@ vi.mock("@tauri-apps/plugin-http", () => ({
   fetch: () => Promise.reject(new Error("the installed transport is the one under test")),
 }));
 
-const { setHealthIpTransport, EGRESS_TIMEOUT_MS, DEMOTED_BASELINE_MS } = await import("./egress");
+const { captureBaselineIp, setHealthIpTransport, EGRESS_TIMEOUT_MS, DEMOTED_BASELINE_MS } = await import("./egress");
 const { settleAndCaptureBaseline } = await import("./baseline-settle");
 const demotion = await import("./endpoint-demotion");
 
@@ -76,6 +80,7 @@ beforeEach(() => {
   demotion.resetDemotionsForTests();
   net.blockPage = new Set(MIRRORS.map((base) => new URL(base).hostname));
   net.proxied = false;
+  net.resolverSilent = false;
   net.answering = new Set();
   net.refused = new Set([ORIGIN, CDN]);
   sent.length = 0;
@@ -203,6 +208,117 @@ describe("addresses that hang rather than refuse", () => {
     // Hedged a second apart, two seconds each.
     expect(ms).toBeLessThanOrEqual(1_000 + DEMOTED_BASELINE_MS + 100);
     expect(ms).toBeLessThan(EGRESS_TIMEOUT_MS);
+  });
+});
+
+/** Every address hangs: SNI or DPI drops the ClientHello, or the addresses
+ * are blackholed -- the VM's S2b, and a common shape in Iran. The
+ * dashboard's failed load has timed out on every one of them, so every
+ * one is demoted. Each got two seconds, but the hedge launched one a
+ * second, so the walk still took eleven: before the first rung, and again
+ * on every rung after a teardown -- about 55 s of a five-rung ladder spent
+ * on baselines that could not be had. */
+describe("when every address hangs", () => {
+  function everyAddressHangs() {
+    net.refused.clear();
+    net.blockPage.clear();
+    for (const base of LIST) demotion.demoteEndpoint(base);
+  }
+
+  it("gives up on the baseline before the first rung in about two seconds, not eleven", async () => {
+    everyAddressHangs();
+    const { ms, baseline } = await timed(FAILOVER_SETTLE_TIMEOUT_MS, false);
+    expect(baseline).toBeNull();
+    // Before: 11,000 ms on this model. Every address is still asked.
+    expect(ms).toBeLessThanOrEqual(DEMOTED_BASELINE_MS + 100);
+    expect([...sent].sort()).toEqual([...LIST].sort());
+  });
+
+  it("gives up again within the settle's budget and one walk on every rung after a teardown", async () => {
+    everyAddressHangs();
+    const { ms, baseline } = await timed(FAILOVER_SETTLE_TIMEOUT_MS, true);
+    expect(baseline).toBeNull();
+    // Before: 11,000 ms a rung. Now the settle's budget, and the walk that
+    // was under way when it ran out.
+    expect(ms).toBeLessThanOrEqual(FAILOVER_SETTLE_TIMEOUT_MS + DEMOTED_BASELINE_MS + 500);
+  });
+
+  it("still asks the addresses not demoted first, a hedge apart, and the demoted ones together after them", async () => {
+    net.refused.clear();
+    net.blockPage.clear();
+    for (const base of MIRRORS) demotion.demoteEndpoint(base);
+    const times: number[] = [];
+    const start = Date.now();
+    setHealthIpTransport((base, timeoutMs) => {
+      sent.push(base);
+      times.push(Date.now() - start);
+      return new Promise((_, reject) => setTimeout(() => reject(new Error("no answer")), timeoutMs));
+    });
+    const { ms, baseline } = await timed(FAILOVER_SETTLE_TIMEOUT_MS, false);
+    expect(baseline).toBeNull();
+    expect(sent.slice(0, 2)).toEqual([ORIGIN, CDN]);
+    expect(times.slice(0, 3)).toEqual([0, 1_000, 2_000]);
+    expect(new Set(times.slice(2))).toEqual(new Set([2_000]));
+    // The panel host and the CDN get their six seconds: nothing says they
+    // are dead here. Before: 11,000 ms.
+    expect(ms).toBe(1_000 + EGRESS_TIMEOUT_MS);
+  });
+
+  /** Nothing known about the network at all -- no load has failed on it --
+   * and every address hangs: nothing says which one is dead, so each still
+   * gets its six seconds, a hedge apart, up to the walk's ceiling. This is
+   * the case the demotions cannot help with, measured so it is not
+   * mistaken for fixed. */
+  it("still takes the walk's ceiling when nothing has failed on this network before", async () => {
+    net.refused.clear();
+    net.blockPage.clear();
+    const { ms, baseline } = await timed(FAILOVER_SETTLE_TIMEOUT_MS, false);
+    expect(baseline).toBeNull();
+    expect(ms).toBe(2 * EGRESS_TIMEOUT_MS);
+  });
+});
+
+describe("the look before sending", () => {
+  /** A name already found on the block page here, and a resolver that is
+   * now slow or silent. The look was awaited outside the request's budget,
+   * so up to three more seconds came on top of it, past the deadline that
+   * no request is meant to outlive. */
+  it("is held to the request's budget, so the walk keeps its deadline", async () => {
+    const mirror = MIRRORS[0];
+    demotion.demoteName(new URL(mirror).hostname);
+    net.resolverSilent = true;
+    const start = Date.now();
+    let done: number | null = null;
+    void captureBaselineIp({ only: mirror, deadline: start + FAILOVER_SETTLE_TIMEOUT_MS }).then(() => {
+      done = Date.now();
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(done).not.toBeNull();
+    // Before: 5,000 ms -- the look's three, then the request's two.
+    expect((done as unknown as number) - start).toBeLessThanOrEqual(FAILOVER_SETTLE_TIMEOUT_MS);
+  });
+});
+
+describe("an answer the walk passes over", () => {
+  /** After a teardown whose routes have not gone yet, an endpoint can
+   * answer through the old tunnel with the node's address. The walk
+   * passes the reading over, and that answer proves nothing about the bare
+   * line -- but it used to lift the address's demotion there, and the next
+   * API race on the bare line led with an address that is dead on it. */
+  it("leaves the address's demotion on this network as it was", async () => {
+    const NODE = "203.0.113.20";
+    net.refused.clear();
+    demotion.demoteEndpoint(CDN);
+    setHealthIpTransport((base) => {
+      sent.push(base);
+      if (base === CDN) return Promise.resolve({ status: 200, body: { ip: NODE }, peer: "198.51.100.9" });
+      return Promise.reject(new Error("no answer"));
+    });
+    let result: unknown = "pending";
+    void captureBaselineIp({ only: CDN, nodeAddresses: [NODE] }).then((baseline) => (result = baseline));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(result).toBeNull();
+    expect(demotion.isDemoted(CDN)).toBe(true);
   });
 });
 
