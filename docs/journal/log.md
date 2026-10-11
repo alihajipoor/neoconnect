@@ -6183,3 +6183,95 @@ reach" (the health check never asks for the load again, so its 15 s poll
 cannot defeat the backoff); one token refresh per expiry, its outcome and
 trace legs shared; a known baseline endpoint demoted or block-paged here
 is skipped for the hedged walk.
+
+## 2026-10-11 — desktop capture, phases 1 and 2 (branch `claude/desktop-capture`, not merged, not pushed)
+
+**Status:** in code and in tests on this PC; **no VM run for this
+branch**. Commits `ccde938..c0b516e` on `origin/main` (93b5d49).
+
+What changed, in the order built (the commit messages carry the why):
+
+- **Routes left on the uplink.** A host route to the node sits on the
+  physical adapter, where none of our cleanups looked. The service now
+  reads the table as rows (`engines/route_table.rs`), keeps a ledger of
+  host routes it owes the machine (`owed-routes.json` in the config
+  directory: written before the add, struck off after the delete, replayed
+  by the janitor at service start and by Repair), takes over the host
+  routes openvpn.exe pushes so that Disconnect, the dead-session teardown
+  and the hard stop remove them, and at the top of every connect deletes
+  host routes to the servers the app knows (`known_nodes`, a new
+  serde-default field on `Connect`) that an earlier session left. Xray's
+  own host route is deleted before it is added if one is already there --
+  an identical one used to fail the connect. Deletes are native, by the
+  exact row (interface and next hop), so the phase-one teardowns run at
+  most two `route.exe`.
+- **The uplink.** The host route goes by Windows' best route to the
+  server (`GetBestRoute2`), taken before xray.exe starts, and an on-link
+  0.0.0.0 next hop (PPP) is accepted. The old rule -- first adapter with a
+  gateway -- is the fallback, and Custom mode still uses it.
+- **The app's own residue.** A pnpm patch to `@tauri-apps/plugin-http`
+  2.5.9 releases null-body responses (204/205/304), which the plugin never
+  freed; a page the request ends on has its body cancelled; while a tunnel
+  is up and its server is reached around (Xray, OpenVPN, IKEv2 on
+  Windows) the connected server's own snapshot mirrors are asked last; a
+  connect this machine refused (`os error 10013`) is traced as `local` and
+  the control-plane probe reports it as `local`, never as `tcp`.
+- **W1.** WireGuard's full tunnel gets our IPv6 block, beside
+  wireguard.exe's own kill switch (kept), so a forced IPv6 connect fails
+  on the PC instead of waiting 6-8 s on a tunnel with no IPv6. The status
+  poll now reports `ipv6Blocked` for WireGuard, so the app shows the
+  full-tunnel IPv6 line there too.
+- **W2.** Custom mode on WireGuard and OpenVPN installs the same NRPT rule
+  (`.` -> 1.1.1.1) Xray and IKEv2 already did, so selected apps' lookups
+  reach the redirect instead of the router. A rule that will not install
+  is reported as unprotected DNS, which the app already warns on.
+
+**Not built, on purpose (TODO, gated on a VM measurement that has not
+run):** 1.6, DAD readiness (`DadTransmits=0` and waiting for Preferred) --
+only if P0-A shows the 1.5-3 s dead window after connect is the address
+still Tentative with 10049s; 1.7, the IPv6 block's V6 permits for the
+tunnel LUID and `::ffff:0:0/96` -- only once P0-B says whether a dual-mode
+socket's IPv4 is classified at the V6 layers. Phase 3 (IPv4 confinement)
+waits on the owner's decisions (a)-(e) in the design; Phase 4 is optional.
+
+**Proven -- tests on this PC:** desktop `cargo test --workspace` 50, 59,
+513 (were 49, 58, 487), `cargo check --workspace --all-targets` clean of
+new warnings; desktop `pnpm test` 1436 / 80 files (were 1424 / 78) and
+`pnpm typecheck`; mobile `pnpm test` 239 / 16 and `tsc`. Each new test was
+run against a stand-in for the previous behaviour first and failed. The
+route-teardown test runs 32 OpenVPN sessions at once on one table --
+Disconnect, hard stop, engine death, and death racing the hard stop -- and
+the ledger test 32 writers on one file, which fails without its lock. One
+flake seen once under load and passing alone: the picker's explorer.exe
+icon test (`split_tunnel/picker/icon.rs`), untouched here.
+
+**Unverified -- every behaviour above on a real machine.** No VM run for
+this branch: the leftover route gone after Compatible and after a killed
+service, the stale purge on an upgraded machine, the uplink with two
+adapters and with the network going away mid-connect, zero frames to the
+API front after Connect + 3.5 s, the connected node's mirror not asked at
+the NIC while another answers, WireGuard's forced IPv6 failing fast with
+no IPv6 at the NIC, and Custom mode on Fast and Compatible with a
+router-style resolver sending no port 53 to it. Beyond the VM: a real
+Iranian line; a real IPv6 path (this PC has none); Wi-Fi roaming and
+sleep/resume; PPPoE -- the on-link uplink is accepted now but has never
+been dialled, and the native delete matches the next hop, so if Windows
+records a `route.exe` on-link route with a next hop other than 0.0.0.0
+the delete would miss it and the ledger strike it off; Mobile Hotspot,
+WSL2, Hyper-V and Docker; another VPN installed; phones (the plugin patch
+ships to them too; nothing else of this does).
+
+Gaps stated rather than closed:
+
+- **W1 widens an unverified risk.** If a dual-mode socket's IPv4 is
+  classified at the V6 layers (P0-B), our IPv6 block refuses that IPv4 --
+  already true on Xray, OpenVPN and IKEv2, now on WireGuard as well, where
+  wireguard.exe's tunnel permit had let it through. 1.7 is the fix and is
+  gated on the same measurement.
+- **10013 through the HTTP plugin is still `net`.** The plugin's errors
+  carry no cause (reqwest's Display drops it), so only the probe and our
+  own commands can say `local`.
+- **OpenVPN's adoption** takes new host routes on the best-route uplink
+  and any new one to the server on another adapter; a `bypass-dhcp` route
+  on some other adapter would be missed. The known-nodes purge and the
+  ledger cover the node's route either way.
