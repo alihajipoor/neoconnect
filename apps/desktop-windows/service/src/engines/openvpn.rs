@@ -423,6 +423,18 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     // as running a test.
     let dns = if passive { "" } else { "block-outside-dns\n" };
 
+    // Custom mode keeps the server's address across OpenVPN's own restarts.
+    //
+    // A ping-restart looks `remote` up again unless told not to, through
+    // the DNS Client like any other lookup. In Custom mode that lookup is
+    // pinned to 1.1.1.1 by the NRPT rule and carried into the tunnel by
+    // the redirect -- the tunnel that is down and restarting -- so it
+    // times out, and with `resolv-retry infinite` OpenVPN never reconnects.
+    // Only a server named by a hostname is exposed; the first lookup, at
+    // connect, happens before the rule exists. A full tunnel is left as
+    // it was.
+    let keep_remote = if passive { "persist-remote-ip\n" } else { "" };
+
     // The tunnel's MTU, pinned, and the server's pushed value refused.
     //
     // This is the failure `MTU = 1420` in wireguard.rs already exists to
@@ -484,6 +496,7 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
          nobind\n\
          persist-key\n\
          persist-tun\n\
+         {keep_remote}\
          remote-cert-tls server\n\
          cipher AES-256-GCM\n\
          auth SHA256\n\
@@ -818,6 +831,45 @@ mod tests {
         // silently becomes a full tunnel.
         assert!(build_config(&profile(), true).unwrap().contains("route-nopull"));
         assert!(!build_config(&profile(), false).unwrap().contains("route-nopull"));
+    }
+
+    /// Custom mode keeps the server's address across OpenVPN's own
+    /// restarts instead of looking its name up again.
+    ///
+    /// Custom mode now pins the machine's lookups to 1.1.1.1, and the
+    /// redirect carries them into the tunnel. A ping-restart re-resolves
+    /// `remote` unless told not to, and that lookup -- through the DNS
+    /// Client like any other -- then went into the very tunnel that was
+    /// down and restarting; with `resolv-retry infinite` OpenVPN waited on
+    /// it for ever, where before W2 it went to the router and the
+    /// reconnect worked. Only a server named by a hostname is exposed, which
+    /// the installer allows. The first lookup, at connect, happens before
+    /// the rule exists.
+    #[test]
+    fn custom_mode_keeps_the_servers_address_across_its_own_restarts() {
+        let named = OpenvpnProfile { endpoint: "vpn.example.test:1194".into(), ..profile() };
+        assert!(build_config(&named, true).unwrap().contains("\npersist-remote-ip\n"));
+        // A full tunnel is as it was: its DNS is the pushed one, and nothing
+        // of Custom mode's applies.
+        assert!(!build_config(&named, false).unwrap().contains("persist-remote-ip"));
+    }
+
+    /// The Custom-mode rule is installed by `connect` itself, and only
+    /// once OpenVPN says the tunnel is up. The policy above is a function
+    /// of its own, and deleting the call that uses it brought the leak
+    /// back with every other test still passing; this holds the call where
+    /// it is, from the source, as `repair`'s survey order is held.
+    #[test]
+    fn connect_installs_the_custom_mode_rule_once_the_tunnel_is_up() {
+        let source = include_str!("openvpn.rs");
+        let start = source.find("pub fn connect(").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let up = body.find("Ok(child) => {").expect("the arm for a tunnel that came up");
+        let failed = body[up..].find("Err(e) => {").map(|at| up + at).expect("the arm for a failed connect");
+        let arm = &body[up..failed];
+        let rule = arm.find("if let Some(resolver) = machine_dns_rule(passive) {").expect("the rule is asked for");
+        assert!(arm[rule..].contains("super::dns::force(resolver);"), "the rule is not installed");
+        assert!(!body[..up].contains("dns::force("), "the rule must not go in before the tunnel is up");
     }
 
     #[test]

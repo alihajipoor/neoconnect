@@ -591,6 +591,22 @@ mod tests {
         assert_eq!(machine_dns_rule(false), None);
     }
 
+    /// The rule above is installed by `connect` itself, once the tunnel
+    /// service is in. The policy is a function of its own, and deleting the
+    /// call that uses it brought the leak back with every other test still
+    /// passing; this holds the call where it is, from the source, as
+    /// `repair`'s survey order is held.
+    #[test]
+    fn connect_installs_the_custom_mode_rule_after_the_tunnel_service() {
+        let source = include_str!("wireguard.rs");
+        let start = source.find("pub fn connect(").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let installed = body.find("if !status.success() {").expect("the tunnel service install is checked");
+        let rule = body.find("if let Some(resolver) = machine_dns_rule(passive) {").expect("the rule is asked for");
+        assert!(rule > installed, "the rule must not go in before the tunnel service is installed");
+        assert!(body[rule..].contains("super::dns::force(resolver);"), "the rule is not installed");
+    }
+
     const NOW: u64 = 1_700_000_000;
 
     /// Guards the actual command, which the parser tests cannot: they

@@ -1256,6 +1256,13 @@ impl Engines {
             let _ = self.disconnect();
             return Err(e);
         }
+        // Once the redirect carries lookups, not only when the rule went
+        // in. Every engine installs Custom mode's rule inside its own
+        // connect, seconds before this; lookups in between went to 1.1.1.1
+        // in clear text by the physical link, and on a line that hijacks
+        // port 53 the block page's answer was cached and served to the
+        // selected applications through the redirect afterwards.
+        dns::flush_cache();
         Ok(())
     }
 
@@ -3855,5 +3862,25 @@ mod helper_tests {
         assert!(table.table().contains(&customers), "a host route to an unknown address was taken");
         assert!(engines.owed_routes().read().is_empty(), "a removed route is still owed");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The DNS cache is flushed once Custom mode's redirect is carrying
+    /// lookups, not only when the rule went in.
+    ///
+    /// Every engine installs Custom mode's rule inside its own connect,
+    /// and the redirect starts seconds later, after the relays and the
+    /// firewall allowance. Lookups in between went to 1.1.1.1 in clear
+    /// text over the physical link, and on a line that hijacks port 53 the
+    /// block page's answer was cached and served to selected applications
+    /// after the redirect had started. From the source, as `repair`'s
+    /// survey order is held: the order is the whole of the fix.
+    #[test]
+    fn the_dns_cache_is_flushed_once_the_redirect_is_carrying_lookups() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn start_split_tunnel(").unwrap();
+        let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+        let started = body.find("self.split_tunnel.start(").expect("the redirect is started here");
+        let flushed = body.find("dns::flush_cache();").expect("nothing flushes the cache once it has");
+        assert!(flushed > started, "the cache is flushed before the redirect carries anything");
     }
 }
