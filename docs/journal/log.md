@@ -6188,7 +6188,8 @@ is skipped for the hedged walk.
 
 **Status:** in code and in tests on this PC; **no VM run for this
 branch**. Commits `ccde938..c0b516e` on `origin/main` (93b5d49), this
-entry (`cbc72ca`), then the review round below (`be5b475..`).
+entry (`cbc72ca`), then the review round below (`be5b475..bb2c89c`) and
+the second one (`64039ee..`).
 
 What changed, in the order built (the commit messages carry the why):
 
@@ -6313,12 +6314,12 @@ Gaps stated rather than closed:
   already true on Xray, OpenVPN and IKEv2, now on WireGuard as well, where
   wireguard.exe's tunnel permit had let it through. 1.7 is the fix and is
   gated on the same measurement.
-- **10013 through the HTTP plugin is still `net`.** The plugin's errors
-  carry no cause (reqwest's Display drops it), so only the probe and our
-  own commands can say `local`. A report whose probe found every address
-  refused here says so in its reason; its outcome is still
-  CONTROL_PLANE_UNREACHABLE, which the panel reads as filtering, until the
-  backend has an outcome for a local refusal.
+- **10013 through the HTTP plugin is still `net` in the trace.** The
+  plugin's errors carry no cause (reqwest's Display drops it), so only the
+  probe and our own commands can say `local`. Since the second round a
+  report whose every attempt failed within 50 ms, and whose probe's
+  connect was refused here, is filed as OTHER with the reason; what that
+  still misses is listed there.
 - **OpenVPN's adoption** takes new `NETMGMT` host routes on the
   best-route uplink through its gateway, and any new one to the server on
   another adapter; a `bypass-dhcp` route on some other adapter would be
@@ -6334,8 +6335,9 @@ Gaps stated rather than closed:
   well, and names only the router or a company resolver knows stop
   resolving for them at all. The app does not show Connected meanwhile (a
   stale handshake reads `degraded`, an unproven tunnel `unverified`;
-  `customModePollState`), but whether its failover or a teardown gives the
-  PC its DNS back promptly in Custom mode is **unverified**, on any engine.
+  `customModePollState`). Since the second round the pin is given back
+  while the tunnel is measured not to carry -- see there for which
+  measurements, and why Xray and IKEv2 keep it through a stall.
 - **A selected application that does its own DNS to the router's
   address** -- reading the adapter's servers and sending UDP 53 itself,
   as c-ares or nslookup do -- is not captured on any engine: the
@@ -6345,3 +6347,68 @@ Gaps stated rather than closed:
 - **The lookups between the rule and the redirect** still leave in clear
   text to 1.1.1.1 for those seconds, on every engine; the flush once the
   redirect runs only stops a hijacked answer from being served after.
+
+**The second review round.** Four reviewers read `be5b475..bb2c89c`; the
+routes and the hunt found nothing above low. Three findings were fixed
+(commit messages have the detail):
+
+- **F1, `64039ee`: the 401s a token refresh walks past.** The backend's
+  JSON 401 to an expired access token was replaced by the retry unread,
+  so under the HTTP plugin it stayed parked with its connection -- the
+  first signed-in request after any idle, usually made on the bare line
+  before a connect, its connection then open by the physical adapter for
+  the session. Likewise the backend's 401 refusing the refresh, and a
+  JSON 401 from an address shown not to be the backend. Each is cancelled
+  now; sign-out semantics unchanged. That the plugin then closes the
+  connection rests on its `fetch_cancel_body`, read in 2.5.9's source.
+- **F2, `bfa6821`: a request refused on this PC was filed as a block.**
+  Without forking the plugin: when every attempt in the trace failed in
+  transport within 50 ms (`failedAtOnce`), the probe runs even inside its
+  ten-minute interval, at the first address only and without spending the
+  interval; if its connect is refused here (`local`), the report is filed
+  as **OTHER** with `REFILED_HERE_REASON` -- REJECTED would say the server
+  answered, and a new outcome is a backend and panel change. Still filed
+  as CONTROL_PLANE_UNREACHABLE: a failed pre-connect refresh (never
+  probed), a refusal met during a connect or within a minute of one, a
+  local refusal whose lookup took over 50 ms, and a filter that blocks the
+  lookup itself (the probe sees `dns`). A report already sent when the
+  probe answers gets an OTHER follow-up, as before.
+- **F3, `f386b1b`: W2 tied every application's DNS to the tunnel.** The
+  asked-for fix -- carry only the selected applications' lookups, drop the
+  machine-wide pin -- is **not possible**: the DNS Client resolves for
+  everybody under svchost's name (`is_dns` in the redirect), and without
+  the pin those lookups reach the router and the ISP, the leak W2 closed.
+  The fallback is in: the pin is **given back while the tunnel is measured
+  not to carry** -- a WireGuard handshake stale or never made, OpenVPN's
+  log ending on "process restarting", each for 15 s unbroken; at once and
+  for good when the backstop switches interception off -- and **put back,
+  with the cache flushed,** on a fresh handshake or a probe reply, before
+  that answer reaches the app. A failed probe gives nothing back: it has
+  been seen to fail while the tunnel carried. Same code on every engine,
+  but Xray and IKEv2 have no measurement of their link while their adapter
+  is up, so through a stall they keep the pin as before (interception off
+  still gives it back). While it is out a selected application's lookups
+  go to the network's resolver in clear text too -- its connections are
+  in a tunnel that is not carrying them anyway -- and the status poll does
+  not say so (the unpinned-DNS line's words say traffic flows); cleanup.log
+  does.
+
+Not changed: a selected application that does its own DNS to the router
+(c-ares, nslookup) is still not captured on any engine, and the late
+"Custom mode moves the connected server's mirrors last although the app's
+traffic never uses the tunnel" (latency, low) is still open.
+
+**Proven -- tests on this PC, second round:** desktop `cargo test
+--workspace` 50, 59, 547; `cargo check --workspace --all-targets` with no
+new warnings; desktop `pnpm test` 1459 / 83 files and `pnpm typecheck`;
+mobile `pnpm test` 239 / 16 and `tsc`. Every new test failed first, on the
+code before or on a stub standing for today's behaviour; the 32-session
+pin teardown test fails with the per-session reset removed.
+
+**Unverified, second round:** all of it on a real machine. No connection
+watched closing after a cancelled 401; no filter on this PC refusing the
+app's requests, and so no report filed as OTHER; no stalled Custom-mode
+tunnel -- WireGuard throttled, OpenVPN restarting, an adapter pulled --
+seen to give the PC its DNS back, nor the pin and the flush seen to come
+back with the tunnel. Each needs the VM, and the stall a line that can be
+throttled on cue.
