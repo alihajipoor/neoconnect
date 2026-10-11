@@ -21,7 +21,8 @@
 //! machine running the tests.
 
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, NO_ERROR};
@@ -166,6 +167,130 @@ impl RouteOps for SystemRoutes {
         match failed {
             Some(rc) => Err(format!("DeleteIpForwardEntry2 failed for {}/{} ({rc})", route.dest, route.prefix)),
             None => Ok(()),
+        }
+    }
+}
+
+/// Host routes this service has put, or taken over, on an adapter that is
+/// not its own, and has not yet removed -- written down in the config
+/// directory so that a later life of the service can remove them.
+///
+/// A route on our own adapter needs no such record: the Xray adapter goes
+/// away with the engine and takes its routes with it, and the janitor
+/// purges the OpenVPN adapter by interface. A route on the physical
+/// adapter outlives all of that. `InstalledRoutes` removes it on every
+/// teardown that runs, but a service that is killed, crashes or is
+/// upgraded mid-session runs none, and until now that route stayed until
+/// the machine rebooted -- `hard_stop` said as much. With this file, the
+/// janitor at the next start removes it.
+///
+/// Written *before* the route is added and settled only *after* it is
+/// deleted, so there is no moment at which the route exists and the
+/// record of it does not.
+///
+/// Best-effort, like every log here: a file that cannot be written must
+/// never fail the connect it describes. The second net is the stale-route
+/// purge every connect makes against the nodes the app knows.
+pub struct OwedRoutes {
+    path: PathBuf,
+}
+
+/// The ledger's file name in the config directory.
+const OWED_FILE: &str = "owed-routes.json";
+
+/// One lock for every read-modify-write of a ledger, so two sessions
+/// ending on two threads cannot each write back a list missing the
+/// other's change. There is one `Engines` on a customer's machine, but a
+/// teardown can run on a watch thread's behalf, and the tests run
+/// thirty-two at once.
+static LEDGER_LOCK: Mutex<()> = Mutex::new(());
+
+/// What settling the ledger did.
+#[derive(Debug, Default)]
+pub struct Replayed {
+    /// Routes deleted (or already gone) and struck off.
+    pub removed: Vec<RouteRow>,
+    /// Routes that would not delete, and why. Still owed.
+    pub failed: Vec<String>,
+}
+
+impl OwedRoutes {
+    pub fn in_dir(config_dir: &Path) -> Self {
+        Self { path: config_dir.join(OWED_FILE) }
+    }
+
+    /// Everything owed. A file that is missing reads as nothing owed, and
+    /// so does one that cannot be parsed: a ledger is a list of things to
+    /// try to delete, and refusing to start over a corrupt one would cost
+    /// the customer more than the routes it could no longer name.
+    pub fn read(&self) -> Vec<RouteRow> {
+        let _guard = LEDGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        self.read_unlocked()
+    }
+
+    /// Records a route as owed. Called before the route is added.
+    pub fn owe(&self, route: RouteRow) {
+        let _guard = LEDGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut owed = self.read_unlocked();
+        if !owed.iter().any(|r| r.same_route(&route)) {
+            owed.push(route);
+        }
+        self.write_unlocked(&owed);
+    }
+
+    /// Strikes a route off. Called after it is deleted.
+    pub fn settle(&self, route: &RouteRow) {
+        let _guard = LEDGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut owed = self.read_unlocked();
+        let before = owed.len();
+        owed.retain(|r| !r.same_route(route));
+        if owed.len() != before {
+            self.write_unlocked(&owed);
+        }
+    }
+
+    /// Deletes every owed route, each by its own interface and next hop,
+    /// and strikes off the ones that went.
+    ///
+    /// Scoped exactly as it was recorded, never by destination alone: the
+    /// same node address may be routed by something else on another
+    /// adapter or through another gateway, and that route is not ours to
+    /// take. A route that is no longer there -- the machine rebooted, or
+    /// the adapter went -- deletes as nothing and is struck off too.
+    pub fn replay(&self, ops: &dyn RouteOps) -> Replayed {
+        let mut replayed = Replayed::default();
+        for route in self.read() {
+            match ops.delete(&route) {
+                Ok(()) => {
+                    self.settle(&route);
+                    replayed.removed.push(route);
+                }
+                Err(why) => replayed.failed.push(format!("{}/{}: {why}", route.dest, route.prefix)),
+            }
+        }
+        replayed
+    }
+
+    fn read_unlocked(&self) -> Vec<RouteRow> {
+        std::fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// Written whole to a temporary file and renamed over the ledger, so
+    /// a crash mid-write leaves the old list rather than half a new one.
+    /// An empty list removes the file: nothing owed is the ordinary state
+    /// and should leave nothing behind in the config directory.
+    fn write_unlocked(&self, owed: &[RouteRow]) {
+        if owed.is_empty() {
+            let _ = std::fs::remove_file(&self.path);
+            return;
+        }
+        let Ok(text) = serde_json::to_vec_pretty(owed) else { return };
+        let temporary = self.path.with_extension("json.tmp");
+        if std::fs::write(&temporary, text).is_ok() && std::fs::rename(&temporary, &self.path).is_err() {
+            let _ = std::fs::remove_file(&temporary);
         }
     }
 }
@@ -378,5 +503,92 @@ mod tests {
         assert!(table.delete(&row).is_ok());
         assert!(table.delete(&row).is_ok());
         assert!(table.table().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+
+    fn dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("neoconnect-ledger-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn route(last: u8) -> RouteRow {
+        RouteRow::host(Ipv4Addr::new(203, 0, 113, last), 14, Ipv4Addr::new(192, 0, 2, 1), 1)
+    }
+
+    /// Owed routes survive the process -- which is the whole point of
+    /// writing them down -- and are struck off one at a time.
+    #[test]
+    fn ledger_round_trips() {
+        let dir = dir("round-trip");
+        let first = OwedRoutes::in_dir(&dir);
+        first.owe(route(7));
+        first.owe(route(8));
+        first.owe(route(7));
+
+        // A second handle on the same directory, as the next life of the
+        // service would open it.
+        let later = OwedRoutes::in_dir(&dir);
+        assert_eq!(later.read(), vec![route(7), route(8)], "owed once each, in order");
+
+        later.settle(&route(7));
+        assert_eq!(first.read(), vec![route(8)]);
+        later.settle(&route(8));
+        assert!(first.read().is_empty());
+        assert!(!dir.join(OWED_FILE).exists(), "nothing owed leaves no file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing written yet, and something unreadable, both mean nothing
+    /// owed -- and the ledger still works afterwards.
+    #[test]
+    fn missing_or_corrupt_ledger_reads_as_empty() {
+        let dir = dir("corrupt");
+        let owed = OwedRoutes::in_dir(&dir);
+        assert!(owed.read().is_empty(), "no file is nothing owed");
+
+        std::fs::write(dir.join(OWED_FILE), b"{ this is not a ledger").unwrap();
+        assert!(owed.read().is_empty(), "an unreadable file is nothing owed, not a failure");
+
+        owed.owe(route(9));
+        assert_eq!(owed.read(), vec![route(9)], "a corrupt ledger is replaced, not appended to");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Thirty-two writers on one ledger at once, as the concurrent
+    /// teardown tests produce: every route owed is read back, and every
+    /// one settled is gone. A read-modify-write without the lock loses
+    /// some of them.
+    #[test]
+    fn concurrent_owes_and_settles_lose_nothing() {
+        let dir = dir("concurrent");
+        let threads: Vec<_> = (0..32u8)
+            .map(|i| {
+                let dir = dir.clone();
+                std::thread::spawn(move || OwedRoutes::in_dir(&dir).owe(route(i)))
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let owed = OwedRoutes::in_dir(&dir);
+        assert_eq!(owed.read().len(), 32, "a concurrent write lost an owed route");
+
+        let threads: Vec<_> = (0..32u8)
+            .map(|i| {
+                let dir = dir.clone();
+                std::thread::spawn(move || OwedRoutes::in_dir(&dir).settle(&route(i)))
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert!(owed.read().is_empty(), "a concurrent settle was undone by another");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

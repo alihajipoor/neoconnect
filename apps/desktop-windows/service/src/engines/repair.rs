@@ -189,7 +189,7 @@ pub(crate) fn run(engines: &mut Engines) -> RepairReport {
     step_tunnel(engines, &found, &mut report);
     step_engines(&exe_dir, &found, &mut report);
     step_dns(&found, &mut report);
-    step_routes(&found, &mut report);
+    step_routes(engines, &found, &mut report);
     step_firewall(&found, &mut report);
     step_wfp(&found, &mut report);
     step_wireguard(engines, &found, &mut report);
@@ -319,16 +319,35 @@ fn step_dns(found: &Survey, report: &mut RepairReport) {
     }
 }
 
-/// IPv4 routes sitting on our own adapters.
+/// IPv4 routes sitting on our own adapters, and the host routes to a
+/// node that the ledger says an earlier session left on another one.
 ///
 /// Scoped to the interface, never to a destination: deleting
 /// `0.0.0.0/0` machine-wide takes the customer's real default route with
 /// it, which is a fault this repair would be *causing*. See
-/// [`routing::purge_interface`].
-fn step_routes(found: &Survey, report: &mut RepairReport) {
+/// [`routing::purge_interface`] and [`janitor::settle_owed_routes`].
+fn step_routes(engines: &Engines, found: &Survey, report: &mut RepairReport) {
     let purged = janitor::purge_adapter_routes();
+    // Native and spawns nothing, so the deadline arithmetic in the tests
+    // below is unchanged by it.
+    let settled = janitor::settle_owed_routes(&engines.owed_routes(), &*engines.route_ops);
     let after = our_route_counts();
     let left: usize = after.iter().map(|(_, n)| n).sum();
+
+    if !settled.failed.is_empty() {
+        push(
+            report,
+            ROUTES,
+            RepairOutcome::Failed {
+                detail: format!("host routes to a server still present: {}", settled.failed.join("; ")),
+            },
+        );
+        return;
+    }
+    let mut removed = purged.removed.clone();
+    if !settled.removed.is_empty() {
+        removed.push(format!("{} host route(s) to a server on another adapter", settled.removed.len()));
+    }
 
     if left > 0 {
         let names: Vec<String> = after
@@ -348,7 +367,7 @@ fn step_routes(found: &Survey, report: &mut RepairReport) {
         return;
     }
     let before: usize = found.routes.iter().map(|(_, n)| n).sum();
-    if before == 0 && purged.removed.is_empty() {
+    if before == 0 && removed.is_empty() {
         push(report, ROUTES, RepairOutcome::AlreadyClean);
         return;
     }
@@ -362,7 +381,7 @@ fn step_routes(found: &Survey, report: &mut RepairReport) {
         report,
         ROUTES,
         RepairOutcome::Fixed {
-            detail: if names.is_empty() { purged.removed.join(", ") } else { format!("removed {}", names.join(", ")) },
+            detail: if names.is_empty() { removed.join(", ") } else { format!("removed {}", names.join(", ")) },
         },
     );
 }

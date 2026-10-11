@@ -453,6 +453,10 @@ pub struct Engines {
     handshake_reading: Option<(Instant, wireguard::HandshakeHealth)>,
     /// How the WireGuard tunnel service's state is read. See [`ScmQuery`].
     wireguard_scm: ScmQuery,
+    /// The routing table, for the host routes this service owns on
+    /// adapters that are not its own. The machine's, except in tests --
+    /// see `route_table`.
+    route_ops: Arc<dyn route_table::RouteOps>,
     /// The most recent generation a thorough pass -- `disconnect()` --
     /// has run after, with nothing begun since. Phase two after a drop
     /// is skipped for a generation already swept: a Disconnect or the app
@@ -486,6 +490,7 @@ impl Engines {
             engine_gone: None,
             handshake_reading: None,
             wireguard_scm: Arc::new(wireguard::scm_view),
+            route_ops: route_table::system(),
             swept_after: 0,
             drop_logged: 0,
             #[cfg(test)]
@@ -764,6 +769,12 @@ impl Engines {
 
     fn config_path(&self, file_name: &str) -> PathBuf {
         self.config_dir.join(file_name)
+    }
+
+    /// The ledger of host routes this service owes the machine. See
+    /// `route_table::OwedRoutes`.
+    fn owed_routes(&self) -> route_table::OwedRoutes {
+        route_table::OwedRoutes::in_dir(&self.config_dir)
     }
 
     /// Tears down whatever is up, then brings up `profile`. Teardown
@@ -1578,7 +1589,7 @@ impl Engines {
                 // both rather than stranding the machine; and on this
                 // arm `self.ipv6_block` is `None` by construction, since
                 // it is only ever set alongside `self.active`.
-                janitor::reconcile(&self.exe_dir);
+                janitor::reconcile(&self.exe_dir, &self.owed_routes(), &*self.route_ops);
                 Ok(())
             }
             Some(Active::WireguardTunnel) => wireguard::disconnect(self),
@@ -1910,7 +1921,7 @@ impl Engines {
                 // orphaned xray.exe or openvpn.exe holding routes and,
                 // in OpenVPN's case, block-outside-dns filters that drop
                 // every lookup off the tunnel adapter.
-                janitor::reconcile(&self.exe_dir);
+                janitor::reconcile(&self.exe_dir, &self.owed_routes(), &*self.route_ops);
 
                 (false, None, health)
             }
