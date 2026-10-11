@@ -47,6 +47,9 @@ pub struct ProbeResult {
     /// itself crashed -- a fault here, saying nothing about the network.
     /// "cancelled" if a connect started first (`cancel_control_plane_probe`),
     /// which says nothing about the network either.
+    /// "proxy" if the app's requests to the name go through a proxy
+    /// (`http_proxied` in health_ip.rs), and nothing was probed: the stages
+    /// the probe would measure are not the ones the request took.
     pub outcome: &'static str,
     /// From the start of the lookup to the verdict.
     pub ms: u32,
@@ -95,9 +98,11 @@ pub async fn probe_control_plane(targets: Vec<ProbeTarget>) -> Vec<ProbeResult> 
     // Blocking sockets on blocking threads, as the latency probes do:
     // neither app has an async runtime of its own to spare, and a stage
     // that hangs to its limit must not hold Tauri's.
-    tauri::async_runtime::spawn_blocking(move || probe_all(targets, LIMITS, cancelled))
-        .await
-        .unwrap_or_default()
+    tauri::async_runtime::spawn_blocking(move || {
+        probe_unless_proxied(targets, LIMITS, cancelled, &crate::health_ip::http_proxied)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// A connect is starting (`connectStarting` in control-plane-probe.ts):
@@ -112,6 +117,46 @@ pub async fn probe_control_plane(targets: Vec<ProbeTarget>) -> Vec<ProbeResult> 
 #[tauri::command]
 pub fn cancel_control_plane_probe() {
     GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+/// `probe_all`, for the targets whose requests go where this machine's
+/// resolver sends them. A target the app reaches through a proxy is
+/// answered "proxy" and not probed.
+///
+/// The probe repeats the failed request's lookup, TCP handshake and
+/// ClientHello from this machine. Through a proxy the request made none of
+/// them: the proxy resolved the name and connected at its own end. A
+/// lookup here that found Iran's block page was filed as the name's on
+/// this network (`demoteName` in control-plane-probe.ts), and every race
+/// after it held back a name the proxy reached -- the same mistake the
+/// race's own look made (`http_proxied` in health_ip.rs). Nothing is sent
+/// for such a target, and the report says a proxy was in the way, which
+/// is itself worth knowing about a request that failed.
+pub fn probe_unless_proxied(
+    targets: Vec<ProbeTarget>,
+    limits: Limits,
+    cancelled: Cancelled,
+    proxied: &dyn Fn(&str) -> bool,
+) -> Vec<ProbeResult> {
+    let targets: Vec<ProbeTarget> = targets.into_iter().take(MAX_TARGETS).collect();
+    let through_proxy: Vec<bool> = targets.iter().map(|target| proxied(&target.host)).collect();
+    let direct: Vec<ProbeTarget> = targets
+        .into_iter()
+        .zip(&through_proxy)
+        .filter(|(_, &through)| !through)
+        .map(|(target, _)| target)
+        .collect();
+    let mut probed = probe_all(direct, limits, cancelled).into_iter();
+    through_proxy
+        .into_iter()
+        .map(|through| {
+            if through {
+                ProbeResult { outcome: "proxy", ms: 0 }
+            } else {
+                probed.next().unwrap_or(ProbeResult { outcome: "error", ms: 0 })
+            }
+        })
+        .collect()
 }
 
 /// Probes every target at once, and answers in the order asked.
@@ -478,6 +523,32 @@ mod tests {
                 assert!(result.outcome.starts_with("dns"), "{result:?}");
             }
         }
+    }
+
+    /// A target the app's requests reach through a proxy is not probed:
+    /// nothing connects to it, and it is never "blockpage", whatever this
+    /// machine's resolver says. The others are probed as before, and the
+    /// answers still line up with the questions.
+    #[test]
+    fn a_target_reached_through_a_proxy_is_not_probed() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let target = |host: &str, port: u16| ProbeTarget { host: host.into(), port };
+        let targets = vec![
+            target("127.0.0.1", port),
+            target("10.10.34.34", 443),
+            target("10.10.34.35", 443),
+        ];
+        let proxied = |host: &str| host != "10.10.34.35";
+        let results = probe_unless_proxied(targets, FAST, Arc::new(|| false), &proxied);
+        assert_eq!(results.iter().map(|r| r.outcome).collect::<Vec<_>>(), ["proxy", "proxy", "blockpage"]);
+        assert_eq!(listener.accept().map(|_| ()).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+
+        // With no proxy, the same targets are probed.
+        let targets = vec![target("10.10.34.34", 443), target("10.10.34.35", 443)];
+        let results = probe_unless_proxied(targets, FAST, Arc::new(|| false), &|_| false);
+        assert_eq!(results.iter().map(|r| r.outcome).collect::<Vec<_>>(), ["blockpage", "blockpage"]);
     }
 
     /// The app's cancel reaches a probe begun before it, and not one

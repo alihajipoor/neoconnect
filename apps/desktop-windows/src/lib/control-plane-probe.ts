@@ -55,6 +55,11 @@ const OUTCOMES = new Set([
   "cert",
   // The probe itself crashed: a fault here, not a fact about the network.
   "error",
+  // The app's requests to the name go through a proxy, so it was not
+  // probed: this machine's lookup and handshakes are not the request's
+  // (`probe_unless_proxied` in control_plane_probe.rs). Never a block page,
+  // whatever the local resolver says.
+  "proxy",
 ]);
 
 /** At most one probe per this long, per process.

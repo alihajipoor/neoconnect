@@ -2229,6 +2229,7 @@ dependencies = [
 name = "mobile"
 version = "0.2.25"
 dependencies = [
+ "hyper-util",
  "reqwest 0.12.28",
  "rustls",
  "serde",
@@ -2241,6 +2242,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-store",
  "webpki-roots",
+ "windows-registry",
 ]
 
 [[package]]

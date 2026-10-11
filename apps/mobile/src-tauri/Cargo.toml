@@ -39,6 +39,17 @@ webpki-roots = "1"
 # with the TLS feature that crate enables, so this names it rather than
 # adding anything.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Whether the HTTP plugin's requests go through a proxy (`http_proxied` in
+# health_ip.rs): the matcher reqwest itself asks, already in the tree with
+# these features through reqwest's system-proxy, at the version in
+# Cargo.lock. On the phones it reads the environment only.
+hyper-util = { version = "0.1", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+
+# WinINet's proxy settings, for the same question; read only on Windows,
+# which this app is never built for, and named so the shared file still
+# compiles on a Windows host. Already in the tree through hyper-util.
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
 
 # Added for the direct-download APK, which reached 141 MB and is the
 # build Iranian customers use -- Play does not serve them, so this is

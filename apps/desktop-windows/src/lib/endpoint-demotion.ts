@@ -276,6 +276,19 @@ const lookups = new Map<string, Lookup>();
  * resolver's cache. Only whether the answer is the block page is kept,
  * never the addresses.
  *
+ * Except where the HTTP plugin's requests go through a proxy: Psiphon,
+ * v2rayN or Clash in system-proxy mode, or `HTTPS_PROXY`, all of which
+ * its reqwest follows. Then the proxy resolves the name at its own end
+ * and this machine's resolver is never asked for the request, so its
+ * block page says nothing about whether the request will be answered --
+ * and those tools are exactly how people in Iran get past a blocked
+ * sign-in. Looked at anyway, every name was stopped and demoted, nothing
+ * more was sent to them, and the screen said the network blocks Neoxify,
+ * about requests the proxy would have had answered. Rust decides it, as
+ * reqwest does (`http_proxied` in health_ip.rs), and where a proxy is in
+ * the way, or cannot be ruled out, the look finds nothing: the request
+ * finds out for itself, as every request did before the look existed.
+ *
  * Nothing but the block page, rather than any of it, because a request is
  * stopped on this answer, and a name that also resolves somewhere real
  * might still be reached there. Its IPv6 addresses count: the HTTP plugin
@@ -300,9 +313,9 @@ const lookups = new Map<string, Lookup>();
  * share the look.
  *
  * Never rejects. False for an address literal, a build without the
- * command (the web portal), a lookup that fails or takes longer than
- * `RESOLVE_TIMEOUT_MS`, and a look overtaken by an answer from an address
- * under the name: nothing known. */
+ * command (the web portal), a request that would go through a proxy, a
+ * lookup that fails or takes longer than `RESOLVE_TIMEOUT_MS`, and a look
+ * overtaken by an answer from an address under the name: nothing known. */
 export function resolvesToBlockPage(base: string, now = Date.now()): Promise<boolean> {
   const name = nameOf(base);
   if (name === null || isAddressLiteral(name)) return Promise.resolve(false);

@@ -53,6 +53,8 @@
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::time::Duration;
 
+use hyper_util::client::proxy::matcher::Matcher;
+
 /// What one `/health/ip` request came back with.
 #[derive(serde::Serialize, Debug, PartialEq)]
 pub struct HealthIpAnswer {
@@ -228,14 +230,29 @@ fn plain_hostname(host: &str) -> bool {
 /// answer is the block page while its IPv6 answer is real is not one to
 /// stop a request to. Absent, as every caller before it sends, the answer
 /// is IPv4 only.
+///
+/// `unless_proxied` is the same look's too. It asks where the app's own
+/// requests to the name connect, and when those go through a proxy
+/// (`http_proxied`) this machine's resolver does not say: the answer is
+/// then an error, as for a name that does not resolve, which the look
+/// reads as nothing known. The resolver is not asked at all. Absent, the
+/// lookup is the engines', which connect directly whatever proxy is set.
 #[tauri::command]
-pub async fn resolve_ipv4(host: String, timeout_ms: u64, with_ipv6: Option<bool>) -> Result<Vec<String>, String> {
+pub async fn resolve_ipv4(
+    host: String,
+    timeout_ms: u64,
+    with_ipv6: Option<bool>,
+    unless_proxied: Option<bool>,
+) -> Result<Vec<String>, String> {
     let host = host.trim().trim_start_matches('[').trim_end_matches(']').to_string();
     if let Ok(address) = host.parse::<IpAddr>() {
         return Ok(vec![address.to_canonical().to_string()]);
     }
     if !plain_hostname(&host) {
         return Err("not a hostname".to_string());
+    }
+    if unless_proxied == Some(true) && http_proxied(&host) {
+        return Err("proxied".to_string());
     }
     let timeout = Duration::from_millis(timeout_ms.max(1)).min(MAX_TIMEOUT);
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -271,6 +288,100 @@ pub async fn resolve_ipv4(host: String, timeout_ms: u64, with_ipv6: Option<bool>
         }
     }
     Ok(addresses)
+}
+
+/// Whether the app's request to `https://{host}/` -- through tauri-plugin-
+/// http, as every control-plane request is -- goes through a proxy rather
+/// than to the addresses this machine's resolver gives for the name, or
+/// may.
+///
+/// For the two things that judge a name by that resolver's answer: the
+/// race's look at Iran's DNS block page (`resolve_ipv4`'s `unless_proxied`)
+/// and the probe after a failed request (control_plane_probe.rs). Through a
+/// proxy the request never uses that answer. It asks the proxy to connect
+/// to the name, and the proxy resolves it at its own end. Psiphon, v2rayN
+/// and Clash in system-proxy mode are how people in Iran get past a blocked
+/// sign-in; with one of them on, a race stopped and demoted every name the
+/// local resolver sent to the block page, sent nothing more to them, and
+/// the screen said the network blocks Neoxify -- about requests that the
+/// proxy would have had answered.
+///
+/// The plugin's reqwest (0.12, built with its `system-proxy` feature)
+/// builds a client for every request, and that client asks hyper-util's
+/// `Matcher::from_system` which proxy takes the URL: `HTTPS_PROXY` or
+/// `ALL_PROXY` from the environment, less `NO_PROXY`, and on Windows the
+/// WinINet `ProxyServer` while `ProxyEnable` is on, less `ProxyOverride`.
+/// The same matcher, built the same way just before the request, is asked
+/// here, so this follows reqwest's own decision rather than a copy of its
+/// rules. It is the same code: Cargo.lock holds one hyper-util 0.1. Should
+/// the plugin move to a reqwest that decides otherwise, this has to follow.
+///
+/// Beyond that, anything set in WinINet counts (`wininet_names_a_proxy`):
+/// a `ProxyServer` in the per-protocol form, which the matcher may read
+/// otherwise than WinINet does, and a PAC script (`AutoConfigURL`), which
+/// reqwest does not follow today and a later version might. Where a proxy
+/// cannot be ruled out the look is given up. A request left to find out
+/// for itself costs at most a head start; one stopped on an answer that
+/// was not its own was never sent.
+///
+/// Not "Automatically detect settings" (WPAD), which Windows has on by
+/// default. Counted, it would end the look on nearly every machine, and
+/// reqwest follows it no more than a PAC.
+///
+/// On the phones reqwest reads only the environment, and neither Android's
+/// nor iOS's proxy setting: the request goes where the system resolver
+/// says, through whatever VPN is up, as the look does. The environment is
+/// still asked, the same way.
+pub fn http_proxied(host: &str) -> bool {
+    proxied_by(&Matcher::from_system(), wininet_proxy_set(), host)
+}
+
+/// `http_proxied`, with what it reads handed in, so it can be shown
+/// without changing this machine's proxy settings. A name that does not
+/// make a URL counts as proxied: nothing is known about its request.
+fn proxied_by(matcher: &Matcher, wininet: bool, host: &str) -> bool {
+    if wininet {
+        return true;
+    }
+    // An IPv6 literal goes in brackets, as it does in the request's URL.
+    let host = match host.parse::<std::net::Ipv6Addr>() {
+        Ok(_) => format!("[{host}]"),
+        Err(_) => host.to_string(),
+    };
+    match format!("https://{host}/").parse::<tauri::http::Uri>() {
+        Ok(uri) => matcher.intercept(&uri).is_some(),
+        Err(_) => true,
+    }
+}
+
+/// Whether the current user's WinINet settings name a proxy, read where
+/// reqwest's matcher reads them. A key that cannot be opened is one that
+/// matcher cannot read either, so its requests go direct.
+#[cfg(windows)]
+fn wininet_proxy_set() -> bool {
+    let Ok(settings) =
+        windows_registry::CURRENT_USER.open(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+    else {
+        return false;
+    };
+    wininet_names_a_proxy(
+        settings.get_u32("ProxyEnable").ok(),
+        settings.get_string("ProxyServer").ok().as_deref(),
+        settings.get_string("AutoConfigURL").ok().as_deref(),
+    )
+}
+
+/// Only Windows has WinINet.
+#[cfg(not(windows))]
+fn wininet_proxy_set() -> bool {
+    false
+}
+
+/// A proxy server while proxying is switched on, or a PAC script.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wininet_names_a_proxy(enable: Option<u32>, server: Option<&str>, pac: Option<&str>) -> bool {
+    let named = |value: Option<&str>| value.is_some_and(|value| !value.trim().is_empty());
+    (enable.unwrap_or(0) != 0 && named(server)) || named(pac)
 }
 
 #[cfg(test)]
@@ -405,7 +516,7 @@ mod tests {
 
         // And it is one of the addresses the name resolves to, which is
         // how a server named by hostname is recognised.
-        let resolved = tauri::async_runtime::block_on(resolve_ipv4("localhost".to_string(), 3_000, None)).unwrap();
+        let resolved = tauri::async_runtime::block_on(resolve_ipv4("localhost".to_string(), 3_000, None, None)).unwrap();
         assert!(resolved.contains(&"127.0.0.1".to_string()), "{resolved:?}");
     }
 
@@ -462,7 +573,7 @@ mod tests {
 
     #[test]
     fn resolves_a_literal_to_itself_and_a_name_to_ipv4_only() {
-        let resolve = |host: &str| tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 3_000, None));
+        let resolve = |host: &str| tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 3_000, None, None));
         assert_eq!(resolve("192.0.2.1"), Ok(vec!["192.0.2.1".to_string()]));
         assert_eq!(resolve(" 192.0.2.1 "), Ok(vec!["192.0.2.1".to_string()]));
         // An IPv4-mapped literal is the IPv4 address it carries.
@@ -472,7 +583,7 @@ mod tests {
         assert!(!local.is_empty() && local.iter().all(|a| a.parse::<Ipv4Addr>().is_ok()), "{local:?}");
         // Asked for explicitly, IPv4 is said as well -- and Some(false) is
         // the same as not asking.
-        let ipv4_only = |host: &str, with: Option<bool>| tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 3_000, with));
+        let ipv4_only = |host: &str, with: Option<bool>| tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 3_000, with, None));
         assert_eq!(ipv4_only("localhost", Some(false)), Ok(local.clone()));
     }
 
@@ -482,7 +593,7 @@ mod tests {
     #[test]
     fn keeps_a_names_ipv6_addresses_when_asked() {
         let resolve = |with: Option<bool>| {
-            tauri::async_runtime::block_on(resolve_ipv4("localhost".to_string(), 3_000, with)).unwrap()
+            tauri::async_runtime::block_on(resolve_ipv4("localhost".to_string(), 3_000, with, None)).unwrap()
         };
         let ipv4 = resolve(None);
         let both = resolve(Some(true));
@@ -498,11 +609,106 @@ mod tests {
     #[test]
     fn asks_the_resolver_nothing_that_is_not_a_hostname() {
         for host in ["", "a b", "x/y", "http://example.com", "example.com:443", "exa_mple.com"] {
-            let answer = tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 1_000, None));
+            let answer = tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 1_000, None, None));
             assert_eq!(answer, Err("not a hostname".to_string()), "{host:?}");
         }
         let long = "a".repeat(MAX_HOSTNAME + 1);
-        assert!(tauri::async_runtime::block_on(resolve_ipv4(long, 1_000, None)).is_err());
+        assert!(tauri::async_runtime::block_on(resolve_ipv4(long, 1_000, None, None)).is_err());
+    }
+
+    /// Which settings put an https request through a proxy, by the matcher
+    /// reqwest asks: a proxy for https or for everything does, one for
+    /// plain http alone does not, and `NO_PROXY` takes a name and the names
+    /// under it back out. Anything WinINet names counts whatever the
+    /// matcher says.
+    #[test]
+    fn a_proxy_for_https_requests_is_one_the_resolver_says_nothing_about() {
+        let none = Matcher::builder().build();
+        assert!(!proxied_by(&none, false, "api.example.test"));
+        // Address literals make URLs too, an IPv6 one in or out of brackets.
+        assert!(!proxied_by(&none, false, "192.0.2.1"));
+        assert!(!proxied_by(&none, false, "2001:db8::1"));
+        assert!(!proxied_by(&none, false, "[2001:db8::1]"));
+
+        let https = Matcher::builder().https("http://127.0.0.1:8080").build();
+        assert!(proxied_by(&https, false, "api.example.test"));
+        let all = Matcher::builder().all("socks5://127.0.0.1:1080").build();
+        assert!(proxied_by(&all, false, "api.example.test"));
+        // reqwest sends an https request through `HTTPS_PROXY` or
+        // `ALL_PROXY`, never through `HTTP_PROXY`.
+        let http_only = Matcher::builder().http("http://127.0.0.1:8080").build();
+        assert!(!proxied_by(&http_only, false, "api.example.test"));
+
+        let excepted = Matcher::builder().https("http://127.0.0.1:8080").no("example.test").build();
+        assert!(!proxied_by(&excepted, false, "api.example.test"));
+        assert!(proxied_by(&excepted, false, "mirror.example.org"));
+
+        assert!(proxied_by(&none, true, "api.example.test"));
+        assert!(proxied_by(&excepted, true, "api.example.test"));
+    }
+
+    /// What in WinINet's settings counts as a proxy that may take the
+    /// app's requests.
+    #[test]
+    fn wininet_names_a_proxy_by_its_server_while_on_or_by_a_pac() {
+        // Psiphon, v2rayN and Clash in system-proxy mode.
+        assert!(wininet_names_a_proxy(Some(1), Some("127.0.0.1:8080"), None));
+        // The per-protocol form counts too, however the matcher reads it.
+        assert!(wininet_names_a_proxy(Some(1), Some("http=127.0.0.1:8080;https=127.0.0.1:8080"), None));
+        // A server left behind with proxying switched off is not in use.
+        assert!(!wininet_names_a_proxy(Some(0), Some("127.0.0.1:8080"), None));
+        assert!(!wininet_names_a_proxy(None, Some("127.0.0.1:8080"), None));
+        assert!(!wininet_names_a_proxy(Some(1), Some("  "), None));
+        // A PAC script, which reqwest does not follow today, counts on its
+        // own: it cannot be ruled out.
+        assert!(wininet_names_a_proxy(Some(0), None, Some("http://127.0.0.1:10808/pac")));
+        assert!(wininet_names_a_proxy(None, None, Some("http://127.0.0.1:10808/pac")));
+        assert!(!wininet_names_a_proxy(None, None, Some("")));
+        assert!(!wininet_names_a_proxy(None, None, None));
+    }
+
+    /// The child half of [`a_proxy_in_the_environment_ends_the_look`]: run
+    /// only in a process of its own, whose environment names a proxy.
+    /// Ignored, and a no-op without its marker, so a plain `--ignored` run
+    /// passes it by.
+    #[test]
+    #[ignore]
+    fn proxy_environment_child() {
+        if std::env::var_os("NEOXIFY_PROXY_ENV_CHILD").is_none() {
+            return;
+        }
+        let look = |host: &str, unless_proxied: Option<bool>| {
+            tauri::async_runtime::block_on(resolve_ipv4(host.to_string(), 3_000, Some(true), unless_proxied))
+        };
+        // The system's matcher reads the environment, as reqwest's does.
+        assert!(http_proxied("api.example.test"));
+        // The look is given up, and before the resolver is asked: a name
+        // under the reserved `.test` would otherwise fail to resolve.
+        assert_eq!(look("api.example.test", Some(true)), Err("proxied".to_string()));
+        // The engines' lookup is not the HTTP plugin's, and goes on.
+        assert!(look("localhost", None).is_ok_and(|found| !found.is_empty()));
+        // `NO_PROXY` names localhost: its requests go direct, and the look
+        // is made -- unless WinINet on this machine names a proxy too.
+        assert_eq!(look("localhost", Some(true)).is_ok(), !wininet_proxy_set());
+        println!("NEOXIFY_PROXY_ENV_CHILD looked");
+    }
+
+    /// `HTTPS_PROXY` in the environment, which reqwest honours, ends the
+    /// block-page look for the names it covers and no other. In a child
+    /// process, because the environment is the whole process's and the
+    /// other tests here run beside this one.
+    #[test]
+    fn a_proxy_in_the_environment_ends_the_look() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "health_ip::tests::proxy_environment_child", "--nocapture"])
+            .env("NEOXIFY_PROXY_ENV_CHILD", "1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("NO_PROXY", "localhost")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(stdout.contains("NEOXIFY_PROXY_ENV_CHILD looked"), "{stdout}");
     }
 
     #[test]

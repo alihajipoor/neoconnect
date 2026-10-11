@@ -48,10 +48,19 @@ vi.mock("./endpoint-bundle-store", async (importOriginal) => ({
 
 /** What the system resolver answers for each name, as `resolve_ipv4`
  * hands it back. A name not here fails to resolve, which is nothing
- * known. */
-const { resolver } = vi.hoisted(() => ({ resolver: new Map<string, string[]>() }));
+ * known.
+ *
+ * `proxy.on` is a proxy the HTTP plugin's requests go through -- Psiphon
+ * or v2rayN in system-proxy mode. Then `resolve_ipv4`, asked on the
+ * requests' behalf (`unlessProxied`), refuses before asking the resolver,
+ * as `http_proxied` in health_ip.rs makes it; asked for the engines, it
+ * answers as before. */
+const { resolver, proxy } = vi.hoisted(() => ({ resolver: new Map<string, string[]>(), proxy: { on: false } }));
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (command: string, args: { host: string }) => {
+  invoke: (command: string, args: { host: string; unlessProxied?: boolean }) => {
+    if (command === "resolve_ipv4" && proxy.on && args.unlessProxied === true) {
+      return Promise.reject(new Error("proxied"));
+    }
     const answer = command === "resolve_ipv4" ? resolver.get(args.host) : undefined;
     return answer === undefined ? Promise.reject(new Error("could not resolve")) : Promise.resolve(answer);
   },
@@ -128,6 +137,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   resetRaceWinnerForTests();
   resolver.clear();
+  proxy.on = false;
   network = {};
   sent = [];
   remembered.length = 0;
@@ -497,5 +507,98 @@ describe("a write sent straight to the address that answered last", () => {
     expect(result.ok).toBe(true);
     expect(ms).toBeLessThan(5_000);
     expect(renderTrace(trace)).toMatch(/^req: d\.example=blockpage@0; health: /);
+  });
+});
+
+describe("requests that go through a proxy", () => {
+  /** The tester network on which every name, the CDN's included, resolves
+   * here to the block page -- with Psiphon, v2rayN or Clash in system-proxy
+   * mode, which is how people in Iran get past a blocked sign-in. The
+   * proxy resolves the names at its own end, and reaches A. Before: each
+   * race's look found the block page and stopped every request, the names
+   * were demoted and the next race sent them nothing at all, and the
+   * screen said the network was blocking Neoxify. */
+  it("are sent to a name this machine's resolver puts on the block page, and its answer is taken", async () => {
+    proxy.on = true;
+    for (const base of ENDPOINTS) {
+      network[base] = "stall";
+      resolver.set(new URL(base).hostname, BLOCK_PAGE);
+    }
+    network[A] = answers(300);
+    const first = await read();
+    expect(first.result.ok).toBe(true);
+    expect(first.ms).toBe(300);
+
+    // Nothing was demoted: the next read is A's alone, as on any network.
+    const trace = newTrace();
+    const second = await read(trace);
+    expect(second.result.ok).toBe(true);
+    expect(second.sent).toEqual([A]);
+    expect(renderTrace(trace)).toBe("req: a.example=h200@300");
+  });
+
+  /** With no proxy, the same network is what the look was written for, and
+   * it still decides: every request stopped, the names demoted, nothing
+   * sent to them by the next race, and the block page named. */
+  it("leave the look to decide where no proxy is in the way", async () => {
+    for (const base of ENDPOINTS) {
+      network[base] = "stall";
+      resolver.set(new URL(base).hostname, BLOCK_PAGE);
+    }
+    network[A] = answers(300);
+    const first = await read();
+    expect(first.result).toEqual({ ok: false, error: BLOCKED, noResponse: true, blockPage: true });
+    const second = await read();
+    expect(second.sent).toEqual([]);
+    expect(second.result).toEqual({ ok: false, error: BLOCKED, noResponse: true, blockPage: true });
+  });
+
+  /** The names were found on the block page, and demoted, before the proxy
+   * was switched on. A demoted name is looked at again before anything is
+   * sent to it, and through the proxy the look finds nothing. */
+  it("are sent to a name found on the block page before the proxy was switched on", async () => {
+    for (const base of ENDPOINTS) {
+      network[base] = "stall";
+      resolver.set(new URL(base).hostname, BLOCK_PAGE);
+    }
+    const before = await read();
+    expect(before.result).toMatchObject({ ok: false, blockPage: true });
+
+    proxy.on = true;
+    network[A] = answers(300);
+    const after = await read();
+    expect(after.result.ok).toBe(true);
+    expect(after.sent).toContain(A);
+  });
+
+  /** Nothing answering through the proxy either is Neoxify not answering,
+   * not this network's DNS: the request never used it. */
+  it("never say the network blocks Neoxify", async () => {
+    proxy.on = true;
+    for (const base of ENDPOINTS) {
+      network[base] = "stall";
+      resolver.set(new URL(base).hostname, BLOCK_PAGE);
+    }
+    const { result } = await read();
+    expect(result).toEqual({ ok: false, error: UNREACHABLE, noResponse: true });
+  });
+
+  /** A write sent straight to the address that answered last, whose name
+   * this machine's resolver has since started to put on the block page.
+   * Before: stopped at once on the look, and then a health race. */
+  it("include a write sent straight to the address that answered last", async () => {
+    resolver.set("d.example", ["203.0.113.10"]);
+    network[D] = answers(100);
+    await read();
+    expect(remembered).toEqual([D]);
+
+    proxy.on = true;
+    resolver.set("d.example", BLOCK_PAGE);
+    const trace = newTrace();
+    const { result, sent } = await run(() => publicRequest("/client-attempts", { method: "POST", body: "{}" }, trace));
+
+    expect(result.ok).toBe(true);
+    expect(sent).toEqual([D]);
+    expect(renderTrace(trace)).toBe("req: d.example=h200@100");
   });
 });

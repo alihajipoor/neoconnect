@@ -237,7 +237,22 @@ describe("looking at a name's DNS answer", () => {
     resolver.set("m.example", ["10.10.34.34", "2001:db8::7"]);
     expect(await resolvesToBlockPage(MIRROR, 1_000)).toBe(false);
     expect(isDemoted(MIRROR)).toBe(false);
-    expect(askedFor).toEqual([{ host: "m.example", timeoutMs: expect.any(Number), withIpv6: true }]);
+    expect(askedFor).toEqual([
+      { host: "m.example", timeoutMs: expect.any(Number), withIpv6: true, unlessProxied: true },
+    ]);
+  });
+
+  /** Asked on the requests' behalf (`unlessProxied`), so the command gives
+   * up where the HTTP plugin's requests go through a proxy, which resolves
+   * the name at its own end (`http_proxied` in health_ip.rs). That refusal
+   * is nothing known: never the block page, and nothing demoted. Through
+   * Psiphon or v2rayN in system-proxy mode, a name this machine's resolver
+   * put on the block page used to be stopped and demoted, though the proxy
+   * would have reached it (staged-race.test.ts). */
+  it("finds nothing when the command says the requests go through a proxy", async () => {
+    resolver.set("m.example", Promise.reject("proxied"));
+    expect(await resolvesToBlockPage(MIRROR, 1_000)).toBe(false);
+    expect(isDemoted(MIRROR)).toBe(false);
   });
 
   /** A request is stopped on this answer, so only a name with nowhere

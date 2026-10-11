@@ -46,6 +46,16 @@ webpki-roots = "1"
 # Already in the tree through tauri-plugin-http, with the same TLS feature
 # that crate enables, so this names it rather than adding anything.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Whether the HTTP plugin's requests go through a proxy (`http_proxied` in
+# src/health_ip.rs): the matcher reqwest itself asks, already in the tree
+# with these features through reqwest's system-proxy, at the version in
+# Cargo.lock.
+hyper-util = { version = "0.1", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+
+[target.'cfg(windows)'.dependencies]
+# WinINet's proxy settings, for the same question. Already in the tree
+# through hyper-util, at the version in Cargo.lock.
+windows-registry = "0.6"
 
 [dependencies.windows-sys]
 version = "0.59"

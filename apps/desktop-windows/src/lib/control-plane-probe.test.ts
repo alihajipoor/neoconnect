@@ -157,6 +157,21 @@ describe("probeControlPlane", () => {
     ]);
   });
 
+  /** A name the app reaches through a proxy is not probed (Rust's
+   * `probe_unless_proxied`): the report says so, and nothing is demoted.
+   * Before, the probe asked this machine's resolver, found the block page,
+   * and every race after it held back a name the proxy reached. */
+  it("says a proxy was in the way, and demotes nothing for it", async () => {
+    invoke.mockResolvedValue([
+      { outcome: "proxy", ms: 0 },
+      { outcome: "proxy", ms: 0 },
+    ]);
+    const tried = [entry("https://a.example.net/api", "net"), entry("https://b.example.net:2053/api", "timeout")];
+    expect(await probeControlPlane(tried, 0)).toBe("probe: a.example.net=proxy@0 b.example.net:2053=proxy@0");
+    const list = ["https://a.example.net/api", "https://b.example.net:2053/api", "https://d.example.net/api"];
+    expect(demotedLast(list).ordered).toEqual(list);
+  });
+
   /** It decorates a report; it must not hold one up indefinitely. */
   it("gives up on a command that never answers", async () => {
     vi.useFakeTimers();
