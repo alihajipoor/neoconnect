@@ -685,10 +685,19 @@ async function fetchOneEndpointAtATime(
         // the backend acted still ends a write that must not be sent
         // twice; any other page is kept, and the next address is tried.
         forgetWinner(base);
-        if (MAY_HAVE_REACHED_BACKEND.has(response.status) && !REPEATABLE_WRITES.has(path)) return response;
-        walk.page ??= response;
+        if (MAY_HAVE_REACHED_BACKEND.has(response.status) && !REPEATABLE_WRITES.has(path)) {
+          letGoOfKeptPage(walk);
+          return response;
+        }
+        // The first page is kept as the answer of last resort; any other
+        // is let go of now, since nothing will read it (`discardBody`).
+        if (walk.page === null) walk.page = response;
+        else discardBody(response);
         continue;
       }
+      // The answer, which the page kept so far will never be returned in
+      // place of.
+      letGoOfKeptPage(walk);
       void rememberEndpoint(base);
       // The backend answered here, so the next write may come straight
       // here too (`recentWinner`), and the address bundle may be asked
@@ -718,6 +727,16 @@ async function fetchOneEndpointAtATime(
     }
   }
   return null;
+}
+
+/** Lets go of the page a walk kept as its answer of last resort, once
+ * something else is to be returned instead. Under the HTTP plugin it would
+ * otherwise stay parked, with its connection, for the life of the app --
+ * nothing reads it, and its request was never aborted (`discardBody`). */
+function letGoOfKeptPage(walk: Walk): void {
+  if (walk.page === null) return;
+  discardBody(walk.page);
+  walk.page = null;
 }
 
 /** What a walk that got no answer ends with. Something did answer, if

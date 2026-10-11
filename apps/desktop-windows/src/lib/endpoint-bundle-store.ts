@@ -83,13 +83,21 @@ async function persist(raw: string): Promise<void> {
  */
 export async function refreshFrom(
   base: string,
-  fetcher: (url: string) => Promise<{ ok: boolean; text: () => Promise<string> }>,
+  fetcher: (url: string) => Promise<{ ok: boolean; text: () => Promise<string>; body?: ReadableStream<Uint8Array> | null }>,
 ): Promise<EndpointBundle | null> {
   const held = await cachedBundle();
   try {
     const response = await fetcher(`${base}${BUNDLE_PATH}`);
     // A 404 is the ordinary answer before anything has been published.
-    if (!response.ok) return held;
+    //
+    // Its body is let go of rather than left: under the HTTP plugin an
+    // unread response stays parked on the Rust side, with its connection,
+    // until it is read to the end or cancelled -- for the life of the app,
+    // for a mirror that does not proxy this path.
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => undefined);
+      return held;
+    }
     const raw = await response.text();
     const fresh = await verifyBundle(raw);
     if (!fresh) return held;

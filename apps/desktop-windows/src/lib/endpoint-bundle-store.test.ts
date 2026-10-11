@@ -85,6 +85,24 @@ describe("bundle refresh", () => {
     expect(store.set).not.toHaveBeenCalled();
   });
 
+  /** Under the HTTP plugin a response is parked on the Rust side, with its
+   * connection, until its body is read to the end or cancelled. A 404,
+   * 502 or 403 here was neither, and stayed parked for the life of the
+   * app. */
+  it("lets go of the body of a non-ok response it does not read", async () => {
+    store.get.mockResolvedValue(await sealed(3));
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel: () => {
+        cancelled = true;
+      },
+    });
+    await refreshFrom("https://a.example.net/api", () =>
+      Promise.resolve({ ok: false, text: () => Promise.resolve(""), body }),
+    );
+    expect(cancelled).toBe(true);
+  });
+
   // This runs beside real work; a network failure here must never be the
   // reason a request did not happen.
   it("never throws when the fetch fails", async () => {
