@@ -92,6 +92,7 @@ import {
 } from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
+import { setTunnelServer as setEndpointTunnelServer } from "../lib/api-endpoints";
 import { repairUnderWay } from "../lib/repair";
 import {
   asReconnectReport,
@@ -1012,6 +1013,14 @@ export function Dashboard({
       await loadAll(saved ?? undefined);
     })();
   }, []);
+
+  // The control plane asks the connected server's own mirrors last while
+  // a tunnel to it is up and reached around (`setTunnelServer` in
+  // api-endpoints.ts); the usual order comes back the moment the screen
+  // shows the tunnel down, whichever path took it there.
+  useEffect(() => {
+    if (connectionState === "disconnected") setEndpointTunnelServer(null);
+  }, [connectionState]);
 
   // Which mode the app was left in. Persisted rather than reset, because
   // starting in VPN mode somebody who chose gaming mode would quietly
@@ -2933,6 +2942,7 @@ export function Dashboard({
           // poll -- from whichever Dashboard is mounted -- needs to know
           // which endpoints it reaches around it.
           ladderPass.tunnelServer.current = tunnelServer;
+          setEndpointTunnelServer(tunnelServer);
           await invoke("vpn_connect", {
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
