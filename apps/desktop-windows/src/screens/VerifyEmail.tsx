@@ -3,6 +3,8 @@ import { verifyEmailByCode, resendVerification, login } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { Logo } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
+import { StillTrying } from "../components/StillTrying";
 
 // `password` is optional: present when this screen follows a fresh
 // register()/login() attempt in the same session (lets us auto-sign-in
@@ -68,7 +70,7 @@ export function VerifyEmail({
     const result = await verifyEmailByCode(email, code);
     if (!result.ok) {
       setPending(false);
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
 
@@ -112,7 +114,7 @@ export function VerifyEmail({
     const result = await resendVerification(email);
     setResending(false);
     setNotice(result.ok ? "Sent! Check your inbox (and spam folder)." : null);
-    if (!result.ok) setError(result.error);
+    if (!result.ok) setError(failureText(result, t));
   }
 
   return (
@@ -150,6 +152,7 @@ export function VerifyEmail({
           <Button type="submit" disabled={pending || code.length !== 6} className="mt-1 w-full">
             {pending ? t("verify.confirming") : t("verify.confirm")}
           </Button>
+          <StillTrying waiting={pending || resending} />
         </form>
         <button
           type="button"

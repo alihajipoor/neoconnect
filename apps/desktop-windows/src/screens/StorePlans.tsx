@@ -6,6 +6,8 @@ import { formatBytes } from "../lib/utils";
 import { Button, Card } from "../components/ui";
 import { Logo } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
+import { StillTrying } from "../components/StillTrying";
 
 /** Buying a plan on iPhone, through the App Store.
  *
@@ -39,7 +41,7 @@ export function StorePlans({
     void loadIapPlans().then((result) => {
       if (cancelled) return;
       if (result.ok) setPlans(result.data);
-      else setLoadError(result.error);
+      else setLoadError(failureText(result, t));
     });
     return () => {
       cancelled = true;
@@ -55,7 +57,7 @@ export function StorePlans({
       // an error here would be both wrong and alarming.
       if (result === null) return;
       if (!result.ok) {
-        setError(result.error);
+        setError(failureText(result, t));
         return;
       }
       onActivated();
@@ -87,8 +89,9 @@ export function StorePlans({
           </p>
         </Card>
       ) : plans === null ? (
-        <div className="flex flex-1 items-center justify-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-3">
           <Loader2 className="size-6 animate-spin text-muted-foreground" />
+          <StillTrying waiting />
         </div>
       ) : plans.length === 0 ? (
         <Card className="animate-rise">

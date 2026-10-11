@@ -21,7 +21,9 @@ import {
 } from "../lib/customer";
 import { collectDiagnostics, diagnosticsToText } from "../lib/repair";
 import { useI18n } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { Button, Card, Input, Label } from "../components/ui";
+import { StillTrying } from "../components/StillTrying";
 import { cn } from "../lib/utils";
 import type { SupportOverview, SupportThread, SupportTicketSummary } from "../lib/types";
 
@@ -49,7 +51,7 @@ export function Support({ onBack }: { onBack: () => void }) {
       setOverview(result.data);
       setError(null);
     } else {
-      setError(result.error);
+      setError(failureText(result, t));
     }
   }, []);
 
@@ -81,8 +83,9 @@ export function Support({ onBack }: { onBack: () => void }) {
       )}
 
       {!overview ? (
-        <div className="flex flex-1 items-center justify-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-3">
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
+          <StillTrying waiting={!error} />
         </div>
       ) : view.kind === "thread" ? (
         <ThreadView id={view.id} onChanged={load} />
@@ -328,7 +331,7 @@ function NewTicket({
     const result = await openSupportTicket(subject.trim(), body.trim());
     setBusy(false);
     if (!result.ok) {
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     onOpened(result.data);
@@ -381,6 +384,7 @@ function NewTicket({
           {busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
           {busy ? t("support.sending") : t("support.send")}
         </Button>
+        <StillTrying waiting={busy} className="text-left" />
       </form>
     </Card>
   );
@@ -400,7 +404,7 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
       const result = await getSupportThread(id);
       if (cancelled) return;
       if (result.ok) setThread(result.data);
-      else setError(result.error);
+      else setError(failureText(result, t));
     };
     void fetchThread();
     const timer = setInterval(() => void fetchThread(), POLL_MS);
@@ -424,7 +428,7 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
     const result = await replyToSupportTicket(id, trimmed);
     setBusy(false);
     if (!result.ok) {
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     // Cleared only once the server has it. Clearing first means a
@@ -440,7 +444,10 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
         {error ? (
           <p className="text-xs text-destructive">{error}</p>
         ) : (
-          <Loader2 className="size-5 animate-spin text-muted-foreground" />
+          <div className="flex flex-col items-center gap-3">
+            <Loader2 className="size-5 animate-spin text-muted-foreground" />
+            <StillTrying waiting />
+          </div>
         )}
       </div>
     );
@@ -507,6 +514,7 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
           {busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
         </Button>
       </div>
+      <StillTrying waiting={busy} />
     </div>
   );
 }

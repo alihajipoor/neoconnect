@@ -357,25 +357,53 @@ export interface ReleaseRequest {
   handle: string;
 }
 
-/** Gives one grant back.
+/** How a release is sent, beyond what it names. */
+export interface ReleaseHow {
+  /** Sent once a tunnel has come down under it: the second release on
+   * Disconnect (`ReleaseOptions` in device-slot-session.ts). The address
+   * the backend last answered from was reached through that tunnel, and
+   * says nothing about the bare line the release now goes out on; a write
+   * with a deadline goes straight there, and a health race leads with it
+   * alone for `LEAD_MS` -- the release's whole second and a half, on a
+   * bare line that drops that one address. So the health race asks every
+   * address not demoted here at once, and the write goes to whichever
+   * answers first (`afterPathChange` in api.ts). */
+  afterTeardown?: boolean;
+}
+
+/** Gives one grant back, and says whether the backend answered: its 204,
+ * or a refusal of its own (a 404 for a subscription that is not the
+ * customer's), either of which sending it again would only repeat. False
+ * for no answer within `budgetMs`, a page from in front of the backend,
+ * or a session renewal that could not be completed -- a release that may
+ * never have arrived.
  *
  * Fire and forget: resolves within `budgetMs` whatever happens and never
  * rejects, and nothing should wait for it before tearing down. A release
  * that does not arrive costs the slot staying taken until it goes stale
  * (90 s), which "Use on this device instead" covers on the other device.
  */
-export async function releaseSlot(request: ReleaseRequest, budgetMs = RELEASE_BUDGET_MS): Promise<void> {
+export async function releaseSlot(
+  request: ReleaseRequest,
+  budgetMs = RELEASE_BUDGET_MS,
+  how: ReleaseHow = {},
+): Promise<boolean> {
   try {
-    await withinBudget(budgetMs, (signal) =>
+    const result = await withinBudget(budgetMs, (signal) =>
       apiRequest<void>("/customer/vpn/release", {
         method: "POST",
         // Only the fields the contract names: the API rejects unknown ones.
         body: JSON.stringify({ subscriptionId: request.subscriptionId, handle: request.handle }),
         signal,
+        ...(how.afterTeardown ? { afterPathChange: true } : {}),
       }),
     );
+    if (result.ok) return true;
+    if ("timedOut" in result) return false;
+    return result.status !== undefined && result.noResponse !== true && result.page !== true;
   } catch {
     // Nothing on screen depends on this having worked.
+    return false;
   }
 }
 

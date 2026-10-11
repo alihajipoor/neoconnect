@@ -175,12 +175,33 @@ export async function tunnelServerOf(
 /** `resolve_ipv4`, given up on a little after its own bound. Unresolvable,
  * a build without the command, or a call that never returns: nothing
  * known. */
-function resolveIpv4(host: string, timeoutMs: number): Promise<string[]> {
+export function resolveIpv4(host: string, timeoutMs: number): Promise<string[]> {
+  return resolveWith(host, timeoutMs, false);
+}
+
+/** The same lookup with the name's IPv6 addresses kept as well -- every
+ * address the HTTP plugin's own connection may try. How a race looks for
+ * Iran's block page behind a name (`resolvesToBlockPage` in
+ * endpoint-demotion.ts), which must not take a name for the block page
+ * when it has a real IPv6 address too. A build whose command predates the
+ * option answers IPv4 only, as before.
+ *
+ * Nothing, when the HTTP plugin's requests to the name go through a proxy
+ * (`unlessProxied`; `http_proxied` in health_ip.rs). The proxy resolves the
+ * name at its own end, so what this machine's resolver says is not where
+ * the request goes: a name it sends to the block page may be reached
+ * through the proxy perfectly well. */
+export function resolveAddresses(host: string, timeoutMs: number): Promise<string[]> {
+  return resolveWith(host, timeoutMs, true);
+}
+
+function resolveWith(host: string, timeoutMs: number, forRequests: boolean): Promise<string[]> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const stalled = new Promise<string[]>((resolve) => {
     timer = setTimeout(() => resolve([]), timeoutMs + RESOLVE_GRACE_MS);
   });
-  const asked = invoke<unknown>("resolve_ipv4", { host, timeoutMs }).then(
+  const args = forRequests ? { host, timeoutMs, withIpv6: true, unlessProxied: true } : { host, timeoutMs };
+  const asked = invoke<unknown>("resolve_ipv4", args).then(
     (list) => (Array.isArray(list) ? list.filter((a): a is string => typeof a === "string" && a !== "") : []),
     () => [],
   );

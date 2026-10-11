@@ -24,6 +24,9 @@ const calls: { url: string; headers: Record<string, string> }[] = [];
 function makeResponse(reply: Extract<Reply, { kind: "respond" }>): Response {
   const headers = new Map<string, string>();
   if (reply.etag !== undefined) headers.set("etag", reply.etag);
+  // The backend's every body is JSON, and says so. A body without the
+  // type is a page from in front of it, which is never its answer.
+  if (reply.body !== undefined) headers.set("content-type", "application/json; charset=utf-8");
   return {
     ok: reply.status >= 200 && reply.status < 300,
     status: reply.status,
@@ -232,7 +235,8 @@ describe("gaming profile revalidation", () => {
     replies.push({ kind: "respond", status: 500 });
     const result = await getGamingProfile();
     expect(result.ok).toBe(false);
-    expect(result).toEqual({ ok: false, error: "Request failed (500)", status: 500 });
+    // No body, so not the backend's JSON: a page from in front of it.
+    expect(result).toEqual({ ok: false, error: "Request failed (500)", status: 500, page: true });
   });
 
   it("refuses a 304 that answers a request which asked nothing conditional", async () => {

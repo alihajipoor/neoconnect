@@ -29,14 +29,35 @@
  * the token refresh its 401 triggers, and the retry with the new token.
  * After fifteen minutes idle the access token has expired, so the
  * pre-connect refresh is usually all three -- each a fresh connection --
- * and which leg ran out of time is the thing worth knowing. */
-export type TracePhase = "req" | "refresh" | "retry";
+ * and which leg ran out of time is the thing worth knowing.
+ *
+ * A sign-in or sign-up has a leg before its request: the race for the
+ * proof-of-work challenge, which is also what decides where the request
+ * is sent. When nothing answered that race, it is the only leg there is;
+ * when the request then got no answer where the race was answered, a
+ * second race over the rest of the list follows it, as a second
+ * `challenge` leg, and a second request where that one is answered.
+ *
+ * Any other write may have one too: a race for the health check, run
+ * when the backend has not answered anywhere in the last minute and a
+ * half, to decide where the write is sent (see `sendWrite` in api.ts). It comes
+ * just before the leg it was run for -- `health: ...; refresh: ...` is
+ * the token refresh's. A health check after a leg is the other use: a
+ * refused token refresh, checked against the one address that refused
+ * it before the session is ended (`refusedByBackend` in api.ts). Not
+ * called `probe`, which is the socket-level section that may follow the
+ * trace (control-plane-probe.ts). */
+export type TracePhase = "challenge" | "health" | "req" | "refresh" | "retry";
 
 /** How one address's attempt ended, in the classes this side can tell
  * apart.
  *
  * - `h<status>`: an HTTP answer. The address is reachable and is us.
- * - `timeout`: no answer inside `ENDPOINT_TIMEOUT_MS`; aborted by us.
+ * - `timeout`: no answer in the time allowed. Either aborted by us at the
+ *   request's own deadline (eight seconds in a walk, twenty in a race),
+ *   or given up by the HTTP plugin at the connection deadline it is
+ *   passed (`CONNECT_TIMEOUT_MS`, ten seconds), which is what a
+ *   blackholed address now usually shows. See `failedAs` in api.ts.
  * - `scope`: refused before leaving the device, because the address is
  *   not in the app's HTTP permission. A build problem, not a network one.
  * - `cancel`: another address answered first, so this one was stopped.
@@ -45,10 +66,14 @@ export type TracePhase = "req" | "refresh" | "retry";
  *   Display drops the cause), so telling them apart takes the
  *   socket-level probe in control-plane-probe.ts, whose answer follows
  *   the trace as a `probe:` section when it ran.
+ * - `blockpage`: the address's name resolves to Iran's DNS block page and
+ *   nothing else, so a race, or a write's first try, stopped the request
+ *   or did not send it (see `blockPageLook` in api.ts). Found by a lookup
+ *   of its own beside the request's, through the same system resolver.
  * - `pending`: not settled yet. Rendered as `budget` when a caller gives
  *   up waiting -- see `renderTrace`.
  */
-export type TraceOutcome = `h${number}` | "timeout" | "scope" | "cancel" | "net" | "pending";
+export type TraceOutcome = `h${number}` | "timeout" | "scope" | "cancel" | "net" | "blockpage" | "pending";
 
 export interface TraceEntry {
   phase: TracePhase;
@@ -63,6 +88,11 @@ export interface EndpointTrace {
   /** The phase new attempts are recorded under. Moved on by `api.ts`. */
   phase: TracePhase;
   entries: TraceEntry[];
+  /** Traces each attempt is recorded in as well, as the same entry: the
+   * requests waiting on a token refresh that one of them sent
+   * (`renewSession` in api.ts). Each still says what its renewal did,
+   * though only one request sent it. */
+  copies?: EndpointTrace[];
 }
 
 export function newTrace(): EndpointTrace {
@@ -79,6 +109,7 @@ export function beginAttempt(
   if (!trace) return undefined;
   const entry: TraceEntry = { phase: trace.phase, base, startedAt: now, outcome: "pending" };
   trace.entries.push(entry);
+  for (const copy of trace.copies ?? []) copy.entries.push(entry);
   return entry;
 }
 
@@ -152,9 +183,9 @@ export const API_ENDPOINT_MAX = 2000;
 export const LEGACY_API_ENDPOINT_MAX = 200;
 
 /** One piece of a rendered field, for cutting: an entry under its leg
- * (`req`, `refresh`, `retry`, `probe`), or a piece with no leg -- "none
- * dialled", or a cut mark, which carries how many entries it stands
- * for. */
+ * (`challenge`, `health`, `req`, `refresh`, `retry`, `probe`), or a
+ * piece with no leg -- "none dialled", or a cut mark, which carries how
+ * many entries it stands for. */
 interface Piece {
   leg: string | null;
   text: string;

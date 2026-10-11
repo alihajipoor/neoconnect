@@ -81,12 +81,20 @@ export async function apiEndpoints(): Promise<string[]> {
   // Whatever worked last time leads. On a filtered network that is the
   // difference between connecting immediately and waiting out a timeout
   // against the blocked address on every single request.
-  try {
-    const store = await getStore();
-    const remembered = await store.get<string>(KEY);
-    if (typeof remembered === "string") add(remembered);
-  } catch {
-    // No memory is not an error; the list below still works.
+  //
+  // This process's own memory first, as `rememberedEndpoint` reads it. The
+  // store's copy is written asynchronously, and a race that started before
+  // the write had landed was led by the address the race before had just
+  // found dead, and waited out its head start on it again.
+  if (rememberedHere !== undefined) add(rememberedHere);
+  else {
+    try {
+      const store = await getStore();
+      const remembered = await store.get<string>(KEY);
+      if (typeof remembered === "string" && remembered !== forgottenHere) add(remembered);
+    } catch {
+      // No memory is not an error; the list below still works.
+    }
   }
 
   // The signed bundle before the compiled-in list: the binary's idea of
@@ -113,6 +121,33 @@ export async function apiEndpoints(): Promise<string[]> {
   return ordered;
 }
 
+/** The endpoint this process last remembered, held here as well as in
+ * the store. The store's copy is written asynchronously, and a walk that
+ * reads it again between steps (`rememberedEndpoint`) must not miss an
+ * address another request found a moment earlier. */
+let rememberedHere: string | undefined;
+
+/** The endpoint this process last forgot (`forgetEndpoint`), so that the
+ * store's copy, deleted asynchronously, does not bring it back first. */
+let forgottenHere: string | undefined;
+
+/** The endpoint that answered most recently, if one is known.
+ *
+ * Read by a write that is walking addresses one at a time, before each
+ * step. The walk's own list was fixed when it began; another request may
+ * since have found an address that answers. Never throws: not knowing
+ * costs the walk a shortcut, not the request. */
+export async function rememberedEndpoint(): Promise<string | undefined> {
+  if (rememberedHere !== undefined) return rememberedHere;
+  try {
+    const store = await getStore();
+    const remembered = await store.get<string>(KEY);
+    return typeof remembered === "string" && remembered.length > 0 ? remembered : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Records the endpoint that answered.
  *
  * Only ever called on a real response -- including an error response,
@@ -120,11 +155,33 @@ export async function apiEndpoints(): Promise<string[]> {
  * must not be remembered is an endpoint that merely failed slowly.
  */
 export async function rememberEndpoint(url: string): Promise<void> {
+  rememberedHere = url;
+  if (forgottenHere === url) forgottenHere = undefined;
   try {
     const store = await getStore();
     await store.set(KEY, url);
     await store.save();
   } catch {
     // Costs a little time on the next launch, nothing else.
+  }
+}
+
+/** Forgets `url` as the endpoint to try first, if it is the one held.
+ *
+ * For an address found not to be the backend after it was remembered: one
+ * that answers JSON 401 to everything, the public health check included,
+ * wins a read with its fast 401 before anything shows it is not us. Kept,
+ * it led every race on every launch. Nothing else is remembered in its
+ * place: the next address to answer is. */
+export async function forgetEndpoint(url: string): Promise<void> {
+  if (rememberedHere === url) rememberedHere = undefined;
+  forgottenHere = url;
+  try {
+    const store = await getStore();
+    if ((await store.get<string>(KEY)) !== url) return;
+    await store.delete(KEY);
+    await store.save();
+  } catch {
+    // The address leads the next race, which it no longer wins.
   }
 }

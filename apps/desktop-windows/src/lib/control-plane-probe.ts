@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AttemptAddendum } from "./attempts";
+import { demoteName } from "./endpoint-demotion";
 import { endpointLabel, type TraceEntry } from "./endpoint-trace";
 import { watchBackground } from "./visibility";
 
@@ -54,6 +55,11 @@ const OUTCOMES = new Set([
   "cert",
   // The probe itself crashed: a fault here, not a fact about the network.
   "error",
+  // The app's requests to the name go through a proxy, so it was not
+  // probed: this machine's lookup and handshakes are not the request's
+  // (`probe_unless_proxied` in control_plane_probe.rs). Never a block page,
+  // whatever the local resolver says.
+  "proxy",
 ]);
 
 /** At most one probe per this long, per process.
@@ -143,6 +149,17 @@ export interface ProbeOptions {
   pathChanging?: boolean;
 }
 
+/** Screen states in which a connect or a disconnect is moving the path
+ * the control plane is reached over. A probe begun in one would measure
+ * the move. Matched as strings: `appState` is whatever the screen held. */
+const PATH_CHANGING: ReadonlySet<string> = new Set(["connecting", "verifying", "disconnecting"]);
+
+/** Whether a screen in `appState` is moving the path: `pathChanging`,
+ * for a report made from a screen's state. */
+export function pathChangingIn(appState: string | undefined): boolean {
+  return appState !== undefined && PATH_CHANGING.has(appState);
+}
+
 interface ProbeRun {
   /** The `probe:` section for the report's `apiEndpoint`. */
   section: string;
@@ -201,6 +218,13 @@ async function runProbe(entries: TraceEntry[], now: number, options: ProbeOption
       const result = answer[i] as { outcome?: unknown; ms?: unknown } | null;
       const outcome = typeof result?.outcome === "string" && OUTCOMES.has(result.outcome) ? result.outcome : "?";
       const ms = typeof result?.ms === "number" && Number.isFinite(result.ms) ? Math.max(0, Math.round(result.ms)) : 0;
+      // Iran's DNS block page for this name: every address under it, on
+      // any port, is asked last on this network (endpoint-demotion.ts).
+      // A race usually sees that for itself (`resolvesToBlockPage`). This
+      // covers what it does not: a lookup slower than the race waits for
+      // one, and a name that resolves into the block page and somewhere
+      // else as well, which the race leaves alone.
+      if (outcome === "blockpage") demoteName(target.host);
       return `${target.label}=${outcome}@${ms}`;
     });
     return { section: `probe: ${parts.join(" ")}`, answered: true };

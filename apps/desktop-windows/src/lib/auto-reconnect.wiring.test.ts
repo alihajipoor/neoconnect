@@ -247,18 +247,22 @@ describe("which screen runs an attempt", () => {
     // ran on a `runLadder` with no routes: `concurrentExitsFor` found no
     // extra exit and `exitOfRoute` no egress, so it landed without concurrent
     // exits and with every game's placement Unknown until the next connect.
-    const load = body("async function loadAll(preferRouteId?: string) {");
+    const load = body("async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<OfflineLoadOutcome> {");
     // Online: once the list has been asked for, answered or not.
-    const asked = load.indexOf("const routesResult = await getAvailableRoutes(sub.id);");
+    const asked = load.indexOf('const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));');
     const said = load.indexOf("} finally {\n      setRouteListLoaded(true);\n    }");
     expect(asked).toBeGreaterThan(0);
     expect(said).toBeGreaterThan(asked);
     expect(load.indexOf("setRoutes(currentRoutes);")).toBeLessThan(said);
-    // Cached: with the cached list on screen. And with nothing to dial, at
-    // once, as the route memory is.
-    const cached = load.indexOf("setRoutes(cached.routes);\n        setRouteListLoaded(true);");
+    // Cached: with the cached list on screen, whichever way the load came
+    // to it (`showCached`). And with nothing to dial, at once, as the route
+    // memory is.
+    const shown = body("async function showCached(");
+    const cached = shown.indexOf("setRoutes(cached.routes);");
     expect(cached).toBeGreaterThan(0);
-    expect(load.split("setRouteListLoaded(true);").length - 1).toBe(3);
+    expect(shown.indexOf("setRouteListLoaded(true);")).toBeGreaterThan(cached);
+    expect(load).toContain("await showCached(cached, preferRouteId, load, reason);");
+    expect(load.split("setRouteListLoaded(true);").length - 1).toBe(2);
     expect(dashboard.split("setRouteListLoaded(true)").length - 1).toBe(3);
   });
 
@@ -277,8 +281,13 @@ describe("which screen runs an attempt", () => {
     // on it for good.
     expect(dashboard.split("loadLastGood()").length - 1).toBe(1);
     expect(dashboard.split("loadConnectHistory()").length - 1).toBe(1);
-    const load = body("async function loadAll(preferRouteId?: string) {");
-    expect(load.split("loadRouteMemory();").length - 1).toBe(3);
+    const load = body("async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<OfflineLoadOutcome> {");
+    // The screen with nothing to dial, and the online one -- once, not
+    // again when the snapshot went up first while it waited.
+    expect(load.split("loadRouteMemory();").length - 1).toBe(2);
+    expect(load).toContain("if (!shownWhileWaiting) loadRouteMemory();");
+    // And the cached one, whichever way the load came to it.
+    expect(body("async function showCached(").split("loadRouteMemory();").length - 1).toBe(1);
   });
 
   it("on a screen that loaded nothing to dial, ends the episode rather than spending its attempts", () => {
@@ -461,7 +470,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     const pick = picker.slice(picker.indexOf("async function handlePick(route: RouteOption) {"));
     const told = pick.indexOf("onPicking?.(route.id);");
     expect(told).toBeGreaterThan(0);
-    expect(told).toBeLessThan(pick.indexOf("await switchRoute(subscriptionId, route.id);"));
+    expect(told).toBeLessThan(pick.indexOf('await switchRoute(subscriptionId, route.id, requests.trace("switch"));'));
     // Automatic too, before its own handler.
     const automatic = picker.slice(picker.indexOf("if (automatic || switchingId) return;"));
     expect(automatic.indexOf("onPicking?.(null);")).toBeGreaterThan(0);
@@ -484,9 +493,9 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     const failed = pick.slice(pick.indexOf("} else {") + "} else {".length);
     expect(failed.slice(0, failed.indexOf("}"))).toContain("onPickFailed?.();");
     expect(pick.indexOf("onPickFailed?.();")).toBeGreaterThan(pick.indexOf("if (result.ok) {"));
-    expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain(
-      "onPickFailed={() => autoReconnect.pickFailed()}",
-    );
+    const listed = dashboard.slice(dashboard.indexOf("<LocationPicker"));
+    const onFailed = listed.slice(listed.indexOf("onPickFailed={() => {"));
+    expect(onFailed.slice(0, onFailed.indexOf("}}"))).toContain("autoReconnect.pickFailed();");
   });
 
   it("the inline repair is not offered while an automatic pass dials: the last pass's error is cleared as the next begins", () => {

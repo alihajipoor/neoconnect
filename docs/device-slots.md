@@ -285,7 +285,7 @@ refusal of the device -- see obligation 2.
 | Renew interval | 60 s | `renewEverySec` in every grant -- use the value sent |
 | A holder is stale (its slot is free without asking) | 90 s with no renewal **and** no traffic | `staleAfterSec` |
 | Claim budget before dialling anyway | 3 s | client side |
-| Release budget | 1.5 s or less, never delaying teardown | client side |
+| Release budget | 1.5 s or less, never delaying teardown; once more, 1.5 s, the moment the teardown has confirmed the tunnel gone, if unanswered by then | client side |
 | Status check when the tunnel degrades (below) | 4 s | client side |
 | Takeovers logged for the admin | more than 10 per subscription per hour | server |
 | Takeovers refused (429) | more than 30 per subscription per hour | server |
@@ -332,6 +332,28 @@ refusal of the device -- see obligation 2.
    release that lands after the next Connect's claim frees nothing.
    Sign-out releases the slot on the server by itself; no separate call
    is needed.
+   Sent before the teardown, so it goes through the tunnel while the
+   tunnel is up -- on a filtered network the likeliest way to reach the
+   API. The teardown does not wait for it, and so usually takes it down
+   before it is answered: on the Windows test VM (2026-10-10) none of four
+   was answered, and the panel host's access log shows two of the four
+   arriving, none from the run where only the tunnel reached Neoxify.
+   Making the teardown wait until the release is out would keep the
+   customer's traffic in a tunnel they have asked to leave, which this
+   obligation rules out. A release with no answer by the time the
+   teardown is over is therefore sent once more then -- at once, not
+   after the first's 1.5 s, whose connection went down with the tunnel --
+   on the bare line, with its own 1.5 s. Only when the platform confirmed
+   the tunnel gone: a teardown that gave up with the tunnel still reported
+   up would send the second the way the first went. Its health race asks
+   every address not demoted on the network at once, rather than the one
+   that answered last alone, since that one answered through the tunnel.
+   The same handle, so it frees nothing if the first arrived or a Connect
+   has been granted since, and not sent at all once a Connect or a
+   sign-out has started. Where the bare line cannot reach the API either
+   -- the run above where only the tunnel did -- the slot goes stale after
+   90 s, as before. Unverified on a real network: none of this second
+   release has been seen arriving yet.
 9. **When the tunnel degrades and this device was unclaimed or
    displaced**, do not run the ladder blindly: tear down, call `renew`
    with a 4 s budget, and if it answers `displaced`, show that. If it

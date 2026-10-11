@@ -16,10 +16,13 @@ import type {
   SupportThread,
 } from "./types";
 
-export const getMe = () => apiRequest<Customer>("/customer/me");
-export const getSubscriptions = () => apiRequest<Subscription[]>("/customer/subscriptions");
-/** `trace` is for the pre-connect refresh, which reports which addresses
- * it tried when it fails -- see endpoint-trace.ts. */
+/** `trace`, here and below, records which addresses a request tried, for
+ * the report made when nothing answered it: the pre-connect refresh's
+ * (connection-config.ts), and the dashboard's load and the server list's
+ * (unanswered-report.ts). See endpoint-trace.ts. */
+export const getMe = (trace?: EndpointTrace) => apiRequest<Customer>("/customer/me", undefined, trace);
+export const getSubscriptions = (trace?: EndpointTrace) =>
+  apiRequest<Subscription[]>("/customer/subscriptions", undefined, trace);
 export const getProtocolUsers = (trace?: EndpointTrace) =>
   apiRequest<ProtocolUser[]>("/customer/protocol-users", undefined, trace);
 export const getAppLinks = () => apiRequest<AppLinks>("/customer/links");
@@ -47,14 +50,15 @@ export const getReferrals = () => apiRequest<ReferralOverview>("/customer/referr
 // Carries this device's network attestation, so each route comes back
 // tagged with what other people on the same network recently got
 // through on. See network-identity.ts.
-export const getAvailableRoutes = (subscriptionId: string) =>
-  apiRequest<RouteOption[]>(`/customer/subscriptions/${subscriptionId}/routes`, { headers: networkHeaders() });
+export const getAvailableRoutes = (subscriptionId: string, trace?: EndpointTrace) =>
+  apiRequest<RouteOption[]>(`/customer/subscriptions/${subscriptionId}/routes`, { headers: networkHeaders() }, trace);
 
-export const switchRoute = (subscriptionId: string, routeId: string) =>
-  apiRequest<ProtocolUser>(`/customer/subscriptions/${subscriptionId}/route`, {
-    method: "POST",
-    body: JSON.stringify({ routeId }),
-  });
+export const switchRoute = (subscriptionId: string, routeId: string, trace?: EndpointTrace) =>
+  apiRequest<ProtocolUser>(
+    `/customer/subscriptions/${subscriptionId}/route`,
+    { method: "POST", body: JSON.stringify({ routeId }) },
+    trace,
+  );
 
 /** Creates the subscription row only. It is not usable until a payment
  * clears -- credentials aren't provisioned until the provider's webhook

@@ -17,6 +17,14 @@ const sent: { url: string; headers: Record<string, string>; body: unknown }[] = 
 
 vi.mock("@tauri-apps/plugin-http", () => ({
   fetch: (url: string, init?: RequestInit) => {
+    // The health race a write runs first, to find an address that
+    // answers (`sendWrite` in api.ts). Answered everywhere, and not part
+    // of what the contract has the device send.
+    if (new URL(url).pathname === "/health") {
+      return Promise.resolve(
+        new Response(JSON.stringify({ status: "ok" }), { status: 200, headers: { "content-type": "application/json" } }),
+      );
+    }
     sent.push({
       url,
       headers: { ...(init?.headers as Record<string, string>) },
@@ -58,6 +66,7 @@ vi.mock("./session", () => ({
 }));
 
 const { claimSlot, renewSlot, releaseSlot, refusalReport, refusalFrom } = await import("./device-slots");
+const { resetRaceWinnerForTests } = await import("./api");
 const { configureDeviceIdentity } = await import("./device-identity");
 const { onSessionRevoked } = await import("./session-revoked");
 const { failedDial } = await import("./attempts");
@@ -97,6 +106,7 @@ const DEVICE_LIMIT = {
 };
 
 beforeEach(() => {
+  resetRaceWinnerForTests();
   for (const key of Object.keys(replies)) delete replies[key];
   sent.length = 0;
   stored = { accessToken: "access", refreshToken: "refresh" };
@@ -418,11 +428,25 @@ describe("release", () => {
     expect(sent[0].body).toEqual({ subscriptionId: SUB, handle: "Zm9vYmFyYmF6" });
   });
 
-  it("is over within its budget when nothing answers, and never throws", async () => {
+  it("is over within its budget when nothing answers, never throws, and says it was not answered", async () => {
     replies["/customer/vpn/release"] = ["hang", "hang"];
     const started = Date.now();
-    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" }, 50)).resolves.toBeUndefined();
+    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" }, 50)).resolves.toBe(false);
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  /** What decides whether a release taken down with the tunnel is sent
+   * again on the bare line (`ReleaseOptions` in device-slot-session.ts). */
+  it("says it was answered when the backend answered, with its 204 or a refusal of its own", async () => {
+    replies["/customer/vpn/release"] = [{ status: 204 }];
+    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" })).resolves.toBe(true);
+    replies["/customer/vpn/release"] = [{ status: 404, body: { message: "Subscription not found" } }];
+    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" })).resolves.toBe(true);
+  });
+
+  it("says it was not answered when nothing anywhere answered it", async () => {
+    replies["/customer/vpn/release"] = ["unreachable", "unreachable"];
+    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" })).resolves.toBe(false);
   });
 });
 

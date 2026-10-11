@@ -649,16 +649,20 @@ describe("the phone dashboard's wiring", () => {
     // claimed or renewed for the rest of the session.
     const load = dashboard.slice(
       dashboard.indexOf("async function loadAll(preferRouteId?: string) {"),
-      dashboard.indexOf("async function loadScreen(preferRouteId: string | undefined, ready: () => void) {"),
+      dashboard.indexOf("async function loadScreen(preferRouteId: string | undefined, ready: () => void, retry: OfflineRetryTrigger | null = null): Promise<OfflineLoadOutcome> {"),
     );
     // Set as it is said, not as it is next rendered.
     expect(load.indexOf("loadedRef.current = false;")).toBeLessThan(load.indexOf("await loadScreen(preferRouteId, ready);"));
     expect(load).toMatch(/const ready = \(\) => \{\n\s+if \(loadRef\.current !== load\) return;\n\s+loadedRef\.current = true;\n\s+setLoaded\(true\);\n\s+\};/);
     // Both ways a load ends with something to dial read the platform with
     // what they loaded -- the cached one too, which never did.
-    const screen = body("async function loadScreen(preferRouteId: string | undefined, ready: () => void) {");
-    const cached = screen.slice(screen.indexOf("if (cached) {"), screen.indexOf("setError(\n"));
-    expect(cached).toContain("await adoptPlatform(sessionAtStart, cached.protocolUsers, cached.subscription, ready);");
+    const screen = body("async function loadScreen(preferRouteId: string | undefined, ready: () => void, retry: OfflineRetryTrigger | null = null): Promise<OfflineLoadOutcome> {");
+    // The cached one whichever way the load comes to it: failed, or still
+    // waiting past eight seconds (`showCached`).
+    const cached = screen.slice(screen.indexOf("if (cached) {"), screen.indexOf("setError(!meResult.ok"));
+    expect(cached).toContain("await showCached(cached, preferRouteId, load, reason, sessionAtStart, ready);");
+    const shown = body("async function showCached(");
+    expect(shown).toContain("await adoptPlatform(sessionAtStart, cached.protocolUsers, cached.subscription, ready);");
     expect(screen).toContain("await adoptPlatform(sessionAtStart, usersResult.data, sub, ready);");
     // And over a pass under way, said at once, so a pass that ends between
     // that and the load's end is still read by the listener.
@@ -739,7 +743,7 @@ describe("the phone dashboard's wiring", () => {
     expect(adopt.split("if (overtaken()) return;").length - 1).toBe(3);
     // The adopted tunnel keeps the pass's baseline, so it can be proven.
     expect(adopt).toContain("setBaselineIp(on !== null ? ladderPass.baseline.current : null);");
-    expect(body("async function loadScreen(preferRouteId: string | undefined, ready: () => void) {")).toContain(
+    expect(body("async function loadScreen(preferRouteId: string | undefined, ready: () => void, retry: OfflineRetryTrigger | null = null): Promise<OfflineLoadOutcome> {")).toContain(
       "await adoptPlatform(sessionAtStart, usersResult.data, sub, ready);",
     );
   });

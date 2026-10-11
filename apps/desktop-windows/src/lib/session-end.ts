@@ -1,3 +1,4 @@
+import { forgetQueuedSessions } from "./attempts";
 import { clearGamingProfileCache } from "./customer";
 import { clearSnapshot } from "./credential-cache";
 import { deviceSlot, slotNoticeStore, slotTeardown } from "./device-slot-session";
@@ -134,5 +135,8 @@ export async function endCustomerSession(): Promise<SessionEnd> {
   }
   await clearTokens();
   await clearSnapshot();
+  // And the copies of the access token kept with queued reports, which
+  // would otherwise outlive the sign-out on disk (attempts.ts).
+  await forgetQueuedSessions();
   return { tunnel };
 }

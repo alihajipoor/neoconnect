@@ -11,6 +11,10 @@ import { Button } from "./ui";
 import { Latency } from "./Latency";
 import { Flag } from "./Flag";
 import { useI18n } from "../lib/i18n";
+import { failureText, type ShownFailure } from "../lib/failure-text";
+import { useStillTrying } from "../lib/still-trying";
+import { traceRequests } from "../lib/unanswered-report";
+import { routesToAdopt } from "../lib/picker-routes";
 
 // Full-screen overlay, not a floating dialog -- this app's window is a
 // fixed 400x640 (see tauri.conf.json), so "sheet slides over the whole
@@ -26,7 +30,21 @@ export function LocationPicker({
   onChooseAutomatic,
   onPicking,
   onPickFailed,
+  connectionState,
+  onRoutes,
 }: {
+  /** Told the list this picker's own request was answered with, and for
+   * which subscription: newer than anything the dashboard holds. It stayed
+   * in the picker, and the dashboard -- with nothing cached, its own
+   * request having failed -- went on writing an empty list into the
+   * snapshot, so the next start with Neoxify out of reach had no servers
+   * to show although a list had been fetched. */
+  onRoutes?: (subscriptionId: string, routes: RouteOption[]) => void;
+  /** The connection state the dashboard beneath shows, as it changes. For
+   * the report on a list or a switch nothing answered: its socket-level
+   * probe must not run across a connect or a disconnect, and the list
+   * stays open while the dashboard does either (unanswered-report.ts). */
+  connectionState?: string;
   /** Told the moment a server or Automatic is picked, before anything is
    * awaited -- a server's switch request can take seconds to answer, and
    * `onSwitched` waits for it. Whatever an automatic reconnect was doing
@@ -92,9 +110,16 @@ export function LocationPicker({
   const [routes, setRoutes] = useState<RouteOption[]>(initialRoutes ?? []);
   // Only a blocking load when there is genuinely nothing to show.
   const [loading, setLoading] = useState((initialRoutes ?? []).length === 0);
-  const [error, setError] = useState<string | null>(null);
+  // Kept as they came, and worded as the list renders (`ShownFailure`).
+  const [error, setError] = useState<ShownFailure | null>(null);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
-  const [switchError, setSwitchError] = useState<string | null>(null);
+  const [switchError, setSwitchError] = useState<ShownFailure | null>(null);
+  // Both waits are on Neoxify: the list is a read, given up to twenty
+  // seconds an address, and a switch a write that first asks who answers.
+  // Past eight seconds each says it is still trying rather than spinning
+  // in silence.
+  const loadingLong = useStillTrying(loading);
+  const switchingLong = useStillTrying(switchingId !== null);
   /** Measured round-trip per route. Absent means "not measured yet",
    * which renders as "--" -- distinct from a measured failure, which is
    * an explicit null. Both are honest; neither invents a number. */
@@ -109,6 +134,37 @@ export function LocationPicker({
   // With Automatic chosen, no server row is "the current one": the ladder
   // decides at connect time, and every row stays a way to pin a server.
   const pinnedRouteId = automatic ? undefined : currentRouteId;
+  // Read when a request settles, not when it began: see `connectionState`.
+  const stateRef = useRef(connectionState);
+  stateRef.current = connectionState;
+  // The rows as the latest render has them, for a request that settles
+  // after the dashboard has offered a list (`routesToAdopt`).
+  const routesRef = useRef(routes);
+  routesRef.current = routes;
+  // Whether this picker's own request for the list has answered, and
+  // whether one is out now.
+  const ownAnswered = useRef(false);
+  const ownPending = useRef(false);
+
+  // A list the dashboard puts on screen after this opened, while this
+  // picker's own request has not answered: the dashboard's route request
+  // was still out when the picker opened, or has learned more since. See
+  // `routesToAdopt`.
+  useEffect(() => {
+    const adopted = routesToAdopt(routesRef.current, ownAnswered.current, initialRoutes);
+    if (adopted === null) return;
+    setRoutes(adopted);
+    setError(null);
+    if (adopted.length > 0) {
+      setLoading(false);
+      void measureAll(adopted);
+      return;
+    }
+    // Taken away: they were another plan's. This plan's list is the
+    // picker's own request's to find -- still out, or asked again.
+    if (ownPending.current) setLoading(true);
+    else void load();
+  }, [initialRoutes]);
 
   useEffect(() => {
     void load();
@@ -120,14 +176,36 @@ export function LocationPicker({
 
   async function load() {
     setError(null);
-    const result = await getAvailableRoutes(subscriptionId);
+    // A wait, when there is nothing on screen to show meanwhile -- the
+    // Retry after an error. Left false there, the list fell through to
+    // "No locations available on your current plan" for as long as the
+    // request took, which is up to twenty seconds an address now, and is
+    // not something anybody had been told.
+    setLoading(routesRef.current.length === 0);
+    // Traced, so a list that nothing answered is reported with the
+    // addresses it tried, whether or not the customer saw an error for
+    // it. See unanswered-report.ts.
+    const requests = traceRequests("server list", () => stateRef.current);
+    ownPending.current = true;
+    const result = await getAvailableRoutes(subscriptionId, requests.trace("routes")).finally(() => {
+      ownPending.current = false;
+    });
+    const unanswered = requests.settle({ routes: result });
+    const throughTunnel = tunnelActive ? "; a tunnel was up" : "";
+    // Read now: the dashboard may have offered a list while this waited.
+    const shown = routesRef.current;
     if (result.ok) {
+      ownAnswered.current = true;
       setRoutes(result.data);
+      onRoutes?.(subscriptionId, result.data);
       void measureAll(result.data);
-    } else if (routes.length === 0) {
+    } else if (shown.length === 0) {
       // A failed refresh must not blank a list the customer can see and
       // use. It only becomes an error when there is nothing behind it.
-      setError(result.error);
+      setError(result);
+      unanswered?.(`showed the error, with no servers to list${throughTunnel}`);
+    } else {
+      unanswered?.(`kept the ${shown.length} servers already on screen${throughTunnel}`);
     }
     setLoading(false);
   }
@@ -258,14 +336,22 @@ export function LocationPicker({
     onPicking?.(route.id);
     setSwitchError(null);
     setSwitchingId(route.id);
-    const result = await switchRoute(subscriptionId, route.id);
+    // A switch that nothing answered shows the same sentence as a list
+    // that could not be had -- over rows the customer can see -- and it
+    // left no report either.
+    const requests = traceRequests("server switch", () => stateRef.current);
+    const result = await switchRoute(subscriptionId, route.id, requests.trace("switch"));
+    const unanswered = requests.settle({ switch: result });
     setSwitchingId(null);
     if (result.ok) {
       onSwitched(route.id);
       onClose();
     } else {
       onPickFailed?.();
-      setSwitchError(result.error);
+      setSwitchError(result);
+      // Not "nothing was switched": a request whose answer was lost may
+      // still have arrived.
+      unanswered?.(`showed the error and kept the previous choice${tunnelActive ? "; a tunnel was up" : ""}`);
     }
   }
 
@@ -292,12 +378,13 @@ export function LocationPicker({
 
       <div className="flex-1 overflow-y-auto px-3 py-3">
         {loading ? (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
+            {loadingLong ? <p className="text-xs">{t("common.stillTrying")}</p> : null}
           </div>
         ) : error ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
-            <p className="text-sm text-destructive">{error}</p>
+            <p className="text-sm text-destructive">{failureText(error, t)}</p>
             <Button onClick={() => void load()}>{t("loc.retry")}</Button>
           </div>
         ) : routes.length === 0 ? (
@@ -418,7 +505,8 @@ export function LocationPicker({
           </div>
           </>
         )}
-        {switchError ? <p className="px-2 pt-2 text-xs text-destructive">{switchError}</p> : null}
+        {switchingLong ? <p className="px-2 pt-2 text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
+        {switchError ? <p className="px-2 pt-2 text-xs text-destructive">{failureText(switchError, t)}</p> : null}
       </div>
     </div>
   );

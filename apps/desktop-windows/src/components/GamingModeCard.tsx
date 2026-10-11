@@ -15,6 +15,7 @@ import {
 } from "../lib/gaming";
 import { GamePicker, GameTile } from "./GamePicker";
 import { Button, Card } from "./ui";
+import { StillTrying } from "./StillTrying";
 
 /** Gaming mode's settings pane: which games it covers.
  *
@@ -100,8 +101,10 @@ export function GamingModeCard() {
 
   if (loading || !settings) {
     return (
-      <Card className="flex items-center justify-center py-8 text-muted-foreground">
+      <Card className="flex flex-col items-center justify-center gap-2 py-8 text-muted-foreground">
         <Loader2 className="size-5 animate-spin" />
+        {/* The profile is a read that may wait twenty seconds an address. */}
+        <StillTrying waiting={loading} />
       </Card>
     );
   }

@@ -7,6 +7,7 @@ import { flushAttempts } from "./lib/attempts";
 import { endCustomerSession, type SessionEnd } from "./lib/session-end";
 import { onSessionRevoked } from "./lib/session-revoked";
 import { useI18n } from "./lib/i18n";
+import { failureText } from "./lib/failure-text";
 import { Login } from "./screens/Login";
 import { Register } from "./screens/Register";
 import { VerifyEmail } from "./screens/VerifyEmail";
@@ -63,6 +64,11 @@ export default function App() {
   const handledDeepLinkUrls = useRef(new Set<string>());
   const endingRef = useRef(false);
   const { t } = useI18n();
+  // Read through a ref by the deep-link handler, which is registered once
+  // and would otherwise word its notice in the language of the first
+  // render -- before the saved choice was read back from disk.
+  const tRef = useRef(t);
+  tRef.current = t;
 
   useEffect(() => {
     // getTokens() swallows its own read failures, but a catch here too
@@ -106,8 +112,15 @@ export default function App() {
     // `screen`, which this handler -- registered once -- would see stale.
     if (await getTokens().catch(() => null)) return;
     setPendingAuth(null);
+    // In the customer's language, the reason included (failure-text.ts).
+    // It used to be English whatever the app was in, and on a filtered
+    // network the reason was "Could not reach Neoxify. Check your internet
+    // connection." -- the one sentence the error text exists to translate.
+    const say = tRef.current;
     setLoginNotice(
-      result.ok ? "Email verified! Sign in to continue." : `Couldn't verify your email: ${result.error}`,
+      result.ok
+        ? say("auth.emailVerifiedNotice")
+        : say("auth.verifyLinkFailed", { reason: failureText(result, say) }),
     );
     setScreen("login");
   }

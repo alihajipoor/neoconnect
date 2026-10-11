@@ -5848,3 +5848,338 @@ alone and force-pushed; the CI runs on the dropped commit were cancelled.
 The hostnames are in every shipped installer, but the repo is meant not to
 list them. When bumping: test first, `git checkout --` the file, apply only
 `"version"`, and read `git diff --cached` of it before committing.
+
+## 2026-10-09 — control-plane resilience (branch `claude/control-plane-resilience`, not merged)
+
+**Status:** code done, unreleased -- needs the VM, a filtered network, phones
+**Touches:** `apps/desktop-windows/src/lib/api.ts` and its neighbours
+(`auth.ts`, `pow.ts`, `endpoint-demotion.ts`, `attempts.ts`,
+`unanswered-report.ts`, `connection-config.ts`, `credential-cache.ts`,
+`social-auth.ts`, `failure-text.ts`, `i18n.tsx`), both dashboards, the
+shared picker and auth screens, `health_ip.rs` (`resolve_ipv4` gains an
+IPv6 option), backend `client-attempts` and `isp-recommendations`.
+
+What the branch does, for customers whose API addresses are filtered:
+
+- **Sign-in** races the proof-of-work challenge (remembered address alone
+  for 1.5 s, then the rest, then the demoted) and sends the attempt only
+  where the backend answered it; if nothing takes it, a fresh challenge is
+  raced over the addresses not yet heard from. 46.5 s of *network* time at
+  most -- the solve is not counted -- and the last answering address gets
+  20 s for a slow answer. Only a backend answer counts as "Neoxify
+  answered"; a page answering alone is reported as that page's status.
+- **Writes** go to the address the backend answered from in the last 90 s
+  (answered writes renew it, so a connected session's slot release goes
+  straight there), else race `GET /health` and walk only addresses whose
+  answer proves the backend (200/503/429 JSON). A failing or page-answering
+  winner is forgotten; pages are never sent the write but are the answer of
+  last resort.
+- **Reads** are staged races with a 20 s answer deadline and a 10 s connect
+  deadline; addresses that timed out, or whose names resolve only to the
+  10.10.34.x block page, are demoted per network for 30 min and asked last.
+  The block-page lookup is fresh per race (a lookup made before a connect
+  used to be trusted for a minute after the tunnel came up), counts IPv6
+  answers, and is overruled by an answer from the name. All addresses on
+  the block page now says so ("your network is blocking Neoxify").
+- **Non-backend answers** (HTML pages of any status, and JSON 401s from an
+  address whose public `/health` answered 401) never win, never get
+  remembered, never sign anyone out; a token refresh refused by such an
+  address goes on to the others.
+- **Screens**: failures in the customer's language (verify link included),
+  session-renewal failures say whether anything answered, a "still trying"
+  line on every wait on Neoxify, social sign-in starts where Neoxify
+  answers now (CDN asked first) and can be cancelled on Windows, the late
+  config answer reaches whichever dashboard is mounted and never overwrites
+  a newer snapshot, cached route lists drop their per-network ISP tags.
+- **Telemetry**: dashboard/server-list unreachable reports (rate-limited
+  across restarts, skipped after a sign-out), queued reports attributed to
+  the session they were made in but sent with the current token when it is
+  the same customer's, tokens stripped from the queue at sign-out, a new
+  queue key so a downgrade cannot send a token in a body, page-answered
+  reports kept; backend orders per-ISP dials by when they happened.
+
+**Proven -- tests on this PC:** desktop `pnpm test` 1238 / 72 files and
+`pnpm typecheck`; mobile 239 / 16 and `tsc`; web portal 2 / 1 and `tsc`;
+backend isp-recommendations and client-attempts 60 / 5; `cargo check
+--workspace --all-targets` and `cargo test --workspace`. Every fix in the
+second review round has a test that fails without it (checked by stashing
+the sources); the network is simulated per address on a fake clock.
+
+**Unverified:** all of it on a real Iranian network; the VM; Android and
+iPhone; the proof-of-work solve rate in WebView2 and on phones; whether
+Iran's injector answers AAAA queries; the 10 s connect deadline against a
+throttled TLS handshake. Deploy the backend (expired-token attribution on
+`/client-attempts`) before releasing a client from this branch.
+
+**Left as is, with reasons in the commit:** the offline dashboard still
+waits for its reads (11.5-23 s) before showing cached credentials; the web
+portal has no connect deadline; the demotion key is the baseline ASN, and
+answers through a tunnel can lift a carrier-network demotion; a write
+after 90 s idle pays one health round trip; a social start through a
+mirror (only when the CDN does not answer) shares that node's throttle.
+
+## 2026-10-10 — control-plane resilience, third review round (same branch, not merged)
+
+**Status:** code done, unreleased -- still needs the VM, a filtered network, phones
+**Commits:** `f61a9b3` (sign-in, writes, block page), `05b3036` (social
+start), `c8bdb17` (reports), `38f2043` (screens and caches)
+
+The checkers' third pass found the branch's own new rules biting back.
+What changed:
+
+- **What marks an address "not the backend"** is now only JSON 401/403/404
+  to a public request (`/health`, `/login-challenge`). A gateway page on
+  `/health` during a deploy used to mark it, after which the backend's own
+  401 from that address was treated as a page and the token was never
+  refreshed. A JSON 403/404 on `/health` no longer counts as the backend
+  having answered, so its 401 to the refresh is not a sign-out.
+- **Sign-in:** a JSON 401/403/404 can no longer win the challenge race; a
+  page answering the attempt (521, WAF 403, and for sign-in also
+  502/504/520/524) races a fresh challenge elsewhere instead of ending it;
+  every `via` address gets 20 s and the walk stops after a timeout rather
+  than re-sending the same solution. Sign-up is not re-sent after no answer
+  or a may-have-reached page: the account may already exist.
+- **Writes:** a read won by a 401 is offered only to the token refresh; a
+  device-slot write (its own short budget) goes straight to the remembered
+  address when no race was won lately, demoted or not, with the name's block
+  page looked at beside it; "stopped responding" only when this write's own
+  health race was answered.
+- **Block page:** a name already found there is looked at before anything is
+  sent and not sent anything; a reset that beats the lookup no longer hides
+  "your network is blocking Neoxify".
+- **Screens:** a first load with a snapshot shows it at 8 s and keeps
+  waiting (was 11.5-23 s); the banner tells "can't reach" from "answered with
+  an error"; errors are worded at render time; still-trying on Settings,
+  gaming and referrals; late config answers ordered by ask time; overtaken
+  loads no longer overwrite route lists or snapshots; the picker follows the
+  dashboard's newer list and hands its own back.
+- **Reports:** no access token written back to disk by a report in hand at
+  sign-out; page-only and renewal-unanswered loads now leave a row.
+
+Left as is: an address cancelled because another answered first is never
+demoted (nothing is known about it); demotions are still filed under the
+baseline ASN.
+
+**Proven -- tests on this PC:** desktop `pnpm test` 1298 / 73 files and
+`pnpm typecheck`; mobile 239 / 16 and `tsc`; web portal 2 / 1 and `tsc`;
+desktop-macos `tsc`. Every new test was checked to fail with the sources
+reverted. No Rust or backend change this round. The screen changes are
+pinned by source assertions; none were run in the app.
+
+**Unverified:** everything on a real Iranian network, the VM, Android and
+iPhone; the cached-start-at-8-s path with a Connect pressed while the load
+is still waiting; whether real CDN/mirror deployments produce the page and
+JSON-401 shapes these rules are written against.
+
+## 2026-10-10 — control-plane resilience, fourth review round (same branch, not merged)
+
+**Status:** code done, unreleased -- still needs the VM, a filtered network, phones
+
+- **Block page vs proxies.** With Psiphon, v2rayN or Clash in system-proxy
+  mode (WinINet `ProxyEnable`/`ProxyServer`), or `HTTPS_PROXY`/`ALL_PROXY`,
+  tauri-plugin-http's reqwest sends every request through the proxy, which
+  resolves the name remotely. The race's local lookup still found the
+  block page, stopped the request, demoted the name, and the screen said
+  the network blocks Neoxify -- about requests the proxy would have had
+  answered. `resolve_ipv4` now takes `unlessProxied` and refuses before
+  asking the resolver when `http_proxied` says so; the look reads that as
+  nothing known. `http_proxied` asks hyper-util's `Matcher::from_system`,
+  the matcher reqwest 0.12.28 itself builds per request, and also counts
+  anything WinINet names (per-protocol `ProxyServer`, a PAC
+  `AutoConfigURL`) as "cannot be ruled out"; WPAD is not counted. The
+  socket probe after a failed request answers `proxy` for such a target
+  and demotes nothing. On Android and iOS reqwest ignores the system and
+  VPN proxy settings (hyper-util reads system settings on macOS and
+  Windows only), so the request uses the same resolver as the look; only
+  the environment is asked there. No new crates: `hyper-util` and
+  `windows-registry 0.6.1` were already in both lockfiles.
+- **Picker write-back.** `updateSnapshotRoutes` keeps the snapshot's
+  `savedAt`; only a credentials answer refreshes it. Before, every
+  answered server list made old credentials look fresh for ten minutes, so
+  Connect and resume skipped the refresh.
+- **Sign-in walk.** A `via` walk no longer follows the remembered endpoint:
+  the attempt goes only to the addresses its own challenge race heard from.
+
+**Proven -- tests on this PC:** desktop `pnpm test` 1307 / 73 files and
+`pnpm typecheck`; mobile 239 / 16 and `tsc`; web portal and desktop-macos
+`tsc`; desktop `cargo check --workspace --all-targets` and `cargo test
+--workspace` (app 49, ipc 58, service 487); the mobile crate's `cargo check --all-targets` and its
+`health_ip`/probe tests on this Windows host. Each fix's new test fails
+with the source reverted. The environment-proxy case runs in a child test
+process with `HTTPS_PROXY` set.
+
+**Unverified:** a real Windows machine with Psiphon, v2rayN or Clash in
+system-proxy mode (only the registry-reading rule is unit-tested, against
+handed-in values, not this PC's settings); whether reqwest actually
+reaches the backend through those proxies from Iran; real Iranian networks;
+the VM; Android and iPhone, including a VPN app's proxy settings there.
+
+## 2026-10-10 (evening) — control-plane resilience in the VM, and three fixes from it (same branch, not merged)
+
+**Status:** S0-S3 proven in the VM at 8c339b2; S4 failed and is fixed in
+code, not yet rerun in the VM
+
+The branch at 8c339b2 was built, installed in `Neoxify-Test` (installed
+exe and service byte-identical to the build, bar Tauri's bundle-type
+marker) and driven through four network states, with the blocking done by
+guest firewall rules on Ethernet and hosts-file entries pointing names at
+the block page's range. Times are from the press or the page reload; exit
+IPs were read from outside the app.
+
+- **S0, nothing blocked.** Dashboard 1.46 s; "You're protected" at 9.26 s
+  with the exit at the node; Disconnect 1.24 s, exit back to the guest's
+  own address, no engine and no half-default routes left.
+- **S1, CDN ranges blocked, every mirror name on the block page, origin
+  open.** Dashboard 1.47 s with the origin remembered, 3.06 s with the
+  blocked CDN remembered (refused at 0.34 s, the rest asked at once, all
+  eight mirror names demoted). Two dummy sign-ins rejected at 1.32 s, the
+  attempt sent only where the challenge was answered. "You're protected"
+  at 8.60 s.
+- **S2, origin and CDN blocked too.** Sign-in says "Could not reach
+  Neoxify" at 0.48 s (English) and 0.50 s (Persian); no login sent. With
+  the names blackholed instead: "Still trying" at 8.36 s, "Could not
+  reach" at 11.85 s. A signed-in start shows the cached dashboard with
+  Connect at 2.07 s (refused) or 9.30 s (blackholed). Connect on the cached
+  credentials: "Connected, not confirmed" at 20.10 s with the exit at the
+  node; the slot claim (200) and the queued unreachable reports (204) went
+  through the tunnel. The cache (80 credentials, 40 routes) was never
+  wiped in S1-S4.
+- **S3, a CONNECT proxy in the guest as the WinINet system proxy.** Live:
+  dashboard 1.78 s through it, sign-in through it 1.58 s, nothing demoted.
+  Dead, with every name on the block page: "Could not reach" at 3.95 s,
+  never "your network is blocking Neoxify", nothing demoted. The same
+  without a proxy: "blocking" at 0.48 s and ten names demoted.
+- **S4, recovery: FAILED.** Started with everything blocked (cached
+  dashboard at 1.96 s), then every block lifted: no dashboard request for
+  150 s, and "Can't reach Neoxify right now" stayed -- above "You're
+  protected" after a Connect whose claim and reports Neoxify had answered,
+  a minute later still. Only Settings and Back cleared it (1.73 s).
+
+Fixed since, one commit each:
+
+- **The stale banner (S4).** A dashboard on its cached snapshot now loads
+  again in the background -- 15 s, 30 s, 60 s, then every 2 min; at once on
+  `online`, on coming back to the front (at most every 10 s), on a
+  verified tunnel, and whenever the backend answers anything else
+  (`onBackendAnswer` in api.ts). One at a time, never beside the screen's
+  own load, nothing while hidden, no loading screen over it, the cached
+  server list kept until a newer one comes. Any backend answer drops the
+  "can't reach" line at once; the next load's result decides what the
+  banner says. Both clients (`offline-retry.ts`).
+- **The slow Connect (S2).** 12.7 s of the 20 s went on the pre-dial
+  baseline, which ignored the block-page demotions and then walked again
+  until a 12 s ceiling. The baseline now asks undemoted addresses first,
+  looks at each name (the plain IPv4 lookup `/health/ip` itself uses, so a
+  proxy does not change it, and nothing is written to the memory the
+  API's proxied requests read), gives demoted addresses 2 s, and the
+  Windows settle asks again only after a teardown and within its own
+  budget. On a model of S2 on a fake clock: 12,000 ms before, no waiting
+  after; 2,800 ms instead of 12,000 after a teardown. Still no baseline on
+  such a network, so still "Connected, not confirmed" there: on a network
+  that blocks Neoxify on the bare line, Connect cannot reach "You're
+  protected". Honest, and a gap.
+- **The slot release (all runs).** Every release on Disconnect went out
+  through the tunnel ~40 ms after the teardown began and never got an
+  answer. Not a regression: main fires it in the same order with the same
+  1.5 s. The panel host's nginx access log (read-only; the backend logs no
+  routes) shows the S0 and S1 releases arriving (204) and none for S2 or
+  S4. A release that got no answer is now sent once more on the bare line
+  when the teardown is over, same handle, never after a new Connect or a
+  sign-out; the disconnect still waits for nothing. Where the bare line
+  reaches nothing either, the slot still goes stale in 90 s.
+
+Not done: the three concurrent `POST /customer-auth/refresh` at startup
+(one per 401). They are real and predate the branch, but the backend does
+no reuse detection (`tokenVersion` only), all three succeed, and sharing
+one refresh would leave the joining requests' traces without their
+renewal leg. A change for its own sake, not a fix.
+
+Rig notes: `vm-copyfrom.ps1` (VBoxManage `copyfrom`) does not truncate an
+existing host file, so a rerun step leaves the old tail behind -- one
+evidence file was corrupted that way. S4 began with S3's demotions still
+in place, so its recovery timings are confounded. The blackholed Connect
+(S2b) cycled for minutes because the hosts file also poisons names inside
+the tunnel, which real DNS injection does not: a rig artifact.
+
+**Proven -- tests on this PC:** desktop `pnpm test` 1363 / 76 files and
+`pnpm typecheck`; mobile 239 / 16 and `tsc`; desktop `cargo check
+--workspace --all-targets` and `cargo test --workspace` (app 49, ipc 58,
+service 487; no Rust changed). Each fix's new tests fail against the
+previous source.
+
+**Unverified:** the VM rerun of these three fixes; real Iranian networks
+and real DNS injection; real DPI or SNI filtering; a slow-but-answering
+CDN (nothing in the rig reached the 20 s answer deadline); real Psiphon,
+v2rayN or Clash; any IPv6 path; Android and iPhone; whether the second
+release arrives from a line where only the tunnel reached Neoxify.
+
+## 2026-10-10 (night) — review of the three VM fixes, and what it changed (same branch, not merged)
+
+**Status:** fixed in code and in tests on this PC; none of it rerun in the
+VM
+
+Four reviewers read af99cce..5cb9e0d. Each had found the fixes incomplete:
+
+- **The banner could still lie (S4).** A reason to ask again that came
+  while a background load ran -- a tunnel verified, a claim or report
+  answered through it -- was dropped. When the old load, sent on the bare
+  line, then failed, it put "Can't reach Neoxify right now" back above
+  "You're protected", and the next ask was up to two minutes away (a
+  probe against the real class measured 120 s). The same happened through
+  the first load, before any retrying had started. Now the newest such
+  reason is kept and asked about the moment that load ends unanswered; a
+  load that fails after Neoxify answered anything since it began says
+  "reached", not "can't reach"; the screen's own loads run through the
+  retry, so a background load never starts beside one, nor between a
+  server switch being sent and its load beginning; a background load
+  overtaken by the screen's own writes nothing on the banner and does not
+  restart the retrying; and the schedule is no longer left with no timer
+  when the resume after a hidden due time arrives during a load. Answers
+  to reads, which a load is made of, do not queue another load, so a load
+  answered in part cannot repeat with no backoff.
+- **The baseline still took 11 s where every address hangs (S2b).** The
+  hedge launched one address a second, so two seconds each for demoted
+  addresses saved one second of the walk. The demoted addresses, which
+  come last, now go together. On the fake-clock model with ten hanging,
+  demoted addresses: 11,000 ms before the first rung becomes 2,000 ms, and
+  every rung after a teardown 4,400 ms instead of 11,000 (2.5 s budget);
+  with two undemoted hanging ahead of them, 11,000 becomes 7,000. The look
+  before sending is now held to the request's budget (5,000 ms became at
+  most 2,500 against a 2.5 s deadline with a silent resolver), and only a
+  reading the walk keeps lifts an address's demotion, not an answer
+  through a tunnel not yet gone.
+- **The slot release.** The first release still goes on the press,
+  through the tunnel, as obligation 8 asks: holding the teardown until it
+  is out would keep traffic in a tunnel the customer has left. The second
+  now goes the moment the teardown confirms the tunnel gone, rather than
+  after the first's 1.5 s; not at all when the teardown could not confirm
+  it, since it would go the way the first went; and with a health race
+  that asks every undemoted address at once, instead of leading for its
+  whole 1.5 s with the address that answered last through the tunnel.
+
+Not done: the startup token refresh stays three concurrent requests. Making
+it single-flight would hand joining requests a "refused" they announce as a
+sign-out, and leave their traces without the renewal leg the unanswered
+reports are built from; the backend does no reuse detection, so the cost
+is requests, not sessions.
+
+**Proven -- tests on this PC:** desktop `pnpm test` 1395 / 77 files and
+`pnpm typecheck`; mobile 239 / 16 and `tsc`; desktop `cargo check
+--workspace --all-targets` and `cargo test --workspace` (49, 58, 487; no
+Rust changed). Each new test fails against the previous source.
+
+**Unverified:** all of this in the VM, and everything listed above as
+unverified. Two gaps measured rather than fixed: with nothing yet known
+about a network and every address hanging, the baseline still takes its
+12 s ceiling, since nothing says which address is dead; and the 2 s
+given to a demoted address can turn a provable "You're protected" into
+"Connected, not confirmed" on a throttled link where that address answers
+in 2.5 to 5 s -- honest, but less proof, and no rig has such a link.
+
+**Follow-up to the VM re-test (tests on this PC only, not rerun in the VM):**
+the 8 s banner no longer says "Still trying" once a read has answered;
+the updater's check and the backend's `/health/ip` now clear "Can't
+reach" (the health check never asks for the load again, so its 15 s poll
+cannot defeat the backoff); one token refresh per expiry, its outcome and
+trace legs shared; a known baseline endpoint demoted or block-paged here
+is skipped for the hedged walk.

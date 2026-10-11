@@ -3,6 +3,8 @@ import { register } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { Logo } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
+import { failureText, type ShownFailure } from "../lib/failure-text";
+import { useStillTrying } from "../lib/still-trying";
 import { SocialSignIn } from "../components/SocialSignIn";
 
 export function Register({
@@ -23,13 +25,18 @@ export function Register({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [referralCode, setReferralCode] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  // Kept as it came, and worded as the screen renders (`ShownFailure`).
+  const [error, setError] = useState<ShownFailure | null>(null);
   const [pending, setPending] = useState(false);
+  // Sign-up is raced and timed as sign-in is (auth.ts): up to forty-six
+  // and a half seconds on the network, with a line past eight saying it is
+  // still trying.
+  const pendingLong = useStillTrying(pending);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (password.length < 8) {
-      setError("Password must be at least 8 characters.");
+      setError({ error: "Password must be at least 8 characters." });
       return;
     }
     setError(null);
@@ -39,7 +46,7 @@ export function Register({
     if (result.ok) {
       onNeedsVerification(email, password);
     } else {
-      setError(result.error);
+      setError(result);
     }
   }
 
@@ -95,12 +102,13 @@ export function Register({
           </div>
           {error ? (
             <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {error}
+              {failureText(error, t)}
             </p>
           ) : null}
           <Button type="submit" disabled={pending} className="mt-1 w-full">
             {pending ? t("auth.registering") : t("auth.createAccount")}
           </Button>
+          {pendingLong ? <p className="text-center text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
         </form>
         <button
           type="button"

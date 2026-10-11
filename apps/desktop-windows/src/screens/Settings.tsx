@@ -15,8 +15,10 @@ import {
 } from "lucide-react";
 import { changePassword, deleteAccount } from "../lib/auth";
 import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
+import { failureText } from "../lib/failure-text";
 import { Button, Card, Input, Label } from "../components/ui";
 import { RepairNetwork } from "../components/RepairNetwork";
+import { StillTrying } from "../components/StillTrying";
 import { cn } from "../lib/utils";
 
 /** The app's settings surface.
@@ -276,7 +278,7 @@ function PasswordSection() {
     setBusy(false);
 
     if (!result.ok) {
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     // Cleared rather than left filled: this screen stays open afterwards,
@@ -355,6 +357,9 @@ function PasswordSection() {
           {busy ? <Loader2 className="size-4 animate-spin" /> : null}
           {busy ? t("settings.changing") : t("settings.changePassword")}
         </Button>
+        {/* A write asks who answers first, so this can take half a minute
+            where only a slow route answers. */}
+        <StillTrying waiting={busy} />
       </form>
     </Card>
   );
@@ -395,7 +400,7 @@ function DeleteAccountSection({ onDeleted }: { onDeleted: () => void }) {
     setBusy(false);
 
     if (!result.ok) {
-      setError(result.error);
+      setError(failureText(result, t));
       return;
     }
     // No success state on this screen -- there is no account left for it
@@ -458,6 +463,7 @@ function DeleteAccountSection({ onDeleted }: { onDeleted: () => void }) {
               {busy ? t("settings.deleting") : t("settings.deleteConfirm")}
             </Button>
           </div>
+          <StillTrying waiting={busy} />
         </form>
       ) : (
         <Button

@@ -287,6 +287,10 @@ describe("the IPv6 escape alarm", () => {
   });
 });
 
+/** The Windows settle before each rung, apart from the screen so its timing
+ * can be tested (baseline-settle.test.ts). */
+const settleSource = readFileSync(new URL("./baseline-settle.ts", import.meta.url), "utf8");
+
 describe("measurements that cannot outlive what they serve", () => {
   // The walk of the endpoint list used to be unbounded wherever it ran:
   // a dozen endpoints at six seconds each. Source assertions, for the
@@ -306,16 +310,17 @@ describe("measurements that cannot outlive what they serve", () => {
 
   it("settles each candidate on an endpoint already known to answer, within a ceiling", () => {
     expect(dashboard).toMatch(
-      /settleAndCaptureBaseline\(\s*settleBudget,\s*knownBaseline,\s*settleServer,\s*nodeAddresses,\s*\)/,
+      /settleAndCaptureBaseline\(\s*settleBudget,\s*knownBaseline,\s*settleServer,\s*nodeAddresses,\s*index > 0 \|\| !nothingUpAtStart,\s*\)/,
     );
-    expect(dashboard).toContain("captureBaselineIp({ only: ask.from, deadline, tunnelServer, nodeAddresses })");
+    // The settle itself is lib/baseline-settle.ts.
+    expect(settleSource).toContain("captureBaselineIp({ only: ask.from, deadline, tunnelServer, nodeAddresses })");
     // Hedged, so endpoints the bare network black-holes do not use the
     // ceiling up one after another (egress-own-mirror.test.ts).
-    expect(dashboard).toMatch(
+    expect(settleSource).toMatch(
       /captureBaselineIp\(\{\s*deadline: walkDeadline,\s*tunnelServer,\s*nodeAddresses,\s*hedgeMs: BASELINE_HEDGE_MS,\s*\}\)/,
     );
     // The shape that checked its budget only between whole walks.
-    expect(dashboard).not.toMatch(/for \(;;\) \{\s*const ip = await captureBaselineIp\(\);/);
+    expect(settleSource).not.toMatch(/for \(;;\) \{\s*const ip = await captureBaselineIp\(\);/);
   });
 
   it("stops a pass whose guard expired once a newer pass has started", () => {
@@ -710,7 +715,7 @@ describe("the tunnel's own server, named to the egress check", () => {
     expect(dashboard).toContain('const settleServer = literalTunnelServer(candidate, "windows");');
     expect(dashboard).toContain('const tunnelServer = await tunnelServerOf(candidate, "windows");');
     expect(dashboard).toMatch(
-      /settleAndCaptureBaseline\(\s*settleBudget,\s*knownBaseline,\s*settleServer,\s*nodeAddresses,\s*\)/,
+      /settleAndCaptureBaseline\(\s*settleBudget,\s*knownBaseline,\s*settleServer,\s*nodeAddresses,\s*index > 0 \|\| !nothingUpAtStart,\s*\)/,
     );
     expect(dashboard).toContain("confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer)");
     // Kept for the health poll, from whichever Dashboard is mounted.
@@ -747,10 +752,7 @@ describe("the tunnel's own server, named to the egress check", () => {
     // Every capture inside the settle passes them; the one taken when the
     // screen loads has no rung yet, and the settle passes over a `known`
     // endpoint on the server instead (`askedAroundTunnel`).
-    const settle = dashboard.slice(
-      dashboard.indexOf("async function settleAndCaptureBaseline("),
-      dashboard.indexOf("function describeAttempts("),
-    );
+    const settle = settleSource.slice(settleSource.indexOf("export async function settleAndCaptureBaseline("));
     const captures = [...settle.matchAll(/captureBaselineIp\(([^)]*)\)/g)].map((m) => m[1]);
     expect(captures).toHaveLength(2);
     for (const args of captures) {

@@ -14,6 +14,8 @@ const publicRequest = vi.fn<(trace?: EndpointTrace) => Promise<ApiResult<unknown
 vi.mock("./api", () => ({
   publicRequest: (_path: string, _init: RequestInit, trace?: EndpointTrace) => publicRequest(trace),
   apiRequest: vi.fn(),
+  LEAD_MS: 1_500,
+  SLOW_ANSWER_MS: 20_000,
 }));
 
 const reportAttempt = vi.fn();
@@ -28,8 +30,15 @@ type Addendum = { apiEndpoint?: string; reason?: string } | undefined;
 const probeAddendum = vi.fn<(entries: unknown[]) => Promise<Addendum>>();
 vi.mock("./control-plane-probe", () => ({ probeAddendum: (e: unknown[]) => probeAddendum(e) }));
 
-vi.mock("./pow", () => ({ solveChallengeFor: async () => undefined }));
-vi.mock("./session", () => ({ setTokens: vi.fn() }));
+/** The challenge race, stood in for: something answered it, so the
+ * attempt is sent. What sign-in does when nothing did is
+ * sign-in-race.test.ts's. */
+vi.mock("./pow", () => ({
+  raceChallengeFor: async () => ({ answered: [{ base: "https://api.example.net/api", ms: 100 }], pages: [], failed: [] }),
+  solveQuietly: async () => undefined,
+}));
+const setTokens = vi.fn();
+vi.mock("./session", () => ({ setTokens: (tokens: unknown) => setTokens(tokens) }));
 vi.mock("./session-end", () => ({ endCustomerSession: vi.fn() }));
 vi.mock("./customer", () => ({ clearGamingProfileCache: vi.fn() }));
 vi.mock("./i18n", () => ({ currentLanguage: () => "en" }));
@@ -54,6 +63,7 @@ function failsAfterTrying(trace?: EndpointTrace): Promise<ApiResult<unknown>> {
 }
 
 beforeEach(() => {
+  setTokens.mockReset();
   publicRequest.mockReset();
   reportAttempt.mockReset();
   startSocialSignIn.mockReset();
@@ -125,5 +135,35 @@ describe("sign-in telemetry", () => {
     const report = await reported();
     expect(report.outcome).toBe("CONTROL_PLANE_UNREACHABLE");
     expect(report.apiEndpoint).toBeUndefined();
+  });
+});
+
+describe("a social sign-in cancelled while it finished", () => {
+  /** The customer gave up on Google, signed in with email, and the
+   * browser's callback came after. Before: the late exchange stored its
+   * session over the one in use -- another account's tokens under the
+   * dashboard on screen. */
+  it("stores no session once cancelled", async () => {
+    const cancel = new AbortController();
+    startSocialSignIn.mockImplementation(async () => {
+      cancel.abort();
+      return { kind: "handoff", code: "the-code", verifier: "v" };
+    });
+    publicRequest.mockResolvedValue({ ok: true, data: { accessToken: "a", refreshToken: "r" } });
+
+    const result = await socialSignIn("google", cancel.signal);
+
+    expect(result).toBeNull();
+    expect(setTokens).not.toHaveBeenCalled();
+  });
+
+  it("stores the session when it was not cancelled", async () => {
+    startSocialSignIn.mockResolvedValue({ kind: "handoff", code: "the-code", verifier: "v" });
+    publicRequest.mockResolvedValue({ ok: true, data: { accessToken: "a", refreshToken: "r" } });
+
+    const result = await socialSignIn("google", new AbortController().signal);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(setTokens).toHaveBeenCalledTimes(1);
   });
 });

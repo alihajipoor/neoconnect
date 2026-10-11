@@ -18,8 +18,16 @@ const seen: string[] = [];
 
 vi.mock("@tauri-apps/plugin-http", () => ({
   fetch: (url: string, init?: RequestInit) => {
-    seen.push(url);
     const path = new URL(url).pathname;
+    // The health race a write runs first (`sendWrite` in api.ts):
+    // answered everywhere unless a test says otherwise, and not counted in
+    // `seen`, which is about where the request itself went.
+    if (path === "/health" && !replies[path]?.length) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ status: "ok" }), { status: 200, headers: { "content-type": "application/json" } }),
+      );
+    }
+    if (path !== "/health") seen.push(url);
     const reply = replies[path]?.shift();
     if (reply === undefined || reply === "unreachable") return Promise.reject(new TypeError("network error"));
     if (reply === "hang") {
@@ -57,7 +65,7 @@ vi.mock("./session", () => ({
   },
 }));
 
-const { apiRequest } = await import("./api");
+const { apiRequest, resetRaceWinnerForTests, STOPPED_ANSWERING } = await import("./api");
 const { onSessionRevoked } = await import("./session-revoked");
 
 let announced = 0;
@@ -66,6 +74,7 @@ onSessionRevoked(() => {
 });
 
 beforeEach(() => {
+  resetRaceWinnerForTests();
   for (const key of Object.keys(replies)) delete replies[key];
   seen.length = 0;
   stored = { accessToken: "access", refreshToken: "refresh" };
@@ -130,6 +139,7 @@ describe("a refusal keeps what it said", () => {
   });
 
   it("reports a request that never arrived without a status", async () => {
+    replies["/health"] = ["unreachable", "unreachable", "unreachable"];
     replies["/customer/vpn/claim"] = ["unreachable", "unreachable", "unreachable"];
 
     const result = await apiRequest("/customer/vpn/claim", { method: "POST", body: "{}" });
@@ -137,7 +147,28 @@ describe("a refusal keeps what it said", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.status).toBeUndefined();
+    expect(result.noResponse).toBe(true);
     expect(result.error).toMatch(/^Could not reach Neoxify/);
+    // Nothing answered the health race, so the write was never sent.
+    expect(seen).toEqual([]);
+  });
+
+  /** Neoxify answered the health race, so it was reached: the write
+   * that then got no answer is not "could not reach Neoxify". Still no
+   * status, and still `noResponse`: this request was not answered. */
+  it("says Neoxify stopped responding when it answered moments before", async () => {
+    replies["/customer/vpn/claim"] = ["unreachable", "unreachable", "unreachable"];
+
+    const result = await apiRequest("/customer/vpn/claim", { method: "POST", body: "{}" });
+
+    expect(result).toEqual({ ok: false, error: STOPPED_ANSWERING, noResponse: true });
+    // Every address answered the health check, and each was then sent the
+    // write once.
+    expect(seen).toEqual([
+      "https://a.example/customer/vpn/claim",
+      "https://b.example/customer/vpn/claim",
+      "https://c.example/customer/vpn/claim",
+    ]);
   });
 });
 

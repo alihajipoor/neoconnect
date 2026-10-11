@@ -1,7 +1,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
-import { publicRequest } from "./api";
+import { publicRequest, requestFailed } from "./api";
 import { API_ENDPOINT_MAX, clipTrace, LEGACY_API_ENDPOINT_MAX } from "./endpoint-trace";
 import { getTokens } from "./session";
 import { currentAttestation } from "./network-identity";
@@ -108,6 +108,30 @@ interface QueuedReport extends AttemptReport {
   occurredAt: string;
   /** The network attestation held when it happened. */
   network?: string;
+  /** The access token of the session the report was made in, or null
+   * when it was made with nobody signed in. Never part of the body: `send`
+   * takes it off and sends it as the request's Authorization.
+   *
+   * Taken when the report is made, because the token held when it is
+   * delivered says nothing about it. The reports this file exists for are
+   * the ones that could not be sent at the time, and they go out on a
+   * later contact -- usually after the fifteen-minute access token has
+   * expired, so they arrived anonymous, and a per-customer query of the
+   * table missed most of a tester's unreachable reports (the test VM: made
+   * 23:52:40, delivered three minutes later, no customer). And the token
+   * held at delivery may not be the same customer's at all: a failed
+   * sign-in queued with nobody signed in was filed under whoever signed in
+   * next. The server accepts an expired token on this one endpoint, for
+   * filing the report and nothing else (client-attempts.controller.ts).
+   *
+   * Kept beside the report in the same per-user data directory as the
+   * session itself (session.ts), and gone with the report -- or at
+   * sign-out, when it is set to null (`forgetQueuedSessions`): a live
+   * access token left on disk after a sign-out is a leak.
+   *
+   * Absent on a report queued by a build from before it was kept. Those
+   * go out with the token held at delivery, as they always did. */
+  bearer?: string | null;
 }
 
 /** Which platform the user agent suggests -- the fallback only.
@@ -177,7 +201,20 @@ const MAX_QUEUED = 25;
  */
 const MAX_AGE_MS = 14 * 86_400_000;
 
-const KEY = "queue";
+/** Where the queue is kept.
+ *
+ * Not where builds up to 0.9.47 kept it (`LEGACY_KEY`). A report queued
+ * now carries the access token it was made with (`bearer`), and those
+ * builds send a queued report's every field as the body: one installed
+ * over this build would have put the token in the body, been refused for
+ * an unknown field with a 400, counted that as delivered, and dropped the
+ * report. Under a key of its own, an older build finds nothing of this
+ * build's to send. */
+const KEY = "reports";
+
+/** Where builds up to 0.9.47 kept the queue. Read, and moved under `KEY`
+ * at the next write, so nothing they queued is lost on the upgrade. */
+const LEGACY_KEY = "queue";
 
 /** The status the server's throttle answers with. See `send`. */
 const THROTTLED = 429;
@@ -201,10 +238,41 @@ function appVersion(): Promise<string> {
   return versionPromise;
 }
 
+/** Every access token a report in hand has carried in this run: one made
+ * here (`reportAttempt`), or read back from the queue (`readQueue`). When
+ * the session ends they are all its tokens, or older ones. */
+const carried = new Set<string>();
+
+/** The tokens of sessions that have ended in this run
+ * (`forgetQueuedSessions`).
+ *
+ * The sign-out cleans the queue as it finds it, but a report can still be
+ * in hand: one whose own send was walking the addresses when the customer
+ * signed out -- a minute and more on a blocked network, against the
+ * sign-out's eight seconds -- a probe's follow-up, or a flush holding its
+ * copy of the queue. Each of them wrote its copy afterwards, token
+ * included, and the signed-out session's access token was back on disk.
+ * Every write takes these out (`writeQueue`), and no send uses them. */
+const ended = new Set<string>();
+
+/** `report`'s token, unless its session has ended (`ended`). */
+function liveBearer(report: QueuedReport): string | null | undefined {
+  return typeof report.bearer === "string" && ended.has(report.bearer) ? null : report.bearer;
+}
+
+function noteCarried(report: QueuedReport): void {
+  if (typeof report.bearer === "string") carried.add(report.bearer);
+}
+
 async function readQueue(): Promise<QueuedReport[]> {
   try {
-    const stored = await (await getStore()).get<QueuedReport[]>(KEY);
-    return Array.isArray(stored) ? stored : [];
+    const store = await getStore();
+    const stored = await store.get<QueuedReport[]>(KEY);
+    const legacy = await store.get<QueuedReport[]>(LEGACY_KEY);
+    // The older build's first: they were made first.
+    const queue = [...(Array.isArray(legacy) ? legacy : []), ...(Array.isArray(stored) ? stored : [])];
+    queue.forEach(noteCarried);
+    return queue;
   } catch {
     return [];
   }
@@ -213,10 +281,90 @@ async function readQueue(): Promise<QueuedReport[]> {
 async function writeQueue(queue: QueuedReport[]): Promise<void> {
   try {
     const store = await getStore();
-    await store.set(KEY, queue);
+    // Never a token whose session has ended, whenever this copy was taken.
+    await store.set(
+      KEY,
+      queue.map((report) => (liveBearer(report) === report.bearer ? report : { ...report, bearer: null })),
+    );
+    // What was under the old key is in `queue` now, read with the rest.
+    if ((await store.get(LEGACY_KEY)) !== undefined) await store.delete(LEGACY_KEY);
     await store.save();
   } catch {
     // Losing the queue costs diagnostics, nothing the customer can see.
+  }
+}
+
+/** The claims in an access token, read without verifying it -- only to
+ * tell whether two tokens are the same customer's. Null for anything that
+ * is not a readable JWT. */
+function claimsOf(token: string): { sub?: unknown } | null {
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+  try {
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const parsed: unknown = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "=")));
+    return parsed !== null && typeof parsed === "object" ? (parsed as { sub?: unknown }) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The token a queued report goes out with.
+ *
+ * Its own (`bearer`), unless the token held now is the same customer's:
+ * then the one held now, which has usually not expired. The report is
+ * filed under the same customer either way. But the server counts a
+ * report against the session in a token that verifies, and against the
+ * request's address otherwise -- and an expired one does not verify for
+ * that. Behind a node's mirror, and through the tunnel, the address is the
+ * node's, so every customer on the node flushing a queue after an outage
+ * shared twenty reports a minute, which counting per session was there to
+ * stop.
+ *
+ * Nobody's, with nobody signed in when it was made. The token held at
+ * delivery for a report an older build queued, which kept none. */
+async function deliveryToken(bearer: string | null | undefined): Promise<string | null | undefined> {
+  const current = (await getTokens())?.accessToken;
+  if (bearer === undefined) return current;
+  if (bearer === null || current === undefined) return bearer;
+  const made = claimsOf(bearer)?.sub;
+  return typeof made === "string" && claimsOf(current)?.sub === made ? current : bearer;
+}
+
+/** Whether a failed delivery was answered by a page from in front of the
+ * backend saying it could not get the report there: a CDN's bot check, or
+ * a gateway's 5xx. Such a report never reached the backend, and is kept.
+ * Read as failure-text.ts reads a page: a status and no message of the
+ * backend's own. Not any page: one that will never let a report through
+ * -- a 404 from a node's fallback site -- would hold the queue up for its
+ * fourteen days, since a flush stops at the first report it keeps. */
+function stoppedByPage(result: { error: string; status?: number }): boolean {
+  if (result.status === undefined || result.error !== requestFailed(result.status)) return false;
+  return result.status === 403 || result.status >= 500;
+}
+
+/** Takes the access tokens out of the queue at sign-out, leaving the
+ * reports to go out under nobody.
+ *
+ * A queued report kept its session's token on disk until it was sent,
+ * which could be days; the next person on the account could read it and,
+ * for the rest of its fifteen minutes, use it -- the customer API does not
+ * check a token against a revoked session. A report queued by an older
+ * build, which kept no token, would have gone out with whoever signed in
+ * next, and goes out under nobody too. Never rejects. */
+export async function forgetQueuedSessions(): Promise<void> {
+  // Before anything is awaited, so a write that lands meanwhile is cleaned
+  // too: every token in hand belongs to the session that is ending, or to
+  // an older one.
+  for (const bearer of carried) ended.add(bearer);
+  try {
+    const queue = await readQueue();
+    for (const bearer of carried) ended.add(bearer);
+    carried.clear();
+    if (queue.every((report) => report.bearer === null)) return;
+    await writeQueue(queue.map((report) => ({ ...report, bearer: null })));
+  } catch {
+    // The reports are diagnostics; the sign-out goes on regardless.
   }
 }
 
@@ -226,7 +374,9 @@ async function writeQueue(queue: QueuedReport[]): Promise<void> {
  * Any other rejection *from* the server -- a 400, a 5xx, anything with a
  * status -- counts as delivered. It means we reached it and it did not
  * want this, and retrying forever would turn one malformed report into
- * a permanent background load.
+ * a permanent background load. A page from in front of the server saying
+ * it could not get the report there is not the server's rejection, and
+ * is kept (`stoppedByPage`).
  *
  * The throttle is the exception, because it is about timing and not the
  * report. The endpoint allows twenty a minute per address, and one
@@ -244,18 +394,20 @@ async function writeQueue(queue: QueuedReport[]): Promise<void> {
  * sent once more with the trace cut to fit, rather than lost whole over
  * its longest field. A current server never sees the second request.
  */
-async function send(report: QueuedReport): Promise<boolean> {
+async function send(queued: QueuedReport): Promise<boolean> {
   // Attached by hand rather than by using the authenticated helper. That
   // one refreshes on a 401 and reports session expiry to the UI, and a
   // background diagnostic must never be the thing that signs somebody
-  // out. An expired token here simply leaves the report anonymous --
-  // the server verifies it if it can and ignores it if it cannot.
-  const tokens = await getTokens();
-  const post = (body: QueuedReport) =>
+  // out. The token is the one the report was made with (see `bearer`);
+  // the server files the report under its customer if it verifies, and
+  // anonymously if it does not.
+  const { bearer: _own, ...report } = queued;
+  const accessToken = await deliveryToken(liveBearer(queued));
+  const post = (body: Omit<QueuedReport, "bearer">) =>
     publicRequest<void>("/client-attempts", {
       method: "POST",
       body: JSON.stringify(body),
-      headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : undefined,
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
     });
 
   let result = await post(report);
@@ -265,10 +417,17 @@ async function send(report: QueuedReport): Promise<boolean> {
 
   if (result.ok) return true;
   if (result.status === THROTTLED) return false;
-  // publicRequest flattens both cases into a string, and only one of
-  // them should keep the report alive. This is the message it uses when
-  // no endpoint answered at all.
-  return !result.error.startsWith("Could not reach Neoxify");
+  // Kept when only a page answered it, which the backend never saw
+  // (`stoppedByPage`). Such a page is a request's answer of last resort,
+  // and was counted as delivered: during an outage every address answers
+  // with one -- the CDN's 521, a mirror's 502 -- and every queued
+  // unreachable report was dropped unseen.
+  if (stoppedByPage(result)) return false;
+  // Kept when no endpoint answered this request at all. Read from
+  // `noResponse`, not from the sentence: a report whose health race was
+  // answered and whose own request then was not is told it in other
+  // words ("stopped responding"), and it never arrived either.
+  return !result.noResponse;
 }
 
 /** Attaches the network, or strips what only a new server understands.
@@ -350,6 +509,9 @@ async function sendFollowUp(original: QueuedReport, addendum: AttemptAddendum): 
       appVersion: original.appVersion,
       occurredAt: original.occurredAt,
       ...(original.network ? { network: original.network } : {}),
+      // Filed under the same customer as the report it follows, or under
+      // none, as that one was.
+      ...(original.bearer !== undefined ? { bearer: original.bearer } : {}),
       reason: `probe follow-up to the ${original.kind} ${original.outcome} report of ${original.occurredAt}, which was no longer held when the probe answered; not an attempt`,
     },
     addendum,
@@ -424,7 +586,12 @@ export async function reportAttempt(
       // The same, for the one field long enough to hit its limit: the
       // hostname list 0.9.39 to 0.9.43 send would overrun the old 200.
       apiEndpoint: shaped.apiEndpoint === undefined ? undefined : clipTrace(shaped.apiEndpoint, API_ENDPOINT_MAX),
+      // Whose report it is, decided now, while the session it happened in
+      // is the one held. See `bearer`.
+      bearer: (await getTokens())?.accessToken ?? null,
     };
+    // Before it is sent: a sign-out while it is in hand must find it.
+    noteCarried(queued);
 
     if (await send(queued)) {
       // Reaching the server is also the signal that anything held back

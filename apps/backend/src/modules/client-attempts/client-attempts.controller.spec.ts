@@ -7,7 +7,7 @@ import { ThrottlerModule } from "@nestjs/throttler";
 import type { Request } from "express";
 import type { AddressInfo, Server } from "node:net";
 import { ClientThrottlerGuard } from "../../common/guards/client-throttler.guard";
-import { ClientAttemptsController } from "./client-attempts.controller";
+import { ATTRIBUTION_GRACE_MS, ClientAttemptsController } from "./client-attempts.controller";
 import { ClientAttemptsService } from "./client-attempts.service";
 import type { ReportAttemptDto } from "./dto/report-attempt.dto";
 
@@ -69,6 +69,19 @@ describe("POST /client-attempts rate limit", () => {
     // counts against the address, which Alice's reports did not touch.
     expect(await report()).toBe(204);
   });
+
+  /** The report is filed under an expired token's customer (below), but
+   * the bucket is not theirs: an expired token is no session to the
+   * throttle, and counts against the address like no token at all. */
+  it("counts a report carrying an expired token against the address", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const expired = jwt.sign({ sub: "carol", sid: "carol-pc", iat: now - 1080, exp: now - 180 }, { secret: SECRET });
+    const statuses: number[] = [];
+    for (let i = 0; i < REPORTS_PER_MINUTE; i++) statuses.push(await report(i % 2 === 0 ? expired : undefined));
+    expect(statuses.every((s) => s === 204)).toBe(true);
+    expect(await report(expired)).toBe(429);
+    expect(await report()).toBe(429);
+  });
 });
 
 /** Who a report is filed under. The per-ISP tags count distinct
@@ -102,5 +115,33 @@ describe("ClientAttemptsController.report customer", () => {
   it("does not take an emailed single-purpose token as a customer", async () => {
     expect(await filedUnder(jwt.sign({ sub: "cust-1", purpose: "verify-email" }, { secret: SECRET }))).toBeUndefined();
     expect(await filedUnder(jwt.sign({ sub: "cust-1", purpose: "password-reset" }, { secret: SECRET }))).toBeUndefined();
+  });
+
+  /** A queued report goes out on the next contact with the token of the
+   * session it happened in, which has usually expired by then. Verified
+   * with expiry, every one of them was filed under nobody. */
+  describe("a report delivered after its session's token expired", () => {
+    const nowSeconds = () => Math.floor(Date.now() / 1000);
+    const expiredAgo = (seconds: number, claims: Record<string, unknown> = {}, secret = SECRET) =>
+      jwt.sign(
+        { sub: "cust-1", sid: "s1", ...claims, iat: nowSeconds() - seconds - 900, exp: nowSeconds() - seconds },
+        { secret },
+      );
+
+    it("is still filed under the customer", async () => {
+      // Three minutes, as on the test VM, and most of the retention window.
+      expect(await filedUnder(expiredAgo(180))).toBe("cust-1");
+      expect(await filedUnder(expiredAgo(ATTRIBUTION_GRACE_MS / 1000 - 3600))).toBe("cust-1");
+    });
+
+    it("is anonymous once the token expired longer ago than reports are kept", async () => {
+      expect(await filedUnder(expiredAgo(ATTRIBUTION_GRACE_MS / 1000 + 3600))).toBeUndefined();
+    });
+
+    /** Only the expiry is relaxed. */
+    it("is anonymous when the expired token is forged or single-purpose", async () => {
+      expect(await filedUnder(expiredAgo(180, {}, "not-ours"))).toBeUndefined();
+      expect(await filedUnder(expiredAgo(180, { purpose: "password-reset" }))).toBeUndefined();
+    });
   });
 });

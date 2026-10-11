@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import { API_BASE_URL } from "./config";
+import { answeringEndpoint } from "./api";
+import { apiEndpoints } from "./api-endpoints";
+import { API_BASE_URL, API_BASE_URLS } from "./config";
 import { currentLanguage, DICTIONARIES } from "./i18n";
 import type { TranslationKey } from "./i18n";
 
@@ -94,17 +96,104 @@ export const socialSignInAvailable = (): boolean => hasNativeRuntime();
  */
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
-/** The URL that starts the browser flow.
+/** The address the browser flow starts at: the first that answers the
+ * health check now (`answeringEndpoint`), with the first compiled-in
+ * address asked alone first, or that address when nothing answers.
  *
- * Deliberately pointed at whichever API base the app is already talking
- * to, so a client on a mirror does not send the customer to an endpoint
- * its network cannot reach.
- */
-export function startUrl(provider: "google" | "facebook", locale: string, challenge?: string): string {
-  const base = API_BASE_URL.replace(/\/$/, "");
-  const url = `${base}/customer-auth/social/${provider}/start?locale=${encodeURIComponent(locale)}`;
+ * It used to be the first compiled-in address, a CDN name, no matter which
+ * address the app was actually reaching. Where that name was blocked,
+ * Google and Facebook sign-in could not even open, while the exchange that
+ * follows it would have got through. Any address that reaches the backend
+ * can start the flow: the state it mints is kept by the backend, not in a
+ * cookie on the name the browser used, so the provider's redirect back to
+ * the backend's own address finds it. Asked of production on 2026-10-09,
+ * every node mirror that answered sent the browser on to Google with the
+ * same return address the CDN name did.
+ *
+ * Asked, not remembered. It was then the address remembered from the last
+ * answer, never checked: kept across launches and networks, so a signed-out
+ * customer on a new network, where nothing had been asked yet, had the
+ * browser sent to a mirror blocked there, or retired, with no second try,
+ * where the CDN would have worked. The browser gets one address, so it is
+ * given one that has just answered.
+ *
+ * The compiled-in addresses lead, the first of them alone for a head
+ * start, as the staggered race asks. The flow comes back through the CDN
+ * whatever address it starts at, so where the CDN answers the whole flow
+ * can work through it -- and a start through a node's mirror is counted
+ * against the node's address, ten a minute shared by every customer using
+ * that mirror (ClientThrottlerGuard), where through the CDN it is the
+ * customer's own. Where the first compiled-in address does not answer,
+ * the cost is up to one head start (`LEAD_MS`) before the browser opens,
+ * and less where it fails at once -- a name on the block page is stopped
+ * within milliseconds.
+ *
+ * Only an https address: this goes to the customer's browser, and a plain
+ * http one is never a production address. That leaves a development
+ * build on its own compiled-in address, which is localhost there anyway.
+ *
+ * Asked for no longer than `START_BASE_BUDGET_MS`, and not past `signal`.
+ * The browser has a network stack of its own and may get through where
+ * this did not; past that it is opened at the first compiled-in address,
+ * as it always was, rather than after a race with nothing answering has
+ * run its twenty-odd seconds -- and as soon as that address is the only
+ * one still to answer, with nothing else having answered, since the
+ * browser goes there whatever it says. A mirror answering 200 is
+ * preferred to one over its throttle (`answeringEndpoint`).
+ *
+ * What this cannot move is the end of the flow. The provider sends the
+ * browser back to one fixed address, the backend's PUBLIC_API_URL, because
+ * that is the address registered with the provider; it is behind
+ * Cloudflare. The sign-in screen says so (`auth.socialNeedsCloudflare`).
+ * Moving it needs the backend and the providers' consoles, not the app. */
+export async function socialStartBase(signal?: AbortSignal): Promise<string> {
+  const asked = new AbortController();
+  const timer = setTimeout(() => asked.abort(), START_BASE_BUDGET_MS);
+  const cancelled = () => asked.abort();
+  signal?.addEventListener("abort", cancelled);
+  // A signal that fired before it was listened to -- Cancel pressed, or the
+  // screen gone, while the PKCE pair was being made -- never fires again,
+  // and the race used to run its whole budget for a flow already given up.
+  if (signal?.aborted) asked.abort();
+  try {
+    const endpoints = await apiEndpoints();
+    const compiled = endpoints.filter((base) => API_BASE_URLS.includes(base));
+    // The address this falls back to when nothing answers: once it is the
+    // only one still to settle, the race ends (`answeringEndpoint`).
+    const answering = await answeringEndpoint(
+      [...compiled, ...endpoints.filter((base) => !compiled.includes(base))],
+      asked.signal,
+      undefined,
+      API_BASE_URL,
+    );
+    if (answering !== null && answering.startsWith("https://")) return answering;
+  } catch {
+    // Not knowing costs the flow its best address, not the flow.
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", cancelled);
+  }
+  return API_BASE_URL;
+}
+
+/** How long the browser's start waits to find out which address answers
+ * (`socialStartBase`): eight seconds, past which a request used to be given
+ * up on everywhere. */
+export const START_BASE_BUDGET_MS = 8_000;
+
+/** The URL that starts the browser flow at `base` (`socialStartBase`). */
+export function startUrl(base: string, provider: "google" | "facebook", locale: string, challenge?: string): string {
+  const url = `${base.replace(/\/$/, "")}/customer-auth/social/${provider}/start?locale=${encodeURIComponent(locale)}`;
   return challenge ? `${url}&challenge=${encodeURIComponent(challenge)}` : url;
 }
+
+/** Whether this provider's sign-in finishes in a browser at the backend's
+ * fixed address (`socialStartBase` says why that is behind Cloudflare).
+ *
+ * Google and Facebook do. Apple's native sheet hands its token straight
+ * to the app, which sends it through any address it can reach. */
+export const finishesBehindCloudflare = (provider: SocialProvider): boolean =>
+  provider === "google" || provider === "facebook";
 
 function base64url(bytes: Uint8Array): string {
   let binary = "";
@@ -189,8 +278,13 @@ export function readCallback(raw: string): SocialOutcome | null {
  *    listens for the `neoconnect://` link the deep-link plugin already
  *    registers and forwards -- the same path the "Open in Neoxify"
  *    button in the verification email takes.
+ *
+ * `signal` ends the wait on Windows, as a cancellation: the browser there
+ * is not ours to close, and closing it tells the app nothing, so without
+ * this the wait lasted `AUTH_TIMEOUT_MS`. The phones' sheets are the
+ * system's, and end when the customer dismisses them.
  */
-async function openAuthSession(url: string): Promise<string | null> {
+async function openAuthSession(url: string, signal?: AbortSignal): Promise<string | null> {
   if (isMobile()) {
     // Returns null when the customer dismissed the sheet.
     return await invoke<string | null>("vpn_open_auth_session", {
@@ -198,10 +292,10 @@ async function openAuthSession(url: string): Promise<string | null> {
       scheme: "neoconnect",
     });
   }
-  return await openAuthSessionDesktop(url);
+  return await openAuthSessionDesktop(url, signal);
 }
 
-async function openAuthSessionDesktop(url: string): Promise<string | null> {
+async function openAuthSessionDesktop(url: string, signal?: AbortSignal): Promise<string | null> {
   const [{ openUrl }, { onOpenUrl }] = await Promise.all([
     import("@tauri-apps/plugin-opener"),
     import("@tauri-apps/plugin-deep-link"),
@@ -217,8 +311,19 @@ async function openAuthSessionDesktop(url: string): Promise<string | null> {
       settled = true;
       if (timer) clearTimeout(timer);
       unlisten?.();
+      signal?.removeEventListener("abort", cancelled);
       resolve(value);
     };
+    // Cancelled: the customer pressed Cancel, or the screen is gone -- an
+    // email sign-in that succeeded meanwhile, say. A callback after that
+    // is not listened for, so it cannot put a second session over the
+    // first.
+    const cancelled = () => finish(null);
+    if (signal?.aborted) {
+      finish(null);
+      return;
+    }
+    signal?.addEventListener("abort", cancelled);
 
     onOpenUrl((urls) => {
       const hit = urls.find((u) => u.startsWith("neoconnect://social-callback"));
@@ -241,6 +346,7 @@ async function openAuthSessionDesktop(url: string): Promise<string | null> {
         settled = true;
         if (timer) clearTimeout(timer);
         unlisten?.();
+        signal?.removeEventListener("abort", cancelled);
         reject(err instanceof Error ? err : new Error(String(err)));
       });
   });
@@ -276,6 +382,7 @@ function nativeError(err: unknown): Error {
 export async function startSocialSignIn(
   provider: SocialProvider,
   locale: string,
+  signal?: AbortSignal,
 ): Promise<SocialOutcome | null> {
   if (provider === "apple") {
     if (!appleSignInAvailable()) {
@@ -294,13 +401,15 @@ export async function startSocialSignIn(
   }
 
   const pkce = await pkcePair();
+  const base = await socialStartBase(signal);
+  if (signal?.aborted) return null;
   let callback: string | null;
   try {
-    callback = await openAuthSession(startUrl(provider, locale, pkce?.challenge));
+    callback = await openAuthSession(startUrl(base, provider, locale, pkce?.challenge), signal);
   } catch (err) {
     throw nativeError(err);
   }
-  if (callback === null) return null;
+  if (callback === null || signal?.aborted) return null;
   const outcome = readCallback(callback);
   return outcome?.kind === "handoff" && pkce ? { ...outcome, verifier: pkce.verifier } : outcome;
 }
