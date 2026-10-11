@@ -29,6 +29,22 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("a probe of what this machine refused", () => {
+  /** Refused on this PC, so a probe would only measure the filter that
+   * refused it, and report it as the network's doing. */
+  it("does not probe an address refused locally", () => {
+    expect(probeTargets([entry("https://a.example.net/api", "local")])).toEqual([]);
+  });
+
+  /** The Rust side's own class for the same refusal at the TCP stage, passed
+   * on rather than turned into "?". */
+  it("passes the probe's local refusal on as its own class", async () => {
+    invoke.mockResolvedValueOnce([{ outcome: "local", ms: 3 }]);
+    const section = await probeControlPlane([entry("https://a.example.net/api", "net")], 0);
+    expect(section).toBe("probe: a.example.net=local@3");
+  });
+});
+
 describe("probeTargets", () => {
   /** Only what failed without an answer. An HTTP status means reachable;
    * a scope refusal never left the device; a cancelled one lost a race

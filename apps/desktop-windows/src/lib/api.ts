@@ -225,8 +225,11 @@ function foreignResponse(response: Response): boolean {
  * instead, every blackholed address would read as one that was refused,
  * which is the opposite diagnosis -- `timeout` is how a blackhole has
  * always read in these reports. A reset that happens to land in that same
- * second is recorded as a timeout; nothing else is. */
-function failedAs(err: unknown, timedOut: boolean, startedAt: number): "timeout" | "scope" | "net" {
+ * second is recorded as a timeout; nothing else is.
+ *
+ * A refusal by this machine (`local`, see endpoint-trace.ts) is never
+ * either: it is not demoted, not probed, and not the network's. */
+function failedAs(err: unknown, timedOut: boolean, startedAt: number): "timeout" | "scope" | "local" | "net" {
   if (timedOut) return "timeout";
   const outcome = failureOutcome(err);
   const elapsed = Date.now() - startedAt;

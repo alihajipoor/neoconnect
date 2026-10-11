@@ -53,6 +53,9 @@ const OUTCOMES = new Set([
   "tls",
   "tls-timeout",
   "cert",
+  // This machine refused the TCP connect before sending anything: a filter
+  // on this PC, never the network's doing (`classify_connect_error`).
+  "local",
   // The probe itself crashed: a fault here, not a fact about the network.
   "error",
   // The app's requests to the name go through a proxy, so it was not

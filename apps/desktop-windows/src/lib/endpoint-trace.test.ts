@@ -41,6 +41,27 @@ describe("failureOutcome", () => {
   });
 });
 
+describe("a request this machine refused", () => {
+  /** WSAEACCES, Windows' "os error 10013": a filter on this PC refused the
+   * socket before anything was sent -- ours (the IPv6 block, or a future
+   * IPv4 one) or another product's firewall. Not a fact about the network,
+   * and above all not censorship: read as `net`, it would be probed as a
+   * blocked address and counted in the panel against a network that never
+   * saw the request. */
+  it("wsaeacces_is_not_recorded_as_blocking", () => {
+    const refused = "error sending request: An attempt was made to access a socket in a way forbidden by its access permissions. (os error 10013)";
+    expect(failureOutcome(refused)).toBe("local");
+    expect(failureOutcome(new Error(refused))).toBe("local");
+    expect(failureOutcome("connect failed: WSAEACCES")).toBe("local");
+    // Not every number that starts the same way.
+    expect(failureOutcome("connect failed (os error 100130)")).toBe("net");
+
+    const trace = newTrace();
+    settleAttempt(beginAttempt(trace, MIRROR, 1_000), failureOutcome(refused), 1_012);
+    expect(renderTrace(trace)).toBe("req: edge-1.example.org:2053=local@12");
+  });
+});
+
 describe("renderTrace", () => {
   it("writes each attempt as host=outcome@ms, grouped by leg, in order", () => {
     const trace = newTrace();

@@ -43,7 +43,10 @@ pub struct ProbeTarget {
 pub struct ProbeResult {
     /// One of: "ok", "dns", "dns-timeout", "blockpage", "tcp",
     /// "tcp-timeout", "tls", "tls-timeout", "cert". The first stage that
-    /// failed, or "ok" if a TLS handshake completed. "error" if the probe
+    /// failed, or "ok" if a TLS handshake completed. "local" if this
+    /// machine refused the TCP connect before sending anything
+    /// (`classify_connect_error`), which says nothing about the network
+    /// either. "error" if the probe
     /// itself crashed -- a fault here, saying nothing about the network.
     /// "cancelled" if a connect started first (`cancel_control_plane_probe`),
     /// which says nothing about the network either.
@@ -238,8 +241,7 @@ pub fn probe_one(
         Ok(stream) => stream,
         // First: a connect that stopped early stopped for this.
         Err(_) if cancelled() => return verdict("cancelled"),
-        Err(err) if is_timeout(&err) => return verdict("tcp-timeout"),
-        Err(_) => return verdict("tcp"),
+        Err(err) => return verdict(classify_connect_error(&err)),
     };
 
     // Dropping the stream closes it; no ClientHello goes out.
@@ -316,6 +318,23 @@ fn connect(addrs: &[SocketAddr], limit: Duration, cancelled: &dyn Fn() -> bool) 
         }
     }
     Err(first_error.unwrap_or_else(|| io::Error::from(io::ErrorKind::TimedOut)))
+}
+
+/// The class of a failed TCP connect.
+///
+/// "local" when this machine refused it: on Windows that is WSAEACCES
+/// (os error 10013), which a filter on this PC -- the service's IPv6 block,
+/// or another product's firewall -- answers before a packet is sent; Rust
+/// reads it, and EACCES and EPERM elsewhere, as `PermissionDenied`. Never
+/// "tcp", which reads as the network refusing the address.
+pub fn classify_connect_error(err: &io::Error) -> &'static str {
+    if err.kind() == io::ErrorKind::PermissionDenied {
+        "local"
+    } else if is_timeout(err) {
+        "tcp-timeout"
+    } else {
+        "tcp"
+    }
 }
 
 /// A blocking socket that hits its read timeout says WouldBlock on Unix
@@ -455,6 +474,20 @@ mod tests {
         server.join().unwrap();
         assert_eq!(result.outcome, "tls-timeout", "{result:?}");
         assert!(result.ms >= 300, "{result:?}");
+    }
+
+    /// Refused on this machine: Windows' WSAEACCES (os error 10013), which
+    /// a filter on this PC -- ours or another product's -- gives before
+    /// anything is sent. Reported as "tcp" it read as the network blocking
+    /// the address, which it never saw.
+    #[test]
+    fn a_connect_this_machine_refused_is_not_the_networks() {
+        assert_eq!(classify_connect_error(&io::Error::from(io::ErrorKind::PermissionDenied)), "local");
+        #[cfg(windows)]
+        assert_eq!(classify_connect_error(&io::Error::from_raw_os_error(10013)), "local");
+        assert_eq!(classify_connect_error(&io::Error::from(io::ErrorKind::ConnectionRefused)), "tcp");
+        assert_eq!(classify_connect_error(&io::Error::from(io::ErrorKind::ConnectionReset)), "tcp");
+        assert_eq!(classify_connect_error(&io::Error::from(io::ErrorKind::TimedOut)), "tcp-timeout");
     }
 
     #[test]
