@@ -6013,3 +6013,102 @@ system-proxy mode (only the registry-reading rule is unit-tested, against
 handed-in values, not this PC's settings); whether reqwest actually
 reaches the backend through those proxies from Iran; real Iranian networks;
 the VM; Android and iPhone, including a VPN app's proxy settings there.
+
+## 2026-10-10 (evening) — control-plane resilience in the VM, and three fixes from it (same branch, not merged)
+
+**Status:** S0-S3 proven in the VM at 8c339b2; S4 failed and is fixed in
+code, not yet rerun in the VM
+
+The branch at 8c339b2 was built, installed in `Neoxify-Test` (installed
+exe and service byte-identical to the build, bar Tauri's bundle-type
+marker) and driven through four network states, with the blocking done by
+guest firewall rules on Ethernet and hosts-file entries pointing names at
+the block page's range. Times are from the press or the page reload; exit
+IPs were read from outside the app.
+
+- **S0, nothing blocked.** Dashboard 1.46 s; "You're protected" at 9.26 s
+  with the exit at the node; Disconnect 1.24 s, exit back to the guest's
+  own address, no engine and no half-default routes left.
+- **S1, CDN ranges blocked, every mirror name on the block page, origin
+  open.** Dashboard 1.47 s with the origin remembered, 3.06 s with the
+  blocked CDN remembered (refused at 0.34 s, the rest asked at once, all
+  eight mirror names demoted). Two dummy sign-ins rejected at 1.32 s, the
+  attempt sent only where the challenge was answered. "You're protected"
+  at 8.60 s.
+- **S2, origin and CDN blocked too.** Sign-in says "Could not reach
+  Neoxify" at 0.48 s (English) and 0.50 s (Persian); no login sent. With
+  the names blackholed instead: "Still trying" at 8.36 s, "Could not
+  reach" at 11.85 s. A signed-in start shows the cached dashboard with
+  Connect at 2.07 s (refused) or 9.30 s (blackholed). Connect on the cached
+  credentials: "Connected, not confirmed" at 20.10 s with the exit at the
+  node; the slot claim (200) and the queued unreachable reports (204) went
+  through the tunnel. The cache (80 credentials, 40 routes) was never
+  wiped in S1-S4.
+- **S3, a CONNECT proxy in the guest as the WinINet system proxy.** Live:
+  dashboard 1.78 s through it, sign-in through it 1.58 s, nothing demoted.
+  Dead, with every name on the block page: "Could not reach" at 3.95 s,
+  never "your network is blocking Neoxify", nothing demoted. The same
+  without a proxy: "blocking" at 0.48 s and ten names demoted.
+- **S4, recovery: FAILED.** Started with everything blocked (cached
+  dashboard at 1.96 s), then every block lifted: no dashboard request for
+  150 s, and "Can't reach Neoxify right now" stayed -- above "You're
+  protected" after a Connect whose claim and reports Neoxify had answered,
+  a minute later still. Only Settings and Back cleared it (1.73 s).
+
+Fixed since, one commit each:
+
+- **The stale banner (S4).** A dashboard on its cached snapshot now loads
+  again in the background -- 15 s, 30 s, 60 s, then every 2 min; at once on
+  `online`, on coming back to the front (at most every 10 s), on a
+  verified tunnel, and whenever the backend answers anything else
+  (`onBackendAnswer` in api.ts). One at a time, never beside the screen's
+  own load, nothing while hidden, no loading screen over it, the cached
+  server list kept until a newer one comes. Any backend answer drops the
+  "can't reach" line at once; the next load's result decides what the
+  banner says. Both clients (`offline-retry.ts`).
+- **The slow Connect (S2).** 12.7 s of the 20 s went on the pre-dial
+  baseline, which ignored the block-page demotions and then walked again
+  until a 12 s ceiling. The baseline now asks undemoted addresses first,
+  looks at each name (the plain IPv4 lookup `/health/ip` itself uses, so a
+  proxy does not change it, and nothing is written to the memory the
+  API's proxied requests read), gives demoted addresses 2 s, and the
+  Windows settle asks again only after a teardown and within its own
+  budget. On a model of S2 on a fake clock: 12,000 ms before, no waiting
+  after; 2,800 ms instead of 12,000 after a teardown. Still no baseline on
+  such a network, so still "Connected, not confirmed" there: on a network
+  that blocks Neoxify on the bare line, Connect cannot reach "You're
+  protected". Honest, and a gap.
+- **The slot release (all runs).** Every release on Disconnect went out
+  through the tunnel ~40 ms after the teardown began and never got an
+  answer. Not a regression: main fires it in the same order with the same
+  1.5 s. The panel host's nginx access log (read-only; the backend logs no
+  routes) shows the S0 and S1 releases arriving (204) and none for S2 or
+  S4. A release that got no answer is now sent once more on the bare line
+  when the teardown is over, same handle, never after a new Connect or a
+  sign-out; the disconnect still waits for nothing. Where the bare line
+  reaches nothing either, the slot still goes stale in 90 s.
+
+Not done: the three concurrent `POST /customer-auth/refresh` at startup
+(one per 401). They are real and predate the branch, but the backend does
+no reuse detection (`tokenVersion` only), all three succeed, and sharing
+one refresh would leave the joining requests' traces without their
+renewal leg. A change for its own sake, not a fix.
+
+Rig notes: `vm-copyfrom.ps1` (VBoxManage `copyfrom`) does not truncate an
+existing host file, so a rerun step leaves the old tail behind -- one
+evidence file was corrupted that way. S4 began with S3's demotions still
+in place, so its recovery timings are confounded. The blackholed Connect
+(S2b) cycled for minutes because the hosts file also poisons names inside
+the tunnel, which real DNS injection does not: a rig artifact.
+
+**Proven -- tests on this PC:** desktop `pnpm test` 1363 / 76 files and
+`pnpm typecheck`; mobile 239 / 16 and `tsc`; desktop `cargo check
+--workspace --all-targets` and `cargo test --workspace` (app 49, ipc 58,
+service 487; no Rust changed). Each fix's new tests fail against the
+previous source.
+
+**Unverified:** the VM rerun of these three fixes; real Iranian networks
+and real DNS injection; real DPI or SNI filtering; a slow-but-answering
+CDN (nothing in the rig reached the 20 s answer deadline); real Psiphon,
+v2rayN or Clash; any IPv6 path; Android and iPhone; whether the second
+release arrives from a line where only the tunnel reached Neoxify.
