@@ -312,6 +312,27 @@ describe("an addendum that is still being worked out", () => {
     expect(last.apiEndpoint).toBe("probe: a.example=dns@40");
   });
 
+  /** The probe found the request refused on this machine
+   * (control-plane-probe.ts), so the report is not the network's: it is
+   * filed as the addendum says, in time or late. */
+  it("files a queued report under the outcome its addendum gives", async () => {
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    const refiled = { ...PROBE, reason: "refused here", outcome: "OTHER" as const };
+    await attempts.reportAttempt(report, Promise.resolve(refiled));
+    expect(queued()).toHaveLength(1);
+    expect(queued()[0].outcome).toBe("OTHER");
+    expect(queued()[0].reason).toBe("Could not reach Neoxify.; refused here");
+
+    for (const data of files.values()) data.clear();
+    const probe = later<typeof refiled | undefined>();
+    const done = attempts.reportAttempt(report, probe.promise);
+    await vi.waitFor(() => expect(queued()).toHaveLength(1));
+    probe.settle(refiled);
+    await done;
+    expect(queued()).toHaveLength(1);
+    expect(queued()[0].outcome).toBe("OTHER");
+  });
+
   it("adds nothing when there is nothing to add", async () => {
     await attempts.reportAttempt(report, Promise.resolve(undefined));
     expect(publicRequest).toHaveBeenCalledTimes(1);

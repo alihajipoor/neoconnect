@@ -268,6 +268,114 @@ describe("probeAddendum", () => {
 const LOCAL_REASON =
   "every address probed was refused by a filter on this PC (os error 10013), not by the network";
 
+const REFILED_REASON =
+  "refused by this device, not by the network: every attempt failed within 50ms and the probe's connect " +
+  "was refused here (permission denied: os error 10013 on Windows); filed as OTHER, not CONTROL_PLANE_UNREACHABLE";
+
+/** A request this machine refused, through the HTTP plugin.
+ *
+ * The plugin's error drops the OS error, so the request is traced `net`
+ * and the report would go out as CONTROL_PLANE_UNREACHABLE -- "the
+ * signature of a filtered address" on the panel -- for a request that
+ * never left the PC: a firewall here, or one of this app's own filters.
+ * A local refusal fails at once; the probe, which connects by itself,
+ * sees the permission error. When both say so, the report is filed as
+ * OTHER with the reason, which is the outcome the panel reads off the
+ * row. */
+describe("a request refused on this machine", () => {
+  /** Failed in transport, `ms` after it started. */
+  const failedIn = (base: string, ms: number): TraceEntry => ({
+    phase: "req",
+    base,
+    startedAt: 1_000,
+    settledAt: 1_000 + ms,
+    outcome: "net",
+  });
+  const atOnce = [failedIn("https://a.example.net/api", 3), failedIn("https://b.example.net:2053/api", 4)];
+
+  it("is filed as OTHER when every attempt failed at once and the probe was refused here", async () => {
+    invoke.mockResolvedValue([
+      { outcome: "local", ms: 2 },
+      { outcome: "local", ms: 3 },
+    ]);
+    expect(await probeAddendum(atOnce)).toEqual({
+      apiEndpoint: "probe: a.example.net=local@2 b.example.net:2053=local@3",
+      reason: REFILED_REASON,
+      outcome: "OTHER",
+    });
+  });
+
+  /** A reset from the network can be as quick; the probe tells them apart. */
+  it("keeps its outcome when the probe says the network refused it", async () => {
+    invoke.mockResolvedValue([
+      { outcome: "tcp", ms: 30 },
+      { outcome: "tcp", ms: 31 },
+    ]);
+    expect(await probeAddendum(atOnce)).toEqual({
+      apiEndpoint: "probe: a.example.net=tcp@30 b.example.net:2053=tcp@31",
+    });
+  });
+
+  /** The probe says this PC refuses now; attempts that took their time
+   * were not that, or not only that. The reason says what the probe saw,
+   * and the outcome stays. */
+  it("keeps its outcome when the attempts did not fail at once", async () => {
+    invoke.mockResolvedValue([
+      { outcome: "local", ms: 2 },
+      { outcome: "local", ms: 3 },
+    ]);
+    const slowly = [failedIn("https://a.example.net/api", 3), failedIn("https://b.example.net:2053/api", 400)];
+    expect(await probeAddendum(slowly)).toEqual({
+      apiEndpoint: "probe: a.example.net=local@2 b.example.net:2053=local@3",
+      reason: LOCAL_REASON,
+    });
+  });
+
+  /** One answered, so the report is not an unreachable one to refile. */
+  it("keeps its outcome when anything else is in the trace", async () => {
+    invoke.mockResolvedValue([{ outcome: "local", ms: 2 }]);
+    const mixed = [failedIn("https://a.example.net/api", 3), { ...failedIn("https://b.example.net/api", 3), outcome: "h502" as const }];
+    expect((await probeAddendum(mixed))?.outcome).toBeUndefined();
+  });
+
+  /** The ten-minute interval is for probes of a blocked network, every
+   * address a lookup, a handshake and a ClientHello. A request refused at
+   * once is checked anyway, at one address, and that check does not spend
+   * the interval. */
+  it("is checked at one address within the ten-minute interval, which it does not spend", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000_000);
+    invoke.mockResolvedValue([{ outcome: "dns", ms: 40 }]);
+    expect(await probeAddendum([entry("https://c.example.net/api", "timeout")])).toEqual({
+      apiEndpoint: "probe: c.example.net=dns@40",
+    });
+
+    vi.setSystemTime(10_000_000 + 60_000);
+    invoke.mockReset();
+    invoke.mockResolvedValue([{ outcome: "local", ms: 2 }]);
+    expect(await probeAddendum(atOnce)).toEqual({
+      apiEndpoint: "probe: a.example.net=local@2",
+      reason: REFILED_REASON,
+      outcome: "OTHER",
+    });
+    expect(invoke).toHaveBeenCalledWith("probe_control_plane", { targets: [{ host: "a.example.net", port: 443 }] });
+
+    // The interval still runs from the first probe.
+    vi.setSystemTime(10_000_000 + 9 * 60_000);
+    invoke.mockReset();
+    expect(await probeAddendum([entry("https://c.example.net/api", "timeout")])).toBeUndefined();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  /** A connect may be putting up filters of its own: what the probe sees
+   * then is not what the request met. */
+  it("is not checked across a connect", async () => {
+    connectStarting();
+    expect(await probeAddendum(atOnce)).toEqual({ apiEndpoint: "probe: skipped=connect" });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
 /** A connect changes the path a probe measures, and resume -- when a
  * failed resume refresh probes -- is exactly when people press Connect. */
 describe("a probe and a connect", () => {

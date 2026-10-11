@@ -460,6 +460,12 @@ export function withNetwork(report: AttemptReport, attestation = currentAttestat
 export interface AttemptAddendum {
   apiEndpoint?: string;
   reason?: string;
+  /** What the report is filed as instead, when the probe showed it was
+   * not what it was made as: an unreachable control plane that was this
+   * machine refusing the connect (`REFILED_HERE_REASON` in
+   * control-plane-probe.ts). Applied to the report while it is still
+   * held; a follow-up to one already sent is OTHER whatever this says. */
+  outcome?: AttemptOutcome;
 }
 
 const REASON_MAX = 500;
@@ -470,6 +476,7 @@ function amended(report: QueuedReport, addendum: AttemptAddendum): QueuedReport 
   const apiEndpoint = join(report.apiEndpoint, addendum.apiEndpoint);
   return {
     ...report,
+    outcome: addendum.outcome ?? report.outcome,
     reason: join(report.reason, addendum.reason)?.slice(0, REASON_MAX),
     apiEndpoint: apiEndpoint === undefined ? undefined : clipTrace(apiEndpoint, API_ENDPOINT_MAX),
   };
@@ -514,7 +521,9 @@ async function sendFollowUp(original: QueuedReport, addendum: AttemptAddendum): 
       ...(original.bearer !== undefined ? { bearer: original.bearer } : {}),
       reason: `probe follow-up to the ${original.kind} ${original.outcome} report of ${original.occurredAt}, which was no longer held when the probe answered; not an attempt`,
     },
-    addendum,
+    // Never counted as an attempt, whatever the addendum would refile its
+    // report as; its reason says that.
+    { ...addendum, outcome: "OTHER" },
   );
   if (!(await send(followUp))) await enqueue(followUp);
 }
