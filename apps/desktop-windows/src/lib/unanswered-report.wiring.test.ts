@@ -24,7 +24,7 @@ function body(source: string, signature: string): string {
 
 describe("the Windows dashboard's load", () => {
   const dashboard = read("../screens/Dashboard.tsx");
-  const load = body(dashboard, "  async function loadAll(preferRouteId?: string) {");
+  const load = body(dashboard, "  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<boolean> {");
 
   it("traces each of its three requests and settles them together", () => {
     // The state when the report is made, not when the load began: the

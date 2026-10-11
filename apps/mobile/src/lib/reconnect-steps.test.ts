@@ -314,7 +314,7 @@ describe("the phone dashboard's wiring", () => {
     // ended, and never by a load a newer one replaced.
     const load = dashboard.slice(
       dashboard.indexOf("async function loadAll(preferRouteId?: string) {"),
-      dashboard.indexOf("async function loadScreen(preferRouteId: string | undefined, ready: () => void) {"),
+      dashboard.indexOf("async function loadScreen(preferRouteId: string | undefined, ready: () => void, retry: OfflineRetryTrigger | null = null): Promise<boolean> {"),
     );
     expect(load).toContain("const load = ++loadRef.current;");
     expect(load.indexOf("setLoaded(false);")).toBeLessThan(load.indexOf("await loadScreen(preferRouteId, ready);"));

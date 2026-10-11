@@ -282,6 +282,15 @@ describe("the dashboard's banner over the cached snapshot", () => {
     expect(offlineText("trying", fa)).toEqual({ title: DICTIONARIES.fa["dash.offlineTrying"], detail: null });
   });
 
+  /** Neoxify has answered something since the load failed -- a claim, a
+   * report -- and the load is being made again. Neither "can't reach" nor
+   * "still trying" is true then; on the test VM the banner went on saying
+   * the first above "You're protected". */
+  it("says neither that Neoxify is out of reach nor that it is still trying, once it has answered", async () => {
+    const { offlineText } = await import("./failure-text");
+    for (const t of [en, fa]) expect(offlineText("reached", t)).toEqual({ title: null, detail: null });
+  });
+
   /** Read from the source, for both clients. */
   it("is what both clients' dashboards draw", () => {
     for (const path of ["../screens/Dashboard.tsx", "../../../mobile/src/screens/Dashboard.tsx"]) {

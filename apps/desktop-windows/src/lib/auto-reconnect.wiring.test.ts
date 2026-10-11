@@ -247,7 +247,7 @@ describe("which screen runs an attempt", () => {
     // ran on a `runLadder` with no routes: `concurrentExitsFor` found no
     // extra exit and `exitOfRoute` no egress, so it landed without concurrent
     // exits and with every game's placement Unknown until the next connect.
-    const load = body("async function loadAll(preferRouteId?: string) {");
+    const load = body("async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<boolean> {");
     // Online: once the list has been asked for, answered or not.
     const asked = load.indexOf('const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));');
     const said = load.indexOf("} finally {\n      setRouteListLoaded(true);\n    }");
@@ -281,7 +281,7 @@ describe("which screen runs an attempt", () => {
     // on it for good.
     expect(dashboard.split("loadLastGood()").length - 1).toBe(1);
     expect(dashboard.split("loadConnectHistory()").length - 1).toBe(1);
-    const load = body("async function loadAll(preferRouteId?: string) {");
+    const load = body("async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<boolean> {");
     // The screen with nothing to dial, and the online one -- once, not
     // again when the snapshot went up first while it waited.
     expect(load.split("loadRouteMemory();").length - 1).toBe(2);

@@ -58,8 +58,15 @@ export function failureText(failure: ShownFailure, t: Translate): string {
 
 /** Why a dashboard is running on its cached snapshot, which its banner
  * says: still waiting for its load (`trying`), nothing answered the load
- * (`unreached`), or the load was answered with an error, kept as it came. */
-export type OfflineReason = "trying" | "unreached" | ShownFailure;
+ * (`unreached`), the load was answered with an error, kept as it came --
+ * or Neoxify has answered something since (`reached`), and the load is
+ * being made again (offline-retry.ts).
+ *
+ * The banner says the last of these, not the first. Kept at `unreached`
+ * once Neoxify had answered a claim and the queued reports, it said
+ * "Can't reach Neoxify right now" above "You're protected" for as long as
+ * the screen stayed open. */
+export type OfflineReason = "trying" | "unreached" | "reached" | ShownFailure;
 
 /** The banner's reason for a load that failed. "Can't reach Neoxify" only
  * when nothing answered it; an error answer -- the backend's, or a page
@@ -71,9 +78,16 @@ export function offlineReason(failure: ShownFailure): OfflineReason {
 }
 
 /** The banner's words for `reason`: its title, and the failure in the
- * customer's language when the load was answered with one. */
-export function offlineText(reason: OfflineReason, t: Translate): { title: string; detail: string | null } {
+ * customer's language when the load was answered with one.
+ *
+ * No title for `reached`. Neoxify has just answered, so neither "can't
+ * reach" nor "still trying" is true, and nothing is known yet about the
+ * load being made again; what stays true until it lands is the line under
+ * the title, that the servers and figures on screen are the saved ones
+ * and may be out of date. */
+export function offlineText(reason: OfflineReason, t: Translate): { title: string | null; detail: string | null } {
   if (reason === "trying") return { title: t("dash.offlineTrying"), detail: null };
   if (reason === "unreached") return { title: t("dash.offlineTitle"), detail: null };
+  if (reason === "reached") return { title: null, detail: null };
   return { title: t("dash.offlineAnswered"), detail: failureText(reason, t) };
 }

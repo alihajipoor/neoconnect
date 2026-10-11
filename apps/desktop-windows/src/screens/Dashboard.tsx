@@ -130,6 +130,8 @@ import { DeviceSlotCard } from "../components/DeviceSlotCard";
 import { useI18n } from "../lib/i18n";
 import { failureText, offlineReason as reasonFor, offlineText, type OfflineReason, type ShownFailure } from "../lib/failure-text";
 import { STILL_TRYING_AFTER_MS, useStillTrying } from "../lib/still-trying";
+import { onBackendAnswer } from "../lib/api";
+import { useOfflineRetry, type OfflineRetryTrigger } from "../lib/offline-retry";
 
 /** How a ladder pass ended.
  *
@@ -823,8 +825,23 @@ export function Dashboard({
    * exactly the kind of quiet wrongness the rest of this screen exists
    * to avoid. */
   const [offlineSince, setOfflineSince] = useState<number | null>(null);
+  /** The same, for callbacks registered once (`onBackendAnswer`). */
+  const offlineSinceRef = useRef<number | null>(null);
+  offlineSinceRef.current = offlineSince;
   /** Why the screen is on the snapshot, as the banner says it. */
   const [offlineReason, setOfflineReason] = useState<OfflineReason>("unreached");
+  /** How many of the screen's own loads are under way: the mount's, the
+   * one after a server switch, the error card's retry. A background load
+   * waits for them (`offlineRetry`). */
+  const loadsInFlightRef = useRef(0);
+  /** While the screen is on its snapshot, the load is made again in the
+   * background, and at once when there is a reason to think it would now
+   * be answered. See offline-retry.ts. Started where a load falls back to
+   * the snapshot, stopped where one gets its answer. */
+  const offlineRetry = useOfflineRetry({
+    load: (why) => loadInBackground(why),
+    busy: () => loadsInFlightRef.current > 0,
+  });
 
   /** Whether a ladder pass could still be running.
    *
@@ -1342,7 +1359,40 @@ export function Dashboard({
     if (adopted === "disconnected") await captureBaselinesWhileDown(cached.protocolUsers);
   }
 
-  async function loadAll(preferRouteId?: string) {
+  /** One of the screen's own loads -- the mount's, a server switch's, the
+   * error card's retry -- counted while it runs, so a background load
+   * waits for it (`offlineRetry`). */
+  async function loadAll(preferRouteId?: string): Promise<boolean> {
+    loadsInFlightRef.current += 1;
+    try {
+      return await loadScreen(preferRouteId, null);
+    } finally {
+      loadsInFlightRef.current -= 1;
+    }
+  }
+
+  /** The load again, in the background, while the screen is on its cached
+   * snapshot (`offlineRetry`). */
+  function loadInBackground(why: OfflineRetryTrigger): Promise<boolean> {
+    return loadScreen(undefined, why);
+  }
+
+  /** Loads the screen, and says whether it got its answer: the
+   * credentials and the plan.
+   *
+   * `retry` names what started a load made in the background while the
+   * screen is on its cached snapshot and in use (`offlineRetry`), and is
+   * null for the screen's own. A background load does not raise the
+   * loading screen, and is treated throughout as a load the snapshot went
+   * on screen in front of (`shownWhileWaiting`): the credential on screen,
+   * perhaps the one a tunnel is up on, is replaced by its new copy rather
+   * than chosen again, and the service, the route memory and the
+   * baselines are left as they are. When nothing answers it, it is
+   * reported as the mount's load is -- at most once in ten minutes
+   * (unanswered-report.ts), so the retries add a row now and then, not one
+   * each. */
+  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<boolean> {
+    const background = retry !== null;
     // Which customer session this load is for. See sessionGeneration: a
     // sign-out bumps it before it clears anything.
     const sessionAtStart = sessionGeneration();
@@ -1353,8 +1403,10 @@ export function Dashboard({
     // for before this is older than what this load puts on screen
     // (`noteCredentialsShown`).
     const askedAt = Date.now();
-    setLoading(true);
-    setError(null);
+    if (!background) {
+      setLoading(true);
+      setError(null);
+    }
     // Traced, so a load that nothing answered is reported with the
     // addresses it tried. See unanswered-report.ts. The state as it is
     // when the report is made, not as it was when the load began: the
@@ -1368,10 +1420,11 @@ export function Dashboard({
     // handshake through and then stalls; the start sat on "Loading..." for
     // all of it, holding credentials that would have connected at eight.
     // Only before the screen has shown anything: a load after a server
-    // switch holds a newer choice than the cache does.
+    // switch holds a newer choice than the cache does. A background load
+    // is one the snapshot is already in front of.
     let settled = false;
-    let shownWhileWaiting = false;
-    const waiting = shownOnceRef.current
+    let shownWhileWaiting = background;
+    const waiting = shownOnceRef.current || background
       ? undefined
       : setTimeout(() => {
           void (async () => {
@@ -1395,7 +1448,7 @@ export function Dashboard({
       const failed = [meResult, subsResult, usersResult].find((r) => !r.ok);
       if (failed && !failed.ok && failed.sessionExpired) {
         onLoggedOut();
-        return;
+        return false;
       }
 
       // The control plane is unreachable, which is not the same as the
@@ -1409,20 +1462,24 @@ export function Dashboard({
       const cached = await loadSnapshot();
       unanswered?.(
         cached
-          ? `showing the cached credentials, ${snapshotAge(cached.savedAt)}`
+          ? `${background ? `asked again in the background (${retry}); still ` : ""}showing the cached credentials, ${snapshotAge(cached.savedAt)}`
           : "showed the load error, with nothing cached to show",
       );
       // Said as what happened: nothing answered, or something answered
       // with an error (`offlineReason`).
       const reason = failed && !failed.ok ? reasonFor(failed) : "unreached";
       if (shownWhileWaiting) {
-        // Already on screen, and perhaps in use: only the banner changes.
+        // Already on screen, and perhaps in use: only the banner changes,
+        // to what this load found -- the last word on it -- and the load
+        // is made again later (`offlineRetry`).
         setOfflineReason(reason);
-        return;
+        offlineRetry.start();
+        return false;
       }
       if (cached) {
         await showCached(cached, preferRouteId, load, reason);
-        return;
+        offlineRetry.start();
+        return false;
       }
 
       // Kept as it came and worded as the screen renders, so it is in the
@@ -1434,12 +1491,18 @@ export function Dashboard({
       // once it runs.
       setRouteListLoaded(true);
       loadRouteMemory();
-      return;
+      return false;
     }
 
+    // A load of the screen's own began while this one waited in the
+    // background -- a server switch -- and puts its own answer on screen,
+    // with the choice it was made for.
+    if (background && loadSeqRef.current !== load) return true;
+
     // Reached the server, so anything remembered about being offline is
-    // stale.
+    // stale, and there is nothing more to ask again.
     setOfflineSince(null);
+    offlineRetry.stop();
 
     setMe(meResult.data);
     const sub = usableSubscription(subsResult.data);
@@ -1539,7 +1602,7 @@ export function Dashboard({
     // returns. Everything below is for a session that has ended: the
     // snapshot above all, which would write the signed-out customer's
     // credentials back to disk after the sign-out cleared them.
-    if (sessionGeneration() !== sessionAtStart) return;
+    if (sessionGeneration() !== sessionAtStart) return true;
 
     // Written only once the credentials and the plan have answered, so a
     // partial answer can never overwrite a good cache with a worse one --
@@ -1566,7 +1629,32 @@ export function Dashboard({
     // and a baseline captured through a tunnel we simply could not ask
     // about turns every later comparison into a false leak report.
     if (adopted === "disconnected") await captureBaselinesWhileDown(usersResult.data);
+    return true;
   }
+
+  // Neoxify answered something while the screen says it cannot be reached
+  // -- the claim before a connect, a queued report, a renewal through a
+  // tunnel. The banner stops saying so at once, keeping only that what is
+  // on screen is the saved copy, and the load is made again now rather
+  // than at the next step of the backoff. On the test VM the banner said
+  // "Can't reach Neoxify right now" above "You're protected" a minute
+  // after the claim and the reports had been answered. Through the ref:
+  // registered once, for the life of the screen.
+  useEffect(
+    () =>
+      onBackendAnswer(() => {
+        if (offlineSinceRef.current === null) return;
+        setOfflineReason("reached");
+        offlineRetry.trigger("answered");
+      }),
+    [],
+  );
+
+  // A tunnel verified: the path to Neoxify is a different one now, and on
+  // a network that filters it, the likeliest one to be answered.
+  useEffect(() => {
+    if (connectionState === "connected") offlineRetry.trigger("tunnel");
+  }, [connectionState]);
 
   // A pass this screen adopted rather than started (see
   // `adoptServiceState`) reports its outcome to the screen that started
@@ -3421,7 +3509,9 @@ export function Dashboard({
               "Connected". */}
           {offlineSince !== null ? (
             <div className="animate-rise rounded-lg border border-warning/30 bg-warning/10 px-3 py-2">
-              <p className="text-xs font-medium text-warning">{offlineText(offlineReason, t).title}</p>
+              {offlineText(offlineReason, t).title !== null ? (
+                <p className="text-xs font-medium text-warning">{offlineText(offlineReason, t).title}</p>
+              ) : null}
               {offlineText(offlineReason, t).detail !== null ? (
                 <p className="mt-0.5 text-[11px] text-muted-foreground">{offlineText(offlineReason, t).detail}</p>
               ) : null}

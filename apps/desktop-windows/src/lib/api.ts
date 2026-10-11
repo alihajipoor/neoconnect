@@ -153,6 +153,47 @@ function noteAnswer(base: string, response: Response): void {
     servedBackend.add(base);
     notBackend.delete(base);
   }
+  if (servesBackend(response) || bodilessSuccess(response)) announceBackendAnswer();
+}
+
+/** An answer with no body and no type that the rest of this file takes as
+ * the backend's own (`isForeignPage`): its 204 to a report or a release,
+ * its 304 to a revalidated read. */
+function bodilessSuccess(response: Response): boolean {
+  return (response.ok || response.status === 304) && !isBackendAnswer(response) && !isForeignPage(response);
+}
+
+/** Who is told when the backend answers. See `onBackendAnswer`. */
+const answerListeners = new Set<() => void>();
+
+/** Calls `listener` whenever the backend answers any request this app
+ * sends, through any address, whatever the request was: its JSON in any
+ * status but the doubtful ones (`servesBackend`), or a success with no
+ * body. Not a page from in front of it, which says nothing about whether
+ * Neoxify was reached. Returns the function that stops it.
+ *
+ * For a screen that has said Neoxify cannot be reached: the claim before
+ * a connect, a report delivered, a renewal answered -- any of them makes
+ * that untrue, and the screen has to stop saying it then, not when its
+ * own next request happens to go out. On the test VM the dashboard's
+ * banner went on saying "Can't reach Neoxify" for a minute after the
+ * claim and the queued reports had been answered through the tunnel
+ * (offline-retry.ts). */
+export function onBackendAnswer(listener: () => void): () => void {
+  answerListeners.add(listener);
+  return () => {
+    answerListeners.delete(listener);
+  };
+}
+
+function announceBackendAnswer(): void {
+  for (const listener of [...answerListeners]) {
+    try {
+      listener();
+    } catch {
+      // A screen's handler failing is no reason for this request to.
+    }
+  }
 }
 
 /** Whether this answer to the public health check proves the address
