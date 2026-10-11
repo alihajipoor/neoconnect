@@ -21,6 +21,7 @@ mod openvpn;
 /// above. A child of this one so it can call the same private teardowns
 /// the disconnect path does rather than growing second copies of them.
 pub(crate) mod repair;
+pub mod route_table;
 pub mod routing;
 mod wireguard;
 mod xray;

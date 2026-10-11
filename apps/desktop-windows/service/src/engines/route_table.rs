@@ -1,0 +1,382 @@
+//! The IPv4 routing table as plain rows, and the two things this service
+//! does to it on an adapter that is not ours.
+//!
+//! Every other route this service touches sits on one of its own
+//! adapters, and those are handled by interface in `routing`: the
+//! adapter goes away with the engine, or its routes are purged by
+//! interface index. A host route to the node is different. It sits on the
+//! *physical* adapter -- Xray's because `routing::install_full_tunnel`
+//! puts it there, OpenVPN's because `redirect-gateway` makes openvpn.exe
+//! add one -- and nothing that cleans up our adapters ever looks there.
+//! Measured on the VM: after two Compatible sessions, a /32 to each of
+//! the two nodes was still on the guest's Ethernet adapter, and the next
+//! Stealth connect's health check to one of those nodes' mirrors went
+//! around the tunnel, was read as the tunnel being bypassed, and moved the
+//! customer off a server that was working.
+//!
+//! So routes on someone else's adapter are described here as rows that
+//! can be compared, diffed and written down, and changed only through
+//! [`RouteOps`] -- a trait, so that the decisions about which row to add
+//! or delete can be tested against a recorded table instead of the
+//! machine running the tests.
+
+use std::net::Ipv4Addr;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, NO_ERROR};
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    DeleteIpForwardEntry2, FreeMibTable, GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+};
+use windows_sys::Win32::Networking::WinSock::AF_INET;
+
+/// One IPv4 route, as far as this service needs to know it.
+///
+/// The first four fields are what Windows keys a route by: two routes
+/// with the same destination, prefix, interface and next hop are the same
+/// route. The metric is carried for adding one, and is not part of that
+/// identity -- see [`RouteRow::same_route`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RouteRow {
+    pub dest: Ipv4Addr,
+    pub prefix: u8,
+    pub if_index: u32,
+    /// `0.0.0.0` for an on-link route, which is what a PPP or PPPoE
+    /// uplink's default route looks like: there is no gateway to name,
+    /// the far end of the link is the next hop.
+    pub next_hop: Ipv4Addr,
+    pub metric: u32,
+}
+
+impl RouteRow {
+    /// A host route: one address, on one interface, through one next hop.
+    pub fn host(dest: Ipv4Addr, if_index: u32, next_hop: Ipv4Addr, metric: u32) -> Self {
+        Self { dest, prefix: 32, if_index, next_hop, metric }
+    }
+
+    pub fn is_host(&self) -> bool {
+        self.prefix == 32
+    }
+
+    /// Whether `other` is the same route as Windows counts them.
+    ///
+    /// The metric is left out on purpose. Windows will not hold two
+    /// routes that differ only in metric -- the second add is refused as
+    /// already existing -- so a row read back with a different metric
+    /// than the one written is still that row, and deleting by it must
+    /// still find it.
+    pub fn same_route(&self, other: &RouteRow) -> bool {
+        self.dest == other.dest
+            && self.prefix == other.prefix
+            && self.if_index == other.if_index
+            && self.next_hop == other.next_hop
+    }
+
+    /// The netmask `route.exe` wants for this prefix.
+    pub fn mask(&self) -> Ipv4Addr {
+        let bits = u32::from(self.prefix.min(32));
+        Ipv4Addr::from(if bits == 0 { 0 } else { u32::MAX << (32 - bits) })
+    }
+}
+
+/// The host routes on one interface.
+pub fn host_routes_on(rows: &[RouteRow], if_index: u32) -> Vec<RouteRow> {
+    rows.iter().filter(|r| r.is_host() && r.if_index == if_index).copied().collect()
+}
+
+/// The host routes that appeared on `if_index` between two readings of
+/// the table.
+///
+/// What OpenVPN's `redirect-gateway` adds is learned this way, because
+/// openvpn.exe does not say: the table is read before it starts and again
+/// once it reports the tunnel up, and what is new on the uplink is what it
+/// added. Restricted to host routes on that one interface so that nothing
+/// else the machine did in those seconds -- a route on another adapter, a
+/// prefix of any other length, the tunnel's own half-defaults -- is taken
+/// for OpenVPN's and later deleted as ours.
+pub fn new_host_routes(before: &[RouteRow], after: &[RouteRow], if_index: u32) -> Vec<RouteRow> {
+    host_routes_on(after, if_index)
+        .into_iter()
+        .filter(|row| !before.iter().any(|old| old.same_route(row)))
+        .collect()
+}
+
+/// The routing table, and the two changes this service makes to rows on
+/// an adapter that is not its own.
+///
+/// `Send + Sync` and taking `&self` because one of these is shared, as an
+/// `Arc`, by the engine state and every `InstalledRoutes` that may have to
+/// remove a row from a teardown on whichever thread runs it.
+pub trait RouteOps: Send + Sync {
+    /// Every IPv4 route on the machine.
+    fn rows(&self) -> Result<Vec<RouteRow>, String>;
+    /// Adds the route. Refused when the same route already exists, as
+    /// Windows refuses it.
+    fn add(&self, route: &RouteRow) -> Result<(), String>;
+    /// Deletes every row that is [`RouteRow::same_route`] as this one. A
+    /// route that is not there is not an error: the goal is that it is
+    /// gone, not that this call was the one that removed it.
+    fn delete(&self, route: &RouteRow) -> Result<(), String>;
+}
+
+/// The machine's own table.
+pub struct SystemRoutes;
+
+/// The machine's table, as the shared handle the engines hold.
+pub fn system() -> Arc<dyn RouteOps> {
+    Arc::new(SystemRoutes)
+}
+
+impl RouteOps for SystemRoutes {
+    fn rows(&self) -> Result<Vec<RouteRow>, String> {
+        Ok(raw_ipv4_table()?.iter().map(row_from).collect())
+    }
+
+    /// With `route.exe`, as every route this service has ever added was
+    /// added, so the metric means what it has always meant here.
+    fn add(&self, route: &RouteRow) -> Result<(), String> {
+        super::routing::add_route(
+            &route.dest.to_string(),
+            &route.mask().to_string(),
+            &route.next_hop.to_string(),
+            route.if_index,
+            route.metric,
+        )
+    }
+
+    /// Native, and by enumeration: the rows `GetIpForwardTable2` returns
+    /// are exactly what `DeleteIpForwardEntry2` wants back, so nothing has
+    /// to be re-described to be deleted, and no process is started --
+    /// which is what lets the teardowns that may not launch PowerShell,
+    /// or more than three `route.exe`, remove these too.
+    fn delete(&self, route: &RouteRow) -> Result<(), String> {
+        if route.if_index == 0 {
+            return Err("interface index 0 names no interface".to_string());
+        }
+        let mut failed = None;
+        for raw in raw_ipv4_table()?.iter().filter(|raw| row_from(raw).same_route(route)) {
+            // SAFETY: `raw` is a row GetIpForwardTable2 returned, copied
+            // out whole; the call only reads it.
+            let rc = unsafe { DeleteIpForwardEntry2(raw) };
+            // Gone between the read and the delete is gone.
+            if rc != NO_ERROR && rc != ERROR_NOT_FOUND {
+                failed = Some(rc);
+            }
+        }
+        match failed {
+            Some(rc) => Err(format!("DeleteIpForwardEntry2 failed for {}/{} ({rc})", route.dest, route.prefix)),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Every IPv4 route on the machine, as the API's own rows.
+pub(super) fn raw_ipv4_table() -> Result<Vec<MIB_IPFORWARD_ROW2>, String> {
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    // SAFETY: `table` is an out parameter the call fills with a buffer it
+    // allocates, freed below with the matching FreeMibTable.
+    let rc = unsafe { GetIpForwardTable2(AF_INET, &mut table) };
+    if rc != NO_ERROR || table.is_null() {
+        return Err(format!("GetIpForwardTable2 failed ({rc})"));
+    }
+    // SAFETY: on success `table` points at a header followed by
+    // `NumEntries` rows -- the declared `[_; 1]` is the C idiom for a
+    // trailing array -- and they stay valid until FreeMibTable.
+    let rows = unsafe {
+        let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize).to_vec();
+        FreeMibTable(table as *const core::ffi::c_void);
+        rows
+    };
+    Ok(rows)
+}
+
+/// One API row as a [`RouteRow`].
+pub(super) fn row_from(route: &MIB_IPFORWARD_ROW2) -> RouteRow {
+    // SAFETY: every row this is given came from an AF_INET table (or was
+    // built as one), so the IPv4 arm of both unions is the live one. The
+    // addresses are in network byte order, so their in-memory bytes are
+    // the octets in order.
+    let (dest, hop) = unsafe {
+        (
+            route.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr,
+            route.NextHop.Ipv4.sin_addr.S_un.S_addr,
+        )
+    };
+    RouteRow {
+        dest: Ipv4Addr::from(dest.to_ne_bytes()),
+        prefix: route.DestinationPrefix.PrefixLength,
+        if_index: route.InterfaceIndex,
+        next_hop: Ipv4Addr::from(hop.to_ne_bytes()),
+        metric: route.Metric,
+    }
+}
+
+/// A routing table in memory, which records every change asked of it.
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::{RouteOps, RouteRow};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Op {
+        Add(RouteRow),
+        Delete(RouteRow),
+    }
+
+    #[derive(Default)]
+    pub struct FakeRoutes {
+        table: Mutex<Vec<RouteRow>>,
+        log: Mutex<Vec<Op>>,
+    }
+
+    impl FakeRoutes {
+        pub fn with(rows: &[RouteRow]) -> Arc<Self> {
+            Arc::new(Self { table: Mutex::new(rows.to_vec()), log: Mutex::default() })
+        }
+
+        /// What the table holds now.
+        pub fn table(&self) -> Vec<RouteRow> {
+            self.table.lock().unwrap().clone()
+        }
+
+        /// Every change asked of it, in order.
+        pub fn log(&self) -> Vec<Op> {
+            self.log.lock().unwrap().clone()
+        }
+
+        /// A route appearing that nobody asked this for -- what
+        /// openvpn.exe adding one looks like from here.
+        pub fn gain(&self, row: RouteRow) {
+            self.table.lock().unwrap().push(row);
+        }
+    }
+
+    impl RouteOps for FakeRoutes {
+        fn rows(&self) -> Result<Vec<RouteRow>, String> {
+            Ok(self.table())
+        }
+
+        fn add(&self, route: &RouteRow) -> Result<(), String> {
+            self.log.lock().unwrap().push(Op::Add(*route));
+            let mut table = self.table.lock().unwrap();
+            if table.iter().any(|r| r.same_route(route)) {
+                return Err(format!("adding the route for {} failed (the object already exists)", route.dest));
+            }
+            table.push(*route);
+            Ok(())
+        }
+
+        fn delete(&self, route: &RouteRow) -> Result<(), String> {
+            self.log.lock().unwrap().push(Op::Delete(*route));
+            self.table.lock().unwrap().retain(|r| !r.same_route(route));
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr {
+        Ipv4Addr::new(a, b, c, d)
+    }
+
+    /// What OpenVPN's adoption rests on: of everything that changed in the
+    /// table while openvpn.exe connected, only the host routes it put on
+    /// the uplink are its own.
+    ///
+    /// The tunnel's half-default on its own adapter changed too, and must
+    /// not be counted -- it is OpenVPN's and goes with the adapter's purge
+    /// -- and the default route that was there before is the customer's.
+    #[test]
+    fn host_route_diff_finds_only_new_slash32s_on_the_uplink() {
+        let gateway = v4(192, 0, 2, 1);
+        let default = RouteRow { dest: v4(0, 0, 0, 0), prefix: 0, if_index: 14, next_hop: gateway, metric: 25 };
+        let node = RouteRow::host(v4(203, 0, 113, 7), 14, gateway, 0);
+        let half = RouteRow { dest: v4(0, 0, 0, 0), prefix: 1, if_index: 20, next_hop: v4(10, 77, 0, 1), metric: 0 };
+
+        let before = [default];
+        let after = [default, node, half];
+
+        assert_eq!(new_host_routes(&before, &after, 14), vec![node]);
+        assert!(new_host_routes(&before, &after, 20).is_empty(), "a /1 is not a host route");
+        assert!(
+            new_host_routes(&after, &after, 14).is_empty(),
+            "a host route that was there before is not one the engine added"
+        );
+    }
+
+    #[test]
+    fn host_routes_on_one_interface_are_only_the_slash32s_there() {
+        let gateway = v4(192, 0, 2, 1);
+        let rows = [
+            RouteRow::host(v4(203, 0, 113, 7), 14, gateway, 1),
+            RouteRow::host(v4(203, 0, 113, 8), 9, gateway, 1),
+            RouteRow { dest: v4(10, 0, 0, 0), prefix: 8, if_index: 14, next_hop: gateway, metric: 1 },
+        ];
+        assert_eq!(host_routes_on(&rows, 14), vec![rows[0]]);
+    }
+
+    /// The identity a delete is matched by. A different next hop is a
+    /// different route -- someone else's, possibly -- while a different
+    /// metric is the same route read back.
+    #[test]
+    fn the_same_route_ignores_the_metric_and_nothing_else() {
+        let a = RouteRow::host(v4(203, 0, 113, 7), 14, v4(192, 0, 2, 1), 1);
+        assert!(a.same_route(&RouteRow { metric: 35, ..a }));
+        assert!(!a.same_route(&RouteRow { next_hop: v4(192, 0, 2, 254), ..a }));
+        assert!(!a.same_route(&RouteRow { if_index: 9, ..a }));
+        assert!(!a.same_route(&RouteRow { prefix: 31, ..a }));
+    }
+
+    #[test]
+    fn masks_are_the_ones_route_exe_expects() {
+        let row = |prefix| RouteRow { dest: v4(0, 0, 0, 0), prefix, if_index: 1, next_hop: v4(0, 0, 0, 0), metric: 1 };
+        assert_eq!(row(32).mask(), v4(255, 255, 255, 255));
+        assert_eq!(row(1).mask(), v4(128, 0, 0, 0));
+        assert_eq!(row(0).mask(), v4(0, 0, 0, 0));
+        assert_eq!(row(24).mask(), v4(255, 255, 255, 0));
+    }
+
+    /// The native reader against the one `routing` already proves against
+    /// `Get-NetRoute`: the loopback interface's routes, read both ways.
+    /// Loopback because every machine has it and reading it needs no
+    /// elevation. Nothing is changed.
+    #[test]
+    fn the_system_table_reads_what_the_interface_reader_reads() {
+        let mut rows: Vec<String> = SystemRoutes
+            .rows()
+            .expect("the table should read")
+            .iter()
+            .filter(|r| r.if_index == 1)
+            .map(|r| format!("{}/{}", r.dest, r.prefix))
+            .collect();
+        let mut by_interface = super::super::routing::interface_routes(1);
+        rows.sort();
+        rows.dedup();
+        by_interface.sort();
+        by_interface.dedup();
+        assert!(!rows.is_empty(), "loopback always carries routes");
+        assert_eq!(rows, by_interface);
+    }
+
+    #[test]
+    fn deleting_on_interface_zero_is_refused_rather_than_matched() {
+        let row = RouteRow::host(v4(203, 0, 113, 7), 0, v4(192, 0, 2, 1), 1);
+        assert!(SystemRoutes.delete(&row).is_err());
+    }
+
+    /// The recording table behaves as Windows does on the two points the
+    /// tests above it rely on: an identical route is refused, and a
+    /// delete of a route that is not there succeeds.
+    #[test]
+    fn the_fake_table_refuses_a_duplicate_and_forgives_a_missing_delete() {
+        let row = RouteRow::host(v4(203, 0, 113, 7), 14, v4(192, 0, 2, 1), 1);
+        let table = fake::FakeRoutes::with(&[row]);
+        assert!(table.add(&row).is_err());
+        assert!(table.delete(&row).is_ok());
+        assert!(table.delete(&row).is_ok());
+        assert!(table.table().is_empty());
+    }
+}

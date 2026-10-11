@@ -26,12 +26,7 @@ use std::ffi::OsStr;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use windows_sys::Win32::Foundation::NO_ERROR;
-use windows_sys::Win32::NetworkManagement::IpHelper::{
-    DeleteIpForwardEntry2, FreeMibTable, GetIpForwardTable2, MIB_IPFORWARD_ROW2,
-    MIB_IPFORWARD_TABLE2,
-};
-use windows_sys::Win32::Networking::WinSock::AF_INET;
+use windows_sys::Win32::NetworkManagement::IpHelper::{DeleteIpForwardEntry2, MIB_IPFORWARD_ROW2};
 
 use super::run_hidden;
 
@@ -108,24 +103,10 @@ fn ipv4_routes_on(interface_index: u32) -> Result<Vec<MIB_IPFORWARD_ROW2>, Strin
     if interface_index == 0 {
         return Err("interface index 0 names no interface".to_string());
     }
-    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
-    // SAFETY: `table` is an out parameter the call fills with a buffer it
-    // allocates, freed below with the matching FreeMibTable.
-    let rc = unsafe { GetIpForwardTable2(AF_INET, &mut table) };
-    if rc != NO_ERROR || table.is_null() {
-        return Err(format!("GetIpForwardTable2 failed ({rc})"));
-    }
-    // SAFETY: on success `table` points at a header followed by
-    // `NumEntries` rows -- the declared `[_; 1]` is the C idiom for a
-    // trailing array -- and they stay valid until FreeMibTable.
-    let ours = unsafe {
-        let rows =
-            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
-        let ours = rows.iter().filter(|row| row.InterfaceIndex == interface_index).copied().collect();
-        FreeMibTable(table as *const core::ffi::c_void);
-        ours
-    };
-    Ok(ours)
+    Ok(super::route_table::raw_ipv4_table()?
+        .into_iter()
+        .filter(|row| row.InterfaceIndex == interface_index)
+        .collect())
 }
 
 /// A route row's destination as `Get-NetRoute` writes it: `10.0.0.0/8`.
@@ -264,7 +245,7 @@ impl Drop for InstalledRoutes {
     }
 }
 
-fn add_route(
+pub(super) fn add_route(
     dest: &str,
     mask: &str,
     gateway: &str,
