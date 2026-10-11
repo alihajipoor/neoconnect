@@ -73,9 +73,10 @@ impl HardStopSteps for Engines {
                 //
                 // By destination, with `route.exe`: the same two deletes
                 // the connect path makes, no enumeration and no cmdlet.
-                // OpenVPN installs no routes of ours, so `routes` above
-                // was empty and this stays inside the three `route.exe`
-                // runs phase one allows.
+                // What `routes` above holds for OpenVPN is the host route
+                // it put on the physical uplink, taken over at connect;
+                // that is deleted natively and starts no process, so this
+                // stays inside the three `route.exe` runs phase one allows.
                 if protocol == "OPENVPN" {
                     if let Ok(Some(adapter)) = adapters::find_by_name(openvpn::ADAPTER_NAME) {
                         routing::purge_pushed_half_defaults(adapter.index);

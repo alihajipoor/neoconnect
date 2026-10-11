@@ -71,10 +71,12 @@ enum Active {
     Child {
         protocol: &'static str,
         child: Child,
-        /// Routes this service installed on the engine's behalf. Empty
-        /// for engines that manage their own (OpenVPN acts on the
-        /// server's pushed directives); populated for Xray, which does
-        /// not route anything by itself.
+        /// Routes this session removes when it ends. For Xray, which
+        /// routes nothing by itself, every route the service installed on
+        /// its behalf. For OpenVPN, which acts on the server's pushed
+        /// directives, the host routes it put on the physical uplink --
+        /// taken over because nothing else would ever remove them; the
+        /// half-defaults on its own adapter are purged by interface.
         routes: InstalledRoutes,
     },
 }
@@ -643,8 +645,20 @@ impl Engines {
     /// Returns its generation.
     #[cfg(test)]
     pub(crate) fn begin_test_session(&mut self, protocol: &'static str, child: Child) -> u64 {
-        self.begin_session(Active::Child { protocol, child, routes: InstalledRoutes::none() }, &test_profile());
+        self.begin_test_session_with_routes(protocol, child, InstalledRoutes::none())
+    }
+
+    /// The same, with routes for the session to own.
+    #[cfg(test)]
+    fn begin_test_session_with_routes(&mut self, protocol: &'static str, child: Child, routes: InstalledRoutes) -> u64 {
+        self.begin_session(Active::Child { protocol, child, routes }, &test_profile());
         self.active.peek().map_or(0, |s| s.generation)
+    }
+
+    /// Points this instance at a routing table the test owns.
+    #[cfg(test)]
+    fn set_route_ops_for_test(&mut self, ops: Arc<dyn route_table::RouteOps>) {
+        self.route_ops = ops;
     }
 
     /// The same, with the first watch on `first_watch` instead of the
@@ -802,13 +816,7 @@ impl Engines {
         // hypothetical: enabling Custom mode on a live OpenVPN connection
         // reported "Another VPN is connected on this machine
         // (Neoxify-OpenVPN)", pointing at the very tunnel being rebuilt.
-        let rivals = adapters::other_vpns_up(&[
-            xray::ADAPTER_NAME,
-            wireguard::TUNNEL_NAME,
-            openvpn::ADAPTER_NAME,
-            ikev2::ENTRY_NAME,
-        ])
-        .unwrap_or_default();
+        let rivals = adapters::other_vpns_up(&OUR_ADAPTER_NAMES).unwrap_or_default();
         // The one place the published token is read on this path.
         //
         // Below here cancellation is a parameter. That is the whole
@@ -987,8 +995,9 @@ impl Engines {
                 self.begin_session(Active::Child { protocol, child, routes }, profile);
             }
             ConnectProfile::Openvpn(p) => {
-                let child = openvpn::connect(self, p, passive, limits)?;
-                let engine = Active::Child { protocol: "OPENVPN", child, routes: InstalledRoutes::none() };
+                let (child, added) = openvpn::connect(self, p, passive, limits)?;
+                let routes = self.openvpn_routes(added);
+                let engine = Active::Child { protocol: "OPENVPN", child, routes };
                 self.begin_session(engine, profile);
             }
         }
@@ -1024,6 +1033,15 @@ impl Engines {
         // functions with no `Engines` to hand it back to.
         self.dns_state = dns::tunnel_dns();
         Ok(())
+    }
+
+    /// The routes an OpenVPN session owns: the host routes openvpn.exe
+    /// added on the uplink, taken over so that every teardown -- a
+    /// Disconnect, a dead engine's, the hard stop -- removes them, and owed
+    /// in the ledger in case none of those runs. See
+    /// `InstalledRoutes::adopted`.
+    fn openvpn_routes(&self, added: Vec<route_table::RouteRow>) -> InstalledRoutes {
+        InstalledRoutes::adopted(added, Arc::clone(&self.route_ops), self.owed_routes())
     }
 
     /// Blocks IPv6 for a full tunnel, on the engines that would
@@ -1992,6 +2010,28 @@ pub fn os_visible_tunnel() -> (bool, Option<String>, TunnelHealth) {
     // Shipped apps read every `connected: false` the same way whatever the
     // health says, so to them nothing changes.
     (false, None, TunnelHealth::Unknown)
+}
+
+/// Every adapter this service's engines bring up, by the name Windows
+/// shows. What "ours" means wherever a route or an adapter has to be told
+/// apart from the customer's -- the rival-VPN hint, the uplink, and the
+/// host routes taken over from OpenVPN.
+const OUR_ADAPTER_NAMES: [&str; 4] =
+    [xray::ADAPTER_NAME, wireguard::TUNNEL_NAME, openvpn::ADAPTER_NAME, ikev2::ENTRY_NAME];
+
+/// The interface indexes of [`OUR_ADAPTER_NAMES`] that exist right now.
+/// Empty when the adapters cannot be listed, which only ever makes the
+/// callers take fewer routes for the customer's.
+fn our_interfaces() -> Vec<u32> {
+    adapters::list()
+        .map(|all| all.into_iter().filter(|a| OUR_ADAPTER_NAMES.contains(&a.name.as_str())).map(|a| a.index).collect())
+        .unwrap_or_default()
+}
+
+/// The physical adapter the machine's traffic leaves by, as an interface
+/// index, for an engine that routes its own way around the tunnel.
+fn uplink_index() -> Option<u32> {
+    adapters::physical_uplink(&OUR_ADAPTER_NAMES).ok().flatten().map(|a| a.index)
 }
 
 /// The network adapter a given protocol's engine creates.
@@ -3496,5 +3536,172 @@ mod helper_tests {
         let lines = crate::cleanup_log::noted_containing(LABEL);
         assert_eq!(lines.len(), 1, "{lines:#?}");
         assert!(lines[0].contains(&format!("{LABEL}, exit code 1, noticed by the engine watch; routes, filters")), "{}", lines[0]);
+    }
+
+    // ---- OpenVPN's host route to its server ---------------------------
+    //
+    // Measured on the VM: after Compatible sessions, a host route to each
+    // node stayed on the guest's Ethernet adapter, and the next Stealth
+    // connect's check against one of those nodes' mirrors went around the
+    // tunnel and moved the customer off a server that worked. openvpn.exe
+    // adds that route itself and is always ended by TerminateProcess, so
+    // it never takes it back; these pin the session taking it over. What
+    // they cannot pin is the real table, which is the VM's job.
+
+    /// A recording table with the customer's default route on the uplink.
+    fn uplink_table() -> (Arc<route_table::fake::FakeRoutes>, Ipv4Addr) {
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let default =
+            route_table::RouteRow { dest: Ipv4Addr::UNSPECIFIED, prefix: 0, if_index: 14, next_hop: gateway, metric: 25 };
+        (route_table::fake::FakeRoutes::with(&[default]), gateway)
+    }
+
+    fn fresh_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("neoconnect-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The route openvpn.exe pushed while it connected belongs to the
+    /// session, and is owed in the ledger before anything can end it.
+    #[test]
+    fn openvpn_session_owns_the_host_route_it_pushed() {
+        let (table, gateway) = uplink_table();
+        let node = route_table::RouteRow::host(Ipv4Addr::new(203, 0, 113, 7), 14, gateway, 0);
+        let dir = fresh_dir("openvpn-owns");
+        let mut engines = Engines::new(dir.clone(), dir.clone());
+        engines.set_route_ops_for_test(table.clone());
+
+        let watch = openvpn::HostRouteWatch::begin(&*table, Some(14), Some(node.dest), Vec::new());
+        table.gain(node);
+        let routes = engines.openvpn_routes(watch.added(&*table));
+        assert_eq!(routes.foreign_rows(), vec![node], "the session does not own the route OpenVPN pushed");
+        assert_eq!(engines.owed_routes().read(), vec![node], "the route is not owed, so a killed service leaves it");
+
+        engines.begin_test_session_with_routes("OPENVPN", engine_stand_in(), routes);
+        let _ = engines.disconnect();
+        assert!(!table.table().contains(&node), "the disconnect left the host route behind");
+        assert!(engines.owed_routes().read().is_empty(), "a removed route is still owed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every way an OpenVPN session ends removes its host route, once:
+    /// a Disconnect, the hard stop, the engine dying on its own, and the
+    /// engine dying while the hard stop races it.
+    ///
+    /// Thirty-two at once on one table, per CLAUDE.md: the relay teardown
+    /// passed every single-instance run and failed under load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn every_openvpn_teardown_deletes_the_adopted_route() {
+        use crate::lifecycle::supervisor::Supervisor;
+        use route_table::fake::Op;
+        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+        const AT_ONCE: usize = 32;
+        let (table, gateway) = uplink_table();
+        let node = |i: usize| route_table::RouteRow::host(Ipv4Addr::new(203, 0, 113, i as u8 + 1), 14, gateway, 0);
+        let base = fresh_dir("openvpn-teardowns");
+
+        let mut racers = Vec::new();
+        for i in 0..AT_ONCE {
+            let dir = base.join(i.to_string());
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut engines = Engines::new(dir.clone(), dir.clone());
+            engines.set_route_ops_for_test(table.clone());
+            let watch = openvpn::HostRouteWatch::begin(&*table, Some(14), Some(node(i).dest), Vec::new());
+            table.gain(node(i));
+            let routes = engines.openvpn_routes(watch.added(&*table));
+            assert_eq!(routes.foreign_rows(), vec![node(i)], "racer {i}: the pushed route was not taken over");
+
+            let sup = Supervisor::spawn(engines, "test-openvpn-routes");
+            let teardown = sup.clone();
+            let pid = sup
+                .run(move |engines: &mut Engines, _| {
+                    engines.when_an_engine_ends(Arc::new(move |generation| {
+                        let _ = teardown.run_detached(move |engines: &mut Engines, _| {
+                            engines.end_dead_session(generation);
+                        });
+                    }));
+                    let child = engine_stand_in();
+                    let pid = child.id();
+                    engines.begin_test_session_with_routes("OPENVPN", child, routes);
+                    pid
+                })
+                .await
+                .unwrap();
+            racers.push((i, sup, pid, dir));
+        }
+
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let mut threads = Vec::new();
+        for (i, sup, pid, _) in &racers {
+            let (i, sup, pid, start) = (*i, sup.clone(), *pid, Arc::clone(&start));
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                let kill = || {
+                    // SAFETY: plain calls; the handle is closed below.
+                    unsafe {
+                        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                        if !h.is_null() {
+                            TerminateProcess(h, 1);
+                            windows_sys::Win32::Foundation::CloseHandle(h);
+                        }
+                    }
+                };
+                let hard_stop = || {
+                    let _ = sup.run_detached(|engines: &mut Engines, token| {
+                        adopt_token(token);
+                        let _ = crate::lifecycle::teardown::hard_stop(engines);
+                    });
+                };
+                match i % 4 {
+                    0 => {
+                        let _ = sup.run_detached(|engines: &mut Engines, _| {
+                            let _ = engines.disconnect();
+                        });
+                    }
+                    1 => hard_stop(),
+                    2 => kill(),
+                    // Both orders, so neither side always wins.
+                    _ if i % 8 == 3 => {
+                        kill();
+                        hard_stop();
+                    }
+                    _ => {
+                        hard_stop();
+                        kill();
+                    }
+                }
+            }));
+        }
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        for (i, sup, _, dir) in racers {
+            let mut settled = None;
+            for _ in 0..250 {
+                let empty = !sup.run(|engines: &mut Engines, _| engines.has_session()).await.unwrap();
+                if empty {
+                    // Long enough for a report still in flight to land and
+                    // be run, and so be counted if it did anything.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    settled = Some(sup.run(|engines: &mut Engines, _| engines.sessions_ended()).await.unwrap());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let ended = settled.unwrap_or_else(|| panic!("racer {i}: the session was never ended"));
+            assert_eq!(ended, 1, "racer {i}: the session was ended {ended} times");
+            let deletes = table.log().iter().filter(|op| **op == Op::Delete(node(i))).count();
+            assert_eq!(deletes, 1, "racer {i}: the host route was deleted {deletes} times");
+            assert!(!table.table().contains(&node(i)), "racer {i}: the host route was left behind");
+            assert!(route_table::OwedRoutes::in_dir(&dir).read().is_empty(), "racer {i}: the route is still owed");
+            // Drop the sink, which holds a handle to this supervisor, so
+            // its thread can end with the test.
+            let _ = sup.run(|engines: &mut Engines, _| engines.engine_gone = None).await;
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

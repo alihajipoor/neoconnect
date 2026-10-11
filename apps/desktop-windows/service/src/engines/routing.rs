@@ -26,8 +26,11 @@ use std::ffi::OsStr;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
+use std::sync::Arc;
+
 use windows_sys::Win32::NetworkManagement::IpHelper::{DeleteIpForwardEntry2, MIB_IPFORWARD_ROW2};
 
+use super::route_table::{OwedRoutes, RouteOps, RouteRow};
 use super::run_hidden;
 
 /// Routes installed for the current tunnel, removed by an explicit
@@ -48,6 +51,24 @@ pub struct InstalledRoutes {
     /// this did, and the customer saw their internet drop for 10-30
     /// seconds after every failed connection attempt.
     destinations: Vec<(String, String, u32)>,
+    /// Host routes on an adapter that is *not* ours -- the route to the
+    /// node on the physical uplink -- which this session added or took
+    /// over from its engine.
+    ///
+    /// Kept apart from `destinations` because everything about removing
+    /// them differs. They do not go away with our adapter, so a teardown
+    /// that never runs leaves them for good; they are therefore owed in
+    /// the ledger from the moment they are ours. And they share an adapter
+    /// with the customer's own routes, so each is deleted by its exact
+    /// interface and next hop rather than by destination and interface.
+    foreign: Option<ForeignRoutes>,
+}
+
+/// See [`InstalledRoutes::foreign`].
+struct ForeignRoutes {
+    rows: Vec<RouteRow>,
+    ops: Arc<dyn RouteOps>,
+    owed: OwedRoutes,
 }
 
 /// Removes every IPv4 route sitting on one interface.
@@ -191,14 +212,73 @@ fn route_exe() -> PathBuf {
 
 impl InstalledRoutes {
     pub fn none() -> Self {
-        Self { destinations: Vec::new() }
+        Self { destinations: Vec::new(), foreign: None }
+    }
+
+    /// Host routes an engine added on the uplink by itself, taken over so
+    /// that this session's teardown removes them.
+    ///
+    /// OpenVPN is the engine. The server pushes `redirect-gateway`, and
+    /// openvpn.exe adds a host route to the server through the physical
+    /// gateway so that its own packets escape the tunnel. Every teardown
+    /// here ends openvpn.exe with TerminateProcess, so it never withdraws
+    /// that route, and nothing of ours touched the physical adapter:
+    /// measured on the VM, the route outlived every disconnect, and the
+    /// next session's checks against that node's mirror went around the
+    /// tunnel and moved the customer off a server that was working.
+    ///
+    /// Owed in the ledger from here, before anything can end the session.
+    pub fn adopted(rows: Vec<RouteRow>, ops: Arc<dyn RouteOps>, owed: OwedRoutes) -> Self {
+        if rows.is_empty() {
+            return Self::none();
+        }
+        for row in &rows {
+            owed.owe(*row);
+        }
+        Self { destinations: Vec::new(), foreign: Some(ForeignRoutes { rows, ops, owed }) }
+    }
+
+    /// The routes on other adapters this session will remove, for tests.
+    #[cfg(test)]
+    pub fn foreign_rows(&self) -> Vec<RouteRow> {
+        self.foreign.as_ref().map(|f| f.rows.clone()).unwrap_or_default()
     }
 
     /// Best-effort removal. A route that has already gone (because the
     /// adapter disappeared with the engine) is not an error worth
     /// surfacing -- the goal is that none remain, not that each delete
     /// succeeded.
+    ///
+    /// Our own adapters' routes first, then the host routes on the
+    /// uplink: with the tunnel's routes gone, traffic falls back to the
+    /// physical link at once, and nothing is left pointing into a tunnel
+    /// whose way out has just been removed.
     pub fn remove(&mut self) {
+        self.remove_ours();
+        self.remove_foreign();
+    }
+
+    /// The host routes on another adapter, each by its exact key, struck
+    /// off the ledger once gone. One that will not delete stays owed, so
+    /// the janitor at the next start tries again -- reported, because it
+    /// is the one route this session leaves behind.
+    ///
+    /// Native rather than `route.exe`, so the teardowns that may start at
+    /// most three processes can still remove these.
+    fn remove_foreign(&mut self) {
+        let Some(foreign) = self.foreign.as_mut() else { return };
+        for row in foreign.rows.drain(..) {
+            match foreign.ops.delete(&row) {
+                Ok(()) => foreign.owed.settle(&row),
+                Err(why) => crate::cleanup_log::note(
+                    "remove the host route to the server",
+                    &format!("{}/{}: {why}; still owed, the next start removes it", row.dest, row.prefix),
+                ),
+            }
+        }
+    }
+
+    fn remove_ours(&mut self) {
         let exe = route_exe();
         for (dest, mask, interface_index) in self.destinations.drain(..) {
             let index = interface_index.to_string();

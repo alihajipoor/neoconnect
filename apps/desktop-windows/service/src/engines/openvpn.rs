@@ -32,6 +32,7 @@
 //! text.
 
 use std::ffi::{c_void, OsStr};
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::Child;
 
@@ -40,6 +41,7 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 use neoconnect_ipc::OpenvpnProfile;
 
+use super::route_table::{new_host_routes, RouteOps, RouteRow};
 use super::{
     confirm_started, routing, run_hidden_capture, run_hidden_capture_within, spawn_hidden,
     write_config, Engines,
@@ -501,12 +503,63 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     ))
 }
 
+/// The host routes openvpn.exe adds on the uplink, found by reading the
+/// table before it starts and again once it says the tunnel is up.
+///
+/// openvpn.exe does not report what it routed, and its `redirect-gateway`
+/// puts a host route to the server -- and with `bypass-dhcp`, one to the
+/// DHCP server -- on the physical adapter, where nothing of ours would
+/// otherwise ever remove it. See `InstalledRoutes::adopted`.
+pub(super) struct HostRouteWatch {
+    /// The table before openvpn.exe started. `None` when it could not be
+    /// read, in which case nothing on the uplink can be told apart from
+    /// the customer's own routes and only routes to the server itself
+    /// are taken.
+    before: Option<Vec<RouteRow>>,
+    /// The adapter openvpn.exe's `net_gateway` is expected on.
+    uplink: Option<u32>,
+    /// The server's address, when the profile names it as one.
+    remote: Option<Ipv4Addr>,
+    /// Our own adapters, whose routes are never the uplink's.
+    ours: Vec<u32>,
+}
+
+impl HostRouteWatch {
+    pub(super) fn begin(ops: &dyn RouteOps, uplink: Option<u32>, remote: Option<Ipv4Addr>, ours: Vec<u32>) -> Self {
+        Self { before: ops.rows().ok(), uplink, remote, ours }
+    }
+
+    /// What was added since [`Self::begin`]: new host routes on the
+    /// uplink, and any new host route to the server on an adapter that is
+    /// not ours. The second is a guard on the first -- if the uplink was
+    /// guessed wrongly, the route that matters most is still found.
+    pub(super) fn added(&self, ops: &dyn RouteOps) -> Vec<RouteRow> {
+        let Ok(after) = ops.rows() else { return Vec::new() };
+        let mut added = match (&self.before, self.uplink) {
+            (Some(before), Some(uplink)) => new_host_routes(before, &after, uplink),
+            _ => Vec::new(),
+        };
+        let before = self.before.as_deref().unwrap_or(&[]);
+        if let Some(remote) = self.remote {
+            for row in after.iter().filter(|r| r.is_host() && r.dest == remote && !self.ours.contains(&r.if_index)) {
+                let known = before.iter().chain(added.iter()).any(|old| old.same_route(row));
+                if !known {
+                    added.push(*row);
+                }
+            }
+        }
+        added
+    }
+}
+
+/// Brings OpenVPN up, and returns it with the host routes it added on
+/// the uplink for the session to own.
 pub fn connect(
     engines: &Engines,
     profile: &OpenvpnProfile,
     passive: bool,
     limits: &crate::lifecycle::budget::Limits,
-) -> Result<Child, String> {
+) -> Result<(Child, Vec<RouteRow>), String> {
     let exe = engines.engine_path("openvpn.exe")?;
     engines.engine_path("wintun.dll")?;
     ensure_adapter(engines)?;
@@ -534,6 +587,13 @@ pub fn connect(
         .parent()
         .ok_or_else(|| "could not resolve the engine directory".to_string())?;
 
+    // Custom mode refuses the pushed routes (`route-nopull`), so there is
+    // nothing to watch for.
+    let watch = (!passive).then(|| {
+        let remote = profile.endpoint.rsplit_once(':').and_then(|(host, _)| host.parse().ok());
+        HostRouteWatch::begin(&*engines.route_ops, super::uplink_index(), remote, super::our_interfaces())
+    });
+
     let log_path = engines.config_path(LOG_FILE);
     let child = spawn_hidden(
         &exe,
@@ -543,8 +603,22 @@ pub fn connect(
     )
     .map_err(|e| format!("could not start openvpn.exe: {e}"))?;
 
-    let child = confirm_started(child, "OpenVPN", &log_path)?;
-    wait_until_up(child, &log_path, limits)
+    let up = confirm_started(child, "OpenVPN", &log_path).and_then(|child| wait_until_up(child, &log_path, limits));
+    let added = watch.map(|w| w.added(&*engines.route_ops)).unwrap_or_default();
+    match up {
+        Ok(child) => Ok((child, added)),
+        Err(e) => {
+            // openvpn.exe has ended on every path that reaches here, so
+            // nothing is left to put these back -- and no session will
+            // exist to remove them. A connect that is cancelled after the
+            // pushed routes went in, but before OpenVPN said it was done,
+            // used to leave them behind.
+            for row in &added {
+                let _ = engines.route_ops.delete(row);
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Waits until OpenVPN says its tunnel is up, rather than until it has
@@ -827,5 +901,42 @@ mod tests {
         // through a tunnel they are not using.
         let conf = build_config(&profile(), true).unwrap();
         assert!(!conf.contains("block-outside-dns"), "custom mode must not claim DNS");
+    }
+
+    /// The watch's guard: when the uplink was guessed as the wrong
+    /// adapter, the route that matters -- the one to the server -- is
+    /// still taken, and nothing on our own adapters ever is.
+    #[test]
+    fn the_watch_takes_the_route_to_the_server_wherever_it_landed_but_never_on_ours() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let table = FakeRoutes::with(&[]);
+        // Guessed uplink 14; our OpenVPN adapter is 30.
+        let watch = HostRouteWatch::begin(&*table, Some(14), Some(server), vec![30]);
+        let on_other_adapter = RouteRow::host(server, 9, gateway, 0);
+        let on_ours = RouteRow::host(server, 30, Ipv4Addr::new(10, 8, 0, 1), 0);
+        let unrelated = RouteRow::host(Ipv4Addr::new(198, 51, 100, 9), 9, gateway, 0);
+        table.gain(on_other_adapter);
+        table.gain(on_ours);
+        table.gain(unrelated);
+
+        assert_eq!(watch.added(&*table), vec![on_other_adapter]);
+    }
+
+    /// A table that could not be read beforehand cannot tell OpenVPN's
+    /// routes from the customer's, so only the route to the server is
+    /// taken -- never every host route on the uplink.
+    #[test]
+    fn a_watch_that_saw_nothing_before_takes_only_the_route_to_the_server() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let customers = RouteRow::host(Ipv4Addr::new(198, 51, 100, 9), 14, gateway, 0);
+        let pushed = RouteRow::host(server, 14, gateway, 0);
+        let table = FakeRoutes::with(&[customers, pushed]);
+        let watch = HostRouteWatch { before: None, uplink: Some(14), remote: Some(server), ours: Vec::new() };
+
+        assert_eq!(watch.added(&*table), vec![pushed]);
     }
 }
