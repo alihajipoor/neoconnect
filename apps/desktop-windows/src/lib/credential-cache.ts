@@ -117,15 +117,20 @@ function getStore(): Promise<Store> {
  * after the sign-out had cleared them, for the next person on the
  * machine to be shown or to connect with. A predicate rather than an
  * import of the session's generation, because session-end already
- * imports this file. */
+ * imports this file.
+ *
+ * `savedAt` is now unless given. Given only by a write that leaves the
+ * credentials and the plan as they were (`updateSnapshotRoutes`): the time
+ * is what says how fresh they are (`isSnapshotStale`), and what the offline
+ * banner says they were last updated. */
 export async function saveSnapshot(
-  snapshot: Omit<ConnectionSnapshot, "version" | "savedAt">,
+  snapshot: Omit<ConnectionSnapshot, "version" | "savedAt"> & { savedAt?: number },
   stillCurrent?: () => boolean,
 ): Promise<void> {
   try {
     const store = await getStore();
     if (stillCurrent && !stillCurrent()) return;
-    const savedAt = Date.now();
+    const savedAt = snapshot.savedAt ?? Date.now();
     await store.set(KEY, { ...snapshot, version: VERSION, savedAt, askedAt: snapshot.askedAt ?? savedAt });
     await store.save();
   } catch {
@@ -395,7 +400,17 @@ export function standInRoutes(cached: RouteOption[], shown: ShownRoutes, plan: s
  * a list the server list's own request was answered with
  * (`LocationPicker`'s `onRoutes`). Nothing for a snapshot of another
  * subscription or plan, whose servers these are not (`cachedRoutesFor`),
- * nor where nothing is cached. `stillCurrent` is `saveSnapshot`'s. */
+ * nor where nothing is cached. `stillCurrent` is `saveSnapshot`'s.
+ *
+ * The snapshot keeps the time it had. A route list is not an answer about
+ * the credentials or the plan beside it, and the time is what says how
+ * fresh those are. Written as now, a three-day-old snapshot counted as
+ * fresh for ten minutes after the picker's list came in: Connect and the
+ * refresh on resume asked nothing (`refreshConnectionConfig` in
+ * connection-config.ts) and dialled credentials whose server had changed
+ * its REALITY SNI since; with the app left open, every list that came in
+ * put the refresh off again; and the next offline start's banner said the
+ * plan's usage and expiry had been updated just now. */
 export async function updateSnapshotRoutes(
   subscription: Pick<Subscription, "id" | "planId">,
   routes: RouteOption[],
@@ -409,6 +424,7 @@ export async function updateSnapshotRoutes(
       subscription: existing.subscription,
       protocolUsers: existing.protocolUsers,
       routes,
+      savedAt: existing.savedAt,
       ...(existing.askedAt !== undefined ? { askedAt: existing.askedAt } : {}),
     },
     stillCurrent,

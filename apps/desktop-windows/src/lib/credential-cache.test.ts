@@ -30,6 +30,7 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 const {
   cachedRoutesFor,
   clearSnapshot,
+  isSnapshotStale,
   loadSnapshot,
   maySaveSnapshot,
   NO_ROUTES_SHOWN,
@@ -349,6 +350,38 @@ describe("the server list's own answer, written into the snapshot", () => {
     expect(await updateSnapshotRoutes(plan, [germany])).toBe("written");
     expect((await loadSnapshot())!.routes).toEqual([germany]);
     expect((await loadSnapshot())!.protocolUsers).toEqual([credential]);
+  });
+
+  /** A route list says nothing about the credentials beside it. Before: the
+   * picker's list rewrote a three-day-old snapshot as saved just now, and
+   * for the next ten minutes Connect and the refresh on resume took its
+   * credentials as fresh and asked nothing -- the server's REALITY SNI had
+   * changed the day before -- and the offline banner said the plan had
+   * been updated just now. */
+  it("leaves the credentials as old as they were, and only an answer about them makes them fresh", async () => {
+    const first = Date.parse("2026-10-07T09:00:00Z");
+    const later = first + 3 * 24 * 60 * 60_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(first);
+    try {
+      await saveSnapshot({ subscription: plan, protocolUsers: [credential], routes: [] });
+      clock.mockReturnValue(later);
+
+      expect(await updateSnapshotRoutes(plan, [germany])).toBe("written");
+      const adopted = (await loadSnapshot())!;
+      expect(adopted.routes).toEqual([germany]);
+      expect(adopted.savedAt).toBe(first);
+      expect(adopted.askedAt).toBe(first);
+      expect(isSnapshotStale(adopted, later)).toBe(true);
+
+      // The credentials' own answer does.
+      expect(await updateSnapshotProtocolUsers([credential])).toBe("written");
+      const refreshed = (await loadSnapshot())!;
+      expect(refreshed.savedAt).toBe(later);
+      expect(refreshed.routes).toEqual([germany]);
+      expect(isSnapshotStale(refreshed, later)).toBe(false);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("is not written into another plan's snapshot, nor where nothing is cached", async () => {
