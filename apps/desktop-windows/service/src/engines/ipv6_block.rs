@@ -56,7 +56,10 @@
 //! machines, by a component this product already ships. This module is
 //! that mechanism, in our code, for the engines that do not bring one --
 //! so that all eight protocols behave the same way instead of one of
-//! them being accidentally safe.
+//! them being accidentally safe. Since 2026-10-11 it is installed beside
+//! WireGuard's own as well: that one permits its tunnel, and IPv6 routed
+//! into it went unanswered for seconds instead of failing (see
+//! [`needed_for`]).
 //!
 //! # Why blocking and not carrying
 //!
@@ -287,8 +290,8 @@ pub struct Ipv6Block {
     /// two lines in `ipv6-block.log` naming the same count is the
     /// cheapest possible check that the teardown matched the setup.
     filters: usize,
-    /// What removing it gives back, for the log line: "IPv6", "DNS", or
-    /// both. A DNS-only session (WireGuard) restores no IPv6.
+    /// What removing it gives back, for the log line: "IPv6", or "IPv6
+    /// and DNS".
     restores: &'static str,
     log: PathBuf,
 }
@@ -305,18 +308,6 @@ impl Ipv6Block {
     /// does.
     pub fn install(log_dir: &Path, dns: Option<&DnsConfinement>) -> Result<Self, String> {
         Self::install_with(log_dir, true, dns)
-    }
-
-    /// DNS confinement alone, with no IPv6 block -- for WireGuard, whose
-    /// own kill-switch blocks IPv6 but permits DNS to its configured
-    /// resolver on *every* interface. Measured: a query bound to the
-    /// physical NIC's address left it in clear text and was answered,
-    /// while the same test was refused on OpenVPN.
-    ///
-    /// Held apart from the IPv6 block by the caller, so that what the app
-    /// is told about IPv6 still follows only the IPv6 block.
-    pub fn install_dns_only(log_dir: &Path, dns: &DnsConfinement) -> Result<Self, String> {
-        Self::install_with(log_dir, false, Some(dns))
     }
 
     fn install_with(log_dir: &Path, ipv6: bool, dns: Option<&DnsConfinement>) -> Result<Self, String> {
@@ -829,24 +820,36 @@ fn note(path: &Path, line: &str) {
     }
 }
 
-/// Whether a profile needs this block installed.
+/// Whether a profile needs this block installed. Every one does.
 ///
-/// WireGuard is exempt, and deliberately so. `wireguard.exe` arms its own
-/// WFP kill-switch -- the capture that produced this module read
-/// provider "WireGuard" owning `Block all outbound (IPv6)` at the same
-/// layer this one uses -- and it was the one protocol of the four
-/// measured that did not leak. Adding a second provider blocking the
-/// same traffic buys nothing and costs clarity: whoever debugs a
-/// customer's filtering table next would find two kill-switches and have
-/// to work out which one was responsible for what.
+/// All five Xray protocols share one code path and one adapter and
+/// therefore one gap; OpenVPN and IKEv2 were measured leaking without it.
 ///
-/// Every other engine gets it, including all five Xray protocols, which
-/// share one code path and one adapter and therefore one gap.
+/// WireGuard was exempt until 2026-10-11, on the argument that `wireguard.exe`
+/// arms its own WFP kill-switch -- the capture that produced this module
+/// read provider "WireGuard" owning `Block all outbound (IPv6)` -- and a
+/// second provider blocking the same traffic would only confuse whoever
+/// read the filtering table next. That kill-switch does not leak, and it
+/// is kept. But it permits everything on its own tunnel, and our
+/// AllowedIPs (`0.0.0.0/0, ::/0`, from the backend) route IPv6 into that
+/// tunnel, which has no IPv6 address at either end: nothing refuses an
+/// IPv6 connect, it is simply never answered. Measured on the VM, a forced
+/// IPv6 connection on WireGuard waited 6-8 s before failing, where every
+/// other engine refuses it in milliseconds and a program falls back to
+/// IPv4 at once. The two providers now overlap on purpose: theirs keeps
+/// the tunnel the only way out, ours makes IPv6 fail fast.
+///
+/// Not verified: whether a dual-mode socket's IPv4 is classified at the V6
+/// layers, as the Custom-mode block below assumes. If it is, this block
+/// refuses that IPv4 too -- already true of the other engines, and now of
+/// WireGuard -- which the planned V6 permits for the tunnel and
+/// `::ffff:0:0/96` would undo. Settled by a VM measurement that has not
+/// run.
 pub fn needed_for(profile: &neoconnect_ipc::ConnectProfile) -> bool {
     use neoconnect_ipc::ConnectProfile as P;
     match profile {
-        P::Wireguard(_) => false,
-        P::Openvpn(_)
+        P::Wireguard(_)
+        | P::Openvpn(_)
         | P::Ikev2(_)
         | P::XrayVlessReality(_)
         | P::XrayVlessTls(_)
@@ -1305,7 +1308,7 @@ mod tests {
     /// share an engine, an adapter and therefore a gap, so they are
     /// listed individually here rather than trusted to be equivalent.
     #[test]
-    fn every_engine_but_wireguard_needs_the_block() {
+    fn every_engine_needs_the_block() {
         let wireguard = ConnectProfile::Wireguard(WireguardProfile {
             private_key: String::new(),
             address: "10.77.0.8/32".into(),
@@ -1315,8 +1318,9 @@ mod tests {
             endpoint: "203.0.113.1:51820".into(),
         });
         assert!(
-            !needed_for(&wireguard),
-            "wireguard.exe arms its own WFP kill-switch; a second one only confuses the table"
+            needed_for(&wireguard),
+            "wireguard.exe's own kill-switch carries IPv6 into a tunnel with nowhere to send it, \
+             where a forced IPv6 connect waited 6-8 s; ours refuses it on the PC"
         );
 
         let xray = XrayProfile {

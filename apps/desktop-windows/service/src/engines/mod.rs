@@ -385,24 +385,16 @@ struct SessionFilters {
     /// `Some` exactly while it is installed, which is what the status
     /// poll reports to the app -- the customer is told IPv6 is blocked
     /// because it *is* blocked, not because the protocol usually implies
-    /// it. See `ipv6_block` for the measurement, and for why WireGuard
-    /// is the one engine that never has one here.
+    /// it. See `ipv6_block` for the measurement, and for why WireGuard,
+    /// once the exception, has one too.
     ipv6: Option<Ipv6Block>,
-    /// DNS confined to the tunnel with no IPv6 block, for WireGuard --
-    /// whose own kill-switch blocks IPv6 but lets DNS out by the physical
-    /// NIC. Separate so that `ipv6_blocked`, and what the app tells the
-    /// customer about IPv6, still follows only `ipv6`.
-    dns_only: Option<Ipv6Block>,
 }
 
 impl SessionFilters {
-    /// Releases both, now. Dropping does the same; this exists so the
+    /// Releases them, now. Dropping does the same; this exists so the
     /// teardown can say *when*.
     fn release(mut self) {
         if let Some(mut block) = self.ipv6.take() {
-            block.remove();
-        }
-        if let Some(mut block) = self.dns_only.take() {
             block.remove();
         }
     }
@@ -617,8 +609,8 @@ impl Engines {
     ///
     /// Read from the installed block rather than inferred from the
     /// protocol, because the app puts this in front of the customer in
-    /// words and the two can differ: a WireGuard session has no block of
-    /// ours at all, and an install that failed leaves none either. The
+    /// words and the two can differ: a Custom-mode session has no block
+    /// of ours at all, and an install that failed leaves none either. The
     /// rule in this product is that the UI never reports a state nothing
     /// verified, and "IPv6 is blocked" is exactly such a state.
     pub fn ipv6_blocked(&self) -> bool {
@@ -1125,8 +1117,9 @@ impl Engines {
     /// everything else on the machine, because that mode also runs
     /// through the redirect. It is stated here rather than papered over.
     ///
-    /// **WireGuard is excluded** because `wireguard.exe` installs its
-    /// own; see `ipv6_block::needed_for`.
+    /// **WireGuard is included**, beside `wireguard.exe`'s own kill-switch,
+    /// so that IPv6 fails on the PC at once rather than vanishing into a
+    /// tunnel with no IPv6 at either end; see `ipv6_block::needed_for`.
     ///
     /// A failure is logged and not returned. The tunnel is up and
     /// carrying IPv4 at this point, and tearing it down over a filter
@@ -1146,24 +1139,14 @@ impl Engines {
     }
 
     /// Installs whatever this tunnel needs, and returns it to be owned by
-    /// the session.
+    /// the session. What that is, is [`filter_plan`]'s to say.
     fn filters_for(&self, profile: &ConnectProfile) -> SessionFilters {
         let mut filters = SessionFilters::default();
-        if self.split_tunnel.wants_interception() {
+        let plan = filter_plan(profile, self.split_tunnel.wants_interception());
+        if !plan.ipv6_block {
             return filters;
         }
-        let dns = self.dns_confinement_for(profile);
-        if !ipv6_block::needed_for(profile) {
-            // WireGuard: its own kill-switch blocks IPv6, but not DNS
-            // leaving by the physical NIC. See `Ipv6Block::install_dns_only`.
-            if let Some(dns) = dns {
-                match Ipv6Block::install_dns_only(&self.config_dir, &dns) {
-                    Ok(block) => filters.dns_only = Some(block),
-                    Err(e) => eprintln!("DNS could not be confined to the tunnel: {e}"),
-                }
-            }
-            return filters;
-        }
+        let dns = if plan.dns_confinement { self.dns_confinement_for(profile) } else { None };
         let installed = match Ipv6Block::install(&self.config_dir, dns.as_ref()) {
             // The DNS filters share the IPv6 block's transaction, so a
             // rejection of theirs would take the IPv6 block down with
@@ -1187,7 +1170,7 @@ impl Engines {
     /// Whether this tunnel's DNS needs confining to it, and to what.
     ///
     /// Every engine but OpenVPN, whose config already carries
-    /// `block-outside-dns`. Measured on a Windows 11 guest with a query
+    /// `block-outside-dns` (`filter_plan`). Measured on a Windows 11 guest with a query
     /// deliberately made the way Windows' own connectivity probes make
     /// theirs, capture at the NIC miniport: Xray leaked those probes;
     /// WireGuard let a query bound to the physical NIC reach its
@@ -1607,8 +1590,7 @@ impl Engines {
     }
 
     /// Releases the filters of the session just ended: the machine-wide
-    /// IPv6 block (with the DNS confinement in it) and WireGuard's
-    /// DNS-only confinement.
+    /// IPv6 block, with the DNS confinement in it.
     ///
     /// Dropping a block's handle ends its dynamic WFP session, which is
     /// what removes the filters, so releasing twice is a no-op.
@@ -2072,6 +2054,34 @@ pub fn os_visible_tunnel() -> (bool, Option<String>, TunnelHealth) {
     // Shipped apps read every `connected: false` the same way whatever the
     // health says, so to them nothing changes.
     (false, None, TunnelHealth::Unknown)
+}
+
+/// Which WFP filters a session gets: the machine-wide IPv6 block, and DNS
+/// confined to the tunnel. Decided before anything is installed, so the
+/// decision can be tested where WFP cannot be.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FilterPlan {
+    ipv6_block: bool,
+    dns_confinement: bool,
+}
+
+/// The filters for a tunnel of `profile`, in Custom mode or not.
+///
+/// Custom mode gets none: its redirect covers the selected applications
+/// per application, and a machine-wide filter would change the behaviour
+/// of the ones the customer kept out of the VPN (see
+/// `Engines::block_ipv6_if_needed`). A full tunnel gets the IPv6 block
+/// where `ipv6_block::needed_for` says so, and DNS confinement on every
+/// engine but OpenVPN, whose config carries `block-outside-dns` -- the
+/// same filters, written by OpenVPN (`Engines::dns_confinement_for`).
+fn filter_plan(profile: &ConnectProfile, custom_mode: bool) -> FilterPlan {
+    if custom_mode {
+        return FilterPlan::default();
+    }
+    FilterPlan {
+        ipv6_block: ipv6_block::needed_for(profile),
+        dns_confinement: !matches!(profile, ConnectProfile::Openvpn(_)),
+    }
 }
 
 /// The most server addresses a connect will look for host routes to. An
@@ -3610,6 +3620,47 @@ mod helper_tests {
         let lines = crate::cleanup_log::noted_containing(LABEL);
         assert_eq!(lines.len(), 1, "{lines:#?}");
         assert!(lines[0].contains(&format!("{LABEL}, exit code 1, noticed by the engine watch; routes, filters")), "{}", lines[0]);
+    }
+
+    // ---- Which filters a session gets --------------------------------
+
+    fn wireguard_profile() -> ConnectProfile {
+        ConnectProfile::Wireguard(neoconnect_ipc::WireguardProfile {
+            private_key: String::new(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0, ::/0".into(),
+            server_public_key: String::new(),
+            endpoint: "203.0.113.1:51820".into(),
+        })
+    }
+
+    /// WireGuard's full tunnel refuses IPv6 on the PC, as every other
+    /// engine's does, with its DNS confined in the same set.
+    ///
+    /// Before: no block of ours, and wireguard.exe's AllowedIPs carried
+    /// IPv6 into a tunnel that has no IPv6 address at either end. A forced
+    /// IPv6 connect waited 6-8 s on the VM before failing, where the other
+    /// engines refuse it in milliseconds; wireguard.exe's own kill switch
+    /// permits its tunnel, so nothing refused it sooner. Custom mode stays
+    /// without any machine-wide filter, as for every engine.
+    #[test]
+    fn wireguard_full_tunnel_refuses_ipv6_on_the_pc() {
+        let full = filter_plan(&wireguard_profile(), false);
+        assert_eq!(full, FilterPlan { ipv6_block: true, dns_confinement: true });
+        assert_eq!(filter_plan(&wireguard_profile(), true), FilterPlan::default(), "Custom mode gets none");
+
+        // The rest, unchanged: OpenVPN brings block-outside-dns of its own.
+        assert_eq!(filter_plan(&test_profile(), false), FilterPlan { ipv6_block: true, dns_confinement: true });
+        let openvpn = ConnectProfile::Openvpn(neoconnect_ipc::OpenvpnProfile {
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            ca_cert_pem: String::new(),
+            endpoint: "203.0.113.1:1194".into(),
+            proto: "udp".into(),
+            tls_crypt_key: None,
+        });
+        assert_eq!(filter_plan(&openvpn, false), FilterPlan { ipv6_block: true, dns_confinement: false });
     }
 
     // ---- OpenVPN's host route to its server ---------------------------
