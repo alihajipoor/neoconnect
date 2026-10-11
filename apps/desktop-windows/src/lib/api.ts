@@ -2040,7 +2040,12 @@ async function refreshTokens(trace?: EndpointTrace): Promise<Refresh> {
   // leaves one more out, so this ends.
   const excluded = new Set<string>();
   for (;;) {
-    if (await refusedByBackend(res, trace)) return { kind: "refused" };
+    if (await refusedByBackend(res, trace)) {
+      // The refusal is the whole answer; its body is not read
+      // (`discardBody`).
+      discardBody(res);
+      return { kind: "refused" };
+    }
     // JSON that `refusedByBackend` has just shown is not the backend's:
     // the refresh goes on to the other addresses, which the one that
     // refused it may have been answering ahead of. It may be sent twice
@@ -2052,6 +2057,9 @@ async function refreshTokens(trace?: EndpointTrace): Promise<Refresh> {
     forgetRemembered(base);
     const rest = (await apiEndpoints()).filter((other) => !excluded.has(other));
     if (rest.length === 0) break;
+    // Replaced by whatever the rest answer, or by nothing if none does;
+    // either way never read (`discardBody`).
+    discardBody(res);
     try {
       res = await sendWrite(REFRESH_PATH, init, rest, trace);
     } catch {
@@ -2191,6 +2199,13 @@ async function authenticatedAttempt(path: string, init?: ApiInit, trace?: Endpoi
   // last resort -- nothing better replied -- and says nothing about this
   // session's tokens; it is returned as it is.
   if (res.status === 401 && isBackendAnswer(res) && !foreignResponse(res)) {
+    // Whatever the refresh comes to, this 401 is never read: the request
+    // is retried, or ends in words of its own. Its body is JSON, so the
+    // plugin's null-body patch does not release it, and unread it kept its
+    // connection open for the life of the app -- the first signed-in
+    // request after any idle, usually made on the bare line before a
+    // connect (`discardBody`).
+    discardBody(res);
     if (trace) trace.phase = "refresh";
     const refreshed = await renewSession(tokens.accessToken, trace);
     if (refreshed.kind === "unavailable") {
