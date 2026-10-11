@@ -8,9 +8,8 @@ import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/t
 import { formatBytes } from "../lib/utils";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import { concurrentExitsFor } from "../lib/concurrent-exits";
+import { settleAndCaptureBaseline } from "../lib/baseline-settle";
 import {
-  askedAroundTunnel,
-  BASELINE_HEDGE_MS,
   captureBaselineIp,
   captureIpv6Baseline,
   checkIpv6,
@@ -359,7 +358,6 @@ function confirmEgress(
  * started inside that window has its packets black-holed and fails for a
  * reason that has nothing to do with the protocol it was testing. */
 const SETTLE_TIMEOUT_MS = 6_000;
-const SETTLE_INTERVAL_MS = 400;
 
 /** The budgets that apply while there is another protocol to fall back
  * to, as opposed to the patient ones used for a lone connection.
@@ -399,95 +397,8 @@ const SETTLE_INTERVAL_MS = 400;
 const FAILOVER_VERIFY_TIMEOUT_MS = 6_000;
 const FAILOVER_SETTLE_TIMEOUT_MS = 2_500;
 
-/** Waits until the machine can reach the outside world unaided, and
- * returns the address the world sees.
- *
- * Serves two purposes at once, which is why it is one function. It
- * proves the previous engine's routes are really gone before the next
- * one is tried -- without this, one failed attempt poisoned every
- * attempt after it, and a whole failover run reported "no traffic got
- * through" while the server never saw so much as a connection. And the
- * moment it succeeds is the only correct moment to take a baseline: an
- * address captured through a live tunnel makes the next comparison read
- * every working connection as a leak.
- *
- * Null means we could not reach our own API even unprotected. That is
- * not a reason to refuse to connect -- their network may be fine and
- * ours may not be -- so the caller proceeds without a baseline and falls
- * back to handshake evidence.
- *
- * **Bounded, which it was not.** The budget used to be checked only
- * between whole walks of the endpoint list, and one walk is a dozen
- * endpoints at six seconds each when the bare network filters them. So
- * a 2.5-second settle could cost a minute, once per candidate, and a
- * pass ran far past `LADDER_MAX_MS` -- whose guard then expired under a
- * pass still dialling, and a press started a second ladder beside it.
- *
- * Now `known`, an endpoint that already answered on this network (the
- * pass's previous baseline, or the one taken when the screen loaded), is
- * asked alone first, within the budget: it is the one that is going to
- * answer, and it is the one the `sameEndpointOnly` check will ask. Only
- * if it does not is the whole list walked, in its fixed order -- the
- * order is what keeps a mirror reporting its own node's address from
- * supplying a baseline the CDN would have -- and that walk has a
- * ceiling of its own: one endpoint timeout past the budget, or two for a
- * pass with nothing known yet, so a first endpoint that is blocked on
- * the bare network still leaves the next one time to answer.
- *
- * `tunnelServer` is the server of the rung about to be dialled. Where
- * this client reaches it around the tunnel, no baseline comes from an
- * endpoint on it: once that tunnel is up, the endpoint answers with this
- * same home address -- read as "NOT protected" over a working tunnel --
- * so the next endpoint supplies it instead. A `known` endpoint on it is
- * not asked at all, and the walk gets the longer ceiling, as with
- * nothing known. See `TunnelServer` in egress.ts.
- *
- * The walk is hedged (`BaselineOptions.hedgeMs`). The known endpoint is
- * passed over exactly where it mattered most: in Iran, where the panel
- * hosts are filtered and the last endpoint that worked is a mirror --
- * often the mirror of the node being dialled. Walked strictly in turn,
- * the list then spent its whole twelve seconds timing out the two panel
- * hosts at its head and ended with no baseline, "not confirmed", before
- * it reached the next mirror, which would have answered at once.
- *
- * `nodeAddresses` are every node the account holds a credential on. A
- * reading of one is never this machine's own address (see
- * `BaselineOptions.nodeAddresses`); the phones always passed them, and
- * now that the comparisons ask the baseline's endpoint first, Windows
- * needs them as much.
- */
-async function settleAndCaptureBaseline(
-  budgetMs: number,
-  known: BaselineIp | null,
-  tunnelServer: TunnelServer,
-  nodeAddresses: ReadonlySet<string>,
-): Promise<BaselineIp | null> {
-  const deadline = Date.now() + budgetMs;
-  const ask = known !== null && !askedAroundTunnel(known, tunnelServer) ? known : null;
-  if (ask !== null) {
-    for (;;) {
-      const ip = await captureBaselineIp({ only: ask.from, deadline, tunnelServer, nodeAddresses });
-      if (ip !== null) return ip;
-      if (Date.now() >= deadline) break;
-      await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
-    }
-  }
-  const walkDeadline = Math.max(
-    deadline,
-    Date.now() + (ask === null ? 2 * EGRESS_TIMEOUT_MS : EGRESS_TIMEOUT_MS),
-  );
-  for (;;) {
-    const ip = await captureBaselineIp({
-      deadline: walkDeadline,
-      tunnelServer,
-      nodeAddresses,
-      hedgeMs: BASELINE_HEDGE_MS,
-    });
-    if (ip !== null) return ip;
-    if (Date.now() >= walkDeadline) return null;
-    await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
-  }
-}
+// `settleAndCaptureBaseline`, which waits for the bare network before
+// each rung and takes its baseline, is in lib/baseline-settle.ts.
 
 /** What was tried, and how much of what was available.
  *
@@ -2835,6 +2746,12 @@ export function Dashboard({
       // Every node the account holds a credential on, for the baselines:
       // a reading of one of them is never this machine's own address.
       const nodeAddresses = nodeAddressesOf(dialable);
+      // Whether this pass began with nothing up: pressed on a screen that
+      // showed nothing connected, rather than a failover or a reconnect
+      // from a tunnel that was there. Its first rung then has no previous
+      // engine's routes to wait out, and its settle does not ask again
+      // (`settleAndCaptureBaseline`).
+      const nothingUpAtStart = connectionState === "disconnected" && !options.automatic;
 
       for (const [index, candidate] of candidates.entries()) {
         if (stopped() || sessionGeneration() !== sessionAtStart) break;
@@ -2880,6 +2797,7 @@ export function Dashboard({
           knownBaseline,
           settleServer,
           nodeAddresses,
+          index > 0 || !nothingUpAtStart,
         );
         if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
         const tunnelServer = await tunnelServerOf(candidate, "windows");

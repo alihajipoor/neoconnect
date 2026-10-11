@@ -1,7 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints } from "./api-endpoints";
+import { isKnownBlockPage } from "./endpoint-bundle-store";
+import { clearDemotion, demotedLast, isDemoted, isNameDemoted } from "./endpoint-demotion";
 import { rememberNetwork } from "./network-identity";
+import { isAddressLiteral, resolveIpv4, RESOLVE_TIMEOUT_MS } from "./tunnel-server";
 
 /** Proving a tunnel actually carries traffic, rather than merely existing.
  *
@@ -198,16 +201,93 @@ async function publicIp(
   // are protected. Pinned to one address, a blocked control plane would
   // report a perfectly working tunnel as carrying nothing -- turning a
   // reachability problem into a false accusation against the VPN.
-  const bases = only !== undefined ? [only] : await apiEndpoints();
+  //
+  // In the order the API's own requests use on this network: the
+  // addresses that have not lately failed here first, those that have
+  // last (`demotedLast`). See `BARE_WALK`.
+  const bases = only !== undefined ? [only] : demotedLast(await apiEndpoints()).ordered;
   const nodes = nodeAddresses === undefined ? null : addressSet(nodeAddresses);
   const skip = nodes === null ? undefined : (ip: string) => nodes.has(comparable(ip));
   const around = aroundSet(tunnelServer);
-  const walk = { onBody, deadline, skip, around };
+  const walk: WalkOptions = { onBody, deadline, skip, around, ...BARE_WALK };
   const read =
     hedgeMs === undefined
       ? readFrom(bases, EGRESS_TIMEOUT_MS, walk)
       : readHedged(bases, EGRESS_TIMEOUT_MS, hedgeMs, walk);
   return (await read).reading;
+}
+
+/** How long a baseline gives an address that has lately failed on this
+ * network (`isDemoted`): one that timed out, or whose name led to the
+ * block page.
+ *
+ * Such an address is asked last, never not at all, as the API's own
+ * requests ask it; but not for the whole `EGRESS_TIMEOUT_MS`. One that has
+ * come back answers well inside two seconds -- three round trips to
+ * Europe, under a second from Iran (`BASELINE_HEDGE_MS`) -- and one that
+ * has not would otherwise hold the connect for six. */
+export const DEMOTED_BASELINE_MS = 2_000;
+
+/** What a baseline walk does that a reading through a tunnel does not.
+ * A baseline is taken on the bare network, before connecting, where the
+ * API's own requests have been learning which addresses this network
+ * blocks (endpoint-demotion.ts), and it used to ignore all of it.
+ *
+ * On the test VM, with the panel hosts refused and every mirror's name
+ * sent to the block page, the baseline before a connect waited up to six
+ * seconds on each mirror and spent 12.7 s of a 20 s connect before the
+ * engine was even started -- for no baseline at the end of it, and the
+ * honest "Connected, not confirmed" it then had to settle for.
+ *
+ * So, as the API's race does (`blockPageLook` in api.ts): each address's
+ * name is looked at beside the request, and one on the block page counts
+ * as no answer at once; a name this network has already sent there is
+ * looked at before anything is sent, and sent nothing if it still is
+ * (`baselineBlockPage`). An address that failed here lately gets
+ * `DEMOTED_BASELINE_MS`. An address that answers has its demotion lifted,
+ * as an answer to any of the API's requests lifts it. Nothing here
+ * demotes anything, by a timeout or by the block page: what the API's
+ * requests are sent to is theirs to learn, with their own deadlines and
+ * their own look -- which, unlike this one, has to ask about a proxy. */
+const BARE_WALK: Pick<WalkOptions, "look" | "timeoutFor" | "answered"> = {
+  look: (base) => {
+    const found = baselineBlockPage(base);
+    return { found, beforeSending: isNameDemoted(base) ? found : Promise.resolve(false) };
+  },
+  timeoutFor: (base, timeoutMs) => (isDemoted(base) ? Math.min(timeoutMs, DEMOTED_BASELINE_MS) : timeoutMs),
+  answered: (base) => clearDemotion(base),
+};
+
+/** Whether `base`'s name resolves to Iran's block page and nothing else,
+ * for the one request a baseline makes to it.
+ *
+ * IPv4 only, through this machine's own resolver, and with no question
+ * about a proxy -- because that is how `/health/ip` is asked: over IPv4
+ * only (`health_ip_v4`), and never through a proxy (`.no_proxy()` in
+ * health_ip.rs; a proxy's exit is not this machine's address). So this is
+ * exactly the answer the baseline's request will meet. The API's own look
+ * (`resolvesToBlockPage`) is different on purpose: its requests do go
+ * through Psiphon's, v2rayN's or Clash's system proxy, which resolves the
+ * name at its own end, so where one is set it finds nothing (fbe5cc5).
+ * This one is never written into the network's memory for that reason --
+ * a verdict found here says nothing about a request that goes through the
+ * proxy -- and is only ever used to stop waiting on a request of its own
+ * that cannot be answered.
+ *
+ * Never rejects: false for an address literal, a name that does not
+ * resolve in time, or a build without the command. */
+function baselineBlockPage(base: string): Promise<boolean> {
+  let name: string;
+  try {
+    name = new URL(base).hostname;
+  } catch {
+    return Promise.resolve(false);
+  }
+  if (name === "" || isAddressLiteral(name)) return Promise.resolve(false);
+  return resolveIpv4(name, RESOLVE_TIMEOUT_MS).then(
+    (addresses) => addresses.length > 0 && addresses.every((address) => isKnownBlockPage(address)),
+    () => false,
+  );
 }
 
 /** How long a baseline walk with `hedgeMs` waits on one endpoint before
@@ -358,21 +438,45 @@ type WalkOptions = {
   /** Which self-naming answers are the tunnel's own server relaying the
    * request, not a mirror describing itself; see `relayedByServer`. */
   relayed?: (base: string, peer: string) => boolean;
+  /** A look at `base`'s name for the block page: `found` ends the request
+   * as unanswered when it says so, and `beforeSending` keeps it from being
+   * sent at all. Baselines only; see `BARE_WALK`. */
+  look?: (base: string) => { found: Promise<boolean>; beforeSending: Promise<boolean> };
+  /** How long `base` gets, out of the walk's `timeoutMs`. */
+  timeoutFor?: (base: string, timeoutMs: number) => number;
+  /** Told of every endpoint that gave an HTTP answer. */
+  answered?: (base: string) => void;
 };
+
+/** An endpoint that gave no answer. */
+const NO_ANSWER: OneAnswer = { reading: null, answered: false };
 
 /** What one endpoint came back with: a reading if it gave one, the body
  * that reading came in (for `onBody`, which only the reading the walk
  * keeps may reach), and whether it answered at all. */
 type OneAnswer = { reading: IpReading | null; body?: Record<string, unknown>; answered: boolean };
 
-/** Asks one endpoint, and judges its answer. Never throws. */
-async function askOne(
+/** Asks one endpoint, and judges its answer. Never throws.
+ *
+ * With a `look`, the name's block page ends the wait as no answer -- the
+ * request itself is left to time out on its own, unread -- or, for a name
+ * already found there, keeps it from being sent. */
+async function askOne(base: string, budget: number, options: WalkOptions): Promise<OneAnswer> {
+  const look = options.look?.(base);
+  if (look === undefined) return await askAndJudge(base, budget, options);
+  if (await look.beforeSending) return NO_ANSWER;
+  const asked = askAndJudge(base, budget, options);
+  return await Promise.race([asked, look.found.then((found) => (found ? NO_ANSWER : asked))]);
+}
+
+async function askAndJudge(
   base: string,
   budget: number,
-  { skip, around, relayed }: WalkOptions,
+  { skip, around, relayed, answered }: WalkOptions,
 ): Promise<OneAnswer> {
   try {
     const res = await transport(base, budget);
+    answered?.(base);
     const peer = typeof res.peer === "string" && res.peer ? plainAddress(res.peer.trim()) : undefined;
     // The tunnel's own server, reached around the tunnel: not even "an
     // answer" in the sense below. Packets that never entered the tunnel
@@ -439,7 +543,7 @@ function budgetFor(timeoutMs: number, deadline: number | undefined): number | nu
 async function readFrom(bases: string[], timeoutMs: number, options: WalkOptions = {}): Promise<ReadResult> {
   let answered = false;
   for (const base of bases) {
-    const budget = budgetFor(timeoutMs, options.deadline);
+    const budget = budgetFor(options.timeoutFor?.(base, timeoutMs) ?? timeoutMs, options.deadline);
     if (budget === null) break;
     const one = await askOne(base, budget, options);
     if (one.answered) answered = true;
@@ -485,7 +589,10 @@ function readHedged(
     const launch = () => {
       clearTimeout(hedge);
       if (done) return;
-      const budget = next < bases.length ? budgetFor(timeoutMs, options.deadline) : null;
+      const budget =
+        next < bases.length
+          ? budgetFor(options.timeoutFor?.(bases[next], timeoutMs) ?? timeoutMs, options.deadline)
+          : null;
       if (budget === null) {
         // Nothing more may be asked: the list is spent or the deadline
         // is. Whatever is still in flight may yet answer.
