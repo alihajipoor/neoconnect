@@ -530,6 +530,11 @@ interface Walk {
    * then did not answer in time: a sign-in's, whose single-use solution
    * that address may already have spent (`fetchAnyEndpoint`). */
   endOnTimeout?: boolean;
+  /** Whether the walk keeps to the addresses it was given, in the order it
+   * was given them: a sign-in's, which goes only where its challenge race
+   * was answered (`via` in `fetchAnyEndpoint`). The remembered endpoint is
+   * then not followed (`followRemembered`). */
+  listedOnly?: boolean;
 }
 
 /** `rememberedEndpoint`, which is advisory: a walk goes on without it. */
@@ -553,8 +558,17 @@ async function newWalk(): Promise<Walk> {
  * Measured in a VM with every name but one sinkholed: the dashboard's
  * reads found the live address in under a second, and a report sent at
  * the same moment walked six other addresses at eight seconds each, 56
- * seconds in all, before reaching it. */
+ * seconds in all, before reaching it.
+ *
+ * Not for a walk that keeps to its list (`listedOnly`): a sign-in, sent
+ * only to the addresses whose answers to its own challenge race proved
+ * they reach the backend, winner first. An address another request had
+ * remembered meanwhile was put at the head of that walk, and the attempt,
+ * with its single-use solution, went to an address this sign-in had
+ * never heard from -- and ahead of the one that handed out the challenge,
+ * when it was in the list but further down. */
 async function followRemembered(queue: Stop[], walk: Walk): Promise<void> {
+  if (walk.listedOnly) return;
   const remembered = await rememberedNow();
   if (remembered === undefined || remembered === walk.remembered) return;
   walk.remembered = remembered;
@@ -869,6 +883,10 @@ async function sendWrite(
  * (`sendWithChallenge` in auth.ts); a transport failure that came sooner
  * still goes on to the next address, as it always has. The caller's own
  * deadline bounds all of it.
+ *
+ * Nothing but those addresses is sent the request (`listedOnly`): not even
+ * the remembered endpoint, which every other walk follows when another
+ * request finds it answering meanwhile (`followRemembered`).
  */
 async function fetchAnyEndpoint(
   path: string,
@@ -883,7 +901,7 @@ async function fetchAnyEndpoint(
   if (init.signal?.aborted) throw new Error("the request ran out of time");
   if (via) {
     const stops = via.map((answered) => ({ base: answered.base, timeoutMs: SLOW_ANSWER_MS }));
-    const walk: Walk = { ...(await newWalk()), endOnTimeout: true };
+    const walk: Walk = { ...(await newWalk()), endOnTimeout: true, listedOnly: true };
     return (await fetchOneEndpointAtATime(path, init, stops, walk, trace)) ?? unanswered(walk, init);
   }
 

@@ -25,13 +25,20 @@ vi.mock("@tauri-apps/plugin-http", () => ({
   fetch: (...args: unknown[]) => tauriFetch(...args),
 }));
 
-const { remembered } = vi.hoisted(() => ({ remembered: [] as string[] }));
+/** `remembered` is what the sign-in's own requests remembered; `elsewhere`
+ * is the remembered endpoint as a walk reads it, which another request
+ * may change meanwhile. Nothing, unless a test says otherwise. */
+const { remembered, elsewhere } = vi.hoisted(() => ({
+  remembered: [] as string[],
+  elsewhere: { base: undefined as string | undefined },
+}));
 vi.mock("./api-endpoints", () => ({
   apiEndpoints: () => Promise.resolve([...ENDPOINTS]),
   rememberEndpoint: (base: string) => {
     remembered.push(base);
     return Promise.resolve();
   },
+  rememberedEndpoint: () => Promise.resolve(elsewhere.base),
 }));
 vi.mock("./endpoint-bundle-store", () => ({ maybeRefreshBundle: () => Promise.resolve() }));
 vi.mock("./session", () => ({
@@ -115,6 +122,7 @@ beforeEach(() => {
   network = {};
   sent = [];
   remembered.length = 0;
+  elsewhere.base = undefined;
   // What one test's answers showed about an address -- not the backend,
   // demoted, the last to answer -- is not the next test's to go on.
   resetRaceWinnerForTests();
@@ -248,6 +256,30 @@ describe("where the sign-in is sent", () => {
 
     expect(result.ok).toBe(true);
     expect(sentTo("/customer-auth/login")).toEqual([B, A]);
+  });
+
+  /** Another request -- the dashboard's read, a report -- finds C
+   * answering and remembers it while the sign-in is being sent. Before:
+   * the sign-in's walk followed the remembered address like any other
+   * walk, and once A refused the attempt it went, with its single-use
+   * solution, to C, which this sign-in's challenge race had never heard
+   * from. It goes only where the race was answered, and after that to a
+   * fresh race, which here nothing answers. */
+  it("is never sent to an address another request remembered meanwhile", async () => {
+    network[A] = { "/login-challenge": answers(100, challenge), "/customer-auth/login": "reset" };
+    network[C] = { "/customer-auth/login": answers(100, tokens) };
+    const plain = tauriFetch.getMockImplementation()!;
+    tauriFetch.mockImplementation((url: string, init?: RequestInit) => {
+      const { origin, pathname } = new URL(url);
+      if (origin === A && pathname === "/customer-auth/login") elsewhere.base = C;
+      return plain(url, init);
+    });
+
+    const { result } = await run(() => login("someone@example.com", "pw"));
+
+    expect(sentTo("/customer-auth/login")).toEqual([A]);
+    expect(sentTo("/login-challenge")).toEqual([A, B, C, D]);
+    expect(result).toEqual({ ok: false, error: STOPPED, noResponse: true });
   });
 
   it("does the same for a sign-up", async () => {
