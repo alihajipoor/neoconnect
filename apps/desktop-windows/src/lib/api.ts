@@ -1186,6 +1186,28 @@ function bodyFailure(err: unknown, res: Response): RequestFailure {
   return { ok: false, error: requestFailed(res.status), status: res.status };
 }
 
+/** Lets go of a body nobody is going to read.
+ *
+ * Under the HTTP plugin a response is parked on the Rust side until its
+ * body is read to the end or cancelled, and while it is parked its
+ * connection stays open. A page from in front of the backend was returned
+ * unread, so a request made on the bare line before a connect kept its
+ * connection -- and its keep-alives, by the physical adapter -- for the
+ * whole session that followed. Cancelling the stream is what tells the
+ * plugin to release it.
+ *
+ * Never throws: a body already read or locked, or none at all (a null-body
+ * status, or a test's stand-in), has nothing to give back. */
+function discardBody(res: Response): void {
+  const body = (res as { body?: ReadableStream<Uint8Array> | null }).body;
+  if (!body || typeof body.cancel !== "function") return;
+  try {
+    void body.cancel().catch(() => undefined);
+  } catch {
+    // A locked stream throws rather than rejecting; it is someone else's.
+  }
+}
+
 /** The sentence for an answer that carried no message of its own: a page
  * from in front of the backend, or a body that was not the JSON promised.
  *
@@ -1205,8 +1227,12 @@ export function requestFailed(status: number): string {
  * other failure to every caller. */
 async function failureFrom(res: Response, signal?: AbortSignal | null, foreign = false): Promise<RequestFailure> {
   // Not the backend's answer (`foreignResponse`): whatever its body says,
-  // it is not a sentence the backend wrote, nor one of its codes.
-  if (foreign) return { ok: false, error: requestFailed(res.status), status: res.status, page: true };
+  // it is not a sentence the backend wrote, nor one of its codes. Nobody
+  // reads it, so it is let go of here (`discardBody`).
+  if (foreign) {
+    discardBody(res);
+    return { ok: false, error: requestFailed(res.status), status: res.status, page: true };
+  }
   const body: unknown = await readWithin(res.json(), signal).catch(() => null);
   const fields = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : null;
   const message = fields?.message;
