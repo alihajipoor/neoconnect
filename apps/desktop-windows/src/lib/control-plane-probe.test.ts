@@ -235,7 +235,38 @@ describe("probeAddendum", () => {
       Object.assign(globalThis, { document: undefined });
     }
   });
+
+  /** Every address refused by this PC (os error 10013), which the probe
+   * alone can tell: the HTTP plugin's errors carry no cause, so the
+   * request itself is traced `net` and the report is filed as
+   * CONTROL_PLANE_UNREACHABLE -- an outcome the panel reads as a filtered
+   * address. The report's reason now says it was this machine. */
+  it("says when this PC refused every address, which the outcome cannot", async () => {
+    invoke.mockResolvedValue([
+      { outcome: "local", ms: 2 },
+      { outcome: "local", ms: 3 },
+    ]);
+    expect(await probeAddendum(failed)).toEqual({
+      apiEndpoint: "probe: a.example.net=local@2 b.example.net:2053=local@3",
+      reason: LOCAL_REASON,
+    });
+  });
+
+  /** One refused here and one by the network is the network's answer
+   * still, and is left to the section to tell. */
+  it("says nothing more when only some were refused here", async () => {
+    invoke.mockResolvedValue([
+      { outcome: "local", ms: 2 },
+      { outcome: "tcp-timeout", ms: 4001 },
+    ]);
+    expect(await probeAddendum(failed)).toEqual({
+      apiEndpoint: "probe: a.example.net=local@2 b.example.net:2053=tcp-timeout@4001",
+    });
+  });
 });
+
+const LOCAL_REASON =
+  "every address probed was refused by a filter on this PC (os error 10013), not by the network";
 
 /** A connect changes the path a probe measures, and resume -- when a
  * failed resume refresh probes -- is exactly when people press Connect. */

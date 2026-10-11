@@ -169,7 +169,22 @@ interface ProbeRun {
   /** Whether it is the network's answer, rather than a note that the
    * probe was skipped or abandoned. */
   answered: boolean;
+  /** Whether this PC refused every address the probe tried (`local`). */
+  allLocal?: boolean;
 }
+
+/** The reason a report carries when the probe found every address refused
+ * by this machine.
+ *
+ * The HTTP plugin's errors carry no cause -- its message is reqwest's,
+ * which leaves out the OS error -- so a request a filter on this PC
+ * refused is traced `net`, like a filtered one, and the report is filed as
+ * CONTROL_PLANE_UNREACHABLE, which the panel reads as the network's doing.
+ * The probe connects by itself and sees WSAEACCES; this puts what it saw
+ * where the report's reader looks first. The outcome stays as it is: it is
+ * the backend's enum, and a new member of it is a backend change. */
+export const REFUSED_HERE_REASON =
+  "every address probed was refused by a filter on this PC (os error 10013), not by the network";
 
 /** Settles the race below when a connect starts. */
 const CONNECT_STARTED = Symbol("connect started");
@@ -217,6 +232,7 @@ async function runProbe(entries: TraceEntry[], now: number, options: ProbeOption
     }
 
     if (!Array.isArray(answer) || answer.length !== targets.length) return undefined;
+    const outcomes: string[] = [];
     const parts = targets.map((target, i) => {
       const result = answer[i] as { outcome?: unknown; ms?: unknown } | null;
       const outcome = typeof result?.outcome === "string" && OUTCOMES.has(result.outcome) ? result.outcome : "?";
@@ -228,9 +244,10 @@ async function runProbe(entries: TraceEntry[], now: number, options: ProbeOption
       // one, and a name that resolves into the block page and somewhere
       // else as well, which the race leaves alone.
       if (outcome === "blockpage") demoteName(target.host);
+      outcomes.push(outcome);
       return `${target.label}=${outcome}@${ms}`;
     });
-    return { section: `probe: ${parts.join(" ")}`, answered: true };
+    return { section: `probe: ${parts.join(" ")}`, answered: true, allLocal: outcomes.every((o) => o === "local") };
   } catch {
     // Decorates a report about a failure; must never become a second one.
     return undefined;
@@ -269,10 +286,11 @@ export async function probeAddendum(
   const run = await runProbe(entries, Date.now(), options);
   const hidden = backgrounded();
   if (run === undefined) return undefined;
+  const reasons: string[] = [];
   // Only an answer can have been distorted by a suspension.
-  return run.answered && hidden
-    ? { apiEndpoint: run.section, reason: "app was in the background during the probe" }
-    : { apiEndpoint: run.section };
+  if (run.answered && hidden) reasons.push("app was in the background during the probe");
+  if (run.answered && run.allLocal) reasons.push(REFUSED_HERE_REASON);
+  return reasons.length > 0 ? { apiEndpoint: run.section, reason: reasons.join("; ") } : { apiEndpoint: run.section };
 }
 
 /** For tests: forget the last probe and connect, as a fresh process would. */
