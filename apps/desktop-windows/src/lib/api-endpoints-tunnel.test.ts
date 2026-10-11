@@ -75,15 +75,56 @@ describe("the endpoint order with a tunnel up", () => {
 
   /** Source assertions, as in auto-reconnect.wiring.test.ts: the screen
    * needs a Tauri runtime and the service, so what can be pinned is that it
-   * tells the order about the server it dials, and forgets it when the
-   * tunnel is shown down. */
-  it("is told by the Windows screen as each rung is dialled, and forgets on disconnect", () => {
+   * tells the order about the server it dials, and follows the service's
+   * own answer about the tunnel after that (`tunnelServerFromService`). */
+  it("is told by the Windows screen as each rung is dialled, and follows the service after", () => {
     const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
     const dial = dashboard.indexOf('await invoke("vpn_connect", {');
     const told = dashboard.lastIndexOf("setEndpointTunnelServer(tunnelServer);", dial);
     expect(told).toBeGreaterThan(0);
     expect(dashboard.slice(told, dial)).not.toContain("await ");
-    expect(dashboard).toContain('if (connectionState === "disconnected") setEndpointTunnelServer(null);');
+
+    const read = dashboard.indexOf("async function readServiceState(): Promise<ConnectionState> {");
+    const readEnd = dashboard.indexOf("\n  }\n", read);
+    expect(dashboard.slice(read, readEnd)).toContain("followTunnelForEndpoints(observed);");
+  });
+
+  /** The screen's own first state is not the service's answer. Every
+   * Dashboard mounts saying "disconnected", and App.tsx unmounts it for
+   * Settings, Plans, Support and Referrals; an effect that cleared the
+   * order whenever the screen showed "disconnected" cleared it on every
+   * remount while the tunnel was up, and the connected server's mirror led
+   * every request again for the rest of the session. */
+  it("is never cleared by a remounted screen's own first state", () => {
+    const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+    expect(dashboard).not.toMatch(/connectionState === "disconnected"\)\s*setEndpointTunnelServer\(null\)/);
+  });
+
+  it("follows the service: kept while up, cleared once down with no pass dialling", () => {
+    const server = { addresses: new Set([FINLAND]), reachedAround: true };
+    // Up: the pass's server, which a remounted screen still holds.
+    expect(endpoints.tunnelServerFromService(true, false, server)).toBe(server);
+    // Up in a fresh app, which knows no server: the usual order.
+    expect(endpoints.tunnelServerFromService(true, false, null)).toBeNull();
+    // Down, nothing dialling: cleared.
+    expect(endpoints.tunnelServerFromService(false, false, server)).toBeNull();
+    // Down between two rungs of a pass: the pass says, as it dials.
+    expect(endpoints.tunnelServerFromService(false, true, server)).toBeUndefined();
+    // The service could not be asked: nothing is known, nothing changes.
+    expect(endpoints.tunnelServerFromService(null, false, server)).toBeUndefined();
+  });
+
+  /** What the race re-sorts by: the mirrors this put last are the ones a
+   * race keeps last after sorting by demotion (connected-mirrors.ts), and
+   * none once the tunnel is down. */
+  it("tells the race which mirrors it put last", async () => {
+    const { connectedMirrorsLast } = await import("./connected-mirrors");
+    endpoints.setTunnelServer({ addresses: new Set([FINLAND]), reachedAround: true });
+    await endpoints.apiEndpoints();
+    expect(connectedMirrorsLast([FI_MIRROR, FR_MIRROR], 1).ordered).toEqual([FR_MIRROR, FI_MIRROR]);
+
+    endpoints.setTunnelServer(null);
+    expect(connectedMirrorsLast([FI_MIRROR, FR_MIRROR], 1).ordered).toEqual([FI_MIRROR, FR_MIRROR]);
   });
 
   it("goes back to the usual order once the tunnel is down", async () => {

@@ -2,6 +2,7 @@ import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints, forgetEndpoint, rememberedEndpoint, rememberEndpoint } from "./api-endpoints";
 import { deviceHeaders } from "./device-identity";
 import { announceBackendAnswer, DOUBTFUL_STATUSES, type BackendAnswer } from "./backend-answer";
+import { connectedMirrorsLast, isConnectedMirror } from "./connected-mirrors";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
 import {
   clearDemotion,
@@ -382,6 +383,10 @@ function recentWinner(forRefresh = false): AnsweredBase | null {
   if (age < 0 || age >= PROVEN_FOR_MS) return null;
   if (isDemoted(lastWinner.base) || notBackend.has(lastWinner.base)) return null;
   if (lastWinner.refusal && !forRefresh) return null;
+  // The connected server's own mirror, which won before the connect, is
+  // asked last while that server is reached around the tunnel, never
+  // first (connected-mirrors.ts).
+  if (isConnectedMirror(lastWinner.base)) return null;
   return { base: lastWinner.base, ms: lastWinner.ms };
 }
 
@@ -589,6 +594,9 @@ async function followRemembered(queue: Stop[], walk: Walk): Promise<void> {
   if (walk.listedOnly) return;
   const remembered = await rememberedNow();
   if (remembered === undefined || remembered === walk.remembered) return;
+  // Not the connected server's own mirror, which keeps its place at the
+  // back while that server is reached around the tunnel.
+  if (isConnectedMirror(remembered)) return;
   walk.remembered = remembered;
   if (walk.tried.has(remembered)) return;
   const at = queue.findIndex((stop) => stop.base === remembered);
@@ -757,7 +765,9 @@ function recentStop(path: string, outer: AbortSignal | null, walk: Walk): Stop |
   const recent = recentWinner(path === REFRESH_PATH);
   if (recent !== null) return { base: recent.base, timeoutMs: followUpTimeout(recent), blockPageLook: true };
   const remembered = walk.remembered;
-  if (outer === null || remembered === undefined || notBackend.has(remembered)) return null;
+  if (outer === null || remembered === undefined || notBackend.has(remembered) || isConnectedMirror(remembered)) {
+    return null;
+  }
   return { base: remembered, timeoutMs: timeoutAt(remembered), blockPageLook: true };
 }
 
@@ -1373,11 +1383,14 @@ function blockPageLook(base: string): { found: Promise<boolean>; beforeSending: 
  * Without `leadAlone`, the first is asked with the rest of those not
  * demoted: for a write sent after the path to the API has changed
  * (`afterPathChange`), where the address that answered last says nothing
- * about the path now in use. */
-function stagesOf(count: number, healthy: number, leadAlone = true): [number, number][] {
+ * about the path now in use.
+ *
+ * From `aroundFrom` on, the connected server's own mirrors, in a stage of
+ * their own after all the rest (`connectedMirrorsLast`). */
+function stagesOf(count: number, healthy: number, leadAlone = true, aroundFrom = count): [number, number][] {
   const stages: [number, number][] = [];
   let from = 0;
-  for (const to of leadAlone ? [1, healthy, count] : [healthy, count]) {
+  for (const to of leadAlone ? [1, healthy, aroundFrom, count] : [healthy, aroundFrom, count]) {
     if (to > from) {
       stages.push([from, to]);
       from = to;
@@ -1438,12 +1451,16 @@ async function staggeredRace(
   giveUp?: GiveUp,
   leadAlone = true,
 ): Promise<Staggered> {
-  const { ordered, healthy } = demotedLast(endpoints);
+  const byHealth = demotedLast(endpoints);
+  // The connected server's own mirrors behind everything else, demoted
+  // addresses included, while it is reached around the tunnel -- see
+  // connected-mirrors.ts.
+  const { ordered, healthy, aroundFrom } = connectedMirrorsLast(byHealth.ordered, byHealth.healthy);
   // With nothing to ask there is no stage to settle the race; every
   // caller checks first, and this keeps one that did not from waiting for
   // ever.
   if (ordered.length === 0) return { winner: null, answers: [], failed: [], blockPage: false, stop: () => undefined };
-  const stages = stagesOf(ordered.length, healthy, leadAlone);
+  const stages = stagesOf(ordered.length, healthy, leadAlone, aroundFrom);
   const outer = request.signal ?? null;
   const controllers = ordered.map(() => new AbortController());
   // Which aborts were our own deadline, so the trace can say "timeout"

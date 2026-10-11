@@ -1,6 +1,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { API_BASE_URLS } from "./config";
 import { loadSnapshot } from "./credential-cache";
+import { setConnectedMirrors } from "./connected-mirrors";
 import { bundledBases } from "./endpoint-bundle-store";
 import type { TunnelServer } from "./egress";
 
@@ -128,7 +129,9 @@ export async function apiEndpoints(): Promise<string[]> {
 
   // The connected server's own mirrors last, while it is reached around
   // the tunnel -- even the one that answered last time, which is exactly
-  // the case that put it first (see `aroundServer`).
+  // the case that put it first (see `aroundServer`). A race re-sorts this
+  // list by demotion, and is told which to keep last (connected-mirrors.ts).
+  setConnectedMirrors(last);
   if (last.size === 0) return ordered;
   return [...ordered.filter((url) => !last.has(url)), ...ordered.filter((url) => last.has(url))];
 }
@@ -144,15 +147,43 @@ export async function apiEndpoints(): Promise<string[]> {
  * exists to hide this from (measured for all three through finland1 on
  * 2026-10-06). It still works, so it is kept, behind every other address.
  *
- * Set by the screen as a rung is dialled and cleared once it shows the
- * tunnel down, and nowhere else: a fresh app knows no server, and asks
- * in the usual order. */
+ * Set by the screen as a rung is dialled, and after that by what the
+ * service says about the tunnel (`tunnelServerFromService`): a fresh app
+ * knows no server, and asks in the usual order. */
 let aroundServer: ReadonlySet<string> | null = null;
 
 /** Tells the endpoint order which server the tunnel now up is dialled at
  * (`null` once none is). See `aroundServer`. */
 export function setTunnelServer(server: TunnelServer | null): void {
   aroundServer = server?.reachedAround ? new Set(server.addresses) : null;
+  // Until the next `apiEndpoints` works out the new server's, a race keeps
+  // nothing back: the old server's mirrors are no longer around anything.
+  setConnectedMirrors([]);
+}
+
+/** What the endpoint order should be told once the service has said
+ * whether a tunnel is up (`tunnelUp`; null when it could not be asked):
+ * the server to pass to `setTunnelServer`, or `undefined` to leave the
+ * order as it is.
+ *
+ * Up: the server the connect pass dialled (`ladderPass.tunnelServer`),
+ * which outlives the screen -- or null in a fresh app, which knows no
+ * server. Down: null, unless a pass is still dialling, whose next rung
+ * says for itself as it dials. Unknown: nothing changes.
+ *
+ * The service's answer and not the screen's state, because the screen's
+ * first state is its own: every Dashboard mounts saying "disconnected",
+ * and one remounted after Settings while the tunnel was up cleared the
+ * order, so the connected server's mirror led every request again for the
+ * rest of the session. */
+export function tunnelServerFromService(
+  tunnelUp: boolean | null,
+  passInFlight: boolean,
+  passServer: TunnelServer | null,
+): TunnelServer | null | undefined {
+  if (tunnelUp === null) return undefined;
+  if (tunnelUp) return passServer;
+  return passInFlight ? undefined : null;
 }
 
 /** The mirrors on one of `addresses`: those `mirrorsFrom` derives from a

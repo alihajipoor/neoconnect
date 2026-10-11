@@ -92,7 +92,7 @@ import {
 } from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
-import { setTunnelServer as setEndpointTunnelServer } from "../lib/api-endpoints";
+import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "../lib/api-endpoints";
 import { repairUnderWay } from "../lib/repair";
 import {
   asReconnectReport,
@@ -924,7 +924,21 @@ export function Dashboard({
     setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
     setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
     setIpv6Blocked(Boolean(status.ipv6Blocked));
-    return stateFromStatus(status);
+    const observed = stateFromStatus(status);
+    followTunnelForEndpoints(observed);
+    return observed;
+  }
+
+  /** Tells the control plane's endpoint order what the service just said
+   * about the tunnel (`tunnelServerFromService` in api-endpoints.ts): the
+   * connected server's own mirrors stay last while it is up and reached
+   * around, and the usual order comes back once it is down. From the
+   * service's answer, never from this screen's state, whose first value
+   * on every mount is its own "disconnected". */
+  function followTunnelForEndpoints(observed: ConnectionState): void {
+    const tunnelUp = isTunnelUp(observed) ? true : observed === "disconnected" ? false : null;
+    const told = tunnelServerFromService(tunnelUp, ladderPass.inFlight(), ladderPass.tunnelServer.current);
+    if (told !== undefined) setEndpointTunnelServer(told);
   }
 
   /** Replaces what the screen believes with what the service says.
@@ -1013,14 +1027,6 @@ export function Dashboard({
       await loadAll(saved ?? undefined);
     })();
   }, []);
-
-  // The control plane asks the connected server's own mirrors last while
-  // a tunnel to it is up and reached around (`setTunnelServer` in
-  // api-endpoints.ts); the usual order comes back the moment the screen
-  // shows the tunnel down, whichever path took it there.
-  useEffect(() => {
-    if (connectionState === "disconnected") setEndpointTunnelServer(null);
-  }, [connectionState]);
 
   // Which mode the app was left in. Persisted rather than reset, because
   // starting in VPN mode somebody who chose gaming mode would quietly
