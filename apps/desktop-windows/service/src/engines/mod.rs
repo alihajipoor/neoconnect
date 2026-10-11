@@ -3701,7 +3701,7 @@ mod helper_tests {
         let mut engines = Engines::new(dir.clone(), dir.clone());
         engines.set_route_ops_for_test(table.clone());
 
-        let watch = openvpn::HostRouteWatch::begin(&*table, Some(adapters::Uplink { index: 14, next_hop: gateway }), Some(node.dest), Vec::new());
+        let watch = openvpn::HostRouteWatch::begin(&*table, Some(adapters::Uplink { index: 14, next_hop: gateway }), Some(node.dest), None, Vec::new());
         table.gain(node);
         let routes = engines.openvpn_routes(watch.added(&*table));
         assert_eq!(routes.foreign_rows(), vec![node], "the session does not own the route OpenVPN pushed");
@@ -3737,7 +3737,7 @@ mod helper_tests {
             std::fs::create_dir_all(&dir).unwrap();
             let mut engines = Engines::new(dir.clone(), dir.clone());
             engines.set_route_ops_for_test(table.clone());
-            let watch = openvpn::HostRouteWatch::begin(&*table, Some(adapters::Uplink { index: 14, next_hop: gateway }), Some(node(i).dest), Vec::new());
+            let watch = openvpn::HostRouteWatch::begin(&*table, Some(adapters::Uplink { index: 14, next_hop: gateway }), Some(node(i).dest), None, Vec::new());
             table.gain(node(i));
             let routes = engines.openvpn_routes(watch.added(&*table));
             assert_eq!(routes.foreign_rows(), vec![node(i)], "racer {i}: the pushed route was not taken over");

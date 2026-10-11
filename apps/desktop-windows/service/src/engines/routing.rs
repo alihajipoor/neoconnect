@@ -382,8 +382,8 @@ pub fn install_full_tunnel(
     // The escape hatch first: if anything below fails, the machine is
     // left with normal connectivity plus one redundant host route,
     // rather than a half-built tunnel swallowing traffic.
-    let node = RouteRow::host(server_ip, physical_index, physical_gateway, 1);
-    install_node_route(&*ops, &owed, node)?;
+    // Owned as Windows stored it, which `install_node_route` returns.
+    let node = install_node_route(&*ops, &owed, RouteRow::host(server_ip, physical_index, physical_gateway, 1))?;
     // Already owed; `adopted` records it again only if it is not.
     let mut installed = InstalledRoutes::adopted(vec![node], ops, owed);
 
@@ -408,7 +408,7 @@ pub fn install_full_tunnel(
 /// makes the add fail as already existing, which failed the connect; one
 /// through a gateway the machine has since left sends the engine's
 /// packets nowhere.
-pub(super) fn install_node_route(ops: &dyn RouteOps, owed: &OwedRoutes, route: RouteRow) -> Result<(), String> {
+pub(super) fn install_node_route(ops: &dyn RouteOps, owed: &OwedRoutes, route: RouteRow) -> Result<RouteRow, String> {
     // A table that cannot be read skips this rather than the connect:
     // the add below then fails or succeeds exactly as it always did.
     if let Ok(rows) = ops.rows() {
@@ -424,10 +424,49 @@ pub(super) fn install_node_route(ops: &dyn RouteOps, owed: &OwedRoutes, route: R
     }
     owed.owe(route);
     if let Err(e) = ops.add(&route) {
-        owed.settle(&route);
+        // Struck off only once it is known not to be there. An add can
+        // report failure after the route went in -- `route.exe` exiting
+        // non-zero having added it, or killed by its timeout after it had
+        // -- and the connect fails here, so no session will exist to
+        // remove it. A route nothing owed stayed until a reboot.
+        if ops.delete(&route).is_ok() {
+            owed.settle(&route);
+        }
         return Err(e);
     }
-    Ok(())
+    Ok(stored_as(ops, owed, route))
+}
+
+/// `route` as Windows stored it, owed under that key instead when the two
+/// differ.
+///
+/// Every delete matches the exact next hop, and one that matches nothing
+/// counts as done, so a route owed under any other key than the stored
+/// one would be struck off at every teardown while it stayed on the
+/// uplink. Expected to differ only for an on-link uplink (PPP, PPPoE),
+/// whose host route is added through 0.0.0.0, and not measured there:
+/// read back rather than assumed either way.
+///
+/// Read as the one host route to the server on that adapter, added
+/// through `NETMGMT`, since the leftovers went before the add. With none
+/// or several, `route` is kept as it was.
+fn stored_as(ops: &dyn RouteOps, owed: &OwedRoutes, route: RouteRow) -> RouteRow {
+    let Ok(rows) = ops.rows() else { return route };
+    let candidates: Vec<RouteRow> = rows
+        .into_iter()
+        .filter(|r| r.is_host() && r.netmgmt && r.dest == route.dest && r.if_index == route.if_index)
+        .collect();
+    if candidates.iter().any(|r| r.same_route(&route)) {
+        return route;
+    }
+    match candidates.as_slice() {
+        [stored] => {
+            owed.owe(*stored);
+            owed.settle(&route);
+            *stored
+        }
+        _ => route,
+    }
 }
 
 #[cfg(test)]
@@ -534,6 +573,71 @@ mod tests {
             "a route on another adapter, or one Windows made, is not this one's to take"
         );
         assert_eq!(owed.read(), vec![ours]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn node_route_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("neoconnect-node-route-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// An add that reports failure may still have gone in: `route.exe`
+    /// exiting non-zero after adding, or killed by its timeout after it
+    /// had. Struck off the ledger on the report alone, the route stayed on
+    /// the uplink with nothing owing it -- and the connect had failed, so
+    /// no session existed to remove it either. Now it is deleted, and owed
+    /// for as long as that does not work.
+    #[test]
+    fn a_failed_add_that_went_in_is_deleted_or_stays_owed() {
+        use super::super::route_table::fake::FakeRoutes;
+        let ours = RouteRow::host(Ipv4Addr::new(203, 0, 113, 7), 14, Ipv4Addr::new(192, 0, 2, 1), 1);
+
+        let table = FakeRoutes::with(&[]);
+        table.adds_then_fails();
+        let dir = node_route_dir("add-failed");
+        let owed = OwedRoutes::in_dir(&dir);
+        assert!(install_node_route(&*table, &owed, ours).is_err());
+        assert!(!table.table().contains(&ours), "the route the failed add put in is still there");
+        assert!(owed.read().is_empty());
+
+        let table = FakeRoutes::with(&[]);
+        table.adds_then_fails();
+        table.refuses_deletes();
+        assert!(install_node_route(&*table, &owed, ours).is_err());
+        assert!(table.table().contains(&ours));
+        assert_eq!(owed.read(), vec![ours], "a route still on the machine is no longer owed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Owed, and removed, by the key Windows stored the route under.
+    ///
+    /// Every delete here matches the exact next hop, and a delete that
+    /// matches nothing counts as done. A route stored under another next
+    /// hop than the one it was added through -- the case the journal
+    /// names for an on-link PPP uplink, whose host route is added through
+    /// 0.0.0.0 -- was then struck off at every teardown while it stayed on
+    /// the uplink. The row is read back after the add instead.
+    #[test]
+    fn the_route_is_owed_and_removed_by_the_key_windows_stored_it_under() {
+        use super::super::route_table::fake::FakeRoutes;
+        let asked = RouteRow::host(Ipv4Addr::new(203, 0, 113, 7), 23, Ipv4Addr::UNSPECIFIED, 1);
+        let peer = Ipv4Addr::new(10, 64, 0, 1);
+        let table = FakeRoutes::with(&[]);
+        table.stores_next_hop_as(peer);
+        let dir = node_route_dir("stored-key");
+        let owed = OwedRoutes::in_dir(&dir);
+
+        let stored = install_node_route(&*table, &owed, asked).expect("the add went in");
+        assert_eq!(stored, RouteRow { next_hop: peer, ..asked });
+        assert_eq!(owed.read(), vec![stored], "owed under a key no delete will ever match");
+
+        let ops: Arc<dyn RouteOps> = table.clone();
+        let mut routes = InstalledRoutes::adopted(vec![stored], ops, OwedRoutes::in_dir(&dir));
+        routes.remove();
+        assert!(table.table().is_empty(), "the teardown left the route on the uplink");
+        assert!(owed.read().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

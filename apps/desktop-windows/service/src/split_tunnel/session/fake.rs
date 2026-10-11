@@ -226,6 +226,7 @@ impl Parts for Fake {
             gateway: None,
             ipv4: Some(Ipv4Addr::LOCALHOST),
             is_up: true,
+            dhcp_server: None,
             description: "stand-in tunnel".to_string(),
         })
     }
@@ -239,6 +240,7 @@ impl Parts for Fake {
             gateway: None,
             ipv4: Some(Ipv4Addr::LOCALHOST),
             is_up: true,
+            dhcp_server: None,
             description: "stand-in uplink".to_string(),
         })
     }

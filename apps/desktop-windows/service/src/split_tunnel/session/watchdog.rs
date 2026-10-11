@@ -171,6 +171,7 @@ mod tests {
             gateway: None,
             ipv4,
             is_up,
+            dhcp_server: None,
             description: "WireGuard Tunnel".to_string(),
         }
     }

@@ -41,7 +41,7 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 use neoconnect_ipc::OpenvpnProfile;
 
-use super::route_table::{new_host_routes, RouteOps, RouteRow};
+use super::route_table::{new_host_routes, OwedRoutes, RouteOps, RouteRow};
 use crate::adapters::Uplink;
 use super::{
     confirm_started, routing, run_hidden_capture, run_hidden_capture_within, spawn_hidden,
@@ -523,13 +523,76 @@ pub(super) struct HostRouteWatch {
     uplink: Option<Uplink>,
     /// The server's address, when the profile names it as one.
     remote: Option<Ipv4Addr>,
+    /// The uplink's DHCP server, which `bypass-dhcp` routes around the
+    /// tunnel, when its lease came from one.
+    dhcp_server: Option<Ipv4Addr>,
     /// Our own adapters, whose routes are never the uplink's.
     ours: Vec<u32>,
 }
 
 impl HostRouteWatch {
-    pub(super) fn begin(ops: &dyn RouteOps, uplink: Option<Uplink>, remote: Option<Ipv4Addr>, ours: Vec<u32>) -> Self {
-        Self { before: ops.rows().ok(), uplink, remote, ours }
+    pub(super) fn begin(
+        ops: &dyn RouteOps,
+        uplink: Option<Uplink>,
+        remote: Option<Ipv4Addr>,
+        dhcp_server: Option<Ipv4Addr>,
+        ours: Vec<u32>,
+    ) -> Self {
+        Self { before: ops.rows().ok(), uplink, remote, dhcp_server, ours }
+    }
+
+    /// Owes the routes openvpn.exe is about to add that can be named before
+    /// it starts, and returns them. Called just before it is started.
+    ///
+    /// `redirect-gateway` adds the server's host route, and `bypass-dhcp`
+    /// the DHCP server's, early in the connect, through the uplink's
+    /// gateway. They used to be owed only once the connect returned, so a
+    /// service killed, crashed or stopped in between left both with no
+    /// record: the server's waited for the next connect's known-node
+    /// purge, and the DHCP server's stayed until a reboot. Owed now, the
+    /// janitor at the next start removes them like Xray's.
+    ///
+    /// Only what was not there before -- a route already on the table is
+    /// not openvpn.exe's to add, and owing it would have a crash take the
+    /// customer's -- and nothing when the table could not be read or the
+    /// uplink is unknown. Keyed by the gateway the uplink was found
+    /// through; openvpn.exe finds its own `net_gateway`, and where the two
+    /// differ the route is owed under the wrong key and still only owed
+    /// from the moment the connect returns, as before.
+    pub(super) fn owe_ahead(&self, owed: &OwedRoutes) -> Vec<RouteRow> {
+        let (Some(before), Some(uplink)) = (&self.before, self.uplink) else { return Vec::new() };
+        let ahead: Vec<RouteRow> = [self.remote, self.dhcp_server]
+            .into_iter()
+            .flatten()
+            .map(|dest| RouteRow::host(dest, uplink.index, uplink.next_hop, 0))
+            .filter(|row| !before.iter().any(|old| old.same_route(row)))
+            .collect();
+        for row in &ahead {
+            owed.owe(*row);
+        }
+        ahead
+    }
+
+    /// After a connect that came up: strikes off what was owed ahead and
+    /// never added. What was added stays owed, and the session owns it.
+    pub(super) fn settle_unused(owed: &OwedRoutes, ahead: &[RouteRow], added: &[RouteRow]) {
+        for row in ahead.iter().filter(|row| !added.iter().any(|a| a.same_route(row))) {
+            owed.settle(row);
+        }
+    }
+
+    /// After a connect that failed, when openvpn.exe has ended and no
+    /// session will exist to remove anything: deletes what it added and
+    /// what was owed ahead, each struck off once gone and owed until then,
+    /// so one that will not delete is the next start's to remove.
+    pub(super) fn give_back(ops: &dyn RouteOps, owed: &OwedRoutes, ahead: &[RouteRow], added: &[RouteRow]) {
+        let unadded = ahead.iter().filter(|row| !added.iter().any(|a| a.same_route(row)));
+        for row in added.iter().chain(unadded) {
+            owed.owe(*row);
+            if ops.delete(row).is_ok() {
+                owed.settle(row);
+            }
+        }
     }
 
     /// What was added since [`Self::begin`]: new host routes added through
@@ -602,22 +665,34 @@ pub fn connect(
     // nothing to watch for.
     let watch = (!passive).then(|| {
         let remote = profile.endpoint.rsplit_once(':').and_then(|(host, _)| host.parse().ok());
-        HostRouteWatch::begin(&*engines.route_ops, super::uplink_toward(remote), remote, super::our_interfaces())
+        let uplink = super::uplink_toward(remote);
+        let dhcp_server = uplink.and_then(|u| {
+            adapters::list().ok()?.into_iter().find(|a| a.index == u.index)?.dhcp_server
+        });
+        HostRouteWatch::begin(&*engines.route_ops, uplink, remote, dhcp_server, super::our_interfaces())
     });
 
+    let owed = engines.owed_routes();
+    let ahead = watch.as_ref().map(|w| w.owe_ahead(&owed)).unwrap_or_default();
     let log_path = engines.config_path(LOG_FILE);
-    let child = spawn_hidden(
+    let child = match spawn_hidden(
         &exe,
         &[OsStr::new("--config"), config_path.as_os_str()],
         exe_dir,
         &log_path,
-    )
-    .map_err(|e| format!("could not start openvpn.exe: {e}"))?;
+    ) {
+        Ok(child) => child,
+        Err(e) => {
+            HostRouteWatch::give_back(&*engines.route_ops, &owed, &ahead, &[]);
+            return Err(format!("could not start openvpn.exe: {e}"));
+        }
+    };
 
     let up = confirm_started(child, "OpenVPN", &log_path).and_then(|child| wait_until_up(child, &log_path, limits));
     let added = watch.map(|w| w.added(&*engines.route_ops)).unwrap_or_default();
     match up {
         Ok(child) => {
+            HostRouteWatch::settle_unused(&owed, &ahead, &added);
             // Once OpenVPN says the tunnel is up: a connect that failed
             // before here has no tunnel for the lookups to be carried by.
             // Reported in the status poll, never fatal -- see
@@ -633,9 +708,7 @@ pub fn connect(
             // exist to remove them. A connect that is cancelled after the
             // pushed routes went in, but before OpenVPN said it was done,
             // used to leave them behind.
-            for row in &added {
-                let _ = engines.route_ops.delete(row);
-            }
+            HostRouteWatch::give_back(&*engines.route_ops, &owed, &ahead, &added);
             Err(e)
         }
     }
@@ -950,7 +1023,7 @@ mod tests {
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
         let table = FakeRoutes::with(&[]);
         // Guessed uplink 14; our OpenVPN adapter is 30.
-        let watch = HostRouteWatch::begin(&*table, Some(Uplink { index: 14, next_hop: gateway }), Some(server), vec![30]);
+        let watch = HostRouteWatch::begin(&*table, Some(Uplink { index: 14, next_hop: gateway }), Some(server), None, vec![30]);
         let on_other_adapter = RouteRow::host(server, 9, gateway, 0);
         let on_ours = RouteRow::host(server, 30, Ipv4Addr::new(10, 8, 0, 1), 0);
         let unrelated = RouteRow::host(Ipv4Addr::new(198, 51, 100, 9), 9, gateway, 0);
@@ -972,7 +1045,7 @@ mod tests {
         let customers = RouteRow::host(Ipv4Addr::new(198, 51, 100, 9), 14, gateway, 0);
         let pushed = RouteRow::host(server, 14, gateway, 0);
         let table = FakeRoutes::with(&[customers, pushed]);
-        let watch = HostRouteWatch { before: None, uplink: Some(Uplink { index: 14, next_hop: gateway }), remote: Some(server), ours: Vec::new() };
+        let watch = HostRouteWatch { before: None, uplink: Some(Uplink { index: 14, next_hop: gateway }), remote: Some(server), dhcp_server: None, ours: Vec::new() };
 
         assert_eq!(watch.added(&*table), vec![pushed]);
     }
@@ -996,7 +1069,7 @@ mod tests {
         let server = Ipv4Addr::new(203, 0, 113, 5);
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
         let table = FakeRoutes::with(&[]);
-        let watch = HostRouteWatch::begin(&*table, Some(Uplink { index: 14, next_hop: gateway }), Some(server), vec![30]);
+        let watch = HostRouteWatch::begin(&*table, Some(Uplink { index: 14, next_hop: gateway }), Some(server), None, vec![30]);
 
         let pushed = RouteRow::host(server, 14, gateway, 0);
         let bypass_dhcp = RouteRow::host(Ipv4Addr::new(192, 0, 2, 254), 14, gateway, 0);
@@ -1015,6 +1088,106 @@ mod tests {
         assert_eq!(watch.added(&*table), vec![pushed, bypass_dhcp]);
     }
 
+    fn ledger_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("neoconnect-openvpn-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The server's and the DHCP server's routes are owed before
+    /// openvpn.exe starts, so a service killed, crashed or stopped while it
+    /// is still connecting leaves nothing the next start cannot remove.
+    ///
+    /// openvpn.exe adds both early in its connect, and they used to be
+    /// owed only once the connect returned. The janitor at the next start
+    /// kills the orphaned openvpn.exe, but had no record of its routes: the
+    /// server's waited for the next connect's known-node purge, and the
+    /// DHCP server's stayed until a reboot.
+    #[test]
+    fn the_routes_openvpn_will_add_are_owed_before_it_starts() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let dhcp = Ipv4Addr::new(192, 0, 2, 254);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let default = RouteRow { prefix: 0, ..RouteRow::host(Ipv4Addr::UNSPECIFIED, 14, gateway, 25) };
+        let table = FakeRoutes::with(&[default]);
+        let dir = ledger_dir("ahead");
+        let owed = OwedRoutes::in_dir(&dir);
+        let uplink = Some(Uplink { index: 14, next_hop: gateway });
+
+        let watch = HostRouteWatch::begin(&*table, uplink, Some(server), Some(dhcp), Vec::new());
+        let ahead = watch.owe_ahead(&owed);
+        // openvpn.exe adds both, and then the service is killed: nothing
+        // of this life runs again.
+        table.gain(RouteRow::host(server, 14, gateway, 0));
+        table.gain(RouteRow::host(dhcp, 14, gateway, 0));
+
+        // The next life's janitor.
+        super::super::janitor::settle_owed_routes(&OwedRoutes::in_dir(&dir), &*table);
+        assert_eq!(table.table(), vec![default], "the pushed routes outlived the service; owed ahead: {ahead:?}");
+        assert!(owed.read().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing is owed ahead that was there before -- such a route is not
+    /// openvpn.exe's to add, and deleting it on a crash would take the
+    /// customer's -- and nothing ahead stays owed once the connect is up
+    /// without it.
+    #[test]
+    fn owed_ahead_is_only_what_was_not_there_and_is_settled_if_never_added() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let dhcp = Ipv4Addr::new(192, 0, 2, 254);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let customers = RouteRow::host(dhcp, 14, gateway, 0);
+        let table = FakeRoutes::with(&[customers]);
+        let dir = ledger_dir("ahead-settled");
+        let owed = OwedRoutes::in_dir(&dir);
+
+        let watch = HostRouteWatch::begin(&*table, Some(Uplink { index: 14, next_hop: gateway }), Some(server), Some(dhcp), Vec::new());
+        let ahead = watch.owe_ahead(&owed);
+        let pushed = RouteRow::host(server, 14, gateway, 0);
+        assert_eq!(ahead, vec![pushed], "the DHCP route was there before, and is not openvpn.exe's");
+        assert_eq!(owed.read(), vec![pushed]);
+
+        // Up, and the server's route was added through another gateway
+        // than the one expected: what was owed ahead is struck off.
+        table.gain(RouteRow::host(server, 14, Ipv4Addr::new(192, 0, 2, 9), 0));
+        let added = watch.added(&*table);
+        HostRouteWatch::settle_unused(&owed, &ahead, &added);
+        assert!(owed.read().is_empty(), "a route never added is still owed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A connect that failed removes what openvpn.exe added and what was
+    /// owed ahead, and owes whatever will not delete for the next start.
+    /// It used to delete what was added and owe nothing, so a refused
+    /// delete left the route behind with no record of it.
+    #[test]
+    fn a_failed_connect_gives_back_its_routes_or_owes_them() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let pushed = RouteRow::host(server, 14, gateway, 0);
+        let bypass = RouteRow::host(Ipv4Addr::new(192, 0, 2, 254), 14, gateway, 0);
+        let dir = ledger_dir("give-back");
+        let owed = OwedRoutes::in_dir(&dir);
+
+        let table = FakeRoutes::with(&[pushed, bypass]);
+        owed.owe(pushed);
+        HostRouteWatch::give_back(&*table, &owed, &[pushed], &[pushed, bypass]);
+        assert!(table.table().is_empty());
+        assert!(owed.read().is_empty());
+
+        let table = FakeRoutes::with(&[pushed, bypass]);
+        table.refuses_deletes();
+        owed.owe(pushed);
+        HostRouteWatch::give_back(&*table, &owed, &[pushed], &[pushed, bypass]);
+        assert_eq!(owed.read(), vec![pushed, bypass], "a route the failed connect left is not owed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The guard for a wrongly guessed uplink takes the server's route
     /// wherever it landed -- but never one Windows made itself.
     #[test]
@@ -1022,7 +1195,7 @@ mod tests {
         use super::super::route_table::fake::FakeRoutes;
         let server = Ipv4Addr::new(203, 0, 113, 5);
         let table = FakeRoutes::with(&[]);
-        let watch = HostRouteWatch::begin(&*table, None, Some(server), Vec::new());
+        let watch = HostRouteWatch::begin(&*table, None, Some(server), None, Vec::new());
         table.gain(RouteRow { netmgmt: false, ..RouteRow::host(server, 9, Ipv4Addr::UNSPECIFIED, 256) });
 
         assert!(watch.added(&*table).is_empty());

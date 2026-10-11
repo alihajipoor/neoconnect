@@ -243,8 +243,13 @@ impl RouteOps for SystemRoutes {
 /// janitor at the next start removes it.
 ///
 /// Written *before* the route is added and settled only *after* it is
-/// deleted, so there is no moment at which the route exists and the
-/// record of it does not.
+/// deleted, so for Xray's route there is no moment at which the route
+/// exists and the record of it does not. OpenVPN adds its own, so the two
+/// that can be named before openvpn.exe starts -- the server's and the
+/// DHCP server's, through the uplink's gateway -- are owed then
+/// (`openvpn::HostRouteWatch::owe_ahead`); any other it adds, or one put
+/// through another gateway than expected, is owed only from the moment
+/// the connect returns.
 ///
 /// Best-effort, like every log here: a file that cannot be written must
 /// never fail the connect it describes. The second net is the stale-route
@@ -399,6 +404,8 @@ pub(crate) fn row_from(route: &MIB_IPFORWARD_ROW2) -> RouteRow {
 #[cfg(test)]
 pub(crate) mod fake {
     use super::{RouteOps, RouteRow};
+    use std::net::Ipv4Addr;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,11 +418,36 @@ pub(crate) mod fake {
     pub struct FakeRoutes {
         table: Mutex<Vec<RouteRow>>,
         log: Mutex<Vec<Op>>,
+        /// Adds go in and still report failure.
+        add_then_fail: AtomicBool,
+        /// Deletes are refused, and change nothing.
+        refuse_deletes: AtomicBool,
+        /// The next hop an added route is stored with, when Windows keeps
+        /// it under another than the one it was given.
+        stored_next_hop: Mutex<Option<Ipv4Addr>>,
     }
 
     impl FakeRoutes {
         pub fn with(rows: &[RouteRow]) -> Arc<Self> {
-            Arc::new(Self { table: Mutex::new(rows.to_vec()), log: Mutex::default() })
+            Arc::new(Self { table: Mutex::new(rows.to_vec()), ..Self::default() })
+        }
+
+        /// From now on an add puts the route in and then reports failure:
+        /// a `route.exe` that added it and exited non-zero, or was killed
+        /// by its timeout after it had.
+        pub fn adds_then_fails(&self) {
+            self.add_then_fail.store(true, Ordering::SeqCst);
+        }
+
+        /// From now on every delete is refused.
+        pub fn refuses_deletes(&self) {
+            self.refuse_deletes.store(true, Ordering::SeqCst);
+        }
+
+        /// From now on an added route is stored through `next_hop`,
+        /// whatever it was added through.
+        pub fn stores_next_hop_as(&self, next_hop: Ipv4Addr) {
+            *self.stored_next_hop.lock().unwrap() = Some(next_hop);
         }
 
         /// What the table holds now.
@@ -446,12 +478,22 @@ pub(crate) mod fake {
             if table.iter().any(|r| r.same_route(route)) {
                 return Err(format!("adding the route for {} failed (the object already exists)", route.dest));
             }
-            table.push(*route);
+            let stored = match *self.stored_next_hop.lock().unwrap() {
+                Some(next_hop) => RouteRow { next_hop, ..*route },
+                None => *route,
+            };
+            table.push(stored);
+            if self.add_then_fail.load(Ordering::SeqCst) {
+                return Err(format!("adding the route for {} timed out", route.dest));
+            }
             Ok(())
         }
 
         fn delete(&self, route: &RouteRow) -> Result<(), String> {
             self.log.lock().unwrap().push(Op::Delete(*route));
+            if self.refuse_deletes.load(Ordering::SeqCst) {
+                return Err(format!("deleting the route for {} was refused", route.dest));
+            }
             self.table.lock().unwrap().retain(|r| !r.same_route(route));
             Ok(())
         }

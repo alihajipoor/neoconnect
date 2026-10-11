@@ -38,6 +38,13 @@ pub struct Adapter {
     /// intercepting its own upstream traffic in a loop.
     pub ipv4: Option<Ipv4Addr>,
     pub is_up: bool,
+    /// The DHCP server the adapter's IPv4 lease came from, when it has one.
+    ///
+    /// OpenVPN's `bypass-dhcp` routes this address around the tunnel with
+    /// a host route on the uplink, which is one of the two routes this
+    /// service owes for an OpenVPN session before openvpn.exe has added
+    /// it -- see `openvpn::HostRouteWatch::owe_ahead`.
+    pub dhcp_server: Option<Ipv4Addr>,
     /// The driver's own description, e.g. "WireGuard Tunnel" or
     /// "TAP-Windows Adapter V9". FriendlyName is whatever the user
     /// renamed the connection to, so it cannot identify what a thing is;
@@ -159,6 +166,23 @@ pub fn list() -> io::Result<Vec<Adapter>> {
             ua = u.Next;
         }
 
+        // The lease's server, which the API fills only for an adapter whose
+        // address came from DHCP.
+        let mut dhcp_server = None;
+        if !entry.Dhcpv4Server.lpSockaddr.is_null() {
+            // SAFETY: a non-null SOCKET_ADDRESS the API wrote; family was
+            // restricted to AF_INET, and the family is checked before the
+            // address is read.
+            let sa = unsafe { &*(entry.Dhcpv4Server.lpSockaddr as *const SOCKADDR_IN) };
+            if sa.sin_family == AF_INET {
+                // SAFETY: reading the union's IPv4 representation.
+                let addr = Ipv4Addr::from(unsafe { sa.sin_addr.S_un.S_addr }.to_ne_bytes());
+                if !addr.is_unspecified() {
+                    dhcp_server = Some(addr);
+                }
+            }
+        }
+
         adapters.push(Adapter {
             // SAFETY: reading a plain field of the union-typed anonymous
             // struct the API defines.
@@ -168,6 +192,7 @@ pub fn list() -> io::Result<Vec<Adapter>> {
             gateway,
             ipv4,
             is_up: entry.OperStatus == IF_OPER_STATUS_UP,
+            dhcp_server,
         });
 
         current = entry.Next;
@@ -327,6 +352,7 @@ mod tests {
             gateway,
             ipv4: Some(Ipv4Addr::new(10, 0, index as u8, 2)),
             is_up: true,
+            dhcp_server: None,
             description: String::new(),
         }
     }
