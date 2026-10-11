@@ -6187,7 +6187,8 @@ is skipped for the hedged walk.
 ## 2026-10-11 — desktop capture, phases 1 and 2 (branch `claude/desktop-capture`, not merged, not pushed)
 
 **Status:** in code and in tests on this PC; **no VM run for this
-branch**. Commits `ccde938..c0b516e` on `origin/main` (93b5d49).
+branch**. Commits `ccde938..c0b516e` on `origin/main` (93b5d49), this
+entry (`cbc72ca`), then the review round below (`be5b475..`).
 
 What changed, in the order built (the commit messages carry the why):
 
@@ -6234,16 +6235,58 @@ tunnel LUID and `::ffff:0:0/96` -- only once P0-B says whether a dual-mode
 socket's IPv4 is classified at the V6 layers. Phase 3 (IPv4 confinement)
 waits on the owner's decisions (a)-(e) in the design; Phase 4 is optional.
 
+**The review round.** Four reviewers read the branch; what they found,
+and what became of it (each commit message has the detail):
+
+- **High, fixed: the production images would not build.** The plugin
+  patch put `pnpm.patchedDependencies` in the root package.json, pnpm 9.15
+  reads every listed patch at the start of an install, and the backend,
+  panel and discord-bot deps stages copied no `patches/` -- so after a
+  merge no backend deploy or hotfix could be built from main. Reproduced
+  with the backend deps stage's exact inputs and pnpm 9.15.0 `--offline`
+  (ENOENT without, a clean install with; the backend's `--prod deploy` and
+  the bot's install too). All three Dockerfiles copy `patches/` now, and
+  `scripts/check-docker-install-inputs.mjs`, run by CI, fails any
+  Dockerfile that installs before it. No Docker build was run.
+- **Routes.** The OpenVPN watch took any new /32 on the uplink, Windows'
+  own local and broadcast routes for a new address included; it now takes
+  only `NETMGMT` routes through the uplink's gateway (`RouteRow::netmgmt`;
+  the origin does not tell them apart -- read off this PC's table). The
+  ledger now deletes after a failed add instead of forgetting, owes a
+  route under the key Windows read back for it, and owes OpenVPN's server
+  and `bypass-dhcp` routes before openvpn.exe starts. Past a leftover
+  host route the uplink is asked of Windows for the address beside the
+  server. Repair names every route left at once, and the idle poll writes
+  "still owed" to cleanup.log once.
+- **The app's own traffic.** The connected server's mirrors stay last in
+  the race (which re-sorted them ahead of demoted addresses), on the write
+  path (recent winner, remembered address), and across a Dashboard remount
+  (the order now follows the service's answer, not the screen's first
+  "disconnected"). A write's walk lets go of the pages it does not return,
+  and the bundle refresh of a refused body. A report whose probe found
+  every address refused by this PC says so in its reason; the request
+  itself is still `net` and the outcome still CONTROL_PLANE_UNREACHABLE.
+- **W2.** OpenVPN in Custom mode writes `persist-remote-ip`, so a
+  ping-restart does not look a hostname up through the tunnel it is
+  restarting. The DNS cache is flushed once the redirect is carrying
+  lookups, on every engine. The `dns::force` calls in both connects are
+  held in place by source tests.
+
 **Proven -- tests on this PC:** desktop `cargo test --workspace` 50, 59,
-513 (were 49, 58, 487), `cargo check --workspace --all-targets` clean of
-new warnings; desktop `pnpm test` 1436 / 80 files (were 1424 / 78) and
-`pnpm typecheck`; mobile `pnpm test` 239 / 16 and `tsc`. Each new test was
-run against a stand-in for the previous behaviour first and failed. The
-route-teardown test runs 32 OpenVPN sessions at once on one table --
-Disconnect, hard stop, engine death, and death racing the hard stop -- and
-the ledger test 32 writers on one file, which fails without its lock. One
-flake seen once under load and passing alone: the picker's explorer.exe
-icon test (`split_tunnel/picker/icon.rs`), untouched here.
+529 (were 49, 58, 487 on main), `cargo check --workspace --all-targets`
+with no new warnings; desktop `pnpm test` 1448 / 82 files (were 1424 /
+78) and `pnpm typecheck`; mobile `pnpm test` 239 / 16 and `tsc`. Each new
+test was run against the previous behaviour first -- or a stub standing
+for it where the seam was new -- and failed; the source tests were run
+with the call removed. The route-teardown test runs 32 OpenVPN sessions
+at once on one table -- Disconnect, hard stop, engine death, and death
+racing the hard stop -- and the ledger test 32 writers on one file, which
+fails without its lock. One flake seen once under load and passing alone:
+the picker's explorer.exe icon test (`split_tunnel/picker/icon.rs`),
+untouched here. A real-table test reads this PC's loopback routes as
+Windows' own (`LOCAL`); that a `route.exe` or openvpn.exe route reads
+`NETMGMT` is from the API's documentation and this PC's DHCP default
+route, not from adding one (this session was not elevated).
 
 **Unverified -- every behaviour above on a real machine.** No VM run for
 this branch: the leftover route gone after Compatible and after a killed
@@ -6252,14 +6295,16 @@ adapters and with the network going away mid-connect, zero frames to the
 API front after Connect + 3.5 s, the connected node's mirror not asked at
 the NIC while another answers, WireGuard's forced IPv6 failing fast with
 no IPv6 at the NIC, and Custom mode on Fast and Compatible with a
-router-style resolver sending no port 53 to it. Beyond the VM: a real
-Iranian line; a real IPv6 path (this PC has none); Wi-Fi roaming and
-sleep/resume; PPPoE -- the on-link uplink is accepted now but has never
-been dialled, and the native delete matches the next hop, so if Windows
-records a `route.exe` on-link route with a next hop other than 0.0.0.0
-the delete would miss it and the ledger strike it off; Mobile Hotspot,
-WSL2, Hyper-V and Docker; another VPN installed; phones (the plugin patch
-ships to them too; nothing else of this does).
+router-style resolver sending no port 53 to it; a service killed while
+openvpn.exe connects, then started again; an OpenVPN Custom-mode session
+by hostname surviving a ping-restart. Beyond the VM: a real Iranian line;
+a real IPv6 path (this PC has none); Wi-Fi roaming and sleep/resume --
+including an uplink that takes a new address during an OpenVPN connect;
+PPPoE -- the on-link uplink is accepted now but has never been dialled,
+and whether Windows stores its host route under 0.0.0.0 is read back
+after the add rather than known; Mobile Hotspot, WSL2, Hyper-V and
+Docker; another VPN installed; phones (the plugin patch ships to them
+too; nothing else of this does).
 
 Gaps stated rather than closed:
 
@@ -6270,8 +6315,33 @@ Gaps stated rather than closed:
   gated on the same measurement.
 - **10013 through the HTTP plugin is still `net`.** The plugin's errors
   carry no cause (reqwest's Display drops it), so only the probe and our
-  own commands can say `local`.
-- **OpenVPN's adoption** takes new host routes on the best-route uplink
-  and any new one to the server on another adapter; a `bypass-dhcp` route
-  on some other adapter would be missed. The known-nodes purge and the
-  ledger cover the node's route either way.
+  own commands can say `local`. A report whose probe found every address
+  refused here says so in its reason; its outcome is still
+  CONTROL_PLANE_UNREACHABLE, which the panel reads as filtering, until the
+  backend has an outcome for a local refusal.
+- **OpenVPN's adoption** takes new `NETMGMT` host routes on the
+  best-route uplink through its gateway, and any new one to the server on
+  another adapter; a `bypass-dhcp` route on some other adapter would be
+  missed, and another program adding a host route through the same
+  gateway during the connect would be taken -- nothing Windows records
+  says which program made a route. The known-nodes purge and the ledger
+  cover the node's route either way.
+- **W2 couples every application's DNS to the tunnel on WireGuard and
+  OpenVPN too,** as it already was on Xray and IKEv2: in Custom mode all of
+  the machine's lookups go to 1.1.1.1 through the tunnel, so when the
+  tunnel stalls -- WireGuard's UDP throttled, common in Iran -- the
+  applications the customer kept out of the VPN stop resolving names as
+  well, and names only the router or a company resolver knows stop
+  resolving for them at all. The app does not show Connected meanwhile (a
+  stale handshake reads `degraded`, an unproven tunnel `unverified`;
+  `customModePollState`), but whether its failover or a teardown gives the
+  PC its DNS back promptly in Custom mode is **unverified**, on any engine.
+- **A selected application that does its own DNS to the router's
+  address** -- reading the adapter's servers and sending UDP 53 itself,
+  as c-ares or nslookup do -- is not captured on any engine: the
+  redirect's filter leaves private ranges alone and the NRPT rule only
+  steers the DNS Client. Not changed here; the status poll does not report
+  that case as unprotected DNS.
+- **The lookups between the rule and the redirect** still leave in clear
+  text to 1.1.1.1 for those seconds, on every engine; the flush once the
+  redirect runs only stops a hijacked answer from being served after.
