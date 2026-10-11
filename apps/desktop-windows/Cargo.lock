@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "neoconnect-desktop"
-version = "0.9.47"
+version = "0.9.48"
 dependencies = [
  "hyper-util",
  "neoconnect-ipc",
