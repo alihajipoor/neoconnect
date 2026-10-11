@@ -5970,3 +5970,46 @@ pinned by source assertions; none were run in the app.
 iPhone; the cached-start-at-8-s path with a Connect pressed while the load
 is still waiting; whether real CDN/mirror deployments produce the page and
 JSON-401 shapes these rules are written against.
+
+## 2026-10-10 — control-plane resilience, fourth review round (same branch, not merged)
+
+**Status:** code done, unreleased -- still needs the VM, a filtered network, phones
+
+- **Block page vs proxies.** With Psiphon, v2rayN or Clash in system-proxy
+  mode (WinINet `ProxyEnable`/`ProxyServer`), or `HTTPS_PROXY`/`ALL_PROXY`,
+  tauri-plugin-http's reqwest sends every request through the proxy, which
+  resolves the name remotely. The race's local lookup still found the
+  block page, stopped the request, demoted the name, and the screen said
+  the network blocks Neoxify -- about requests the proxy would have had
+  answered. `resolve_ipv4` now takes `unlessProxied` and refuses before
+  asking the resolver when `http_proxied` says so; the look reads that as
+  nothing known. `http_proxied` asks hyper-util's `Matcher::from_system`,
+  the matcher reqwest 0.12.28 itself builds per request, and also counts
+  anything WinINet names (per-protocol `ProxyServer`, a PAC
+  `AutoConfigURL`) as "cannot be ruled out"; WPAD is not counted. The
+  socket probe after a failed request answers `proxy` for such a target
+  and demotes nothing. On Android and iOS reqwest ignores the system and
+  VPN proxy settings (hyper-util reads system settings on macOS and
+  Windows only), so the request uses the same resolver as the look; only
+  the environment is asked there. No new crates: `hyper-util` and
+  `windows-registry 0.6.1` were already in both lockfiles.
+- **Picker write-back.** `updateSnapshotRoutes` keeps the snapshot's
+  `savedAt`; only a credentials answer refreshes it. Before, every
+  answered server list made old credentials look fresh for ten minutes, so
+  Connect and resume skipped the refresh.
+- **Sign-in walk.** A `via` walk no longer follows the remembered endpoint:
+  the attempt goes only to the addresses its own challenge race heard from.
+
+**Proven -- tests on this PC:** desktop `pnpm test` 1307 / 73 files and
+`pnpm typecheck`; mobile 239 / 16 and `tsc`; web portal and desktop-macos
+`tsc`; desktop `cargo check --workspace --all-targets` and `cargo test
+--workspace` (app 49, ipc 58, service 487); the mobile crate's `cargo check --all-targets` and its
+`health_ip`/probe tests on this Windows host. Each fix's new test fails
+with the source reverted. The environment-proxy case runs in a child test
+process with `HTTPS_PROXY` set.
+
+**Unverified:** a real Windows machine with Psiphon, v2rayN or Clash in
+system-proxy mode (only the registry-reading rule is unit-tested, against
+handed-in values, not this PC's settings); whether reqwest actually
+reaches the backend through those proxies from Iran; real Iranian networks;
+the VM; Android and iPhone, including a VPN app's proxy settings there.
