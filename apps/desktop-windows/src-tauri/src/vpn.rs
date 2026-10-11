@@ -502,9 +502,15 @@ pub struct ExitPayload {
 /// signature it was written against -- the same additive rule the wire
 /// protocol follows. Absent means one exit for everything, which is
 /// what this command has always done.
+///
+/// `known_nodes` is every server the account's credentials name, passed
+/// through for the service to remove host routes to them that an earlier
+/// session left on the physical adapter. Optional on the same terms:
+/// absent, nothing is purged.
 pub async fn vpn_connect(
     payload: ProtocolUserPayload,
     exits: Option<Vec<ExitPayload>>,
+    known_nodes: Option<Vec<String>>,
 ) -> Result<(), String> {
     let profile = payload.into_profile()?;
     // Dropped here rather than sent and ignored, because the service
@@ -529,7 +535,7 @@ pub async fn vpn_connect(
     } else {
         Vec::new()
     };
-    call_expecting_ok(&Request::Connect { profile, exits }).await
+    call_expecting_ok(&Request::Connect { profile, exits, known_nodes: known_nodes.unwrap_or_default() }).await
 }
 
 #[tauri::command]

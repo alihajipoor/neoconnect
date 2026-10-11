@@ -105,6 +105,20 @@ pub enum Request {
         /// pretend, not the place the customer finds out.
         #[serde(default)]
         exits: Vec<ExitProfile>,
+        /// Every server address the app holds a credential for, as the
+        /// credentials write them.
+        ///
+        /// So the service can remove host routes to those servers that an
+        /// earlier session left on the physical adapter before it builds
+        /// this one -- releases up to 0.9.48 left one after every OpenVPN
+        /// session, and nothing removed it until a reboot. Data only:
+        /// what is not an IPv4 address is ignored, and the service only
+        /// ever deletes a host route to one of these, never adds one.
+        ///
+        /// Additive like `exits`: an older app sends none and the purge
+        /// is skipped, and an older service ignores the field.
+        #[serde(default)]
+        known_nodes: Vec<String>,
     },
     Disconnect,
     Status,
@@ -2373,6 +2387,23 @@ mod tests {
         let request: Request = serde_json::from_str(older).expect("an older app must still connect");
         match request {
             Request::Connect { exits, .. } => assert!(exits.is_empty()),
+            other => panic!("expected a connect, got {other:?}"),
+        }
+    }
+
+    /// The same additive rule for the servers the app knows: an older app
+    /// sends none and still connects, and a newer one's list arrives.
+    #[test]
+    fn connect_without_known_nodes_still_parses() {
+        let older = r#"{"type":"connect","profile":{"protocol":"IKEV2","server":"a.example.com","username":"u","password":"p"}}"#;
+        match serde_json::from_str::<Request>(older).expect("an older app must still connect") {
+            Request::Connect { known_nodes, .. } => assert!(known_nodes.is_empty()),
+            other => panic!("expected a connect, got {other:?}"),
+        }
+
+        let newer = r#"{"type":"connect","profile":{"protocol":"IKEV2","server":"a.example.com","username":"u","password":"p"},"known_nodes":["203.0.113.7","node.example.com"]}"#;
+        match serde_json::from_str::<Request>(newer).expect("a newer app must connect") {
+            Request::Connect { known_nodes, .. } => assert_eq!(known_nodes, ["203.0.113.7", "node.example.com"]),
             other => panic!("expected a connect, got {other:?}"),
         }
     }

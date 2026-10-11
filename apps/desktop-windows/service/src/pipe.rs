@@ -624,7 +624,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888\nPostUp = calc.exe".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
         let reply = round_trip(name, &request).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
@@ -1019,7 +1019,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
         let connect = tokio::spawn(async move { round_trip(name, &request).await });
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
@@ -1050,7 +1050,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(round_trip(name, &request).await.trim()).unwrap();
         assert!(parsed["message"].as_str().unwrap().contains("wireguard.exe"), "{parsed}");
     }
@@ -1067,7 +1067,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
         let reply = round_trip(name, &request).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
@@ -1342,7 +1342,7 @@ async fn dispatch(
                 }
             }
         }
-        Request::Connect { profile, exits } => {
+        Request::Connect { profile, exits, known_nodes } => {
             if crate::gaming::is_armed() {
                 return Response::Error {
                     message: "Gaming mode is on, and a VPN connection cannot run alongside it. \
@@ -1362,7 +1362,7 @@ async fn dispatch(
                         };
                     }
                     crate::engines::adopt_token(token);
-                    match engines.connect(&profile, &exits) {
+                    match engines.connect(&profile, &exits, &known_nodes) {
                         Ok(()) => Response::Ok,
                         Err(message) => Response::Error { message },
                     }

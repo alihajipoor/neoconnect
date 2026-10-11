@@ -603,7 +603,10 @@ impl Engines {
                     .to_string(),
             );
         };
-        self.connect(&profile, &[])
+        // No known servers: the rebuild has just torn down the session
+        // whose own host route it would have found, and the delete before
+        // the add covers a leftover to this server.
+        self.connect(&profile, &[], &[])
     }
 
     pub fn split_tunnel_running(&self) -> bool {
@@ -796,7 +799,12 @@ impl Engines {
     /// never leave two engines fighting over the system routing table.
     /// Wraps the real work so that EVERY failure path picks up the hint,
     /// rather than the two or three someone remembered to decorate.
-    pub fn connect(&mut self, profile: &ConnectProfile, exits: &[ExitProfile]) -> Result<(), String> {
+    pub fn connect(
+        &mut self,
+        profile: &ConnectProfile,
+        exits: &[ExitProfile],
+        known_nodes: &[String],
+    ) -> Result<(), String> {
         // Noted before the attempt, reported only if it fails.
         //
         // Another VPN that is up owns the default route, and two clients
@@ -834,7 +842,7 @@ impl Engines {
         // The profile Custom mode rebuilds from is the session's own,
         // so a failed attempt -- which ends whatever session it began --
         // cannot leave one behind.
-        self.connect_inner(profile, exits, &limits)
+        self.connect_inner(profile, exits, known_nodes, &limits)
             .map_err(|e| with_rival_hint(e, &rivals))
     }
 
@@ -842,6 +850,7 @@ impl Engines {
         &mut self,
         profile: &ConnectProfile,
         exits: &[ExitProfile],
+        known_nodes: &[String],
         limits: &crate::lifecycle::budget::Limits,
     ) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
@@ -878,6 +887,9 @@ impl Engines {
         // "no tunnel" is then exactly the answer that must not stand.
         self.ledger.forget();
         cleared?;
+        // Before anything of the new session is built, and on a table the
+        // teardown above has just cleared of everything this process held.
+        self.purge_stale_node_routes(known_nodes, &our_interfaces());
         // Belt and braces with `disconnect`'s own reset: a connect that
         // fails part way must not leave the previous session's DNS
         // complaint attached to nothing.
@@ -982,7 +994,7 @@ impl Engines {
                 let prepared = if passive {
                     xray::prepare_passive(&outbound, limits).map(|_| InstalledRoutes::none())
                 } else {
-                    xray::install_routes(&outbound, limits)
+                    xray::install_routes(&outbound, Arc::clone(&self.route_ops), self.owed_routes(), limits)
                 };
                 let routes = match prepared {
                     Ok(routes) => routes,
@@ -1033,6 +1045,51 @@ impl Engines {
         // functions with no `Engines` to hand it back to.
         self.dns_state = dns::tunnel_dns();
         Ok(())
+    }
+
+    /// Removes host routes to our own servers that an earlier session left
+    /// on an adapter that is not ours.
+    ///
+    /// The second net under the ledger, and the only one for what was
+    /// left before the ledger existed: releases up to 0.9.48 left a host
+    /// route to the server on the physical adapter after every OpenVPN
+    /// session, and those are on customers' machines now. Measured on the
+    /// VM, one of them sent the next session's checks against that node's
+    /// mirror around the tunnel and moved the customer off a working
+    /// server. See `route_table::stale_node_routes` for what qualifies.
+    ///
+    /// Only addresses: a name in the list is ignored rather than resolved,
+    /// because a host route is to an address, and the names the app sends
+    /// are IKEv2 certificate names whose server it also lists by address.
+    /// Bounded, so a caller cannot make this walk the table for an
+    /// unbounded list.
+    fn purge_stale_node_routes(&self, known_nodes: &[String], ours: &[u32]) {
+        let nodes: Vec<Ipv4Addr> =
+            known_nodes.iter().take(MAX_KNOWN_NODES).filter_map(|host| host.trim().parse().ok()).collect();
+        if nodes.is_empty() {
+            return;
+        }
+        let Ok(rows) = self.route_ops.rows() else { return };
+        let owed = self.owed_routes();
+        let mut removed = Vec::new();
+        for row in route_table::stale_node_routes(&rows, &nodes, ours) {
+            match self.route_ops.delete(&row) {
+                Ok(()) => {
+                    owed.settle(&row);
+                    removed.push(format!("{}/{}", row.dest, row.prefix));
+                }
+                Err(why) => crate::cleanup_log::note(
+                    "remove a host route to a server an earlier session left",
+                    &format!("{}/{}: {why}", row.dest, row.prefix),
+                ),
+            }
+        }
+        if !removed.is_empty() {
+            crate::cleanup_log::note(
+                "remove a host route to a server an earlier session left",
+                &format!("removed {}", removed.join(", ")),
+            );
+        }
     }
 
     /// The routes an OpenVPN session owns: the host routes openvpn.exe
@@ -1411,10 +1468,11 @@ impl Engines {
     /// to forget a step; the history of this file is mostly that.
     ///
     /// Phase-one rules (docs/windows-service-rewrite.md): no PowerShell,
-    /// no waiting for anything to disappear. At most three `route.exe`
-    /// for Xray's own routes or two for OpenVPN's pushed ones, the same
-    /// allowance the hard stop has, and for the same reason -- the record
-    /// of which routes were installed ends with the session.
+    /// no waiting for anything to disappear. At most two `route.exe`, for
+    /// Xray's half-defaults or OpenVPN's pushed ones, the same allowance
+    /// the hard stop has, and for the same reason -- the record of which
+    /// routes were installed ends with the session. The host route to the
+    /// node is deleted natively.
     ///
     /// The order is the order of harm. Custom mode first (inside
     /// `end_session`), because its redirect is pinned to an adapter that
@@ -2011,6 +2069,12 @@ pub fn os_visible_tunnel() -> (bool, Option<String>, TunnelHealth) {
     // health says, so to them nothing changes.
     (false, None, TunnelHealth::Unknown)
 }
+
+/// The most server addresses a connect will look for host routes to. An
+/// account holds a handful of credentials, each naming its server two or
+/// three ways; this is far above that, and far below anything that would
+/// make the purge cost noticeable.
+const MAX_KNOWN_NODES: usize = 256;
 
 /// Every adapter this service's engines bring up, by the name Windows
 /// shows. What "ours" means wherever a route or an adapter has to be told
@@ -3512,7 +3576,7 @@ mod helper_tests {
             crate::lifecycle::cancel::CancelToken::new(),
             crate::lifecycle::budget::CONNECT_BUDGET.limit,
         );
-        assert!(engines.connect_inner(&profile, &[], &limits).is_err(), "there is no wireguard.exe to connect with here");
+        assert!(engines.connect_inner(&profile, &[], &[], &limits).is_err(), "there is no wireguard.exe to connect with here");
         assert!(!engines.end_dead_session(g));
         assert!(engines.ledger().ended_without_successor().is_none(), "the connect left the old drop answering");
 
@@ -3703,5 +3767,29 @@ mod helper_tests {
             let _ = sup.run(|engines: &mut Engines, _| engines.engine_gone = None).await;
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A host route to a known server that an earlier session left on the
+    /// uplink is gone before the next session is built, and struck off the
+    /// ledger if it was owed there. Names in the list are ignored, and a
+    /// host route to any other address is the customer's.
+    #[test]
+    fn a_connect_removes_host_routes_to_known_servers_an_earlier_session_left() {
+        let (table, gateway) = uplink_table();
+        let left = route_table::RouteRow::host(Ipv4Addr::new(203, 0, 113, 7), 14, gateway, 0);
+        let customers = route_table::RouteRow::host(Ipv4Addr::new(198, 51, 100, 9), 14, gateway, 0);
+        table.gain(left);
+        table.gain(customers);
+        let dir = fresh_dir("stale-purge");
+        let mut engines = Engines::new(dir.clone(), dir.clone());
+        engines.set_route_ops_for_test(table.clone());
+        engines.owed_routes().owe(left);
+
+        engines.purge_stale_node_routes(&["203.0.113.7".into(), "node.example.com".into(), "not an address".into()], &[]);
+
+        assert!(!table.table().contains(&left), "the leftover host route survived the connect");
+        assert!(table.table().contains(&customers), "a host route to an unknown address was taken");
+        assert!(engines.owed_routes().read().is_empty(), "a removed route is still owed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

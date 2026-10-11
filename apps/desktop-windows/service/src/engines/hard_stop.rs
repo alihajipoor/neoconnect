@@ -41,15 +41,16 @@ impl HardStopSteps for Engines {
             // the record of what was installed is gone with it. The one
             // route that does not vanish with the adapter is the host
             // route to the node, which sits on the *physical* interface;
-            // leaving it would be a small leak that nothing cleans until
-            // the machine reboots.
+            // leaving it would be a leak that, before the ledger, nothing
+            // cleaned until the machine rebooted.
             //
             // This is the one step that runs an executable, and it is a
             // deliberate exception rather than a hole in the rule. The
             // rule is about PowerShell, where 4.4 to 6.5 seconds is
             // spent before the first statement runs; `route.exe` is a
             // small native program with no runtime to start, and there
-            // are at most three of them.
+            // are at most two of them -- the half-defaults. The host
+            // route is deleted natively and starts nothing.
             Active::Child { protocol, mut child, mut routes } => {
                 let killed = child
                     .kill()

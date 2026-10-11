@@ -21,6 +21,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 const {
   hostOfEndpoint,
   isAddressLiteral,
+  knownServerHosts,
   literalTunnelServer,
   nodeAddressesOf,
   reachesServerAround,
@@ -53,6 +54,25 @@ describe("serverHostsOf", () => {
     expect(serverHostsOf({})).toEqual([]);
     expect(serverHostsOf({ connection: null, credentials: null })).toEqual([]);
     expect(serverHostsOf({ connection: { host: " ", publicParams: { endpointHost: 7 } } })).toEqual([]);
+  });
+});
+
+describe("knownServerHosts", () => {
+  it("names every server the account's credentials dial, once across all of them", () => {
+    // What the Windows connect sends the service, so a host route to any
+    // of these servers that an earlier session left on the physical
+    // adapter is removed before the next tunnel is built. Two credentials
+    // on one node name it once.
+    const OTHER = "203.0.113.42";
+    expect(
+      knownServerHosts([
+        { connection: { host: NODE, publicParams: { endpointHost: "fi1.example.test" } } },
+        { credentials: { endpoint: `${NODE}:1194` } },
+        { connection: { host: OTHER } },
+        {},
+      ]),
+    ).toEqual([NODE, "fi1.example.test", OTHER]);
+    expect(knownServerHosts([])).toEqual([]);
   });
 });
 

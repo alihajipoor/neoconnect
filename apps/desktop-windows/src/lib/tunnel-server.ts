@@ -112,6 +112,25 @@ export function serverHostsOf(user: DialledCredential): string[] {
   return hosts;
 }
 
+/** Every host the given credentials' engines may dial, once across all of
+ * them.
+ *
+ * What the Windows connect sends the service as `knownNodes`: before it
+ * builds a tunnel, the service removes host routes to these servers that
+ * an earlier session left on the physical adapter. Releases up to 0.9.48
+ * left one after every OpenVPN session, and the next session's checks
+ * against that node's mirror then went around the tunnel (measured on the
+ * VM). Names are sent as written; the service acts on addresses only. */
+export function knownServerHosts(users: readonly DialledCredential[]): string[] {
+  const hosts: string[] = [];
+  for (const user of users) {
+    for (const host of serverHostsOf(user)) {
+      if (!hosts.includes(host)) hosts.push(host);
+    }
+  }
+  return hosts;
+}
+
 /** The host half of "host:port", "[v6]:port", or a bare host. */
 export function hostOfEndpoint(endpoint: string): string {
   const text = endpoint.trim();

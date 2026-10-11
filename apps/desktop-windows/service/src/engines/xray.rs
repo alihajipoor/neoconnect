@@ -668,6 +668,8 @@ fn resolve_server(
 /// previously looked connected while changing nothing.
 pub fn install_routes(
     outbound: &Outbound,
+    ops: std::sync::Arc<dyn super::route_table::RouteOps>,
+    owed: super::route_table::OwedRoutes,
     limits: &crate::lifecycle::budget::Limits,
 ) -> Result<InstalledRoutes, String> {
     let server_ip = resolve_server(outbound.host(), outbound.port(), limits)?;
@@ -698,7 +700,7 @@ pub fn install_routes(
     configure_adapter(tun_gateway, false, limits)?;
     wait_for_address(tun_gateway, limits)?;
 
-    routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
+    routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index, ops, owed)
 }
 
 /// Everything `install_routes` does except install the routes.

@@ -102,6 +102,24 @@ pub fn new_host_routes(before: &[RouteRow], after: &[RouteRow], if_index: u32) -
         .collect()
 }
 
+/// Host routes to one of our own servers on an adapter that is not ours.
+///
+/// What the stale purge at the top of every connect removes: a host route
+/// to a node is only ever on the physical adapter because a session of
+/// ours put it there -- Xray's routing, or OpenVPN's `redirect-gateway` --
+/// and by the time a connect runs, that session has been torn down. Any
+/// left are what releases up to 0.9.48 left after every Compatible
+/// session, and what a killed service leaves before the ledger existed.
+///
+/// Narrow on purpose: host routes only, only to the addresses given, and
+/// never on our own adapters, whose routes are purged by interface.
+pub fn stale_node_routes(rows: &[RouteRow], nodes: &[Ipv4Addr], ours: &[u32]) -> Vec<RouteRow> {
+    rows.iter()
+        .filter(|r| r.is_host() && nodes.contains(&r.dest) && !ours.contains(&r.if_index))
+        .copied()
+        .collect()
+}
+
 /// The routing table, and the two changes this service makes to rows on
 /// an adapter that is not its own.
 ///
@@ -430,6 +448,26 @@ mod tests {
             new_host_routes(&after, &after, 14).is_empty(),
             "a host route that was there before is not one the engine added"
         );
+    }
+
+    /// What the purge at the top of a connect may take: a host route to a
+    /// node the app knows, on an adapter that is not ours. A host route to
+    /// any other address is the customer's; a prefix of any other length
+    /// is not a leftover of ours; and a route on our own adapter is the
+    /// adapter purge's.
+    #[test]
+    fn stale_purge_hits_only_slash32s_to_known_nodes_off_our_adapters() {
+        let gateway = v4(192, 0, 2, 1);
+        let known = v4(203, 0, 113, 7);
+        let stale = RouteRow::host(known, 14, gateway, 0);
+        let stale_other_gateway = RouteRow::host(known, 9, v4(198, 18, 5, 1), 0);
+        let unknown = RouteRow::host(v4(198, 51, 100, 9), 14, gateway, 0);
+        let on_ours = RouteRow::host(known, 30, v4(10, 8, 0, 1), 0);
+        let wider = RouteRow { dest: known, prefix: 31, if_index: 14, next_hop: gateway, metric: 0 };
+        let rows = [stale, unknown, on_ours, wider, stale_other_gateway];
+
+        assert_eq!(stale_node_routes(&rows, &[known], &[30]), vec![stale, stale_other_gateway]);
+        assert!(stale_node_routes(&rows, &[], &[30]).is_empty(), "nothing known, nothing taken");
     }
 
     #[test]

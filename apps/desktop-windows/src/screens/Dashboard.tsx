@@ -20,7 +20,7 @@ import {
   type EgressVerdict,
   type TunnelServer,
 } from "../lib/egress";
-import { literalTunnelServer, nodeAddressesOf, tunnelServerOf } from "../lib/tunnel-server";
+import { knownServerHosts, literalTunnelServer, nodeAddressesOf, tunnelServerOf } from "../lib/tunnel-server";
 import {
   combineEvidence,
   customModePollState,
@@ -2829,6 +2829,10 @@ export function Dashboard({
       // Every node the account holds a credential on, for the baselines:
       // a reading of one of them is never this machine's own address.
       const nodeAddresses = nodeAddressesOf(dialable);
+      // The same servers as the service reads them: before each rung's
+      // tunnel is built it removes host routes to any of these that an
+      // earlier session left on the physical adapter (`knownServerHosts`).
+      const knownNodes = knownServerHosts(dialable);
       // Whether this pass began with nothing up: pressed on a screen that
       // showed nothing connected, rather than a failover or a reconnect
       // from a tunnel that was there. Its first rung then has no previous
@@ -2932,6 +2936,7 @@ export function Dashboard({
           await invoke("vpn_connect", {
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
+            knownNodes,
           });
           // The session this pass was started under ended while the
           // engine was coming up. The sign-out's own teardown may have

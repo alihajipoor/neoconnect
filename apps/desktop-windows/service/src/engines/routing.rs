@@ -363,23 +363,29 @@ pub(super) fn add_route(
 /// `physical_gateway`/`physical_index` must be captured *before* the
 /// tunnel takes over, since afterwards the best route to the server
 /// would be the tunnel itself.
+///
+/// The host route to the server sits on the physical adapter, so it is
+/// added through `ops` and owed in `owed` -- see [`install_node_route`]
+/// -- while the half-defaults on the tunnel's own adapter go the way
+/// they always have.
 pub fn install_full_tunnel(
     tun_gateway: Ipv4Addr,
     tun_index: u32,
     server_ip: Ipv4Addr,
     physical_gateway: Ipv4Addr,
     physical_index: u32,
+    ops: Arc<dyn RouteOps>,
+    owed: OwedRoutes,
 ) -> Result<InstalledRoutes, String> {
-    let mut installed = InstalledRoutes::none();
-    let server = server_ip.to_string();
     let tun_gw = tun_gateway.to_string();
-    let phys_gw = physical_gateway.to_string();
 
     // The escape hatch first: if anything below fails, the machine is
     // left with normal connectivity plus one redundant host route,
     // rather than a half-built tunnel swallowing traffic.
-    add_route(&server, "255.255.255.255", &phys_gw, physical_index, 1)?;
-    installed.destinations.push((server.clone(), "255.255.255.255".into(), physical_index));
+    let node = RouteRow::host(server_ip, physical_index, physical_gateway, 1);
+    install_node_route(&*ops, &owed, node)?;
+    // Already owed; `adopted` records it again only if it is not.
+    let mut installed = InstalledRoutes::adopted(vec![node], ops, owed);
 
     for (dest, mask) in HALF_DEFAULTS {
         if let Err(e) = add_route(dest, mask, &tun_gw, tun_index, 1) {
@@ -390,6 +396,35 @@ pub fn install_full_tunnel(
     }
 
     Ok(installed)
+}
+
+/// Adds the host route that keeps the engine's own connection to the
+/// server off the tunnel, owing it first.
+///
+/// Any host route to the same server already on that adapter goes before
+/// the add. That is a route an earlier session left -- OpenVPN's, which
+/// used to outlive every disconnect, or Xray's own after the service was
+/// killed -- and it does harm either way: one with the same next hop
+/// makes the add fail as already existing, which failed the connect; one
+/// through a gateway the machine has since left sends the engine's
+/// packets nowhere.
+pub(super) fn install_node_route(ops: &dyn RouteOps, owed: &OwedRoutes, route: RouteRow) -> Result<(), String> {
+    // A table that cannot be read skips this rather than the connect:
+    // the add below then fails or succeeds exactly as it always did.
+    if let Ok(rows) = ops.rows() {
+        let leftovers = rows.iter().filter(|r| r.is_host() && r.dest == route.dest && r.if_index == route.if_index);
+        for leftover in leftovers {
+            if ops.delete(leftover).is_ok() {
+                owed.settle(leftover);
+            }
+        }
+    }
+    owed.owe(route);
+    if let Err(e) = ops.add(&route) {
+        owed.settle(&route);
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -458,6 +493,38 @@ mod tests {
     fn interface_zero_is_refused_rather_than_matched() {
         assert!(ipv4_routes_on(0).is_err());
         assert!(interface_routes(0).is_empty());
+    }
+
+    /// A host route to the server already on the uplink -- left by an
+    /// OpenVPN session, or by Xray's own when the service was killed -- is
+    /// deleted before ours is added. Identical, it made the add fail as
+    /// already existing and so failed the connect; through an old gateway,
+    /// it would win and send the engine's packets nowhere.
+    #[test]
+    fn install_full_tunnel_deletes_an_identical_slash32_before_adding() {
+        use super::super::route_table::fake::{FakeRoutes, Op};
+        let server = Ipv4Addr::new(203, 0, 113, 7);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let ours = RouteRow::host(server, 14, gateway, 1);
+        let identical = RouteRow::host(server, 14, gateway, 0);
+        let old_gateway = RouteRow::host(server, 14, Ipv4Addr::new(192, 0, 2, 254), 0);
+        let elsewhere = RouteRow::host(server, 9, gateway, 0);
+        let table = FakeRoutes::with(&[identical, old_gateway, elsewhere]);
+        let dir = std::env::temp_dir().join(format!("neoconnect-node-route-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let owed = OwedRoutes::in_dir(&dir);
+
+        install_node_route(&*table, &owed, ours).expect("the add must not fail over a leftover");
+
+        assert_eq!(
+            table.log(),
+            vec![Op::Delete(identical), Op::Delete(old_gateway), Op::Add(ours)],
+            "leftovers on the uplink first, then ours"
+        );
+        assert_eq!(table.table(), vec![elsewhere, ours], "a route on another adapter is not this one's to take");
+        assert_eq!(owed.read(), vec![ours]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
