@@ -428,11 +428,25 @@ describe("release", () => {
     expect(sent[0].body).toEqual({ subscriptionId: SUB, handle: "Zm9vYmFyYmF6" });
   });
 
-  it("is over within its budget when nothing answers, and never throws", async () => {
+  it("is over within its budget when nothing answers, never throws, and says it was not answered", async () => {
     replies["/customer/vpn/release"] = ["hang", "hang"];
     const started = Date.now();
-    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" }, 50)).resolves.toBeUndefined();
+    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" }, 50)).resolves.toBe(false);
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  /** What decides whether a release taken down with the tunnel is sent
+   * again on the bare line (`ReleaseOptions` in device-slot-session.ts). */
+  it("says it was answered when the backend answered, with its 204 or a refusal of its own", async () => {
+    replies["/customer/vpn/release"] = [{ status: 204 }];
+    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" })).resolves.toBe(true);
+    replies["/customer/vpn/release"] = [{ status: 404, body: { message: "Subscription not found" } }];
+    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" })).resolves.toBe(true);
+  });
+
+  it("says it was not answered when nothing anywhere answered it", async () => {
+    replies["/customer/vpn/release"] = ["unreachable", "unreachable"];
+    await expect(releaseSlot({ subscriptionId: SUB, handle: "h" })).resolves.toBe(false);
   });
 });
 

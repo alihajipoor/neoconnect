@@ -153,8 +153,11 @@ export interface DeviceSlotSession {
   /** True when an automatic reconnect should ask first. */
   needsStandingCheck(): boolean;
   checkStanding(): Promise<StandingCheck>;
-  /** On Disconnect. Fire and forget; resolves within the release budget. */
-  release(): Promise<void>;
+  /** On Disconnect. Fire and forget: sent at once, and resolves within
+   * the release budget -- or, given the teardown it was sent in front of
+   * (`ReleaseOptions`), once the release has been sent again after it, if
+   * that was needed. Nothing waits on it. */
+  release(options?: ReleaseOptions): Promise<void>;
   /** Gives the slot back while nothing is going to renew it -- a phone's
    * reconnect waiting for the app to be opened -- without forgetting that
    * the pass which eventually dials has to ask where this device stands
@@ -163,6 +166,37 @@ export interface DeviceSlotSession {
   /** Forgets the slot without telling the server -- sign-out releases it
    * there by itself. */
   reset(): void;
+}
+
+/** How a release on Disconnect is sent.
+ *
+ * `tunnelGone` settles once the teardown that follows the press is over.
+ * The release goes first, while the tunnel is still up -- on a filtered
+ * network the tunnel is the likeliest way to reach the API at all -- and
+ * the teardown does not wait for it (docs/device-slots.md, 8). But the
+ * teardown is under way within milliseconds, and the request, which needs
+ * a TCP and a TLS handshake through the tunnel before it is even sent,
+ * goes down with it: on the test VM no release on Disconnect ever got an
+ * answer, in four runs out of four, and the panel host's access log shows
+ * only two of the four arriving -- none from the run where only the tunnel
+ * could reach Neoxify. So a
+ * release that got no answer is sent once more when the teardown is over,
+ * on the bare line, with its own budget. It names the same grant, so if
+ * the first did arrive, or a Connect pressed since has been granted the
+ * slot under a new handle, it frees nothing; and it is not sent at all once
+ * anything has started since. */
+export interface ReleaseOptions {
+  tunnelGone?: Promise<unknown>;
+}
+
+/** A `tunnelGone` for a Disconnect, and the function that settles it:
+ * called once the teardown is over, whichever way it ended. */
+export function teardownSignal(): { over: Promise<void>; done: () => void } {
+  let done: () => void = () => undefined;
+  const over = new Promise<void>((resolve) => {
+    done = resolve;
+  });
+  return { over, done };
 }
 
 /** The grant an answer that settled after a release may have left this
@@ -236,7 +270,7 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
   /** Claims and renewals still on the wire. See `release`. */
   const inFlight = new Set<Promise<ClaimOutcome | RenewOutcome>>();
   /** The release on the wire, if one is. See `beforeDial`. */
-  let releasing: Promise<void> | null = null;
+  let releasing: Promise<unknown> | null = null;
   /** The handle of the latest counted grant the server gave this device,
    * and the subscription it is on. What a release names.
    *
@@ -281,12 +315,15 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
 
   /** Releases each grant named, one after another. Several only when
    * answers that settled after a Disconnect named more than one; each
-   * frees the slot only if it is still held under that grant. */
-  function sendRelease(target: string, handles: string[]): Promise<void> {
-    const sent: Promise<void> = (async () => {
+   * frees the slot only if it is still held under that grant. Says
+   * whether the backend answered every one (`releaseSlot`). */
+  function sendRelease(target: string, handles: string[]): Promise<boolean> {
+    const sent: Promise<boolean> = (async () => {
+      let answered = true;
       for (const handle of handles) {
-        await release({ subscriptionId: target, handle }).catch(() => undefined);
+        if ((await release({ subscriptionId: target, handle }).catch(() => false)) !== true) answered = false;
       }
+      return answered;
     })().finally(() => {
       if (releasing === sent) releasing = null;
     });
@@ -355,7 +392,7 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
   }
 
   /** `release`, as a function the session's own `setAside` can call. */
-  async function giveBack(): Promise<void> {
+  async function giveBack(options: ReleaseOptions = {}): Promise<void> {
     const target = subscriptionId;
     // Nothing to give back, and nothing to start over: every request that
     // could still be out was orphaned by whatever emptied the slot. A
@@ -409,7 +446,15 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     // covers on the other device; a release naming no grant could free
     // the slot of a Connect pressed in the meantime instead.
     const handle = knownHandle(target);
-    if (held && handle !== null) await sendRelease(target, [handle]);
+    if (!held || handle === null) return;
+    const answered = await sendRelease(target, [handle]);
+    // Taken down with the tunnel it was sent through: once more on the
+    // bare line, when the teardown is over (`ReleaseOptions`). Not over a
+    // connect started since, whose slot this is not.
+    if (answered || options.tunnelGone === undefined) return;
+    await options.tunnelGone.catch(() => undefined);
+    if (epoch !== releasedIn) return;
+    await sendRelease(target, [handle]);
   }
 
   async function claimNow(protocolUserId: string | null, budgetMs: number): Promise<ClaimSettled> {

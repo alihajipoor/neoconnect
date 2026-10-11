@@ -41,7 +41,7 @@ function harness(claims: ClaimOutcome[], renewals: RenewOutcome[] = []) {
   let clock = 1_000_000;
   const claim = vi.fn(async (_request: unknown, _budget?: number) => claims.shift() ?? GRANT);
   const renew = vi.fn(async (_sub: string, _budget?: number) => renewals.shift() ?? HELD);
-  const release = vi.fn(async (_request: { subscriptionId: string; handle: string }) => undefined);
+  const release = vi.fn(async (_request: { subscriptionId: string; handle: string }): Promise<boolean> => false);
   const session = createDeviceSlotSession({ claim, renew, release, now: () => clock });
   return {
     session,
@@ -512,6 +512,119 @@ describe("release", () => {
   });
 });
 
+/** The release on Disconnect and the teardown it is sent in front of.
+ *
+ * The test VM, four Disconnects out of four: the release went out through
+ * the tunnel 40 ms after the teardown had begun, and never got an answer
+ * -- cancelled at its budget, or failed with the tunnel. The panel host's
+ * access log shows two of the four arriving and none from the run where
+ * only the tunnel could reach Neoxify. The teardown is not made to wait
+ * for it (docs/device-slots.md, 8); the release is sent again once the
+ * teardown is over, on the bare line. */
+describe("a release the teardown took with it", () => {
+  /** A teardown the test ends by hand. */
+  function teardown() {
+    let over: () => void = () => undefined;
+    const tunnelGone = new Promise<void>((resolve) => (over = resolve));
+    return { tunnelGone, over };
+  }
+
+  it("goes out at once, ahead of the teardown, and does not wait for it", async () => {
+    const h = harness([GRANT]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    const t = teardown();
+    void h.session.release({ tunnelGone: t.tunnelGone });
+    await settle();
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenCalledWith({ subscriptionId: SUB, handle: "mine" });
+  });
+
+  it("is sent again, naming the same grant, once the teardown is over -- and not before", async () => {
+    const h = harness([GRANT]);
+    h.release.mockResolvedValue(false);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    const t = teardown();
+    const released = h.session.release({ tunnelGone: t.tunnelGone });
+    await settle();
+    expect(h.release).toHaveBeenCalledTimes(1);
+    t.over();
+    await released;
+    expect(h.release).toHaveBeenCalledTimes(2);
+    expect(h.release).toHaveBeenLastCalledWith({ subscriptionId: SUB, handle: "mine" });
+  });
+
+  it("is not sent again when the first one was answered", async () => {
+    const h = harness([GRANT]);
+    h.release.mockResolvedValue(true);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    const t = teardown();
+    const released = h.session.release({ tunnelGone: t.tunnelGone });
+    t.over();
+    await released;
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  /** Disconnect, then Connect before the teardown is over: that connect's
+   * claim gave the slot a new handle, and a release now is the old one's,
+   * which would free nothing -- but it is not sent at all. */
+  it("is not sent again once a new connect has started", async () => {
+    const h = harness([GRANT, { ...GRANT, grant: { ...GRANT.grant, handle: "next" } } as ClaimOutcome]);
+    h.release.mockResolvedValue(false);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    const t = teardown();
+    const released = h.session.release({ tunnelGone: t.tunnelGone });
+    await settle();
+    await h.session.beforeDial({ subscriptionId: SUB });
+    t.over();
+    await released;
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.session.standing()).toBe("held");
+  });
+
+  it("is not sent again after a sign-out", async () => {
+    const h = harness([GRANT]);
+    h.release.mockResolvedValue(false);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    const t = teardown();
+    const released = h.session.release({ tunnelGone: t.tunnelGone });
+    await settle();
+    h.session.reset();
+    t.over();
+    await released;
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("is sent once, as before, when there is no teardown to wait for", async () => {
+    const h = harness([GRANT]);
+    h.release.mockResolvedValue(false);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    await h.session.release();
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  /** Read from the source, for both clients: every Disconnect the customer
+   * presses hands the release its teardown, and ends it whichever way the
+   * teardown went. */
+  it("is what both clients' Disconnect and stop do", () => {
+    for (const path of ["../screens/Dashboard.tsx", "../../../mobile/src/screens/Dashboard.tsx"]) {
+      const screen = readFileSync(new URL(path, import.meta.url), "utf8");
+      const sent = screen.split("void deviceSlot.release({ tunnelGone: teardown.over });").length - 1;
+      expect(sent, path).toBe(2);
+      expect(screen.split("const teardown = teardownSignal();").length - 1, path).toBe(2);
+      expect(screen.split(/\} finally \{\s*teardown\.done\(\);\s*\}/).length - 1, path).toBe(2);
+      // The release before the teardown, never after it.
+      for (const at of [...screen.matchAll(/void deviceSlot\.release\(\{ tunnelGone: teardown\.over \}\);/g)]) {
+        const after = screen.slice(at.index);
+        const release = 0;
+        const down = Math.min(
+          ...[after.indexOf("serviceDisconnect("), after.indexOf("customerTeardown.begin(")].filter((i) => i >= 0),
+        );
+        expect(release, path).toBeLessThan(down);
+      }
+    }
+  });
+});
+
 /** "Use on this device instead" on a network where the API answers only
  * through the tunnel: the claim before dialling never arrives, so the
  * takeover has to travel with the claim that does. Without it the server
@@ -725,7 +838,7 @@ describe("a request still out at Disconnect", () => {
    * release, or the release could overtake it and drop the new slot. */
   it("holds a new claim until the release before it has gone", async () => {
     const h = harness([GRANT, GRANT]);
-    const finishRelease = pending<undefined>(h.release);
+    const finishRelease = pending<boolean>(h.release);
     await h.session.beforeDial({ subscriptionId: SUB });
     const released = h.session.release();
 
@@ -733,7 +846,7 @@ describe("a request still out at Disconnect", () => {
     await settle();
     expect(h.claim).toHaveBeenCalledTimes(1);
 
-    finishRelease(undefined);
+    finishRelease(true);
     await released;
     expect(await decision).toEqual({ kind: "dial" });
     expect(h.claim).toHaveBeenCalledTimes(2);
@@ -994,7 +1107,7 @@ describe("a slot set aside while a reconnect waits", () => {
     // freed it, under a reconnect that believed it held one.
     const h = harness([GRANT], [HELD]);
     let finish: () => void = () => undefined;
-    h.release.mockImplementationOnce(() => new Promise<undefined>((resolve) => (finish = () => resolve(undefined))));
+    h.release.mockImplementationOnce(() => new Promise<boolean>((resolve) => (finish = () => resolve(true))));
     await h.session.beforeDial({ subscriptionId: SUB });
     const setAside = h.session.setAside();
     const check = h.session.checkStanding();

@@ -357,16 +357,21 @@ export interface ReleaseRequest {
   handle: string;
 }
 
-/** Gives one grant back.
+/** Gives one grant back, and says whether the backend answered: its 204,
+ * or a refusal of its own (a 404 for a subscription that is not the
+ * customer's), either of which sending it again would only repeat. False
+ * for no answer within `budgetMs`, a page from in front of the backend,
+ * or a session renewal that could not be completed -- a release that may
+ * never have arrived.
  *
  * Fire and forget: resolves within `budgetMs` whatever happens and never
  * rejects, and nothing should wait for it before tearing down. A release
  * that does not arrive costs the slot staying taken until it goes stale
  * (90 s), which "Use on this device instead" covers on the other device.
  */
-export async function releaseSlot(request: ReleaseRequest, budgetMs = RELEASE_BUDGET_MS): Promise<void> {
+export async function releaseSlot(request: ReleaseRequest, budgetMs = RELEASE_BUDGET_MS): Promise<boolean> {
   try {
-    await withinBudget(budgetMs, (signal) =>
+    const result = await withinBudget(budgetMs, (signal) =>
       apiRequest<void>("/customer/vpn/release", {
         method: "POST",
         // Only the fields the contract names: the API rejects unknown ones.
@@ -374,8 +379,12 @@ export async function releaseSlot(request: ReleaseRequest, budgetMs = RELEASE_BU
         signal,
       }),
     );
+    if (result.ok) return true;
+    if ("timedOut" in result) return false;
+    return result.status !== undefined && result.noResponse !== true && result.page !== true;
   } catch {
     // Nothing on screen depends on this having worked.
+    return false;
   }
 }
 

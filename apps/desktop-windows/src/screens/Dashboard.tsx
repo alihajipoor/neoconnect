@@ -86,6 +86,7 @@ import {
   slotStop,
   slotTeardown,
   slotTeardownShown,
+  teardownSignal,
   type SlotStop,
   type SlotStopReason,
 } from "../lib/device-slot-session";
@@ -2126,12 +2127,18 @@ export function Dashboard({
     const generation = beginIntent("disconnect");
     cancelRef.current = true;
     // The pass may already hold a slot. Given back fire and forget,
-    // never in front of the teardown (docs/device-slots.md, 8).
-    void deviceSlot.release();
+    // never in front of the teardown (docs/device-slots.md, 8) -- and
+    // again once it is over, if the teardown took the first one with it.
+    const teardown = teardownSignal();
+    void deviceSlot.release({ tunnelGone: teardown.over });
     setSlotNotice(null);
     setConnectionState("disconnecting");
-    await serviceDisconnect().catch(() => undefined);
-    await confirmTornDown();
+    try {
+      await serviceDisconnect().catch(() => undefined);
+      await confirmTornDown();
+    } finally {
+      teardown.done();
+    }
     endIntent(generation);
   }
 
@@ -2239,8 +2246,13 @@ export function Dashboard({
         // fire and forget, within a second and a half, and never in
         // front of the teardown: while the tunnel is still up the request
         // goes through it, which on a filtered network is the likeliest
-        // way to reach the API at all.
-        void deviceSlot.release();
+        // way to reach the API at all. The teardown is under way before
+        // that request can finish its handshakes, though, and on the test
+        // VM it took every one down with it: so a release that got no
+        // answer goes again on the bare line once the teardown is over
+        // (`ReleaseOptions` in device-slot-session.ts).
+        const teardown = teardownSignal();
+        void deviceSlot.release({ tunnelGone: teardown.over });
         setSlotNotice(null);
         setConnectionState("disconnecting");
         try {
@@ -2268,6 +2280,8 @@ export function Dashboard({
           // Not back to "connected": the tunnel may be down, may be up,
           // and this press produced no evidence either way. Ask.
           await confirmTornDown();
+        } finally {
+          teardown.done();
         }
         endIntent(generation);
         return;

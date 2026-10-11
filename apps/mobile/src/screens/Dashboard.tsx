@@ -104,6 +104,7 @@ import {
   slotStop,
   slotTeardown,
   slotTeardownShown,
+  teardownSignal,
   type SlotStop,
   type SlotStopReason,
 } from "@shared/lib/device-slot-session";
@@ -1433,8 +1434,10 @@ export function Dashboard({
   async function stopPass() {
     cancelRef.current = true;
     // The pass may already hold a slot. Given back fire and forget,
-    // never in front of the teardown (docs/device-slots.md, 8).
-    void deviceSlot.release();
+    // never in front of the teardown (docs/device-slots.md, 8) -- and
+    // again once it is over, if the teardown took the first one with it.
+    const teardown = teardownSignal();
+    void deviceSlot.release({ tunnelGone: teardown.over });
     setSlotNotice(null);
     setConnectionState("disconnecting");
     // Down only on the platform's word. Still in a tunnel, the phone
@@ -1444,7 +1447,11 @@ export function Dashboard({
     // the app before their internet came back. The platform is asked
     // even when the disconnect call failed -- a call that failed may
     // still have stopped the engine.
-    settleTeardown(await customerTeardown.begin(teardownOnce));
+    try {
+      settleTeardown(await customerTeardown.begin(teardownOnce));
+    } finally {
+      teardown.done();
+    }
   }
 
   /** "Stop reconnecting": the customer does not want the tunnel back by
@@ -1548,13 +1555,21 @@ export function Dashboard({
       // and forget, within a second and a half, and never in front of
       // the teardown: started while the tunnel is still up, the request
       // goes through it, which on a filtered network is the likeliest
-      // way to reach the API at all.
-      void deviceSlot.release();
+      // way to reach the API at all -- and once more on the bare line
+      // when the teardown is over, if the teardown took it down before it
+      // was answered, as it did every time on the Windows test VM
+      // (`ReleaseOptions` in device-slot-session.ts).
+      const teardown = teardownSignal();
+      void deviceSlot.release({ tunnelGone: teardown.over });
       setSlotNotice(null);
       setConnectionState("disconnecting");
       // As above: down on the platform's word, or still disconnecting and
       // tried again -- not a green orb, and not "degraded" either.
-      settleTeardown(await customerTeardown.begin(teardownOnce));
+      try {
+        settleTeardown(await customerTeardown.begin(teardownOnce));
+      } finally {
+        teardown.done();
+      }
       return;
     }
 
