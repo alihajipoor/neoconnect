@@ -411,10 +411,11 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     // installed a VPN for refuse to load.
     //
     // block-outside-dns is OpenVPN's own fix: it drops DNS leaving any
-    // other adapter while the tunnel is up. Full tunnel only -- in
-    // Custom mode most applications are deliberately off the tunnel,
-    // and seizing the machine's resolver would push their lookups
-    // through a tunnel they are not using.
+    // other adapter while the tunnel is up. Full tunnel only. In Custom
+    // mode nothing is routed to the tunnel, and its filters would refuse
+    // every lookup at the adapter it leaves by, before the redirect could
+    // carry it in. Custom mode pins the machine's lookups with the NRPT
+    // rule instead ([`machine_dns_rule`]), as it does on every engine.
     //
     // Two tests asserted this before it was ever written, and could not
     // fail: the job that would have run them had never once got as far
@@ -552,6 +553,12 @@ impl HostRouteWatch {
     }
 }
 
+/// The NRPT rule this engine installs for a session, if any. See
+/// `dns::custom_mode_rule`.
+fn machine_dns_rule(passive: bool) -> Option<&'static str> {
+    super::dns::custom_mode_rule(passive)
+}
+
 /// Brings OpenVPN up, and returns it with the host routes it added on
 /// the uplink for the session to own.
 pub fn connect(
@@ -606,7 +613,16 @@ pub fn connect(
     let up = confirm_started(child, "OpenVPN", &log_path).and_then(|child| wait_until_up(child, &log_path, limits));
     let added = watch.map(|w| w.added(&*engines.route_ops)).unwrap_or_default();
     match up {
-        Ok(child) => Ok((child, added)),
+        Ok(child) => {
+            // Once OpenVPN says the tunnel is up: a connect that failed
+            // before here has no tunnel for the lookups to be carried by.
+            // Reported in the status poll, never fatal -- see
+            // `dns::TunnelDns`.
+            if let Some(resolver) = machine_dns_rule(passive) {
+                super::dns::force(resolver);
+            }
+            Ok((child, added))
+        }
         Err(e) => {
             // openvpn.exe has ended on every path that reaches here, so
             // nothing is left to put these back -- and no session will
@@ -894,13 +910,30 @@ mod tests {
         assert!(conf.contains("block-outside-dns"), "full tunnel must claim DNS");
     }
 
+    /// No `block-outside-dns` in Custom mode: its filters refuse port 53
+    /// on every adapter but the tunnel, before the redirect can carry a
+    /// lookup in, and nothing is routed to the tunnel in this mode. The
+    /// machine's lookups are pinned by the NRPT rule instead -- see the
+    /// next test.
     #[test]
-    fn custom_mode_leaves_the_machines_dns_alone() {
-        // Most applications are deliberately NOT on the tunnel in Custom
-        // mode, and seizing the machine's DNS would push their lookups
-        // through a tunnel they are not using.
+    fn custom_mode_does_not_block_dns_outside_the_tunnel() {
         let conf = build_config(&profile(), true).unwrap();
         assert!(!conf.contains("block-outside-dns"), "custom mode must not claim DNS");
+    }
+
+    /// Custom mode pins the machine's lookups to 1.1.1.1, as Xray and IKEv2
+    /// already do, and the redirect carries them through the tunnel.
+    ///
+    /// Before: `route-nopull` dropped the pushed DNS and no rule replaced
+    /// it, so every lookup -- a selected application's included -- went to
+    /// the router and on to the ISP in clear text, and in Iran came back
+    /// with the block page's 10.10.34.x, which the redirect's filter leaves
+    /// alone as a private address. A full tunnel keeps its own: the pushed
+    /// DNS behind `block-outside-dns`.
+    #[test]
+    fn custom_mode_pins_the_machines_dns_like_xray_and_ikev2() {
+        assert_eq!(machine_dns_rule(true), Some("1.1.1.1"));
+        assert_eq!(machine_dns_rule(false), None);
     }
 
     /// The watch's guard: when the uplink was guessed as the wrong

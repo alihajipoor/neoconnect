@@ -53,16 +53,18 @@ const GAMING_NRPT_COMMENT: &str = "Neoxify gaming DNS";
 /// protocol name.
 ///
 /// [`NotRequested`] must never be reported as a problem. It is the
-/// ordinary state for WireGuard and OpenVPN, which install their own
-/// DNS and drop it in Custom mode -- and this product's rule is that
-/// the app never reports a state nothing verified, in either direction.
+/// ordinary state for a full tunnel on WireGuard and OpenVPN, which
+/// install their own DNS -- and this product's rule is that the app never
+/// reports a state nothing verified, in either direction.
 ///
-/// It is *not* the ordinary state for a Custom-mode tunnel on the two
-/// engines that call [`force`]. This comment used to say Custom mode
+/// It is *not* the ordinary state for a Custom-mode tunnel on any engine:
+/// all four call [`force`] there. This comment used to say Custom mode
 /// "deliberately leaves the machine's lookups alone", which read as a
 /// design rule and was never true of Xray; see
 /// [`machine_wide_rule_wanted`] for what Custom mode actually does and
-/// why the rule is load-bearing there rather than over-broad.
+/// why the rule is load-bearing there rather than over-broad. WireGuard
+/// and OpenVPN did leave them alone until 2026-10-11, which was that
+/// leak; see [`custom_mode_rule`].
 ///
 /// [`NotRequested`]: TunnelDns::NotRequested
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -96,7 +98,7 @@ impl TunnelDns {
 
 /// A courier, and only a courier.
 ///
-/// The two engines that install this rule do it from free functions
+/// The engines that install this rule do it from free functions
 /// several frames below any `Engines` value -- `xray::configure_adapter`
 /// is called from both `install_routes` and `prepare_passive`, and
 /// neither has one -- so there is nowhere to return the answer to.
@@ -183,13 +185,38 @@ pub(super) fn machine_wide_rule_wanted(_passive: bool) -> bool {
     true
 }
 
+/// The resolver Custom mode pins the machine to on the engines that bring
+/// their own DNS in a full tunnel.
+///
+/// The same as Xray's and IKEv2's. Which public resolver it is matters
+/// less than that it is public: the redirect carries every port-53
+/// packet its filter admits to 1.1.1.1 through the tunnel whatever its
+/// destination, and a public address is what the filter admits.
+pub(super) const CUSTOM_MODE_RESOLVER: &str = "1.1.1.1";
+
+/// The rule WireGuard and OpenVPN install for a session: none in a full
+/// tunnel, where wireguard.exe's `DNS =` and OpenVPN's pushed DNS behind
+/// `block-outside-dns` already settle it, and [`CUSTOM_MODE_RESOLVER`] in
+/// Custom mode, for the reason [`machine_wide_rule_wanted`] gives.
+///
+/// Custom mode drops both engines' own DNS -- no `DNS =` line, and
+/// `route-nopull` refuses the pushed one -- and until 2026-10-11 nothing
+/// replaced it. On a home network that left every lookup, a selected
+/// application's included, going to the router and on to the ISP in
+/// clear text; in Iran the answer for a filtered name is the block page's
+/// 10.10.34.x, which the redirect's filter then leaves alone too, as a
+/// private address. Xray and IKEv2 never had the gap.
+pub(super) fn custom_mode_rule(passive: bool) -> Option<&'static str> {
+    (passive && machine_wide_rule_wanted(passive)).then_some(CUSTOM_MODE_RESOLVER)
+}
+
 /// Installs the tunnel's DNS rule and reports what happened.
 ///
-/// **Returns no error on purpose.** This is the single entry point both
-/// engines use, and its type is the mechanism that keeps them
+/// **Returns no error on purpose.** This is the single entry point every
+/// engine uses, and its type is the mechanism that keeps them
 /// consistent: there is no `Result` here for a caller to `?`, so
 /// "refuse the connect because the DNS rule would not install" is not
-/// an option either engine can take unilaterally again. See
+/// an option any engine can take unilaterally again. See
 /// [`TunnelDns`] for why that is the decision.
 ///
 /// The failure is not swallowed -- it goes to the cleanup log for

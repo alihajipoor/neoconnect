@@ -38,9 +38,11 @@ const TUNNEL_SERVICE_NAME: &str = "WireGuardTunnel$neoconnect";
 /// the machine's routing policy, and `Table = off` is exactly the line
 /// between the two.
 ///
-/// DNS is also dropped in passive mode. Setting a tunnel resolver would
-/// point the whole machine's lookups at the VPN, which is a full-tunnel
-/// behaviour arriving through a setting that promised the opposite.
+/// DNS is left out of the config in passive mode: wireguard.exe would set
+/// it on a tunnel adapter that nothing is routed to. The machine's lookups
+/// are pinned by the NRPT rule instead ([`machine_dns_rule`]), and the
+/// redirect carries them through the tunnel -- which is what Custom mode
+/// does with DNS on every engine; see `dns::machine_wide_rule_wanted`.
 fn build_conf(p: &WireguardProfile, passive: bool) -> String {
     let dns = if passive {
         String::new()
@@ -72,6 +74,12 @@ fn build_conf(p: &WireguardProfile, passive: bool) -> String {
         p.allowed_ips,
         p.endpoint,
     )
+}
+
+/// The NRPT rule this engine installs for a session, if any. See
+/// `dns::custom_mode_rule`.
+fn machine_dns_rule(passive: bool) -> Option<&'static str> {
+    super::dns::custom_mode_rule(passive)
 }
 
 pub fn connect(
@@ -107,6 +115,13 @@ pub fn connect(
     .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
     if !status.success() {
         return Err(format!("wireguard.exe /installtunnelservice exited with {status}"));
+    }
+    // After the tunnel service is installed, as Xray installs its rule
+    // once its adapter is configured: a connect that failed before here
+    // has no tunnel for the lookups to be carried by. Reported in the
+    // status poll, never fatal -- see `dns::TunnelDns`.
+    if let Some(resolver) = machine_dns_rule(passive) {
+        super::dns::force(resolver);
     }
     Ok(())
 }
@@ -551,14 +566,29 @@ mod tests {
         assert!(conf.contains("AllowedIPs = 0.0.0.0/0"), "the peer must still accept everything");
     }
 
+    /// No `DNS =` line in Custom mode: wireguard.exe would set it on the
+    /// tunnel adapter, which nothing routes to in this mode. The machine's
+    /// lookups are pinned by the NRPT rule instead -- see the next test.
     #[test]
-    fn custom_mode_leaves_the_machines_dns_alone() {
-        // Pointing every lookup at the VPN resolver is a full-tunnel
-        // behaviour. Arriving through a setting that promises the
-        // opposite would send the whole machine's browsing history to
-        // the node for a customer who selected one game.
+    fn custom_mode_leaves_dns_out_of_the_config() {
         let conf = build_conf(&profile(), true);
         assert!(!conf.contains("DNS ="));
+    }
+
+    /// Custom mode pins the machine's lookups to 1.1.1.1, as Xray and IKEv2
+    /// already do, and the redirect carries them through the tunnel.
+    ///
+    /// Before: no rule. The redirect only sees packets its filter admits,
+    /// and the filter leaves every private range alone, so on a home
+    /// network every lookup -- a selected application's included -- went
+    /// to the router and on to the ISP in clear text, and in Iran came back
+    /// with the block page's 10.10.34.x, which the filter then left alone
+    /// too. `dns::machine_wide_rule_wanted` has the argument. A full tunnel
+    /// keeps its own: the `DNS =` line, and wireguard.exe's rule from it.
+    #[test]
+    fn custom_mode_pins_the_machines_dns_like_xray_and_ikev2() {
+        assert_eq!(machine_dns_rule(true), Some("1.1.1.1"));
+        assert_eq!(machine_dns_rule(false), None);
     }
 
     const NOW: u64 = 1_700_000_000;
