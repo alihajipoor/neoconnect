@@ -14,6 +14,10 @@ WORKDIR /repo
 
 FROM base AS deps
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+# pnpm reads every patch the root package.json lists before it installs
+# anything, used here or not, and stops with ENOENT on a missing one.
+# scripts/check-docker-install-inputs.mjs holds every Dockerfile to this.
+COPY patches ./patches
 COPY apps/backend/package.json apps/backend/package.json
 COPY apps/panel/package.json apps/panel/package.json
 COPY packages ./packages
