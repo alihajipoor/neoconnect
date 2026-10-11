@@ -6175,3 +6175,11 @@ about a network and every address hanging, the baseline still takes its
 given to a demoted address can turn a provable "You're protected" into
 "Connected, not confirmed" on a throttled link where that address answers
 in 2.5 to 5 s -- honest, but less proof, and no rig has such a link.
+
+**Follow-up to the VM re-test (tests on this PC only, not rerun in the VM):**
+the 8 s banner no longer says "Still trying" once a read has answered;
+the updater's check and the backend's `/health/ip` now clear "Can't
+reach" (the health check never asks for the load again, so its 15 s poll
+cannot defeat the backoff); one token refresh per expiry, its outcome and
+trace legs shared; a known baseline endpoint demoted or block-paged here
+is skipped for the hedged walk.

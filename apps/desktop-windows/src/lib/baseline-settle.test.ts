@@ -67,6 +67,7 @@ vi.mock("@tauri-apps/plugin-http", () => ({
 }));
 
 const { captureBaselineIp, setHealthIpTransport, EGRESS_TIMEOUT_MS, DEMOTED_BASELINE_MS } = await import("./egress");
+type BaselineIp = import("./egress").BaselineIp;
 const { settleAndCaptureBaseline } = await import("./baseline-settle");
 const demotion = await import("./endpoint-demotion");
 
@@ -102,10 +103,14 @@ afterEach(() => {
 
 /** Runs the settle on the fake clock and says how long it took and what
  * it returned. */
-async function timed(budgetMs: number, afterTeardown: boolean): Promise<{ ms: number; baseline: unknown }> {
+async function timed(
+  budgetMs: number,
+  afterTeardown: boolean,
+  known: BaselineIp | null = null,
+): Promise<{ ms: number; baseline: unknown }> {
   const start = Date.now();
   let done: { at: number; baseline: unknown } | null = null;
-  void settleAndCaptureBaseline(budgetMs, null, NO_SERVER, NO_NODES, afterTeardown).then((baseline) => {
+  void settleAndCaptureBaseline(budgetMs, known, NO_SERVER, NO_NODES, afterTeardown).then((baseline) => {
     done = { at: Date.now(), baseline };
   });
   for (let waited = 0; done === null && waited < 60_000; waited += 50) await vi.advanceTimersByTimeAsync(50);
@@ -191,6 +196,84 @@ describe("after a teardown", () => {
     net.answering.add(CDN);
     await vi.advanceTimersByTimeAsync(500);
     expect(result).toEqual({ ip: HOME, from: CDN, peer: "198.51.100.7" });
+  });
+});
+
+/** The endpoint the settle knows answered on this network -- the baseline
+ * taken when the screen loaded, or the previous rung's -- is asked alone
+ * first. Not once this network has shown it will not answer: the review
+ * after the VM run measured a demoted CDN that hangs, with a mirror that
+ * answers at once next in the race, taking 2,001 ms before the first rung
+ * and 7,001 ms on the last rung after a teardown, where the race takes
+ * none; and a known name on the block page asked again every 400 ms until
+ * the budget was gone. */
+describe("a known endpoint this network has since failed", () => {
+  /** The ladder's budget for the last rung, after a teardown. */
+  const SETTLE_TIMEOUT_MS = 6_000;
+  const MIRROR = MIRRORS[0];
+
+  /** The CDN answered for the screen-load baseline; it has since timed
+   * out for the API's requests, and hangs. The first mirror's name is not
+   * on the block page, and it answers. */
+  function cdnDemotedAndHanging(): BaselineIp {
+    net.refused.delete(CDN);
+    demotion.demoteEndpoint(CDN);
+    net.blockPage.delete(new URL(MIRROR).hostname);
+    net.answering.add(MIRROR);
+    return { ip: HOME, from: CDN, peer: "198.51.100.7" };
+  }
+
+  it("is not asked first once the API's requests have demoted it, before the first rung", async () => {
+    const known = cdnDemotedAndHanging();
+    const { ms, baseline } = await timed(FAILOVER_SETTLE_TIMEOUT_MS, false, known);
+    expect(baseline).toEqual({ ip: HOME, from: MIRROR, peer: "198.51.100.7" });
+    // Before: 2,000 ms, the demoted CDN's whole budget, asked alone.
+    expect(ms).toBeLessThan(100);
+    expect(sent[0]).not.toBe(CDN);
+  });
+
+  it("is not asked first once the API's requests have demoted it, after a teardown", async () => {
+    const known = cdnDemotedAndHanging();
+    const { ms, baseline } = await timed(SETTLE_TIMEOUT_MS, true, known);
+    expect(baseline).toEqual({ ip: HOME, from: MIRROR, peer: "198.51.100.7" });
+    // Before: 6,000 ms of the CDN asked alone, three times, then the race.
+    expect(ms).toBeLessThan(100);
+  });
+
+  it("is not asked again after a teardown once its name is found on the block page", async () => {
+    // Found by the settle's own look: nothing had demoted the name, as
+    // behind a system proxy, whose requests the API's look cannot see.
+    net.refused.delete(CDN);
+    net.answering.add(CDN);
+    const known: BaselineIp = { ip: HOME, from: MIRROR, peer: "198.51.100.8" };
+    const { ms, baseline } = await timed(SETTLE_TIMEOUT_MS, true, known);
+    expect(baseline).toEqual({ ip: HOME, from: CDN, peer: "198.51.100.7" });
+    // Before: asked every 400 ms for the six seconds, fifteen times.
+    expect(sent.filter((base) => base === MIRROR)).toHaveLength(1);
+    expect(ms).toBeLessThan(100);
+  });
+
+  it("is still asked alone first while nothing says it has failed here", async () => {
+    net.refused.delete(CDN);
+    net.answering.add(CDN);
+    const known: BaselineIp = { ip: HOME, from: CDN, peer: "198.51.100.7" };
+    const { baseline } = await timed(FAILOVER_SETTLE_TIMEOUT_MS, true, known);
+    expect(baseline).toEqual(known);
+    expect(sent).toEqual([CDN]);
+  });
+
+  /** Every address hangs, the known one demoted with the rest. Passed over,
+   * it gives the walk no more time than asking it did: the walk's ceiling
+   * stays the one a known endpoint gets, not the one for nothing known. */
+  it("takes no longer when every address hangs", async () => {
+    net.refused.clear();
+    net.blockPage.clear();
+    for (const base of LIST) demotion.demoteEndpoint(base);
+    const known: BaselineIp = { ip: HOME, from: CDN, peer: "198.51.100.7" };
+    const { ms, baseline } = await timed(FAILOVER_SETTLE_TIMEOUT_MS, false, known);
+    expect(baseline).toBeNull();
+    // Before: the CDN's two seconds alone, then the walk's two.
+    expect(ms).toBeLessThanOrEqual(DEMOTED_BASELINE_MS + 100);
   });
 });
 

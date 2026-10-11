@@ -17,8 +17,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 /** An answer, JSON unless `page` gives the HTML of something in front of
- * the backend instead. */
-type Reply = { status: number; body?: unknown; page?: string } | "unreachable";
+ * the backend instead, and sent only once `after` has settled when it is
+ * given. */
+type Reply = { status: number; body?: unknown; page?: string; after?: Promise<unknown> } | "unreachable";
 const replies: Record<string, Reply[]> = {};
 const requested: string[] = [];
 
@@ -28,14 +29,17 @@ vi.mock("@tauri-apps/plugin-http", () => ({
     requested.push(path);
     const reply = replies[path]?.shift();
     if (reply === undefined || reply === "unreachable") return Promise.reject(new Error(`no route to ${url}`));
+    const after = reply.after ?? Promise.resolve();
     if (reply.page !== undefined) {
-      return Promise.resolve(new Response(reply.page, { status: reply.status, headers: { "content-type": "text/html" } }));
+      const page = reply.page;
+      return after.then(() => new Response(page, { status: reply.status, headers: { "content-type": "text/html" } }));
     }
-    return Promise.resolve(
-      new Response(reply.body === undefined ? null : JSON.stringify(reply.body), {
-        status: reply.status,
-        headers: { "content-type": "application/json" },
-      }),
+    return after.then(
+      () =>
+        new Response(reply.body === undefined ? null : JSON.stringify(reply.body), {
+          status: reply.status,
+          headers: { "content-type": "application/json" },
+        }),
     );
   },
 }));
@@ -278,5 +282,123 @@ describe("the endpoint trace of an authenticated request", () => {
     replies["/customer-auth/refresh"] = [{ status: 200, body: { accessToken: "new-access", refreshToken: "r2" } }];
     await apiRequest("/customer/me", undefined, newTrace());
     expect(requested).toEqual(["/customer/me", "/customer-auth/refresh", "/customer/me"]);
+  });
+});
+
+/** One expiry, met by several requests at once: the dashboard's three
+ * reads and a claim, on the test VM, which sent four refreshes within 0.6
+ * s. Each request still gets what it got before -- a retry with the new
+ * token, a failure in its own words, a sign-out -- from one refresh. */
+describe("requests that find the token expired at once", () => {
+  /** A refresh held until the test lets it be answered, so the requests'
+   * refusals all come back while it is under way. */
+  function held(reply: Exclude<Reply, "unreachable"> | "unreachable") {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const answer: Exclude<Reply, "unreachable"> =
+      reply === "unreachable" ? { status: 0, after: gate.then(() => Promise.reject(new Error("no route"))) } : { ...reply, after: gate };
+    return { answer, release };
+  }
+  const settle = async () => {
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  const READS = ["/customer/me", "/customer/subscriptions", "/customer/protocol-users"];
+  const refreshes = () => requested.filter((path) => path === "/customer-auth/refresh").length;
+
+  it("send one refresh, and each is retried with the new token", async () => {
+    for (const path of READS) replies[path] = [{ status: 401 }, { status: 200, body: { path } }];
+    const refresh = held({ status: 200, body: { accessToken: "new-access", refreshToken: "r2" } });
+    replies["/customer-auth/refresh"] = [refresh.answer];
+
+    const results = Promise.all(READS.map((path) => apiRequest<{ path: string }>(path)));
+    await settle();
+    refresh.release();
+
+    expect(await results).toEqual(READS.map((path) => ({ ok: true, data: { path } })));
+    expect(refreshes()).toBe(1);
+    expect(stored).toEqual({ accessToken: "new-access", refreshToken: "r2" });
+    expect(announced).toBe(0);
+  });
+
+  /** The unanswered reports are made from these traces, and one of a
+   * request that only waited for the refresh has to say what the refresh
+   * did as much as the one that sent it. */
+  it("each record the one refresh in their own trace", async () => {
+    for (const path of READS) replies[path] = [{ status: 401 }, { status: 200, body: { path } }];
+    const refresh = held({ status: 200, body: { accessToken: "new-access", refreshToken: "r2" } });
+    replies["/customer-auth/refresh"] = [refresh.answer];
+    const traces = READS.map(() => newTrace());
+
+    const results = Promise.all(READS.map((path, i) => apiRequest(path, undefined, traces[i])));
+    await settle();
+    refresh.release();
+    await results;
+
+    expect(refreshes()).toBe(1);
+    for (const trace of traces) {
+      expect(renderTrace(trace)).toMatch(/^req: a\.example=h401@\d+; refresh: a\.example=h200@\d+; retry: a\.example=h200@\d+$/);
+    }
+  });
+
+  /** A failure shared, not tried again by each request in turn. */
+  it("share a refresh that could not be completed, and end nothing", async () => {
+    for (const path of READS) replies[path] = [{ status: 401 }];
+    const refresh = held("unreachable");
+    // Answers for any further refresh, which none should send.
+    replies["/customer-auth/refresh"] = [refresh.answer, { status: 200, body: { accessToken: "x", refreshToken: "y" } }];
+
+    const results = Promise.all(READS.map((path) => apiRequest(path)));
+    await settle();
+    refresh.release();
+
+    for (const result of await results) {
+      expect(result.ok).toBe(false);
+      expect(!result.ok && result.sessionExpired).toBeFalsy();
+    }
+    expect(refreshes()).toBe(1);
+    expect(stored).toEqual({ accessToken: "old-access", refreshToken: "refresh" });
+    expect(announced).toBe(0);
+  });
+
+  /** The sign-out rules are each request's, as they were. */
+  it("each end the session when the backend refuses the one refresh", async () => {
+    replies["/customer/subscriptions"] = [{ status: 200, body: [] }];
+    await apiRequest("/customer/subscriptions");
+    requested.length = 0;
+    for (const path of READS) replies[path] = [{ status: 401 }];
+    const refresh = held({ status: 401, body: REVOKED });
+    replies["/customer-auth/refresh"] = [refresh.answer];
+
+    const results = Promise.all(READS.map((path) => apiRequest(path)));
+    await settle();
+    refresh.release();
+
+    for (const result of await results) expect(!result.ok && result.sessionExpired).toBe(true);
+    expect(refreshes()).toBe(1);
+    expect(stored).toBeNull();
+    expect(announced).toBeGreaterThan(0);
+  });
+
+  /** A refusal that comes back after another request has already renewed
+   * the session -- on the VM, the claim's, which sent a fourth refresh. */
+  it("retry a request refused after the session was renewed with the new token, sending no refresh", async () => {
+    replies["/customer/me"] = [{ status: 401 }, { status: 200, body: { id: "c1" } }];
+    replies["/customer-auth/refresh"] = [{ status: 200, body: { accessToken: "new-access", refreshToken: "r2" } }];
+    let releaseLate: () => void = () => undefined;
+    const lateRefusal = new Promise<void>((resolve) => {
+      releaseLate = resolve;
+    });
+    replies["/customer/subscriptions"] = [{ status: 401, after: lateRefusal }, { status: 200, body: [] }];
+
+    const late = apiRequest("/customer/subscriptions");
+    await settle();
+    expect(await apiRequest("/customer/me")).toEqual({ ok: true, data: { id: "c1" } });
+    releaseLate();
+
+    expect(await late).toEqual({ ok: true, data: [] });
+    expect(refreshes()).toBe(1);
+    expect(stored).toEqual({ accessToken: "new-access", refreshToken: "r2" });
   });
 });

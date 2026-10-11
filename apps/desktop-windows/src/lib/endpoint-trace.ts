@@ -88,6 +88,11 @@ export interface EndpointTrace {
   /** The phase new attempts are recorded under. Moved on by `api.ts`. */
   phase: TracePhase;
   entries: TraceEntry[];
+  /** Traces each attempt is recorded in as well, as the same entry: the
+   * requests waiting on a token refresh that one of them sent
+   * (`renewSession` in api.ts). Each still says what its renewal did,
+   * though only one request sent it. */
+  copies?: EndpointTrace[];
 }
 
 export function newTrace(): EndpointTrace {
@@ -104,6 +109,7 @@ export function beginAttempt(
   if (!trace) return undefined;
   const entry: TraceEntry = { phase: trace.phase, base, startedAt: now, outcome: "pending" };
   trace.entries.push(entry);
+  for (const copy of trace.copies ?? []) copy.entries.push(entry);
   return entry;
 }
 

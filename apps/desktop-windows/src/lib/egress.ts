@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints } from "./api-endpoints";
+import { announceBackendAnswer, isBackendHealthAnswer } from "./backend-answer";
 import { isKnownBlockPage } from "./endpoint-bundle-store";
 import { clearDemotion, demotedLast, isDemoted, isNameDemoted } from "./endpoint-demotion";
 import { rememberNetwork } from "./network-identity";
@@ -263,7 +264,9 @@ const BARE_WALK: Pick<WalkOptions, "look" | "timeoutFor" | "together" | "answere
 };
 
 /** Whether `base`'s name resolves to Iran's block page and nothing else,
- * for the one request a baseline makes to it.
+ * for the one request a baseline makes to it -- and for the settle, which
+ * stops asking an endpoint it knew to answer once its name is there
+ * (`settleAndCaptureBaseline`).
  *
  * IPv4 only, through this machine's own resolver, and with no question
  * about a proxy -- because that is how `/health/ip` is asked: over IPv4
@@ -280,7 +283,7 @@ const BARE_WALK: Pick<WalkOptions, "look" | "timeoutFor" | "together" | "answere
  *
  * Never rejects: false for an address literal, a name that does not
  * resolve in time, or a build without the command. */
-function baselineBlockPage(base: string): Promise<boolean> {
+export function baselineBlockPage(base: string): Promise<boolean> {
   let name: string;
   try {
     name = new URL(base).hostname;
@@ -508,6 +511,13 @@ async function askAndJudge(
 ): Promise<OneAnswer> {
   try {
     const res = await transport(base, budget);
+    // Neoxify answered, whatever the walk makes of the reading -- one of the
+    // API's addresses, over TLS with one of our names. A dashboard saying it
+    // cannot be reached hears of it (backend-answer.ts): on the test VM it
+    // went on saying so for a second after the tunnel's health check had
+    // been answered. Its JSON only, and not in a doubtful status, as for
+    // the API's own requests; never an error page from in front of it.
+    if (isBackendHealthAnswer(res)) announceBackendAnswer({ read: false, healthCheck: true });
     const peer = typeof res.peer === "string" && res.peer ? plainAddress(res.peer.trim()) : undefined;
     // The tunnel's own server, reached around the tunnel: not even "an
     // answer" in the sense below. Packets that never entered the tunnel

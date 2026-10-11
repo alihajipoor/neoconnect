@@ -70,7 +70,15 @@ import {
 } from "@shared/lib/failure-text";
 import { STILL_TRYING_AFTER_MS, useStillTrying } from "@shared/lib/still-trying";
 import { onBackendAnswer } from "@shared/lib/api";
-import { reasonAfterUnansweredLoad, useOfflineRetry, type OfflineLoadOutcome, type OfflineRetryTrigger } from "@shared/lib/offline-retry";
+import {
+  answerAsksAgain,
+  reasonAfterAnswer,
+  reasonAfterUnansweredLoad,
+  reasonWhileWaiting,
+  useOfflineRetry,
+  type OfflineLoadOutcome,
+  type OfflineRetryTrigger,
+} from "@shared/lib/offline-retry";
 import { sessionGeneration } from "@shared/lib/session-end";
 import {
   cachedRoutesFor,
@@ -747,7 +755,15 @@ export function Dashboard({
             const cached = await loadSnapshot();
             if (settled || !cached || loadRef.current !== load || sessionGeneration() !== sessionAtStart) return;
             shownWhileWaiting = true;
-            await showCached(cached, preferRouteId, load, "trying", sessionAtStart, ready);
+            // "Still trying" only while nothing has answered, as on Windows.
+            await showCached(
+              cached,
+              preferRouteId,
+              load,
+              reasonWhileWaiting(answersHeardRef.current !== answersAtStart),
+              sessionAtStart,
+              ready,
+            );
           })();
         }, STILL_TRYING_AFTER_MS);
     const [meResult, subsResult, usersResult] = await Promise.all([
@@ -927,10 +943,12 @@ export function Dashboard({
 
   // Neoxify answered something while the screen says it cannot be reached
   // -- the claim before a connect, a queued report, a renewal through the
-  // tunnel. The banner stops saying so at once, keeping only that what is
-  // on screen is the saved copy, and the load is made again now. As on
-  // Windows, where the test VM showed "Can't reach Neoxify right now"
-  // above "You're protected" a minute after both had been answered.
+  // tunnel, the tunnel's health check. The banner stops saying so at once,
+  // keeping only that what is on screen is the saved copy, and -- for any
+  // but the health check, asked every fifteen seconds while connected
+  // (`answerAsksAgain`) -- the load is made again now. As on Windows,
+  // where the test VM showed "Can't reach Neoxify right now" above "You're
+  // protected" a minute after both had been answered.
   //
   // Counted whether or not the screen is on its snapshot, for a load that
   // fails after it (`answersHeardRef`). An answer to a read while a load is
@@ -941,8 +959,8 @@ export function Dashboard({
       onBackendAnswer((answer) => {
         answersHeardRef.current += 1;
         if (offlineSinceRef.current === null) return;
-        setOfflineReason("reached");
-        offlineRetry.trigger("answered", { ifLoading: answer.read ? "drop" : "keep" });
+        setOfflineReason((current) => reasonAfterAnswer(current, answer));
+        if (answerAsksAgain(answer)) offlineRetry.trigger("answered", { ifLoading: answer.read ? "drop" : "keep" });
       }),
     [],
   );

@@ -1,5 +1,6 @@
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { announceBackendAnswer } from "./backend-answer";
 
 /** Background update checking, Discord-shaped: find it quietly, fetch
  * it quietly, apply it when the customer is already closing the app.
@@ -51,6 +52,16 @@ export async function checkAndStage(onState: (state: UpdateState) => void): Prom
   inFlight = true;
   try {
     const update = await check();
+    // Answered by Neoxify, update or none: every endpoint the updater asks
+    // is the API's own `/updates` (tauri.conf.json, and the bundle's panel
+    // addresses that apply-updater-endpoints.mjs puts ahead of them), and
+    // the plugin returns only on a 204 or on a success whose JSON is a
+    // release (tauri-plugin-updater's `check`) -- a page, a refusal or
+    // silence from every endpoint is the error below. On the test VM this
+    // check was answered 43 seconds before the dashboard stopped saying it
+    // could not reach Neoxify (backend-answer.ts). The download that may
+    // follow is GitHub's, and says nothing about Neoxify.
+    announceBackendAnswer({ read: false });
     if (!update) return;
 
     let downloaded = 0;

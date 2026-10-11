@@ -131,7 +131,15 @@ import { useI18n } from "../lib/i18n";
 import { failureText, offlineReason as reasonFor, offlineText, type OfflineReason, type ShownFailure } from "../lib/failure-text";
 import { STILL_TRYING_AFTER_MS, useStillTrying } from "../lib/still-trying";
 import { onBackendAnswer } from "../lib/api";
-import { reasonAfterUnansweredLoad, useOfflineRetry, type OfflineLoadOutcome, type OfflineRetryTrigger } from "../lib/offline-retry";
+import {
+  answerAsksAgain,
+  reasonAfterAnswer,
+  reasonAfterUnansweredLoad,
+  reasonWhileWaiting,
+  useOfflineRetry,
+  type OfflineLoadOutcome,
+  type OfflineRetryTrigger,
+} from "../lib/offline-retry";
 
 /** How a ladder pass ended.
  *
@@ -1349,7 +1357,14 @@ export function Dashboard({
             const cached = await loadSnapshot();
             if (settled || !cached || loadSeqRef.current !== load || sessionGeneration() !== sessionAtStart) return;
             shownWhileWaiting = true;
-            await showCached(cached, preferRouteId, load, "trying");
+            // "Still trying" only while nothing has answered: the account
+            // may have, with the credentials still out.
+            await showCached(
+              cached,
+              preferRouteId,
+              load,
+              reasonWhileWaiting(answersHeardRef.current !== answersAtStart),
+            );
           })();
         }, STILL_TRYING_AFTER_MS);
     const [meResult, subsResult, usersResult] = await Promise.all([
@@ -1565,12 +1580,17 @@ export function Dashboard({
 
   // Neoxify answered something while the screen says it cannot be reached
   // -- the claim before a connect, a queued report, a renewal through a
-  // tunnel. The banner stops saying so at once, keeping only that what is
-  // on screen is the saved copy, and the load is made again now rather
-  // than at the next step of the backoff. On the test VM the banner said
-  // "Can't reach Neoxify right now" above "You're protected" a minute
-  // after the claim and the reports had been answered. Through the ref:
-  // registered once, for the life of the screen.
+  // tunnel, the updater's check, the tunnel's health check. The banner
+  // stops saying so at once, keeping only that what is on screen is the
+  // saved copy, and -- for any but the health check, which is asked every
+  // fifteen seconds while connected (`answerAsksAgain`) -- the load is made
+  // again now rather than at the next step of the backoff. On the test VM
+  // the banner said "Can't reach Neoxify right now" above "You're
+  // protected" a minute after the claim and the reports had been answered;
+  // with those heard, it still said so 43 seconds after the updater's
+  // check, and a second after the tunnel's health check, neither of which
+  // goes through api.ts (backend-answer.ts). Through the ref: registered
+  // once, for the life of the screen.
   //
   // Counted whether or not the screen is on its snapshot, for a load that
   // fails after it (`answersHeardRef`). An answer to a read that comes
@@ -1582,8 +1602,8 @@ export function Dashboard({
       onBackendAnswer((answer) => {
         answersHeardRef.current += 1;
         if (offlineSinceRef.current === null) return;
-        setOfflineReason("reached");
-        offlineRetry.trigger("answered", { ifLoading: answer.read ? "drop" : "keep" });
+        setOfflineReason((current) => reasonAfterAnswer(current, answer));
+        if (answerAsksAgain(answer)) offlineRetry.trigger("answered", { ifLoading: answer.read ? "drop" : "keep" });
       }),
     [],
   );

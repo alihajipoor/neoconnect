@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { BackendAnswer } from "./backend-answer";
 import type { OfflineReason } from "./failure-text";
 
 /** Asking Neoxify again while a dashboard is running on its cached
@@ -32,9 +33,10 @@ import type { OfflineReason } from "./failure-text";
  * every `RESUME_RETRY_GAP_MS`, since a window gets focus every time it is
  * clicked), a tunnel was verified (`tunnel`: the path to Neoxify is a
  * different one now), or Neoxify answered something else this app sent
- * (`answered`: a claim, a report, a renewal). Those are what an answer is
- * most likely to follow, and waiting two minutes after one is the stale
- * banner over again.
+ * (`answered`: a claim, a report, a renewal, the updater's check -- not
+ * the tunnel's health check, which `answerAsksAgain` explains). Those are
+ * what an answer is most likely to follow, and waiting two minutes after
+ * one is the stale banner over again.
  *
  * **A reason that comes while a load is under way is kept, not dropped.**
  * It used to be dropped, and that brought the VM's banner back in a
@@ -115,6 +117,57 @@ export function offlineRetryDelay(failures: number): number {
  * anything that came before it reached the screen. */
 export function reasonAfterUnansweredLoad(found: OfflineReason, heardSinceItBegan: boolean): OfflineReason {
   return found === "unreached" && heardSinceItBegan ? "reached" : found;
+}
+
+/** What the banner says when the snapshot goes up in front of a load
+ * still waiting past `STILL_TRYING_AFTER_MS`, given whether Neoxify has
+ * answered anything this app sent since that load began.
+ *
+ * "Still trying to reach Neoxify" says nothing has answered yet. The
+ * account can answer at two seconds while the credentials are still out
+ * at eight -- a slower race on a lossy network, or device credentials
+ * being made -- and the banner used to say it anyway, for up to fifteen
+ * seconds more, after Neoxify had answered. Then it has been reached
+ * (`reached`), and what is on screen is the saved copy until the rest of
+ * the load answers. */
+export function reasonWhileWaiting(heardSinceItBegan: boolean): OfflineReason {
+  return heardSinceItBegan ? "reached" : "trying";
+}
+
+/** What the banner says once Neoxify has answered something, given what
+ * it said before (`onBackendAnswer`).
+ *
+ * Any answer heard through the API's own requests, or the updater's, is
+ * the newest word, and asks for the load again at once
+ * (`answerAsksAgain`): until that load ends, Neoxify has been reached
+ * (`reached`).
+ *
+ * The egress check's `/health/ip` (`BackendAnswer.healthCheck`) asks
+ * nothing, so it changes only what it shows to be untrue: that nothing
+ * has answered (`unreached`, `trying`). A load answered with an error says
+ * what the backend said about that load, and a health check says nothing
+ * about it; replaced, it would be gone from the banner within fifteen
+ * seconds of every failure while a tunnel is up, with no newer load to
+ * say anything in its place. */
+export function reasonAfterAnswer(current: OfflineReason, answer: BackendAnswer): OfflineReason {
+  if (!answer.healthCheck) return "reached";
+  return current === "unreached" || current === "trying" ? "reached" : current;
+}
+
+/** Whether an answer from Neoxify asks for a screen's load again at once
+ * (`trigger("answered")`).
+ *
+ * Not the egress check's `/health/ip`. While a tunnel is up it is asked
+ * every fifteen seconds, by the health poll, and answered whatever the
+ * load would meet: through a system proxy that has died, or with an
+ * error the backend gives the load and not the health check, the load
+ * fails each time and the health check is answered each time -- a load
+ * every fifteen seconds, for as long as the tunnel stays up, with the
+ * backoff never reached. What the health check shows is said at once
+ * (`reasonAfterAnswer`); the asking again stays the backoff's, the
+ * tunnel's (`tunnel`) and the other answers'. */
+export function answerAsksAgain(answer: BackendAnswer): boolean {
+  return !answer.healthCheck;
 }
 
 export interface OfflineRetryDeps {

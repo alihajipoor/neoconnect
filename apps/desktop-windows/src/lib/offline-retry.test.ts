@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  answerAsksAgain,
   OFFLINE_RETRY_BACKOFF_MS,
   OFFLINE_RETRY_EVERY_MS,
   OfflineRetry,
   offlineRetryDelay,
   OWN_LOAD_EXPECTED_MS,
+  reasonAfterAnswer,
   reasonAfterUnansweredLoad,
+  reasonWhileWaiting,
   RESUME_RETRY_GAP_MS,
   type OfflineLoadOutcome,
   type OfflineRetryTrigger,
@@ -572,5 +575,91 @@ describe("what the banner says after a load nothing answered", () => {
   it("keeps an error the backend answered the load with, which is itself the newest answer", () => {
     const failure = { error: "Server error", status: 500 };
     expect(reasonAfterUnansweredLoad(failure, true)).toBe(failure);
+  });
+});
+
+/** The snapshot put up in front of the mount's load at eight seconds, on
+ * both clients. "Still trying to reach Neoxify" used to be said there
+ * whatever had answered: the account answered at two seconds, the
+ * credentials still out, and the banner said nothing had answered for up
+ * to fifteen seconds more. */
+describe("what the banner says while the load still waits", () => {
+  it("says it is still trying while nothing has answered", () => {
+    expect(reasonWhileWaiting(false)).toBe("trying");
+  });
+
+  it("says Neoxify was reached once anything has answered since the load began", () => {
+    expect(reasonWhileWaiting(true)).toBe("reached");
+  });
+});
+
+/** An answer from Neoxify while the screen is on its snapshot. The test
+ * VM: the updater's check answered, and "Can't reach Neoxify right now"
+ * stayed up 43 seconds more; the tunnel's health check answered, and it
+ * stayed a second more. Both are heard now (backend-answer.test.ts). */
+describe("what the banner says when Neoxify answers", () => {
+  const failure = { error: "Server error", status: 500 };
+  const request = { read: false };
+  const read = { read: true };
+  const health = { read: false, healthCheck: true } as const;
+
+  it("says Neoxify was reached after any answer that asks for the load again", () => {
+    for (const answer of [request, read]) {
+      for (const current of ["unreached", "trying", "reached", failure] as const) {
+        expect(reasonAfterAnswer(current, answer)).toBe("reached");
+      }
+    }
+  });
+
+  it("drops 'can't reach' and 'still trying' for the tunnel's health check", () => {
+    expect(reasonAfterAnswer("unreached", health)).toBe("reached");
+    expect(reasonAfterAnswer("trying", health)).toBe("reached");
+    expect(reasonAfterAnswer("reached", health)).toBe("reached");
+  });
+
+  /** It asks for nothing, so nothing newer would take the error's place;
+   * and while a tunnel is up it comes every fifteen seconds. */
+  it("keeps an error the backend answered the load with, which a health check says nothing about", () => {
+    expect(reasonAfterAnswer(failure, health)).toBe(failure);
+  });
+});
+
+describe("which answers ask for the load again at once", () => {
+  it("asks for any answer but the health check: a claim, a report, the updater's check", () => {
+    expect(answerAsksAgain({ read: false })).toBe(true);
+    expect(answerAsksAgain({ read: true })).toBe(true);
+  });
+
+  /** Asked every fifteen seconds while connected, and answered whatever
+   * the load meets: through a system proxy that has died, the load fails
+   * each time and the health check is answered each time. Asking at each
+   * one made the load every fifteen seconds for as long as the tunnel
+   * stayed up. */
+  it("does not ask for the tunnel's health check", () => {
+    expect(answerAsksAgain({ read: false, healthCheck: true })).toBe(false);
+  });
+
+  it("keeps the backoff on a screen whose health check is answered every fifteen seconds", async () => {
+    const h = harness();
+    h.retry.start();
+    let ended = 0;
+    for (let poll = 0; poll < 8; poll += 1) {
+      await h.advance(15_000);
+      // The health poll's answer, as the dashboards' handler treats it.
+      if (answerAsksAgain({ read: false, healthCheck: true })) h.retry.trigger("answered", { ifLoading: "keep" });
+      // Every load fails at once, as it does behind a dead proxy.
+      while (ended < h.loads.length) {
+        h.loads[ended].end("unanswered");
+        ended += 1;
+        await h.settle();
+      }
+    }
+    // Two minutes: the timer's loads at fifteen, forty-five and a hundred
+    // and five seconds. Asked at each answer, it was two every fifteen.
+    expect(h.loads.map((load) => [load.why, load.at])).toEqual([
+      ["timer", 15_000],
+      ["timer", 45_000],
+      ["timer", 105_000],
+    ]);
   });
 });

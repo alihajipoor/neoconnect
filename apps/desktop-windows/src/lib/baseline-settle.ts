@@ -1,11 +1,13 @@
 import {
   askedAroundTunnel,
   BASELINE_HEDGE_MS,
+  baselineBlockPage,
   captureBaselineIp,
   EGRESS_TIMEOUT_MS,
   type BaselineIp,
   type TunnelServer,
 } from "./egress";
+import { isDemoted } from "./endpoint-demotion";
 
 /** How often the settle asks again while ordinary networking is coming
  * back after a teardown. */
@@ -39,8 +41,18 @@ export const SETTLE_INTERVAL_MS = 400;
  * Now `known`, an endpoint that already answered on this network (the
  * pass's previous baseline, or the one taken when the screen loaded), is
  * asked alone first, within the budget: it is the one that is going to
- * answer, and it is the one the `sameEndpointOnly` check will ask. Only
- * if it does not is the whole list walked -- in the order the API's own
+ * answer, and it is the one the `sameEndpointOnly` check will ask --
+ * unless this network has since shown it will not. One the API's own
+ * requests have demoted here (`isDemoted`: it timed out, or its name went
+ * to the block page) is not asked first at all, and one whose name the
+ * settle's own look finds on the block page is not asked again: the settle
+ * goes straight on to the hedged walk, which still asks it where this
+ * network's order puts it. Asked first anyway, a demoted endpoint that
+ * hangs held the first rung for its two seconds, and the last rung after
+ * a teardown for seven, where a mirror that answers at once was next in
+ * the walk; and a name on the block page was asked again every 400 ms
+ * until the budget was gone. Only if the known endpoint does not answer,
+ * or is passed over, is the whole list walked -- in the order the API's own
  * requests use on this network, with the addresses that have lately
  * failed here last (`BARE_WALK` in egress.ts). Which endpoint supplies
  * the baseline does not matter so long as the comparison asks it again
@@ -95,14 +107,23 @@ export async function settleAndCaptureBaseline(
 ): Promise<BaselineIp | null> {
   const deadline = Date.now() + budgetMs;
   const ask = known !== null && !askedAroundTunnel(known, tunnelServer) ? known : null;
-  if (ask !== null) {
+  if (ask !== null && !isDemoted(ask.from)) {
+    // Looked at beside the first ask, which looks too and ends at the block
+    // page without saying why; this says whether to ask again.
+    let onBlockPage = false;
+    void baselineBlockPage(ask.from).then((found) => {
+      onBlockPage = found;
+    });
     for (;;) {
       const ip = await captureBaselineIp({ only: ask.from, deadline, tunnelServer, nodeAddresses });
       if (ip !== null) return ip;
-      if (!afterTeardown || Date.now() >= deadline) break;
+      if (!afterTeardown || Date.now() >= deadline || onBlockPage || isDemoted(ask.from)) break;
       await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
     }
   }
+  // The longer ceiling only with nothing known: a known endpoint passed
+  // over for having failed here gives the walk no more time than asking it
+  // would have, so no pass takes longer for it.
   const walkDeadline = Math.max(
     deadline,
     Date.now() + (ask === null ? 2 * EGRESS_TIMEOUT_MS : EGRESS_TIMEOUT_MS),

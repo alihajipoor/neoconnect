@@ -30,10 +30,20 @@ describe.each(screens)("the %s dashboard's first load", (_name, path, signature)
     expect(timer).toContain("const cached = await loadSnapshot();");
     expect(timer).toContain("if (settled || !cached || ");
     expect(timer).toContain("shownWhileWaiting = true;");
-    expect(timer).toMatch(/await showCached\(cached, preferRouteId, load, "trying"/);
+    expect(timer).toMatch(/await showCached\(\s*cached,\s*preferRouteId,\s*load,\s*reasonWhileWaiting\(/);
     // Set before the requests are asked, and cleared when they settle.
     expect(waiting).toBeLessThan(load.indexOf("getMe(requests.trace(\"me\")),"));
     expect(load).toMatch(/\]\)\.finally\(\(\) => \{\s*settled = true;\s*clearTimeout\(waiting\);\s*\}\);/);
+  });
+
+  /** "Still trying to reach Neoxify" says nothing has answered. The
+   * account answering at two seconds, the credentials still out at eight,
+   * and the banner said it anyway until the load ended. */
+  it("says it is still trying only while nothing has answered since the load began", () => {
+    const waiting = load.indexOf("const waiting = shownOnceRef.current");
+    const timer = load.slice(waiting, load.indexOf("}, STILL_TRYING_AFTER_MS);", waiting));
+    expect(timer).toContain("reasonWhileWaiting(answersHeardRef.current !== answersAtStart)");
+    expect(timer).not.toContain('"trying"');
   });
 
   /** Only the first: a load after a server switch holds a newer choice
@@ -146,11 +156,15 @@ describe.each(screens)("the %s dashboard on its snapshot", (_name, path, signatu
     expect(onSwitched.slice(0, onSwitched.indexOf("}}"))).toMatch(/void loadAll\(shown \?\? undefined\);(\s*\/\/[^\n]*\n)*\s*switchLoadSettled\(\);/);
   });
 
-  it("takes any answer from Neoxify as the last word on the banner, and asks again at once", () => {
+  /** Every answer Neoxify gives, the updater's check and the tunnel's
+   * health check included (backend-answer-elsewhere.test.ts); what each
+   * does to the banner and the asking again is offline-retry.test.ts's. */
+  it("takes any answer from Neoxify as the last word on the banner, and asks again at once for all but the health check", () => {
     const heard = screen.slice(screen.indexOf("onBackendAnswer((answer) => {"));
     expect(heard).toMatch(
-      /onBackendAnswer\(\(answer\) => \{\s*answersHeardRef\.current \+= 1;\s*if \(offlineSinceRef\.current === null\) return;\s*setOfflineReason\("reached"\);\s*offlineRetry\.trigger\("answered", \{ ifLoading: answer\.read \? "drop" : "keep" \}\);/,
+      /onBackendAnswer\(\(answer\) => \{\s*answersHeardRef\.current \+= 1;\s*if \(offlineSinceRef\.current === null\) return;\s*setOfflineReason\(\(current\) => reasonAfterAnswer\(current, answer\)\);\s*if \(answerAsksAgain\(answer\)\) offlineRetry\.trigger\("answered", \{ ifLoading: answer\.read \? "drop" : "keep" \}\);/,
     );
+    expect(screen).not.toContain('setOfflineReason("reached")');
     expect(screen).toContain('if (connectionState === "connected") offlineRetry.trigger("tunnel");');
   });
 

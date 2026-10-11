@@ -1,6 +1,7 @@
 import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints, forgetEndpoint, rememberedEndpoint, rememberEndpoint } from "./api-endpoints";
 import { deviceHeaders } from "./device-identity";
+import { announceBackendAnswer, DOUBTFUL_STATUSES, type BackendAnswer } from "./backend-answer";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
 import {
   clearDemotion,
@@ -119,12 +120,6 @@ const servedBackend = new Set<string>();
  * address serves the backend's JSON again. */
 const notBackend = new Set<string>();
 
-/** The JSON statuses an address that is not the backend has been seen
- * answering every request with. The backend gives them too -- an expired
- * token, a forbidden route, a missing one -- so one of them, alone, proves
- * neither that an address is the backend nor that it is not. */
-const DOUBTFUL_STATUSES = new Set([401, 403, 404]);
-
 /** Whether `response` is JSON in one of the `DOUBTFUL_STATUSES`. */
 function isDoubtful(response: Response): boolean {
   return isBackendAnswer(response) && DOUBTFUL_STATUSES.has(response.status);
@@ -156,17 +151,10 @@ function noteAnswer(base: string, response: Response, answer: BackendAnswer): vo
   if (servesBackend(response) || bodilessSuccess(response)) announceBackendAnswer(answer);
 }
 
-/** What a listener is told about an answer (`onBackendAnswer`). */
-export interface BackendAnswer {
-  /** Whether the request that was answered only read: a GET -- the
-   * account, the plan, the credentials, the server list, the health check
-   * a write's race sends first -- or the token refresh, which any request
-   * may need before it is sent. A dashboard's load is made of nothing
-   * else, so an answer like this while one is under way is most likely
-   * that load's own; anything else -- a claim, a renewal, a report, a
-   * release, a server switch -- was sent by something else. */
-  read: boolean;
-}
+// Who is told, and what: backend-answer.ts, where the answers heard
+// outside this file are announced too. Exported from here as well, where
+// the screens have always found it.
+export { onBackendAnswer, type BackendAnswer } from "./backend-answer";
 
 /** Whether a request to `path` is a read, as `BackendAnswer` means it. */
 function isRead(path: string, init: RequestInit): boolean {
@@ -179,42 +167,6 @@ function isRead(path: string, init: RequestInit): boolean {
  * its 304 to a revalidated read. */
 function bodilessSuccess(response: Response): boolean {
   return (response.ok || response.status === 304) && !isBackendAnswer(response) && !isForeignPage(response);
-}
-
-/** Who is told when the backend answers. See `onBackendAnswer`. */
-const answerListeners = new Set<(answer: BackendAnswer) => void>();
-
-/** Calls `listener` whenever the backend answers any request this app
- * sends, through any address, whatever the request was: its JSON in any
- * status but the doubtful ones (`servesBackend`), or a success with no
- * body. Not a page from in front of it, which says nothing about whether
- * Neoxify was reached. Returns the function that stops it.
- *
- * For a screen that has said Neoxify cannot be reached: the claim before
- * a connect, a report delivered, a renewal answered -- any of them makes
- * that untrue, and the screen has to stop saying it then, not when its
- * own next request happens to go out. On the test VM the dashboard's
- * banner went on saying "Can't reach Neoxify" for a minute after the
- * claim and the queued reports had been answered through the tunnel
- * (offline-retry.ts).
- *
- * The listener is told whether the request was a read (`BackendAnswer`),
- * so that a screen can tell its own load's answers from the rest. */
-export function onBackendAnswer(listener: (answer: BackendAnswer) => void): () => void {
-  answerListeners.add(listener);
-  return () => {
-    answerListeners.delete(listener);
-  };
-}
-
-function announceBackendAnswer(answer: BackendAnswer): void {
-  for (const listener of [...answerListeners]) {
-    try {
-      listener(answer);
-    } catch {
-      // A screen's handler failing is no reason for this request to.
-    }
-  }
 }
 
 /** Whether this answer to the public health check proves the address
@@ -442,6 +394,7 @@ function timeoutAt(base: string): number {
  * refresh is believed, or which address its races ask first. */
 export function resetRaceWinnerForTests(): void {
   lastWinner = null;
+  refreshInFlight = null;
   servedBackend.clear();
   notBackend.clear();
   resetDemotionsForTests();
@@ -2050,6 +2003,73 @@ async function refreshTokens(trace?: EndpointTrace): Promise<Refresh> {
   return { kind: "renewed", tokens: result.data };
 }
 
+/** A token refresh under way: what it will come to, and the trace it is
+ * recorded in, whose every attempt is copied into the traces of the
+ * requests waiting for it (`EndpointTrace.copies`). */
+interface RefreshFlight {
+  result: Promise<Refresh>;
+  trace: EndpointTrace;
+  waiting: EndpointTrace[];
+}
+
+/** The token refresh under way, if one is. See `renewSession`. */
+let refreshInFlight: RefreshFlight | null = null;
+
+/** Renews the session for a request the backend has just refused with an
+ * expired access token, `sentWith` -- with one refresh, however many
+ * requests found it expired.
+ *
+ * Every request that finds the token expired needs the same new pair, and
+ * each used to send a refresh of its own. On the test VM one expiry, met
+ * by the dashboard's three reads and a claim at once, sent four refreshes
+ * within 0.6 s: four more requests on a network where every request
+ * counts, and four new pairs, each overwriting the last. So a request that
+ * finds a refresh under way waits for that one, and is told what it came
+ * to, whatever that was: a failure is shared, not tried again by each
+ * request in turn. One whose refusal comes back after a refresh has
+ * already renewed the session -- the pair stored is no longer the one it
+ * was sent with -- is retried with the stored pair, and sends no refresh
+ * at all.
+ *
+ * Not about signing anyone out. The backend checks a refresh token by its
+ * session and token version, and does not treat one presented twice as
+ * stolen, so the four refreshes were all answered 200. What each request
+ * does with the outcome is unchanged: `authenticatedAttempt` treats a
+ * shared refusal exactly as it treated its own, and the backend would have
+ * refused each of their own refreshes the same way.
+ *
+ * Every waiting request's trace records the refresh's legs as they
+ * happen, the same entries as the one that sent it, so a report made from
+ * any of them still says what the renewal did. */
+async function renewSession(sentWith: string, trace?: EndpointTrace): Promise<Refresh> {
+  if (refreshInFlight !== null) return waitFor(refreshInFlight, trace);
+  const stored = await getTokens();
+  if (stored !== null && stored.accessToken !== sentWith) return { kind: "renewed", tokens: stored };
+  // Another request may have begun one while the pair was being read.
+  if (refreshInFlight !== null) return waitFor(refreshInFlight, trace);
+  const waiting: EndpointTrace[] = [];
+  const shared: EndpointTrace = { phase: "refresh", entries: [], copies: waiting };
+  const flight: RefreshFlight = {
+    trace: shared,
+    waiting,
+    result: refreshTokens(shared).finally(() => {
+      if (refreshInFlight === flight) refreshInFlight = null;
+    }),
+  };
+  refreshInFlight = flight;
+  return waitFor(flight, trace);
+}
+
+/** `flight`'s outcome, with `trace` recording its legs from now on and
+ * holding the ones it has had so far. */
+function waitFor(flight: RefreshFlight, trace?: EndpointTrace): Promise<Refresh> {
+  if (trace !== undefined) {
+    trace.entries.push(...flight.trace.entries);
+    flight.waiting.push(trace);
+  }
+  return flight.result;
+}
+
 /** Either a real HTTP response, or a failure already phrased for the
  * customer. Deliberately not an `ApiResult`: the status still has to be
  * interpreted, and each caller below interprets it differently. */
@@ -2107,7 +2127,7 @@ async function authenticatedAttempt(path: string, init?: ApiInit, trace?: Endpoi
   // session's tokens; it is returned as it is.
   if (res.status === 401 && isBackendAnswer(res) && !foreignResponse(res)) {
     if (trace) trace.phase = "refresh";
-    const refreshed = await refreshTokens(trace);
+    const refreshed = await renewSession(tokens.accessToken, trace);
     if (refreshed.kind === "unavailable") {
       // Not a verdict on the session, so neither the tokens nor the
       // screen change. The next request tries the refresh again. In
