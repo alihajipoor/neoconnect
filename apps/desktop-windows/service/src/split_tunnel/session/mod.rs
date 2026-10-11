@@ -550,6 +550,12 @@ impl<P: Parts> Session<P> {
         })
     }
 
+    /// Whether the backstop has switched interception off. See
+    /// `SplitTunnel::interception_stopped`.
+    pub(super) fn interception_stopped(&self) -> bool {
+        self.watchdog_tripped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// What the live counters say is wrong, or `None` when nothing is.
     /// See `SplitTunnel::complaint`.
     pub(super) fn complaint(&self) -> Option<String> {

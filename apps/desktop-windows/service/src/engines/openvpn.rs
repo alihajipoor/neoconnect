@@ -796,6 +796,48 @@ fn wait_until_up(
     }
 }
 
+/// What OpenVPN logs each time it goes round again: a ping-restart after
+/// the server went quiet, a TLS error, a reset connection -- every soft
+/// or hard restart ends its line with this. Its last word on the link
+/// until [`TUNNEL_UP_MARK`] follows it.
+const RESTART_MARK: &str = "process restarting";
+
+/// How much of the end of the log [`link_reading`] reads. At `verb 3` a
+/// tunnel that is up logs next to nothing, so its last restart or
+/// completion is well inside this; one that is not is logging little else.
+const LOG_TAIL_BYTES: u64 = 16 * 1024;
+
+/// What OpenVPN's own log says about its link, for Custom mode's DNS pin
+/// (`dns::PinWatch`).
+///
+/// `No` while the last thing it logged about the link is a restart, and
+/// `Unknown` otherwise. Never `Yes`: [`TUNNEL_UP_MARK`] is OpenVPN's word
+/// that it set the tunnel up, not that anything has crossed it since --
+/// what puts the pin back is the split tunnel's probe getting a reply.
+pub(super) fn link_reading(log_tail: &str) -> super::dns::Carrying {
+    match (log_tail.rfind(RESTART_MARK), log_tail.rfind(TUNNEL_UP_MARK)) {
+        (Some(restart), Some(up)) if restart > up => super::dns::Carrying::No,
+        (Some(_), None) => super::dns::Carrying::No,
+        _ => super::dns::Carrying::Unknown,
+    }
+}
+
+/// The end of the session's log, as [`link_reading`] wants it: the last
+/// [`LOG_TAIL_BYTES`], or nothing if it cannot be read.
+pub(super) fn log_tail(engines: &Engines) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(engines.config_path(LOG_FILE)) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if file.seek(SeekFrom::Start(len.saturating_sub(LOG_TAIL_BYTES))).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    let _ = file.take(LOG_TAIL_BYTES).read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// The last few lines of an engine log, for an error message.
 fn tail(log: &str) -> String {
     let lines: Vec<&str> = log.lines().rev().take(6).collect();
@@ -1048,6 +1090,49 @@ mod tests {
     fn custom_mode_does_not_block_dns_outside_the_tunnel() {
         let conf = build_config(&profile(), true).unwrap();
         assert!(!conf.contains("block-outside-dns"), "custom mode must not claim DNS");
+    }
+
+    /// What Custom mode's DNS pin reads from OpenVPN's own log: a restart
+    /// that has not been followed by the tunnel coming up again is a link
+    /// that is down. In OpenVPN 2.6's own words, at `verb 3`.
+    #[test]
+    fn a_restart_not_followed_by_the_tunnel_coming_up_reads_as_not_carrying() {
+        use super::super::dns::Carrying;
+        const UP: &str = "2026-10-11 14:00:01 Initialization Sequence Completed\n";
+        const QUIET: &str = "2026-10-11 14:20:11 [server] Inactivity timeout (--ping-restart), restarting\n\
+                             2026-10-11 14:20:11 SIGUSR1[soft,ping-restart] received, process restarting\n\
+                             2026-10-11 14:20:11 Restart pause, 5 second(s)\n";
+        const TLS: &str = "2026-10-11 14:21:16 TLS Error: TLS key negotiation failed to occur within 60 seconds\n\
+                           2026-10-11 14:21:16 SIGUSR1[soft,tls-error] received, process restarting\n";
+
+        assert_eq!(link_reading(UP), Carrying::Unknown, "up is OpenVPN's word, not a measurement of traffic");
+        assert_eq!(link_reading(&format!("{UP}{QUIET}")), Carrying::No);
+        assert_eq!(link_reading(&format!("{UP}{QUIET}{TLS}")), Carrying::No);
+        assert_eq!(link_reading(&format!("{UP}{QUIET}{UP}")), Carrying::Unknown, "it came back by itself");
+        assert_eq!(link_reading(""), Carrying::Unknown);
+    }
+
+    /// Read from the end, and only so much of it: a status poll reads this
+    /// for as long as the session lasts.
+    #[test]
+    fn only_the_end_of_the_log_is_read() {
+        use super::super::dns::Carrying;
+        let dir = std::env::temp_dir().join(format!("neoconnect-openvpn-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let engines = Engines::new(dir.clone(), dir.clone());
+        let filler = "2026-10-11 14:30:00 Data Channel: cipher 'AES-256-GCM'\n".repeat(1_000);
+
+        std::fs::write(dir.join(LOG_FILE), format!("SIGUSR1[soft,ping-restart] received, process restarting\n{filler}")).unwrap();
+        let tail = log_tail(&engines);
+        assert!(tail.len() as u64 <= LOG_TAIL_BYTES);
+        assert_eq!(link_reading(&tail), Carrying::Unknown, "a restart that far back is not this poll's business");
+
+        std::fs::write(dir.join(LOG_FILE), format!("{filler}SIGUSR1[soft,ping-restart] received, process restarting\n")).unwrap();
+        assert_eq!(link_reading(&log_tail(&engines)), Carrying::No);
+
+        std::fs::remove_file(dir.join(LOG_FILE)).unwrap();
+        assert_eq!(log_tail(&engines), "", "no log, nothing read");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Custom mode pins the machine's lookups to 1.1.1.1, as Xray and IKEv2

@@ -433,7 +433,22 @@ pub struct Engines {
     /// nowhere to return it to. See `dns::TunnelDns` for the decision it
     /// records, which is that a tunnel comes up even when this fails and
     /// the customer is told.
+    ///
+    /// A Custom-mode pin given back while the tunnel is measured not to
+    /// carry leaves this `Forced`: that is not a complaint the customer is
+    /// shown, whose words say traffic flows. See `dns_pin`.
     dns_state: dns::TunnelDns,
+    /// Custom mode's pin through this session: given back while the
+    /// tunnel is measured not to carry, put back when it does. See
+    /// `dns::PinWatch`. Forgotten with `dns_state`.
+    dns_pin: dns::PinWatch,
+    /// What giving the pin back and putting it in again do. The machine's
+    /// NRPT table, except in tests.
+    pin_ops: Arc<dyn dns::PinOps>,
+    /// What the pin is told about Custom mode, in place of the split
+    /// tunnel's own answer: the tests cannot run its driver.
+    #[cfg(test)]
+    custom_mode_for_test: Option<CustomModeView>,
     /// Which session is live and whether the last one ended on its own.
     /// Shared with the pipe, which reads it without the owning thread --
     /// see `lifecycle::engine_watch::Ledger`.
@@ -480,6 +495,10 @@ impl Engines {
             split_tunnel: SplitTunnel::new(),
             ending_filters: None,
             dns_state: dns::TunnelDns::NotRequested,
+            dns_pin: dns::PinWatch::default(),
+            pin_ops: Arc::new(dns::MachinePin),
+            #[cfg(test)]
+            custom_mode_for_test: None,
             ledger,
             engine_gone: None,
             handshake_reading: None,
@@ -633,6 +652,68 @@ impl Engines {
     /// a one-line mistake to make.
     fn forget_dns_state(&mut self) {
         self.dns_state = dns::TunnelDns::NotRequested;
+        // And whether this session had given its pin back: the next one
+        // starts with its own, and nothing of this one's is put back.
+        self.dns_pin.reset();
+    }
+
+    /// What Custom mode looks like to the pin right now.
+    fn custom_mode_view(&self) -> CustomModeView {
+        #[cfg(test)]
+        if let Some(view) = self.custom_mode_for_test {
+            return view;
+        }
+        CustomModeView {
+            intercepting: self.split_tunnel.wants_passive_tunnel() && self.split_tunnel.is_running(),
+            interception_stopped: self.split_tunnel.interception_stopped(),
+        }
+    }
+
+    /// Gives Custom mode's DNS pin back while the tunnel is measured not to
+    /// carry, and puts it back when it is shown to. See `dns::PinWatch` for
+    /// the policy and what it costs.
+    ///
+    /// Only a Custom-mode session -- a passive tunnel with the redirect up --
+    /// whose rule went in, or that this gave back: a full tunnel's rule is
+    /// left alone, since every lookup there is meant to go through the
+    /// tunnel and, with it stalled, so is every connection. `read` is asked
+    /// only then, so a poll of any other session reads no log.
+    fn keep_dns_pin(&mut self, read: impl FnOnce(&Self) -> dns::Carrying) {
+        let custom = self.custom_mode_view();
+        if !custom.intercepting {
+            return;
+        }
+        if self.dns_state != dns::TunnelDns::Forced && !self.dns_pin.released() {
+            return;
+        }
+        let reading = if custom.interception_stopped { dns::Carrying::InterceptionStopped } else { read(self) };
+        match self.dns_pin.observe(reading, Instant::now()) {
+            dns::PinMove::Keep => {}
+            dns::PinMove::Release => {
+                self.pin_ops.release();
+                crate::cleanup_log::note(
+                    "give the machine its own DNS back while Custom mode's tunnel is not carrying",
+                    &format!(
+                        "{reading:?}; the NRPT rule is out and this PC resolves through its own network, \
+                         the selected applications' lookups included, until the tunnel is shown to carry again"
+                    ),
+                );
+            }
+            dns::PinMove::Restore => {
+                let state = self.pin_ops.restore(dns::CUSTOM_MODE_RESOLVER);
+                self.dns_pin.restored(state == dns::TunnelDns::Forced);
+                if state == dns::TunnelDns::Forced {
+                    crate::cleanup_log::note(
+                        "pin DNS to the tunnel again now that Custom mode's tunnel carries",
+                        "the NRPT rule is back and the DNS cache was flushed",
+                    );
+                }
+                // Unforced is reported in the status poll from here, as at
+                // connect: the tunnel carries and the lookups are not
+                // pinned to it.
+                self.dns_state = state;
+            }
+        }
     }
 
     /// Installs a session around a process the test started, exactly as a
@@ -757,8 +838,28 @@ impl Engines {
     /// Proves the tunnel carries traffic, over the path selected apps
     /// use. See `SplitTunnel::probe` for why the app cannot check this
     /// for itself once Custom mode is on.
-    pub fn probe_split_tunnel(&self) -> Result<(), String> {
-        self.split_tunnel.probe()
+    ///
+    /// A reply is also what puts Custom mode's DNS pin back after it was
+    /// given back (`keep_dns_pin`), before the answer reaches the app: the
+    /// "connected" it leads to is never shown over a pin still out, unless
+    /// putting it back failed -- which the status poll then reports as
+    /// unpinned DNS, as it would at connect.
+    pub fn probe_split_tunnel(&mut self) -> Result<(), String> {
+        let outcome = self.split_tunnel.probe();
+        self.note_probe(&outcome);
+        outcome
+    }
+
+    /// What a split-tunnel probe tells the pin. A reply the destination had
+    /// to send is the strongest "carrying" there is. A failure is told
+    /// nothing: it has been seen to fail while the tunnel carried, which is
+    /// why the app reads it as "unverified", and the pin is given back only
+    /// on a measurement (`dns::PinWatch`) -- nor does it interrupt the run of
+    /// readings that one is building up.
+    fn note_probe(&mut self, outcome: &Result<(), String>) {
+        if outcome.is_ok() {
+            self.keep_dns_pin(|_| dns::Carrying::Yes);
+        }
     }
 
     /// Resolves an engine binary from the service's own directory.
@@ -1902,7 +2003,20 @@ impl Engines {
         };
 
         match verdict {
-            Verdict::Reported(up, protocol, health) => (up, protocol, health),
+            Verdict::Reported(up, protocol, health) => {
+                // OpenVPN's own log is the one measurement of its link this
+                // poll can take; the other engines answer `Unknown` here and
+                // keep their pin through a stall, as before.
+                let openvpn = up && protocol.as_deref() == Some("OPENVPN");
+                self.keep_dns_pin(|engines| {
+                    if openvpn {
+                        openvpn::link_reading(&openvpn::log_tail(engines))
+                    } else {
+                        dns::Carrying::Unknown
+                    }
+                });
+                (up, protocol, health)
+            }
             Verdict::WireguardUp => {
                 // Reused for a few seconds rather than read per poll; see
                 // HANDSHAKE_REUSE_FOR. Cleared with the session.
@@ -1924,6 +2038,7 @@ impl Engines {
                     wireguard::HandshakeHealth::NeverHandshaked => TunnelHealth::NeverHandshaked,
                     wireguard::HandshakeHealth::Unknown => TunnelHealth::Unknown,
                 };
+                self.keep_dns_pin(|_| wireguard::carrying(reading));
                 (true, Some("WIREGUARD".into()), health)
             }
             // Whatever this session was built on is gone. Everything
@@ -1996,6 +2111,17 @@ impl Engines {
             }
         }
     }
+}
+
+/// What Custom mode's DNS pin is told about the split tunnel. See
+/// [`Engines::keep_dns_pin`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CustomModeView {
+    /// A passive tunnel with the redirect up: Custom mode, whose pin this
+    /// is.
+    intercepting: bool,
+    /// The backstop has switched interception off under it.
+    interception_stopped: bool,
 }
 
 /// What one look at the engine slot concluded, before anything was done
@@ -3882,5 +4008,287 @@ mod helper_tests {
         let started = body.find("self.split_tunnel.start(").expect("the redirect is started here");
         let flushed = body.find("dns::flush_cache();").expect("nothing flushes the cache once it has");
         assert!(flushed > started, "the cache is flushed before the redirect carries anything");
+    }
+
+    /* Custom mode's DNS pin through a live session (`keep_dns_pin`).
+     *
+     * Before: once the rule was in it stayed in for the life of the
+     * session. A WireGuard handshake gone stale, an OpenVPN stuck
+     * restarting, interception switched off under the session -- every
+     * lookup on the PC still went to 1.1.1.1 and the redirect carried it
+     * into a tunnel that answered nothing, so the applications the customer
+     * kept out of the VPN stopped resolving names too. */
+
+    /// What the pin did to the machine, instead of doing it.
+    #[derive(Default)]
+    struct RecordingPin {
+        released: std::sync::atomic::AtomicU32,
+        restored: std::sync::atomic::AtomicU32,
+        /// What putting it back reports; `Forced` unless a test says.
+        restore_fails: std::sync::atomic::AtomicBool,
+    }
+
+    impl RecordingPin {
+        fn released(&self) -> u32 {
+            self.released.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn restored(&self) -> u32 {
+            self.restored.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl dns::PinOps for RecordingPin {
+        fn release(&self) {
+            self.released.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn restore(&self, resolver: &str) -> dns::TunnelDns {
+            assert_eq!(resolver, dns::CUSTOM_MODE_RESOLVER);
+            self.restored.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.restore_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                dns::TunnelDns::Unforced("the rule would not go back in".into())
+            } else {
+                dns::TunnelDns::Forced
+            }
+        }
+    }
+
+    /// An `Engines` in its own directory, as a Custom-mode session whose
+    /// rule went in would leave it: the pin recorded, no hold, so one
+    /// reading is a run.
+    fn custom_mode_engines(name: &str) -> (Engines, Arc<RecordingPin>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("neoconnect-pin-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut engines = Engines::new(dir.clone(), dir.clone());
+        let pin = Arc::new(RecordingPin::default());
+        engines.pin_ops = Arc::clone(&pin) as Arc<dyn dns::PinOps>;
+        engines.dns_pin = dns::PinWatch::with_hold(Duration::ZERO);
+        engines.custom_mode_for_test = Some(CustomModeView { intercepting: true, interception_stopped: false });
+        (engines, pin, dir)
+    }
+
+    /// A session's rule went in, as `connect_inner` records it.
+    fn rule_went_in(engines: &mut Engines) {
+        engines.set_dns_state_for_test(dns::TunnelDns::Forced);
+    }
+
+    fn handshake(engines: &mut Engines, reading: wireguard::HandshakeHealth) {
+        engines.handshake_reading = Some((Instant::now(), reading));
+    }
+
+    #[test]
+    fn a_stale_wireguard_handshake_gives_the_pin_back_and_a_fresh_one_puts_it_back() {
+        let (mut engines, pin, dir) = custom_mode_engines("wireguard");
+        let mut service_process = engine_stand_in();
+        let pid = service_process.id();
+        engines.begin_test_wireguard_session(move || wireguard::ScmView::Running(Some(pid)));
+        rule_went_in(&mut engines);
+
+        handshake(&mut engines, wireguard::HandshakeHealth::Alive { age_secs: 20 });
+        engines.status();
+        assert_eq!(pin.released(), 0, "a tunnel that carries keeps its pin");
+
+        handshake(&mut engines, wireguard::HandshakeHealth::Stale { age_secs: 600 });
+        let (up, _, health) = engines.status();
+        assert!(up);
+        assert_eq!(health, TunnelHealth::Stale { age_secs: 600 }, "the status poll says what it said before");
+        assert_eq!(pin.released(), 1, "a stale handshake left every lookup on the PC in a dead tunnel");
+        engines.status();
+        assert_eq!(pin.released(), 1, "given back once");
+        assert!(!engines.tunnel_dns_unprotected(), "not the connect-time complaint, whose words say traffic flows");
+
+        handshake(&mut engines, wireguard::HandshakeHealth::Alive { age_secs: 3 });
+        engines.status();
+        assert_eq!(pin.restored(), 1, "the pin did not go back when the tunnel carried again");
+        assert!(!engines.dns_pin.released());
+        assert!(!engines.tunnel_dns_unprotected());
+
+        let _ = service_process.kill();
+        let _ = service_process.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tunnel that never handshook is measured too: the peer never answered.
+    #[test]
+    fn a_wireguard_tunnel_that_never_handshook_gives_the_pin_back() {
+        let (mut engines, pin, dir) = custom_mode_engines("wireguard-never");
+        let mut service_process = engine_stand_in();
+        let pid = service_process.id();
+        engines.begin_test_wireguard_session(move || wireguard::ScmView::Running(Some(pid)));
+        rule_went_in(&mut engines);
+
+        handshake(&mut engines, wireguard::HandshakeHealth::NeverHandshaked);
+        engines.status();
+        assert_eq!(pin.released(), 1);
+
+        let _ = service_process.kill();
+        let _ = service_process.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn openvpn_stuck_restarting_gives_the_pin_back_and_a_probe_that_carried_puts_it_back() {
+        let (mut engines, pin, dir) = custom_mode_engines("openvpn");
+        engines.begin_test_session("OPENVPN", engine_stand_in());
+        rule_went_in(&mut engines);
+
+        std::fs::write(dir.join("openvpn.log"), "Initialization Sequence Completed\n").unwrap();
+        engines.status();
+        assert_eq!(pin.released(), 0, "up, as far as OpenVPN says");
+
+        // A failed probe is not a measurement: nothing is given back on it.
+        std::fs::write(
+            dir.join("openvpn.log"),
+            "Initialization Sequence Completed\nSIGUSR1[soft,ping-restart] received, process restarting\n",
+        )
+        .unwrap();
+        engines.note_probe(&Err("the tunnel did not carry a test connection".into()));
+        assert_eq!(pin.released(), 0, "a failed probe gave the pin back");
+
+        engines.status();
+        assert_eq!(pin.released(), 1, "OpenVPN restarting left every lookup on the PC in a dead tunnel");
+
+        // OpenVPN's word that it is up again does not put it back...
+        std::fs::write(
+            dir.join("openvpn.log"),
+            "SIGUSR1[soft,ping-restart] received, process restarting\nInitialization Sequence Completed\n",
+        )
+        .unwrap();
+        engines.status();
+        assert_eq!(pin.restored(), 0);
+        // ...a reply through the tunnel does.
+        engines.note_probe(&Ok(()));
+        assert_eq!(pin.restored(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing measures an Xray or IKEv2 link while its adapter is up, so a
+    /// stall keeps the pin as it always has. Interception switched off is
+    /// another matter, on every engine: nothing carries the pinned lookups
+    /// any more, and the pin only sends them to 1.1.1.1 over the bare line.
+    #[test]
+    fn interception_switched_off_gives_the_pin_back_for_good_on_any_engine() {
+        let (mut engines, pin, dir) = custom_mode_engines("xray");
+        engines.begin_test_session("XRAY_VLESS_REALITY", engine_stand_in());
+        rule_went_in(&mut engines);
+
+        engines.status();
+        engines.note_probe(&Err("nothing came back".into()));
+        assert_eq!(pin.released(), 0, "an Xray stall has no measurement to give the pin back on");
+
+        engines.custom_mode_for_test = Some(CustomModeView { intercepting: true, interception_stopped: true });
+        engines.status();
+        assert_eq!(pin.released(), 1);
+        engines.note_probe(&Ok(()));
+        engines.status();
+        assert_eq!(pin.restored(), 0, "put back with nothing to carry the lookups");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only Custom mode's pin, and only one that went in.
+    #[test]
+    fn a_full_tunnel_or_a_rule_that_never_went_in_is_left_alone() {
+        for (intercepting, state) in [
+            (false, dns::TunnelDns::Forced),
+            (true, dns::TunnelDns::NotRequested),
+            (true, dns::TunnelDns::Unforced("refused".into())),
+        ] {
+            let (mut engines, pin, dir) = custom_mode_engines("left-alone");
+            let mut service_process = engine_stand_in();
+            let pid = service_process.id();
+            engines.begin_test_wireguard_session(move || wireguard::ScmView::Running(Some(pid)));
+            engines.custom_mode_for_test = Some(CustomModeView { intercepting, interception_stopped: false });
+            engines.set_dns_state_for_test(state.clone());
+
+            handshake(&mut engines, wireguard::HandshakeHealth::Stale { age_secs: 600 });
+            engines.status();
+            assert_eq!(pin.released(), 0, "{intercepting} {state:?}: given back");
+
+            let _ = service_process.kill();
+            let _ = service_process.wait();
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Putting it back can fail as installing it can at connect, and is
+    /// reported the same way: the tunnel carries, its lookups are not
+    /// pinned to it.
+    #[test]
+    fn a_pin_that_will_not_go_back_is_reported_as_unpinned_dns() {
+        let (mut engines, pin, dir) = custom_mode_engines("restore-fails");
+        let mut service_process = engine_stand_in();
+        let pid = service_process.id();
+        engines.begin_test_wireguard_session(move || wireguard::ScmView::Running(Some(pid)));
+        rule_went_in(&mut engines);
+        pin.restore_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        handshake(&mut engines, wireguard::HandshakeHealth::Stale { age_secs: 600 });
+        engines.status();
+        handshake(&mut engines, wireguard::HandshakeHealth::Alive { age_secs: 3 });
+        engines.status();
+        assert_eq!(pin.restored(), 1);
+        assert!(engines.tunnel_dns_unprotected(), "a pin that is out was not reported");
+        engines.status();
+        assert_eq!(pin.restored(), 1, "tried again on every poll");
+
+        let _ = service_process.kill();
+        let _ = service_process.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The four engines pin Custom mode to the same resolver, which is the
+    /// one it is put back to.
+    #[test]
+    fn the_pin_goes_back_to_the_resolver_every_engine_pins() {
+        assert_eq!(xray::TUN_DNS, dns::CUSTOM_MODE_RESOLVER);
+        assert_eq!(ikev2::IKEV2_DNS, dns::CUSTOM_MODE_RESOLVER);
+        assert_eq!(dns::custom_mode_rule(true), Some(dns::CUSTOM_MODE_RESOLVER));
+    }
+
+    /// A pin given back goes with its session, by whichever teardown ends
+    /// it: nothing of it is put back in the next one, and the next one's is
+    /// its own. Thirty-two at once, each on its own `Engines`, because the
+    /// state that decides this must belong to the session and not to the
+    /// process -- `dns::tunnel_dns` is a process-wide static, and two tests
+    /// that shared one were how a per-session field came to exist.
+    #[test]
+    fn a_pin_given_back_ends_with_its_session_thirty_two_at_once() {
+        let handles: Vec<_> = (0..32)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let (mut engines, pin, dir) = custom_mode_engines(&format!("teardown-{i}"));
+                    let generation = engines.begin_test_session("OPENVPN", engine_stand_in());
+                    rule_went_in(&mut engines);
+                    std::fs::write(dir.join("openvpn.log"), "SIGUSR1[soft,ping-restart] received, process restarting\n")
+                        .unwrap();
+                    engines.status();
+                    assert_eq!(pin.released(), 1, "{i}: not given back");
+
+                    // The engine dies; the watch ends the session.
+                    kill_engine_behind_its_back(&mut engines);
+                    let scm = Arc::clone(&engines.wireguard_scm);
+                    assert!(wait_for(Duration::from_secs(5), || {
+                        matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
+                    }));
+                    assert!(engines.end_dead_session(generation), "{i}: the dead session was not ended");
+                    assert!(!engines.dns_pin.released(), "{i}: the given-back pin outlived its session");
+                    assert_eq!(engines.dns_state, dns::TunnelDns::NotRequested);
+
+                    // The next session: up, carrying, and nothing of the old
+                    // one's is put back.
+                    engines.begin_test_session("OPENVPN", engine_stand_in());
+                    rule_went_in(&mut engines);
+                    std::fs::write(dir.join("openvpn.log"), "Initialization Sequence Completed\n").unwrap();
+                    engines.status();
+                    engines.note_probe(&Ok(()));
+                    assert_eq!(pin.restored(), 0, "{i}: the old session's pin was put back");
+                    assert_eq!(pin.released(), 1, "{i}: another session's evidence reached this one");
+                    let _ = std::fs::remove_dir_all(&dir);
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a session's pin outlived it");
+        }
     }
 }

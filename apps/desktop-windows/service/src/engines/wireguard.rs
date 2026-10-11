@@ -483,6 +483,23 @@ pub fn handshake_health(engines: &Engines) -> HandshakeHealth {
     parse_handshake(&out, now)
 }
 
+/// What a handshake reading says about whether the tunnel carries, for
+/// Custom mode's DNS pin (`dns::PinWatch`).
+///
+/// A stale handshake is a measurement: with `PersistentKeepalive = 25` the
+/// peer is asked every few seconds and rehandshakes every two minutes, so
+/// three minutes without one is a peer that stopped answering. A tunnel
+/// that never handshook is one whose peer never answered. Neither is an
+/// absence of evidence, and only `Unknown` -- wg.exe unreadable -- is.
+pub(super) fn carrying(health: HandshakeHealth) -> super::dns::Carrying {
+    use super::dns::Carrying;
+    match health {
+        HandshakeHealth::Alive { .. } => Carrying::Yes,
+        HandshakeHealth::Stale { .. } | HandshakeHealth::NeverHandshaked => Carrying::No,
+        HandshakeHealth::Unknown => Carrying::Unknown,
+    }
+}
+
 /// Split out from the process call so the decision itself can be tested.
 /// This is the judgement that decides whether a customer is told they are
 /// protected, so it should not only be exercisable by having a real
@@ -564,6 +581,17 @@ mod tests {
         let conf = build_conf(&profile(), true);
         assert!(conf.contains("Table = off"));
         assert!(conf.contains("AllowedIPs = 0.0.0.0/0"), "the peer must still accept everything");
+    }
+
+    /// What Custom mode's DNS pin is told by a handshake reading: a stale
+    /// one and one never made are measurements, wg.exe unreadable is not.
+    #[test]
+    fn a_stale_or_missing_handshake_reads_as_not_carrying() {
+        use super::super::dns::Carrying;
+        assert_eq!(carrying(HandshakeHealth::Alive { age_secs: 30 }), Carrying::Yes);
+        assert_eq!(carrying(HandshakeHealth::Stale { age_secs: 600 }), Carrying::No);
+        assert_eq!(carrying(HandshakeHealth::NeverHandshaked), Carrying::No);
+        assert_eq!(carrying(HandshakeHealth::Unknown), Carrying::Unknown);
     }
 
     /// No `DNS =` line in Custom mode: wireguard.exe would set it on the

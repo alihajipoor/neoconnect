@@ -496,6 +496,14 @@ impl SplitTunnel {
         active.complaint()
     }
 
+    /// Whether the backstop has switched interception off under the
+    /// running session because its tunnel adapter went away. Nothing is
+    /// redirected after that, whatever the tunnel does, until the session
+    /// is rebuilt. `false` when nothing is running.
+    pub fn interception_stopped(&self) -> bool {
+        self.active.as_ref().is_some_and(|active| active.interception_stopped())
+    }
+
     /// Whether the tunnel is really carrying traffic, checked over the
     /// same kind of pinned socket a selected app's traffic uses.
     ///
