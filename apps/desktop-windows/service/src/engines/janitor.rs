@@ -21,7 +21,8 @@
 //! remove, and one that refuses to let the service start would cost the
 //! customer the ability to connect at all.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -85,13 +86,45 @@ pub(super) fn settle_owed_routes(owed: &OwedRoutes, ops: &dyn RouteOps) -> Repla
             &format!("removed {}", removed.join(", ")),
         );
     }
-    if !replayed.failed.is_empty() {
-        crate::cleanup_log::note(
-            "remove host routes an earlier session left on another adapter",
-            &format!("still owed: {}", replayed.failed.join("; ")),
-        );
+    let still_owed = (!replayed.failed.is_empty()).then(|| format!("still owed: {}", replayed.failed.join("; ")));
+    if let Some(line) = still_owed.as_deref().filter(|line| first_time_said(owed, line)) {
+        crate::cleanup_log::note("remove host routes an earlier session left on another adapter", line);
+    }
+    if still_owed.is_none() {
+        forget_said(owed);
     }
     replayed
+}
+
+/// The "still owed" line last written for each ledger.
+///
+/// This runs on every idle status poll -- the app sends one every few
+/// seconds for as long as it is open and disconnected -- so a route that
+/// will not delete wrote the same line to cleanup.log on every one of
+/// them. Said once, and again only when what is owed changes or has been
+/// cleared in between. Per ledger file, so the tests' ledgers, each in a
+/// directory of its own, do not speak over each other.
+static STILL_OWED_SAID: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+
+/// Whether `line` is news for this ledger, remembering it if so.
+fn first_time_said(owed: &OwedRoutes, line: &str) -> bool {
+    let mut said = STILL_OWED_SAID.lock().unwrap_or_else(|e| e.into_inner());
+    match said.iter_mut().find(|(path, _)| path == owed.file()) {
+        Some((_, last)) if last == line => false,
+        Some((_, last)) => {
+            *last = line.to_string();
+            true
+        }
+        None => {
+            said.push((owed.file().to_path_buf(), line.to_string()));
+            true
+        }
+    }
+}
+
+/// Nothing is owed that would not delete: the next failure is news.
+fn forget_said(owed: &OwedRoutes) {
+    STILL_OWED_SAID.lock().unwrap_or_else(|e| e.into_inner()).retain(|(path, _)| path != owed.file());
 }
 
 /// What one sweep for orphaned engines found.
@@ -369,6 +402,32 @@ mod tests {
         assert_eq!(replayed.removed, vec![ours]);
         assert!(owed.read().is_empty(), "a removed route is struck off");
         assert!(!dir.join("owed-routes.json").exists(), "nothing owed leaves no file behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A route that will not delete is put in cleanup.log once, not on
+    /// every pass. The janitor runs on every idle status poll, for as long
+    /// as the app is open and disconnected, and each wrote the same "still
+    /// owed" line again. Said again when what is owed changes.
+    #[test]
+    fn a_route_that_will_not_delete_is_logged_once_not_on_every_poll() {
+        let route = RouteRow::host(Ipv4Addr::new(203, 0, 113, 77), 14, Ipv4Addr::new(192, 0, 2, 1), 1);
+        let other = RouteRow::host(Ipv4Addr::new(203, 0, 113, 78), 14, Ipv4Addr::new(192, 0, 2, 1), 1);
+        let table = FakeRoutes::with(&[route, other]);
+        table.refuses_deletes();
+        let dir = ledger_dir("still-owed-once");
+        let owed = OwedRoutes::in_dir(&dir);
+        owed.owe(route);
+
+        for _ in 0..3 {
+            settle_owed_routes(&owed, &*table);
+        }
+        assert_eq!(crate::cleanup_log::noted_containing("203.0.113.77/32").len(), 1);
+
+        owed.owe(other);
+        settle_owed_routes(&owed, &*table);
+        settle_owed_routes(&owed, &*table);
+        assert_eq!(crate::cleanup_log::noted_containing("203.0.113.78/32").len(), 1, "a change was not said");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

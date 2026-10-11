@@ -68,6 +68,7 @@ use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
 use crate::adapters;
 
+use super::route_table::Replayed;
 use super::{dns, ikev2, ipv6_block, janitor, routing, wireguard, Engines};
 
 /// One repair step's identity.
@@ -332,58 +333,50 @@ fn step_routes(engines: &Engines, found: &Survey, report: &mut RepairReport) {
     // below is unchanged by it.
     let settled = janitor::settle_owed_routes(&engines.owed_routes(), &*engines.route_ops);
     let after = our_route_counts();
-    let left: usize = after.iter().map(|(_, n)| n).sum();
+    push(report, ROUTES, routes_outcome(&found.routes, &purged, &settled, &after));
+}
 
+/// The routes step's outcome, from what was found before, what the two
+/// sweeps did, and what is left: the decision [`step_routes`] reports, on
+/// facts already gathered.
+fn routes_outcome(
+    found: &[(&'static str, usize)],
+    purged: &janitor::Purged,
+    settled: &Replayed,
+    after: &[(&'static str, usize)],
+) -> RepairOutcome {
+    // Everything still there, in one line: a host route that would not
+    // delete used to end the step before our own adapters were looked at,
+    // so one problem was reported where there were two.
+    let left: Vec<String> =
+        after.iter().filter(|(_, n)| *n > 0).map(|(name, n)| format!("{n} on {name}")).collect();
+    let mut still = Vec::new();
+    if !left.is_empty() {
+        still.push(format!("still present: {}", left.join(", ")));
+    }
     if !settled.failed.is_empty() {
-        push(
-            report,
-            ROUTES,
-            RepairOutcome::Failed {
-                detail: format!("host routes to a server still present: {}", settled.failed.join("; ")),
-            },
-        );
-        return;
+        still.push(format!("host routes to a server still present: {}", settled.failed.join("; ")));
+    }
+    if !still.is_empty() {
+        return RepairOutcome::Failed { detail: still.join("; ") };
     }
     let mut removed = purged.removed.clone();
     if !settled.removed.is_empty() {
         removed.push(format!("{} host route(s) to a server on another adapter", settled.removed.len()));
     }
 
-    if left > 0 {
-        let names: Vec<String> = after
-            .iter()
-            .filter(|(_, n)| *n > 0)
-            .map(|(name, n)| format!("{n} on {name}"))
-            .collect();
-        push(
-            report,
-            ROUTES,
-            RepairOutcome::Failed { detail: format!("still present: {}", names.join(", ")) },
-        );
-        return;
-    }
     if !purged.unknown.is_empty() {
-        push(report, ROUTES, RepairOutcome::Unknown { detail: purged.unknown.join("; ") });
-        return;
+        return RepairOutcome::Unknown { detail: purged.unknown.join("; ") };
     }
-    let before: usize = found.routes.iter().map(|(_, n)| n).sum();
+    let before: usize = found.iter().map(|(_, n)| n).sum();
     if before == 0 && removed.is_empty() {
-        push(report, ROUTES, RepairOutcome::AlreadyClean);
-        return;
+        return RepairOutcome::AlreadyClean;
     }
-    let names: Vec<String> = found
-        .routes
-        .iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(name, n)| format!("{n} on {name}"))
-        .collect();
-    push(
-        report,
-        ROUTES,
-        RepairOutcome::Fixed {
-            detail: if names.is_empty() { removed.join(", ") } else { format!("removed {}", names.join(", ")) },
-        },
-    );
+    let names: Vec<String> =
+        found.iter().filter(|(_, n)| *n > 0).map(|(name, n)| format!("{n} on {name}")).collect();
+    RepairOutcome::Fixed {
+        detail: if names.is_empty() { removed.join(", ") } else { format!("removed {}", names.join(", ")) },
+    }
 }
 
 /// The inbound allowance Custom mode installs for its own relay.
@@ -1147,6 +1140,31 @@ mod tests {
         assert!(!step("x", RepairOutcome::Unknown { detail: String::new() }).outcome.is_failure());
         assert!(!step("x", RepairOutcome::AlreadyClean).outcome.is_failure());
         assert!(!step("x", RepairOutcome::Fixed { detail: String::new() }).outcome.is_failure());
+    }
+
+    /// A host route on the uplink that would not delete is reported beside
+    /// the routes still on our own adapters, not instead of them. The step
+    /// returned at the first, so the same Repair said nothing of the
+    /// second, and the customer and support read one problem where there
+    /// were two.
+    #[test]
+    fn a_host_route_that_will_not_delete_does_not_hide_routes_left_on_our_adapters() {
+        let purged = janitor::Purged { removed: Vec::new(), unknown: Vec::new() };
+        let settled = Replayed { removed: Vec::new(), failed: vec!["203.0.113.7/32: refused".into()] };
+        let outcome = routes_outcome(&[("neoconnect0", 2)], &purged, &settled, &[("neoconnect0", 2)]);
+        let RepairOutcome::Failed { detail } = outcome else { panic!("{outcome:?} is not a failure") };
+        assert!(detail.contains("2 on neoconnect0"), "{detail}");
+        assert!(detail.contains("203.0.113.7/32"), "{detail}");
+
+        // Each alone, as before.
+        let clean = Replayed::default();
+        let outcome = routes_outcome(&[("neoconnect0", 2)], &purged, &clean, &[("neoconnect0", 2)]);
+        assert_eq!(outcome, RepairOutcome::Failed { detail: "still present: 2 on neoconnect0".into() });
+        let outcome = routes_outcome(&[], &purged, &settled, &[]);
+        assert_eq!(
+            outcome,
+            RepairOutcome::Failed { detail: "host routes to a server still present: 203.0.113.7/32: refused".into() }
+        );
     }
 
     /// Every step this service can report has a label the app can

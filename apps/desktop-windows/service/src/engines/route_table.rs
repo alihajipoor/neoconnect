@@ -282,6 +282,12 @@ impl OwedRoutes {
         Self { path: config_dir.join(OWED_FILE) }
     }
 
+    /// The ledger's file, which names this ledger wherever two handles on
+    /// it must be recognised as one.
+    pub fn file(&self) -> &Path {
+        &self.path
+    }
+
     /// Everything owed. A file that is missing reads as nothing owed, and
     /// so does one that cannot be parsed: a ledger is a list of things to
     /// try to delete, and refusing to start over a corrupt one would cost
