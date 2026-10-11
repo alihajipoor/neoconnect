@@ -361,7 +361,7 @@ mod tests {
     fn uplink_is_the_best_route_not_the_first_adapter() {
         let ethernet = adapter(5, "Ethernet", Some(Ipv4Addr::new(192, 0, 2, 1)));
         let wifi = adapter(9, "Wi-Fi", Some(Ipv4Addr::new(198, 51, 100, 1)));
-        let best = RouteRow { dest: Ipv4Addr::UNSPECIFIED, prefix: 0, if_index: 9, next_hop: Ipv4Addr::new(198, 51, 100, 1), metric: 0 };
+        let best = RouteRow { dest: Ipv4Addr::UNSPECIFIED, prefix: 0, if_index: 9, next_hop: Ipv4Addr::new(198, 51, 100, 1), metric: 0, netmgmt: true };
         assert_eq!(
             choose_uplink(&[ethernet, wifi], Some(best), Ipv4Addr::new(203, 0, 113, 7), &["neoconnect0"]),
             Some(Uplink { index: 9, next_hop: Ipv4Addr::new(198, 51, 100, 1) })
@@ -379,7 +379,7 @@ mod tests {
         let first = Some(Uplink { index: 5, next_hop: Ipv4Addr::new(192, 0, 2, 1) });
         let adapters = [ethernet, tunnel];
 
-        let through_tunnel = RouteRow { dest: Ipv4Addr::UNSPECIFIED, prefix: 1, if_index: 30, next_hop: Ipv4Addr::new(198, 18, 0, 1), metric: 0 };
+        let through_tunnel = RouteRow { dest: Ipv4Addr::UNSPECIFIED, prefix: 1, if_index: 30, next_hop: Ipv4Addr::new(198, 18, 0, 1), metric: 0, netmgmt: true };
         assert_eq!(choose_uplink(&adapters, Some(through_tunnel), server, &["neoconnect0"]), first);
 
         let leftover = RouteRow::host(server, 5, Ipv4Addr::new(192, 0, 2, 254), 0);

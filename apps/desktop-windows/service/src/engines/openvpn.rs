@@ -42,6 +42,7 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use neoconnect_ipc::OpenvpnProfile;
 
 use super::route_table::{new_host_routes, RouteOps, RouteRow};
+use crate::adapters::Uplink;
 use super::{
     confirm_started, routing, run_hidden_capture, run_hidden_capture_within, spawn_hidden,
     write_config, Engines,
@@ -517,8 +518,9 @@ pub(super) struct HostRouteWatch {
     /// the customer's own routes and only routes to the server itself
     /// are taken.
     before: Option<Vec<RouteRow>>,
-    /// The adapter openvpn.exe's `net_gateway` is expected on.
-    uplink: Option<u32>,
+    /// The adapter openvpn.exe's `net_gateway` is expected on, and the
+    /// gateway itself.
+    uplink: Option<Uplink>,
     /// The server's address, when the profile names it as one.
     remote: Option<Ipv4Addr>,
     /// Our own adapters, whose routes are never the uplink's.
@@ -526,23 +528,25 @@ pub(super) struct HostRouteWatch {
 }
 
 impl HostRouteWatch {
-    pub(super) fn begin(ops: &dyn RouteOps, uplink: Option<u32>, remote: Option<Ipv4Addr>, ours: Vec<u32>) -> Self {
+    pub(super) fn begin(ops: &dyn RouteOps, uplink: Option<Uplink>, remote: Option<Ipv4Addr>, ours: Vec<u32>) -> Self {
         Self { before: ops.rows().ok(), uplink, remote, ours }
     }
 
-    /// What was added since [`Self::begin`]: new host routes on the
-    /// uplink, and any new host route to the server on an adapter that is
-    /// not ours. The second is a guard on the first -- if the uplink was
+    /// What was added since [`Self::begin`]: new host routes added through
+    /// `NETMGMT` on the uplink through its gateway (`new_host_routes`), and
+    /// any new one added that way to the server on an adapter that is not
+    /// ours. The second is a guard on the first -- if the uplink was
     /// guessed wrongly, the route that matters most is still found.
     pub(super) fn added(&self, ops: &dyn RouteOps) -> Vec<RouteRow> {
         let Ok(after) = ops.rows() else { return Vec::new() };
         let mut added = match (&self.before, self.uplink) {
-            (Some(before), Some(uplink)) => new_host_routes(before, &after, uplink),
+            (Some(before), Some(uplink)) => new_host_routes(before, &after, uplink.index, uplink.next_hop),
             _ => Vec::new(),
         };
         let before = self.before.as_deref().unwrap_or(&[]);
         if let Some(remote) = self.remote {
-            for row in after.iter().filter(|r| r.is_host() && r.dest == remote && !self.ours.contains(&r.if_index)) {
+            let to_server = |r: &&RouteRow| r.is_host() && r.netmgmt && r.dest == remote && !self.ours.contains(&r.if_index);
+            for row in after.iter().filter(to_server) {
                 let known = before.iter().chain(added.iter()).any(|old| old.same_route(row));
                 if !known {
                     added.push(*row);
@@ -598,7 +602,7 @@ pub fn connect(
     // nothing to watch for.
     let watch = (!passive).then(|| {
         let remote = profile.endpoint.rsplit_once(':').and_then(|(host, _)| host.parse().ok());
-        HostRouteWatch::begin(&*engines.route_ops, super::uplink_index(remote), remote, super::our_interfaces())
+        HostRouteWatch::begin(&*engines.route_ops, super::uplink_toward(remote), remote, super::our_interfaces())
     });
 
     let log_path = engines.config_path(LOG_FILE);
@@ -946,7 +950,7 @@ mod tests {
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
         let table = FakeRoutes::with(&[]);
         // Guessed uplink 14; our OpenVPN adapter is 30.
-        let watch = HostRouteWatch::begin(&*table, Some(14), Some(server), vec![30]);
+        let watch = HostRouteWatch::begin(&*table, Some(Uplink { index: 14, next_hop: gateway }), Some(server), vec![30]);
         let on_other_adapter = RouteRow::host(server, 9, gateway, 0);
         let on_ours = RouteRow::host(server, 30, Ipv4Addr::new(10, 8, 0, 1), 0);
         let unrelated = RouteRow::host(Ipv4Addr::new(198, 51, 100, 9), 9, gateway, 0);
@@ -968,8 +972,59 @@ mod tests {
         let customers = RouteRow::host(Ipv4Addr::new(198, 51, 100, 9), 14, gateway, 0);
         let pushed = RouteRow::host(server, 14, gateway, 0);
         let table = FakeRoutes::with(&[customers, pushed]);
-        let watch = HostRouteWatch { before: None, uplink: Some(14), remote: Some(server), ours: Vec::new() };
+        let watch = HostRouteWatch { before: None, uplink: Some(Uplink { index: 14, next_hop: gateway }), remote: Some(server), ours: Vec::new() };
 
         assert_eq!(watch.added(&*table), vec![pushed]);
+    }
+
+    /// Only what openvpn.exe could have added is taken: a host route added
+    /// through `NETMGMT`, through the uplink's own gateway, which is where
+    /// `redirect-gateway` puts the server's route and the `bypass-dhcp`
+    /// one.
+    ///
+    /// The watch spans the whole connect, and the machine goes on changing
+    /// in that time. The uplink taking a new address -- a DHCP renewal
+    /// that moved it, or Wi-Fi roaming to another network on the same
+    /// adapter -- makes Windows add a local and a broadcast /32 for it on
+    /// that very adapter. Taken as OpenVPN's, they were deleted at
+    /// Disconnect and owed in the ledger, which replays them by key on
+    /// every idle status poll and at the next start: Windows' own routes,
+    /// on the customer's active adapter.
+    #[test]
+    fn the_watch_never_takes_a_route_windows_made_or_one_through_another_gateway() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let table = FakeRoutes::with(&[]);
+        let watch = HostRouteWatch::begin(&*table, Some(Uplink { index: 14, next_hop: gateway }), Some(server), vec![30]);
+
+        let pushed = RouteRow::host(server, 14, gateway, 0);
+        let bypass_dhcp = RouteRow::host(Ipv4Addr::new(192, 0, 2, 254), 14, gateway, 0);
+        // What Windows adds for a new address on the uplink: on-link, and
+        // protocol `LOCAL`.
+        let windows = |dest| RouteRow { netmgmt: false, ..RouteRow::host(dest, 14, Ipv4Addr::UNSPECIFIED, 256) };
+        let new_address = windows(Ipv4Addr::new(198, 51, 100, 23));
+        let new_broadcast = windows(Ipv4Addr::new(198, 51, 100, 255));
+        // Added through `NETMGMT`, but not through the gateway openvpn.exe
+        // uses.
+        let elsewhere = RouteRow::host(Ipv4Addr::new(198, 18, 7, 7), 14, Ipv4Addr::new(192, 0, 2, 9), 0);
+        for row in [pushed, new_address, new_broadcast, bypass_dhcp, elsewhere] {
+            table.gain(row);
+        }
+
+        assert_eq!(watch.added(&*table), vec![pushed, bypass_dhcp]);
+    }
+
+    /// The guard for a wrongly guessed uplink takes the server's route
+    /// wherever it landed -- but never one Windows made itself.
+    #[test]
+    fn the_guard_for_the_server_route_never_takes_one_windows_made() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let table = FakeRoutes::with(&[]);
+        let watch = HostRouteWatch::begin(&*table, None, Some(server), Vec::new());
+        table.gain(RouteRow { netmgmt: false, ..RouteRow::host(server, 9, Ipv4Addr::UNSPECIFIED, 256) });
+
+        assert!(watch.added(&*table).is_empty());
     }
 }

@@ -412,7 +412,10 @@ pub(super) fn install_node_route(ops: &dyn RouteOps, owed: &OwedRoutes, route: R
     // A table that cannot be read skips this rather than the connect:
     // the add below then fails or succeeds exactly as it always did.
     if let Ok(rows) = ops.rows() {
-        let leftovers = rows.iter().filter(|r| r.is_host() && r.dest == route.dest && r.if_index == route.if_index);
+        // `NETMGMT` only: a route Windows made itself for an address is
+        // never a leftover of ours (`RouteRow::netmgmt`).
+        let leftovers =
+            rows.iter().filter(|r| r.is_host() && r.netmgmt && r.dest == route.dest && r.if_index == route.if_index);
         for leftover in leftovers {
             if ops.delete(leftover).is_ok() {
                 owed.settle(leftover);
@@ -509,7 +512,10 @@ mod tests {
         let identical = RouteRow::host(server, 14, gateway, 0);
         let old_gateway = RouteRow::host(server, 14, Ipv4Addr::new(192, 0, 2, 254), 0);
         let elsewhere = RouteRow::host(server, 9, gateway, 0);
-        let table = FakeRoutes::with(&[identical, old_gateway, elsewhere]);
+        // One Windows made itself (protocol `LOCAL`), which is never a
+        // leftover of ours whatever its destination.
+        let windows = RouteRow { netmgmt: false, ..RouteRow::host(server, 14, Ipv4Addr::UNSPECIFIED, 256) };
+        let table = FakeRoutes::with(&[identical, old_gateway, elsewhere, windows]);
         let dir = std::env::temp_dir().join(format!("neoconnect-node-route-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -522,7 +528,11 @@ mod tests {
             vec![Op::Delete(identical), Op::Delete(old_gateway), Op::Add(ours)],
             "leftovers on the uplink first, then ours"
         );
-        assert_eq!(table.table(), vec![elsewhere, ours], "a route on another adapter is not this one's to take");
+        assert_eq!(
+            table.table(),
+            vec![elsewhere, windows, ours],
+            "a route on another adapter, or one Windows made, is not this one's to take"
+        );
         assert_eq!(owed.read(), vec![ours]);
         let _ = std::fs::remove_dir_all(&dir);
     }

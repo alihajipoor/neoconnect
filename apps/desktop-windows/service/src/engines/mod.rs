@@ -2106,15 +2106,18 @@ fn our_interfaces() -> Vec<u32> {
         .unwrap_or_default()
 }
 
-/// The physical adapter traffic to `toward` leaves by, as an interface
-/// index, for an engine that routes its own way around the tunnel.
+/// The physical adapter traffic to `toward` leaves by, and the next hop
+/// on it, for an engine that routes its own way around the tunnel.
 /// Windows' own answer when there is an address to ask about -- see
 /// `adapters::best_uplink_for` -- and the first adapter with a gateway
 /// when there is not.
-fn uplink_index(toward: Option<Ipv4Addr>) -> Option<u32> {
+fn uplink_toward(toward: Option<Ipv4Addr>) -> Option<adapters::Uplink> {
     match toward {
-        Some(dest) => adapters::best_uplink_for(dest, &OUR_ADAPTER_NAMES).ok().flatten().map(|u| u.index),
-        None => adapters::physical_uplink(&OUR_ADAPTER_NAMES).ok().flatten().map(|a| a.index),
+        Some(dest) => adapters::best_uplink_for(dest, &OUR_ADAPTER_NAMES).ok().flatten(),
+        None => adapters::physical_uplink(&OUR_ADAPTER_NAMES)
+            .ok()
+            .flatten()
+            .and_then(|a| a.gateway.map(|gateway| adapters::Uplink { index: a.index, next_hop: gateway })),
     }
 }
 
@@ -3677,7 +3680,7 @@ mod helper_tests {
     fn uplink_table() -> (Arc<route_table::fake::FakeRoutes>, Ipv4Addr) {
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
         let default =
-            route_table::RouteRow { dest: Ipv4Addr::UNSPECIFIED, prefix: 0, if_index: 14, next_hop: gateway, metric: 25 };
+            route_table::RouteRow { dest: Ipv4Addr::UNSPECIFIED, prefix: 0, if_index: 14, next_hop: gateway, metric: 25, netmgmt: true };
         (route_table::fake::FakeRoutes::with(&[default]), gateway)
     }
 
@@ -3698,7 +3701,7 @@ mod helper_tests {
         let mut engines = Engines::new(dir.clone(), dir.clone());
         engines.set_route_ops_for_test(table.clone());
 
-        let watch = openvpn::HostRouteWatch::begin(&*table, Some(14), Some(node.dest), Vec::new());
+        let watch = openvpn::HostRouteWatch::begin(&*table, Some(adapters::Uplink { index: 14, next_hop: gateway }), Some(node.dest), Vec::new());
         table.gain(node);
         let routes = engines.openvpn_routes(watch.added(&*table));
         assert_eq!(routes.foreign_rows(), vec![node], "the session does not own the route OpenVPN pushed");
@@ -3734,7 +3737,7 @@ mod helper_tests {
             std::fs::create_dir_all(&dir).unwrap();
             let mut engines = Engines::new(dir.clone(), dir.clone());
             engines.set_route_ops_for_test(table.clone());
-            let watch = openvpn::HostRouteWatch::begin(&*table, Some(14), Some(node(i).dest), Vec::new());
+            let watch = openvpn::HostRouteWatch::begin(&*table, Some(adapters::Uplink { index: 14, next_hop: gateway }), Some(node(i).dest), Vec::new());
             table.gain(node(i));
             let routes = engines.openvpn_routes(watch.added(&*table));
             assert_eq!(routes.foreign_rows(), vec![node(i)], "racer {i}: the pushed route was not taken over");

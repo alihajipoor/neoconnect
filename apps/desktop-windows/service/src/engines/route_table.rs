@@ -29,14 +29,15 @@ use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, NO_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     DeleteIpForwardEntry2, FreeMibTable, GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
 };
-use windows_sys::Win32::Networking::WinSock::AF_INET;
+use windows_sys::Win32::Networking::WinSock::{AF_INET, MIB_IPPROTO_NETMGMT};
 
 /// One IPv4 route, as far as this service needs to know it.
 ///
 /// The first four fields are what Windows keys a route by: two routes
 /// with the same destination, prefix, interface and next hop are the same
 /// route. The metric is carried for adding one, and is not part of that
-/// identity -- see [`RouteRow::same_route`].
+/// identity -- see [`RouteRow::same_route`]. Nor is `netmgmt`, which says
+/// who made it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RouteRow {
     pub dest: Ipv4Addr,
@@ -47,12 +48,35 @@ pub struct RouteRow {
     /// the far end of the link is the next hop.
     pub next_hop: Ipv4Addr,
     pub metric: u32,
+    /// Whether the route came in through Windows' network-management
+    /// interface (protocol `NETMGMT`) -- as everything `route.exe`,
+    /// openvpn.exe or any other VPN client adds does, and DHCP's default
+    /// gateway -- rather than being made by Windows itself for an address
+    /// an adapter holds (protocol `LOCAL`): the local, broadcast and subnet
+    /// routes every address brings. Those are never this service's to take
+    /// or delete, so every rule here that picks rows to take or delete asks
+    /// this first.
+    ///
+    /// The protocol and not the origin, because the origin does not tell
+    /// them apart. Read off this PC's own table (2026-10-11): the local,
+    /// broadcast and subnet routes read protocol `LOCAL` with origin manual,
+    /// and the DHCP default route `NETMGMT` with origin manual too.
+    ///
+    /// Defaulted for a ledger written before it existed: everything in a
+    /// ledger was added by this service, with `route.exe` or by OpenVPN.
+    #[serde(default = "added_through_netmgmt")]
+    pub netmgmt: bool,
+}
+
+fn added_through_netmgmt() -> bool {
+    true
 }
 
 impl RouteRow {
-    /// A host route: one address, on one interface, through one next hop.
+    /// A host route: one address, on one interface, through one next hop,
+    /// added through `NETMGMT` -- as every host route this service adds is.
     pub fn host(dest: Ipv4Addr, if_index: u32, next_hop: Ipv4Addr, metric: u32) -> Self {
-        Self { dest, prefix: 32, if_index, next_hop, metric }
+        Self { dest, prefix: 32, if_index, next_hop, metric, netmgmt: true }
     }
 
     pub fn is_host(&self) -> bool {
@@ -85,8 +109,8 @@ pub fn host_routes_on(rows: &[RouteRow], if_index: u32) -> Vec<RouteRow> {
     rows.iter().filter(|r| r.is_host() && r.if_index == if_index).copied().collect()
 }
 
-/// The host routes that appeared on `if_index` between two readings of
-/// the table.
+/// The host routes added through `NETMGMT` on `if_index`, through
+/// `next_hop`, between two readings of the table.
 ///
 /// What OpenVPN's `redirect-gateway` adds is learned this way, because
 /// openvpn.exe does not say: the table is read before it starts and again
@@ -95,9 +119,24 @@ pub fn host_routes_on(rows: &[RouteRow], if_index: u32) -> Vec<RouteRow> {
 /// else the machine did in those seconds -- a route on another adapter, a
 /// prefix of any other length, the tunnel's own half-defaults -- is taken
 /// for OpenVPN's and later deleted as ours.
-pub fn new_host_routes(before: &[RouteRow], after: &[RouteRow], if_index: u32) -> Vec<RouteRow> {
+///
+/// And restricted to what openvpn.exe can have made: a route added
+/// through `NETMGMT` ([`RouteRow::netmgmt`]), through the uplink's gateway, which is
+/// where `redirect-gateway` sends both the server's route and the
+/// `bypass-dhcp` one. Those seconds can be the whole connect budget, and
+/// an uplink that takes a new address in them -- a DHCP renewal, Wi-Fi
+/// roaming to another network on the same adapter -- gets a local and a
+/// broadcast /32 from Windows, on-link and protocol `LOCAL`. Taken, they
+/// were deleted at Disconnect and owed in the ledger.
+///
+/// What this cannot tell apart is another program adding a host route
+/// through the same gateway in the same seconds -- another VPN client
+/// re-adding its own server's route, say. Nothing Windows records about
+/// a route says which program made it.
+pub fn new_host_routes(before: &[RouteRow], after: &[RouteRow], if_index: u32, next_hop: Ipv4Addr) -> Vec<RouteRow> {
     host_routes_on(after, if_index)
         .into_iter()
+        .filter(|row| row.netmgmt && row.next_hop == next_hop)
         .filter(|row| !before.iter().any(|old| old.same_route(row)))
         .collect()
 }
@@ -111,11 +150,12 @@ pub fn new_host_routes(before: &[RouteRow], after: &[RouteRow], if_index: u32) -
 /// left are what releases up to 0.9.48 left after every Compatible
 /// session, and what a killed service leaves before the ledger existed.
 ///
-/// Narrow on purpose: host routes only, only to the addresses given, and
-/// never on our own adapters, whose routes are purged by interface.
+/// Narrow on purpose: host routes added through `NETMGMT`, only to the
+/// addresses given, and never on our own adapters, whose routes are
+/// purged by interface.
 pub fn stale_node_routes(rows: &[RouteRow], nodes: &[Ipv4Addr], ours: &[u32]) -> Vec<RouteRow> {
     rows.iter()
-        .filter(|r| r.is_host() && nodes.contains(&r.dest) && !ours.contains(&r.if_index))
+        .filter(|r| r.is_host() && r.netmgmt && nodes.contains(&r.dest) && !ours.contains(&r.if_index))
         .copied()
         .collect()
 }
@@ -351,6 +391,7 @@ pub(crate) fn row_from(route: &MIB_IPFORWARD_ROW2) -> RouteRow {
         if_index: route.InterfaceIndex,
         next_hop: Ipv4Addr::from(hop.to_ne_bytes()),
         metric: route.Metric,
+        netmgmt: route.Protocol == MIB_IPPROTO_NETMGMT,
     }
 }
 
@@ -435,17 +476,17 @@ mod tests {
     #[test]
     fn host_route_diff_finds_only_new_slash32s_on_the_uplink() {
         let gateway = v4(192, 0, 2, 1);
-        let default = RouteRow { dest: v4(0, 0, 0, 0), prefix: 0, if_index: 14, next_hop: gateway, metric: 25 };
+        let default = RouteRow { dest: v4(0, 0, 0, 0), prefix: 0, if_index: 14, next_hop: gateway, metric: 25, netmgmt: true };
         let node = RouteRow::host(v4(203, 0, 113, 7), 14, gateway, 0);
-        let half = RouteRow { dest: v4(0, 0, 0, 0), prefix: 1, if_index: 20, next_hop: v4(10, 77, 0, 1), metric: 0 };
+        let half = RouteRow { dest: v4(0, 0, 0, 0), prefix: 1, if_index: 20, next_hop: v4(10, 77, 0, 1), metric: 0, netmgmt: true };
 
         let before = [default];
         let after = [default, node, half];
 
-        assert_eq!(new_host_routes(&before, &after, 14), vec![node]);
-        assert!(new_host_routes(&before, &after, 20).is_empty(), "a /1 is not a host route");
+        assert_eq!(new_host_routes(&before, &after, 14, gateway), vec![node]);
+        assert!(new_host_routes(&before, &after, 20, v4(10, 77, 0, 1)).is_empty(), "a /1 is not a host route");
         assert!(
-            new_host_routes(&after, &after, 14).is_empty(),
+            new_host_routes(&after, &after, 14, gateway).is_empty(),
             "a host route that was there before is not one the engine added"
         );
     }
@@ -463,8 +504,10 @@ mod tests {
         let stale_other_gateway = RouteRow::host(known, 9, v4(198, 18, 5, 1), 0);
         let unknown = RouteRow::host(v4(198, 51, 100, 9), 14, gateway, 0);
         let on_ours = RouteRow::host(known, 30, v4(10, 8, 0, 1), 0);
-        let wider = RouteRow { dest: known, prefix: 31, if_index: 14, next_hop: gateway, metric: 0 };
-        let rows = [stale, unknown, on_ours, wider, stale_other_gateway];
+        let wider = RouteRow { dest: known, prefix: 31, if_index: 14, next_hop: gateway, metric: 0, netmgmt: true };
+        // A route Windows made, which is never a leftover of ours.
+        let windows = RouteRow { netmgmt: false, ..RouteRow::host(known, 14, Ipv4Addr::UNSPECIFIED, 256) };
+        let rows = [stale, unknown, on_ours, wider, stale_other_gateway, windows];
 
         assert_eq!(stale_node_routes(&rows, &[known], &[30]), vec![stale, stale_other_gateway]);
         assert!(stale_node_routes(&rows, &[], &[30]).is_empty(), "nothing known, nothing taken");
@@ -476,7 +519,7 @@ mod tests {
         let rows = [
             RouteRow::host(v4(203, 0, 113, 7), 14, gateway, 1),
             RouteRow::host(v4(203, 0, 113, 8), 9, gateway, 1),
-            RouteRow { dest: v4(10, 0, 0, 0), prefix: 8, if_index: 14, next_hop: gateway, metric: 1 },
+            RouteRow { dest: v4(10, 0, 0, 0), prefix: 8, if_index: 14, next_hop: gateway, metric: 1, netmgmt: true },
         ];
         assert_eq!(host_routes_on(&rows, 14), vec![rows[0]]);
     }
@@ -495,7 +538,7 @@ mod tests {
 
     #[test]
     fn masks_are_the_ones_route_exe_expects() {
-        let row = |prefix| RouteRow { dest: v4(0, 0, 0, 0), prefix, if_index: 1, next_hop: v4(0, 0, 0, 0), metric: 1 };
+        let row = |prefix| RouteRow { dest: v4(0, 0, 0, 0), prefix, if_index: 1, next_hop: v4(0, 0, 0, 0), metric: 1, netmgmt: true };
         assert_eq!(row(32).mask(), v4(255, 255, 255, 255));
         assert_eq!(row(1).mask(), v4(128, 0, 0, 0));
         assert_eq!(row(0).mask(), v4(0, 0, 0, 0));
@@ -522,6 +565,17 @@ mod tests {
         by_interface.dedup();
         assert!(!rows.is_empty(), "loopback always carries routes");
         assert_eq!(rows, by_interface);
+    }
+
+    /// Who made a route, read off the real table: the loopback routes
+    /// Windows makes on every machine are its own (protocol `LOCAL`), so
+    /// nothing that takes or deletes routes here could ever take them.
+    #[test]
+    fn the_system_table_reads_windows_own_routes_as_not_a_programs() {
+        let loopback: Vec<RouteRow> =
+            SystemRoutes.rows().expect("the table should read").into_iter().filter(|r| r.if_index == 1).collect();
+        assert!(!loopback.is_empty(), "loopback always carries routes");
+        assert!(loopback.iter().all(|r| !r.netmgmt), "{loopback:#?}");
     }
 
     #[test]
