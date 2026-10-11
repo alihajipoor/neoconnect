@@ -1,0 +1,36 @@
+diff --git a/dist-js/index.cjs b/dist-js/index.cjs
+index f1bba4502af349efbde8b94ac1b1773a490f4836..b26f1c5a89baba1c03c5e666b6c7bdc141ae8903 100644
+--- a/dist-js/index.cjs
++++ b/dist-js/index.cjs
+@@ -161,6 +161,13 @@ async function fetch(input, init) {
+                 void dropBody();
+             }
+         });
++    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
++    // a null-body response is never read or cancelled, so nothing above
++    // ever frees it, and the Rust side keeps it -- and its HTTP/2 stream and
++    // connection -- for the life of the webview. Release it now.
++    if (body === null) {
++        dropBody().catch(() => undefined);
++    }
+     const res = new Response(body, {
+         status,
+         statusText
+diff --git a/dist-js/index.js b/dist-js/index.js
+index 01f0ea49e0fe45425adcb8596f57e97a92c8c958..c2e08db4c3f1d387bf611576b11fe641cc1294ec 100644
+--- a/dist-js/index.js
++++ b/dist-js/index.js
+@@ -159,6 +159,13 @@ async function fetch(input, init) {
+                 void dropBody();
+             }
+         });
++    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
++    // a null-body response is never read or cancelled, so nothing above
++    // ever frees it, and the Rust side keeps it -- and its HTTP/2 stream and
++    // connection -- for the life of the webview. Release it now.
++    if (body === null) {
++        dropBody().catch(() => undefined);
++    }
+     const res = new Response(body, {
+         status,
+         statusText

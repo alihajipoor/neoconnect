@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@tauri-apps/plugin-http@2.5.9':
+    hash: l7oan5tygeowht36wg7kkplvom
+    path: patches/@tauri-apps__plugin-http@2.5.9.patch
+
 importers:
 
   .:
@@ -258,7 +263,7 @@ importers:
         version: 2.7.2
       '@tauri-apps/plugin-http':
         specifier: ^2.5.9
-        version: 2.5.9
+        version: 2.5.9(patch_hash=l7oan5tygeowht36wg7kkplvom)
       '@tauri-apps/plugin-opener':
         specifier: ^2
         version: 2.5.4
@@ -356,7 +361,7 @@ importers:
         version: 2.3.2
       '@tauri-apps/plugin-http':
         specifier: ^2.5.9
-        version: 2.5.9
+        version: 2.5.9(patch_hash=l7oan5tygeowht36wg7kkplvom)
       '@tauri-apps/plugin-opener':
         specifier: ^2.5.4
         version: 2.5.4
@@ -7770,7 +7775,7 @@ snapshots:
     dependencies:
       '@tauri-apps/api': 2.12.1
 
-  '@tauri-apps/plugin-http@2.5.9':
+  '@tauri-apps/plugin-http@2.5.9(patch_hash=l7oan5tygeowht36wg7kkplvom)':
     dependencies:
       '@tauri-apps/api': 2.12.1
 

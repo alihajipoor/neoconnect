@@ -15,5 +15,10 @@
   },
   "devDependencies": {
     "turbo": "^2.3.0"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "@tauri-apps/plugin-http@2.5.9": "patches/@tauri-apps__plugin-http@2.5.9.patch"
+    }
   }
 }
