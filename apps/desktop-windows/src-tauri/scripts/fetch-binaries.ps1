@@ -71,7 +71,19 @@ $xrayZip = Join-Path $xrayTemp "xray.zip"
 $xrayUrl = "https://github.com/XTLS/Xray-core/releases/download/$xrayVersion/Xray-windows-64.zip"
 Write-Host "Downloading $xrayUrl ..."
 Invoke-WebRequest -Uri $xrayUrl -OutFile $xrayZip
-$xrayActual = (Get-FileHash -Algorithm SHA256 $xrayZip).Hash.ToLowerInvariant()
+# Hashed with .NET, not the Utility module's file-hash cmdlet:
+# `pnpm run fetch-binaries` from a pwsh step (the release and the
+# test-installer workflows) starts this Windows PowerShell with
+# PowerShell 7's modules first on PSModulePath, and that cmdlet is then
+# not found.
+$xraySha = [System.Security.Cryptography.SHA256]::Create()
+$xrayStream = [System.IO.File]::OpenRead($xrayZip)
+try {
+    $xrayActual = ([BitConverter]::ToString($xraySha.ComputeHash($xrayStream)) -replace "-", "").ToLowerInvariant()
+} finally {
+    $xrayStream.Dispose()
+    $xraySha.Dispose()
+}
 if ($xrayActual -ne $xraySha256) {
     throw "Xray $xrayVersion zip has SHA-256 $xrayActual, expected $xraySha256 -- not using it."
 }

@@ -1108,7 +1108,13 @@ mod tests {
             .expect("the Xray zip's SHA-256 is pinned");
         assert_eq!(hash.len(), 64, "{hash}");
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{hash}");
-        assert!(script.contains("Get-FileHash -Algorithm SHA256 $xrayZip"), "the pinned hash is never checked");
+        assert!(script.contains("[System.IO.File]::OpenRead($xrayZip)"), "the pinned hash is never computed");
+        assert!(script.contains("$xrayActual -ne $xraySha256"), "the pinned hash is never compared");
+        // `pnpm run fetch-binaries` under a pwsh step (the release, the
+        // test installer) hands Windows PowerShell a module path with
+        // PowerShell 7's modules first, and Get-FileHash is then not found:
+        // the test-installer build of 59ebd99 stopped here.
+        assert!(!script.contains("Get-FileHash"), "Get-FileHash is missing when pnpm runs this under pwsh");
     }
 
     /// xray.exe names its adapter's GUID after its name since v26.3.23, so
