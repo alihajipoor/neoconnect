@@ -2336,19 +2336,35 @@ impl Engines {
                 mut routes,
                 protocol,
             }) => {
-                // Routes first: leaving them pointed at an adapter that is
-                // about to disappear would black-hole all traffic until
-                // Windows noticed.
-                routes.remove();
-                self.mark("routes removed");
+                // The engine first, and the IPv4 confinement the moment it is
+                // gone (K1), as the hard stop does. Routes used to come out
+                // first, while the confinement still held: from the first
+                // route.exe delete to the kill, everything went to the
+                // physical adapter and was refused there -- the machine's
+                // whole internet, on every replacing connect, Custom-mode
+                // rebuild, Repair, idle-watchdog teardown and service stop.
+                // Killed first, the engine's adapter goes with it -- and with
+                // Xray's, the routes on it -- so the deletes below find the
+                // bare line already working.
                 let _ = child.kill();
                 self.mark("engine stopped");
-                // The engine is killed and its routes are gone: the IPv4
-                // confinement goes now, before the reap (up to REAP_BUDGET),
-                // the OpenVPN purge below (PowerShell, seconds) and the DNS
-                // sweep. With the routes out, everything it still held was
-                // headed for the physical adapter and refused there (K1).
+                // Before the routes, the reap (up to REAP_BUDGET), the
+                // OpenVPN purge below (PowerShell, seconds) and the DNS
+                // sweep: the session is ending, so it protects nothing now.
                 self.let_go_of_confinement();
+                routes.remove();
+                self.mark("routes removed");
+                // OpenVPN's pushed half-defaults, which `routes` does not
+                // hold and which outlive the kill on an adapter kept between
+                // sessions: by destination with route.exe, as the hard stop
+                // and a dead engine's teardown take them, rather than only by
+                // the PowerShell purge after the reap -- seconds of two /1
+                // routes into a dead adapter beating the real default.
+                if protocol == "OPENVPN" {
+                    if let Ok(Some(adapter)) = adapters::find_by_name(openvpn::ADAPTER_NAME) {
+                        routing::purge_pushed_half_defaults(adapter.index);
+                    }
+                }
                 reap(&mut child);
                 self.mark("engine reaped");
 
@@ -5226,11 +5242,12 @@ mod helper_tests {
     /// through the route.exe deletes and the reap it only takes the
     /// machine's internet away for as long as they take: routes going one
     /// at a time send traffic to the physical adapter, where it is
-    /// refused. So: the hard stop lets go the moment it has killed the
-    /// engine, before the routes; the thorough pass, whose routes come out
-    /// before its kill, lets go straight after the kill and before the
-    /// reap (up to five seconds); and a dead engine's teardown lets go
-    /// first, its engine being stopped already.
+    /// refused. So every teardown lets go the moment its engine is gone,
+    /// before the routes: the hard stop; the thorough pass -- a
+    /// Disconnect, a replacing connect, a Custom-mode rebuild, Repair, the
+    /// idle watchdog, service stop -- whose routes used to come out before
+    /// its kill, with the confinement held through them; and a dead
+    /// engine's teardown, its engine being stopped already.
     #[test]
     fn confinement_released_the_moment_the_engine_is_killed_before_routes_and_reap() {
         let (mut engines, fake, _) = confined_session();
@@ -5241,7 +5258,7 @@ mod helper_tests {
         let (mut engines, fake, _) = confined_session();
         engines.disconnect().expect("disconnect");
         assert_eq!(fake.closed(), vec![1000], "Disconnect: closed exactly once");
-        in_order(&engines.teardown_steps, &["routes removed", "engine stopped", "confinement released", "engine reaped"]);
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "routes removed", "engine reaped"]);
 
         let (mut engines, fake, generation) = confined_session();
         kill_engine_behind_its_back(&mut engines);
