@@ -25,8 +25,10 @@
 //!   machine's up, non-tunnel adapters, link-local, multicast, the limited
 //!   broadcast and DHCP -- never `10/8` or `100.64/10` wholesale, which on
 //!   Iranian carrier-grade NAT is the ISP's network. The router's DNS stays
-//!   refused: DNS goes through the tunnel (the IPv6 block's sublayer refuses
-//!   port 53 off the tunnel, and a block in any sublayer wins).
+//!   refused: DNS goes through the tunnel. This sublayer refuses port 53
+//!   off the tunnel itself, over the LAN permit, as the IPv6 block's
+//!   sublayer also does -- a block in any sublayer wins, but that one's DNS
+//!   filters are a separate install that can fail on its own.
 //! * (b) While connected, other VPNs and overlays and inbound connections
 //!   from the internet stop working. Custom mode is untouched: no
 //!   confinement there, in either variant.
@@ -337,7 +339,10 @@ pub const WEIGHT_LOOPBACK: u8 = 15;
 pub const WEIGHT_TUNNEL: u8 = 14;
 pub const WEIGHT_TRANSPORT: u8 = 13;
 pub const WEIGHT_DHCP: u8 = 12;
-pub const WEIGHT_LAN: u8 = 11;
+/// DNS outside the tunnel refused, over the LAN permit: the router's
+/// resolver is on the LAN, and decision (a) keeps it refused.
+pub const WEIGHT_DNS: u8 = 11;
+pub const WEIGHT_LAN: u8 = 10;
 pub const WEIGHT_BLOCK: u8 = 0;
 
 /// Link-local (APIPA), multicast and the limited broadcast: the LAN's
@@ -353,7 +358,8 @@ fn lan_plumbing() -> [Prefix; 3] {
 /// The filters for a plan, in the order they go in.
 ///
 /// At each V4 layer, both directions: loopback, the tunnel, the engine,
-/// DHCP, the LAN, then a block of everything. At the matching V6 layer,
+/// DHCP, a block of DNS (outbound only), the LAN, then a block of
+/// everything. At the matching V6 layer,
 /// the same permits with their addresses IPv4-mapped, then a block of
 /// `::ffff:0:0/96` only (K4) -- native IPv6 is the IPv6 block's, in its own
 /// sublayer. P0-B measured Windows judging a dual-mode socket's IPv4 at the
@@ -443,6 +449,23 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
                 conds: conds.clone(),
             });
         }
+        // DNS beside the tunnel, the router's included, whatever the LAN
+        // permit below would let through. Under the tunnel, loopback and
+        // the engine's own link (which may be to port 53); outbound only,
+        // because a lookup is a request this PC makes, and a DNS server on
+        // it -- a Mobile Hotspot's -- is asked on its local port 53, not a
+        // remote one. Here, not only in the IPv6 block's sublayer, whose
+        // DNS filters are a separate install that can fail while these go
+        // in (decision (a)).
+        if layer == Layer::ConnectV4 {
+            specs.push(FilterSpec {
+                name: "Neoxify: block DNS outside the tunnel (outbound)".into(),
+                layer,
+                action: Action::Block,
+                weight: WEIGHT_DNS,
+                conds: vec![Cond::RemotePort(53)],
+            });
+        }
         specs.push(FilterSpec {
             name: format!("Neoxify: block all {} IPv4 outside the tunnel", layer.direction()),
             layer,
@@ -459,6 +482,15 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
                 action: Action::Permit,
                 weight: *weight,
                 conds: conds.iter().map(mapped).collect(),
+            });
+        }
+        if layer == Layer::ConnectV6 {
+            specs.push(FilterSpec {
+                name: "Neoxify: block DNS outside the tunnel, IPv4-mapped (outbound)".into(),
+                layer,
+                action: Action::Block,
+                weight: WEIGHT_DNS,
+                conds: vec![Cond::RemoteV6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped(), 96), Cond::RemotePort(53)],
             });
         }
         specs.push(FilterSpec {
@@ -1736,9 +1768,10 @@ mod tests {
 
     /// Within a sublayer the highest-weight matching filter decides, so the
     /// order of the weights is the policy: loopback over the tunnel over
-    /// the engine over DHCP over the LAN, and the block under everything.
+    /// the engine over DHCP over the DNS block (outbound) over the LAN, and
+    /// the block under everything.
     #[test]
-    fn weights_loopback_gt_tunnel_gt_transport_gt_dhcp_gt_lan_gt_block() {
+    fn weights_loopback_gt_tunnel_gt_transport_gt_dhcp_gt_dns_gt_lan_gt_block() {
         let specs = specs(&xray_plan());
         let home = Ipv4Addr::new(192, 168, 1, 0);
         for layer in the_four_layers() {
@@ -1750,11 +1783,17 @@ mod tests {
                 s.conds == [Cond::RemoteV4(Prefix::new(home, 24))]
                     || s.conds == [Cond::RemoteV6(home.to_ipv6_mapped(), 120)]
             });
-            let block = weight_of(&specs, layer, |s| s.action == Action::Block);
+            let block = weight_of(&specs, layer, |s| {
+                s.action == Action::Block && !s.conds.contains(&Cond::RemotePort(53))
+            });
             assert!(
                 loopback > tunnel && tunnel > transport && transport > dhcp && dhcp > lan && lan > block,
                 "at {layer:?}: loopback {loopback}, tunnel {tunnel}, transport {transport}, dhcp {dhcp}, lan {lan}, block {block}"
             );
+            if matches!(layer, Layer::ConnectV4 | Layer::ConnectV6) {
+                let dns = weight_of(&specs, layer, |s| s.action == Action::Block && s.conds.contains(&Cond::RemotePort(53)));
+                assert!(dhcp > dns && dns > lan, "at {layer:?}: dhcp {dhcp}, dns {dns}, lan {lan}");
+            }
             assert_eq!(block, WEIGHT_BLOCK);
             assert!(loopback <= 15, "FWP_UINT8 weights run 0-15");
         }
@@ -1796,23 +1835,30 @@ mod tests {
         }
     }
 
-    /// The V6 block in this sublayer covers the IPv4-mapped range and
+    /// The V6 blocks in this sublayer cover the IPv4-mapped range and
     /// nothing else (K4). Native IPv6 is the IPv6 block's job, in its own
     /// sublayer; a block-all here would duplicate it with a different
-    /// lifetime. The V4 blocks are the unconditional ones.
+    /// lifetime. The V4 block of everything is the unconditional one; the
+    /// only other block is DNS's, outbound, by port.
     #[test]
     fn v6_block_in_this_sublayer_covers_only_ffff_0_0_96() {
         let specs = specs(&xray_plan());
+        let mapped_range = Cond::RemoteV6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped(), 96);
         for layer in [Layer::ConnectV6, Layer::RecvAcceptV6] {
             let blocks: Vec<&FilterSpec> = specs.iter().filter(|s| s.layer == layer && s.action == Action::Block).collect();
-            assert_eq!(blocks.len(), 1, "{layer:?}");
-            assert_eq!(blocks[0].conds, vec![Cond::RemoteV6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped(), 96)], "{layer:?}");
+            assert!(blocks.iter().all(|b| b.conds.contains(&mapped_range)), "{layer:?}: {blocks:?}");
+            let everything: Vec<&&FilterSpec> = blocks.iter().filter(|b| b.conds == [mapped_range.clone()]).collect();
+            assert_eq!(everything.len(), 1, "{layer:?}");
             assert!(specs.iter().filter(|s| s.layer == layer).all(|s| !s.conds.is_empty()), "{layer:?}");
         }
         for layer in [Layer::ConnectV4, Layer::RecvAcceptV4] {
             let blocks: Vec<&FilterSpec> = specs.iter().filter(|s| s.layer == layer && s.action == Action::Block).collect();
-            assert_eq!(blocks.len(), 1, "{layer:?}");
-            assert!(blocks[0].conds.is_empty(), "the IPv4 block is everything the permits did not claim");
+            let everything: Vec<&&FilterSpec> = blocks.iter().filter(|b| b.conds.is_empty()).collect();
+            assert_eq!(everything.len(), 1, "the IPv4 block is everything the permits did not claim: {layer:?}");
+            let scoped: Vec<Vec<Cond>> = blocks.iter().filter(|b| !b.conds.is_empty()).map(|b| b.conds.clone()).collect();
+            let expected: Vec<Vec<Cond>> =
+                if layer == Layer::ConnectV4 { vec![vec![Cond::RemotePort(53)]] } else { Vec::new() };
+            assert_eq!(scoped, expected, "{layer:?}");
         }
     }
 
@@ -2485,6 +2531,77 @@ mod tests {
             assert!(udp_said.is_some_and(|w| w.contains("UDP") && w.contains("port 9")), "WFP's record of the UDP drop");
         }
 
+        /// The LAN permit and the DNS block against the real filtering
+        /// engine: with this machine's own LAN allowed, a connection to the
+        /// router on a port that is not DNS is let out, and one to the
+        /// router's port 53 is refused here, over TCP and over UDP -- the
+        /// router's DNS stays refused by this sublayer alone (decision (a)),
+        /// with no IPv6 block installed.
+        ///
+        /// A UDP send WFP refuses still returns Ok to its sender (as the
+        /// test above shows), so UDP is judged by WFP's record of what it
+        /// dropped, and TCP by the connect's own error: 10013 is refused
+        /// here, anything else -- the router refusing the port, a timeout --
+        /// is the packet having left.
+        ///
+        /// Ignored, like the test above: elevated, and it confines this
+        /// machine's IPv4 for a moment. Run it in the VM guest.
+        #[test]
+        #[ignore = "elevated, and confines this machine's IPv4 for a moment: run in the VM guest"]
+        fn wfp_refuses_the_routers_dns_and_permits_the_lan() {
+            let luid = loopback_luid().expect("interface 1");
+            let adapters = crate::adapters::list().expect("adapters");
+            let uplink = adapters
+                .iter()
+                .find(|a| a.is_up && a.gateway.is_some() && a.ipv4.is_some() && a.ipv4_prefix.is_some())
+                .expect("an adapter with a gateway");
+            let router = uplink.gateway.unwrap();
+            let lan = Prefix::new(uplink.ipv4.unwrap(), uplink.ipv4_prefix.unwrap());
+            assert!(lan.contains(router), "the router is on the adapter's own prefix");
+            println!("router {router}, LAN {}/{}", lan.addr, lan.len);
+            let plan = Plan {
+                tunnel_luid: luid,
+                transport: Transport::Xray {
+                    exe: std::env::current_exe().expect("test binary path"),
+                    nodes: vec![Ipv4Addr::new(203, 0, 113, 7)],
+                },
+                lan: Lan::Allowed(vec![lan]),
+            };
+            let connect = |port: u16| {
+                let to = std::net::SocketAddr::from((router, port));
+                std::net::TcpStream::connect_timeout(&to, std::time::Duration::from_secs(2))
+                    .map(|_| ())
+                    .map_err(|e| e.raw_os_error())
+            };
+            let send_to = |port: u16| {
+                let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("a UDP socket");
+                socket.send_to(b"neoxify confinement test", (router, port)).map_err(|e| e.raw_os_error())
+            };
+            println!("before: tcp router:9 {:?}, tcp router:53 {:?}", connect(9), connect(53));
+            let installed = install(&plan, &std::env::temp_dir()).expect("installed");
+            let (lan_tcp, dns_tcp) = (connect(9), connect(53));
+            let (lan_udp, dns_udp) = (send_to(9), send_to(53));
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let session = crate::engines::ipv6_block::open_dynamic_session_named("Neoxify test lookup", "test")
+                .expect("a session to read WFP's record with");
+            // SAFETY: both sessions are live; each is closed once, here.
+            let recorded = unsafe {
+                let recorded = refusals_since(session, installed.since, &installed.blocks);
+                FwpmEngineClose0(session);
+                FwpmEngineClose0(installed.engine as HANDLE);
+                recorded
+            };
+            let (refusals, _) = recorded.expect("WFP's record of refusals");
+            let app = app_id_text(&std::env::current_exe().unwrap()).unwrap();
+            let ours: Vec<&Refusal> = refusals.iter().filter(|r| r.app.eq_ignore_ascii_case(&app)).collect();
+            println!("confined: tcp router:9 {lan_tcp:?}, tcp router:53 {dns_tcp:?}, udp router:9 {lan_udp:?}, udp router:53 {dns_udp:?}");
+            println!("refused by this plan's blocks: {ours:?}");
+            assert_ne!(lan_tcp, Err(Some(10013)), "a TCP connection to the LAN was refused");
+            assert_eq!(dns_tcp, Err(Some(10013)), "TCP to the router's DNS was not refused");
+            assert!(ours.iter().any(|r| r.protocol == protocol::UDP && r.remote_port == 53), "UDP to the router's DNS was not refused");
+            assert!(!ours.iter().any(|r| r.remote_port == 9), "the LAN was refused");
+        }
+
         const CHILD: &str = "NEOXIFY_CONFINEMENT_TEST_CHILD";
 
         /// The whole crash-safety argument, run: a process installs a real
@@ -2538,9 +2655,10 @@ mod tests {
     /// highest-weight matching filter decides; across sublayers a block in
     /// any of them wins over a permit that did not clear the action right
     /// (none here does). What it pins is the reasoning built on those rules
-    /// -- above all that the LAN permit does not let the router's DNS out,
-    /// because the other sublayer still blocks port 53 off the tunnel. What
-    /// WFP actually does is for the elevated install test and the VM.
+    /// -- above all that the LAN permit does not let the router's DNS out:
+    /// this sublayer's DNS block outweighs it, and the other sublayer blocks
+    /// port 53 off the tunnel too. What WFP actually does is for the
+    /// elevated install test and the VM.
     mod arbitration {
         use super::*;
         use std::net::IpAddr;
@@ -2661,7 +2779,7 @@ mod tests {
             let node = IpAddr::V4(node());
             let rows: Vec<(&str, Flow, Verdict)> = vec![
                 (
-                    "the router's DNS, on the physical adapter: the LAN permit lets it past this sublayer, the IPv6 block's port-53 block does not",
+                    "the router's DNS, on the physical adapter: refused by this sublayer's DNS block over its LAN permit, and by the IPv6 block's",
                     out(app(), v4(192, 168, 1, 1), 53, protocol::UDP, PHYSICAL),
                     Verdict::Block,
                 ),
@@ -2746,6 +2864,56 @@ mod tests {
                 if got != *expected {
                     wrong.push(format!("{why}: expected {expected:?}, got {got:?}"));
                 }
+            }
+            assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        }
+
+        /// The router's DNS stays refused (the owner's decision (a)) by this
+        /// sublayer on its own -- not only because the IPv6 block's sublayer
+        /// refuses port 53 off the tunnel. Those DNS filters are a separate
+        /// install that can fail while this one goes in (`mod.rs` then
+        /// reinstalls the IPv6 block without them, and says so only in
+        /// ipv6-block.log), and on OpenVPN the other refusal is openvpn.exe's
+        /// own block-outside-dns, which nothing checks. Either way the LAN
+        /// permit let a lookup to the router out in clear text while the
+        /// status said confined. The engine's own link keeps any port --
+        /// OpenVPN over UDP 53 is a classic way through a filter -- and the
+        /// tunnel, loopback and the rest of the LAN are untouched.
+        #[test]
+        fn router_dns_is_refused_by_this_sublayer_alone() {
+            let ours = vec![specs(&xray_plan())];
+            let server = IpAddr::V4(node());
+            let rows: Vec<(&str, Flow, Verdict)> = vec![
+                ("the router's DNS over UDP", out(app(), v4(192, 168, 1, 1), 53, protocol::UDP, PHYSICAL), Verdict::Block),
+                ("the router's DNS over TCP", out(app(), v4(192, 168, 1, 1), 53, protocol::TCP, PHYSICAL), Verdict::Block),
+                ("a public resolver beside the tunnel", out(app(), v4(8, 8, 8, 8), 53, protocol::UDP, PHYSICAL), Verdict::Block),
+                (
+                    "the router's DNS, IPv4-mapped at V6",
+                    out(app(), mapped(v4(192, 168, 1, 1)), 53, protocol::UDP, PHYSICAL),
+                    Verdict::Block,
+                ),
+                ("DNS through the tunnel", out(app(), v4(1, 1, 1, 1), 53, protocol::UDP, LUID), Verdict::Permit),
+                (
+                    "a resolver on loopback",
+                    Flow { loopback: true, ..out(app(), v4(127, 0, 0, 1), 53, protocol::UDP, 1) },
+                    Verdict::Permit,
+                ),
+                ("xray.exe to a server listening on 53", out(xray_exe(), server, 53, protocol::UDP, PHYSICAL), Verdict::Permit),
+                ("a printer on the LAN", out(app(), v4(192, 168, 1, 20), 9100, protocol::TCP, PHYSICAL), Verdict::Permit),
+            ];
+            let mut wrong = Vec::new();
+            for (why, flow, expected) in &rows {
+                let got = decide(&ours, flow);
+                if got != *expected {
+                    wrong.push(format!("{why}: expected {expected:?}, got {got:?}"));
+                }
+            }
+            let over_53 = plan_for(&openvpn("udp", 53), false, inputs(Some(openvpn_exe()), vec![node()]))
+                .expect("planned")
+                .expect("built");
+            let flow = out(openvpn_exe(), server, 53, protocol::UDP, PHYSICAL);
+            if decide(&[specs(&over_53)], &flow) != Verdict::Permit {
+                wrong.push("openvpn.exe to its server over UDP 53 was refused".into());
             }
             assert!(wrong.is_empty(), "{}", wrong.join("\n"));
         }
