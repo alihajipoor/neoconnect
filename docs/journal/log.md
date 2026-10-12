@@ -6236,8 +6236,8 @@ Tentative (the errors were 10065, not the predicted 10049; a causal test
 settled it). 1.7, the IPv6 block's V6 permits for the tunnel LUID and
 `::ffff:0:0/96`, is **not** built -- P0-B showed the block never refused a
 dual-mode socket's IPv4, so they would change nothing. Phase 3 (IPv4
-confinement) waits on the owner's decisions (a)-(e) in the design; Phase 4
-is optional.
+confinement) was decided by the owner on 2026-10-12 and is built (the
+second 2026-10-12 entry); Phase 4 is optional, and not wanted now.
 
 **The review round.** Four reviewers read the branch; what they found,
 and what became of it (each commit message has the detail):
@@ -6466,7 +6466,8 @@ the test adapter, a leftover host route).
   own services. And on Stealth and Compatible an IPv4 TLS connection opened
   before Connect went on leaving by the NIC, from the host's public
   address, for the whole session: 0.9.48 has no IPv4 filter on those
-  engines. That is Phase 3's question, still with the owner.
+  engines. That is Phase 3's question, since decided and built (the second
+  2026-10-12 entry).
 - **D, flows already open when a filter goes in are re-examined.** A
   connected IPv6 UDP socket opened before Connect was refused by our block
   from then on (5157 naming it, 63 times in one Stealth run, 33 in one
@@ -6664,3 +6665,145 @@ gave none and a 200.
   real IPv6 path, a censored Iranian line, PPPoE, Wi-Fi roaming and
   sleep/resume, MTU below 1500, Mobile Hotspot, WSL2, Hyper-V and Docker,
   another VPN installed, phones.
+
+## 2026-10-12 — desktop capture, Phase 3: IPv4 confined to a full tunnel (same branch, not merged, not pushed)
+
+**Status:** in code and in tests on this PC, and the two WFP tests run
+elevated in the `Neoxify-Test` guest. **No connect of this build has been
+made anywhere**: the design's P3 gate (captures at the NIC, the leakers,
+the teardown and kill scenarios) has not run. Commits `c568291..28ce5b6`
+on this branch, then this entry.
+
+**What it does.** On a full tunnel over Xray (the five Stealth protocols
+and Shadowsocks) or OpenVPN (Compatible), the service now refuses every
+IPv4 connection on the PC that does not go through the tunnel, the way
+wireguard.exe's own kill switch does for Fast: permitted are loopback, the
+tunnel's interface, the engine's own link to its servers (xray.exe to the
+primary and each exit; openvpn.exe to its server, port and protocol),
+DHCP as client and as server, and the LAN. Everything else is refused at
+`ALE_AUTH_CONNECT_V4` and `ALE_AUTH_RECV_ACCEPT_V4`, with the same permits
+IPv4-mapped at the V6 layers and a block of `::ffff:0:0/96` only there
+(native IPv6 stays the IPv6 block's). This closes what P0-C measured on
+0.9.48: an IPv4 connection opened before Connect leaving by the guest's
+own adapter for the whole Stealth and Compatible sessions; and with it
+sockets bound to the physical adapter and connections opened in the gap
+between two rungs. It is not a kill switch: "while the tunnel is down
+nothing is blocked" (2026-10-07) holds -- the filters are released the
+moment the engine stops or is reported gone, and live in a dynamic WFP
+session the kernel ends with the service.
+
+**What the owner decided (2026-10-12, "do everything based on the
+recommendations"):**
+
+- (a) The LAN stays reachable: the RFC 1918 on-link prefix of each up,
+  non-tunnel adapter, plus 169.254/16, 224/4, 255.255.255.255 and DHCP.
+  Never 10/8 or 100.64/10 wholesale: carrier-grade NAT is dropped, and an
+  on-link prefix wider than /16 (a modem's 10/8) is narrowed to the /24
+  around the address. The router's DNS stays refused -- the IPv6 block's
+  port-53 block, in its own sublayer, still wins (modelled, below).
+- (b) Accepted: other VPNs and overlays, and inbound connections from the
+  internet, stop working while connected. Custom mode is not confined,
+  in either variant, on any engine.
+- (c) Connections open outside the tunnel at connect are reset once so
+  they come back through it. **Decided from P0-D:** Windows re-examines
+  open flows when a filter is added, so the confinement alone stops an old
+  flow leaking -- but only at its next packet, and a connected UDP socket
+  is never told (its sends "succeed"). So both: the filters, and
+  `SetTcpEntry(DELETE_TCB)` from the service on every established IPv4
+  connection outside the tunnel (not from our adapters' addresses, not the
+  engine's process, not to the LAN or loopback; Neoxify's own included),
+  once at connect and again every 250 ms for 3 s for rows that were
+  mid-handshake. UDP cannot be reset; IPv6 TCP is the IPv6 block's.
+- (d) A confinement that will not go in keeps the tunnel up and is
+  reported: `ipv4_confined: false` with a reason. The app then says
+  "Connected, not fully protected" instead of "You're protected", and a
+  line under it (English and Persian) says what is not covered.
+- (e) The node's own address keeps its host route around the tunnel;
+  Phase 4 is not done.
+
+**How it is built** (each commit message has the detail):
+
+- `engines/confinement.rs`: the pure plan (`plan_for`, `specs`,
+  `lan_prefixes`), a dynamic WFP session of its own (provider "Neoxify
+  capture", sublayer "Neoxify IPv4 confinement", weight 0xFFFE, one
+  transaction), and `Hold`, the session's handle on it.
+- The design judge's invariants: K1 -- released straight after the
+  engine stops, before DNS, the phonebook entry, OpenVPN's PowerShell
+  route purge and the IPv6 block (a hard-stop step of its own); K2 --
+  released on **any** drop report, on the watch's own thread, and put back
+  with the tunnel's LUID read again when phase one finds the engine alive;
+  K5 -- the plan-error valve: for 10 s after each install the engine's log
+  is read, and a line where its own socket was refused (WSAEACCES) lets
+  the confinement go for the session and says why; K10 -- while confined
+  the app does not ask the connected server's own mirrors, which are
+  refused on the PC, and reads the service's status before a rung's
+  egress check so the first check knows too.
+- IKEv2's plan (IKE by local port 500/4500, ESP to the server -- K3) is
+  coded and tested and **off** (`IKEV2_CONFINED`), until its own VM gate
+  passes. WireGuard has no plan: wireguard.exe's own kill switch (K8).
+- Status: `Response::State` gains `ipv4_confined` and
+  `confinement_problem`, serde-default and omitted when `None`; `None`
+  (Custom mode, WireGuard, IKEv2, an older service) shows nothing.
+- Leftovers: Repair and the service's start sweep the new provider and
+  sublayer by key, as they do the IPv6 block's.
+- One row of the design's arbitration table was corrected: IPv4-mapped
+  traffic classified at V6 through the tunnel is refused by the IPv6
+  block (1.7 was never built, after P0-B), exactly as today; the new
+  sublayer on its own permits it.
+- Two gaps found re-reading the plan and fixed before any run: a DHCP
+  server on the PC (hotspot, Hyper-V, WSL) is asked from 0.0.0.0, so the
+  server direction is permitted too; and the reset spares every address
+  our adapters hold, not the first listed, which on a Wintun adapter can
+  be a stale APIPA.
+
+**Proven -- tests on this PC:** desktop `cargo test --workspace` 50, 60,
+607 (8 ignored), `cargo check --workspace --all-targets` with no new
+warnings; desktop `pnpm test` 1483 / 87 files and `pnpm typecheck`;
+mobile `pnpm test` 239 / 16 and `tsc` (the dictionary and `api.ts` are
+shared). Every new test failed first, against a stub standing for
+today's behaviour or before its API existed; the guards that passed on
+the stubs are named in the commit messages. Release tests include the
+32-way variants: one hold released by 32 threads, 32 holds each raced by
+the watch's thread and the owning thread, and 32 confined sessions whose
+engines are killed while their hard stops run -- each closed exactly
+once. The arbitration model is a model, not evidence of WFP.
+
+**Proven -- run elevated in the VM guest** (the installed build's DLLs
+beside this branch's test binary, sha256 `E031C507…`): WFP accepted every
+engine's plan -- Xray with three exits, OpenVPN over UDP and TCP, IKEv2,
+the LAN refused -- inside a transaction that was then aborted; and a
+child that installed a real 56-filter confinement was killed with
+TerminateProcess, after which neither the provider nor the sublayer was
+on the machine, and the guest reached 1.1.1.1. The IPv6 block's own two
+add-then-abort tests passed beside them. Nothing was left in the guest.
+
+**Unverified -- all of the behaviour, on any machine.** No connect has
+installed this. The P3 gate is the next step: the NIC capture with the
+leakers started before Connect (a TCP and a connected UDP flow, sockets
+bound to the NIC, a dual-mode socket, a keep-alive loop), Xray's capture
+held to Fast's, the reset log against the RSTs at the NIC, Disconnect's
+bare line within 300 ms, an engine killed and the service killed with a
+diagnostics snapshot running, the stalled tunnel, NCSI's taskbar state,
+the upgrade from 0.9.48 with no orphaned WFP objects, and Custom mode
+unchanged. Specifically not known yet:
+
+- whether the engine permits are right on a real connect -- the valve is
+  the net if not, and its 10013 lines are **provisional** (what xray.exe
+  and openvpn.exe are known to print, not captured); P3 step 8 is to
+  capture them;
+- whether reset connections come back through the tunnel, and what an
+  idle one and a connected UDP flow do meanwhile;
+- the LAN in practice: printers, casting, mDNS, a hotspot's clients,
+  Hyper-V, WSL2 (NAT and mirrored), Docker; forwarded traffic is expected
+  to bypass ALE and follow the routes, not seen;
+- that the router's DNS stays refused (the model says so);
+- a network joined after Connect: its LAN is refused until the next
+  connect, a stated limitation;
+- the app: the warning and the headline have not been seen on screen,
+  and a request made between a connect returning and the ladder's status
+  read could still reach the connected server's mirror; the updater's
+  endpoints (tauri.conf.json, not touched) are not skipped;
+- IKEv2 (off) and the design's read-only route check (3.10, not built);
+- beyond the VM, as always: a real IPv6 path, a censored Iranian line,
+  PPPoE, Wi-Fi roaming and sleep/resume, MTU below 1500, another VPN
+  installed, phones.

@@ -317,3 +317,29 @@ platform, and adding such a gate would be the wrong fix.
 `CLAUDE.md` says a platform that cannot support something is "a gap to
 state plainly, not a decision to make quietly" — so it is stated here,
 plainly, and it is a decision.
+
+## 2026-10-12 — Windows full tunnel: IPv4 confined to the tunnel, by decision
+
+The owner decided, on the desktop capture design's questions (a)-(e),
+"do everything based on the recommendations". Built on
+`claude/desktop-capture` (the 2026-10-12 Phase 3 entry in `log.md`), not
+yet merged. What stands, so it is not re-litigated:
+
+- **While a full tunnel is up on Xray or OpenVPN, the PC's IPv4 outside
+  it is refused** -- the engine's link to its server, the LAN, DHCP and
+  loopback excepted -- as wireguard.exe already does for WireGuard.
+  Released the moment the tunnel ends: fail open, never a kill switch.
+- **The LAN stays reachable**, as the private on-link prefixes of the
+  PC's own adapters plus link-local, multicast and broadcast; never
+  `10/8` or `100.64/10` wholesale. The router's DNS stays refused.
+- **Accepted costs:** other VPNs and overlays, and inbound connections
+  from the internet, do not work while connected; connections open at
+  connect are reset once.
+- **A confinement that will not install keeps the tunnel up**, and the
+  app says "not fully protected" in words. It never claims full
+  protection then.
+- **Custom mode is not confined**, in either variant. WireGuard keeps its
+  own kill switch and gets none of ours. IKEv2 is confined only after its
+  own VM gate.
+- **The server's own address is not routed through the tunnel** for now
+  (design Phase 4: not wanted now).
