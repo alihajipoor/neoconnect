@@ -59,14 +59,17 @@ use std::path::PathBuf;
 
 use neoconnect_ipc::ConnectProfile;
 use windows_sys::core::GUID;
-use windows_sys::Win32::Foundation::{FWP_E_ALREADY_EXISTS, HANDLE};
+use windows_sys::Win32::Foundation::{FILETIME, FWP_E_ALREADY_EXISTS, HANDLE};
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmEngineClose0, FwpmFilterAdd0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmTransactionAbort0,
+    FwpmEngineClose0, FwpmFilterAdd0, FwpmFreeMemory0, FwpmNetEventCreateEnumHandle0, FwpmNetEventDestroyEnumHandle0,
+    FwpmNetEventEnum0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmTransactionAbort0,
     FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_FLAGS,
     FWPM_CONDITION_IP_LOCAL_INTERFACE, FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL,
     FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
     FWPM_FILTER_FLAG_NONE, FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0, FWPM_SUBLAYER0,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_NET_EVENT0, FWPM_NET_EVENT_ENUM_TEMPLATE0,
+    FWPM_NET_EVENT_FLAG_APP_ID_SET, FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET, FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET,
+    FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWPM_PROVIDER0, FWPM_SUBLAYER0,
     FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0,
     FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET, FWP_UINT16, FWP_UINT32, FWP_UINT64, FWP_UINT8,
     FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
@@ -544,11 +547,18 @@ pub enum Release {
 }
 
 /// An installed confinement: the dynamic WFP session that holds it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
     /// The engine handle, as an integer -- see `Ipv6Block::engine`.
     pub engine: isize,
     pub filters: usize,
+    /// The ids WFP gave this confinement's block filters: what a refusal
+    /// WFP recorded is recognised as this plan's by
+    /// ([`plan_error_in_refusals`]).
+    pub blocks: Vec<u64>,
+    /// When the install began, as a FILETIME (100 ns since 1601, UTC):
+    /// refusals WFP recorded before it are not this plan's.
+    pub since: u64,
 }
 
 /// What closes an installed confinement's session.
@@ -732,6 +742,9 @@ pub trait ConfinementOps: Send + Sync {
     /// now -- a RAS interface can come back with a new one (K2).
     fn luid(&self, adapter: &str) -> Result<u64, String>;
     fn install(&self, plan: &Plan) -> Result<Installed, String>;
+    /// What tells the plan-error valve that WFP itself refused the engine
+    /// under this installed plan ([`Witness`], [`run_valve`]).
+    fn witness(&self, plan: &Plan, installed: &Installed) -> Witness;
     fn hold(&self) -> std::sync::Arc<Hold>;
     /// One pass of the reset at connect: established IPv4 TCP outside the
     /// tunnel, closed (`split_tunnel::OutsideTunnel` has the rules).
@@ -764,6 +777,24 @@ impl ConfinementOps for System {
         install(plan, &self.log_dir)
     }
 
+    fn witness(&self, plan: &Plan, installed: &Installed) -> Witness {
+        let exe = match &plan.transport {
+            Transport::Xray { exe, .. } | Transport::Openvpn { exe, .. } => exe,
+            // Windows' IKE service is svchost, shared with half the
+            // machine; not built while IKEv2 is not confined.
+            Transport::Ikev2 { .. } => return Box::new(|| None),
+        };
+        let app = match app_id_text(exe) {
+            Ok(app) => app,
+            Err(e) => {
+                note(&self.log_dir, &format!("the plan-error valve has no witness but the engine's log: {e}"));
+                return Box::new(|| None);
+            }
+        };
+        let mut witness = NetEventWitness::new(app, installed.blocks.clone(), installed.since, self.log_dir.clone());
+        Box::new(move || witness.poll())
+    }
+
     fn hold(&self) -> std::sync::Arc<Hold> {
         Hold::new(&self.log_dir)
     }
@@ -794,22 +825,76 @@ pub fn lan_reachable(lan: &Lan) -> Vec<(Ipv4Addr, u8)> {
 // The plan-error valve (K5).
 // ---------------------------------------------------------------------
 
-/// How long after an install the engine's log is watched.
+/// How long after an install the engine is watched.
 pub const VALVE_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// How often it is read meanwhile.
+/// How often it is looked at meanwhile.
 const VALVE_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// One refusal WFP recorded (a classify drop, in its "net events"): the
+/// filter that refused, and what it refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub filter_id: u64,
+    /// The sender's app id as WFP writes it -- its NT path,
+    /// `\device\harddiskvolume3\program files\...\xray.exe` -- or empty
+    /// when WFP did not record one.
+    pub app: String,
+    pub protocol: u8,
+    pub remote_port: u16,
+}
+
+/// The plan error in what WFP refused since the install, if there is one:
+/// one of this confinement's own block filters refusing the engine's own
+/// application. Nothing else the plan refuses is its error -- a browser
+/// refused on the physical adapter is the plan working.
+///
+/// The witness that does not depend on the engine (K5). The engines' logs
+/// do not reliably say: the bundled xray-core (26.1.23) writes a failed
+/// outbound with `errors.LogInfo`, below the "warning" level the client
+/// config sets, so a refused dial never reaches xray.log; Go words the
+/// error in the system's language; and a UDP flow WFP re-examines and
+/// drops -- OpenVPN's, open before the filters went in (P0-D) -- is
+/// dropped without its sender being told, so nothing is written at all.
+pub fn plan_error_in_refusals(refusals: &[Refusal], blocks: &[u64], engine_app: &str) -> Option<String> {
+    let same_app = |a: &str, b: &str| {
+        let (a, b) = (a.trim_end_matches('\0'), b.trim_end_matches('\0'));
+        !a.is_empty() && a.eq_ignore_ascii_case(b)
+    };
+    let refusal = refusals.iter().find(|r| blocks.contains(&r.filter_id) && same_app(&r.app, engine_app))?;
+    let protocol = match refusal.protocol {
+        protocol::TCP => "TCP".to_string(),
+        protocol::UDP => "UDP".to_string(),
+        other => format!("IP protocol {other}"),
+    };
+    let program = engine_app.trim_end_matches('\0').rsplit('\\').next().unwrap_or(engine_app);
+    Some(format!(
+        "the tunnel engine's own connection was refused by the IPv4 confinement, so it was let go of: \
+         the filtering platform refused {program}'s {protocol} to port {}",
+        refusal.remote_port
+    ))
+}
+
+/// What the plan-error valve asks, besides the engine's log, whether WFP
+/// refused the engine: called every quarter-second for the valve's window,
+/// on the valve's thread. `Some` is the plan error, in words.
+pub type Witness = Box<dyn FnMut() -> Option<String> + Send>;
 
 /// What each engine writes when a socket of its own is refused on this PC
 /// (WSAEACCES, 10013) -- which, with this plan installed, is the plan
 /// refusing the engine's link to its server.
 ///
-/// PROVISIONAL: read from what the engines are known to print, not
-/// captured from a refused engine. xray.exe is Go, whose error text asks
-/// Windows for the English message ("...forbidden by its access
-/// permissions.") and falls back to "winapi error #10013"; openvpn.exe 2.6
-/// prints "Permission denied (WSAEACCES)" and the code. The VM's P3 step 8
-/// is to capture the real lines and replace the fixtures in the tests.
+/// PROVISIONAL, and second to WFP's own record ([`plan_error_in_refusals`]):
+/// read from what the engines are known to print, not captured from a
+/// refused engine. openvpn.exe 2.6 prints "Permission denied (WSAEACCES)"
+/// and the code for a TCP connect or a UDP write it is told failed. xray.exe
+/// is Go, whose error text asks Windows for the message in the system's
+/// language ("...forbidden by its access permissions." in English) and
+/// falls back to "winapi error #10013" -- but xray-core 26.1.23 logs a
+/// failed outbound at Info, which the client config's "warning" level
+/// filters out, so for Xray these marks are expected never to match and
+/// WFP's record is the witness. The VM's P3 step 8 is to capture the real
+/// lines.
 fn refusal_marks(transport: &Transport) -> &'static [&'static str] {
     match transport {
         Transport::Xray { .. } => &["forbidden by its access permissions", "winapi error #10013"],
@@ -831,17 +916,17 @@ pub fn plan_error_in(text: &str, transport: &Transport) -> Option<String> {
     Some(format!("the tunnel engine's own connection was refused by the IPv4 confinement, so it was let go of: {line}"))
 }
 
-/// The valve: reads what the engine writes to its log after the install
-/// (from byte `from` on), for `window`, and lets go of the confinement at
-/// the first plan error (K5) -- for the rest of the session, with the
-/// reason. A wrong permit -- an address the engine dials that the plan did
-/// not name, a byte-order slip -- otherwise looks exactly like censorship,
-/// and the ladder would drop the protocol for it on every attempt, which
-/// this project does not do.
+/// The valve: asks the witness whether WFP refused the engine, and reads
+/// what the engine writes to its log after the install (from byte `from`
+/// on), for `window`, and lets go of the confinement at the first plan
+/// error (K5) -- for the rest of the session, with the reason. A wrong
+/// permit -- an address the engine dials that the plan did not name, a
+/// byte-order slip -- otherwise looks exactly like censorship, and the
+/// ladder would drop the protocol for it on every attempt, which this
+/// project does not do.
 ///
-/// A refusal that writes no log line is not caught; no engine here is
-/// known to give one. Returns when the window ends, at the first plan
-/// error, or when `stop` is set (the session ended).
+/// Returns when the window ends, at the first plan error, or when `stop`
+/// is set (the session ended).
 pub fn run_valve(
     log: &std::path::Path,
     from: u64,
@@ -849,12 +934,21 @@ pub fn run_valve(
     hold: &Hold,
     stop: &std::sync::atomic::AtomicBool,
     window: std::time::Duration,
+    witness: &mut dyn FnMut() -> Option<String>,
 ) {
     use std::io::{Read, Seek, SeekFrom};
     let deadline = std::time::Instant::now() + window;
     let mut at = from;
     let mut pending = String::new();
+    let trip = |why: String| {
+        hold.release(Release::PlanError(why.clone()));
+        crate::cleanup_log::note("let go of the IPv4 confinement: the plan refused the engine", &why);
+    };
     loop {
+        if let Some(why) = witness() {
+            trip(why);
+            return;
+        }
         if let Ok(mut file) = std::fs::File::open(log) {
             let len = file.metadata().map(|m| m.len()).unwrap_or(0);
             // A log written afresh (a restarted engine truncates it) is
@@ -869,8 +963,7 @@ pub fn run_valve(
                     at += bytes.len() as u64;
                     pending.push_str(&String::from_utf8_lossy(&bytes));
                     if let Some(why) = plan_error_in(&pending, transport) {
-                        hold.release(Release::PlanError(why.clone()));
-                        crate::cleanup_log::note("let go of the IPv4 confinement: the plan refused the engine", &why);
+                        trip(why);
                         return;
                     }
                     // Keep only a partial last line for the next read.
@@ -889,6 +982,183 @@ pub fn run_valve(
             return;
         }
     }
+}
+
+/// The machine's witness: WFP's own record of what it dropped, read for
+/// this confinement's blocks refusing the engine ([`plan_error_in_refusals`]).
+///
+/// It needs WFP to be keeping that record -- net-event collection, on by
+/// default, and the same record `netsh wfp show netevents` prints. Where it
+/// is off, or cannot be read, the witness says so once in confinement.log
+/// and the valve has the engine's log alone, as before it existed.
+struct NetEventWitness {
+    /// A WFP session of its own, opened at the first look and closed with
+    /// this; 0 until then. Dynamic, with nothing added to it.
+    session: isize,
+    app: String,
+    blocks: Vec<u64>,
+    /// The install's time: nothing earlier is this plan's.
+    start: u64,
+    /// Where the next look starts: a little before the newest record seen,
+    /// since records can reach WFP's store out of order.
+    since: u64,
+    broken: bool,
+    log_dir: PathBuf,
+}
+
+/// How far before the newest record already seen each look starts again.
+const NET_EVENT_OVERLAP: u64 = 30_000_000; // three seconds, in 100 ns
+
+impl NetEventWitness {
+    fn new(app: String, blocks: Vec<u64>, start: u64, log_dir: PathBuf) -> Self {
+        Self { session: 0, app, blocks, start, since: start, broken: false, log_dir }
+    }
+
+    fn poll(&mut self) -> Option<String> {
+        if self.broken || self.blocks.is_empty() {
+            return None;
+        }
+        if self.session == 0 {
+            match super::ipv6_block::open_dynamic_session_named(
+                "Neoxify confinement witness",
+                "Reads whether the IPv4 confinement refused the tunnel engine",
+            ) {
+                Ok(session) => self.session = session as isize,
+                Err(e) => return self.give_up(&e),
+            }
+        }
+        // SAFETY: `session` is live until `drop`.
+        match unsafe { refusals_since(self.session as HANDLE, self.since, &self.blocks) } {
+            Ok((refusals, newest)) => {
+                self.since = self.start.max(newest.saturating_sub(NET_EVENT_OVERLAP)).max(self.since);
+                plan_error_in_refusals(&refusals, &self.blocks, &self.app)
+            }
+            Err(e) => self.give_up(&e),
+        }
+    }
+
+    fn give_up(&mut self, why: &str) -> Option<String> {
+        self.broken = true;
+        note(&self.log_dir, &format!("the plan-error valve cannot read WFP's record of refusals, so it has the engine's log alone: {why}"));
+        None
+    }
+}
+
+impl Drop for NetEventWitness {
+    fn drop(&mut self) {
+        if self.session != 0 {
+            // SAFETY: opened in `poll`, closed once.
+            unsafe { FwpmEngineClose0(self.session as HANDLE) };
+        }
+    }
+}
+
+/// Now, as a FILETIME in one number.
+fn filetime_now() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+    // SAFETY: writes the out-parameter.
+    let now = unsafe {
+        let mut now: FILETIME = std::mem::zeroed();
+        GetSystemTimeAsFileTime(&mut now);
+        now
+    };
+    from_filetime(now)
+}
+
+fn from_filetime(time: FILETIME) -> u64 {
+    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+}
+
+fn to_filetime(time: u64) -> FILETIME {
+    FILETIME { dwLowDateTime: time as u32, dwHighDateTime: (time >> 32) as u32 }
+}
+
+/// An app id blob as text: UTF-16, its terminating NULs dropped, in lower
+/// case -- WFP writes the NT path lower-cased, and the comparison must not
+/// turn on that.
+///
+/// # Safety
+/// `blob` must point to `size` readable bytes, or be null.
+unsafe fn blob_text(data: *const u8, size: u32) -> String {
+    if data.is_null() || size < 2 {
+        return String::new();
+    }
+    let units = std::slice::from_raw_parts(data as *const u16, size as usize / 2);
+    String::from_utf16_lossy(units).trim_end_matches('\0').to_lowercase()
+}
+
+/// The engine's app id, as WFP names it in its records.
+fn app_id_text(exe: &std::path::Path) -> Result<String, String> {
+    let id = super::ipv6_block::AppId::resolve(&exe.to_string_lossy())
+        .map_err(|e| format!("the engine could not be named to the filtering platform: {e}"))?;
+    // SAFETY: `id.blob` is a live blob until `id` drops, after this.
+    let text = unsafe { blob_text((*id.blob).data, (*id.blob).size) };
+    if text.is_empty() {
+        return Err(format!("{} has an empty app id", exe.display()));
+    }
+    Ok(text)
+}
+
+/// The classify drops WFP recorded from `since` on, by any of `blocks`.
+/// Returns them and the newest record's time.
+///
+/// # Safety
+/// `session` must be a live WFP engine handle.
+unsafe fn refusals_since(session: HANDLE, since: u64, blocks: &[u64]) -> Result<(Vec<Refusal>, u64), String> {
+    const PAGE: u32 = 512;
+    let mut template: FWPM_NET_EVENT_ENUM_TEMPLATE0 = std::mem::zeroed();
+    template.startTime = to_filetime(since);
+    // An hour ahead: "until now", with room for a clock that moves.
+    template.endTime = to_filetime(filetime_now() + 36_000_000_000);
+    let mut handle: HANDLE = std::ptr::null_mut();
+    let err = FwpmNetEventCreateEnumHandle0(session, &template, &mut handle);
+    if err != 0 {
+        return Err(format!("FwpmNetEventCreateEnumHandle0 ({err:#010x})"));
+    }
+    let mut refusals = Vec::new();
+    let mut newest = since;
+    let mut result = Ok(());
+    loop {
+        let mut entries: *mut *mut FWPM_NET_EVENT0 = std::ptr::null_mut();
+        let mut count: u32 = 0;
+        let err = FwpmNetEventEnum0(session, handle, PAGE, &mut entries, &mut count);
+        if err != 0 {
+            result = Err(format!("FwpmNetEventEnum0 ({err:#010x})"));
+            break;
+        }
+        for i in 0..count as usize {
+            let event = *entries.add(i);
+            if event.is_null() {
+                continue;
+            }
+            let event = &*event;
+            newest = newest.max(from_filetime(event.header.timeStamp));
+            if event.r#type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP {
+                continue;
+            }
+            let drop = event.Anonymous.classifyDrop;
+            if drop.is_null() || !blocks.contains(&(*drop).filterId) {
+                continue;
+            }
+            let header = &event.header;
+            let app = if header.flags & FWPM_NET_EVENT_FLAG_APP_ID_SET != 0 {
+                blob_text(header.appId.data, header.appId.size)
+            } else {
+                String::new()
+            };
+            let protocol = if header.flags & FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET != 0 { header.ipProtocol } else { 0 };
+            let remote_port = if header.flags & FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET != 0 { header.remotePort } else { 0 };
+            refusals.push(Refusal { filter_id: (*drop).filterId, app, protocol, remote_port });
+        }
+        if !entries.is_null() {
+            FwpmFreeMemory0(&mut entries as *mut *mut *mut FWPM_NET_EVENT0 as *mut *mut std::ffi::c_void);
+        }
+        if count < PAGE {
+            break;
+        }
+    }
+    FwpmNetEventDestroyEnumHandle0(session, handle);
+    result.map(|()| (refusals, newest))
 }
 
 // ---------------------------------------------------------------------
@@ -972,13 +1242,16 @@ fn install_specs(specs: &[FilterSpec]) -> Result<Installed, String> {
             }
         }
     }
+    // Before the session opens: what WFP refuses from here on may be this
+    // plan's doing (`plan_error_in_refusals`).
+    let since = filetime_now();
     let engine = super::ipv6_block::open_dynamic_session_named(
         SUBLAYER_NAME,
         "Confines IPv4 to a Neoxify full tunnel; removed when it ends",
     )?;
     // SAFETY: `engine` is live, and every blob in `apps` outlives the call.
     match unsafe { build(engine, specs, &apps) } {
-        Ok(filters) => Ok(Installed { engine: engine as isize, filters }),
+        Ok(blocks) => Ok(Installed { engine: engine as isize, filters: specs.len(), blocks, since }),
         Err(e) => {
             // Closing the handle ends the session, which undoes whatever
             // a failed transaction left.
@@ -991,19 +1264,19 @@ fn install_specs(specs: &[FilterSpec]) -> Result<Installed, String> {
 
 /// # Safety
 /// `engine` must be live, and the blobs in `apps` must outlive the call.
-unsafe fn build(engine: HANDLE, specs: &[FilterSpec], apps: &[(PathBuf, super::ipv6_block::AppId)]) -> Result<usize, String> {
+unsafe fn build(engine: HANDLE, specs: &[FilterSpec], apps: &[(PathBuf, super::ipv6_block::AppId)]) -> Result<Vec<u64>, String> {
     let err = FwpmTransactionBegin0(engine, 0);
     if err != 0 {
         return Err(format!("could not begin a filtering transaction ({err:#010x})"));
     }
     match add_everything(engine, specs, apps) {
-        Ok(filters) => {
+        Ok(blocks) => {
             let err = FwpmTransactionCommit0(engine);
             if err != 0 {
                 FwpmTransactionAbort0(engine);
                 return Err(format!("the IPv4 confinement could not be committed ({err:#010x})"));
             }
-            Ok(filters)
+            Ok(blocks)
         }
         Err(e) => {
             FwpmTransactionAbort0(engine);
@@ -1012,19 +1285,25 @@ unsafe fn build(engine: HANDLE, specs: &[FilterSpec], apps: &[(PathBuf, super::i
     }
 }
 
+/// Returns the ids WFP gave the block filters.
+///
 /// # Safety
 /// Inside an open transaction; blobs alive for the duration.
 unsafe fn add_everything(
     engine: HANDLE,
     specs: &[FilterSpec],
     apps: &[(PathBuf, super::ipv6_block::AppId)],
-) -> Result<usize, String> {
+) -> Result<Vec<u64>, String> {
     add_provider(engine)?;
     add_sublayer(engine)?;
+    let mut blocks = Vec::new();
     for spec in specs {
-        add_spec(engine, spec, apps)?;
+        let id = add_spec(engine, spec, apps)?;
+        if spec.action == Action::Block {
+            blocks.push(id);
+        }
     }
-    Ok(specs.len())
+    Ok(blocks)
 }
 
 /// # Safety
@@ -1074,11 +1353,11 @@ fn layer_key(layer: Layer) -> GUID {
     }
 }
 
-/// One planned filter, as WFP takes it.
+/// One planned filter, as WFP takes it. Returns the id WFP gave it.
 ///
 /// # Safety
 /// Inside an open transaction; every app blob alive for the duration.
-unsafe fn add_spec(engine: HANDLE, spec: &FilterSpec, apps: &[(PathBuf, super::ipv6_block::AppId)]) -> Result<(), String> {
+unsafe fn add_spec(engine: HANDLE, spec: &FilterSpec, apps: &[(PathBuf, super::ipv6_block::AppId)]) -> Result<u64, String> {
     let mut display_name = super::ipv6_block::wide(&spec.name);
     let mut provider_key = CAPTURE_PROVIDER_KEY;
     // The values carried by pointer, in buffers reserved up front so that
@@ -1178,11 +1457,12 @@ unsafe fn add_spec(engine: HANDLE, spec: &FilterSpec, apps: &[(PathBuf, super::i
         Action::Block => FWP_ACTION_BLOCK,
     };
     filter.action = FWPM_ACTION0 { r#type: action, Anonymous: std::mem::zeroed() };
-    let err = FwpmFilterAdd0(engine, &filter, std::ptr::null_mut(), std::ptr::null_mut());
+    let mut id: u64 = 0;
+    let err = FwpmFilterAdd0(engine, &filter, std::ptr::null_mut(), &mut id);
     if err != 0 {
         return Err(format!("could not add the filter \"{}\" ({err:#010x})", spec.name));
     }
-    Ok(())
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -1695,7 +1975,7 @@ mod tests {
         }
 
         fn installed(engine: isize) -> Installed {
-            Installed { engine, filters: 42 }
+            Installed { engine, filters: 42, blocks: Vec::new(), since: 0 }
         }
 
         /// What the status poll is told, through a session's life: nothing
@@ -1884,7 +2164,7 @@ mod tests {
         fn held() -> (Arc<Hold>, Arc<std::sync::Mutex<Vec<isize>>>) {
             let (close, closed) = super::hold::recording();
             let hold = Hold::with_closer(close);
-            assert!(hold.put(Installed { engine: 77, filters: 40 }));
+            assert!(hold.put(Installed { engine: 77, filters: 40, blocks: vec![7], since: 0 }));
             (hold, closed)
         }
 
@@ -1908,7 +2188,7 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let watcher = {
                 let (path, hold, stop) = (path.clone(), Arc::clone(&hold), Arc::clone(&stop));
-                std::thread::spawn(move || run_valve(&path, from, &xray(), &hold, &stop, std::time::Duration::from_secs(5)))
+                std::thread::spawn(move || run_valve(&path, from, &xray(), &hold, &stop, std::time::Duration::from_secs(5), &mut || None))
             };
             std::thread::sleep(std::time::Duration::from_millis(150));
             use std::io::Write;
@@ -1937,9 +2217,70 @@ mod tests {
             let from = std::fs::metadata(&path).unwrap().len();
             let (hold, closed) = held();
             let stop = AtomicBool::new(false);
-            run_valve(&path, from, &xray(), &hold, &stop, std::time::Duration::from_millis(600));
+            run_valve(&path, from, &xray(), &hold, &stop, std::time::Duration::from_millis(600), &mut || None);
             assert_eq!(hold.confined(), Some(true));
             assert!(closed.lock().unwrap().is_empty());
+        }
+
+        const XRAY_APP: &str = r"\device\harddiskvolume3\program files\neoxify\xray.exe";
+        const OUR_BLOCKS: [u64; 4] = [70_001, 70_002, 70_003, 70_004];
+
+        fn refused(filter_id: u64, app: &str) -> Refusal {
+            Refusal { filter_id, app: app.to_string(), protocol: protocol::TCP, remote_port: 443 }
+        }
+
+        /// WFP's own record is the witness that does not depend on the
+        /// engine: one of this confinement's blocks refusing the engine is
+        /// the plan error. Another filter refusing the engine -- the IPv6
+        /// block, another product's firewall -- is not this plan's doing,
+        /// and this plan refusing anything else is the plan working.
+        #[test]
+        fn wfp_refusing_the_engine_by_one_of_our_blocks_is_a_plan_error() {
+            let why = plan_error_in_refusals(&[refused(70_003, XRAY_APP)], &OUR_BLOCKS, XRAY_APP);
+            assert!(why.as_deref().is_some_and(|w| w.contains("refused") && w.contains("443")), "{why:?}");
+            // UDP, which no log line ever shows (P0-D: the sender is not told).
+            let udp = Refusal { protocol: protocol::UDP, remote_port: 1194, ..refused(70_001, XRAY_APP) };
+            assert!(plan_error_in_refusals(&[udp], &OUR_BLOCKS, XRAY_APP).is_some());
+            // The app id compared as WFP writes it: case and a trailing NUL
+            // are not a different program.
+            let shouted = XRAY_APP.to_uppercase();
+            assert!(plan_error_in_refusals(&[refused(70_002, &shouted)], &OUR_BLOCKS, &format!("{XRAY_APP}\0")).is_some());
+
+            let browser = r"\device\harddiskvolume3\program files\browser\browser.exe";
+            for (refusals, case) in [
+                (vec![refused(70_001, browser)], "another program refused by the plan: the plan working"),
+                (vec![refused(12_345, XRAY_APP)], "the engine refused by a filter that is not this plan's"),
+                (vec![refused(70_001, "")], "a refusal WFP recorded no application for"),
+                (Vec::new(), "nothing refused"),
+            ] {
+                assert_eq!(plan_error_in_refusals(&refusals, &OUR_BLOCKS, XRAY_APP), None, "{case}");
+            }
+            assert_eq!(plan_error_in_refusals(&[refused(70_001, XRAY_APP)], &[], XRAY_APP), None, "no blocks known");
+            assert_eq!(plan_error_in_refusals(&[refused(70_001, XRAY_APP)], &OUR_BLOCKS, ""), None, "no engine named");
+        }
+
+        /// The witness speaks and the log says nothing -- Xray's refused dial
+        /// is written below its log level, OpenVPN's dropped UDP not at all:
+        /// the valve still lets go of the confinement within its window,
+        /// and says why.
+        #[test]
+        fn a_refusal_wfp_saw_lets_go_of_it_while_the_log_says_nothing() {
+            let path = log_file("witness", "2026/10/12 21:04:01 [Warning] core: Xray 26.1.23 started\n");
+            let from = std::fs::metadata(&path).unwrap().len();
+            let (hold, closed) = held();
+            let stop = AtomicBool::new(false);
+            let mut looks = 0;
+            let mut witness = || {
+                looks += 1;
+                (looks >= 3).then(|| "the tunnel engine's own connection was refused by the IPv4 confinement".to_string())
+            };
+            let started = std::time::Instant::now();
+            run_valve(&path, from, &xray(), &hold, &stop, std::time::Duration::from_secs(5), &mut witness);
+            assert_eq!(hold.confined(), Some(false), "WFP's refusal of the engine was not acted on");
+            assert_eq!(*closed.lock().unwrap(), vec![77]);
+            assert!(hold.problem().is_some_and(|p| p.contains("refused")), "{:?}", hold.problem());
+            assert!(!hold.owed_after_drop(), "a refused plan is not put back");
+            assert!(started.elapsed() < std::time::Duration::from_secs(3), "the window ran out first");
         }
 
         /// The window is a window: a session that ends stops it at once.
@@ -1949,7 +2290,7 @@ mod tests {
             let (hold, _closed) = held();
             let stop = AtomicBool::new(true);
             let started = std::time::Instant::now();
-            run_valve(&path, 0, &xray(), &hold, &stop, std::time::Duration::from_secs(10));
+            run_valve(&path, 0, &xray(), &hold, &stop, std::time::Duration::from_secs(10), &mut || None);
             assert!(started.elapsed() < std::time::Duration::from_secs(1));
         }
     }
@@ -2047,7 +2388,12 @@ mod tests {
                     result
                 };
                 match result {
-                    Ok(filters) => assert_eq!(filters, specs.len(), "{}", describe(&plan)),
+                    Ok(blocks) => assert_eq!(
+                        blocks.len(),
+                        specs.iter().filter(|s| s.action == Action::Block).count(),
+                        "{}",
+                        describe(&plan)
+                    ),
                     Err(e) => panic!("the Windows Filtering Platform rejected the plan ({}): {e}", describe(&plan)),
                 }
             }
@@ -2072,6 +2418,71 @@ mod tests {
                 (s == 0, p == 0)
             };
             Some(found)
+        }
+
+        /// The plan-error valve's witness against the real filtering engine.
+        /// A confinement whose "engine" is this test binary, permitted to
+        /// one address, refuses the binary's own TCP connect to another
+        /// -- and, separately, a send on a UDP socket connected before the
+        /// filters went in, the shape of OpenVPN's link, which WFP drops
+        /// without telling the sender (P0-D). WFP's record of each, read the
+        /// way the valve reads it, names this plan's block and this binary.
+        ///
+        /// Ignored: it needs administrator rights, and for its few seconds
+        /// this machine's IPv4 is confined to loopback and the LAN. Run it
+        /// in the VM guest, elevated, on its own (`--exact ... --ignored`).
+        #[test]
+        #[ignore = "elevated, and confines this machine's IPv4 for a few seconds: run in the VM guest"]
+        fn wfp_records_its_refusal_of_the_engine() {
+            use std::time::{Duration, Instant};
+            let luid = loopback_luid().expect("interface 1");
+            let exe = std::env::current_exe().expect("test binary path");
+            // Documentation addresses: nothing answers, and nothing needs to.
+            let permitted = Ipv4Addr::new(203, 0, 113, 7);
+            let udp = std::net::UdpSocket::bind("0.0.0.0:0").expect("a UDP socket");
+            udp.connect("192.0.2.1:9").expect("connected before the filters");
+            println!("udp send before the install: {:?}", udp.send(b"before"));
+
+            let plan = Plan {
+                tunnel_luid: luid,
+                transport: Transport::Xray { exe: exe.clone(), nodes: vec![permitted] },
+                lan: Lan::Allowed(Vec::new()),
+            };
+            let installed = install(&plan, &std::env::temp_dir()).expect("installed");
+            println!("installed {} filters, {} blocks", installed.filters, installed.blocks.len());
+            let app = app_id_text(&exe).expect("the binary's app id");
+            println!("app id: {app}");
+            let wait = |witness: &mut NetEventWitness| {
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_secs(10) {
+                    if let Some(why) = witness.poll() {
+                        return (Some(why), started.elapsed());
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                (None, started.elapsed())
+            };
+
+            let tcp = std::net::TcpStream::connect_timeout(&"192.0.2.2:443".parse().unwrap(), Duration::from_secs(3));
+            let refused_here = tcp.as_ref().err().and_then(|e| e.raw_os_error());
+            println!("tcp connect elsewhere: {tcp:?}");
+            let mut witness = NetEventWitness::new(app.clone(), installed.blocks.clone(), installed.since, std::env::temp_dir());
+            let (tcp_said, tcp_took) = wait(&mut witness);
+            println!("tcp: witness after {tcp_took:?}: {tcp_said:?}");
+
+            let udp_from = filetime_now();
+            println!("udp send after the install: {:?}", udp.send(b"after"));
+            let _ = udp.send(b"after again");
+            let mut witness = NetEventWitness::new(app, installed.blocks.clone(), udp_from, std::env::temp_dir());
+            let (udp_said, udp_took) = wait(&mut witness);
+            println!("udp: witness after {udp_took:?}: {udp_said:?}");
+
+            // SAFETY: the session `install` opened; closing it ends the
+            // confinement.
+            unsafe { FwpmEngineClose0(installed.engine as HANDLE) };
+            assert_eq!(refused_here, Some(10013), "the connect was not refused on this PC");
+            assert!(tcp_said.is_some_and(|w| w.contains("TCP") && w.contains("443")), "WFP's record of the TCP refusal");
+            assert!(udp_said.is_some_and(|w| w.contains("UDP") && w.contains("port 9")), "WFP's record of the UDP drop");
         }
 
         const CHILD: &str = "NEOXIFY_CONFINEMENT_TEST_CHILD";

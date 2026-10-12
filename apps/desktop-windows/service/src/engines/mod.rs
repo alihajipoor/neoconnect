@@ -725,6 +725,7 @@ impl Engines {
         };
         let Some(decision) = confinement::plan_for(profile, passive, inputs) else { return };
         let Some(session) = self.active.peek_mut() else { return };
+        let mut witness = None;
         let refused = match decision {
             // The LUID's own error says more than "could not be read".
             Err(why) => Some(match luid {
@@ -733,6 +734,7 @@ impl Engines {
             }),
             Ok(plan) => match ops.install(&plan) {
                 Ok(installed) => {
+                    witness = Some(ops.witness(&plan, &installed));
                     session.confinement_plan = Some(plan);
                     session.confinement.put(installed);
                     None
@@ -748,7 +750,9 @@ impl Engines {
             );
             return;
         }
-        self.start_valve();
+        if let Some(witness) = witness {
+            self.start_valve(witness);
+        }
     }
 
     /// The owner's decision (c): established IPv4 TCP connections outside
@@ -820,11 +824,12 @@ impl Engines {
         }));
     }
 
-    /// Starts the plan-error valve on the live session (K5): its engine's
-    /// log, from where it stands now, for `confinement::VALVE_FOR`. Owned
-    /// by the session, so it stops and is joined when the session ends.
-    /// Xray and OpenVPN only: their logs are where a refused socket shows.
-    fn start_valve(&mut self) {
+    /// Starts the plan-error valve on the live session (K5): WFP's record
+    /// of what it refused, through `witness`, and its engine's log from
+    /// where it stands now, for `confinement::VALVE_FOR`. Owned by the
+    /// session, so it stops and is joined when the session ends. Xray and
+    /// OpenVPN only, the engines confined.
+    fn start_valve(&mut self, mut witness: confinement::Witness) {
         let config_dir = self.config_dir.clone();
         let Some(session) = self.active.peek_mut() else { return };
         let Some(plan) = &session.confinement_plan else { return };
@@ -839,7 +844,7 @@ impl Engines {
         let transport = plan.transport.clone();
         let hold = Arc::clone(&session.confinement);
         session.valve = Some(crate::split_tunnel::worker::Worker::spawn(move |stop| {
-            confinement::run_valve(&log, from, &transport, &hold, &stop, confinement::VALVE_FOR);
+            confinement::run_valve(&log, from, &transport, &hold, &stop, confinement::VALVE_FOR, &mut witness);
         }));
     }
 
@@ -1853,24 +1858,29 @@ impl Engines {
         let hold = Arc::clone(&session.confinement);
         let adapter = adapter_name_for(&session.profile);
         hold.rearm();
-        let installed =
-            ops.luid(adapter).and_then(|tunnel_luid| ops.install(&confinement::Plan { tunnel_luid, ..plan }));
-        let mut put_back = false;
+        let installed = ops.luid(adapter).and_then(|tunnel_luid| {
+            let plan = confinement::Plan { tunnel_luid, ..plan };
+            ops.install(&plan).map(|installed| (ops.witness(&plan, &installed), installed))
+        });
+        let mut put_back = None;
         let detail = match installed {
-            Ok(installed) if hold.put(installed) => {
-                put_back = true;
-                "put back, with the tunnel adapter's LUID read again".to_string()
+            Ok((witness, installed)) => {
+                if hold.put(installed) {
+                    put_back = Some(witness);
+                    "put back, with the tunnel adapter's LUID read again".to_string()
+                } else {
+                    "let go of again at once: another report came in while it went back".to_string()
+                }
             }
-            Ok(_) => "let go of again at once: another report came in while it went back".to_string(),
             Err(why) => {
                 hold.refuse(format!("could not be put back after the engine was reported gone: {why}"));
                 format!("not put back: {why}")
             }
         };
         crate::cleanup_log::note("the IPv4 confinement after a drop report the engine contradicted", &detail);
-        if put_back {
+        if let Some(witness) = put_back {
             // A plan put back is a plan installed: watched like one.
-            self.start_valve();
+            self.start_valve(witness);
         }
     }
 
@@ -4955,6 +4965,9 @@ mod helper_tests {
         refuse: std::sync::atomic::AtomicBool,
         /// The rules of every reset pass asked for.
         resets: std::sync::Mutex<Vec<crate::split_tunnel::OutsideTunnel>>,
+        /// What every witness handed out says: WFP's record of a refusal,
+        /// as the test sets it.
+        wfp_says: Arc<std::sync::Mutex<Option<String>>>,
     }
 
     impl FakeConfinement {
@@ -4966,6 +4979,7 @@ mod helper_tests {
                 closed: Arc::default(),
                 refuse: std::sync::atomic::AtomicBool::new(false),
                 resets: std::sync::Mutex::new(Vec::new()),
+                wfp_says: Arc::default(),
             })
         }
         fn closed(&self) -> Vec<isize> {
@@ -4988,7 +5002,11 @@ mod helper_tests {
             }
             self.installs.lock().unwrap().push(plan.clone());
             let engine = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(confinement::Installed { engine, filters: confinement::specs(plan).len() })
+            Ok(confinement::Installed { engine, filters: confinement::specs(plan).len(), blocks: vec![1, 2, 3, 4], since: 0 })
+        }
+        fn witness(&self, _plan: &confinement::Plan, _installed: &confinement::Installed) -> confinement::Witness {
+            let says = Arc::clone(&self.wfp_says);
+            Box::new(move || says.lock().unwrap().clone())
         }
         fn reset(&self, rules: &crate::split_tunnel::OutsideTunnel) -> crate::split_tunnel::ResetOutcome {
             self.resets.lock().unwrap().push(rules.clone());
@@ -5351,6 +5369,35 @@ mod helper_tests {
         assert!(engines.confinement_problem().is_some_and(|p| p.contains("refused")), "{:?}", engines.confinement_problem());
         assert!(engines.has_session(), "the tunnel was taken down over its plan");
         assert!(engines.status().0);
+        end_test_session(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "closed once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// K5 by WFP's own record, the witness that does not depend on the
+    /// engine: the log says nothing -- the bundled xray-core writes a
+    /// refused dial at Info, below the config's level; OpenVPN's dropped UDP
+    /// is never told -- and WFP records this plan's block refusing the
+    /// engine. The confinement is let go of within the valve's window, the
+    /// tunnel left up, and the reason said.
+    #[test]
+    fn a_refusal_wfp_recorded_releases_confinement_though_the_engine_log_is_quiet() {
+        let (mut engines, fake, dir) = engines_with_engine_files("valve-wfp");
+        std::fs::write(dir.join(xray::LOG_FILE), "2026/10/12 21:04:01 [Warning] core: Xray 26.1.23 started
+").unwrap();
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.confine_if_needed(&reality_profile(), false, vec![Ipv4Addr::new(203, 0, 113, 7)]);
+        assert_eq!(engines.ipv4_confined(), Some(true));
+
+        *fake.wfp_says.lock().unwrap() =
+            Some("the tunnel engine's own connection was refused by the IPv4 confinement: TCP to port 443".into());
+        assert!(
+            wait_for(Duration::from_secs(5), || engines.ipv4_confined() == Some(false)),
+            "WFP's record of refusing the engine did not let go of the confinement"
+        );
+        assert_eq!(fake.closed(), vec![1000]);
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("refused")), "{:?}", engines.confinement_problem());
+        assert!(engines.has_session(), "the tunnel was taken down over its plan");
         end_test_session(&mut engines);
         assert_eq!(fake.closed(), vec![1000], "closed once");
         let _ = std::fs::remove_dir_all(&dir);
