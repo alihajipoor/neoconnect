@@ -492,7 +492,11 @@ impl WfpSweep for LiveWfp {
 /// confinement's own (`confinement`), which it keeps apart so the two
 /// dynamic sessions never share one.
 fn our_providers() -> Vec<GUID> {
-    vec![ipv6_block::PROVIDER_KEY, super::confinement::CAPTURE_PROVIDER_KEY]
+    vec![
+        ipv6_block::PROVIDER_KEY,
+        super::confinement::CAPTURE_PROVIDER_KEY,
+        super::confinement::CAPTURE_PROVIDER_KEY_ALT,
+    ]
 }
 
 /// Every sublayer this service registers, with the name a report gives it.
@@ -505,6 +509,7 @@ fn our_sublayers() -> Vec<(GUID, &'static str)> {
         (ipv6_block::SUBLAYER_KEY, "sublayer"),
         (ipv6_block::SPLIT_SUBLAYER_KEY, "Custom-mode sublayer"),
         (super::confinement::CAPTURE_SUBLAYER_KEY, "IPv4 confinement sublayer"),
+        (super::confinement::CAPTURE_SUBLAYER_KEY_ALT, "second IPv4 confinement sublayer"),
     ]
 }
 
@@ -1393,6 +1398,14 @@ mod tests {
                 assert!(!guid_eq(a, b), "two of our WFP objects share a key");
             }
         }
-        assert_eq!(every.len(), 5);
+        assert_eq!(every.len(), 7);
+        // Both of the confinement's pairs (`confinement::CAPTURE_KEYS`): a
+        // second confinement put in while the first is closed registers the
+        // other, and a registration of either that outlived its build holds
+        // IPv4 hostage the same way.
+        for keys in super::super::confinement::CAPTURE_KEYS {
+            assert!(our_providers().iter().any(|k| guid_eq(k, &keys.provider)), "a confinement provider is not swept");
+            assert!(our_sublayers().iter().any(|(k, _)| guid_eq(k, &keys.sublayer)), "a confinement sublayer is not swept");
+        }
     }
 }

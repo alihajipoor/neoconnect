@@ -334,6 +334,9 @@ struct Session {
     /// The reset at connect's rescans, for its first seconds; stopped and
     /// joined with the session. See `Engines::reset_outside_the_tunnel`.
     rescan: Option<crate::split_tunnel::worker::Worker>,
+    /// The last LAN plan WFP refused, and when: not tried again until
+    /// `LAN_RETRY_AFTER` has passed (`Engines::follow_the_lan`).
+    lan_refused: Option<(confinement::Plan, Instant)>,
 }
 
 impl Session {
@@ -350,6 +353,7 @@ impl Session {
             confinement_plan: None,
             valve: None,
             rescan: None,
+            lan_refused: None,
         }
     }
 }
@@ -400,6 +404,12 @@ fn test_profile() -> ConnectProfile {
         password: String::new(),
     })
 }
+
+/// How long a LAN whose plan WFP refused waits before it is tried again
+/// (`Engines::follow_the_lan`). Tried on every 1 s status poll, it opened a
+/// WFP session, added and aborted every filter and wrote a line to
+/// confinement.log each second for the rest of the session.
+const LAN_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The WFP filters a session installed, released when this is dropped.
 #[derive(Default)]
@@ -890,7 +900,8 @@ impl Engines {
     /// (`Hold::put`), so nothing is unconfined meanwhile -- and is watched
     /// like any plan installed. Only while a confinement is held. An
     /// adapter list that cannot be read is no evidence, and changes
-    /// nothing; an install that fails keeps the old plan, and says so.
+    /// nothing; an install that fails keeps the old plan, says so, and is
+    /// not tried again for that LAN until `LAN_RETRY_AFTER` has passed.
     fn follow_the_lan(&mut self) {
         let ops = Arc::clone(&self.confinement_ops);
         let Some(session) = self.active.peek() else { return };
@@ -903,6 +914,12 @@ impl Engines {
         if !confinement::lan_changed(&plan, &lan, &dhcp_servers) {
             return;
         }
+        // Refused already, and not long ago: not tried on every poll.
+        if let Some((refused, at)) = &session.lan_refused {
+            if !confinement::lan_changed(refused, &lan, &dhcp_servers) && at.elapsed() < LAN_RETRY_AFTER {
+                return;
+            }
+        }
         let prefixes = lan.len();
         let next = confinement::Plan { lan: confinement::Lan::Allowed(lan), dhcp_servers, ..plan };
         let installed = match ops.install(&next) {
@@ -912,6 +929,9 @@ impl Engines {
                     &self.config_dir,
                     &format!("the network changed, and its LAN could not be put in the plan; the old one stays: {why}"),
                 );
+                if let Some(session) = self.active.peek_mut() {
+                    session.lan_refused = Some((next, Instant::now()));
+                }
                 return;
             }
         };
@@ -927,6 +947,7 @@ impl Engines {
         );
         if let Some(session) = self.active.peek_mut() {
             session.confinement_plan = Some(next);
+            session.lan_refused = None;
         }
         self.start_valve(witness);
     }
@@ -1552,9 +1573,11 @@ impl Engines {
                 // of answered by the network. The same filters, the same
                 // wait for the adapter (`dns_confinement_for`, which
                 // `install_routes` then finds done), so the connect takes no
-                // longer; `block_ipv6_if_needed` keeps them. Custom mode
-                // gets none, as ever.
-                let early_filters = if passive { None } else { Some(self.filters_for(profile)) };
+                // longer; `block_ipv6_if_needed` keeps them. An adapter not
+                // up within that wait (a fresh install's first connect)
+                // gets them after its routes instead, DNS confinement and
+                // all (`early_filters_for`). Custom mode gets none, as ever.
+                let early_filters = if passive { None } else { self.early_filters_for(profile) };
                 // Xray creates the adapter but routes nothing into it, so
                 // the tunnel is inert until this succeeds. Failing here
                 // must take the engine down with it rather than leave a
@@ -1571,9 +1594,12 @@ impl Engines {
                     Ok(routes) => routes,
                     Err(e) => {
                         let _ = child.kill();
-                        reap(&mut child);
-                        // Released with the engine gone, as a session's are.
+                        // Released the moment the engine is killed, as a
+                        // session's are (K1): not after the reap, with port
+                        // 53 and IPv6 refused machine-wide for up to
+                        // REAP_BUDGET over a rung already given up.
                         drop(early_filters);
+                        reap(&mut child);
                         return Err(e);
                     }
                 };
@@ -1747,12 +1773,36 @@ impl Engines {
     /// Installs whatever this tunnel needs, and returns it to be owned by
     /// the session. What that is, is [`filter_plan`]'s to say.
     fn filters_for(&self, profile: &ConnectProfile) -> SessionFilters {
-        let mut filters = SessionFilters::default();
         let plan = filter_plan(profile, self.split_tunnel.wants_interception());
         if !plan.ipv6_block {
-            return filters;
+            return SessionFilters::default();
         }
         let dns = if plan.dns_confinement { self.dns_confinement_for(profile) } else { None };
+        self.install_filters(dns)
+    }
+
+    /// [`Self::filters_for`] for a full Xray tunnel before its routes and
+    /// its DNS (`connect_inner`) -- or `None`, leaving them all to
+    /// `block_ipv6_if_needed` after the routes, when the DNS confinement
+    /// they should carry cannot be had yet. On a fresh install Xray
+    /// installs Wintun on first use and its adapter was measured appearing
+    /// 8.5 s in, past `dns_confinement_for`'s 5 s: the IPv6 block went in
+    /// alone, `block_ipv6_if_needed` kept it, and DNS was never confined
+    /// for that session. Left to after the routes, it is as it was before
+    /// the early install: the adapter's DNS then goes in only once routes
+    /// into the tunnel are up (`xray::install_routes`).
+    fn early_filters_for(&self, profile: &ConnectProfile) -> Option<SessionFilters> {
+        let plan = filter_plan(profile, self.split_tunnel.wants_interception());
+        if !plan.ipv6_block {
+            return None;
+        }
+        let dns = if plan.dns_confinement { Some(self.dns_confinement_for(profile)?) } else { None };
+        Some(self.install_filters(dns))
+    }
+
+    /// The IPv6 block, with `dns` in the same WFP session when given.
+    fn install_filters(&self, dns: Option<ipv6_block::DnsConfinement>) -> SessionFilters {
+        let mut filters = SessionFilters::default();
         let installed = match Ipv6Block::install(&self.config_dir, dns.as_ref()) {
             // The DNS filters share the IPv6 block's transaction, so a
             // rejection of theirs would take the IPv6 block down with
@@ -5199,6 +5249,8 @@ mod helper_tests {
         closed: Arc<std::sync::Mutex<Vec<isize>>>,
         /// Every install refused, as WFP would refuse a filter.
         refuse: std::sync::atomic::AtomicBool,
+        /// How many installs were refused.
+        refused: std::sync::atomic::AtomicUsize,
         /// The rules of every reset pass asked for.
         resets: std::sync::Mutex<Vec<crate::split_tunnel::OutsideTunnel>>,
         /// What every witness handed out says: WFP's record of a refusal,
@@ -5220,6 +5272,7 @@ mod helper_tests {
                 next: std::sync::atomic::AtomicIsize::new(1000),
                 closed: Arc::default(),
                 refuse: std::sync::atomic::AtomicBool::new(false),
+                refused: std::sync::atomic::AtomicUsize::new(0),
                 resets: std::sync::Mutex::new(Vec::new()),
                 wfp_says: Arc::default(),
                 tunnel_gone: std::sync::atomic::AtomicBool::new(false),
@@ -5245,6 +5298,7 @@ mod helper_tests {
         }
         fn install(&self, plan: &confinement::Plan) -> Result<confinement::Installed, String> {
             if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                self.refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 return Err("could not add the filter (0x80320009)".into());
             }
             self.installs.lock().unwrap().push(plan.clone());
@@ -5443,6 +5497,38 @@ mod helper_tests {
         end_test_session(&mut engines);
     }
 
+    /// A LAN whose plan WFP refuses is tried again only after
+    /// `LAN_RETRY_AFTER`, not on every 1 s status poll: each try opened a
+    /// WFP session, added and aborted the filters and wrote a line to
+    /// confinement.log, for the rest of the session. Another LAN is tried
+    /// at once.
+    #[test]
+    fn a_lan_that_will_not_go_in_is_not_tried_on_every_poll() {
+        let (mut engines, fake, _) = confined_session();
+        let refused = || fake.refused.load(std::sync::atomic::Ordering::SeqCst);
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let cafe = confinement::Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24);
+        *fake.lan.lock().unwrap() = Some((vec![cafe], vec![Ipv4Addr::new(10, 20, 30, 1)]));
+        for _ in 0..5 {
+            let _ = engines.status();
+        }
+        assert_eq!(refused(), 1, "the same refused LAN was tried on every poll");
+        let home = confinement::Prefix::new(Ipv4Addr::new(192, 168, 7, 0), 24);
+        *fake.lan.lock().unwrap() = Some((vec![home], vec![Ipv4Addr::new(192, 168, 7, 1)]));
+        let _ = engines.status();
+        let _ = engines.status();
+        assert_eq!(refused(), 2, "another network was not tried at once, or was tried twice");
+        // Once the wait is over, the same one is tried again -- and put in.
+        fake.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some((_, at)) = engines.active.peek_mut().and_then(|s| s.lan_refused.as_mut()) {
+            *at = at.checked_sub(LAN_RETRY_AFTER).expect("an instant a minute back");
+        }
+        let _ = engines.status();
+        assert_eq!(fake.installs.lock().unwrap().len(), 2, "the LAN was not tried again after the wait");
+        assert_eq!(engines.ipv4_confined(), Some(true));
+        end_test_session(&mut engines);
+    }
+
     /// Xray's full tunnel gets its IPv6 block and DNS confinement before
     /// its adapter is given DNS and before its routes, not after the
     /// connect: in between, `set dnsservers static 1.1.1.1` and the NRPT
@@ -5456,17 +5542,45 @@ mod helper_tests {
         let start = source.find("    fn connect_inner(").expect("connect_inner");
         let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
         let arm = &body[body.find("ConnectProfile::XrayVlessReality(_)").expect("the Xray arm")..];
-        let early = arm.find("let early_filters = if passive { None } else { Some(self.filters_for(profile)) };").expect("the early filters");
+        let early = arm.find("let early_filters = if passive { None } else { self.early_filters_for(profile) };").expect("the early filters");
         let routes = arm.find("xray::install_routes(").expect("the routes, and the adapter's DNS with them");
         let spawned = arm.find("xray::connect_returning_exits(").expect("the engine");
         assert!(spawned < early && early < routes, "engine {spawned}, filters {early}, routes {routes}");
+        // A rung whose routes failed lets go of them with its engine,
+        // before the reap -- not up to REAP_BUDGET later, with port 53 and
+        // IPv6 refused machine-wide for a rung already given up (K1).
         let failed = &arm[arm.find("Err(e) => {").expect("the routes failing")..];
-        assert!(failed[..failed.find("return Err(e);").unwrap()].contains("drop(early_filters);"));
+        let failed = &failed[..failed.find("return Err(e);").unwrap()];
+        let killed = failed.find("let _ = child.kill();").expect("the kill");
+        let dropped = failed.find("drop(early_filters);").expect("the filters let go of");
+        let reaped = failed.find("reap(&mut child);").expect("the reap");
+        assert!(killed < dropped && dropped < reaped, "kill {killed}, filters {dropped}, reap {reaped}");
         assert!(arm.contains("session.filters = filters;"), "the session keeps them");
         let block = &source[source.find("    fn block_ipv6_if_needed(").expect("block_ipv6_if_needed")..];
         let block = &block[..block.find("\n    }\n").unwrap()];
         let kept = block.find("s.filters.ipv6.is_some()").expect("filters already in are kept");
         assert!(kept < block.find("self.filters_for(profile)").unwrap());
+    }
+
+    /// The early filters go in only with the DNS confinement they should
+    /// carry. On a fresh install Xray installs Wintun on first use and its
+    /// adapter was measured appearing 8.5 s in, past `dns_confinement_for`'s
+    /// 5 s: the IPv6 block went in alone, `block_ipv6_if_needed` kept it,
+    /// and DNS was never confined for that session. Now that case is left
+    /// to `block_ipv6_if_needed` after the routes, when the adapter is
+    /// there, as before the early install existed.
+    #[test]
+    fn early_filters_wait_for_the_dns_confinement_they_should_carry() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn early_filters_for(").expect("early_filters_for");
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("-> Option<SessionFilters>"), "it can decline");
+        let dns = body.find("self.dns_confinement_for(profile)?").expect("no confinement yet: declined");
+        let installs = body.find("self.install_filters(").expect("installed with it");
+        assert!(dns < installs);
+        // And the later install is the same one.
+        let later = &source[source.find("    fn filters_for(").expect("filters_for")..];
+        assert!(later[..later.find("\n    }\n").unwrap()].contains("self.install_filters("));
     }
 
     /// Every session's hold is noted in the ledger as it begins, so a

@@ -64,7 +64,7 @@ use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::{FILETIME, FWP_E_ALREADY_EXISTS, HANDLE};
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmFilterAdd0, FwpmFreeMemory0, FwpmNetEventCreateEnumHandle0, FwpmNetEventDestroyEnumHandle0,
-    FwpmNetEventEnum0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmTransactionAbort0,
+    FwpmNetEventEnum0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmSubLayerGetByKey0, FwpmTransactionAbort0,
     FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_FLAGS,
     FWPM_CONDITION_IP_LOCAL_INTERFACE, FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL,
     FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
@@ -468,8 +468,12 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
     // refused and the PC stayed offline until the failover let go of the
     // filters, then waited minutes for Windows to try DHCP again. This is
     // wireguard.exe's own shape for the same reason: answers to local 68
-    // from remote 67, from anywhere. A program that binds 68 can receive
-    // from a remote 67, and still send only where DHCP goes.
+    // from remote 67, from anywhere. Not "send only where DHCP goes": the
+    // permit authorizes the whole flow, so a program bound to local 68
+    // that is sent one datagram from some host's port 67 can answer that
+    // host on the same flow, around the tunnel. That needs unsolicited
+    // inbound to reach the PC (a public address, no NAT) and a program on
+    // the DHCP client's own port; wireguard.exe accepts the same.
     let mut dhcp_remotes = vec![Prefix::host(Ipv4Addr::BROADCAST), Prefix::host(Ipv4Addr::UNSPECIFIED)];
     for server in &plan.dhcp_servers {
         let host = Prefix::host(*server);
@@ -1382,6 +1386,51 @@ pub(super) const CAPTURE_SUBLAYER_KEY: GUID = GUID::from_u128(0x6f1a4b82_ad53_4e
 /// not whether a block wins -- a block in any sublayer does.
 const SUBLAYER_WEIGHT: u16 = 0xFFFE;
 
+/// The second provider and sublayer ([`CAPTURE_KEYS`]).
+pub(super) const CAPTURE_PROVIDER_KEY_ALT: GUID = GUID::from_u128(0x5e0f3a72_9c42_4d8b_a6e1_7b3c2f9d0a14);
+pub(super) const CAPTURE_SUBLAYER_KEY_ALT: GUID = GUID::from_u128(0x6f1a4b83_ad53_4e9c_b7f2_8c4d3e0a1b25);
+
+/// A provider and sublayer a confinement installs under, and the
+/// sublayer's weight.
+#[derive(Clone, Copy)]
+pub(super) struct CaptureKeys {
+    pub provider: GUID,
+    pub sublayer: GUID,
+    pub weight: u16,
+}
+
+/// Two pairs, and an install takes the one no live session holds
+/// ([`free_keys`]). Following the LAN (`Engines::follow_the_lan`) puts the
+/// new plan in before it closes the old, so for a moment two dynamic
+/// sessions are alive. On one pair the second accepted the first's
+/// provider and sublayer as already there and put its filters in them;
+/// closing the first then asked BFE to delete objects the second's filters
+/// still referenced, which WFP does not document. On two, neither session
+/// touches the other's objects. Both weigh below the IPv6 block's sublayer.
+pub(super) const CAPTURE_KEYS: [CaptureKeys; 2] = [
+    CaptureKeys { provider: CAPTURE_PROVIDER_KEY, sublayer: CAPTURE_SUBLAYER_KEY, weight: SUBLAYER_WEIGHT },
+    CaptureKeys { provider: CAPTURE_PROVIDER_KEY_ALT, sublayer: CAPTURE_SUBLAYER_KEY_ALT, weight: SUBLAYER_WEIGHT - 1 },
+];
+
+/// The first pair whose sublayer is not registered now. Both registered
+/// -- never, while a hold closes the old session as it takes the new --
+/// or a lookup that fails gives the first, as every install before took.
+///
+/// # Safety
+/// `engine` must be live.
+unsafe fn free_keys(engine: HANDLE) -> CaptureKeys {
+    for keys in CAPTURE_KEYS {
+        let mut sublayer: *mut FWPM_SUBLAYER0 = std::ptr::null_mut();
+        let err = FwpmSubLayerGetByKey0(engine, &keys.sublayer, &mut sublayer);
+        if err == 0 {
+            FwpmFreeMemory0(&mut sublayer as *mut _ as *mut *mut std::ffi::c_void);
+            continue;
+        }
+        return keys;
+    }
+    CAPTURE_KEYS[0]
+}
+
 const PROVIDER_NAME: &str = "Neoxify capture";
 const SUBLAYER_NAME: &str = "Neoxify IPv4 confinement";
 const LOG_FILE: &str = "confinement.log";
@@ -1451,8 +1500,10 @@ fn install_specs(specs: &[FilterSpec]) -> Result<Installed, String> {
         SUBLAYER_NAME,
         "Confines IPv4 to a Neoxify full tunnel; removed when it ends",
     )?;
+    // SAFETY: `engine` is live.
+    let keys = unsafe { free_keys(engine) };
     // SAFETY: `engine` is live, and every blob in `apps` outlives the call.
-    match unsafe { build(engine, specs, &apps) } {
+    match unsafe { build(engine, keys, specs, &apps) } {
         Ok(blocks) => Ok(Installed { engine: engine as isize, filters: specs.len(), blocks, since }),
         Err(e) => {
             // Closing the handle ends the session, which undoes whatever
@@ -1466,12 +1517,17 @@ fn install_specs(specs: &[FilterSpec]) -> Result<Installed, String> {
 
 /// # Safety
 /// `engine` must be live, and the blobs in `apps` must outlive the call.
-unsafe fn build(engine: HANDLE, specs: &[FilterSpec], apps: &[(PathBuf, super::ipv6_block::AppId)]) -> Result<Vec<u64>, String> {
+unsafe fn build(
+    engine: HANDLE,
+    keys: CaptureKeys,
+    specs: &[FilterSpec],
+    apps: &[(PathBuf, super::ipv6_block::AppId)],
+) -> Result<Vec<u64>, String> {
     let err = FwpmTransactionBegin0(engine, 0);
     if err != 0 {
         return Err(format!("could not begin a filtering transaction ({err:#010x})"));
     }
-    match add_everything(engine, specs, apps) {
+    match add_everything(engine, keys, specs, apps) {
         Ok(blocks) => {
             let err = FwpmTransactionCommit0(engine);
             if err != 0 {
@@ -1493,14 +1549,15 @@ unsafe fn build(engine: HANDLE, specs: &[FilterSpec], apps: &[(PathBuf, super::i
 /// Inside an open transaction; blobs alive for the duration.
 unsafe fn add_everything(
     engine: HANDLE,
+    keys: CaptureKeys,
     specs: &[FilterSpec],
     apps: &[(PathBuf, super::ipv6_block::AppId)],
 ) -> Result<Vec<u64>, String> {
-    add_provider(engine)?;
-    add_sublayer(engine)?;
+    add_provider(engine, keys)?;
+    add_sublayer(engine, keys)?;
     let mut blocks = Vec::new();
     for spec in specs {
-        let id = add_spec(engine, spec, apps)?;
+        let id = add_spec(engine, keys, spec, apps)?;
         if spec.action == Action::Block {
             blocks.push(id);
         }
@@ -1510,11 +1567,11 @@ unsafe fn add_everything(
 
 /// # Safety
 /// Inside an open transaction.
-unsafe fn add_provider(engine: HANDLE) -> Result<(), String> {
+unsafe fn add_provider(engine: HANDLE, keys: CaptureKeys) -> Result<(), String> {
     let mut name = super::ipv6_block::wide(PROVIDER_NAME);
     let mut description = super::ipv6_block::wide("Neoxify VPN: IPv4 confined to a full tunnel");
     let mut provider: FWPM_PROVIDER0 = std::mem::zeroed();
-    provider.providerKey = CAPTURE_PROVIDER_KEY;
+    provider.providerKey = keys.provider;
     provider.displayData.name = name.as_mut_ptr();
     provider.displayData.description = description.as_mut_ptr();
     // Not persistent: it belongs to the dynamic session.
@@ -1528,17 +1585,17 @@ unsafe fn add_provider(engine: HANDLE) -> Result<(), String> {
 
 /// # Safety
 /// Inside an open transaction.
-unsafe fn add_sublayer(engine: HANDLE) -> Result<(), String> {
+unsafe fn add_sublayer(engine: HANDLE, keys: CaptureKeys) -> Result<(), String> {
     let mut name = super::ipv6_block::wide(SUBLAYER_NAME);
     let mut description = super::ipv6_block::wide("IPv4 confined to a Neoxify full tunnel; removed when it ends");
-    let mut provider_key = CAPTURE_PROVIDER_KEY;
+    let mut provider_key = keys.provider;
     let mut sublayer: FWPM_SUBLAYER0 = std::mem::zeroed();
-    sublayer.subLayerKey = CAPTURE_SUBLAYER_KEY;
+    sublayer.subLayerKey = keys.sublayer;
     sublayer.displayData.name = name.as_mut_ptr();
     sublayer.displayData.description = description.as_mut_ptr();
     sublayer.flags = 0;
     sublayer.providerKey = &mut provider_key;
-    sublayer.weight = SUBLAYER_WEIGHT;
+    sublayer.weight = keys.weight;
     let err = FwpmSubLayerAdd0(engine, &sublayer, std::ptr::null_mut());
     if err == 0 || err == FWP_E_ALREADY_EXISTS as u32 {
         return Ok(());
@@ -1559,9 +1616,14 @@ pub(super) fn layer_key(layer: Layer) -> GUID {
 ///
 /// # Safety
 /// Inside an open transaction; every app blob alive for the duration.
-unsafe fn add_spec(engine: HANDLE, spec: &FilterSpec, apps: &[(PathBuf, super::ipv6_block::AppId)]) -> Result<u64, String> {
+unsafe fn add_spec(
+    engine: HANDLE,
+    keys: CaptureKeys,
+    spec: &FilterSpec,
+    apps: &[(PathBuf, super::ipv6_block::AppId)],
+) -> Result<u64, String> {
     let mut display_name = super::ipv6_block::wide(&spec.name);
-    let mut provider_key = CAPTURE_PROVIDER_KEY;
+    let mut provider_key = keys.provider;
     // The values carried by pointer, in buffers reserved up front so that
     // pushing cannot move an earlier one out from under its condition.
     let n = spec.conds.len();
@@ -1650,7 +1712,7 @@ unsafe fn add_spec(engine: HANDLE, spec: &FilterSpec, apps: &[(PathBuf, super::i
     filter.flags = FWPM_FILTER_FLAG_NONE;
     filter.providerKey = &mut provider_key;
     filter.layerKey = layer_key(spec.layer);
-    filter.subLayerKey = CAPTURE_SUBLAYER_KEY;
+    filter.subLayerKey = keys.sublayer;
     filter.weight = FWP_VALUE0 { r#type: FWP_UINT8, Anonymous: FWP_VALUE0_0 { uint8: spec.weight } };
     filter.numFilterConditions = conditions.len() as u32;
     filter.filterCondition = if conditions.is_empty() { std::ptr::null_mut() } else { conditions.as_mut_ptr() };
@@ -2602,6 +2664,30 @@ mod tests {
     }
 
     /// The plans against the real filtering engine.
+    /// Following the LAN puts the new plan in before it closes the old, so
+    /// two confinements are alive for a moment. They share no WFP object:
+    /// two pairs, distinct, the first the one every earlier build used,
+    /// both below the IPv6 block's sublayer -- and an install takes the
+    /// pair no live session holds.
+    #[test]
+    fn two_confinements_alive_at_once_share_no_wfp_object() {
+        let [a, b] = CAPTURE_KEYS;
+        let key = |g: GUID| (g.data1, g.data2, g.data3, g.data4);
+        let all = [key(a.provider), key(a.sublayer), key(b.provider), key(b.sublayer)];
+        for (i, x) in all.iter().enumerate() {
+            for y in &all[i + 1..] {
+                assert_ne!(x, y, "two of the confinement's WFP objects share a key");
+            }
+        }
+        assert_eq!((key(a.provider), key(a.sublayer)), (key(CAPTURE_PROVIDER_KEY), key(CAPTURE_SUBLAYER_KEY)));
+        assert!(a.weight < 0xFFFF && b.weight < 0xFFFF && a.weight != b.weight);
+        let source = include_str!("confinement.rs");
+        let body = &source[source.find("fn install_specs(").expect("install_specs")..];
+        let body = &body[..body.find("\n}\n").expect("its end")];
+        let probed = body.find("free_keys(engine)").expect("the free pair asked for");
+        assert!(probed < body.find("build(engine, keys, specs, &apps)").expect("and built under"));
+    }
+
     mod wfp {
         use super::*;
         use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
@@ -2692,7 +2778,7 @@ mod tests {
                         eprintln!("skipped: no filtering transaction ({begun:#010x})");
                         return;
                     }
-                    let result = add_everything(engine, &specs, &apps);
+                    let result = add_everything(engine, free_keys(engine), &specs, &apps);
                     // Before the assertion, so a failure cannot leave a
                     // transaction open; closing ends the session anyway.
                     FwpmTransactionAbort0(engine);
@@ -2709,6 +2795,61 @@ mod tests {
                     Err(e) => panic!("the Windows Filtering Platform rejected the plan ({}): {e}", describe(&plan)),
                 }
             }
+        }
+
+        /// The probe that picks a pair, against the real engine: a pair a
+        /// live session registered is not taken, the other is, and once
+        /// that session ends the first is free again. It registers a
+        /// provider and an empty sublayer only: no filter, nothing stops.
+        #[test]
+        fn an_install_takes_the_pair_no_live_session_holds() {
+            let Ok(first) = crate::engines::ipv6_block::open_dynamic_session_named(SUBLAYER_NAME, "test") else {
+                eprintln!("skipped: the filtering engine would not open (needs administrator)");
+                return;
+            };
+            // SAFETY: `first` is live until closed below, once.
+            let held = unsafe {
+                let keys = free_keys(first);
+                let begun = FwpmTransactionBegin0(first, 0);
+                if begun != 0 {
+                    FwpmEngineClose0(first);
+                    eprintln!("skipped: no filtering transaction ({begun:#010x})");
+                    return;
+                }
+                match add_provider(first, keys).and_then(|()| add_sublayer(first, keys)) {
+                    Ok(()) => {
+                        let committed = FwpmTransactionCommit0(first);
+                        if committed == 0 { Ok(keys) } else { Err(format!("not committed ({committed:#010x})")) }
+                    }
+                    Err(e) => {
+                        FwpmTransactionAbort0(first);
+                        Err(e)
+                    }
+                }
+            };
+            let keys = match held {
+                Ok(keys) => keys,
+                Err(e) => {
+                    // SAFETY: as above.
+                    unsafe { FwpmEngineClose0(first) };
+                    panic!("the first pair could not be registered: {e}");
+                }
+            };
+            let second = crate::engines::ipv6_block::open_dynamic_session_named(SUBLAYER_NAME, "test");
+            // SAFETY: each handle is live until closed, once.
+            let (other, again) = unsafe {
+                let Ok(second) = second else {
+                    FwpmEngineClose0(first);
+                    panic!("a second session would not open");
+                };
+                let other = free_keys(second);
+                FwpmEngineClose0(first);
+                let again = free_keys(second);
+                FwpmEngineClose0(second);
+                (other, again)
+            };
+            assert_ne!(other.sublayer.data1, keys.sublayer.data1, "a pair a live session holds was taken");
+            assert_eq!(again.sublayer.data1, keys.sublayer.data1, "the pair was not free once its session ended");
         }
 
         /// Whether this sublayer and provider exist on the machine now.
