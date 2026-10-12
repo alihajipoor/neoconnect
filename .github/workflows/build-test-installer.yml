@@ -1,0 +1,142 @@
+name: Build test installer (unsigned)
+
+# Builds the Windows installers from any branch, tag or commit, by hand,
+# for the test VM -- and ships nothing.
+#
+# For when the installer cannot, or should not, be built on a developer
+# machine -- Smart App Control on the Windows PC refuses every freshly
+# built binary, for one. This is the release build
+# (release-desktop-windows.yml) with everything that makes a build a
+# release taken out:
+#
+#   - no updater artifact. createUpdaterArtifacts is turned off, so the
+#     build needs no updater key and produces no .sig. An updater-signed
+#     build of an arbitrary branch is something every installed client
+#     would accept as an update, so this workflow never holds the key.
+#   - no Authenticode signing, and no secrets of any kind.
+#   - no release, no tag, nothing pushed, nothing sent to the releases
+#     repository. GITHUB_TOKEN is read-only here.
+#
+# scripts/check-test-installer-workflow.sh holds those properties in CI;
+# extend that check before loosening any of them.
+#
+# The result is a workflow artifact kept for three days. The repository
+# is public, so a signed-in GitHub user can download it -- which adds
+# nothing: the source is public, and the one thing a build bakes in, the
+# endpoint seed, is the published bundle every release installer carries.
+#
+# What an installed test build still does: the app checks the real
+# update endpoint. If the newest desktop-v* release is newer than the
+# version this tree builds, the test build downloads it and is replaced
+# by it when the app quits.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or full commit SHA to build"
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Unsigned test installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: pnpm install --frozen-lockfile
+
+      # The commit actually checked out, not GITHUB_SHA -- for a manual
+      # run that is the commit the workflow file came from, which is main
+      # whatever was asked for. The ref arrives through env rather than
+      # being spliced into the script, so a branch name cannot run as code.
+      - name: Record what is being built
+        id: what
+        shell: bash
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          short=$(git rev-parse --short=7 HEAD)
+          version=$(node -p "require('./apps/desktop-windows/src-tauri/tauri.conf.json').version")
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          echo "Building '$REQUESTED_REF' at $sha, app version $version"
+          {
+            echo "### Unsigned test installer"
+            echo
+            echo "Ref \`$REQUESTED_REF\` at \`$sha\`, app version $version."
+            echo
+            echo "Not Authenticode-signed and carries no updater signature. For testing only."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fetch bundled binaries
+        working-directory: apps/desktop-windows
+        run: pnpm run fetch-binaries
+
+      # Required, as in the release: an installer without the seed cannot
+      # reach the service from a censored network, and a test of it there
+      # would be a test of the wrong thing.
+      - name: Fetch endpoint seed bundle and updater endpoints
+        working-directory: apps/desktop-windows
+        run: pnpm run seed
+        env:
+          NEOXIFY_REQUIRE_SEED: "1"
+
+      # A file rather than an inline JSON argument, which PowerShell
+      # mangles on its way to a native command.
+      - name: Build, without updater artifacts
+        working-directory: apps/desktop-windows
+        run: |
+          $noUpdater = Join-Path $env:RUNNER_TEMP 'no-updater.json'
+          Set-Content -Path $noUpdater -Value '{ "bundle": { "createUpdaterArtifacts": false } }'
+          pnpm exec tauri build --config $noUpdater
+
+      # As release-desktop-windows.yml, including the static CRT -- the
+      # comments there say why each part is needed.
+      - name: Build branded bootstrapper
+        working-directory: apps/desktop-windows
+        shell: bash
+        run: |
+          setup=$(ls "$PWD"/target/release/bundle/nsis/*_x64-setup.exe | head -1)
+          echo "Embedding $setup"
+          NEOXIFY_SETUP="$setup" RUSTFLAGS="-C target-feature=+crt-static" \
+            cargo build --release -p neoxify-bootstrapper
+          cp target/release/Neoxify-Setup.exe target/release/bundle/nsis/Neoxify-Setup.exe
+
+      # Asserted on the files rather than inferred from green steps.
+      - name: Check the installers exist and carry no updater signature
+        working-directory: apps/desktop-windows/target/release/bundle/nsis
+        shell: bash
+        run: |
+          ls -l
+          test -s "$(ls *_x64-setup.exe | head -1)"
+          test -s Neoxify-Setup.exe
+          if ls *.sig >/dev/null 2>&1; then
+            echo "::error::an updater signature was produced; this build must not have one"
+            exit 1
+          fi
+          sha256sum *.exe | tee sha256sums.txt
+
+      - name: Upload the installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-installer-${{ steps.what.outputs.short }}
+          path: |
+            apps/desktop-windows/target/release/bundle/nsis/*.exe
+            apps/desktop-windows/target/release/bundle/nsis/sha256sums.txt
+          retention-days: 3
+          if-no-files-found: error
