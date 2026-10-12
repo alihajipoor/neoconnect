@@ -327,6 +327,9 @@ struct Session {
     /// The plan-error valve watching the engine's log after an install;
     /// stopped and joined with the session. See `confinement::run_valve`.
     valve: Option<crate::split_tunnel::worker::Worker>,
+    /// The reset at connect's rescans, for its first seconds; stopped and
+    /// joined with the session. See `Engines::reset_outside_the_tunnel`.
+    rescan: Option<crate::split_tunnel::worker::Worker>,
 }
 
 impl Session {
@@ -342,6 +345,7 @@ impl Session {
             confinement,
             confinement_plan: None,
             valve: None,
+            rescan: None,
         }
     }
 }
@@ -745,6 +749,75 @@ impl Engines {
             return;
         }
         self.start_valve();
+    }
+
+    /// The owner's decision (c): established IPv4 TCP connections outside
+    /// the tunnel -- opened before Connect, or in the gap between two rungs
+    /// -- are reset once at connect, so they come back through it.
+    ///
+    /// For the sessions that are confined (`confinement::applies_to`),
+    /// whether or not the filters went in: a confinement re-examines open
+    /// flows at their next packet (P0-D) and so stops them leaking, but only
+    /// a reset tells an idle connection to come back. See
+    /// `split_tunnel::OutsideTunnel` for what is left alone. One pass now,
+    /// then the session's own rescans every quarter-second for
+    /// [`RESET_RESCAN_FOR`], for rows that were mid-handshake at the first:
+    /// `SetTcpEntry` cannot close a handshake. What each pass closed goes to
+    /// confinement.log, which a capture's resets are checked against.
+    fn reset_outside_the_tunnel(&mut self, profile: &ConnectProfile, passive: bool) {
+        if !confinement::applies_to(profile, passive) {
+            return;
+        }
+        let ops = Arc::clone(&self.confinement_ops);
+        let log_dir = self.config_dir.clone();
+        let Some(session) = self.active.peek_mut() else { return };
+        let mut tunnel_addresses: Vec<Ipv4Addr> =
+            adapters::find_by_name(adapter_name_for(profile)).ok().flatten().and_then(|a| a.ipv4).into_iter().collect();
+        if matches!(profile, ConnectProfile::XrayVlessReality(_) | ConnectProfile::XrayVlessTls(_) | ConnectProfile::XrayTrojan(_) | ConnectProfile::Shadowsocks(_))
+            && !tunnel_addresses.contains(&xray::TUN_ADDRESS)
+        {
+            tunnel_addresses.push(xray::TUN_ADDRESS);
+        }
+        let lan = match &session.confinement_plan {
+            Some(plan) => confinement::lan_reachable(&plan.lan),
+            None => confinement::lan_reachable(&confinement::Lan::Allowed(machine_lan())),
+        };
+        let engine_pid = match &session.engine {
+            Active::Child { child, .. } => Some(child.id()),
+            Active::Ikev2(_) | Active::WireguardTunnel => None,
+        };
+        let rules = crate::split_tunnel::OutsideTunnel { tunnel_addresses, engine_pid, lan };
+
+        let first = ops.reset(&rules);
+        note_reset(&log_dir, "reset at connect", &first);
+        let closed_at_first = first.closed;
+        session.rescan = Some(crate::split_tunnel::worker::Worker::spawn(move |stop| {
+            let deadline = Instant::now() + RESET_RESCAN_FOR;
+            let (mut closed, mut passes, mut handshaking) = (closed_at_first, 0usize, first.skipped_handshaking);
+            while Instant::now() < deadline {
+                if !crate::split_tunnel::worker::sleep_unless_stopped(&stop, RESET_RESCAN_EVERY) {
+                    return;
+                }
+                let outcome = ops.reset(&rules);
+                closed += outcome.closed;
+                handshaking = outcome.skipped_handshaking;
+                passes += 1;
+                if !outcome.closed_rows.is_empty() || !outcome.failures.is_empty() {
+                    note_reset(&log_dir, "reset rescan", &outcome);
+                }
+            }
+            confinement::note(
+                &log_dir,
+                &format!(
+                    "reset settled after {passes} rescan(s): {closed} connection(s) closed in all{}",
+                    if handshaking > 0 {
+                        format!("; {handshaking} still mid-handshake at the end, which completed outside the tunnel or were refused")
+                    } else {
+                        String::new()
+                    }
+                ),
+            );
+        }));
     }
 
     /// Starts the plan-error valve on the live session (K5): its engine's
@@ -1384,6 +1457,9 @@ impl Engines {
         // link to its servers, the LAN, DHCP and loopback. See
         // `confinement`. A failure leaves the tunnel up and is reported.
         self.confine_if_needed(profile, passive, confine_nodes);
+        // Then what was opened outside it before, so it comes back through
+        // it: the owner's decision (c).
+        self.reset_outside_the_tunnel(profile, passive);
         // Whatever the engine above reported about a full tunnel's DNS
         // rule, collected onto the session now that there is one. Read
         // rather than returned because the engines install it from free
@@ -2600,6 +2676,29 @@ fn our_interfaces() -> Vec<u32> {
     adapters::list()
         .map(|all| all.into_iter().filter(|a| OUR_ADAPTER_NAMES.contains(&a.name.as_str())).map(|a| a.index).collect())
         .unwrap_or_default()
+}
+
+/// How long the reset at connect goes on rescanning, and how often. The
+/// same shape as Custom mode's activation reset (`split_tunnel::session::
+/// convergence`), for the same reason: a connection in SYN_SENT at the
+/// first pass is closeable a few hundred milliseconds later.
+const RESET_RESCAN_FOR: std::time::Duration = std::time::Duration::from_secs(3);
+const RESET_RESCAN_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// One reset pass, in confinement.log: what was closed, by owner and
+/// remote, and what refused to close.
+fn note_reset(log_dir: &Path, what: &str, outcome: &crate::split_tunnel::ResetOutcome) {
+    let mut line = format!("{what}: {} connection(s) closed", outcome.closed);
+    if !outcome.closed_rows.is_empty() {
+        line.push_str(&format!(" ({})", outcome.closed_rows.join(", ")));
+    }
+    if outcome.skipped_handshaking > 0 {
+        line.push_str(&format!("; {} mid-handshake, left for the rescans", outcome.skipped_handshaking));
+    }
+    for failure in &outcome.failures {
+        line.push_str(&format!("; {failure}"));
+    }
+    confinement::note(log_dir, &line);
 }
 
 /// The LAN as this machine's adapters are on it right now, for the IPv4
@@ -4827,6 +4926,8 @@ mod helper_tests {
         closed: Arc<std::sync::Mutex<Vec<isize>>>,
         /// Every install refused, as WFP would refuse a filter.
         refuse: std::sync::atomic::AtomicBool,
+        /// The rules of every reset pass asked for.
+        resets: std::sync::Mutex<Vec<crate::split_tunnel::OutsideTunnel>>,
     }
 
     impl FakeConfinement {
@@ -4837,6 +4938,7 @@ mod helper_tests {
                 next: std::sync::atomic::AtomicIsize::new(1000),
                 closed: Arc::default(),
                 refuse: std::sync::atomic::AtomicBool::new(false),
+                resets: std::sync::Mutex::new(Vec::new()),
             })
         }
         fn closed(&self) -> Vec<isize> {
@@ -4860,6 +4962,10 @@ mod helper_tests {
             self.installs.lock().unwrap().push(plan.clone());
             let engine = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(confinement::Installed { engine, filters: confinement::specs(plan).len() })
+        }
+        fn reset(&self, rules: &crate::split_tunnel::OutsideTunnel) -> crate::split_tunnel::ResetOutcome {
+            self.resets.lock().unwrap().push(rules.clone());
+            crate::split_tunnel::ResetOutcome::default()
         }
         fn hold(&self) -> Arc<confinement::Hold> {
             let closed = Arc::clone(&self.closed);
@@ -5179,6 +5285,10 @@ mod helper_tests {
         let block = body.find("self.block_ipv6_if_needed(profile);").expect("the IPv6 block");
         let confine = body.find("self.confine_if_needed(profile, passive, confine_nodes);").expect("the confinement");
         assert!(block < confine);
+        // And the reset after it: the old flows are refused from the moment
+        // the filters go in, then told to come back.
+        let reset = body.find("self.reset_outside_the_tunnel(profile, passive);").expect("the reset");
+        assert!(confine < reset);
         assert!(body.find("confine_nodes.push(plan.server)").is_some(), "Xray's server");
         assert!(body.find("confine_nodes.push(node)").is_some(), "OpenVPN's server");
     }
@@ -5211,6 +5321,68 @@ mod helper_tests {
         assert!(engines.status().0);
         end_test_session(&mut engines);
         assert_eq!(fake.closed(), vec![1000], "closed once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- The reset at connect (decision (c)) -------------------------
+
+    /// A full Xray tunnel's connect resets what is open outside it: one
+    /// pass at once, then again every quarter-second for its first three
+    /// seconds -- for connections that were mid-handshake at the first --
+    /// leaving the engine's own process, the tunnel's address and the LAN
+    /// alone. The rescans are the session's: they stop when it ends, and
+    /// settle on their own.
+    #[test]
+    fn a_full_tunnel_resets_what_is_outside_it_and_the_rescans_end_with_the_session() {
+        let node = Ipv4Addr::new(203, 0, 113, 7);
+        let (mut engines, fake, dir) = engines_with_engine_files("reset");
+        let child = engine_stand_in();
+        let pid = child.id();
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", child);
+        engines.confine_if_needed(&reality_profile(), false, vec![node]);
+        engines.reset_outside_the_tunnel(&reality_profile(), false);
+        let passes = || fake.resets.lock().unwrap().len();
+        assert!(passes() >= 1, "no pass at connect");
+        let rules = fake.resets.lock().unwrap()[0].clone();
+        assert_eq!(rules.engine_pid, Some(pid), "the engine's link would be cut");
+        assert!(rules.tunnel_addresses.contains(&xray::TUN_ADDRESS), "{rules:?}");
+        assert!(rules.lan.contains(&(Ipv4Addr::new(169, 254, 0, 0), 16)), "{rules:?}");
+        assert!(wait_for(Duration::from_secs(2), || passes() >= 3), "no rescans");
+        end_test_session(&mut engines);
+        let after = passes();
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(passes(), after, "a rescan outlived its session");
+
+        // Left alone, the rescans settle within their window.
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.reset_outside_the_tunnel(&reality_profile(), false);
+        std::thread::sleep(Duration::from_millis(3_600));
+        let settled = passes();
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(passes(), settled, "the rescans did not settle");
+        end_test_session(&mut engines);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No reset where there is no confinement of ours: WireGuard (its own
+    /// kill switch re-examines open flows -- P0-D saw it reset one), IKEv2
+    /// while it is not confined, and Custom mode, whose own reset covers
+    /// the applications it carries and leaves the rest alone.
+    #[test]
+    fn no_reset_for_wireguard_ikev2_or_custom_mode() {
+        let (mut engines, fake, dir) = engines_with_engine_files("no-reset");
+        for (protocol, profile, passive) in [
+            ("WIREGUARD", wireguard_profile(), false),
+            ("IKEV2", test_profile(), false),
+            ("XRAY_VLESS_REALITY", reality_profile(), true),
+            ("OPENVPN", openvpn_profile(), true),
+        ] {
+            engines.begin_test_session_for(&profile, protocol, engine_stand_in());
+            engines.reset_outside_the_tunnel(&profile, passive);
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(fake.resets.lock().unwrap().is_empty(), "{protocol}, passive {passive}");
+            end_test_session(&mut engines);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

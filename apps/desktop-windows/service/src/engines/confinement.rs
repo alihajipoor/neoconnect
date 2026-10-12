@@ -725,6 +725,9 @@ pub trait ConfinementOps: Send + Sync {
     fn luid(&self, adapter: &str) -> Result<u64, String>;
     fn install(&self, plan: &Plan) -> Result<Installed, String>;
     fn hold(&self) -> std::sync::Arc<Hold>;
+    /// One pass of the reset at connect: established IPv4 TCP outside the
+    /// tunnel, closed (`split_tunnel::OutsideTunnel` has the rules).
+    fn reset(&self, rules: &crate::split_tunnel::OutsideTunnel) -> crate::split_tunnel::ResetOutcome;
 }
 
 /// The machine.
@@ -755,6 +758,27 @@ impl ConfinementOps for System {
 
     fn hold(&self) -> std::sync::Arc<Hold> {
         Hold::new(&self.log_dir)
+    }
+
+    fn reset(&self, rules: &crate::split_tunnel::OutsideTunnel) -> crate::split_tunnel::ResetOutcome {
+        crate::split_tunnel::reset_outside_the_tunnel(rules)
+    }
+}
+
+/// Writes a line to `confinement.log`: what the reset at connect closed is
+/// recorded there, beside what the confinement installed and let go of,
+/// so a packet capture can be checked against one file.
+pub fn note(log_dir: &std::path::Path, line: &str) {
+    super::ipv6_block::note(&log_dir.join(LOG_FILE), line);
+}
+
+/// The LAN a plan leaves reachable, as (address, prefix length): its
+/// on-link prefixes and the LAN's own plumbing. Empty when the LAN is
+/// refused. What the reset at connect leaves alone as the LAN.
+pub fn lan_reachable(lan: &Lan) -> Vec<(Ipv4Addr, u8)> {
+    match lan {
+        Lan::Allowed(prefixes) => prefixes.iter().copied().chain(lan_plumbing()).map(|p| (p.addr, p.len)).collect(),
+        Lan::Refused => Vec::new(),
     }
 }
 

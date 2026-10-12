@@ -100,6 +100,11 @@ const ADAPTER_ADDRESSED_WAIT: std::time::Duration = std::time::Duration::from_se
 /// changed nothing.
 const TUN_GATEWAY: &str = "198.18.0.1/30";
 
+/// The same address, as the reset at connect needs it: a connection from
+/// it is in the tunnel already. Kept beside the string it must agree with;
+/// a test below holds the two together.
+pub(super) const TUN_ADDRESS: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
+
 /// Resolver handed to the tunnel adapter. The physical link's resolvers
 /// are usually LAN or ISP addresses that stop being reachable once the
 /// default route moves, so the tunnel needs one that works from
@@ -925,6 +930,13 @@ mod tests {
     fn trojan_never_disables_certificate_verification() {
         let json = build_config_for(&Outbound::Trojan(&trojan_profile()), false);
         assert!(!json.contains("allowInsecure"));
+    }
+
+    /// The reset at connect leaves connections from the tunnel's own
+    /// address alone; that address is the one the adapter is given.
+    #[test]
+    fn the_tunnel_address_the_reset_spares_is_the_one_the_adapter_gets() {
+        assert_eq!(TUN_GATEWAY.split('/').next().and_then(|a| a.parse::<Ipv4Addr>().ok()), Some(TUN_ADDRESS));
     }
 
     #[test]
