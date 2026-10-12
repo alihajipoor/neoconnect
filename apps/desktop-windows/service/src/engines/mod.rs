@@ -1308,6 +1308,14 @@ impl Engines {
             ConnectProfile::Ikev2(p) => {
                 let live = ikev2::connect(p, passive)?;
                 self.begin_session(Active::Ikev2(live), profile);
+                // ESP's permit names the server's address; IKE's does not
+                // (K3). Only asked while IKEv2's plan is on, which it is
+                // not until its own VM gate passes (`IKEV2_CONFINED`).
+                if confinement::applies_to(profile, passive) {
+                    if let Ok(node) = node_address(profile, limits) {
+                        confine_nodes.push(node);
+                    }
+                }
             }
             // Both Xray protocols take the same path: one engine, one
             // adapter, one set of routes -- only the outbound differs.
@@ -5291,6 +5299,11 @@ mod helper_tests {
         assert!(confine < reset);
         assert!(body.find("confine_nodes.push(plan.server)").is_some(), "Xray's server");
         assert!(body.find("confine_nodes.push(node)").is_some(), "OpenVPN's server");
+        // IKEv2's, only while its plan is on: no lookup otherwise.
+        let ikev2 = &body[body.find("ConnectProfile::Ikev2(p) => {").expect("the IKEv2 arm")..];
+        let ikev2 = &ikev2[..ikev2.find("\n            }\n").expect("its end")];
+        assert!(ikev2.contains("if confinement::applies_to(profile, passive) {"));
+        assert!(ikev2.contains("confine_nodes.push(node)"));
     }
 
     /// K5, through the session: a confined Xray tunnel whose engine then
