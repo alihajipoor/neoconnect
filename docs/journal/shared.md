@@ -331,15 +331,19 @@ yet merged. What stands, so it is not re-litigated:
   Released the moment the tunnel ends: fail open, never a kill switch.
 - **The LAN stays reachable**, as the private on-link prefixes of the
   PC's own adapters plus link-local, multicast and broadcast; never
-  `10/8` or `100.64/10` wholesale. The router's DNS stays refused.
+  `10/8` or `100.64/10` wholesale. The router's DNS stays refused, by the
+  confinement itself as well as by the IPv6 block's DNS filters.
 - **Accepted costs:** other VPNs and overlays, and inbound connections
   from the internet, do not work while connected; connections open at
   connect are reset once.
-- **A confinement that will not install keeps the tunnel up**, and the
-  app says "not fully protected" in words. It never claims full
-  protection then.
+- **A confinement that will not install, or is let go of, keeps the
+  tunnel up**, and the app says "not fully protected" in words from the
+  next status it reads: right after the rung's egress check at connect,
+  then every health poll (15 s) -- so a confinement let go of later in a
+  session can stand behind "You're protected" for up to one poll.
 - **Custom mode is not confined**, in either variant. WireGuard keeps its
   own kill switch and gets none of ours. IKEv2 is confined only after its
-  own VM gate.
+  own VM gate; until then the app says, on Built-in, that it is not fully
+  protected.
 - **The server's own address is not routed through the tunnel** for now
   (design Phase 4: not wanted now).

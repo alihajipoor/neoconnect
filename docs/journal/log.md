@@ -6807,3 +6807,144 @@ unchanged. Specifically not known yet:
 - beyond the VM, as always: a real IPv6 path, a censored Iranian line,
   PPPoE, Wi-Fi roaming and sleep/resume, MTU below 1500, another VPN
   installed, phones.
+
+## 2026-10-12 — desktop capture, Phase 3 reviewed: fifteen fixes, four measurements in the VM (same branch, not merged, not pushed)
+
+**Status:** five read-only checkers (blackout, leaks, protocols, honesty,
+a regression hunt) reviewed `c568291..fc2d704`. Their real findings are
+fixed test-first in `569e234..3246efb`; the rest are answered below with
+the reason. Four of the fixes were also run elevated against the real
+filtering engine in the `Neoxify-Test` guest. **Still no connect of this
+build has been made anywhere**: the P3 gate has not run.
+
+**The plan-error valve could not see the refusals it is for** (protocols,
+high). The bundled xray-core 26.1.23 logs a failed outbound with
+`errors.LogInfo` (checked against the tag's `handler.go`), below the
+config's "warning", so a refused dial never reached xray.log; Go words it
+in the system's language; and OpenVPN's UDP flow, re-examined and dropped
+by WFP, is never told, so nothing is written. `569e234`: install records
+the ids WFP gives the plan's block filters and the time, and the valve
+also reads WFP's own record (net events, classify drops) for one of those
+blocks refusing the engine's app id. In the guest (three runs): a TCP
+connect elsewhere was refused here with 10013 and the witness named the
+plan's block and "TCP to port 443" after 27-29 ms; a send on a UDP socket
+connected before the install returned Ok and was dropped, and the
+witness named "UDP to port 9" after 26-29 ms. `netevents = on` is the
+guest's default. The log marks stay as a second witness. `3246efb`: the
+ladder reads the status again after a rung's egress check, so the warning
+is not 15 s late, and gives the rung one more check when the confinement
+was held before and let go of during a failed check -- otherwise a
+protocol our own filter broke was still dropped as if censored.
+
+**Leaks and holes.**
+- The router's DNS was refused only by the IPv6 block's DNS filters, a
+  separate install that can fail while the confinement goes in.
+  `88869c3`: the confinement blocks port 53 outbound itself, over its LAN
+  permit (DHCP 12, DNS 11, LAN 10). In the guest: TCP and UDP to the
+  router's 53 refused by one of the plan's filters; port 9 on the router
+  let out; no IPv6 block installed.
+- DHCP was permitted by ports alone. `5dea914`: also by remote -- the
+  broadcast, 0.0.0.0 and the DHCP servers the adapters lease from.
+- IKEv2 said nothing about confinement, so "You're protected" over a
+  tunnel with no kill switch. `f7cec52`: `ipv4_confined=false` with the
+  reason, and Built-in's own line (reconnecting cannot change it; another
+  protocol can). **This changes what every Built-in user sees while
+  connected.** The reset at connect is still not run for IKEv2: it needs
+  RAS's tunnel address identified, unmeasured, and belongs with IKEv2's
+  gate.
+- `57c7121` (a measurement, kept as a test): a TCP connection opened
+  before the install, written after it, was refused by the plan's block
+  and reset (10054) -- the first measurement of WFP re-examining an open
+  flow under this sublayer; the witness run shows the same for connected
+  UDP. So what the reset at connect misses, and what opens in a drop
+  report's gap before `confine_again` (no reset follows it), is refused
+  at its next packet, not carried by the physical adapter. Not added: a
+  reset after `confine_again`.
+
+**Blackouts.**
+- `d898d9d`: a drop report racing the put-back could be erased by the
+  re-arm, holding a dead engine's confinement (K2). The hold is re-armed
+  before the new watch starts. A source-order test fails on the old
+  order; the 32-way race test passed on both (the window is microseconds
+  wide), so it guards the property rather than proving the bug.
+- `d8a89a6`: released the moment the engine is killed -- before the hard
+  stop's route.exe deletes and the thorough pass's reap -- and first on a
+  dead engine's teardown. Each of those windows was the whole machine
+  offline while the confinement protected nothing.
+- `801809f`: the tunnel adapter gone under a live engine lets go of the
+  confinement at the next status poll, with the reason.
+- `7aae09e`: flipping an empty Custom-mode list between "only these" and
+  "all except these" restarted the redirect on a confined full tunnel,
+  which let go of the confinement for good (a debug-build panic). It now
+  changes nothing.
+
+**Honesty.**
+- `384c737`: the unconfined line no longer opens "Your traffic is going
+  through the VPN" -- it shows in "not confirmed" and "not carrying
+  traffic" too -- and the VPN mode's own line no longer says "Everything
+  on this computer goes through Neoxify" beside it.
+- `ca58e30`: in the same country, "Your usual protocol didn't get
+  through" only when a rung was dialled and failed; otherwise "Now using".
+- `1ff7dbc`: every engine now fails with "no network connection with a
+  gateway was found" before dialling when Windows has no way out, so the
+  app's no-network handling covers WireGuard, OpenVPN and IKEv2 too.
+- `6993abf`: a busy service's fallback status reads the live session's
+  confinement through the ledger, instead of `None` (which cleared the
+  warning).
+- `841bffa`: a WFP session that will not open is reported for the block
+  that asked, not always as "IPv6 could not be blocked".
+
+**Answered, not changed:**
+- *A stalled tunnel, or a network joined after Connect (resume, roaming),
+  keeps the machine confined until failover* (blackout 3). A stalled
+  tunnel black-holed routed traffic before this branch too, and the LAN
+  fixed at connect is a stated limitation; only the adapter-gone case was
+  strictly worse, and it is fixed. Unmeasured: no sleep/resume or roaming
+  run.
+- *RFC 1918 on-link prefixes from /16 to /23 are permitted whole* (leaks
+  4). Kept: those are LAN shapes too -- a WSL vEthernet is a /20, office
+  LANs are /22-/23 -- and cutting them to /24 breaks the LAN decision (a)
+  keeps. A carrier line handing Windows a 10.x/16-/20 on-link prefix
+  directly is not something we have seen; if it is, the carrier's hosts
+  in that prefix are reachable around the tunnel.
+- *Forwarded, bridged and kernel-sent traffic never meets ALE* (leaks
+  5). True of every host ALE filter, wireguard.exe's included. Mobile
+  Hotspot/ICS and WinNAT (WSL2 NAT, Docker, Hyper-V's Default Switch) are
+  forwarded and follow the routes -- so only traffic to the node's own
+  address goes around, which decision (e) accepts for now. A Hyper-V
+  external switch and WSL2 mirrored mode bypass the host stack entirely:
+  not covered, now named. RSTs from the reset, TCP RSTs and ICMP errors
+  carry no application data.
+- *Another product's hard permit in a higher sublayer beats the block*
+  (leaks 7). Only 0xFFFF is above our 0xFFFE, and a permit that clears
+  the action right there is another security product's deliberate
+  choice; detecting it would mean enumerating every provider's filters at
+  four layers. Not built; `ipv4_confined=true` does not cover it.
+- *A refused mirror is "demoted on this network for half an hour"*
+  (hunter 2, 3). Not so: only a timeout demotes (`settleFailure` in
+  api.ts). A 10013 refusal or our own reset fails at once, is traced as
+  `net` (the HTTP plugin's error carries no cause) and forgets the
+  remembered winner; nothing is demoted. The requests in flight across a
+  connect are reset on purpose (decision (c) includes Neoxify's own rows,
+  after P2.2).
+- *Never run on a real connect* (hunter 1). Still true; the witness now
+  has real-WFP evidence, the log lines remain provisional.
+
+**Proven -- tests on this PC**, run before every commit: desktop `cargo
+check --workspace --all-targets` (no new warnings), `cargo test
+--workspace` 50, 60, 624 (11 ignored), `pnpm test` 1493 and `pnpm
+typecheck`; mobile `pnpm test` 239 and `tsc` where shared TS changed.
+Every fix's test failed first against today's behaviour or a stub of it;
+the commit messages say which, and where only a source-order test could.
+
+**Proven -- elevated in the guest**, this branch's test binary beside the
+installed build's DLLs: the witness (TCP and UDP), the DNS block and the
+LAN permit, the TCP re-examination, the add-then-abort of every plan with
+the new filters and a DHCP server named, and the kill test. Nothing of
+ours was left; the guest reached 1.1.1.1 after each run.
+
+**Unverified:** everything the Phase 3 entry lists for the P3 gate, plus:
+an IKEv2 connect of this build and Built-in's new line on screen; the
+no-network sentence on Compatible, Fast and Built-in with the adapter
+off (p1-17's shape); a real engine refused by a wrong permit end to end
+(P3 step 8); and the ladder's second check on a real rung.
