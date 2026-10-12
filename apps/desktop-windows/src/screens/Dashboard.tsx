@@ -79,6 +79,13 @@ import { useRefreshOnResume } from "../lib/resume";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
+import {
+  failoverNotice,
+  failoverText,
+  rungFate,
+  type FailedRung,
+  type FailoverNotice,
+} from "../lib/failover-notice";
 import { snapshotAge, traceRequests } from "../lib/unanswered-report";
 import {
   deviceSlot,
@@ -534,16 +541,10 @@ export function Dashboard({
    * insufficient: someone who chose Singapore chose it for a reason, and
    * the fact that they are now leaving from France should not have to be
    * inferred from a field elsewhere on the screen. */
-  const [failedOverTo, setFailedOverTo] = useState<{
-    label: string;
-    /** Region we meant to use, only when it differs from where we landed. */
-    fromRegion: string | null;
-    toRegion: string | null;
-    /** Whether `fromRegion` was actually dialled and failed, as opposed
-     * to never being attempted. Picks between two different sentences,
-     * because only one of them is true in each case. */
-    intendedWasTried: boolean;
-  } | null>(null);
+  // And what became of the server on screen -- dialled and failed, never
+  // dialled for want of a network, or never asked -- because each takes a
+  // different sentence and only one of them is true (`failoverNotice`).
+  const [failedOverTo, setFailedOverTo] = useState<FailoverNotice | null>(null);
   /** Guards the ladder against running twice at once. The health poll
    * and the Connect button can both start one, and two of them
    * interleaving would have each tearing down the other's engine.
@@ -2813,8 +2814,9 @@ export function Dashboard({
       // about a route it never dialled.
       const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
 
-      // Whether the route on screen was actually dialled before we
-      // settled somewhere else.
+      // Every rung that failed, with what it did with its route: whether
+      // the route on screen was actually dialled before we settled
+      // somewhere else, or only refused for want of a network.
       //
       // Without this the app tells the customer "Couldn't reach
       // sg-singapore" in the one case it never tried Singapore at all --
@@ -2822,8 +2824,12 @@ export function Dashboard({
       // continent won at index 0. Observed exactly that. Asserting a
       // failure that did not happen is the same dishonesty as the
       // silence it replaced, just louder, and it sends the customer to
-      // support over a server that is fine.
-      let triedShownRoute = false;
+      // support over a server that is fine. Being reached by the ladder
+      // is not being dialled either: with the network adapter off, every
+      // rung failed in the service before anything was sent, and the
+      // screen said "Couldn't reach fi-finland" once the network was back
+      // and another country answered (`failoverNotice`).
+      const failedRungs: FailedRung[] = [];
 
       let lastError: ClassifiedError | null = null;
       // Why each attempt failed, in order. Kept because diagnosing the
@@ -2871,7 +2877,6 @@ export function Dashboard({
         options.reconnect?.progress();
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
-        if (candidate.routeId === shownRouteId) triedShownRoute = true;
 
         // Patient only for the last candidate. With another protocol
         // sitting untried, waiting out a long budget on this one is
@@ -3166,13 +3171,16 @@ export function Dashboard({
               const landed = routes.find((r) => r.id === candidate.routeId);
               const from = intended?.location.region ?? null;
               const to = landed?.location.region ?? null;
-              setFailedOverTo({
-                label,
-                fromRegion: from && to && from !== to ? from : null,
-                toRegion: to,
-                // Only "couldn't reach it" if we actually tried it.
-                intendedWasTried: triedShownRoute,
-              });
+              setFailedOverTo(
+                failoverNotice({
+                  label,
+                  fromRegion: from && to && from !== to ? from : null,
+                  toRegion: to,
+                  // Only "couldn't reach it" if we actually dialled it.
+                  shownRouteId: shownRouteId ?? null,
+                  failed: failedRungs,
+                }),
+              );
             }
             // Remembered only on proof it carried traffic. Recording a
             // merely-started engine would teach the app to lead with a
@@ -3264,6 +3272,8 @@ export function Dashboard({
 
           attempts.push(`${label}: up but ${reason}`);
           dials.push({ routeId: candidate.routeId, carried: false });
+          // Its tunnel came up: dialled, whatever else is true of it.
+          failedRungs.push({ routeId: candidate.routeId, fate: "dialled" });
           lastError = {
             kind: "serverUnreachable",
             messageKey: candidates.length > 1 ? "err.allProtocolsFailed" : "err.notCarryingTraffic",
@@ -3273,6 +3283,11 @@ export function Dashboard({
           const classified = classifyConnectionError(err);
           attempts.push(`${label}: ${classified.detail}`);
           dials.push(failedDial(candidate.routeId, classified.kind));
+          // A rung the service could not dial for want of a network is not
+          // one that failed to reach its server (`rungFate`). And when it is
+          // the last word, the screen says there is no network rather than
+          // naming anything: `err.noNetwork`.
+          failedRungs.push({ routeId: candidate.routeId, fate: rungFate(classified.kind) });
           lastError = { ...classified, detail: describeAttempts(attempts, candidates.length) };
         }
 
@@ -3718,32 +3733,29 @@ export function Dashboard({
                           "Connected" -- and a customer who is told which
                           transport got through has something useful to
                           report when none of them do. */}
-                      {isTunnelUp(connectionState) && failedOverTo ? (
-                        <p className="mt-1 text-xs text-amber-400/90">
-                          {failedOverTo.fromRegion ? (
-                            // Crossed a border, so the country is named
-                            // -- and which sentence depends on whether
-                            // that country was ever dialled. "Couldn't
-                            // reach it" is a claim about the server, and
-                            // it must not be made about one we skipped.
-                            t(
-                              failedOverTo.intendedWasTried
-                                ? "dash.switchedServer"
-                                : "dash.usedInstead",
-                              {
-                                from: failedOverTo.fromRegion,
-                                to: failedOverTo.toRegion ?? "",
-                                protocol: failedOverTo.label,
-                              },
-                            )
-                          ) : (
-                            <>
-                              {t("dash.switchedTo")}{" "}
-                              <span className="font-medium">{failedOverTo.label}</span>
-                            </>
-                          )}
-                        </p>
-                      ) : null}
+                      {isTunnelUp(connectionState) && failedOverTo
+                        ? (() => {
+                            // Which sentence depends on whether the server
+                            // on screen was ever dialled. "Couldn't reach
+                            // it" is a claim about the server, and it must
+                            // not be made about one we skipped, nor about
+                            // one there was no network to dial
+                            // (`failoverText`).
+                            const said = failoverText(failedOverTo);
+                            return (
+                              <p className="mt-1 text-xs text-amber-400/90">
+                                {said.trailingLabel ? (
+                                  <>
+                                    {t(said.key, said.vars)}{" "}
+                                    <span className="font-medium">{said.trailingLabel}</span>
+                                  </>
+                                ) : (
+                                  t(said.key, said.vars)
+                                )}
+                              </p>
+                            );
+                          })()
+                        : null}
 
                       {/* Custom mode changes what "protected" covers, so
                           the same word must not stand for both. Read

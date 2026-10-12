@@ -674,10 +674,12 @@ export function outcomeFromApiError(error: string): AttemptOutcome {
 
 /** The reported outcome for a classified connect failure.
  *
- * The mapping collapses seven client-side kinds into the four the panel
+ * The mapping collapses eight client-side kinds into the four the panel
  * filters on, and the grouping is the point: "the engine never started"
  * and "the server said no" send an operator to completely different
  * places, while the exact flavour of each is already in `reason`.
+ * `noNetwork` -- the service found no network to dial over -- is OTHER:
+ * neither the engine's failure nor the server's.
  */
 export function outcomeFromError(kind: string): AttemptOutcome {
   switch (kind) {

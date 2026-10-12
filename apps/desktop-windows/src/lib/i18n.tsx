@@ -639,6 +639,15 @@ const en = {
   // customer at a problem that does not exist; it also buries the one
   // thing they can act on, which is that pinning a choice makes it stick.
   "dash.usedInstead": "Used {to} over {protocol}, not {from}. Pick a server to stay on it.",
+  // The pass started with no network at all -- the service found no
+  // connection with a gateway to dial over -- and landed once one came
+  // back. The server on screen was never dialled, so it is not blamed; and
+  // "your usual protocol didn't get through" would be the same claim about
+  // a protocol. Seen on the VM with the network adapter switched off
+  // mid-connect: "Couldn't reach fi-finland" about a server nothing had
+  // asked (failover-notice.ts).
+  "dash.switchedNoNetwork": "No network connection at first, so {from} wasn't tried. Now on {to} over {protocol}",
+  "dash.switchedToNoNetwork": "No network connection at first. Now using",
   "dash.yourIp": "Your IP:",
   "err.serviceUnavailable": "The Neoxify background service isn't running. Restarting the app usually fixes this; reinstalling will if it doesn't.",
   "err.engineMissing": "Part of the installation is missing. Please reinstall Neoxify.",
@@ -663,6 +672,9 @@ const en = {
   // nothing, and it deliberately names no server -- nothing was dialled,
   // so there is nothing to report about one.
   "err.connectBusy": "A connection attempt is already running. Give it a moment, then try again.",
+  // The service found no network connection with a gateway to dial over:
+  // nothing was dialled, so no server is named and none is blamed.
+  "err.noNetwork": "No network connection. Check that this device is online, then try again.",
   "err.unknown": "Couldn't connect.",
   "err.showDetail": "Technical details",
 
@@ -1356,6 +1368,8 @@ const fa: Record<TranslationKey, string> = {
   "dash.switchedTo": "پروتکل همیشگی شما عبور نکرد. اکنون از این استفاده می‌شود:",
   "dash.switchedServer": "دسترسی به {from} ممکن نشد. اکنون {to} با {protocol}",
   "dash.usedInstead": "به‌جای {from}، {to} با {protocol} استفاده شد. برای ثابت‌ماندن، یک سرور انتخاب کنید.",
+  "dash.switchedNoNetwork": "ابتدا اتصال شبکه برقرار نبود، پس {from} امتحان نشد. اکنون {to} با {protocol}",
+  "dash.switchedToNoNetwork": "ابتدا اتصال شبکه برقرار نبود. اکنون از این استفاده می‌شود:",
   "dash.yourIp": "آی‌پی شما:",
   "err.serviceUnavailable": "سرویس پس‌زمینه نئوکسیفای اجرا نمی‌شود. معمولاً راه‌اندازی دوباره برنامه مشکل را حل می‌کند.",
   "err.engineMissing": "بخشی از نصب ناقص است. لطفاً دوباره نصب کنید.",
@@ -1372,6 +1386,7 @@ const fa: Record<TranslationKey, string> = {
   "err.quotaExhausted": "حجم پلن شما تمام شده است.",
   "err.subscriptionInactive": "اشتراک شما فعال نیست.",
   "err.connectBusy": "یک تلاش برای اتصال در حال انجام است. کمی صبر کنید و دوباره امتحان کنید.",
+  "err.noNetwork": "اتصال شبکه برقرار نیست. مطمئن شوید این دستگاه به اینترنت وصل است و دوباره امتحان کنید.",
   "err.unknown": "اتصال برقرار نشد.",
   "err.showDetail": "جزئیات فنی",
 
