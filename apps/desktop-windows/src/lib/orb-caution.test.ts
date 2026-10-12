@@ -1,7 +1,17 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { ConnectionState } from "../components/ConnectOrb";
-import { CAUTION_AFTER_MS, NO_CAUTION, nextCaution, orbTone, type CautionState, type OrbTone } from "./orb-caution";
+import {
+  CAUTION_AFTER_MS,
+  NO_CAUTION,
+  NO_ORB_LOOK,
+  nextCaution,
+  nextOrbLook,
+  orbTone,
+  type CautionState,
+  type OrbLook,
+  type OrbTone,
+} from "./orb-caution";
 
 /** The owner's rule (2026-10-12): a few seconds of not being connected must
  * not change the button's colour, because people read a colour change as
@@ -244,12 +254,49 @@ describe("the orb's warning colour", () => {
   });
 });
 
+describe("the orb's look over a short gap in a confirmed session", () => {
+  /** What the orb is drawn as after each state, a second apart. */
+  function held(states: ConnectionState[], from: OrbLook = NO_ORB_LOOK, at = 1_000_000) {
+    let look = from;
+    return states.map((state, i) => (look = nextOrbLook(look, state, at + i * 1_000)).state);
+  }
+  const n = (count: number, state: ConnectionState): ConnectionState[] => Array.from({ length: count }, () => state);
+  const short = Math.floor(CAUTION_AFTER_MS / 1_000) - 1;
+
+  it("keeps a confirmed session's look through one failed check, or a few", () => {
+    for (const gap of ["degraded", "unverified", "unknown"] as ConnectionState[]) {
+      const shown = held([...n(5, "connected"), ...n(short, gap), ...n(5, "connected")]);
+      expect(shown.every((state) => state === "connected"), gap).toBe(true);
+    }
+    // Flipping between the up-but-unconfirmed states is one gap, not several.
+    expect(held([...n(3, "connected"), "degraded", "unverified", "degraded", ...n(3, "connected")])).not.toContain("degraded");
+  });
+
+  it("shows the gap's own look once it has held, unbroken, and the connection's again once confirmed", () => {
+    // Held for the looks at 0 to 9 s into the gap; its own look from 10 s.
+    const full = CAUTION_AFTER_MS / 1_000;
+    const shown = held([...n(3, "connected"), ...n(full + 3, "degraded"), "connected"]);
+    expect(shown.slice(0, 3 + full)).not.toContain("degraded");
+    expect(shown.slice(3 + full, -1)).toEqual(n(3, "degraded"));
+    expect(shown[shown.length - 1]).toBe("connected");
+  });
+
+  it("never holds a look the session has not had: a first look, or one after a connect, is shown as it is", () => {
+    expect(held(["unverified", "unverified"])).toEqual(["unverified", "unverified"]);
+    expect(held(["connecting", "verifying", "degraded"])).toEqual(["connecting", "verifying", "degraded"]);
+    // A drop is not a gap to hold over: disconnected, and the reconnect's
+    // busy look ("Reconnecting..."), show at once.
+    expect(held(["connected", "disconnected", "connecting"])).toEqual(["connected", "disconnected", "connecting"]);
+  });
+});
+
 describe("the dashboard and the orb use the rule", () => {
   const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
   const orb = readFileSync(new URL("../components/ConnectOrb.tsx", import.meta.url), "utf8");
 
   it("hands the orb the sustained caution, not the raw reading", () => {
-    expect(dashboard).toMatch(/<ConnectOrb\s+state=\{connectionState\}\s+caution=\{cautionShown\}/);
+    expect(dashboard).toMatch(/<ConnectOrb\s+state=\{orbState\}\s+caution=\{cautionShown\}/);
+    expect(dashboard).toContain("orbHold.observe(");
     expect(dashboard).toContain("orbCaution.observe(");
     // The raw reading never reaches the orb.
     expect(dashboard).not.toMatch(/caution=\{ipv4NotConfined\}/);
@@ -257,7 +304,7 @@ describe("the dashboard and the orb use the rule", () => {
 
   it("colours the status dot by the same tone as the orb", () => {
     const dot = dashboard.slice(dashboard.indexOf('<div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">'));
-    expect(dot.slice(0, 2_000)).toContain("orbTone(connectionState, cautionShown)");
+    expect(dot.slice(0, 2_000)).toContain("orbTone(orbState, cautionShown)");
   });
 
   it("takes its looks from the one rule", () => {

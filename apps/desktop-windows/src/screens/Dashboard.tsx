@@ -41,7 +41,7 @@ import {
   unconfinedLine,
   warnsUnconfined,
 } from "../lib/connection-evidence";
-import { orbCaution, orbTone, type OrbTone } from "../lib/orb-caution";
+import { orbCaution, orbHold, orbTone, type OrbTone } from "../lib/orb-caution";
 import { networkWait, waitForNetwork } from "../lib/network-wait";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
@@ -767,14 +767,20 @@ export function Dashboard({
    * rung, an engine restarted, a drop's gap -- must not change the colour.
    * The headline's words follow `ipv4NotConfined` at once, as before. */
   const [cautionShown, setCautionShown] = useState(() => orbCaution.current());
+  /** The state the orb and the status dot are drawn as: a confirmed
+   * session's, held over a short "degraded" / "unverified" / "unknown"
+   * (`orbHold`). The headline still follows `connectionState`. */
+  const [orbState, setOrbState] = useState<ConnectionState>(() => orbHold.current());
   const unconfinedChosen = unconfinedByChoice(unconfinedKey);
   useEffect(() => {
-    const look = () =>
+    const look = () => {
+      setOrbState(orbHold.observe(connectionState));
       setCautionShown(orbCaution.observe({ state: connectionState, unconfined: ipv4NotConfined, byChoice: unconfinedChosen }));
+    };
     look();
-    // Looked at every second while connected, so a condition that holds is
-    // seen to hold whether or not anything else renders.
-    if (connectionState !== "connected") return;
+    // Looked at every second while up, so a condition that holds is seen to
+    // hold whether or not anything else renders.
+    if (connectionState !== "connected" && connectionState !== "degraded" && connectionState !== "unverified" && connectionState !== "unknown") return;
     const id = setInterval(look, 1_000);
     return () => clearInterval(id);
   }, [connectionState, ipv4NotConfined, unconfinedChosen]);
@@ -3434,9 +3440,12 @@ export function Dashboard({
               // Wi-Fi left, sg waited, and the pass went on to sg once the
               // network was back -- another country, with a notice that fi
               // did not get through. So it starts again from its first
-              // rung, and says nothing against the ones before.
+              // rung, and says nothing against the ones before -- on screen
+              // or in the pass's report, which pairs `attempts` and `dials`.
               if (index > 0) {
                 failedRungs.length = 0;
+                attempts.length = 0;
+                dials.length = 0;
                 lastError = null;
                 index = -1;
               } else {
@@ -3789,7 +3798,7 @@ export function Dashboard({
           </div>
 
           <div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">
-            <span className={DOT_CLASS[orbTone(connectionState, cautionShown)]} />
+            <span className={DOT_CLASS[orbTone(orbState, cautionShown)]} />
             <span className="truncate">{me?.email}</span>
           </div>
 
@@ -3814,7 +3823,7 @@ export function Dashboard({
                 ) : (
                   <>
                     <ConnectOrb
-                      state={connectionState}
+                      state={orbState}
                       caution={cautionShown}
                       // The action travels with the press, decided in the
                       // same render as the label above it.

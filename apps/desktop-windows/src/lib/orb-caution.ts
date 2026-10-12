@@ -124,6 +124,55 @@ export function orbTone(state: ConnectionState, caution: boolean): OrbTone {
   }
 }
 
+/** What the orb and the status dot are drawn as: the session's state, held
+ * over a short gap.
+ *
+ * The same owner's rule, for the other colours. A confirmed session whose
+ * health check fails once, or whose reading lapses for a poll, goes to
+ * "degraded", "unverified" or "unknown" -- amber, cyan, grey -- and is
+ * usually "connected" again a few seconds later. So a confirmed session
+ * keeps its connected look until the up-but-unconfirmed condition has held,
+ * unbroken, for `CAUTION_AFTER_MS`; then the orb takes that state's own
+ * look. The headline and its line still say what the service says, at
+ * once: honesty is not delayed with the colour.
+ *
+ * Only ever held over a look the session has had: a first look, a connect
+ * and a reconnect are shown as they are. A drop is not held either:
+ * "disconnected", and the reconnect's busy look, are the existing
+ * "Reconnecting..." the owner's rule leaves transient gaps to. */
+export interface OrbLook {
+  readonly state: ConnectionState;
+  /** Since when the shown "connected" has been held over an
+   * up-but-unconfirmed state; null while nothing is held. */
+  readonly since: number | null;
+}
+
+export const NO_ORB_LOOK: OrbLook = { state: "disconnected", since: null };
+
+export function nextOrbLook(prev: OrbLook, state: ConnectionState, now: number): OrbLook {
+  const gap = state === "degraded" || state === "unverified" || state === "unknown";
+  if (!gap || prev.state !== "connected") return { state, since: null };
+  const since = prev.since ?? now;
+  if (now - since >= CAUTION_AFTER_MS) return { state, since: null };
+  return { state: "connected", since };
+}
+
+let orbLook: OrbLook = NO_ORB_LOOK;
+
+/** One per app, like the caution below. */
+export const orbHold = {
+  /** Takes a look, and returns the state the orb is drawn as. */
+  observe(state: ConnectionState, now = Date.now()): ConnectionState {
+    orbLook = nextOrbLook(orbLook, state, now);
+    return orbLook.state;
+  },
+  current: (): ConnectionState => orbLook.state,
+  /** For tests: a fresh app. */
+  reset(): void {
+    orbLook = NO_ORB_LOOK;
+  },
+};
+
 /** One per app, like the reconnect: the dashboard unmounts whenever
  * Settings opens. A screen that comes back looks first at its own
  * "disconnected", and then shows the session as the service has it at its

@@ -163,6 +163,13 @@ describe("the Windows ladder waits on the same rung", () => {
     expect(retried).toMatch(/if \(index > 0\) \{[^}]*failedRungs\.length = 0;[^}]*lastError = null;[^}]*index = -1;/);
   });
 
+  it("files nothing against the rungs before the wait in the pass's report, either", () => {
+    // The CONNECT report pairs `attempts` and `dials` by index; left as they
+    // were, it filed fi as dialled and not carrying over a network that had
+    // gone, though the screen said nothing against it.
+    expect(retried).toMatch(/if \(index > 0\) \{[^}]*attempts\.length = 0;[^}]*dials\.length = 0;[^}]*index = -1;/);
+  });
+
   it("takes the IPv6 baseline again on the network that is back", () => {
     // Taken at the first rung of a pass that began with no network, it
     // said "no IPv6 here" of a network that has it, and the "IPv6 blocked"

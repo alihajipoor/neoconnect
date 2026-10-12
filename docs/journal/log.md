@@ -7288,3 +7288,22 @@ Recorded, not changed:
 
 Rust again proven only by CI on the push of these commits; nothing here
 is verified at the NIC.
+
+Follow-up, same day (checker on `57766ca`):
+
+- **The orb now holds over a short gap.** A confirmed session that goes
+  "degraded", "unverified" or "unknown" keeps its connected look until
+  that has held 10 s unbroken (`orbHold` in `orb-caution.ts`); the
+  headline still says the service's state at once. A drop and the
+  reconnect's busy look ("Reconnecting...") are not held, as the owner's
+  rule allows. Supersedes the "single failed health check" item above.
+- **A network-wait restart clears the report too**: `attempts` and
+  `dials` with `failedRungs`, so the CONNECT report no longer files the
+  rungs before the wait as dialled and not carrying.
+- Not changed: xray 26.1.23's TUN panic (B4, needs the config change and
+  the VM), the fresh-install early-filter fallback and Custom mode's DNS
+  window while connecting -- both recorded above as accepted, neither
+  verified at the NIC.
+
+JS proven by `pnpm test` (1537) and `tsc` locally; nothing here is
+verified on a real tunnel.
