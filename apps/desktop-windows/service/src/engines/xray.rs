@@ -11,13 +11,22 @@
 //!   turn that into a clear message instead of an opaque engine exit.
 //! * Routing `0.0.0.0/0` into the TUN naively causes an infinite loop,
 //!   because Xray's own outbound to the node has to reach the internet
-//!   like anything else. The config asks for upstream's answer to that
-//!   -- `autoSystemRoutingTable` and `autoOutboundsInterface` -- but the
-//!   bundled xray.exe (26.1.23) does not appear to read either key:
-//!   neither is among its strings (sites diagnosis, 2026-10-11). What
-//!   actually keeps the engine's connection off the tunnel is the host
-//!   route to the node that `routing::install_full_tunnel` adds through
-//!   the uplink [`plan_uplink`] picks.
+//!   like anything else. What keeps the engine's connection off the
+//!   tunnel is the host route to the node that
+//!   `routing::install_full_tunnel` adds through the uplink
+//!   [`plan_uplink`] picks.
+//!
+//! The bundled xray.exe is v26.6.27 (`fetch-binaries.ps1`), a prerelease,
+//! and the first build with upstream's fix for the TUN panic 26.1.23 died
+//! of (`e7e9254630`: a connection reset right after its handshake took
+//! the process down, eight times in one VM run). Its TUN inbound reads
+//! three keys 26.1.23 ignored -- `autoSystemRoutingTable`,
+//! `autoOutboundsInterface` and `gateway` -- which would have Xray install
+//! routes, bind its sockets and address the adapter itself, beside the
+//! service doing all three. The config no longer carries them; the
+//! service does what it did. And it names the adapter's GUID after the
+//! adapter's name, so Windows remembers its settings between sessions:
+//! [`forget_last_sessions_dns`] and [`address_in_place`] are why.
 
 use std::ffi::OsStr;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
@@ -110,6 +119,73 @@ pub(super) const TUN_ADDRESS: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
 /// default route moves, so the tunnel needs one that works from
 /// anywhere.
 pub(super) const TUN_DNS: &str = "1.1.1.1";
+
+/// MD5 of [`ADAPTER_NAME`], from which xray.exe derives the adapter's GUID
+/// (`open` in `proxy/tun/tun_windows.go`, since v26.3.23: `md5.Sum` of the
+/// name, read as a `windows.GUID`). A test holds it to the name.
+const ADAPTER_NAME_MD5: [u8; 16] = [
+    0xbe, 0xe8, 0xf7, 0xf5, 0x47, 0x94, 0x84, 0x28, 0x6f, 0x7c, 0xfd, 0x1f, 0xb5, 0x5a, 0x61, 0xbc,
+];
+
+/// A 16-byte digest as the GUID Windows reads from the same bytes: the
+/// first three fields little-endian, the last eight bytes as they are.
+fn wintun_guid(d: [u8; 16]) -> String {
+    format!(
+        "{{{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        d[3], d[2], d[1], d[0], d[5], d[4], d[7], d[6], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]
+    )
+}
+
+/// Where Windows keeps the TCP/IP settings of the adapter xray.exe makes,
+/// under HKLM -- the static resolver `configure_dns` sets among them.
+fn tcpip_interface_key() -> String {
+    format!(r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}", wintun_guid(ADAPTER_NAME_MD5))
+}
+
+/// Forgets the resolver an earlier session gave the adapter, before
+/// xray.exe makes the adapter again.
+///
+/// 26.1.23 made its adapter with a new GUID every time, so each one came
+/// up bare. Since v26.3.23 the GUID is derived from the name, and Windows
+/// gives an adapter on a GUID it has seen the settings it had: 1.1.1.1 as
+/// its resolver, from the moment it appears -- seconds before a full
+/// tunnel's routes lead into it, and before Custom mode's redirect. Lookups
+/// sent to it then leave by the physical adapter, the leak `configure_dns`
+/// waits for the routes to avoid. Deleted here, the adapter comes up as it
+/// did on 26.1.23, and `configure_dns` sets the resolver when it means to.
+///
+/// Only while no adapter by that name exists: the settings of a live one
+/// are not this function's to touch. Best effort -- a key that is not
+/// there is a first connect -- and a failure is logged, not fatal: the
+/// DNS confinement (full tunnel) and Custom mode's DNS hold refuse port 53
+/// outside the tunnel through the same window.
+fn forget_last_sessions_dns() {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
+    use winreg::RegKey;
+
+    if !matches!(adapters::find_by_name(ADAPTER_NAME), Ok(None)) {
+        return;
+    }
+    let key = match RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(tcpip_interface_key(), KEY_SET_VALUE) {
+        Ok(key) => key,
+        // Never made, or never given settings: nothing to forget.
+        Err(_) => return,
+    };
+    match key.delete_value("NameServer") {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => crate::cleanup_log::note("forget the tunnel adapter's last resolver", &e.to_string()),
+    }
+}
+
+/// Whether the adapter has the address the connect needs: netsh set it,
+/// or -- refused -- the adapter holds it already. Windows can bring the
+/// adapter up holding the address it held last session (its GUID is the
+/// same every time since v26.3.23), and netsh is not documented to accept
+/// setting what is already set.
+fn address_in_place(set: bool, held: &[Ipv4Addr], wanted: Ipv4Addr) -> bool {
+    set || held.contains(&wanted)
+}
 
 /// Which proxy the generated config dials out through.
 ///
@@ -288,16 +364,15 @@ impl Outbound<'_> {
 /// into it, so only the applications the customer selected reach it --
 /// via sockets the split tunnel pins to it by hand.
 ///
-/// That makes `autoSystemRoutingTable` the one setting that must differ.
-/// Left on, Xray installs system routes of its own and takes the default
-/// route, which is precisely the behaviour Custom mode exists to avoid;
-/// the customer would ask for one game and get their whole machine
-/// tunnelled.
-///
-/// `autoOutboundsInterface` stays on either way. It is meant to pin
-/// Xray's own connection to the node onto the physical link; the bundled
-/// binary does not appear to read it (see the module comment), and the
-/// host route to the node is what does that job in a full tunnel.
+/// The config is the same either way. It used to differ in
+/// `autoSystemRoutingTable`, on in a full tunnel and off in Custom mode,
+/// which the bundled 26.1.23 never read; v26.6.27 reads it as a list of
+/// routes to install, and on in Custom mode it would take the default
+/// route -- the customer asks for one game and gets their whole machine
+/// tunnelled. No key here asks Xray for routes, an address or a binding
+/// in either mode: the service installs the routes (or none), addresses
+/// the adapter, and keeps the engine's own connection off the tunnel with
+/// the host route to the node. See the module comment.
 fn build_config_for(outbound: &Outbound, passive: bool) -> String {
     build_multi_exit_config(outbound, &[], passive)
 }
@@ -382,17 +457,19 @@ fn exit_tags(index: usize) -> (String, String) {
 /// inbound without it accepts the TCP handshake and silently drops
 /// every datagram -- which presents as a game that connects, shows a
 /// server list and then never updates.
-fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], passive: bool) -> String {
+fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], _passive: bool) -> String {
+    // Name, description and MTU only. No `gateway`, `dns`,
+    // `autoSystemRoutingTable` or `autoOutboundsInterface`: the address,
+    // the resolver, the routes and the engine's way out are the service's
+    // (`configure_address`, `configure_dns`, `install_routes`), in both
+    // modes -- see `build_config_for`.
     let mut inbounds = vec![json!({
         "tag": "tun-in",
         "protocol": "tun",
         "settings": {
             "name": ADAPTER_NAME,
             "desc": "Wintun",
-            "mtu": 1500,
-            "gateway": [TUN_GATEWAY],
-            "autoSystemRoutingTable": !passive,
-            "autoOutboundsInterface": true
+            "mtu": 1500
         }
     })];
     let mut outbounds = vec![primary.to_json()];
@@ -457,8 +534,10 @@ fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], passive: b
 
 /// Assigns the TUN adapter its address.
 ///
-/// Xray's `gateway` setting does not take effect on Windows -- the
-/// adapter comes up and Windows self-assigns an APIPA address instead,
+/// Xray's `gateway` setting did not take effect on Windows in 26.1.23 --
+/// v26.6.27 reads it, and the config no longer sends it, so the address
+/// stays this function's alone. On 26.1.23 the
+/// adapter came up and Windows self-assigned an APIPA address instead,
 /// which was visible in the engine's own log as every packet arriving
 /// from a 169.254.x source. That left the next hop in our routes
 /// (198.18.0.1) not actually present on the interface, so traffic could
@@ -495,7 +574,17 @@ fn configure_address(tun_ip: Ipv4Addr, limits: &crate::lifecycle::budget::Limits
     )
     .map_err(|e| format!("could not configure the tunnel adapter: {e}"))?;
     if !status.success() {
-        return Err(format!("assigning the tunnel adapter's address failed ({status})"));
+        // Refused, but perhaps over an address the adapter already holds:
+        // see `address_in_place`. Asked once; `wait_for_address` then waits
+        // for it to be usable, as after a netsh that succeeded.
+        let held = adapters::find_by_name(ADAPTER_NAME).ok().flatten().map(|a| a.ipv4_all).unwrap_or_default();
+        if !address_in_place(false, &held, tun_ip) {
+            return Err(format!("assigning the tunnel adapter's address failed ({status})"));
+        }
+        crate::cleanup_log::note(
+            "address the tunnel adapter",
+            &format!("netsh refused ({status}), but the adapter already holds {tun_ip}; going on"),
+        );
     }
     Ok(())
 }
@@ -886,6 +975,9 @@ pub fn connect_returning_exits(
         .parent()
         .ok_or_else(|| "could not resolve the engine directory".to_string())?;
 
+    // Before the engine makes its adapter: see the function.
+    forget_last_sessions_dns();
+
     // Working directory is the engine directory so xray.exe finds
     // wintun.dll beside itself.
     let log_path = engines.config_path(LOG_FILE);
@@ -964,14 +1056,107 @@ mod tests {
         assert_eq!(TUN_GATEWAY.split('/').next().and_then(|a| a.parse::<Ipv4Addr>().ok()), Some(TUN_ADDRESS));
     }
 
+    /// The routes, the adapter's address and its DNS are the service's,
+    /// in both modes. 26.1.23 ignored `autoSystemRoutingTable`,
+    /// `autoOutboundsInterface` and `gateway`; every release with the TUN
+    /// panic fixed reads them (from v26.4.13), and as this config wrote
+    /// them -- two booleans where it takes a list and a name -- xray.exe
+    /// would refuse the config outright. Read as meant, it would install
+    /// its own routes beside the service's and the confinement, take the
+    /// default route in Custom mode, flush the adapter's routes as it
+    /// starts, and assign the address `configure_address` assigns.
     #[test]
-    fn tun_inbound_enables_the_anti_loop_helpers() {
-        // Without these two, routing 0.0.0.0/0 into the TUN loops
-        // forever -- see this module's doc comment.
-        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()), false)).unwrap();
-        let settings = &parsed["inbounds"][0]["settings"];
-        assert_eq!(settings["autoSystemRoutingTable"], true);
-        assert_eq!(settings["autoOutboundsInterface"], true);
+    fn tun_inbound_leaves_routes_address_and_dns_to_the_service() {
+        for passive in [false, true] {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()), passive)).unwrap();
+            let settings = parsed["inbounds"][0]["settings"].as_object().expect("the TUN inbound's settings");
+            for key in ["autoSystemRoutingTable", "autoOutboundsInterface", "gateway", "dns"] {
+                assert!(!settings.contains_key(key), "passive={passive}: {key} hands xray.exe what the service does");
+            }
+            assert_eq!(settings["name"], ADAPTER_NAME, "the adapter everything else looks for by name");
+        }
+    }
+
+    /// The bundled engine must carry upstream's fix for the TUN panic
+    /// (`e7e9254630`, "Avoid panic on nil RemoteAddr due to quickly
+    /// closed connection", #6365): 26.1.23 died on `Unknown address type`
+    /// whenever a TCP connection the tunnel carried was reset right after
+    /// its handshake -- eight times in one VM run, each leaving 9-16 s
+    /// unprotected. The first build with the fix is v26.6.27. And the zip
+    /// is pinned by its SHA-256, not only by its tag.
+    #[test]
+    fn the_bundled_engine_has_the_tun_panic_fix_and_is_pinned_by_hash() {
+        let script = include_str!("../../../src-tauri/scripts/fetch-binaries.ps1");
+        let line = script
+            .lines()
+            .find(|line| line.trim_start().starts_with("$xrayVersion = \"v"))
+            .expect("the Xray version is pinned");
+        let version: Vec<u32> = line
+            .split('"')
+            .nth(1)
+            .and_then(|v| v.strip_prefix('v'))
+            .expect("a quoted vX.Y.Z")
+            .split('.')
+            .map(|part| part.parse().expect("a number"))
+            .collect();
+        assert!(version >= vec![26, 6, 27], "{line}: before the TUN panic fix");
+        let hash = script
+            .lines()
+            .find(|line| line.trim_start().starts_with("$xraySha256 = \""))
+            .and_then(|line| line.split('"').nth(1))
+            .expect("the Xray zip's SHA-256 is pinned");
+        assert_eq!(hash.len(), 64, "{hash}");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{hash}");
+        assert!(script.contains("Get-FileHash -Algorithm SHA256 $xrayZip"), "the pinned hash is never checked");
+    }
+
+    /// xray.exe names its adapter's GUID after its name since v26.3.23, so
+    /// Windows brings the adapter up with whatever an earlier session left
+    /// on that GUID. Held to the derivation upstream uses: MD5 of the name,
+    /// laid out as Windows lays out a GUID (`proxy/tun/tun_windows.go`).
+    #[test]
+    fn the_adapter_guid_is_the_one_xray_derives_from_its_name() {
+        // MD5 of the empty string: d41d8cd98f00b204e9800998ecf8427e.
+        let empty = [
+            0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8, 0x42, 0x7e,
+        ];
+        assert_eq!(wintun_guid(empty), "{D98C1DD4-008F-04B2-E980-0998ECF8427E}");
+        assert_eq!(ADAPTER_NAME, "neoconnect0", "ADAPTER_NAME_MD5 is the MD5 of the old name");
+        assert_eq!(wintun_guid(ADAPTER_NAME_MD5), "{F5F7E8BE-9447-2884-6F7C-FD1FB55A61BC}");
+        assert_eq!(
+            tcpip_interface_key(),
+            r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{F5F7E8BE-9447-2884-6F7C-FD1FB55A61BC}"
+        );
+    }
+
+    /// The resolver an earlier session put on the adapter is forgotten
+    /// before xray.exe creates it again, in both modes: brought up with it,
+    /// the adapter sent lookups to 1.1.1.1 before any route led into the
+    /// tunnel. Held from the source: it shows only on a real adapter.
+    #[test]
+    fn the_last_sessions_resolver_is_forgotten_before_the_engine_starts() {
+        let body = body_of("pub fn connect_returning_exits(");
+        let forgotten = body.find("forget_last_sessions_dns();").expect("the old resolver is never forgotten");
+        let spawned = body.find("spawn_hidden(").expect("the engine is started");
+        assert!(forgotten < spawned, "forgotten {forgotten}, started {spawned}");
+        let forget = body_of("fn forget_last_sessions_dns(");
+        assert!(forget.contains("delete_value(\"NameServer\")"), "the resolver is not what is deleted");
+        assert!(forget.contains("find_by_name(ADAPTER_NAME)"), "deleted under a live adapter");
+    }
+
+    /// netsh may refuse to set an address the adapter already holds --
+    /// which it can, brought up on a GUID Windows remembers. What the
+    /// connect needs is the address on the adapter, not netsh's word.
+    #[test]
+    fn an_address_already_held_is_as_good_as_one_set() {
+        let wanted = TUN_ADDRESS;
+        let apipa = Ipv4Addr::new(169, 254, 3, 4);
+        assert!(address_in_place(true, &[], wanted), "netsh's success stands");
+        assert!(address_in_place(false, &[wanted], wanted), "refused, but the adapter has it");
+        assert!(address_in_place(false, &[apipa, wanted], wanted));
+        assert!(!address_in_place(false, &[], wanted), "refused, and nothing there");
+        assert!(!address_in_place(false, &[apipa], wanted), "refused, and only APIPA there");
     }
 
     // ---------------------------------------------------------------
