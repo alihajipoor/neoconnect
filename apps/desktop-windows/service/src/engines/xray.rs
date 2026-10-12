@@ -708,7 +708,7 @@ pub fn plan_uplink(outbound: &Outbound, limits: &crate::lifecycle::budget::Limit
     let server = resolve_server(outbound.host(), outbound.port(), limits)?;
     let uplink = adapters::best_uplink_for(server, &super::OUR_ADAPTER_NAMES)
         .map_err(|e| format!("could not enumerate network adapters: {e}"))?
-        .ok_or_else(|| "no network connection with a gateway was found".to_string())?;
+        .ok_or_else(|| super::NO_NETWORK.to_string())?;
     Ok(UplinkPlan { server, uplink })
 }
 

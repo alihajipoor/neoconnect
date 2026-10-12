@@ -79,8 +79,10 @@ const PATTERNS: { kind: ConnectionErrorKind; messageKey: TranslationKey; match: 
   },
   {
     // The Windows service's own sentence when it found no network
-    // connection with a gateway to dial the server over (`plan_uplink` in
-    // the service's xray.rs). Nothing was dialled, so this is never a
+    // connection with a gateway to dial the server over -- for every
+    // engine, before any dials (`NO_NETWORK` and
+    // `refuse_without_a_way_out` in the service's engines/mod.rs; Xray's
+    // `plan_uplink` too). Nothing was dialled, so this is never a
     // failed route: it records no dial (`failedDial`) and names no server
     // (failover-notice.ts). Above the pattern below so that no wording of
     // it can ever be read as a server that did not answer.

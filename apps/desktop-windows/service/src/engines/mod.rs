@@ -505,6 +505,10 @@ pub struct Engines {
     /// adapters that are not its own. The machine's, except in tests --
     /// see `route_table`.
     route_ops: Arc<dyn route_table::RouteOps>,
+    /// Windows' way out toward an address, as `adapters::best_uplink_for`
+    /// gives it: what a connect asks before any engine dials
+    /// (`refuse_without_a_way_out`). The machine's, except in tests.
+    uplink_lookup: UplinkLookup,
     /// The most recent generation a thorough pass -- `disconnect()` --
     /// has run after, with nothing begun since. Phase two after a drop
     /// is skipped for a generation already swept: a Disconnect or the app
@@ -549,6 +553,7 @@ impl Engines {
             handshake_reading: None,
             wireguard_scm: Arc::new(wireguard::scm_view),
             route_ops: route_table::system(),
+            uplink_lookup: Arc::new(|dest| adapters::best_uplink_for(dest, &OUR_ADAPTER_NAMES)),
             swept_after: 0,
             drop_logged: 0,
             #[cfg(test)]
@@ -1055,6 +1060,12 @@ impl Engines {
         self.route_ops = ops;
     }
 
+    /// Points this instance at a way out the test decides.
+    #[cfg(test)]
+    fn set_uplink_lookup_for_test(&mut self, lookup: UplinkLookup) {
+        self.uplink_lookup = lookup;
+    }
+
     /// The same, with the first watch on `first_watch` instead of the
     /// process -- for a source that reports an ending the process then
     /// contradicts, which is what a restarted WireGuard tunnel service or
@@ -1258,6 +1269,26 @@ impl Engines {
             .map_err(|e| with_rival_hint(e, &rivals))
     }
 
+    /// Refuses a connect with no way out at all -- no route toward the
+    /// server and no up adapter with a gateway, ours aside -- in
+    /// [`NO_NETWORK`]'s words, which the app reads as no network: nothing
+    /// was dialled, so no server is named and no dial is counted against
+    /// a route. Every engine, before it dials. Without it, only Xray's full
+    /// tunnel said so (`xray::plan_uplink`); WireGuard, OpenVPN and IKEv2
+    /// failed in their own words -- a handshake that never came, a RAS
+    /// error -- read as a server that did not answer.
+    ///
+    /// A way out, or adapters that could not be listed, says nothing: the
+    /// connect goes on. The same question Xray's routes ask, so a line
+    /// whose way out Windows names -- PPP's on-link next hop included --
+    /// passes here as it does there.
+    fn refuse_without_a_way_out(&self, profile: &ConnectProfile) -> Result<(), String> {
+        match (self.uplink_lookup)(way_out_probe(profile)) {
+            Ok(None) => Err(NO_NETWORK.to_string()),
+            Ok(Some(_)) | Err(_) => Ok(()),
+        }
+    }
+
     fn connect_inner(
         &mut self,
         profile: &ConnectProfile,
@@ -1319,6 +1350,10 @@ impl Engines {
         // one of them to disagree -- which would show up as a full
         // tunnel for a customer who asked for one app.
         let passive = self.split_tunnel.wants_passive_tunnel();
+
+        // No way out at all is said as that, for every engine, before any
+        // is asked to dial: see `refuse_without_a_way_out`.
+        self.refuse_without_a_way_out(profile)?;
 
         // The servers the engine's own connection goes to, as this connect
         // resolved them: what the IPv4 confinement permits the engine to
@@ -2808,6 +2843,32 @@ fn machine_lan() -> (Vec<confinement::Prefix>, Vec<Ipv4Addr>) {
         })
         .collect();
     (confinement::lan_prefixes(&lan, &OUR_ADAPTER_NAMES), confinement::lan_dhcp_servers(&lan, &OUR_ADAPTER_NAMES))
+}
+
+/// Windows' way out toward an address: the adapter and next hop, `None`
+/// when there is none at all, or an error when the adapters could not be
+/// listed. See `Engines::refuse_without_a_way_out`.
+type UplinkLookup = Arc<dyn Fn(Ipv4Addr) -> std::io::Result<Option<adapters::Uplink>> + Send + Sync>;
+
+/// What a connect that found no way out says -- the same words for every
+/// engine, which the app recognises as no network rather than a server
+/// that did not answer (connection-errors.ts, `noNetwork`).
+pub(crate) const NO_NETWORK: &str = "no network connection with a gateway was found";
+
+/// The address a connect's way out is asked about: the server's own when
+/// the profile names it by address, otherwise any public one -- the
+/// question is whether there is a way out at all, and nothing is sent.
+fn way_out_probe(profile: &ConnectProfile) -> Ipv4Addr {
+    let host = match profile {
+        ConnectProfile::Wireguard(p) => split_host_port(&p.endpoint).ok().map(|(host, _)| host),
+        ConnectProfile::Openvpn(p) => split_host_port(&p.endpoint).ok().map(|(host, _)| host),
+        ConnectProfile::XrayVlessReality(p) => Some(p.host.clone()),
+        ConnectProfile::XrayVlessTls(p) => Some(p.host.clone()),
+        ConnectProfile::XrayTrojan(p) => Some(p.host.clone()),
+        ConnectProfile::Shadowsocks(p) => Some(p.host.clone()),
+        ConnectProfile::Ikev2(p) => Some(p.server.clone()),
+    };
+    host.and_then(|host| host.parse().ok()).unwrap_or(Ipv4Addr::new(1, 1, 1, 1))
 }
 
 /// The physical adapter traffic to `toward` leaves by, and the next hop
@@ -5511,6 +5572,79 @@ mod helper_tests {
             end_test_session(&mut engines);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// With no way out at all -- no route anywhere, no adapter with a
+    /// gateway -- every engine's connect says so in the one sentence the
+    /// app reads as no network (\`NO_NETWORK\`), before anything is asked to
+    /// dial. Only Xray's full tunnel did (\`xray::plan_uplink\`); WireGuard,
+    /// OpenVPN and IKEv2 went on to fail in their own words -- a handshake
+    /// that never came, a RAS error -- which the app reads as a server that
+    /// did not answer, and the screen then named a server nothing had
+    /// reached as unreachable. With a way out, or adapters that could not
+    /// be listed, the connect goes on as before: no claim without a reason.
+    #[test]
+    fn with_no_way_out_every_engine_says_no_network_before_dialling() {
+        let limits = || {
+            crate::lifecycle::budget::Limits::new(
+                crate::lifecycle::cancel::CancelToken::new(),
+                crate::lifecycle::budget::CONNECT_BUDGET.limit,
+            )
+        };
+        let wireguard = ConnectProfile::Wireguard(neoconnect_ipc::WireguardProfile {
+            private_key: "GMSgBTYpH7yC6bV88xblWmViQlk+bHxiTDsdsi+WgXI=".into(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
+            endpoint: "203.0.113.5:51888".into(),
+        });
+        let openvpn = ConnectProfile::Openvpn(neoconnect_ipc::OpenvpnProfile {
+            cert_pem: "-----BEGIN CERTIFICATE-----\nQ0VSVA==\n-----END CERTIFICATE-----".into(),
+            key_pem: "-----BEGIN PRIVATE KEY-----\nS0VZ\n-----END PRIVATE KEY-----".into(),
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nQ0E=\n-----END CERTIFICATE-----".into(),
+            endpoint: "203.0.113.7:1194".into(),
+            proto: "udp".into(),
+            tls_crypt_key: None,
+        });
+        let asked: Arc<std::sync::Mutex<Vec<Ipv4Addr>>> = Arc::default();
+        for profile in [wireguard.clone(), openvpn] {
+            let mut engines = engines_for_test();
+            let seen = Arc::clone(&asked);
+            engines.set_uplink_lookup_for_test(Arc::new(move |dest| {
+                seen.lock().unwrap().push(dest);
+                Ok(None)
+            }));
+            let refused = engines.connect_inner(&profile, &[], &[], &limits()).expect_err("no way out");
+            assert!(refused.contains(NO_NETWORK), "{profile:?}: {refused}");
+            assert!(!engines.has_session());
+        }
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![Ipv4Addr::new(203, 0, 113, 5), Ipv4Addr::new(203, 0, 113, 7)],
+            "asked about the servers themselves"
+        );
+
+        // A way out, or no answer: the connect goes on and fails as it would
+        // have here (no wireguard.exe), not with a claim about the network.
+        for lookup in [
+            Arc::new(|_| Ok(Some(adapters::Uplink { index: 7, next_hop: Ipv4Addr::new(192, 168, 1, 1) }))) as UplinkLookup,
+            Arc::new(|_| Err(std::io::Error::other("could not list adapters"))) as UplinkLookup,
+        ] {
+            let mut engines = engines_for_test();
+            engines.set_uplink_lookup_for_test(lookup);
+            let failed = engines.connect_inner(&wireguard, &[], &[], &limits()).expect_err("no wireguard.exe here");
+            assert!(!failed.contains(NO_NETWORK), "{failed}");
+        }
+
+        // IKEv2, read from the source: nothing here can dial RAS.
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn connect_inner(").expect("connect_inner");
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
+        let check = body.find("self.refuse_without_a_way_out(profile)?;").expect("the way out asked about");
+        let ikev2 = body.find("ikev2::connect(p, passive)").expect("IKEv2's dial");
+        assert!(check < ikev2, "IKEv2 dials before the way out is asked about");
+        assert_eq!(way_out_probe(&test_profile()), Ipv4Addr::new(1, 1, 1, 1), "a hostname: any public address");
     }
 
     /// An IKEv2 full tunnel is not confined -- its plan stays off until its
