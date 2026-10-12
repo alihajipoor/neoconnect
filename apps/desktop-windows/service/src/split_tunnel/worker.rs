@@ -18,14 +18,14 @@ use std::sync::Arc;
 /// The body is handed the flag and is expected to wait through
 /// [`sleep_unless_stopped`] so that a drop is answered within one step
 /// rather than one whole interval.
-pub(super) struct Worker {
+pub(crate) struct Worker {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Worker {
     /// Runs `body` on a thread of its own.
-    pub(super) fn spawn(body: impl FnOnce(Arc<AtomicBool>) + Send + 'static) -> Self {
+    pub(crate) fn spawn(body: impl FnOnce(Arc<AtomicBool>) + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
@@ -60,7 +60,7 @@ impl Drop for Worker {
 /// after another inside phase one's 900ms. Twenty milliseconds is fifty
 /// wake-ups a second per thread, each a load and a comparison, against
 /// a tenth of the wait on every join.
-pub(super) fn sleep_unless_stopped(
+pub(crate) fn sleep_unless_stopped(
     stop: &std::sync::atomic::AtomicBool,
     total: std::time::Duration,
 ) -> bool {

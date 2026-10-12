@@ -32,7 +32,7 @@ use super::{confirm_started, spawn_hidden, write_config, Engines};
 use crate::adapters;
 
 const CONFIG_FILE: &str = "xray-client.json";
-const LOG_FILE: &str = "xray.log";
+pub(super) const LOG_FILE: &str = "xray.log";
 pub const ADAPTER_NAME: &str = "neoconnect0";
 
 /// How long to wait for the TUN adapter to show up after Xray starts.

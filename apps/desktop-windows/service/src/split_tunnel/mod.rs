@@ -59,7 +59,7 @@ mod policy;
 mod relay;
 mod session;
 mod tables;
-mod worker;
+pub(crate) mod worker;
 
 use std::net::Ipv4Addr;
 use std::path::Path;

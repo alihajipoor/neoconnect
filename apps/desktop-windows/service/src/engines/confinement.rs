@@ -532,7 +532,6 @@ pub enum Release {
     Dropped,
     /// The engine was refused by the plan (K5): let go of for the rest of
     /// the session, with the reason.
-    #[allow(dead_code)] // the plan-error valve, next
     PlanError(String),
 }
 
@@ -756,6 +755,107 @@ impl ConfinementOps for System {
 
     fn hold(&self) -> std::sync::Arc<Hold> {
         Hold::new(&self.log_dir)
+    }
+}
+
+// ---------------------------------------------------------------------
+// The plan-error valve (K5).
+// ---------------------------------------------------------------------
+
+/// How long after an install the engine's log is watched.
+pub const VALVE_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often it is read meanwhile.
+const VALVE_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// What each engine writes when a socket of its own is refused on this PC
+/// (WSAEACCES, 10013) -- which, with this plan installed, is the plan
+/// refusing the engine's link to its server.
+///
+/// PROVISIONAL: read from what the engines are known to print, not
+/// captured from a refused engine. xray.exe is Go, whose error text asks
+/// Windows for the English message ("...forbidden by its access
+/// permissions.") and falls back to "winapi error #10013"; openvpn.exe 2.6
+/// prints "Permission denied (WSAEACCES)" and the code. The VM's P3 step 8
+/// is to capture the real lines and replace the fixtures in the tests.
+fn refusal_marks(transport: &Transport) -> &'static [&'static str] {
+    match transport {
+        Transport::Xray { .. } => &["forbidden by its access permissions", "winapi error #10013"],
+        Transport::Openvpn { .. } => &["(WSAEACCES)", "code=10013"],
+        // Windows' IKE service writes no log of ours; RAS state would be
+        // the witness. Not built: IKEv2 is not confined (IKEV2_CONFINED).
+        Transport::Ikev2 { .. } => &[],
+    }
+}
+
+/// The plan error in a stretch of an engine's log, if there is one: a
+/// line where the engine's own connection was refused on this PC.
+/// Timeouts, resets and unreachable networks are the network's and stay
+/// the ladder's to judge.
+pub fn plan_error_in(text: &str, transport: &Transport) -> Option<String> {
+    let marks = refusal_marks(transport);
+    let line = text.lines().find(|line| marks.iter().any(|mark| line.contains(mark)))?;
+    let line: String = line.trim().chars().take(300).collect();
+    Some(format!("the tunnel engine's own connection was refused by the IPv4 confinement, so it was let go of: {line}"))
+}
+
+/// The valve: reads what the engine writes to its log after the install
+/// (from byte `from` on), for `window`, and lets go of the confinement at
+/// the first plan error (K5) -- for the rest of the session, with the
+/// reason. A wrong permit -- an address the engine dials that the plan did
+/// not name, a byte-order slip -- otherwise looks exactly like censorship,
+/// and the ladder would drop the protocol for it on every attempt, which
+/// this project does not do.
+///
+/// A refusal that writes no log line is not caught; no engine here is
+/// known to give one. Returns when the window ends, at the first plan
+/// error, or when `stop` is set (the session ended).
+pub fn run_valve(
+    log: &std::path::Path,
+    from: u64,
+    transport: &Transport,
+    hold: &Hold,
+    stop: &std::sync::atomic::AtomicBool,
+    window: std::time::Duration,
+) {
+    use std::io::{Read, Seek, SeekFrom};
+    let deadline = std::time::Instant::now() + window;
+    let mut at = from;
+    let mut pending = String::new();
+    loop {
+        if let Ok(mut file) = std::fs::File::open(log) {
+            let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            // A log written afresh (a restarted engine truncates it) is
+            // read from its start.
+            if len < at {
+                at = 0;
+                pending.clear();
+            }
+            if len > at && file.seek(SeekFrom::Start(at)).is_ok() {
+                let mut bytes = Vec::new();
+                if file.take(len - at).read_to_end(&mut bytes).is_ok() {
+                    at += bytes.len() as u64;
+                    pending.push_str(&String::from_utf8_lossy(&bytes));
+                    if let Some(why) = plan_error_in(&pending, transport) {
+                        hold.release(Release::PlanError(why.clone()));
+                        crate::cleanup_log::note("let go of the IPv4 confinement: the plan refused the engine", &why);
+                        return;
+                    }
+                    // Keep only a partial last line for the next read.
+                    if let Some(cut) = pending.rfind('\n') {
+                        pending.drain(..=cut);
+                    }
+                }
+            }
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let step = VALVE_EVERY.min(deadline - now);
+        if !crate::split_tunnel::worker::sleep_unless_stopped(stop, step) {
+            return;
+        }
     }
 }
 
@@ -1682,6 +1782,134 @@ mod tests {
             let closers = threads.into_iter().map(|t| t.join().unwrap()).filter(|c| *c).count();
             assert_eq!(closers, 1);
             assert_eq!(*closed.lock().unwrap(), vec![5]);
+        }
+    }
+
+    /// The plan-error valve (K5): the engine's own connection refused by
+    /// the plan, recognised in its log and let go of.
+    mod valve {
+        use super::*;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        // PROVISIONAL fixtures. Written from what each engine is known to
+        // print for WSAEACCES (10013) -- Go's error text, which asks Windows
+        // for the English message first and falls back to "winapi error
+        // #10013"; OpenVPN 2.6's strerror_win32 -- not captured from a
+        // refused engine on a real machine. The VM's P3 step 8 (a debug
+        // build with a deliberately wrong permit) is to capture the real
+        // lines and replace these.
+        const XRAY_REFUSED: &str = "2026/10/12 21:04:05.123456 [Warning] [3123123] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > common/retry: [dial tcp 203.0.113.7:443: connectex: An attempt was made to access a socket in a way forbidden by its access permissions.] > common/retry: all retry attempts failed";
+        const XRAY_REFUSED_NO_ENGLISH: &str = "2026/10/12 21:04:05 [Warning] [42] proxy/trojan: failed to find an available destination > dial tcp 203.0.113.7:443: connectex: winapi error #10013";
+        const OPENVPN_REFUSED_UDP: &str = "2026-10-12 21:04:05 write UDP: Permission denied (WSAEACCES) (fd=1d4,code=10013)";
+        const OPENVPN_REFUSED_TCP: &str = "2026-10-12 21:04:05 TCP: connect to [AF_INET]203.0.113.7:443 failed: Permission denied (WSAEACCES) (code=10013)";
+
+        fn xray() -> Transport {
+            Transport::Xray { exe: xray_exe(), nodes: vec![node()] }
+        }
+
+        fn openvpn() -> Transport {
+            Transport::Openvpn { exe: openvpn_exe(), node: node(), port: 1194, protocol: protocol::UDP }
+        }
+
+        #[test]
+        fn the_engines_own_refusal_is_recognised_in_its_log() {
+            for line in [XRAY_REFUSED, XRAY_REFUSED_NO_ENGLISH] {
+                let why = plan_error_in(&format!("2026/10/12 21:04:01 [Warning] core: Xray 26.1.23 started\n{line}\n"), &xray());
+                assert!(why.as_deref().is_some_and(|w| w.contains("refused")), "{line}: {why:?}");
+            }
+            for line in [OPENVPN_REFUSED_UDP, OPENVPN_REFUSED_TCP] {
+                let why = plan_error_in(&format!("Initialization Sequence Completed\n{line}\n"), &openvpn());
+                assert!(why.as_deref().is_some_and(|w| w.contains("refused")), "{line}: {why:?}");
+            }
+            // What a working tunnel and a censored line write: never a plan
+            // error -- those are the network's, and stay the ladder's to
+            // judge.
+            for line in [
+                "2026/10/12 21:04:05 [Warning] [1] app/proxyman/outbound: failed to process outbound traffic > read tcp 198.18.0.1:50211->203.0.113.7:443: wsarecv: An existing connection was forcibly closed by the remote host.",
+                "2026/10/12 21:04:05 [Warning] [2] proxy/vless/outbound: failed to find an available destination > dial tcp 203.0.113.7:443: i/o timeout",
+            ] {
+                assert_eq!(plan_error_in(line, &xray()), None, "{line}");
+            }
+            for line in [
+                "2026-10-12 21:04:05 Initialization Sequence Completed",
+                "2026-10-12 21:04:05 TLS Error: TLS handshake failed",
+                "2026-10-12 21:04:05 write UDP: Network is unreachable (WSAENETUNREACH) (fd=1d4,code=10051)",
+            ] {
+                assert_eq!(plan_error_in(line, &openvpn()), None, "{line}");
+            }
+        }
+
+        fn held() -> (Arc<Hold>, Arc<std::sync::Mutex<Vec<isize>>>) {
+            let (close, closed) = super::hold::recording();
+            let hold = Hold::with_closer(close);
+            assert!(hold.put(Installed { engine: 77, filters: 40 }));
+            (hold, closed)
+        }
+
+        fn log_file(name: &str, contents: &str) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!("neoxify-valve-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("xray.log");
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+
+        /// The engine's refusal, written after the install, lets go of the
+        /// confinement within the window and says why -- the tunnel's own
+        /// connection is not left refused to look like censorship.
+        #[test]
+        fn a_refusal_written_after_the_install_lets_go_of_it() {
+            let path = log_file("hit", "2026/10/12 21:04:01 [Warning] core: Xray 26.1.23 started\n");
+            let from = std::fs::metadata(&path).unwrap().len();
+            let (hold, closed) = held();
+            let stop = Arc::new(AtomicBool::new(false));
+            let watcher = {
+                let (path, hold, stop) = (path.clone(), Arc::clone(&hold), Arc::clone(&stop));
+                std::thread::spawn(move || run_valve(&path, from, &xray(), &hold, &stop, std::time::Duration::from_secs(5)))
+            };
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(file, "2026/10/12 21:04:02 [Info] something unrelated").unwrap();
+            writeln!(file, "{XRAY_REFUSED}").unwrap();
+            drop(file);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while hold.confined() == Some(true) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert_eq!(hold.confined(), Some(false), "the refusal was not acted on");
+            assert_eq!(*closed.lock().unwrap(), vec![77]);
+            assert!(hold.problem().is_some_and(|p| p.contains("refused")), "{:?}", hold.problem());
+            assert!(!hold.owed_after_drop(), "a refused plan is not put back");
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            watcher.join().unwrap();
+        }
+
+        /// What the log held before the install -- an earlier session's
+        /// refusal -- is not this plan's; and a log with no refusal in the
+        /// window leaves the confinement alone.
+        #[test]
+        fn an_earlier_line_or_a_quiet_log_leaves_it_in_place() {
+            let path = log_file("quiet", &format!("{XRAY_REFUSED}\n"));
+            let from = std::fs::metadata(&path).unwrap().len();
+            let (hold, closed) = held();
+            let stop = AtomicBool::new(false);
+            run_valve(&path, from, &xray(), &hold, &stop, std::time::Duration::from_millis(600));
+            assert_eq!(hold.confined(), Some(true));
+            assert!(closed.lock().unwrap().is_empty());
+        }
+
+        /// The window is a window: a session that ends stops it at once.
+        #[test]
+        fn a_stopped_valve_returns_at_once() {
+            let path = log_file("stop", "");
+            let (hold, _closed) = held();
+            let stop = AtomicBool::new(true);
+            let started = std::time::Instant::now();
+            run_valve(&path, 0, &xray(), &hold, &stop, std::time::Duration::from_secs(10));
+            assert!(started.elapsed() < std::time::Duration::from_secs(1));
         }
     }
 

@@ -50,7 +50,7 @@ use super::{
 use crate::adapters;
 
 const CONFIG_FILE: &str = "neoconnect.ovpn";
-const LOG_FILE: &str = "openvpn.log";
+pub(super) const LOG_FILE: &str = "openvpn.log";
 
 /// The largest encapsulated packet this client will put on the wire,
 /// counted the way `mssfix ... mtu` counts it: outer IP header included.

@@ -324,6 +324,9 @@ struct Session {
     /// The plan it was installed from, kept to put it back with a fresh
     /// LUID when a drop report turns out to be wrong.
     confinement_plan: Option<confinement::Plan>,
+    /// The plan-error valve watching the engine's log after an install;
+    /// stopped and joined with the session. See `confinement::run_valve`.
+    valve: Option<crate::split_tunnel::worker::Worker>,
 }
 
 impl Session {
@@ -338,6 +341,7 @@ impl Session {
             rearms: 0,
             confinement,
             confinement_plan: None,
+            valve: None,
         }
     }
 }
@@ -738,7 +742,32 @@ impl Engines {
                 "confine IPv4 to the tunnel",
                 &format!("not confined, the tunnel left up: {why}"),
             );
+            return;
         }
+        self.start_valve();
+    }
+
+    /// Starts the plan-error valve on the live session (K5): its engine's
+    /// log, from where it stands now, for `confinement::VALVE_FOR`. Owned
+    /// by the session, so it stops and is joined when the session ends.
+    /// Xray and OpenVPN only: their logs are where a refused socket shows.
+    fn start_valve(&mut self) {
+        let config_dir = self.config_dir.clone();
+        let Some(session) = self.active.peek_mut() else { return };
+        let Some(plan) = &session.confinement_plan else { return };
+        let log = match plan.transport {
+            confinement::Transport::Xray { .. } => config_dir.join(xray::LOG_FILE),
+            confinement::Transport::Openvpn { .. } => config_dir.join(openvpn::LOG_FILE),
+            confinement::Transport::Ikev2 { .. } => return,
+        };
+        // Read before the thread starts, so a refusal written in between
+        // is after it.
+        let from = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+        let transport = plan.transport.clone();
+        let hold = Arc::clone(&session.confinement);
+        session.valve = Some(crate::split_tunnel::worker::Worker::spawn(move |stop| {
+            confinement::run_valve(&log, from, &transport, &hold, &stop, confinement::VALVE_FOR);
+        }));
     }
 
     /// Whether this session asked for the tunnel's DNS rule and did not
@@ -1742,8 +1771,12 @@ impl Engines {
         hold.rearm();
         let installed =
             ops.luid(adapter).and_then(|tunnel_luid| ops.install(&confinement::Plan { tunnel_luid, ..plan }));
+        let mut put_back = false;
         let detail = match installed {
-            Ok(installed) if hold.put(installed) => "put back, with the tunnel adapter's LUID read again".to_string(),
+            Ok(installed) if hold.put(installed) => {
+                put_back = true;
+                "put back, with the tunnel adapter's LUID read again".to_string()
+            }
             Ok(_) => "let go of again at once: another report came in while it went back".to_string(),
             Err(why) => {
                 hold.refuse(format!("could not be put back after the engine was reported gone: {why}"));
@@ -1751,6 +1784,10 @@ impl Engines {
             }
         };
         crate::cleanup_log::note("the IPv4 confinement after a drop report the engine contradicted", &detail);
+        if put_back {
+            // A plan put back is a plan installed: watched like one.
+            self.start_valve();
+        }
     }
 
     /// Starts the live session's watch again, after a report its engine
@@ -5144,5 +5181,36 @@ mod helper_tests {
         assert!(block < confine);
         assert!(body.find("confine_nodes.push(plan.server)").is_some(), "Xray's server");
         assert!(body.find("confine_nodes.push(node)").is_some(), "OpenVPN's server");
+    }
+
+    /// K5, through the session: a confined Xray tunnel whose engine then
+    /// writes that its own connection was refused has the confinement let
+    /// go of within the valve's window, the tunnel left up, and the reason
+    /// said -- so a wrong permit costs the confinement, never the protocol.
+    /// The line is a provisional fixture (see `confinement`'s valve tests).
+    #[test]
+    fn engine_log_wsaeacces_releases_confinement_and_reports_reason() {
+        let (mut engines, fake, dir) = engines_with_engine_files("valve");
+        std::fs::write(dir.join(xray::LOG_FILE), "2026/10/12 21:04:01 [Warning] core: Xray 26.1.23 started\n").unwrap();
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.confine_if_needed(&reality_profile(), false, vec![Ipv4Addr::new(203, 0, 113, 7)]);
+        assert_eq!(engines.ipv4_confined(), Some(true));
+
+        use std::io::Write;
+        let mut log = std::fs::OpenOptions::new().append(true).open(dir.join(xray::LOG_FILE)).unwrap();
+        writeln!(log, "2026/10/12 21:04:05 [Warning] [3123123] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > common/retry: [dial tcp 203.0.113.7:443: connectex: An attempt was made to access a socket in a way forbidden by its access permissions.] > common/retry: all retry attempts failed").unwrap();
+        drop(log);
+
+        assert!(
+            wait_for(Duration::from_secs(5), || engines.ipv4_confined() == Some(false)),
+            "the engine's own refusal did not let go of the confinement"
+        );
+        assert_eq!(fake.closed(), vec![1000]);
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("refused")), "{:?}", engines.confinement_problem());
+        assert!(engines.has_session(), "the tunnel was taken down over its plan");
+        assert!(engines.status().0);
+        end_test_session(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "closed once");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
