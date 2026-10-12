@@ -7,19 +7,24 @@
  * colour is kept for a real and sustained "connected, not fully protected"
  * (`warnsUnconfined`):
  *
- *  - a confinement that would not go in, or was let go of for good -- shown
- *    only once it has held, unbroken, for `CAUTION_AFTER_MS`. The drop
- *    report that lets go of a confinement for the second or two before a
- *    dead engine's session is torn down, a retracted report put back, a
- *    reading one poll got wrong -- none of those last that long on a
- *    connected screen;
- *  - Built-in (IKEv2), which this version never confines. That is a fact
- *    about the session, not a gap that might close, and it is shown from
- *    the moment the connection is confirmed: waiting ten seconds would only
- *    turn a steady state into a green-then-amber change on every connect.
- *
- * And it is given up the same way: only once the good condition has held
- * as long, so the colour never flickers back and forth.
+ *  - a session's colour is set at its first confirmed look, as the service
+ *    says it then: a connect, a switch, a reconnect, or a screen opened onto
+ *    a session already up. A confinement that would not go in at connect is
+ *    a fact about the session, like Built-in's, and shown from the start --
+ *    waiting would only turn a steady state into a green-then-amber change
+ *    in front of the customer;
+ *  - within a session the screen has been watching, the colour changes
+ *    only once the new condition has held, unbroken, for
+ *    `CAUTION_AFTER_MS`. The drop report that lets go of a confinement for
+ *    the second or two before a dead engine's session is torn down, a
+ *    retracted report put back, a reading one poll got wrong -- none of
+ *    those last that long on a connected screen. And it is given up the
+ *    same way, so the colour never flickers back and forth. "Unbroken" is
+ *    what was seen, not how often: the dashboard looks at every change of
+ *    what the service says as it lands, so looks a minute apart -- a
+ *    minimized window's throttled timers -- hide nothing;
+ *  - Built-in (IKEv2), which this version never confines, at once and for
+ *    as long as it is connected.
  *
  * Everything else keeps the look it has. A reconnect, a ladder rung and an
  * engine restart are "connecting" / "verifying" -- the busy look -- and the
@@ -37,22 +42,18 @@ import type { ConnectionState } from "../components/ConnectOrb";
  * back. */
 export const CAUTION_AFTER_MS = 10_000;
 
-/** Looks further apart than this break "unbroken": the screen was away
- * (Settings open), or its tick stalled, and what happened meanwhile was not
- * seen. The dashboard looks every second. */
-export const CAUTION_GAP_MS = 5_000;
-
 export interface CautionState {
   /** Whether the orb and the dot show the warning colour. */
   readonly caution: boolean;
   /** Since when the opposite of `caution` has been seen, unbroken, on a
    * connected screen; null while it is not being seen. */
   readonly since: number | null;
-  /** When the last look was taken. */
-  readonly seen: number | null;
+  /** No confirmed look at this session yet: the next one sets the colour
+   * as it finds it. */
+  readonly fresh: boolean;
 }
 
-export const NO_CAUTION: CautionState = { caution: false, since: null, seen: null };
+export const NO_CAUTION: CautionState = { caution: false, since: null, fresh: true };
 
 export interface CautionLook {
   readonly state: ConnectionState;
@@ -66,18 +67,37 @@ export interface CautionLook {
 
 /** The state after one more look at the screen, at `now`. */
 export function nextCaution(prev: CautionState, look: CautionLook, now: number): CautionState {
-  // Nothing up: whatever comes next is a new session, and starts green.
-  if (look.state === "disconnected") return { caution: false, since: null, seen: now };
-  // Up but not confirmed, or on its way somewhere: the orb shows that state's
-  // own look, and nothing seen meanwhile counts towards a change either way.
-  if (look.state !== "connected") return { caution: prev.caution, since: null, seen: now };
-  if (look.unconfined && look.byChoice) return { caution: true, since: null, seen: now };
+  switch (look.state) {
+    // Nothing up, or on its way up or down: what comes next is a session of
+    // its own -- a connect, a switch that never passes "disconnected", a
+    // reconnect -- and its first confirmed look says what it is. So does a
+    // screen's own first look, before it has asked the service: a dashboard
+    // back from Settings starts at "disconnected", and then shows the
+    // session as the service has it, not green for ten seconds first.
+    case "disconnected":
+    case "connecting":
+    case "verifying":
+    case "disconnecting":
+      return { caution: false, since: null, fresh: true };
+    // Up but not confirmed: that state's own look, and nothing seen
+    // meanwhile counts towards a change either way.
+    case "unverified":
+    case "degraded":
+    case "unknown":
+      return { caution: prev.caution, since: null, fresh: prev.fresh };
+    case "connected":
+      break;
+  }
+  if (look.unconfined && look.byChoice) return { caution: true, since: null, fresh: false };
   const wanted = look.unconfined;
-  if (wanted === prev.caution) return { caution: prev.caution, since: null, seen: now };
-  const unbroken = prev.since !== null && prev.seen !== null && now - prev.seen <= CAUTION_GAP_MS;
-  const since = unbroken ? prev.since! : now;
-  if (now - since >= CAUTION_AFTER_MS) return { caution: wanted, since: null, seen: now };
-  return { caution: prev.caution, since, seen: now };
+  if (prev.fresh) return { caution: wanted, since: null, fresh: false };
+  if (wanted === prev.caution) return { caution: prev.caution, since: null, fresh: false };
+  // Counted from when it was first seen, however far apart the looks:
+  // every change is looked at as it lands, so nothing between two looks
+  // went unseen (a minimized window's timers run once a minute).
+  const since = prev.since ?? now;
+  if (now - since >= CAUTION_AFTER_MS) return { caution: wanted, since: null, fresh: false };
+  return { caution: prev.caution, since, fresh: false };
 }
 
 /** The look the orb and the dot take: a connected tunnel's success colour,
