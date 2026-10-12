@@ -7230,3 +7230,61 @@ IPv6, a censored Iranian line, PPPoE (where `network_way_out` reads an
 on-link route), sleep/resume, Hotspot/WSL/Hyper-V/Docker, another VPN,
 MTU below 1500, the upgrade from 0.9.48. The xray crash is still in the
 bundled engine.
+
+**Follow-ups from the round's four checkers** (leaks-roaming, ladder-ui,
+xray, hunter; all read `9213bd4`). Fixed, test-first:
+
+- The orb (`2bb455d`): a dashboard back from Settings starts at its own
+  "disconnected" and wiped the warning (amber, green 10 s, amber); a
+  minimized window's minute-apart looks never made "unbroken"; a switch
+  carried one session's amber into a confined one under "You're
+  protected". A session's colour is now set at its first confirmed look;
+  inside a watched session a change still needs 10 unbroken seconds,
+  counted from when it was first seen. A confinement that would not go in
+  at connect is therefore amber from the start, like Built-in -- not
+  green, then amber.
+- The no-network wait (`ca2eb8e`): a wait after failed rungs restarts the
+  pass from its first rung and drops their "didn't get through" (Wi-Fi
+  leaving while fi was dialled took the pass to sg); the headline no
+  longer turns to "Reconnecting..." for each 30 s retry; a superseded
+  pass cannot clear a newer pass's wait; the IPv6 baseline is taken again
+  on the network that is back.
+- B3 on a fresh install: Xray's first-use Wintun adapter (8.5 s) misses
+  the early filters' 5 s wait, and the IPv6 block went in without DNS
+  confinement for the whole session. Now the early filters go in only
+  with it; otherwise both go in after the routes, as before B3.
+- A failed Xray rung lets go of its early filters at the kill, not after
+  the reap (K1).
+- B2's LAN follow ran two dynamic WFP sessions on one provider and
+  sublayer for a moment; closing the old asked BFE to delete objects the
+  new one's filters used, which WFP does not document. The confinement
+  now has two provider/sublayer pairs and an install takes the one no
+  live session holds (a real-WFP test registers one pair and checks the
+  probe; Repair sweeps both). A LAN whose plan WFP refuses is retried
+  after 60 s, not on every 1 s poll.
+- B2 wording corrected: the inbound DHCP permit authorizes the flow, so a
+  program bound to local 68 can answer a host that sent it a datagram
+  from port 67, around the tunnel (needs unsolicited inbound, no NAT).
+  wireguard.exe accepts the same.
+
+Recorded, not changed:
+
+- **Custom mode still leaks DNS during connect** (G8): `prepare_passive`
+  gives the adapter 1.1.1.1 before the redirect and pin. Custom mode is
+  never confined; the cache flush after the pin limits it.
+- **Mobile has the same xray panic**: `apps/mobile` pins xray-core
+  26.3.27 and runs the same gVisor `HandleConnection` path on Android and
+  iOS, so a TCP connection reset right after its handshake can take the
+  VpnService or the packet-tunnel extension down. Not touched here.
+- **A prerelease with the panic fix changes behaviour**: from v26.4.13
+  the TUN inbound parses `gateway`, `autoSystemRoutingTable` and
+  `autoOutboundsInterface`, which 26.1.23 and 26.3.27 ignore; xray.rs
+  sets `autoSystemRoutingTable: true`, so any fixed release would start
+  installing Xray's own routes beside the service's and the confinement.
+  That needs the config changed and the VM before it ships.
+- **A single failed health check still recolours the orb** (amber
+  "degraded" or cyan "unverified"), unchanged from main: calm against
+  "never show a state not verified" is the owner's call.
+
+Rust again proven only by CI on the push of these commits; nothing here
+is verified at the NIC.

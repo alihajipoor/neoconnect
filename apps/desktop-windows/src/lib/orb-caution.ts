@@ -125,9 +125,10 @@ export function orbTone(state: ConnectionState, caution: boolean): OrbTone {
 }
 
 /** One per app, like the reconnect: the dashboard unmounts whenever
- * Settings opens, and a warning already shown must not go back to green --
- * nor a pending one start counting again -- because the screen came back.
- * A long absence still breaks "unbroken" (`CAUTION_GAP_MS`). */
+ * Settings opens. A screen that comes back looks first at its own
+ * "disconnected", and then shows the session as the service has it at its
+ * first confirmed look (`nextCaution`) -- never green over a warning
+ * because of the navigation. */
 let current: CautionState = NO_CAUTION;
 
 export const orbCaution = {
