@@ -103,6 +103,7 @@ import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
 import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "../lib/api-endpoints";
 import { setConfinedAround } from "../lib/connected-mirrors";
+import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
 import {
   asReconnectReport,
@@ -3092,16 +3093,39 @@ export function Dashboard({
             // confined the connected server's own mirror is refused on this
             // PC (10013) -- a refusal here, which must not be asked, let
             // alone counted against the network (`setConfinedAround`).
-            await serviceStatus()
+            const confinedBefore = await serviceStatus()
               .then((status) => {
                 setConfinedAround(status.ipv4Confined === true);
                 setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
                 setUnconfinedKey(unconfinedLine(status));
+                return status.ipv4Confined;
               })
               .catch(() => undefined);
             // Only the last rung can use an answer from an endpoint other
             // than the baseline's; see `VerifyOptions.sameEndpointOnly`.
-            const egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer);
+            let egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer);
+            // And again once the check is over. The service's plan-error
+            // valve trips during it -- the check is what makes the engine
+            // dial -- and lets go of a confinement the engine itself was
+            // refused by. Read only before, the screen said "You're
+            // protected" over it until the next health poll; and the rung
+            // was judged on a check our own filter had failed, so a protocol
+            // it broke was dropped as if the network had blocked it. A
+            // confinement let go of during a failed check earns the rung one
+            // more check, now that it runs as it would have without it
+            // (`egressWorthAnotherLook`).
+            const after = await serviceStatus().catch(() => null);
+            if (after) {
+              setConfinedAround(after.ipv4Confined === true);
+              setIpv4NotConfined(warnsUnconfined(after, Boolean(after.splitTunnelActive)));
+              setUnconfinedKey(unconfinedLine(after));
+            }
+            // Said in the rung's line if it still fails -- not as a line of
+            // its own: `attempts` and `dials` pair by index.
+            const checkedAgain = egressWorthAnotherLook(confinedBefore, after, egress.state);
+            if (checkedAgain) {
+              egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer);
+            }
             setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
 
             // The reachability check is worth its eight seconds only
@@ -3122,7 +3146,7 @@ export function Dashboard({
                     })
                   ? combineEvidence(await confirmReachable(), egress)
                   : "degraded";
-            reason = egress.state;
+            reason = checkedAgain ? `${egress.state}, checked again after the IPv4 confinement was let go of` : egress.state;
           }
 
           // `unverified` lands the pass rather than rejecting it, and the

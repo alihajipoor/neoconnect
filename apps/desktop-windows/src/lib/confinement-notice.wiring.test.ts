@@ -39,7 +39,7 @@ describe("the IPv4 confinement warning", () => {
   it("is read once a full-tunnel rung is up, before its egress check asks the order", () => {
     const ladder = dashboard.slice(dashboard.indexOf("async function runLadder("));
     const connect = ladder.indexOf('await invoke("vpn_connect", {');
-    const egress = ladder.indexOf("const egress = await confirmEgress(");
+    const egress = ladder.indexOf("let egress = await confirmEgress(");
     const read = ladder.indexOf("setConfinedAround(status.ipv4Confined === true);", connect);
     expect(connect).toBeGreaterThan(0);
     expect(read).toBeGreaterThan(connect);
@@ -49,6 +49,25 @@ describe("the IPv4 confinement warning", () => {
   it("is shown in words while the tunnel is up", () => {
     expect(dashboard).toContain('{isTunnelUp(connectionState) && ipv4NotConfined ? (');
     expect(dashboard).toContain("t(unconfinedKey)");
+  });
+
+  it("is read again once a rung's egress check is over, before the rung is judged", () => {
+    // The plan-error valve trips during the check, which is what makes the
+    // engine dial: a status read only before it left the screen saying
+    // "You're protected" over a confinement already let go of, until the
+    // next health poll -- and the ladder dropping a rung our own filter had
+    // broken, as if the network had blocked it.
+    const ladder = dashboard.slice(dashboard.indexOf("async function runLadder("));
+    const egress = ladder.indexOf("let egress = await confirmEgress(");
+    const verdict = ladder.indexOf("verdict =\n              egress.state === \"throughTunnel\"", egress);
+    const reread = ladder.indexOf("const after = await serviceStatus().catch(() => null);", egress);
+    const another = ladder.indexOf("egressWorthAnotherLook(confinedBefore, after, egress.state);", egress);
+    const retried = ladder.indexOf("egress = await confirmEgress(", another);
+    expect(egress).toBeGreaterThan(0);
+    expect(reread).toBeGreaterThan(egress);
+    expect(another).toBeGreaterThan(reread);
+    expect(retried).toBeGreaterThan(another);
+    expect(verdict).toBeGreaterThan(retried);
   });
 
   it("keeps the VPN mode's own line from contradicting it", () => {
