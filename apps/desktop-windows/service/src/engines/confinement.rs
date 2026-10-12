@@ -58,6 +58,19 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 use neoconnect_ipc::ConnectProfile;
+use windows_sys::core::GUID;
+use windows_sys::Win32::Foundation::{FWP_E_ALREADY_EXISTS, HANDLE};
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+    FwpmEngineClose0, FwpmFilterAdd0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmTransactionAbort0,
+    FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_FLAGS,
+    FWPM_CONDITION_IP_LOCAL_INTERFACE, FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL,
+    FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
+    FWPM_FILTER_FLAG_NONE, FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0, FWPM_SUBLAYER0,
+    FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0,
+    FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET, FWP_UINT16, FWP_UINT32, FWP_UINT64, FWP_UINT8,
+    FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
+};
 
 /// Whether IKEv2 sessions are confined.
 ///
@@ -492,6 +505,484 @@ pub fn lan_prefixes(adapters: &[LanAdapter], ours: &[&str]) -> Vec<Prefix> {
         }
     }
     lan
+}
+
+/// Why a confinement is let go of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Release {
+    /// The session is ending: Disconnect, a connect clearing the decks, a
+    /// dead engine's teardown, the hard stop.
+    Teardown,
+    /// The engine watch reported the engine gone -- definitive or not. Put
+    /// back if the engine turns out to be alive (K2).
+    Dropped,
+    /// The engine was refused by the plan (K5): let go of for the rest of
+    /// the session, with the reason.
+    PlanError(String),
+}
+
+/// An installed confinement: the dynamic WFP session that holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Installed {
+    /// The engine handle, as an integer -- see `Ipv6Block::engine`.
+    pub engine: isize,
+    pub filters: usize,
+}
+
+/// What closes an installed confinement's session.
+pub type Closer = std::sync::Arc<dyn Fn(isize) -> u32 + Send + Sync>;
+
+/// A session's confinement, shared with everything that may have to let go
+/// of it: the owning thread, the engine watch's thread (K2: a busy owning
+/// thread must never keep a dead tunnel's block), and the plan-error valve.
+///
+/// One mutex over the whole state, and the engine handle taken out under
+/// it, so whichever of them gets there first closes the WFP session and
+/// every other finds nothing to close: exactly one close, whatever races.
+/// The close itself is one `FwpmEngineClose0`, milliseconds.
+pub struct Hold {
+    state: std::sync::Mutex<HoldState>,
+    close: Closer,
+    /// `confinement.log`, for the lines that say what was let go of and
+    /// why. `None` in tests.
+    log: Option<PathBuf>,
+}
+
+#[derive(Default)]
+struct HoldState {
+    engine: isize,
+    filters: usize,
+    /// A plan was made for this session: the status poll answers
+    /// `Some(_)` from here on, and `None` -- "not a confined session, do
+    /// not warn" -- before.
+    wanted: bool,
+    /// Why it is not installed, while it is not.
+    problem: Option<String>,
+    /// A drop report let it go (or came before it was put). Cleared by
+    /// [`Hold::rearm`] when the engine turns out to be alive.
+    dropped: bool,
+    /// The plan-error valve let it go. For good, this session.
+    tripped: bool,
+}
+
+/// The reason given for a confinement let go of on a drop report.
+const DROPPED: &str = "the tunnel engine was reported gone, so the filters were let go of until it is shown to be running";
+
+impl Hold {
+    /// A hold whose sessions are closed with `FwpmEngineClose0`, logging to
+    /// `confinement.log` in `log_dir`.
+    pub fn new(log_dir: &std::path::Path) -> std::sync::Arc<Self> {
+        let close: Closer = std::sync::Arc::new(|engine| {
+            // SAFETY: `engine` is a handle `install` opened, taken out of
+            // the hold under its lock, so it is closed once.
+            unsafe { FwpmEngineClose0(engine as HANDLE) }
+        });
+        std::sync::Arc::new(Self { state: Default::default(), close, log: Some(log_dir.join(LOG_FILE)) })
+    }
+
+    /// The same with a closer of the caller's -- for tests.
+    pub fn with_closer(close: Closer) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self { state: Default::default(), close, log: None })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HoldState> {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn note(&self, line: &str) {
+        if let Some(log) = &self.log {
+            super::ipv6_block::note(log, line);
+        }
+    }
+
+    /// Holds an installed confinement. Returns whether it is now held:
+    /// after a drop report or a tripped valve it is closed at once instead,
+    /// and one held already is closed and replaced.
+    pub fn put(&self, installed: Installed) -> bool {
+        let mut state = self.lock();
+        state.wanted = true;
+        if state.dropped || state.tripped {
+            (self.close)(installed.engine);
+            drop(state);
+            self.note(&format!(
+                "let go of at once: {} filters installed after the tunnel was reported gone or the plan was refused",
+                installed.filters
+            ));
+            return false;
+        }
+        let earlier = std::mem::replace(&mut state.engine, installed.engine);
+        state.filters = installed.filters;
+        state.problem = None;
+        if earlier != 0 {
+            (self.close)(earlier);
+        }
+        true
+    }
+
+    /// Records that this session should be confined and is not, and why.
+    pub fn refuse(&self, why: String) {
+        let mut state = self.lock();
+        state.wanted = true;
+        state.problem = Some(why);
+    }
+
+    /// Lets go of the confinement, if one is held. Returns whether this
+    /// call closed it. Safe from any thread, any number of times.
+    pub fn release(&self, why: Release) -> bool {
+        let mut state = self.lock();
+        let engine = std::mem::take(&mut state.engine);
+        let filters = state.filters;
+        let reason = match &why {
+            Release::Teardown => "the session ended".to_string(),
+            Release::Dropped => {
+                state.dropped = true;
+                if state.wanted {
+                    state.problem = Some(DROPPED.to_string());
+                }
+                "the tunnel engine was reported gone".to_string()
+            }
+            Release::PlanError(problem) => {
+                state.tripped = true;
+                state.wanted = true;
+                state.problem = Some(problem.clone());
+                problem.clone()
+            }
+        };
+        if engine == 0 {
+            return false;
+        }
+        let err = (self.close)(engine);
+        drop(state);
+        if err == 0 {
+            self.note(&format!("removed: {filters} filters, IPv4 restored ({reason})"));
+        } else {
+            self.note(&format!("removal reported {err:#010x} ({reason}); the session ends with the process"));
+        }
+        true
+    }
+
+    /// The engine a drop report named turned out to be alive: a
+    /// confinement may be put back. A tripped valve stays tripped.
+    pub fn rearm(&self) {
+        self.lock().dropped = false;
+    }
+
+    /// What the status poll reports as `ipv4_confined`: `None` for a
+    /// session that was never to be confined, else whether it is now.
+    pub fn confined(&self) -> Option<bool> {
+        let state = self.lock();
+        state.wanted.then_some(state.engine != 0)
+    }
+
+    /// Why it is not confined, while it should be and is not.
+    pub fn problem(&self) -> Option<String> {
+        let state = self.lock();
+        if state.engine != 0 {
+            return None;
+        }
+        state.problem.clone()
+    }
+
+    /// Let go of on a drop report, and not since put back or tripped: a
+    /// confinement is owed if the engine is alive after all.
+    pub fn owed_after_drop(&self) -> bool {
+        let state = self.lock();
+        state.wanted && state.dropped && !state.tripped && state.engine == 0
+    }
+}
+
+// ---------------------------------------------------------------------
+// Installing a plan: a dynamic WFP session of its own.
+// ---------------------------------------------------------------------
+
+/// Ours: a provider separate from the IPv6 block's, so the two dynamic
+/// sessions never share a provider object whose deletion order between
+/// them is undefined. `pub(super)` so `repair` can sweep by it; nothing
+/// outside this file creates objects under it.
+pub(super) const CAPTURE_PROVIDER_KEY: GUID = GUID::from_u128(0x5e0f3a71_9c42_4d8b_a6e1_7b3c2f9d0a14);
+
+/// The sublayer the plan's filters arbitrate in. Separate from the IPv6
+/// block's, so it can be released first (K1) and so its weights decide
+/// only among themselves.
+pub(super) const CAPTURE_SUBLAYER_KEY: GUID = GUID::from_u128(0x6f1a4b82_ad53_4e9c_b7f2_8c4d3e0a1b25);
+
+/// Next to the IPv6 block's 0xFFFF. The order sublayers are consulted in,
+/// not whether a block wins -- a block in any sublayer does.
+const SUBLAYER_WEIGHT: u16 = 0xFFFE;
+
+const PROVIDER_NAME: &str = "Neoxify capture";
+const SUBLAYER_NAME: &str = "Neoxify IPv4 confinement";
+const LOG_FILE: &str = "confinement.log";
+
+/// Installs a plan in a dynamic WFP session of its own, in one transaction:
+/// all of it or none of it. Returns the session, for a [`Hold`].
+///
+/// Every application the plan names is resolved to WFP's app id first; one
+/// that cannot be is a permit that cannot be written, and the plan is not
+/// installed without it -- that would block the engine (K5).
+pub fn install(plan: &Plan, log_dir: &std::path::Path) -> Result<Installed, String> {
+    let log = log_dir.join(LOG_FILE);
+    let specs = specs(plan);
+    let result = install_specs(&specs);
+    match &result {
+        Ok(installed) => super::ipv6_block::note(
+            &log,
+            &format!(
+                "installed: {} filters in a dynamic session, provider {PROVIDER_NAME}, sublayer {SUBLAYER_NAME}; {}",
+                installed.filters,
+                describe(plan)
+            ),
+        ),
+        Err(e) => super::ipv6_block::note(&log, &format!("install failed: {e}")),
+    }
+    result
+}
+
+/// One line for the log: what the plan lets past, without the addresses
+/// of the customer's own network.
+fn describe(plan: &Plan) -> String {
+    let transport = match &plan.transport {
+        Transport::Xray { nodes, .. } => format!("xray.exe to {} server(s)", nodes.len()),
+        Transport::Openvpn { port, protocol, .. } => {
+            format!("openvpn.exe to its server on {} {port}", if *protocol == protocol::TCP { "TCP" } else { "UDP" })
+        }
+        Transport::Ikev2 { nodes } => format!("IKE by local port, ESP to {} server address(es)", nodes.len()),
+    };
+    let lan = match &plan.lan {
+        Lan::Allowed(prefixes) => format!("LAN allowed ({} on-link prefix(es))", prefixes.len()),
+        Lan::Refused => "LAN refused".to_string(),
+    };
+    format!("{transport}; {lan}")
+}
+
+fn install_specs(specs: &[FilterSpec]) -> Result<Installed, String> {
+    use super::ipv6_block::AppId;
+    // Resolved before the session opens, and held until it has committed:
+    // the filters point into these blobs.
+    let mut apps: Vec<(PathBuf, AppId)> = Vec::new();
+    for spec in specs {
+        for cond in &spec.conds {
+            if let Cond::App(path) = cond {
+                if apps.iter().any(|(p, _)| p == path) {
+                    continue;
+                }
+                let id = AppId::resolve(&path.to_string_lossy())
+                    .map_err(|e| format!("the engine could not be named to the filtering platform: {e}"))?;
+                apps.push((path.clone(), id));
+            }
+        }
+    }
+    let engine = super::ipv6_block::open_dynamic_session_named(
+        SUBLAYER_NAME,
+        "Confines IPv4 to a Neoxify full tunnel; removed when it ends",
+    )?;
+    // SAFETY: `engine` is live, and every blob in `apps` outlives the call.
+    match unsafe { build(engine, specs, &apps) } {
+        Ok(filters) => Ok(Installed { engine: engine as isize, filters }),
+        Err(e) => {
+            // Closing the handle ends the session, which undoes whatever
+            // a failed transaction left.
+            // SAFETY: opened above and not shared.
+            unsafe { FwpmEngineClose0(engine) };
+            Err(e)
+        }
+    }
+}
+
+/// # Safety
+/// `engine` must be live, and the blobs in `apps` must outlive the call.
+unsafe fn build(engine: HANDLE, specs: &[FilterSpec], apps: &[(PathBuf, super::ipv6_block::AppId)]) -> Result<usize, String> {
+    let err = FwpmTransactionBegin0(engine, 0);
+    if err != 0 {
+        return Err(format!("could not begin a filtering transaction ({err:#010x})"));
+    }
+    match add_everything(engine, specs, apps) {
+        Ok(filters) => {
+            let err = FwpmTransactionCommit0(engine);
+            if err != 0 {
+                FwpmTransactionAbort0(engine);
+                return Err(format!("the IPv4 confinement could not be committed ({err:#010x})"));
+            }
+            Ok(filters)
+        }
+        Err(e) => {
+            FwpmTransactionAbort0(engine);
+            Err(e)
+        }
+    }
+}
+
+/// # Safety
+/// Inside an open transaction; blobs alive for the duration.
+unsafe fn add_everything(
+    engine: HANDLE,
+    specs: &[FilterSpec],
+    apps: &[(PathBuf, super::ipv6_block::AppId)],
+) -> Result<usize, String> {
+    add_provider(engine)?;
+    add_sublayer(engine)?;
+    for spec in specs {
+        add_spec(engine, spec, apps)?;
+    }
+    Ok(specs.len())
+}
+
+/// # Safety
+/// Inside an open transaction.
+unsafe fn add_provider(engine: HANDLE) -> Result<(), String> {
+    let mut name = super::ipv6_block::wide(PROVIDER_NAME);
+    let mut description = super::ipv6_block::wide("Neoxify VPN: IPv4 confined to a full tunnel");
+    let mut provider: FWPM_PROVIDER0 = std::mem::zeroed();
+    provider.providerKey = CAPTURE_PROVIDER_KEY;
+    provider.displayData.name = name.as_mut_ptr();
+    provider.displayData.description = description.as_mut_ptr();
+    // Not persistent: it belongs to the dynamic session.
+    provider.flags = 0;
+    let err = FwpmProviderAdd0(engine, &provider, std::ptr::null_mut());
+    if err == 0 || err == FWP_E_ALREADY_EXISTS as u32 {
+        return Ok(());
+    }
+    Err(format!("could not register the {PROVIDER_NAME} filtering provider ({err:#010x})"))
+}
+
+/// # Safety
+/// Inside an open transaction.
+unsafe fn add_sublayer(engine: HANDLE) -> Result<(), String> {
+    let mut name = super::ipv6_block::wide(SUBLAYER_NAME);
+    let mut description = super::ipv6_block::wide("IPv4 confined to a Neoxify full tunnel; removed when it ends");
+    let mut provider_key = CAPTURE_PROVIDER_KEY;
+    let mut sublayer: FWPM_SUBLAYER0 = std::mem::zeroed();
+    sublayer.subLayerKey = CAPTURE_SUBLAYER_KEY;
+    sublayer.displayData.name = name.as_mut_ptr();
+    sublayer.displayData.description = description.as_mut_ptr();
+    sublayer.flags = 0;
+    sublayer.providerKey = &mut provider_key;
+    sublayer.weight = SUBLAYER_WEIGHT;
+    let err = FwpmSubLayerAdd0(engine, &sublayer, std::ptr::null_mut());
+    if err == 0 || err == FWP_E_ALREADY_EXISTS as u32 {
+        return Ok(());
+    }
+    Err(format!("could not create the {SUBLAYER_NAME} sublayer ({err:#010x})"))
+}
+
+fn layer_key(layer: Layer) -> GUID {
+    match layer {
+        Layer::ConnectV4 => FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+        Layer::RecvAcceptV4 => FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+        Layer::ConnectV6 => FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        Layer::RecvAcceptV6 => FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+    }
+}
+
+/// One planned filter, as WFP takes it.
+///
+/// # Safety
+/// Inside an open transaction; every app blob alive for the duration.
+unsafe fn add_spec(engine: HANDLE, spec: &FilterSpec, apps: &[(PathBuf, super::ipv6_block::AppId)]) -> Result<(), String> {
+    let mut display_name = super::ipv6_block::wide(&spec.name);
+    let mut provider_key = CAPTURE_PROVIDER_KEY;
+    // The values carried by pointer, in buffers reserved up front so that
+    // pushing cannot move an earlier one out from under its condition.
+    let n = spec.conds.len();
+    let mut v4: Vec<FWP_V4_ADDR_AND_MASK> = Vec::with_capacity(n);
+    let mut v6: Vec<FWP_V6_ADDR_AND_MASK> = Vec::with_capacity(n);
+    let mut luids: Vec<u64> = Vec::with_capacity(n);
+    let mut conditions: Vec<FWPM_FILTER_CONDITION0> = Vec::with_capacity(n);
+    for cond in &spec.conds {
+        let condition = match cond {
+            Cond::Loopback => FWPM_FILTER_CONDITION0 {
+                fieldKey: FWPM_CONDITION_FLAGS,
+                matchType: FWP_MATCH_FLAGS_ALL_SET,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_UINT32,
+                    Anonymous: FWP_CONDITION_VALUE0_0 { uint32: FWP_CONDITION_FLAG_IS_LOOPBACK },
+                },
+            },
+            Cond::RemoteV4(prefix) => {
+                let (addr, mask) = prefix.wfp();
+                v4.push(FWP_V4_ADDR_AND_MASK { addr, mask });
+                let value = v4.last_mut().expect("just pushed");
+                FWPM_FILTER_CONDITION0 {
+                    fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
+                    matchType: FWP_MATCH_EQUAL,
+                    conditionValue: FWP_CONDITION_VALUE0 {
+                        r#type: FWP_V4_ADDR_MASK,
+                        Anonymous: FWP_CONDITION_VALUE0_0 { v4AddrMask: value },
+                    },
+                }
+            }
+            Cond::RemoteV6(addr, len) => {
+                v6.push(FWP_V6_ADDR_AND_MASK { addr: addr.octets(), prefixLength: *len });
+                let value = v6.last_mut().expect("just pushed");
+                FWPM_FILTER_CONDITION0 {
+                    fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
+                    matchType: FWP_MATCH_EQUAL,
+                    conditionValue: FWP_CONDITION_VALUE0 {
+                        r#type: FWP_V6_ADDR_MASK,
+                        Anonymous: FWP_CONDITION_VALUE0_0 { v6AddrMask: value },
+                    },
+                }
+            }
+            Cond::LocalInterface(luid) => {
+                luids.push(*luid);
+                let value = luids.last_mut().expect("just pushed");
+                FWPM_FILTER_CONDITION0 {
+                    fieldKey: FWPM_CONDITION_IP_LOCAL_INTERFACE,
+                    matchType: FWP_MATCH_EQUAL,
+                    conditionValue: FWP_CONDITION_VALUE0 { r#type: FWP_UINT64, Anonymous: FWP_CONDITION_VALUE0_0 { uint64: value } },
+                }
+            }
+            Cond::App(path) => {
+                let Some((_, id)) = apps.iter().find(|(p, _)| p == path) else {
+                    return Err(format!("{} was not resolved before the filters went in", path.display()));
+                };
+                FWPM_FILTER_CONDITION0 {
+                    fieldKey: FWPM_CONDITION_ALE_APP_ID,
+                    matchType: FWP_MATCH_EQUAL,
+                    conditionValue: FWP_CONDITION_VALUE0 {
+                        r#type: FWP_BYTE_BLOB_TYPE,
+                        Anonymous: FWP_CONDITION_VALUE0_0 { byteBlob: id.blob },
+                    },
+                }
+            }
+            Cond::RemotePort(port) => FWPM_FILTER_CONDITION0 {
+                fieldKey: FWPM_CONDITION_IP_REMOTE_PORT,
+                matchType: FWP_MATCH_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 { r#type: FWP_UINT16, Anonymous: FWP_CONDITION_VALUE0_0 { uint16: *port } },
+            },
+            Cond::LocalPort(port) => FWPM_FILTER_CONDITION0 {
+                fieldKey: FWPM_CONDITION_IP_LOCAL_PORT,
+                matchType: FWP_MATCH_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 { r#type: FWP_UINT16, Anonymous: FWP_CONDITION_VALUE0_0 { uint16: *port } },
+            },
+            Cond::Protocol(number) => FWPM_FILTER_CONDITION0 {
+                fieldKey: FWPM_CONDITION_IP_PROTOCOL,
+                matchType: FWP_MATCH_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 { r#type: FWP_UINT8, Anonymous: FWP_CONDITION_VALUE0_0 { uint8: *number } },
+            },
+        };
+        conditions.push(condition);
+    }
+
+    let mut filter: FWPM_FILTER0 = std::mem::zeroed();
+    filter.displayData.name = display_name.as_mut_ptr();
+    filter.flags = FWPM_FILTER_FLAG_NONE;
+    filter.providerKey = &mut provider_key;
+    filter.layerKey = layer_key(spec.layer);
+    filter.subLayerKey = CAPTURE_SUBLAYER_KEY;
+    filter.weight = FWP_VALUE0 { r#type: FWP_UINT8, Anonymous: FWP_VALUE0_0 { uint8: spec.weight } };
+    filter.numFilterConditions = conditions.len() as u32;
+    filter.filterCondition = if conditions.is_empty() { std::ptr::null_mut() } else { conditions.as_mut_ptr() };
+    let action = match spec.action {
+        Action::Permit => FWP_ACTION_PERMIT,
+        Action::Block => FWP_ACTION_BLOCK,
+    };
+    filter.action = FWPM_ACTION0 { r#type: action, Anonymous: std::mem::zeroed() };
+    let err = FwpmFilterAdd0(engine, &filter, std::ptr::null_mut(), std::ptr::null_mut());
+    if err != 0 {
+        return Err(format!("could not add the filter \"{}\" ({err:#010x})", spec.name));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -976,6 +1467,318 @@ mod tests {
         assert_eq!(Prefix::host(Ipv4Addr::new(203, 0, 113, 7)).wfp(), (0xCB00_7107, 0xFFFF_FFFF));
         assert_eq!(Prefix::new(Ipv4Addr::new(224, 0, 0, 0), 4).wfp(), (0xE000_0000, 0xF000_0000));
         assert_eq!(Prefix::new(Ipv4Addr::new(1, 2, 3, 4), 0).wfp(), (0, 0));
+    }
+
+    /// The handle a session's confinement lives in, without WFP: the closer
+    /// is a recorder.
+    pub(super) mod hold {
+        use super::*;
+        use std::sync::{Arc, Barrier, Mutex};
+
+        pub(in crate::engines) fn recording() -> (Closer, Arc<Mutex<Vec<isize>>>) {
+            let closed = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&closed);
+            let close: Closer = Arc::new(move |engine| {
+                seen.lock().unwrap().push(engine);
+                0
+            });
+            (close, closed)
+        }
+
+        fn installed(engine: isize) -> Installed {
+            Installed { engine, filters: 42 }
+        }
+
+        /// What the status poll is told, through a session's life: nothing
+        /// for a session that was never to be confined; false with the
+        /// reason when it could not be; true while it is; false with the
+        /// reason once a drop report or the plan-error valve let it go.
+        #[test]
+        fn a_hold_says_what_the_status_poll_reports() {
+            let (close, closed) = recording();
+            let hold = Hold::with_closer(close);
+            assert_eq!(hold.confined(), None, "not a confined session: the app must not warn");
+            assert_eq!(hold.problem(), None);
+
+            hold.refuse("the server's address is not known".into());
+            assert_eq!(hold.confined(), Some(false));
+            assert!(hold.problem().is_some_and(|p| p.contains("address is not known")));
+
+            assert!(hold.put(installed(7)));
+            assert_eq!(hold.confined(), Some(true));
+            assert_eq!(hold.problem(), None);
+
+            assert!(hold.release(Release::Dropped));
+            assert_eq!(*closed.lock().unwrap(), vec![7]);
+            assert_eq!(hold.confined(), Some(false));
+            assert!(hold.problem().is_some(), "a drop's release is said, not silent");
+            assert!(hold.owed_after_drop(), "let go of on a drop report: put back if the engine is alive");
+
+            hold.rearm();
+            assert!(hold.put(installed(8)));
+            assert_eq!(hold.confined(), Some(true));
+            assert!(!hold.owed_after_drop());
+
+            assert!(hold.release(Release::PlanError("xray.exe was refused by the plan".into())));
+            assert_eq!(*closed.lock().unwrap(), vec![7, 8]);
+            assert_eq!(hold.confined(), Some(false));
+            assert!(hold.problem().is_some_and(|p| p.contains("refused by the plan")));
+            hold.rearm();
+            assert!(!hold.owed_after_drop(), "a plan the engine tripped over is never put back");
+
+            assert!(!hold.release(Release::Teardown), "nothing installed, nothing closed");
+            assert_eq!(closed.lock().unwrap().len(), 2);
+        }
+
+        /// The engine went while the confinement was being installed: the
+        /// watch's release found nothing to close. The session it then puts
+        /// in is let go of at once, rather than held for a dead tunnel until
+        /// the owning thread's teardown gets round to it (K2).
+        #[test]
+        fn a_confinement_put_after_a_drop_is_let_go_of_at_once() {
+            let (close, closed) = recording();
+            let hold = Hold::with_closer(close);
+            assert!(!hold.release(Release::Dropped));
+            assert!(!hold.put(installed(9)), "put after a drop is refused");
+            assert_eq!(*closed.lock().unwrap(), vec![9]);
+            assert_eq!(hold.confined(), Some(false));
+            // And after the valve the same: nothing goes back in.
+            let (close, closed) = recording();
+            let hold = Hold::with_closer(close);
+            assert!(hold.put(installed(10)));
+            assert!(hold.release(Release::PlanError("refused".into())));
+            assert!(!hold.put(installed(11)));
+            assert_eq!(*closed.lock().unwrap(), vec![10, 11]);
+        }
+
+        /// A second confinement over a first closes the first: a reinstall
+        /// with a fresh LUID never leaves the old session behind.
+        #[test]
+        fn putting_one_over_another_closes_the_first() {
+            let (close, closed) = recording();
+            let hold = Hold::with_closer(close);
+            assert!(hold.put(installed(1)));
+            assert!(hold.put(installed(2)));
+            assert_eq!(*closed.lock().unwrap(), vec![1]);
+            assert!(hold.release(Release::Teardown));
+            assert_eq!(*closed.lock().unwrap(), vec![1, 2]);
+        }
+
+        /// The engine watch's thread and the owning thread let go of the same
+        /// confinement at the same moment -- a drop report racing a
+        /// Disconnect -- for thirty-two sessions at once, and one hold with
+        /// thirty-two threads on it. Each session's WFP session is closed
+        /// exactly once, and exactly one of its releasers says it closed it.
+        #[test]
+        fn thirty_two_concurrent_releases_close_exactly_once() {
+            let (close, closed) = recording();
+            let holds: Vec<Arc<Hold>> = (0..32)
+                .map(|i| {
+                    let hold = Hold::with_closer(Arc::clone(&close));
+                    assert!(hold.put(installed(100 + i)));
+                    hold
+                })
+                .collect();
+            let start = Arc::new(Barrier::new(64));
+            let mut threads = Vec::new();
+            for hold in &holds {
+                for why in [Release::Dropped, Release::Teardown] {
+                    let hold = Arc::clone(hold);
+                    let start = Arc::clone(&start);
+                    threads.push(std::thread::spawn(move || {
+                        start.wait();
+                        hold.release(why)
+                    }));
+                }
+            }
+            let closers = threads.into_iter().map(|t| t.join().unwrap()).filter(|closed| *closed).count();
+            assert_eq!(closers, 32, "one releaser per session closed it");
+            let mut closed = closed.lock().unwrap().clone();
+            closed.sort_unstable();
+            assert_eq!(closed, (100..132).collect::<Vec<isize>>());
+
+            let (close, closed) = recording();
+            let hold = Hold::with_closer(close);
+            assert!(hold.put(installed(5)));
+            let start = Arc::new(Barrier::new(32));
+            let threads: Vec<_> = (0..32)
+                .map(|i| {
+                    let hold = Arc::clone(&hold);
+                    let start = Arc::clone(&start);
+                    std::thread::spawn(move || {
+                        start.wait();
+                        hold.release(if i % 2 == 0 { Release::Dropped } else { Release::Teardown })
+                    })
+                })
+                .collect();
+            let closers = threads.into_iter().map(|t| t.join().unwrap()).filter(|c| *c).count();
+            assert_eq!(closers, 1);
+            assert_eq!(*closed.lock().unwrap(), vec![5]);
+        }
+    }
+
+    /// The plans against the real filtering engine.
+    mod wfp {
+        use super::*;
+        use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+            FwpmFreeMemory0, FwpmProviderGetByKey0, FwpmSubLayerGetByKey0,
+        };
+
+        /// Interface 1's LUID -- loopback, which every machine has -- so
+        /// nothing is fabricated.
+        fn loopback_luid() -> Option<u64> {
+            use windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceIndexToLuid;
+            use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+            let mut luid = NET_LUID_LH { Value: 0 };
+            // SAFETY: `luid` is a valid out-parameter.
+            let err = unsafe { ConvertInterfaceIndexToLuid(1, &mut luid) };
+            // SAFETY: just written.
+            (err == 0).then(|| unsafe { luid.Value })
+        }
+
+        /// Every engine's plan, with this test binary standing in for the
+        /// engine executables (an app id needs a file that exists).
+        fn every_plan(luid: u64) -> Vec<Plan> {
+            let exe = std::env::current_exe().expect("test binary path");
+            let lan = Lan::Allowed(vec![
+                Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24),
+                Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24),
+            ]);
+            let mut nodes = vec![node()];
+            nodes.extend(exit_nodes());
+            let built = |profile: &ConnectProfile, nodes: Vec<Ipv4Addr>, ikev2: bool| {
+                let inputs = Inputs { tunnel_luid: luid, engine_exe: Some(exe.clone()), nodes, lan: lan.clone() };
+                plan_with(profile, false, inputs, ikev2).expect("planned").expect("built")
+            };
+            vec![
+                built(&reality(), nodes, false),
+                built(&openvpn("udp", 1194), vec![node()], false),
+                built(&openvpn("tcp", 443), vec![node()], false),
+                built(&ikev2(), vec![node()], true),
+                Plan { lan: Lan::Refused, ..built(&reality(), vec![node()], false) },
+            ]
+        }
+
+        /// Hands every plan to the real filtering engine inside a
+        /// transaction, and throws it away -- the trade
+        /// `ipv6_block`'s add-then-abort tests make. WFP validates each
+        /// filter as it is added (layer, sublayer, weight type, every
+        /// condition's field and value type, an IPv4 mask, a protocol, a
+        /// local port, an app id at the receive layer), so a structure it
+        /// rejects is found here instead of on a customer's connect, where
+        /// it would read as "not confined". What it cannot show is that
+        /// traffic stops: that is the VM's capture.
+        ///
+        /// Skipped where the engine will not open -- adding filters needs
+        /// administrator rights. GitHub's Windows runners have them.
+        #[test]
+        fn wfp_accepts_every_engine_plan_then_aborts() {
+            let Some(luid) = loopback_luid() else {
+                eprintln!("skipped: no interface 1 to take a LUID from");
+                return;
+            };
+            for plan in every_plan(luid) {
+                let specs = specs(&plan);
+                let mut apps = Vec::new();
+                for spec in &specs {
+                    for cond in &spec.conds {
+                        if let Cond::App(path) = cond {
+                            if !apps.iter().any(|(p, _): &(PathBuf, _)| p == path) {
+                                let id = crate::engines::ipv6_block::AppId::resolve(&path.to_string_lossy())
+                                    .expect("the test binary resolves to an app id");
+                                apps.push((path.clone(), id));
+                            }
+                        }
+                    }
+                }
+                let Ok(engine) = crate::engines::ipv6_block::open_dynamic_session_named(SUBLAYER_NAME, "test") else {
+                    eprintln!("skipped: the filtering engine would not open (needs administrator)");
+                    return;
+                };
+                let result = unsafe {
+                    let begun = FwpmTransactionBegin0(engine, 0);
+                    if begun != 0 {
+                        FwpmEngineClose0(engine);
+                        eprintln!("skipped: no filtering transaction ({begun:#010x})");
+                        return;
+                    }
+                    let result = add_everything(engine, &specs, &apps);
+                    // Before the assertion, so a failure cannot leave a
+                    // transaction open; closing ends the session anyway.
+                    FwpmTransactionAbort0(engine);
+                    FwpmEngineClose0(engine);
+                    result
+                };
+                match result {
+                    Ok(filters) => assert_eq!(filters, specs.len(), "{}", describe(&plan)),
+                    Err(e) => panic!("the Windows Filtering Platform rejected the plan ({}): {e}", describe(&plan)),
+                }
+            }
+        }
+
+        /// Whether this sublayer and provider exist on the machine now.
+        fn registered() -> Option<(bool, bool)> {
+            let engine = crate::engines::ipv6_block::open_dynamic_session_named("Neoxify test lookup", "test").ok()?;
+            // SAFETY: `engine` is live; each object returned is freed.
+            let found = unsafe {
+                let mut sublayer: *mut FWPM_SUBLAYER0 = std::ptr::null_mut();
+                let s = FwpmSubLayerGetByKey0(engine, &CAPTURE_SUBLAYER_KEY, &mut sublayer);
+                if s == 0 {
+                    FwpmFreeMemory0(&mut sublayer as *mut _ as *mut *mut std::ffi::c_void);
+                }
+                let mut provider: *mut FWPM_PROVIDER0 = std::ptr::null_mut();
+                let p = FwpmProviderGetByKey0(engine, &CAPTURE_PROVIDER_KEY, &mut provider);
+                if p == 0 {
+                    FwpmFreeMemory0(&mut provider as *mut _ as *mut *mut std::ffi::c_void);
+                }
+                FwpmEngineClose0(engine);
+                (s == 0, p == 0)
+            };
+            Some(found)
+        }
+
+        const CHILD: &str = "NEOXIFY_CONFINEMENT_TEST_CHILD";
+
+        /// The whole crash-safety argument, run: a process installs a real
+        /// confinement and is killed with TerminateProcess, and afterwards
+        /// neither the sublayer nor the provider is on the machine -- so
+        /// none of its filters can be.
+        ///
+        /// Ignored: it needs administrator rights, and for the second or two
+        /// the child holds it, this machine's IPv4 is confined to loopback
+        /// and the LAN. Run it in the VM guest, elevated:
+        /// `neoconnect-service-<hash>.exe --exact
+        /// engines::confinement::tests::wfp::confinement_dies_with_its_process
+        /// --ignored --nocapture`.
+        #[test]
+        #[ignore = "elevated, and confines this machine's IPv4 for a moment: run in the VM guest"]
+        fn confinement_dies_with_its_process() {
+            let luid = loopback_luid().expect("interface 1");
+            if std::env::var_os(CHILD).is_some() {
+                let plan = every_plan(luid).remove(0);
+                let installed = install(&plan, &std::env::temp_dir()).expect("installed in the child");
+                println!("installed {} filters", installed.filters);
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                return;
+            }
+            assert_eq!(registered(), Some((false, false)), "nothing of ours before the child");
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "engines::confinement::tests::wfp::confinement_dies_with_its_process", "--ignored", "--nocapture"])
+                .env(CHILD, "1")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("the child starts");
+            let stdout = child.stdout.take().unwrap();
+            let mut lines = std::io::BufRead::lines(std::io::BufReader::new(stdout));
+            let said = lines.find(|line| line.as_ref().is_ok_and(|l| l.starts_with("installed")));
+            assert!(said.is_some(), "the child never installed");
+            assert_eq!(registered(), Some((true, true)), "the child's sublayer and provider while it lives");
+            child.kill().expect("TerminateProcess");
+            let _ = child.wait();
+            assert_eq!(registered(), Some((false, false)), "the kernel ended the child's dynamic session");
+        }
     }
 
     /// A model of WFP's arbitration over the two sublayers a confined full

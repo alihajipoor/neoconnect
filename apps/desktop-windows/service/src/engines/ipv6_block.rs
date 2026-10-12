@@ -401,7 +401,7 @@ fn open_dynamic_session() -> Result<HANDLE, String> {
 /// The same, named for whichever of the two blocks is opening it, so a
 /// support engineer reading `netsh wfp show state` sees which feature
 /// owns the session rather than one generic string for both.
-fn open_dynamic_session_named(session_name: &str, purpose: &str) -> Result<HANDLE, String> {
+pub(super) fn open_dynamic_session_named(session_name: &str, purpose: &str) -> Result<HANDLE, String> {
     let mut name = wide(session_name);
     let mut description = wide(purpose);
 
@@ -813,13 +813,13 @@ unsafe fn add_filter(
 }
 
 /// A NUL-terminated UTF-16 buffer for a Win32 display string.
-fn wide(s: &str) -> Vec<u16> {
+pub(super) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// Best-effort, like every other log in this service: a line that cannot
 /// be written must never affect the connection it describes.
-fn note(path: &Path, line: &str) {
+pub(super) fn note(path: &Path, line: &str) {
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
         let _ = writeln!(file, "{line}");
@@ -905,8 +905,8 @@ const SPLIT_LOG_FILE: &str = "ipv6-block-custom.log";
 /// `FwpmFilterAdd0` that references it and then be handed back to
 /// `FwpmFreeMemory0` -- and the failure mode of getting that wrong is a
 /// filter pointing at freed memory inside the filtering engine.
-struct AppId {
-    blob: *mut FWP_BYTE_BLOB,
+pub(super) struct AppId {
+    pub(super) blob: *mut FWP_BYTE_BLOB,
     /// Kept for the log line, which names what could not be resolved.
     path: String,
 }
@@ -917,7 +917,7 @@ impl AppId {
     /// A missing file is the common failure -- a customer's selection
     /// outlives the program they uninstalled -- and it is not fatal to
     /// anything: a program that is not there cannot leak.
-    fn resolve(path: &str) -> Result<Self, String> {
+    pub(super) fn resolve(path: &str) -> Result<Self, String> {
         let wide_path = wide(path);
         let mut blob: *mut FWP_BYTE_BLOB = std::ptr::null_mut();
         // SAFETY: `wide_path` is a live NUL-terminated UTF-16 buffer for
