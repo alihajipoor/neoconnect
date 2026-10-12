@@ -7,6 +7,10 @@
 //! job is to write the right config file and drive the right process,
 //! invisibly.
 
+/// IPv4 confined to the tunnel while a full tunnel is up -- see the
+/// module's own comment. Planned here, installed nowhere yet.
+#[allow(dead_code)]
+mod confinement;
 // `pub(crate)` for the gaming module, which installs a second,
 // separately-tagged set of NRPT rules through the sibling functions in
 // here. Nothing about `apply`/`clear` changes for the engines.

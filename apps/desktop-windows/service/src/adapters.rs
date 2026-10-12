@@ -513,6 +513,15 @@ const VPN_DRIVER_MARKERS: &[&str] = &[
     "wintun",
 ];
 
+/// Whether a driver description is another VPN's adapter, by
+/// [`VPN_DRIVER_MARKERS`]. What "a tunnel" means wherever an adapter has
+/// to be told apart from the customer's own network -- the rival-VPN hint
+/// below, and the LAN that IPv4 confinement leaves reachable.
+pub fn looks_like_vpn(description: &str) -> bool {
+    let d = description.to_ascii_lowercase();
+    VPN_DRIVER_MARKERS.iter().any(|m| d.contains(m))
+}
+
 /// Other VPN adapters that are currently up, by friendly name.
 ///
 /// Only ones that are UP and carrying an address: a VPN that is merely
@@ -528,10 +537,7 @@ pub fn other_vpns_up(ours: &[&str]) -> io::Result<Vec<String>> {
         .into_iter()
         .filter(|a| a.is_up && a.ipv4.is_some())
         .filter(|a| !ours.iter().any(|o| a.name.eq_ignore_ascii_case(o)))
-        .filter(|a| {
-            let d = a.description.to_ascii_lowercase();
-            VPN_DRIVER_MARKERS.iter().any(|m| d.contains(m))
-        })
+        .filter(|a| looks_like_vpn(&a.description))
         .map(|a| a.name)
         .collect())
 }
@@ -539,11 +545,6 @@ pub fn other_vpns_up(ours: &[&str]) -> io::Result<Vec<String>> {
 #[cfg(test)]
 mod vpn_detection_tests {
     use super::*;
-
-    fn looks_like_vpn(description: &str) -> bool {
-        let d = description.to_ascii_lowercase();
-        VPN_DRIVER_MARKERS.iter().any(|m| d.contains(m))
-    }
 
     #[test]
     fn recognises_the_drivers_customers_actually_have() {
