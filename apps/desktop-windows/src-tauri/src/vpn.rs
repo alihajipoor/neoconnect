@@ -735,9 +735,10 @@ pub struct VpnStatus {
     split_tunnel_restart_needed: Vec<String>,
     /// Whether IPv4 outside the tunnel is refused on this PC while it is
     /// up, as the service read it from the session: `null` where that does
-    /// not apply (Custom mode, WireGuard, IKEv2) or the service is older,
-    /// and the UI says nothing then; `false` is a full tunnel that should be
-    /// confined and is not, which the UI says in words (`i18n.tsx`).
+    /// not apply (Custom mode, WireGuard) or the service is older, and the
+    /// UI says nothing then; `false` is a full tunnel that is not confined
+    /// (a failed or released confinement, or IKEv2 by choice), which the UI
+    /// says in words (`i18n.tsx`).
     #[serde(rename = "ipv4Confined")]
     ipv4_confined: Option<bool>,
     /// Why not, in English, for support -- never shown as the warning.

@@ -723,6 +723,15 @@ impl Engines {
             P::Openvpn(_) => self.engine_path("openvpn.exe").ok(),
             P::Wireguard(_) | P::Ikev2(_) => None,
         };
+        // A full tunnel left unconfined by choice -- IKEv2, until its own
+        // proof -- is said to be, with the reason, so the app does not
+        // claim full protection over it. Nothing is installed.
+        if let Some(why) = confinement::not_confined_by_choice(profile, passive) {
+            if let Some(session) = self.active.peek_mut() {
+                session.confinement.refuse(why.to_string());
+            }
+            return;
+        }
         // Read only for a session that is confined: nothing else needs the
         // tunnel's LUID or the LAN.
         if !confinement::applies_to(profile, passive) {
@@ -5451,8 +5460,9 @@ mod helper_tests {
 
     /// What the status poll says about IPv4 after a full-tunnel connect,
     /// per engine: confined on Xray and OpenVPN; not said on WireGuard
-    /// (wireguard.exe's own kill switch, K8) or IKEv2 (not until its own
-    /// proof); not said in Custom mode on any engine.
+    /// (wireguard.exe's own kill switch, K8); not confined, and said so, on
+    /// IKEv2 (not until its own proof); not said in Custom mode on any
+    /// engine.
     #[test]
     fn status_reports_ipv4_confined_for_xray_and_openvpn_none_for_wireguard() {
         let node = Ipv4Addr::new(203, 0, 113, 7);
@@ -5467,13 +5477,13 @@ mod helper_tests {
             ("SHADOWSOCKS", shadowsocks, Some(true)),
             ("OPENVPN", openvpn_profile(), Some(true)),
             ("WIREGUARD", wireguard_profile(), None),
-            ("IKEV2", test_profile(), None),
+            ("IKEV2", test_profile(), Some(false)),
         ] {
             let (mut engines, fake, dir) = engines_with_engine_files(&format!("confined-{protocol}"));
             engines.begin_test_session_for(&profile, protocol, engine_stand_in());
             engines.confine_if_needed(&profile, false, vec![node]);
             assert_eq!(engines.ipv4_confined(), expected, "{protocol}");
-            assert_eq!(engines.confinement_problem(), None, "{protocol}");
+            assert_eq!(engines.confinement_problem().is_some(), expected == Some(false), "{protocol}");
             let installs = fake.installs.lock().unwrap().clone();
             assert_eq!(installs.len(), usize::from(expected == Some(true)), "{protocol}");
             if let Some(plan) = installs.first() {
@@ -5501,6 +5511,34 @@ mod helper_tests {
             end_test_session(&mut engines);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// An IKEv2 full tunnel is not confined -- its plan stays off until its
+    /// own VM gate passes -- and the status says so, with the reason,
+    /// rather than nothing. Nothing is what the app reads as "not a
+    /// session this applies to", and it then claimed "You're protected"
+    /// over a tunnel that has no kill switch of its own: P0-D's leak --
+    /// a connection opened before Connect going on by the physical adapter
+    /// -- and sockets bound to that adapter, unrefused. WireGuard (its own
+    /// kill switch) and Custom mode stay unsaid; IKEv2 still connects and
+    /// carries as before, nothing is installed for it.
+    #[test]
+    fn an_ikev2_full_tunnel_says_it_is_not_confined() {
+        let (mut engines, fake, dir) = engines_with_engine_files("ikev2-unconfined");
+        engines.begin_test_session_for(&test_profile(), "IKEV2", engine_stand_in());
+        engines.confine_if_needed(&test_profile(), false, Vec::new());
+        assert_eq!(engines.ipv4_confined(), Some(false), "IKEv2 full tunnel");
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("IKEv2")), "{:?}", engines.confinement_problem());
+        assert!(fake.installs.lock().unwrap().is_empty(), "nothing is installed for IKEv2");
+        assert!(engines.has_session());
+        end_test_session(&mut engines);
+
+        // Custom mode on IKEv2: not confined by design, and not said.
+        engines.begin_test_session_for(&test_profile(), "IKEV2", engine_stand_in());
+        engines.confine_if_needed(&test_profile(), true, Vec::new());
+        assert_eq!(engines.ipv4_confined(), None, "IKEv2 in Custom mode");
+        end_test_session(&mut engines);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The owner's decision (d): filters that will not go in leave the

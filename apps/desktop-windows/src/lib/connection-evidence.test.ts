@@ -15,6 +15,7 @@ import {
   showsIpv6Escape,
   stateFromStatus,
   type VpnStatus,
+  unconfinedLine,
   warnsUnconfined,
 } from "./connection-evidence";
 import type { EgressVerdict } from "./egress";
@@ -544,6 +545,18 @@ describe("IPv4 confined to the tunnel", () => {
     for (const ipv4Confined of [false, true, null, undefined]) {
       expect(warnsUnconfined(status({ ipv4Confined }), true), `custom, ${ipv4Confined}`).toBe(false);
     }
+  });
+
+  // Built-in (IKEv2) is not confined by choice until its own proof, and
+  // the service now says so (`ipv4Confined: false`). "Disconnect and
+  // reconnect to try again" would send the customer round a loop that
+  // cannot end, so its line names the reason and the way out.
+  it("names Built-in's own reason, which reconnecting cannot change", () => {
+    expect(unconfinedLine(status({ protocol: "IKEV2", ipv4Confined: false }))).toBe("dash.ipv4NotConfinedIkev2");
+    for (const protocol of ["XRAY_VLESS_REALITY", "XRAY_TROJAN", "SHADOWSOCKS", "OPENVPN"]) {
+      expect(unconfinedLine(status({ protocol, ipv4Confined: false })), protocol).toBe("dash.ipv4NotConfined");
+    }
+    expect(unconfinedLine(null)).toBe("dash.ipv4NotConfined");
   });
 
   it("never says 'protected' over a full tunnel that is not confined", () => {

@@ -37,6 +37,7 @@ import {
   stateFromStatus,
   type HeadlineTone,
   type VpnStatus,
+  unconfinedLine,
   warnsUnconfined,
 } from "../lib/connection-evidence";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
@@ -137,7 +138,7 @@ import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { RepairNetwork } from "../components/RepairNetwork";
 import { DeviceSlotCard } from "../components/DeviceSlotCard";
-import { useI18n } from "../lib/i18n";
+import { useI18n, type TranslationKey } from "../lib/i18n";
 import { failureText, offlineReason as reasonFor, offlineText, type OfflineReason, type ShownFailure } from "../lib/failure-text";
 import { STILL_TRYING_AFTER_MS, useStillTrying } from "../lib/still-trying";
 import { onBackendAnswer } from "../lib/api";
@@ -733,6 +734,9 @@ export function Dashboard({
    * IPv4 to it and does not (`warnsUnconfined`): the headline then says
    * "connected, not fully protected", and a line says what is not covered. */
   const [ipv4NotConfined, setIpv4NotConfined] = useState(false);
+  /** Which words say what is not covered (`unconfinedLine`): Built-in's
+   * own, where reconnecting changes nothing, or the general one. */
+  const [unconfinedKey, setUnconfinedKey] = useState<TranslationKey>("dash.ipv4NotConfined");
   /** Whether this machine could reach public IPv6 *before* connecting.
    *
    * The whole point of taking it beforehand: most machines cannot reach
@@ -933,6 +937,7 @@ export function Dashboard({
     setIpv6Blocked(Boolean(status.ipv6Blocked));
     setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
     setConfinedAround(status.ipv4Confined === true);
+    setUnconfinedKey(unconfinedLine(status));
     const observed = stateFromStatus(status);
     followTunnelForEndpoints(observed);
     return observed;
@@ -1873,6 +1878,7 @@ export function Dashboard({
       setIpv6Blocked(Boolean(status.ipv6Blocked));
       setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
       setConfinedAround(status.ipv4Confined === true);
+      setUnconfinedKey(unconfinedLine(status));
       const fromStatus = stateFromStatus(status);
 
       if (fromStatus === "disconnected") {
@@ -3090,6 +3096,7 @@ export function Dashboard({
               .then((status) => {
                 setConfinedAround(status.ipv4Confined === true);
                 setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
+                setUnconfinedKey(unconfinedLine(status));
               })
               .catch(() => undefined);
             // Only the last rung can use an answer from an endpoint other
@@ -3862,10 +3869,12 @@ export function Dashboard({
                           as the DNS line above -- traffic tunnelled, one
                           way around it open -- so the same styling. The
                           headline says "not fully protected" with it;
-                          this says what is not covered. Never in Custom
-                          mode, on WireGuard or on IKEv2 (`warnsUnconfined`). */}
+                          this says what is not covered -- in Built-in's
+                          own words on IKEv2, which is not confined by
+                          choice (`unconfinedLine`). Never in Custom mode
+                          or on WireGuard (`warnsUnconfined`). */}
                       {isTunnelUp(connectionState) && ipv4NotConfined ? (
-                        <p className="mt-1 text-xs text-destructive">{t("dash.ipv4NotConfined")}</p>
+                        <p className="mt-1 text-xs text-destructive">{t(unconfinedKey)}</p>
                       ) : null}
 
                       {/* Not an error, and deliberately not styled as

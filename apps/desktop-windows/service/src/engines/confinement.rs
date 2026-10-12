@@ -224,6 +224,27 @@ pub fn applies_to(profile: &ConnectProfile, passive: bool) -> bool {
     applies(profile, passive, IKEV2_CONFINED)
 }
 
+/// Why a full tunnel with no kill switch of its own goes unconfined by
+/// this build's choice, if it does: IKEv2, while [`IKEV2_CONFINED`] is off.
+/// The status says so -- `ipv4_confined: false`, with this -- rather than
+/// nothing, which the app reads as "a session this does not apply to" and
+/// answers with "You're protected". WireGuard is not here: wireguard.exe
+/// brings its own kill switch (K8). Nor is Custom mode, not confined by
+/// design on any engine.
+pub fn not_confined_by_choice(profile: &ConnectProfile, passive: bool) -> Option<&'static str> {
+    not_confined_with(profile, passive, IKEV2_CONFINED)
+}
+
+fn not_confined_with(profile: &ConnectProfile, passive: bool, ikev2: bool) -> Option<&'static str> {
+    match profile {
+        ConnectProfile::Ikev2(_) if !passive && !ikev2 => Some(
+            "IKEv2's IPv4 confinement is not switched on in this version -- it waits on its own proof -- \
+             so connections outside the tunnel are not refused",
+        ),
+        _ => None,
+    }
+}
+
 fn applies(profile: &ConnectProfile, passive: bool, ikev2: bool) -> bool {
     use ConnectProfile as P;
     !passive
@@ -1788,6 +1809,20 @@ mod tests {
     fn ikev2_plan_enabled_flag_default_off_until_proven() {
         assert!(!IKEV2_CONFINED, "IKEv2's confinement has not passed its VM gate");
         assert_eq!(plan_for(&ikev2(), false, inputs(None, vec![node()])), None);
+    }
+
+    /// Not confined by choice is said, for the one full tunnel that has it:
+    /// IKEv2 while its plan is off. Nothing for WireGuard, Custom mode, the
+    /// engines that are confined, or IKEv2 once its plan is on.
+    #[test]
+    fn only_ikev2_is_unconfined_by_choice_and_only_while_its_plan_is_off() {
+        assert!(not_confined_with(&ikev2(), false, false).is_some_and(|why| why.contains("IKEv2")));
+        assert_eq!(not_confined_with(&ikev2(), false, true), None, "once its plan is on");
+        assert_eq!(not_confined_with(&ikev2(), true, false), None, "Custom mode");
+        for profile in every_profile().into_iter().filter(|p| !matches!(p, ConnectProfile::Ikev2(_))) {
+            assert_eq!(not_confined_with(&profile, false, false), None, "{profile:?}");
+        }
+        assert_eq!(not_confined_by_choice(&ikev2(), false).is_some(), !IKEV2_CONFINED);
     }
 
     /// wireguard.exe arms its own kill switch, and two providers' IPv4

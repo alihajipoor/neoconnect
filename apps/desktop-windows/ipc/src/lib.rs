@@ -1262,9 +1262,10 @@ pub enum Response {
         ///
         /// `None` is not "unconfined". It is a session this does not apply
         /// to -- Custom mode; WireGuard, whose wireguard.exe brings its own
-        /// kill switch; IKEv2 until its own proof -- or a service too old to
-        /// say, and the app shows nothing for it. `Some(false)` is a full
-        /// tunnel that should be confined and is not: the tunnel is up and
+        /// kill switch -- or a service too old to say, and the app shows
+        /// nothing for it. `Some(false)` is a full tunnel that is not
+        /// confined: one whose confinement failed or was let go of, or IKEv2,
+        /// unconfined by choice until its own proof. The tunnel is up and
         /// carrying, and the app must not claim full protection over it --
         /// it says so in words, in the customer's language.
         #[serde(default, skip_serializing_if = "Option::is_none")]

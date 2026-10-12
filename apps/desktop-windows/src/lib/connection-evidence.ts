@@ -113,10 +113,11 @@ export type VpnStatus = {
    *
    * `null`, or absent from an older service, is not "unconfined": it is a
    * session this does not apply to -- Custom mode; WireGuard, whose own
-   * kill switch does the same; IKEv2 for now -- and nothing is shown.
-   * `false` is a full tunnel that should be confined and is not: the
-   * tunnel carries traffic, and the screen must not claim full protection
-   * over it (`warnsUnconfined`). */
+   * kill switch does the same -- and nothing is shown. `false` is a full
+   * tunnel that is not confined: one whose confinement failed or was let
+   * go of, or Built-in (IKEv2), not confined by choice until its own
+   * proof. The screen must not claim full protection over it
+   * (`warnsUnconfined`, `unconfinedLine`). */
   ipv4Confined?: boolean | null;
   /** Why not, when `ipv4Confined` is false. English, for support; never
    * the words the customer is shown. */
@@ -467,7 +468,7 @@ export function droppedUnseen(
  * leaves the tunnel up -- it carries traffic -- and the screen must never
  * claim full protection over it. Only the service's `false` warns:
  * `true` is the claim made good, `null` is a session it does not apply
- * to (WireGuard, IKEv2), and an older service says nothing at all. Custom
+ * to (WireGuard), and an older service says nothing at all. Custom
  * mode never warns: it is not confined by design, on any engine, and says
  * what it does carry in its own words. */
 export function warnsUnconfined(
@@ -475,6 +476,16 @@ export function warnsUnconfined(
   customMode: boolean,
 ): boolean {
   return !customMode && status?.ipv4Confined === false;
+}
+
+/** Which words say what is not covered, when `warnsUnconfined` holds.
+ *
+ * Built-in (IKEv2) is not confined by choice in this version -- its plan
+ * waits on its own proof -- so reconnecting changes nothing there, and its
+ * line says so and points at the protocols that are held. Every other
+ * protocol that warns has a confinement that failed or was let go of. */
+export function unconfinedLine(status: Pick<VpnStatus, "protocol"> | null): TranslationKey {
+  return status?.protocol === "IKEV2" ? "dash.ipv4NotConfinedIkev2" : "dash.ipv4NotConfined";
 }
 
 /** How the headline is coloured. Mapped to classes by the dashboard. */

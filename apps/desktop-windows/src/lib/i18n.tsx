@@ -278,10 +278,16 @@ const en = {
   // rest of this computer's connections are not held to it, so it must
   // not read as "protected" either. What is not covered is said plainly:
   // programs that send straight over the network, and connections opened
-  // before Connect. Never shown in Custom mode, on WireGuard (its own
-  // kill switch does this) or on IKEv2.
+  // before Connect. Never shown in Custom mode or on WireGuard (its own
+  // kill switch does this); Built-in has a line of its own below.
   "dash.ipv4NotConfined":
     "Your traffic is going through the VPN, but Neoxify couldn't stop other connections on this computer from going around it. Programs that send straight over your network, and connections opened before you connected, may still be seen by your network. Disconnect and reconnect to try again; if it keeps happening, tell support.",
+  // The same line for Built-in (IKEv2), which is not confined by choice
+  // in this version: its plan waits on its own proof, so reconnecting
+  // changes nothing, and the way to full protection is another protocol.
+  // The service says so with `ipv4_confined: false` (unconfinedLine).
+  "dash.ipv4NotConfinedIkev2":
+    "Built-in uses this device's own VPN, and Neoxify can't yet stop other connections on this computer from going around it. Programs that send straight over your network, and connections opened before you connected, may still be seen by your network. For full protection, use another protocol.",
   // Shown when the customer selected an application that was already
   // open. Custom mode routes the connections a program makes *after* it
   // is selected; the ones it already held cannot be moved, because a
@@ -1230,6 +1236,8 @@ const fa: Record<TranslationKey, string> = {
     "ترافیک شما از VPN عبور می‌کند، اما Neoxify نتوانست درخواست‌های DNS این دستگاه را از داخل آن بفرستد. سرویس‌دهنده اینترنت شما همچنان می‌تواند به این درخواست‌ها پاسخ بدهد و روی شبکه فیلترشده این پاسخ‌ها اغلب نادرست هستند — بنابراین ممکن است بعضی سایت‌ها همچنان باز نشوند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، از «ترمیم شبکه» استفاده کنید.",
   "dash.ipv4NotConfined":
     "ترافیک شما از VPN عبور می‌کند، اما Neoxify نتوانست جلوی اتصال‌های دیگر این کامپیوتر را بگیرد که از کنار VPN عبور می‌کنند. برنامه‌هایی که مستقیماً از طریق شبکه شما ارسال می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است همچنان برای شبکه‌تان قابل مشاهده باشند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
+  "dash.ipv4NotConfinedIkev2":
+    "پروتکل Built-in از VPN خود این دستگاه استفاده می‌کند و Neoxify هنوز نمی‌تواند جلوی اتصال‌های دیگر این کامپیوتر را بگیرد که از کنار آن عبور می‌کنند. برنامه‌هایی که مستقیماً از طریق شبکه شما ارسال می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است همچنان برای شبکه‌تان قابل مشاهده باشند. برای محافظت کامل، از پروتکل دیگری استفاده کنید.",
   "dash.splitTunnelRestartNeeded":
     "‏{apps} پیش از انتخاب شما باز بود. اتصال‌هایی که از این پس برقرار می‌کند از VPN عبور می‌کنند، اما اتصال‌هایی که از قبل داشته عبور نمی‌کنند — این‌ها را نمی‌توان بدون قطع شدن جابه‌جا کرد. برای اینکه همه ترافیک آن از VPN عبور کند، برنامه را ببندید و دوباره باز کنید.",
   "voucher.title": "کد هدیه دارید؟",

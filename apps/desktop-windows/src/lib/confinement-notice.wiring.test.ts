@@ -48,6 +48,13 @@ describe("the IPv4 confinement warning", () => {
 
   it("is shown in words while the tunnel is up", () => {
     expect(dashboard).toContain('{isTunnelUp(connectionState) && ipv4NotConfined ? (');
-    expect(dashboard).toContain('t("dash.ipv4NotConfined")');
+    expect(dashboard).toContain("t(unconfinedKey)");
+  });
+
+  it("takes its words from the tested rule on every status the screen reads", () => {
+    const reads = dashboard.match(/setIpv4NotConfined\(warnsUnconfined\(status, Boolean\(status\.splitTunnelActive\)\)\);/g) ?? [];
+    expect(reads.length).toBeGreaterThan(0);
+    const worded = dashboard.match(/setUnconfinedKey\(unconfinedLine\(status\)\);/g) ?? [];
+    expect(worded.length).toBe(reads.length);
   });
 });
