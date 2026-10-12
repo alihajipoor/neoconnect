@@ -6187,7 +6187,8 @@ is skipped for the hedged walk.
 ## 2026-10-11 — desktop capture, phases 1 and 2 (branch `claude/desktop-capture`, not merged, not pushed)
 
 **Status:** in code and in tests on this PC; **no VM run for this
-branch**. Commits `ccde938..c0b516e` on `origin/main` (93b5d49), this
+branch** when written -- `d16be5c` was run in the VM on 2026-10-12, see
+that entry. Commits `ccde938..c0b516e` on `origin/main` (93b5d49), this
 entry (`cbc72ca`), then the review round below (`be5b475..bb2c89c`), the
 second one (`64039ee..28d59aa`), and the two commits P0 gated
 (`08f2044`, `db381bb`; see the last section).
@@ -6351,6 +6352,8 @@ Gaps stated rather than closed:
 - **The lookups between the rule and the redirect** still leave in clear
   text to 1.1.1.1 for those seconds, on every engine; the flush once the
   redirect runs only stops a hijacked answer from being served after.
+  (Seen at the NIC in the VM on 2026-10-12; since `878eb74` the rule goes
+  in after the redirect -- see that entry.)
 
 **The second review round.** Four reviewers read `be5b475..bb2c89c`; the
 routes and the hunt found nothing above low. Three findings were fixed
@@ -6428,7 +6431,7 @@ the test adapter, a leftover host route).
 - **A, the 1.5-3 s dead window after connect: duplicate-address
   detection.** On Stealth and Compatible the tunnel address stayed
   Tentative for 3.06-3.55 s, until 1.6-2.8 s after `vpn_connect` returned.
-  Every connect in that time failed within 2 ms with **10065**
+  Every connect in that time failed at once (0-5 ms) with **10065**
   (WSAEHOSTUNREACH), not the 10049 the design predicted, 36-53 per run, and
   in all five runs with the window the last failure and the first success
   fell inside the poll where the address turned Preferred. `DadTransmits`
@@ -6475,8 +6478,8 @@ the test adapter, a leftover host route).
 - **E, the leftover host route reproduces on 0.9.48:** every Compatible
   session left a host route to the node through the guest's gateway after
   Disconnect; a later Stealth session to the same node removed it. That is
-  what 1.3 and 1.4 on this branch address, and they have not been run in
-  the VM yet.
+  what 1.3 and 1.4 on this branch address; run in the VM on 2026-10-12
+  (see that entry).
 - Also seen once: the first connect after a Disconnect got no answer from
   the service for 66.8 s (the app said the service did not answer within
   45 s), and the app's retry then connected in 2.75 s and verified the
@@ -6525,3 +6528,139 @@ undone); Custom mode on either engine, where the split tunnel's own wait
 for a bindable address already ran; IKEv2 (A, B and E not measured, and
 not touched); for B, inbound, Java, and WireGuard with our block beside
 wireguard.exe's; for D, IPv6 TCP. Beyond the VM: everything listed above.
+
+## 2026-10-12 — desktop capture: `d16be5c` in the VM, the audit, and three fixes (same branch, not merged, not pushed)
+
+**Status:** `d16be5c` was built, installed in `Neoxify-Test` (installed
+service's hash and the page's bundle name both the build's) and run
+against the design's P1 and P2 gates, with pktmon at the NIC from before
+Connect, a 1 s owner sampler, a readiness prober and Filtering Platform
+auditing. An audit then re-read the raw evidence. Two gates failed and one
+claim was contradicted; the three fixes for them are in code and in tests
+on this PC (`1a8e534`, `0d8f089`, `878eb74`) and **have not been run in the
+VM**. The captures and analyses are kept outside the repo. The guest runs
+the branch build now, not 0.9.48.
+
+What the run showed, with the audit's corrections:
+
+- **Leftover host routes (1.1-1.4): none after Disconnect** on any engine
+  -- all five Xray protocols, OpenVPN, WireGuard, IKEv2 -- nor in 20
+  readiness repeats. A service killed mid-Compatible was restarted by the
+  service manager, ended the orphaned openvpn.exe and replayed the ledger;
+  nothing was left. Leftovers made by 0.9.48 survived the upgrade and were
+  removed by the next connect before xray.exe read its config. Weaker than
+  they look: the OpenVPN two-server check took no snapshot between the
+  sessions (the first route going at its own Disconnect is inferred), and
+  Xray onto the node right after Compatible found no host route there to
+  delete, so delete-before-add was not exercised. The uplink took Windows'
+  best route past a decoy adapter that was first in adapter order; that
+  the old rule would have picked the decoy is read from the adapter
+  listing, not run on 0.9.48.
+- **Dead window after connect (1.6): gone.** In 14 captured Xray and
+  OpenVPN connects the address was never Tentative and `DadTransmits` was
+  0; the prober's first connection through the tunnel succeeded before
+  `vpn_connect` returned. The app's first health check after the connect
+  answered 20 of 20 times with the node's exit. (A 15th capture, the
+  network-loss run, measured from a connect that failed and is left out.)
+  The 4 s cap was never reached, so its cleanup.log line is unseen.
+- **Full tunnel, all 8 protocols:** protected, exit address the node's, 0
+  global IPv6 and 0 port-53 frames at the NIC while protected. WireGuard's
+  forced IPv6 was refused on the PC in at most 37 ms, 40 of 40; IKEv2 the
+  same. Custom mode was run in one direction only ("only selected apps",
+  on WireGuard, OpenVPN and Stealth): the selected app exited at the node,
+  an unselected one at the guest's own address.
+- **P2.1:** no frames to the API fronts at the NIC from Connect + 3.5 s to
+  Disconnect in 19 captures -- but P0 saw none on 0.9.48 either, so this
+  is the effect absent, not a fix measured. **P2.3** was not exercised: the
+  preset mirror was never asked during the session.
+- **Failed, P2.2: the app's own connections on the physical address while
+  protected,** 2 runs of 20 -- keep-alives every 15 s to node mirrors, until
+  the servers' idle timeout. Traced in one run's app trace: right after a
+  Disconnect the app raced the health check across the endpoints and
+  stopped the losers; seven answered 200 after the stop, five of them from
+  node mirrors, and only three bodies were ever released. The five were the
+  five connections at the NIC. Fixed by `1a8e534`, below.
+- **Failed, P1.3's honesty check:** with the guest's adapter switched off
+  as Connect was pressed, the service refused every rung before dialling
+  ("no network connection with a gateway was found"); once the adapter was
+  back the pass landed in another country and the screen said "Couldn't
+  reach fi-finland" about a server nothing had asked. Fixed by `0d8f089`.
+- **Contradicted, Custom-mode DNS:** "no other port-53 frame left the NIC
+  during the sessions" was not so. During the connect itself, lookups
+  pinned to 1.1.1.1 left by the physical adapter in clear text -- WireGuard
+  from 2.80 to 1.73 s before `vpn_connect` returned (new with W2), Xray from
+  1.58 to 0.97 s. Fixed by `878eb74`. Unselected applications' lookups
+  through the DNS Client went into the tunnel too, which is W2's stated
+  trade-off; nslookup's own query to the router went to the router.
+- Also seen: four Windows "VPN Reconnect" filters (not ours) appeared with
+  the IKEv2 run and stayed. The prove step's build left the real seed
+  bundle in the worktree (pnpm test then patched the build-patched config
+  files from it) and its frontend output carrying it; both are gone, the
+  placeholder is back, and `git status` is clean.
+
+**The fixes.** Each commit message carries the detail.
+
+- **`1a8e534`, late answers let go of.** In the HTTP plugin 2.5.9 a body
+  hears an abort only through a listener on its own stream, which does not
+  exist until the answer does; an abort sent while the answer was on its
+  way was never heard, and fetch() handed the 200 back with nothing to free
+  it. The pnpm patch now drops the body and rejects with an AbortError when
+  the signal has already fired as the answer arrives; and `staggeredRace`
+  lets go of the body of any answer that arrives after the race was decided
+  (still listed as an answer). An answer that lands after our own deadline
+  or block-page abort now fails as the abort said, where it used to be
+  accepted.
+- **`0d8f089`, a server named unreachable only if it was dialled and
+  failed.** The ladder records what each failed rung did with its route --
+  dialled, refused for want of a network, or failed otherwise -- and the
+  line is chosen from that (`failover-notice.ts`). New sentences: "No
+  network connection at first, so {from} wasn't tried. Now on {to} over
+  {protocol}", "No network connection at first. Now using {protocol}"
+  (where "your usual protocol didn't get through" would make the same claim
+  about a protocol), and, when the whole pass fails that way, "No network
+  connection. Check that this device is online, then try again." Persian
+  for each. The service's sentence is its own kind, `noNetwork`: no dial
+  against the route, outcome OTHER. A server whose rung failed for a
+  reason that is not the network's is no longer called unreachable either;
+  it gets "Used {to} ... not {from}".
+- **`878eb74`, Custom mode's DNS pin after the redirect.** No engine puts
+  Custom mode's rule in inside its own connect any more (Xray and IKEv2
+  keep a full tunnel's, through `dns::rule_at_connect`); it goes in from
+  `start_split_tunnel` once the redirect is up, then the cache is flushed.
+  A list switched between "only these" and "all except these" while
+  connected takes it out before the redirect restarts and puts it back
+  with it. In the gap the lookups now go to the network's own resolver, as
+  before Connect -- still clear text, but no longer pinned to 1.1.1.1 under
+  our rule with nothing to carry them.
+
+**Proven -- tests on this PC:** desktop `cargo test --workspace` 50, 59,
+563 (7 ignored); `cargo check --workspace --all-targets` with no new
+warnings; desktop `pnpm test` 1474 / 86 files and `pnpm typecheck`; mobile
+`pnpm test` 239 / 16 and `tsc`. Each new test failed first -- on the old
+patch, on a fetch behaving as the old plugin did, on the old dashboard, or
+on a stub standing for today's behaviour -- with 32-way variants for the
+race release (32 health races at once) and the pin (32 sessions pinning,
+giving back, unpinning and pinning again). The audit's own reproduction of
+the plugin defect now gives one body release and an AbortError where it
+gave none and a 200.
+
+**Unverified:**
+
+- None of the three fixes has run in the VM. P2.2 was intermittent (2 of
+  20), so a clean run would need many repeats to mean anything; that the
+  connections then close at the NIC rests on the plugin's
+  `fetch_cancel_body`, read in its source.
+- Only the Xray uplink plan's no-network sentence is recognised. With no
+  network, WireGuard, OpenVPN and IKEv2 fail in other words (a handshake
+  that never comes, a RAS error), which still read as a server that did not
+  answer. On this branch the sentence means Windows had no usable route and
+  no adapter with a gateway; on 0.9.48 it also met PPP uplinks.
+- No Custom-mode capture of `878eb74`; nor the "all except these"
+  direction, the engine-kill checks under Custom mode, or IKEv2 in Custom
+  mode, all of which the run skipped.
+- Still open from the run: an uplink that changes during an OpenVPN
+  connect, a service killed while openvpn.exe is still connecting, raw ESP
+  without NAT, and the 66.8 s service stall P0 saw once. Beyond the VM: a
+  real IPv6 path, a censored Iranian line, PPPoE, Wi-Fi roaming and
+  sleep/resume, MTU below 1500, Mobile Hotspot, WSL2, Hyper-V and Docker,
+  another VPN installed, phones.
