@@ -394,19 +394,30 @@ fn lan_plumbing() -> [Prefix; 3] {
 /// refusing anything the V4 rules permit should some path classify that
 /// traffic at V6.
 pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
-    let mut v4: Vec<(u8, String, Vec<Cond>)> = vec![
-        (WEIGHT_LOOPBACK, "permit loopback".into(), vec![Cond::Loopback]),
+    // Which of the two V4 layers each permit goes in: most in both, and
+    // DHCP's client role one way to where DHCP goes and the other from
+    // wherever it answers (below).
+    #[derive(Clone, Copy, PartialEq)]
+    enum Way {
+        Both,
+        Out,
+        In,
+    }
+    let mut v4: Vec<(Way, u8, String, Vec<Cond>)> = vec![
+        (Way::Both, WEIGHT_LOOPBACK, "permit loopback".into(), vec![Cond::Loopback]),
         (
+            Way::Both,
             WEIGHT_LOOPBACK,
             "permit 127.0.0.0/8".into(),
             vec![Cond::RemoteV4(Prefix::new(Ipv4Addr::new(127, 0, 0, 0), 8))],
         ),
-        (WEIGHT_TUNNEL, "permit the tunnel".into(), vec![Cond::LocalInterface(plan.tunnel_luid)]),
+        (Way::Both, WEIGHT_TUNNEL, "permit the tunnel".into(), vec![Cond::LocalInterface(plan.tunnel_luid)]),
     ];
     match &plan.transport {
         Transport::Xray { exe, nodes } => {
             for node in nodes {
                 v4.push((
+                    Way::Both,
                     WEIGHT_TRANSPORT,
                     format!("permit xray.exe to its server {node}"),
                     vec![Cond::App(exe.clone()), Cond::RemoteV4(Prefix::host(*node))],
@@ -414,6 +425,7 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
             }
         }
         Transport::Openvpn { exe, node, port, protocol } => v4.push((
+            Way::Both,
             WEIGHT_TRANSPORT,
             format!("permit openvpn.exe to its server {node}:{port}"),
             vec![
@@ -426,6 +438,7 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
         Transport::Ikev2 { nodes } => {
             for port in [500, 4500] {
                 v4.push((
+                    Way::Both,
                     WEIGHT_TRANSPORT,
                     format!("permit IKE from local UDP {port}"),
                     vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(port)],
@@ -433,6 +446,7 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
             }
             for node in nodes {
                 v4.push((
+                    Way::Both,
                     WEIGHT_TRANSPORT,
                     format!("permit ESP to its server {node}"),
                     vec![Cond::Protocol(protocol::ESP), Cond::RemoteV4(Prefix::host(*node))],
@@ -440,12 +454,22 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
             }
         }
     }
-    // DHCP, by its ports and to where DHCP goes: the limited broadcast;
-    // 0.0.0.0, the address a client with none asks from; and the servers
-    // the machine's adapters lease from, which a relay or an ISP puts off
-    // the LAN and a renewal asks directly. The LAN itself is the LAN
-    // permit's. By ports alone, any program could bind UDP 67 or 68 and
-    // trade with any internet host around the tunnel.
+    // DHCP, by its ports. Out, as a client, to where DHCP goes: the limited
+    // broadcast; 0.0.0.0; and the servers the machine's adapters lease
+    // from, which a relay or an ISP puts off the LAN and a renewal asks
+    // directly. The LAN itself is the LAN permit's. By ports alone, any
+    // program could bind UDP 68 and send to any internet host's 67 around
+    // the tunnel.
+    //
+    // In, as a client, from any server: an OFFER or an ACK comes from the
+    // server's own address, and a server first seen after Connect -- the
+    // network a laptop wakes on or roams to -- is on no prefix the plan
+    // knew. Held to the servers known at Connect (5dea914), that lease was
+    // refused and the PC stayed offline until the failover let go of the
+    // filters, then waited minutes for Windows to try DHCP again. This is
+    // wireguard.exe's own shape for the same reason: answers to local 68
+    // from remote 67, from anywhere. A program that binds 68 can receive
+    // from a remote 67, and still send only where DHCP goes.
     let mut dhcp_remotes = vec![Prefix::host(Ipv4Addr::BROADCAST), Prefix::host(Ipv4Addr::UNSPECIFIED)];
     for server in &plan.dhcp_servers {
         let host = Prefix::host(*server);
@@ -455,6 +479,7 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
     }
     for remote in dhcp_remotes {
         v4.push((
+            Way::Out,
             WEIGHT_DHCP,
             format!("permit DHCP with {}", remote.addr),
             vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67), Cond::RemoteV4(remote)],
@@ -462,11 +487,18 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
         // And as a DHCP server: Mobile Hotspot, a Hyper-V or WSL switch.
         // Their clients ask from 0.0.0.0, which no LAN prefix names.
         v4.push((
+            Way::Both,
             WEIGHT_DHCP,
             format!("permit DHCP to this PC's own DHCP server with {}", remote.addr),
             vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(67), Cond::RemotePort(68), Cond::RemoteV4(remote)],
         ));
     }
+    v4.push((
+        Way::In,
+        WEIGHT_DHCP,
+        "permit DHCP answers to this PC from any DHCP server".into(),
+        vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67)],
+    ));
     if let Lan::Allowed(prefixes) = &plan.lan {
         let mut lan: Vec<Prefix> = Vec::new();
         for prefix in prefixes.iter().copied().chain(lan_plumbing()) {
@@ -475,13 +507,21 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
             }
         }
         for prefix in lan {
-            v4.push((WEIGHT_LAN, format!("permit the LAN {}/{}", prefix.addr, prefix.len), vec![Cond::RemoteV4(prefix)]));
+            v4.push((Way::Both, WEIGHT_LAN, format!("permit the LAN {}/{}", prefix.addr, prefix.len), vec![Cond::RemoteV4(prefix)]));
         }
     }
+    let goes_in = |way: Way, layer: Layer| match way {
+        Way::Both => true,
+        Way::Out => matches!(layer, Layer::ConnectV4 | Layer::ConnectV6),
+        Way::In => matches!(layer, Layer::RecvAcceptV4 | Layer::RecvAcceptV6),
+    };
 
     let mut specs = Vec::new();
     for layer in [Layer::ConnectV4, Layer::RecvAcceptV4] {
-        for (weight, name, conds) in &v4 {
+        for (way, weight, name, conds) in &v4 {
+            if !goes_in(*way, layer) {
+                continue;
+            }
             specs.push(FilterSpec {
                 name: format!("Neoxify: {name} ({})", layer.direction()),
                 layer,
@@ -516,13 +556,16 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
         });
     }
     for layer in [Layer::ConnectV6, Layer::RecvAcceptV6] {
-        for (weight, name, conds) in &v4 {
+        for (way, weight, name, conds) in &v4 {
+            if !goes_in(*way, layer) {
+                continue;
+            }
             specs.push(FilterSpec {
                 name: format!("Neoxify: {name}, IPv4-mapped ({})", layer.direction()),
                 layer,
                 action: Action::Permit,
                 weight: *weight,
-                conds: conds.iter().map(mapped).collect(),
+                conds: v6_twin(conds),
             });
         }
         // DNS on any IPv6 address, not only IPv4-mapped: the router's
@@ -563,6 +606,20 @@ fn mapped(cond: &Cond) -> Cond {
     }
 }
 
+/// A V4 permit's conditions at the V6 layer it pairs with: its addresses
+/// IPv4-mapped, and a permit that names no address, interface or loopback
+/// -- DHCP's answers from any server, IKE by its local ports -- held to
+/// the IPv4-mapped range, so this sublayer permits no native IPv6 on the
+/// strength of an IPv4 rule.
+fn v6_twin(conds: &[Cond]) -> Vec<Cond> {
+    let mut twin: Vec<Cond> = conds.iter().map(mapped).collect();
+    let placed = conds.iter().any(|c| matches!(c, Cond::RemoteV4(_) | Cond::LocalInterface(_) | Cond::Loopback));
+    if !placed {
+        twin.push(Cond::RemoteV6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped(), 96));
+    }
+    twin
+}
+
 /// What [`lan_prefixes`] needs to know about an adapter.
 #[derive(Debug, Clone, Copy)]
 pub struct LanAdapter<'a> {
@@ -585,8 +642,10 @@ fn is_rfc1918(addr: Ipv4Addr) -> bool {
 
 /// The LAN, as the machine's own adapters are on it: the private on-link
 /// prefix of every up adapter that is neither ours (by name) nor another
-/// VPN's (by driver), each once. Fixed at connect -- a network joined later
-/// is refused until the next connect, a stated limitation.
+/// VPN's (by driver), each once. Read at connect, and again on every status
+/// poll while a confinement is held: a network the machine joins or roams to
+/// meanwhile is put in the plan in place of the old one (`lan_changed`,
+/// `Engines::follow_the_lan`).
 ///
 /// Only RFC 1918 addresses name a LAN: a public on-link prefix is the
 /// internet, and `100.64/10` is the carrier's network on the mobile lines
@@ -634,6 +693,18 @@ pub fn lan_dhcp_servers(adapters: &[LanAdapter], ours: &[&str]) -> Vec<Ipv4Addr>
         servers.push(server);
     }
     servers
+}
+
+/// Whether the LAN and the DHCP servers read now differ from the ones a
+/// plan permits, as sets: the same prefixes listed in another order -- the
+/// adapters enumerated differently -- are no change, and a plan whose LAN is
+/// refused has none to follow.
+pub fn lan_changed(plan: &Plan, lan: &[Prefix], dhcp_servers: &[Ipv4Addr]) -> bool {
+    let Lan::Allowed(planned) = &plan.lan else { return false };
+    let same_prefixes = |a: &[Prefix], b: &[Prefix]| a.iter().all(|p| b.contains(p)) && b.iter().all(|p| a.contains(p));
+    let same_servers =
+        |a: &[Ipv4Addr], b: &[Ipv4Addr]| a.iter().all(|s| b.contains(s)) && b.iter().all(|s| a.contains(s));
+    !(same_prefixes(planned, lan) && same_servers(&plan.dhcp_servers, dhcp_servers))
 }
 
 /// Why a confinement is let go of.
@@ -864,6 +935,11 @@ pub trait ConfinementOps: Send + Sync {
     /// under this installed plan ([`Witness`], [`run_valve`]).
     fn witness(&self, plan: &Plan, installed: &Installed) -> Witness;
     fn hold(&self) -> std::sync::Arc<Hold>;
+    /// The LAN as the machine's adapters are on it now, and the DHCP
+    /// servers they lease from (`lan_prefixes`, `lan_dhcp_servers`); `None`
+    /// when the adapters could not be listed, which is no evidence of a
+    /// change.
+    fn lan(&self) -> Option<(Vec<Prefix>, Vec<Ipv4Addr>)>;
     /// One pass of the reset at connect: established IPv4 TCP outside the
     /// tunnel, closed (`split_tunnel::OutsideTunnel` has the rules).
     fn reset(&self, rules: &crate::split_tunnel::OutsideTunnel) -> crate::split_tunnel::ResetOutcome;
@@ -919,6 +995,10 @@ impl ConfinementOps for System {
 
     fn hold(&self) -> std::sync::Arc<Hold> {
         Hold::new(&self.log_dir)
+    }
+
+    fn lan(&self) -> Option<(Vec<Prefix>, Vec<Ipv4Addr>)> {
+        super::machine_lan()
     }
 
     fn reset(&self, rules: &crate::split_tunnel::OutsideTunnel) -> crate::split_tunnel::ResetOutcome {
@@ -1923,16 +2003,25 @@ mod tests {
     /// socket's IPv4 at the V4 layers, so these are expected never to
     /// match; they are kept because the V6 block below them must not be
     /// able to refuse anything the V4 rules permit if some path does
-    /// classify that traffic at V6 (K4).
+    /// classify that traffic at V6 (K4). One that names no address, no
+    /// interface and not loopback -- DHCP's answers from any server, IKE by
+    /// its local ports -- is held to the IPv4-mapped range there: an IPv4
+    /// rule permits no native IPv6.
     #[test]
     fn every_v4_permit_has_a_mapped_v6_twin() {
-        let specs = specs(&xray_plan());
+        let mut every = specs(&xray_plan());
+        every.extend(specs(&plan_with(&ikev2(), false, inputs(None, vec![node()]), true).expect("planned").expect("built")));
+        let specs = every;
+        let mapped_range = Cond::RemoteV6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped(), 96);
         for (v4, v6) in [(Layer::ConnectV4, Layer::ConnectV6), (Layer::RecvAcceptV4, Layer::RecvAcceptV6)] {
             let permits: Vec<&FilterSpec> =
                 specs.iter().filter(|s| s.layer == v4 && s.action == Action::Permit).collect();
             assert!(!permits.is_empty());
             for permit in permits {
-                let twin: Vec<Cond> = permit.conds.iter().map(mapped_twin).collect();
+                let mut twin: Vec<Cond> = permit.conds.iter().map(mapped_twin).collect();
+                if !permit.conds.iter().any(|c| matches!(c, Cond::RemoteV4(_) | Cond::LocalInterface(_) | Cond::Loopback)) {
+                    twin.push(mapped_range.clone());
+                }
                 assert!(
                     specs.iter().any(|s| s.layer == v6
                         && s.action == Action::Permit
@@ -2006,14 +2095,19 @@ mod tests {
         }
     }
 
-    /// The tunnel is permitted by its interface, and DHCP by its ports to
-    /// the limited broadcast, 0.0.0.0 and the adapters' DHCP servers, in
-    /// both directions and in both roles: this PC as a DHCP client, and as
-    /// the DHCP server a Mobile Hotspot or a Hyper-V or WSL switch runs --
-    /// whose clients ask from 0.0.0.0, which no LAN prefix names.
+    /// The tunnel is permitted by its interface both ways. DHCP by its
+    /// ports, in both roles: this PC as the DHCP server a Mobile Hotspot or
+    /// a Hyper-V or WSL switch runs -- whose clients ask from 0.0.0.0, which
+    /// no LAN prefix names -- to and from the limited broadcast, 0.0.0.0 and
+    /// the adapters' DHCP servers; and this PC as a client, asking there,
+    /// and answered from wherever its server is: a server first seen after
+    /// Connect, on a network the PC woke on or roamed to, is on no prefix
+    /// the plan knew, and refusing its OFFER left the PC with no address
+    /// (wireguard.exe's permit is the same shape).
     #[test]
     fn the_tunnel_and_dhcp_are_permitted_both_ways() {
         let specs = specs(&xray_plan());
+        let udp = || Cond::Protocol(protocol::UDP);
         for layer in [Layer::ConnectV4, Layer::RecvAcceptV4] {
             let tunnel: Vec<Vec<Cond>> = at(&specs, layer, WEIGHT_TUNNEL).into_iter().map(|s| s.conds).collect();
             assert_eq!(tunnel, vec![vec![Cond::LocalInterface(LUID)]], "{layer:?}");
@@ -2021,11 +2115,36 @@ mod tests {
             let mut expected = Vec::new();
             for remote in [Ipv4Addr::BROADCAST, Ipv4Addr::UNSPECIFIED, isp_dhcp()] {
                 let remote = Cond::RemoteV4(Prefix::host(remote));
-                expected.push(vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67), remote.clone()]);
-                expected.push(vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(67), Cond::RemotePort(68), remote]);
+                if layer == Layer::ConnectV4 {
+                    expected.push(vec![udp(), Cond::LocalPort(68), Cond::RemotePort(67), remote.clone()]);
+                }
+                expected.push(vec![udp(), Cond::LocalPort(67), Cond::RemotePort(68), remote]);
+            }
+            if layer == Layer::RecvAcceptV4 {
+                expected.push(vec![udp(), Cond::LocalPort(68), Cond::RemotePort(67)]);
             }
             assert_eq!(dhcp, expected, "{layer:?}");
         }
+    }
+
+    /// The LAN a plan permits is followed when the network changes under a
+    /// connected session -- a new prefix, a lost one, another DHCP server --
+    /// and not when the same ones are read in another order. A plan whose
+    /// LAN is refused has none to follow.
+    #[test]
+    fn a_lan_read_again_is_a_change_only_when_its_prefixes_or_servers_differ() {
+        let home = Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let wsl = Prefix::new(Ipv4Addr::new(172, 29, 80, 0), 20);
+        let router = Ipv4Addr::new(192, 168, 1, 1);
+        let plan = Plan { lan: Lan::Allowed(vec![home, wsl]), dhcp_servers: vec![router, isp_dhcp()], ..xray_plan() };
+        assert!(!lan_changed(&plan, &[wsl, home], &[isp_dhcp(), router]), "the same, listed in another order");
+        let cafe = Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24);
+        assert!(lan_changed(&plan, &[cafe, wsl], &[Ipv4Addr::new(10, 20, 30, 1)]), "another network");
+        assert!(lan_changed(&plan, &[home], &[router, isp_dhcp()]), "a prefix gone");
+        assert!(lan_changed(&plan, &[home, wsl], &[router]), "a DHCP server gone");
+        assert!(lan_changed(&plan, &[home, wsl, cafe], &[router, isp_dhcp()]), "a prefix joined");
+        let refused = Plan { lan: Lan::Refused, ..xray_plan() };
+        assert!(!lan_changed(&refused, &[cafe], &[]), "a refused LAN has nothing to follow");
     }
 
     /// With the LAN allowed (the owner's decision (a)): the on-link
@@ -3105,14 +3224,21 @@ mod tests {
             assert!(wrong.is_empty(), "{}", wrong.join("\n"));
         }
 
-        /// DHCP is let past the block to where DHCP goes and nowhere else:
-        /// the limited broadcast, 0.0.0.0 (a client with no address yet,
-        /// asking this PC's own DHCP server), the LAN, and the DHCP servers
-        /// the machine's adapters lease from -- an ISP's or a relayed one
-        /// is off the LAN, and a lease is renewed by asking it directly.
-        /// Permitted by its ports alone, any program could bind local UDP
-        /// 67 or 68 and reach any internet host's 68 or 67 around the
-        /// tunnel, and be reached from any.
+        /// DHCP is let out to where DHCP goes and nowhere else: the limited
+        /// broadcast, 0.0.0.0 (a client with no address yet, asking this
+        /// PC's own DHCP server), the LAN, and the DHCP servers the
+        /// machine's adapters lease from -- an ISP's or a relayed one is off
+        /// the LAN, and a lease is renewed by asking it directly. Permitted
+        /// out by its ports alone, any program could bind local UDP 67 or 68
+        /// and reach any internet host's 68 or 67 around the tunnel.
+        ///
+        /// In, this PC as a client is answered from wherever its server is:
+        /// a server first seen after Connect -- the network a laptop wakes
+        /// on or roams to -- is on no prefix the plan knew, and refusing its
+        /// OFFER and ACK left the PC with no address (the regression in
+        /// 5dea914; wireguard.exe permits the same). This PC as a server is
+        /// still asked only from 0.0.0.0, the broadcast, the LAN and the
+        /// known servers.
         #[test]
         fn dhcp_goes_only_where_dhcp_goes() {
             let ours = vec![specs(&xray_plan())];
@@ -3128,10 +3254,37 @@ mod tests {
                     Verdict::Block,
                 ),
                 (
-                    "an internet host's 67 into local 68",
+                    "a DHCP server first seen after Connect answering -- a network the PC roamed to",
                     Flow {
                         layer: Layer::RecvAcceptV4,
                         local_port: 68,
+                        ..out(app(), v4(10, 20, 30, 1), 67, protocol::UDP, PHYSICAL)
+                    },
+                    Verdict::Permit,
+                ),
+                (
+                    "a relayed DHCP server first seen after Connect, off every prefix, answering",
+                    Flow {
+                        layer: Layer::RecvAcceptV4,
+                        local_port: 68,
+                        ..out(app(), v4(93, 184, 216, 34), 67, protocol::UDP, PHYSICAL)
+                    },
+                    Verdict::Permit,
+                ),
+                (
+                    "an internet host's 68 into this PC's DHCP server",
+                    Flow {
+                        layer: Layer::RecvAcceptV4,
+                        local_port: 67,
+                        ..out(app(), v4(93, 184, 216, 34), 68, protocol::UDP, PHYSICAL)
+                    },
+                    Verdict::Block,
+                ),
+                (
+                    "an internet host's 67 into a port that is not DHCP's",
+                    Flow {
+                        layer: Layer::RecvAcceptV4,
+                        local_port: 69,
                         ..out(app(), v4(93, 184, 216, 34), 67, protocol::UDP, PHYSICAL)
                     },
                     Verdict::Block,

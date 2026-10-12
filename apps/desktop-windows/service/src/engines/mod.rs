@@ -744,7 +744,7 @@ impl Engines {
         }
         let ops = Arc::clone(&self.confinement_ops);
         let luid = ops.luid(adapter_name_for(profile));
-        let (lan, dhcp_servers) = machine_lan();
+        let (lan, dhcp_servers) = ops.lan().unwrap_or_default();
         let inputs = confinement::Inputs {
             tunnel_luid: *luid.as_ref().unwrap_or(&0),
             engine_exe,
@@ -813,7 +813,7 @@ impl Engines {
         }
         let lan = match &session.confinement_plan {
             Some(plan) => confinement::lan_reachable(&plan.lan),
-            None => confinement::lan_reachable(&confinement::Lan::Allowed(machine_lan().0)),
+            None => confinement::lan_reachable(&confinement::Lan::Allowed(ops.lan().unwrap_or_default().0)),
         };
         let engine_pid = match &session.engine {
             Active::Child { child, .. } => Some(child.id()),
@@ -877,6 +877,58 @@ impl Engines {
         );
         session.confinement.release(confinement::Release::PlanError(why.clone()));
         crate::cleanup_log::note("let go of the IPv4 confinement: the tunnel adapter is gone", &why);
+    }
+
+    /// Decision (a) on a network that changes under a connected session.
+    /// The LAN and the DHCP servers a confinement permits were read at
+    /// connect; a laptop that wakes on, or roams to, another network while
+    /// the tunnel is up is on prefixes the plan never named, and its
+    /// printer, its file shares and its router's DHCP renewals there were
+    /// refused until the next connect. Read again on every status poll, and
+    /// when they differ (`confinement::lan_changed`) the plan goes in again
+    /// with them -- the new one installed before the old one is closed
+    /// (`Hold::put`), so nothing is unconfined meanwhile -- and is watched
+    /// like any plan installed. Only while a confinement is held. An
+    /// adapter list that cannot be read is no evidence, and changes
+    /// nothing; an install that fails keeps the old plan, and says so.
+    fn follow_the_lan(&mut self) {
+        let ops = Arc::clone(&self.confinement_ops);
+        let Some(session) = self.active.peek() else { return };
+        if session.confinement.confined() != Some(true) {
+            return;
+        }
+        let Some(plan) = session.confinement_plan.clone() else { return };
+        let hold = Arc::clone(&session.confinement);
+        let Some((lan, dhcp_servers)) = ops.lan() else { return };
+        if !confinement::lan_changed(&plan, &lan, &dhcp_servers) {
+            return;
+        }
+        let prefixes = lan.len();
+        let next = confinement::Plan { lan: confinement::Lan::Allowed(lan), dhcp_servers, ..plan };
+        let installed = match ops.install(&next) {
+            Ok(installed) => installed,
+            Err(why) => {
+                confinement::note(
+                    &self.config_dir,
+                    &format!("the network changed, and its LAN could not be put in the plan; the old one stays: {why}"),
+                );
+                return;
+            }
+        };
+        let witness = ops.witness(&next, &installed);
+        if !hold.put(installed) {
+            // Let go of meanwhile -- a drop report, the valve: closed at
+            // once by the put, and nothing more to do here.
+            return;
+        }
+        confinement::note(
+            &self.config_dir,
+            &format!("the network changed: the plan now permits {prefixes} on-link prefix(es) and their DHCP servers"),
+        );
+        if let Some(session) = self.active.peek_mut() {
+            session.confinement_plan = Some(next);
+        }
+        self.start_valve(witness);
     }
 
     /// Starts the plan-error valve on the live session (K5): WFP's record
@@ -2586,6 +2638,7 @@ impl Engines {
             Verdict::Reported(up, protocol, health) => {
                 if up {
                     self.let_go_if_the_tunnel_adapter_is_gone();
+                    self.follow_the_lan();
                 }
                 // OpenVPN's own log is the one measurement of its link this
                 // poll can take; the other engines answer `Unknown` here and
@@ -2866,16 +2919,17 @@ fn note_reset(log_dir: &Path, what: &str, outcome: &crate::split_tunnel::ResetOu
 
 /// The LAN as this machine's adapters are on it right now, for the IPv4
 /// confinement's LAN permit -- see `confinement::lan_prefixes` for what
-/// counts. Read at connect and fixed for the session: a network joined
-/// later is refused until the next connect. Adapters that cannot be listed
-/// give no on-link prefix, which leaves the plan's link-local, multicast
-/// and broadcast permits and refuses the rest of the LAN -- the narrower
-/// failure.
+/// counts. Read at connect, and again on every status poll while a
+/// confinement is held (`Engines::follow_the_lan`). `None` when the
+/// adapters cannot be listed: a connect then plans no on-link prefix, which
+/// leaves the plan's link-local, multicast and broadcast permits and
+/// refuses the rest of the LAN -- the narrower failure -- and a poll changes
+/// nothing.
 ///
 /// With it, the DHCP servers those same adapters lease from
 /// (`confinement::lan_dhcp_servers`), the one way DHCP leaves the LAN.
-fn machine_lan() -> (Vec<confinement::Prefix>, Vec<Ipv4Addr>) {
-    let Ok(all) = adapters::list() else { return (Vec::new(), Vec::new()) };
+fn machine_lan() -> Option<(Vec<confinement::Prefix>, Vec<Ipv4Addr>)> {
+    let all = adapters::list().ok()?;
     let lan: Vec<confinement::LanAdapter> = all
         .iter()
         .map(|a| confinement::LanAdapter {
@@ -2887,7 +2941,7 @@ fn machine_lan() -> (Vec<confinement::Prefix>, Vec<Ipv4Addr>) {
             dhcp_server: a.dhcp_server,
         })
         .collect();
-    (confinement::lan_prefixes(&lan, &OUR_ADAPTER_NAMES), confinement::lan_dhcp_servers(&lan, &OUR_ADAPTER_NAMES))
+    Some((confinement::lan_prefixes(&lan, &OUR_ADAPTER_NAMES), confinement::lan_dhcp_servers(&lan, &OUR_ADAPTER_NAMES)))
 }
 
 /// Windows' way out toward an address: the adapter and next hop, `None`
@@ -5126,6 +5180,10 @@ mod helper_tests {
         wfp_says: Arc<std::sync::Mutex<Option<String>>>,
         /// The tunnel adapter, as the test says it is: gone when set.
         tunnel_gone: std::sync::atomic::AtomicBool,
+        /// The LAN and DHCP servers the machine's adapters are on, as the
+        /// test says: none until it sets some, the plan `confine_for_test`
+        /// installs; `None` for adapters that could not be listed.
+        lan: std::sync::Mutex<Option<(Vec<confinement::Prefix>, Vec<Ipv4Addr>)>>,
     }
 
     impl FakeConfinement {
@@ -5139,6 +5197,7 @@ mod helper_tests {
                 resets: std::sync::Mutex::new(Vec::new()),
                 wfp_says: Arc::default(),
                 tunnel_gone: std::sync::atomic::AtomicBool::new(false),
+                lan: std::sync::Mutex::new(Some((Vec::new(), Vec::new()))),
             })
         }
         fn closed(&self) -> Vec<isize> {
@@ -5173,6 +5232,9 @@ mod helper_tests {
         fn reset(&self, rules: &crate::split_tunnel::OutsideTunnel) -> crate::split_tunnel::ResetOutcome {
             self.resets.lock().unwrap().push(rules.clone());
             crate::split_tunnel::ResetOutcome::default()
+        }
+        fn lan(&self) -> Option<(Vec<confinement::Prefix>, Vec<Ipv4Addr>)> {
+            self.lan.lock().unwrap().clone()
         }
         fn hold(&self) -> Arc<confinement::Hold> {
             let closed = Arc::clone(&self.closed);
@@ -5293,6 +5355,65 @@ mod helper_tests {
         fake.tunnel_gone.store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = engines.status();
         assert_eq!(fake.closed(), vec![1000], "closed once");
+        end_test_session(&mut engines);
+    }
+
+    /// Decision (a) on a network that changes under a connected session: the
+    /// status poll reads the LAN again, and a changed one goes into the plan
+    /// -- installed before the old one is closed, so the session is never
+    /// unconfined for it -- with the LUID, engine and servers as they were.
+    /// The same LAN read again, or in another order, installs nothing; an
+    /// adapter list that cannot be read changes nothing; a session no longer
+    /// confined is not confined again by it; and the one put in is the one
+    /// the session's end closes.
+    #[test]
+    fn a_network_that_changes_under_a_confined_session_is_followed() {
+        let (mut engines, fake, _) = confined_session();
+        let installs = || fake.installs.lock().unwrap().clone();
+        assert!(engines.status().0);
+        assert_eq!(installs().len(), 1, "the LAN the plan has: nothing to put in");
+
+        let cafe = confinement::Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24);
+        let cafe_dhcp = Ipv4Addr::new(10, 20, 30, 1);
+        *fake.lan.lock().unwrap() = Some((vec![cafe], vec![cafe_dhcp]));
+        assert!(engines.status().0);
+        let now = installs();
+        assert_eq!(now.len(), 2, "the new network's LAN was not put in");
+        let (first, next) = (&now[0], &now[1]);
+        assert_eq!(next.lan, confinement::Lan::Allowed(vec![cafe]));
+        assert_eq!(next.dhcp_servers, vec![cafe_dhcp]);
+        assert_eq!((next.tunnel_luid, &next.transport), (first.tunnel_luid, &first.transport), "only the LAN changes");
+        assert_eq!(fake.closed(), vec![1000], "the old one closed once the new one was in");
+        assert_eq!(engines.ipv4_confined(), Some(true));
+        assert_eq!(engines.active.peek().and_then(|s| s.confinement_plan.clone()).map(|p| p.lan), Some(confinement::Lan::Allowed(vec![cafe])));
+
+        let _ = engines.status();
+        assert_eq!(installs().len(), 2, "the same LAN put in again");
+        *fake.lan.lock().unwrap() = Some((vec![cafe], vec![cafe_dhcp, cafe_dhcp]));
+        let _ = engines.status();
+        assert_eq!(installs().len(), 2, "the same LAN, read with a server listed twice, put in again");
+        *fake.lan.lock().unwrap() = None;
+        let _ = engines.status();
+        assert_eq!(installs().len(), 2, "adapters that could not be listed changed the plan");
+        end_test_session(&mut engines);
+        assert_eq!(fake.closed(), vec![1000, 1001], "the one put in closed with the session");
+
+        // A session no longer confined is not confined again by it.
+        let (mut engines, fake, _) = confined_session();
+        engines.active.peek().unwrap().confinement.release(confinement::Release::PlanError("refused".into()));
+        *fake.lan.lock().unwrap() = Some((vec![cafe], vec![cafe_dhcp]));
+        let _ = engines.status();
+        assert_eq!(fake.installs.lock().unwrap().len(), 1, "a session let go of was confined again by a network change");
+        assert_eq!(engines.ipv4_confined(), Some(false));
+        end_test_session(&mut engines);
+
+        // An install that fails keeps the old plan in place.
+        let (mut engines, fake, _) = confined_session();
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        *fake.lan.lock().unwrap() = Some((vec![cafe], vec![cafe_dhcp]));
+        let _ = engines.status();
+        assert_eq!(engines.ipv4_confined(), Some(true), "a failed install let go of the plan that was in");
+        assert!(fake.closed().is_empty());
         end_test_session(&mut engines);
     }
 
