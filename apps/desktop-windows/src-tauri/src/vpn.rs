@@ -1737,6 +1737,177 @@ pub fn network_way_out() -> bool {
     err == 0
 }
 
+/// The machine's ways out, as a string that changes when they do: every
+/// IPv4 default route's interface and next hop, with the addresses that
+/// interface holds. The empty string is no way out at all; `None`, that
+/// the tables could not be read.
+///
+/// What the dashboard watches under a live tunnel (`lib/uplink-watch.ts`):
+/// the link dropping, a roam, a new address, a second link -- each changes
+/// this, and each is when the tunnel's own way to its server may have gone
+/// with it. Not `network_way_out`, which asks for the best route to a
+/// public address and, with a full tunnel up, finds the tunnel's.
+///
+/// Default routes only, so the tunnel's routes -- Xray's and OpenVPN's
+/// halves of the table, the host route to the node -- are not in it; a
+/// tunnel that does own a default route (IKEv2, WireGuard) is, and stays
+/// the same while it is up. Local tables only: nothing leaves the machine.
+#[tauri::command]
+pub fn network_uplinks() -> Option<String> {
+    let routes = default_routes()?;
+    let addresses = interface_addresses()?;
+    Some(uplink_fingerprint(&routes, &addresses))
+}
+
+/// `(interface, next hop)` of every IPv4 default route, as the legacy
+/// table gives them: addresses in network order, read as stored.
+fn default_routes() -> Option<Vec<(u32, u32)>> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetIpForwardTable, MIB_IPFORWARDROW, MIB_IPFORWARDTABLE};
+
+    let mut size: u32 = 0;
+    // SAFETY: a null table asks only for the size it needs.
+    let mut err = unsafe { GetIpForwardTable(std::ptr::null_mut(), &mut size, 0) };
+    // Again if the table grew between asking its size and reading it.
+    for _ in 0..3 {
+        match err {
+            ERROR_NO_DATA => return Some(Vec::new()),
+            ERROR_INSUFFICIENT_BUFFER => {}
+            _ => return None,
+        }
+        // u32s, so the buffer is aligned for the table's fields.
+        let mut buffer = vec![0u32; (size as usize + 3) / 4 + 1];
+        let table = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
+        // SAFETY: `buffer` holds at least `size` bytes, aligned for the table.
+        err = unsafe { GetIpForwardTable(table, &mut size, 0) };
+        if err == 0 {
+            // SAFETY: on success the table holds `dwNumEntries` rows inside
+            // the bytes it was given; the rows start at `table`.
+            let rows = unsafe {
+                let count = (*table).dwNumEntries as usize;
+                std::slice::from_raw_parts(std::ptr::addr_of!((*table).table) as *const MIB_IPFORWARDROW, count)
+            };
+            return Some(
+                rows.iter()
+                    .filter(|row| row.dwForwardDest == 0 && row.dwForwardMask == 0)
+                    .map(|row| (row.dwForwardIfIndex, row.dwForwardNextHop))
+                    .collect(),
+            );
+        }
+    }
+    None
+}
+
+/// `(interface, address)` of every IPv4 address on the machine.
+fn interface_addresses() -> Option<Vec<(u32, u32)>> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetIpAddrTable, MIB_IPADDRROW_XP, MIB_IPADDRTABLE};
+
+    let mut size: u32 = 0;
+    // SAFETY: as in `default_routes`.
+    let mut err = unsafe { GetIpAddrTable(std::ptr::null_mut(), &mut size, 0) };
+    for _ in 0..3 {
+        match err {
+            ERROR_NO_DATA => return Some(Vec::new()),
+            ERROR_INSUFFICIENT_BUFFER => {}
+            _ => return None,
+        }
+        let mut buffer = vec![0u32; (size as usize + 3) / 4 + 1];
+        let table = buffer.as_mut_ptr() as *mut MIB_IPADDRTABLE;
+        // SAFETY: as in `default_routes`.
+        err = unsafe { GetIpAddrTable(table, &mut size, 0) };
+        if err == 0 {
+            // SAFETY: as in `default_routes`.
+            let rows = unsafe {
+                let count = (*table).dwNumEntries as usize;
+                std::slice::from_raw_parts(std::ptr::addr_of!((*table).table) as *const MIB_IPADDRROW_XP, count)
+            };
+            return Some(rows.iter().map(|row| (row.dwIndex, row.dwAddr)).collect());
+        }
+    }
+    None
+}
+
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+const ERROR_NO_DATA: u32 = 232;
+
+/// The ways out as one string, the same whatever order the tables list
+/// them in: `interface>next hop@address+address`, joined by commas.
+/// Addresses on interfaces with no default route -- a Hyper-V switch, a
+/// tunnel's own adapter -- are left out, so they change nothing.
+fn uplink_fingerprint(routes: &[(u32, u32)], addresses: &[(u32, u32)]) -> String {
+    let address = |raw: u32| std::net::Ipv4Addr::from(raw.to_ne_bytes());
+    let mut ways: Vec<String> = routes
+        .iter()
+        .map(|&(index, next_hop)| {
+            let mut held: Vec<std::net::Ipv4Addr> = addresses
+                .iter()
+                .filter(|&&(on, raw)| on == index && raw != 0)
+                .map(|&(_, raw)| address(raw))
+                .collect();
+            held.sort();
+            held.dedup();
+            let held: Vec<String> = held.iter().map(|a| a.to_string()).collect();
+            format!("{index}>{}@{}", address(next_hop), held.join("+"))
+        })
+        .collect();
+    ways.sort();
+    ways.dedup();
+    ways.join(",")
+}
+
+#[cfg(test)]
+mod uplink_tests {
+    use super::uplink_fingerprint;
+
+    /// As the tables store an address: network order, read in place.
+    fn raw(a: [u8; 4]) -> u32 {
+        u32::from_ne_bytes(a)
+    }
+
+    #[test]
+    fn no_default_route_is_no_way_out() {
+        assert_eq!(uplink_fingerprint(&[], &[(7, raw([192, 168, 1, 20]))]), "");
+    }
+
+    #[test]
+    fn a_way_out_names_its_interface_gateway_and_address() {
+        let routes = [(7, raw([192, 168, 1, 1]))];
+        let addresses = [(7, raw([192, 168, 1, 20])), (12, raw([172, 20, 0, 1]))];
+        assert_eq!(uplink_fingerprint(&routes, &addresses), "7>192.168.1.1@192.168.1.20");
+    }
+
+    #[test]
+    fn the_order_the_tables_list_them_in_changes_nothing() {
+        let routes = [(7, raw([192, 168, 1, 1])), (9, raw([10, 0, 0, 1]))];
+        let addresses = [(9, raw([10, 0, 0, 5])), (7, raw([192, 168, 1, 20]))];
+        let swapped_routes = [routes[1], routes[0]];
+        let swapped_addresses = [addresses[1], addresses[0]];
+        assert_eq!(
+            uplink_fingerprint(&routes, &addresses),
+            uplink_fingerprint(&swapped_routes, &swapped_addresses)
+        );
+    }
+
+    /// Two networks that both hand out 192.168.1.x behind 192.168.1.1: the
+    /// address is what tells a roam between them apart.
+    #[test]
+    fn a_new_address_behind_the_same_gateway_is_a_change() {
+        let routes = [(7, raw([192, 168, 1, 1]))];
+        let home = uplink_fingerprint(&routes, &[(7, raw([192, 168, 1, 20]))]);
+        let elsewhere = uplink_fingerprint(&routes, &[(7, raw([192, 168, 1, 57]))]);
+        assert_ne!(home, elsewhere);
+    }
+
+    /// The tunnel's own adapter, and anything else without a default
+    /// route, does not move it.
+    #[test]
+    fn addresses_off_the_ways_out_change_nothing() {
+        let routes = [(7, raw([192, 168, 1, 1]))];
+        let plain = uplink_fingerprint(&routes, &[(7, raw([192, 168, 1, 20]))]);
+        let with_tunnel = uplink_fingerprint(&routes, &[(7, raw([192, 168, 1, 20])), (31, raw([198, 18, 0, 1]))]);
+        assert_eq!(plain, with_tunnel);
+    }
+}
+
 /// Process ids owning a visible, titled, top-level window.
 ///
 /// The nearest thing Windows offers to "the customer can see this". A

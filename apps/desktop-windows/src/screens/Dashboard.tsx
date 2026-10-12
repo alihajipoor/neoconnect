@@ -43,6 +43,16 @@ import {
 } from "../lib/connection-evidence";
 import { orbCaution, orbHold, orbTone, type OrbTone } from "../lib/orb-caution";
 import { networkWait, waitForNetwork } from "../lib/network-wait";
+import {
+  NEW_UPLINK_WATCH,
+  UPLINK_POLL_MS,
+  UPLINK_RECHECK_MS,
+  afterUplinkRecheck,
+  nextUplink,
+  withinMs,
+  type RecheckVerdict,
+  type UplinkWatch,
+} from "../lib/uplink-watch";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
@@ -647,6 +657,15 @@ export function Dashboard({
   const healthCheckInFlightRef = useRef(false);
   /** A newer run's first check, waiting for the one in flight to end. */
   const healthCheckWantedRef = useRef<(() => Promise<void>) | null>(null);
+  /** The way out this session's tunnel was proven over, as the watch last
+   * saw it (`lib/uplink-watch.ts`). Back to "not looked at" whenever no
+   * tunnel is up, so each session's first look is its own. */
+  const uplinkRef = useRef<UplinkWatch>(NEW_UPLINK_WATCH);
+  /** Single-flight for that watch, its re-verification included. */
+  const uplinkInFlightRef = useRef(false);
+  /** Moved on each change of the way out, so a health poll measuring
+   * across one lands nothing: its reading is about the way out that was. */
+  const uplinkEpochRef = useRef(0);
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
   /** What the plan's device limit has to say, when it is why this device
    * is not connected: refused before dialling, taken over by another
@@ -931,6 +950,61 @@ export function Dashboard({
     // (`slotIdle`).
     if (autoReconnect.dropped({ exclusion: reconnectExclusion() }) === "lost") void deviceSlot.release();
     return true;
+  }
+
+  /** A tunnel whose way out has gone (`lib/uplink-watch.ts`): the link
+   * dropped, or a roam the tunnel did not survive. Its engine may still be
+   * running, but it cannot carry anything, and the screen must not go on
+   * saying "You're protected" over it -- measured on the VM at 20 s after
+   * the link went and 26 s after a roam.
+   *
+   * Said as a drop is said, and handed to the same automatic reconnect: the
+   * existing "Reconnecting..." look, "Waiting for a network connection"
+   * while there is none, the same server first, and "protected" only from
+   * that reconnect's own proof. Its first attempt takes the dead tunnel
+   * down. Where no reconnect will run -- the episode would not start --
+   * the dead tunnel is taken down here, so nothing is left running behind
+   * "VPN connection lost". Not over the device limit's own teardown. */
+  function publishCarrierLost(generation: number): void {
+    if (slotLostRef.current || slotTeardown.owed()) return;
+    if (!publishDrop(generation)) return;
+    const phase = autoReconnect.current().kind;
+    if (phase !== "waiting" && phase !== "attempting") void serviceDisconnect().catch(() => undefined);
+  }
+
+  /** The tunnel measured again, now, after its way out changed: what the
+   * routine health poll would conclude -- the same evidence, from the
+   * status, the egress check or Custom mode's probe -- within
+   * `UPLINK_RECHECK_MS`, or "timedOut". Nothing here is shown or counted;
+   * the watch decides what it means (`afterUplinkRecheck`). */
+  async function recheckAfterUplinkChange(): Promise<RecheckVerdict> {
+    let status: VpnStatus;
+    try {
+      status = await serviceStatus();
+    } catch {
+      return "unknown";
+    }
+    const fromStatus = stateFromStatus(status);
+    if (fromStatus === "disconnected") return "disconnected";
+    let measured: Promise<ConnectionState>;
+    if (status.splitTunnelActive) {
+      // The probe holds the service's owning thread, as the health poll's
+      // does: marked, so a liveness answer it causes is not read as a drop.
+      const probed = statusDisturbances.begin(PROBE_CAP_MS);
+      measured = invoke("vpn_probe_split_tunnel")
+        .then(() => true)
+        .catch(() => false)
+        .finally(probed)
+        .then((carried) => customModePollState(fromStatus, carried));
+    } else {
+      const tunnelServer = ladderPass.tunnelServer.current ?? undefined;
+      measured = verifyEgress(baselineIpRef.current, {
+        totalMs: UPLINK_RECHECK_MS,
+        tunnelServer,
+        baselineFirst: true,
+      }).then((egress) => fullTunnelPollState(fromStatus, egress));
+    }
+    return withinMs(measured, UPLINK_RECHECK_MS, "timedOut" as const);
   }
 
   /** What, at this moment, rules an automatic reconnect out -- asked at
@@ -1853,6 +1927,10 @@ export function Dashboard({
       // over a connect that had already begun, and the next press then
       // meant Disconnect.
       const generation = intentRef.current.generation;
+      // And which way out it measures over: one that changes meanwhile is
+      // re-verified by the watch (`uplink-watch.ts`), and this reading,
+      // about the way out that was, must not land over it or count.
+      const uplinkEpoch = uplinkEpochRef.current;
       // And marked, so an answer one of our own Custom-mode changes or
       // probes may have caught can be told apart afterwards. See
       // `status-disturbance`.
@@ -2022,6 +2100,9 @@ export function Dashboard({
       // reading taken through a tunnel that has since ended must not
       // count towards the per-ISP tags.
       if (!isCurrent(intentRef.current, generation)) return false;
+      // Or by a change of the way out, which the watch re-verified on its
+      // own: this reading straddles it, and is neither shown nor a strike.
+      if (uplinkEpochRef.current !== uplinkEpoch) return false;
 
       // "It kept working", for the per-ISP tags: a proven check advances
       // the session clock, a failed one restarts it. `unverified` does
@@ -2173,6 +2254,68 @@ export function Dashboard({
     };
 
     const id = setInterval(() => void look(), LIVENESS_POLL_MS);
+    return () => clearInterval(id);
+  }, [connectionState]);
+
+  // Is the way out the tunnel was proven over still there -- asked every
+  // second, of the machine's own tables (`lib/uplink-watch.ts`).
+  //
+  // The liveness poll above cannot tell: the engine of a tunnel whose link
+  // has gone is still running, and the service says what it always says.
+  // The health poll can, but every fifteen seconds and then after its own
+  // walk, and that is how "You're protected" stood 20 s over a dropped link
+  // and 26 s after a roam on the VM. So a change of the way out is noticed
+  // here within a second and the tunnel re-verified at once: what that
+  // proves is shown -- nothing changes on screen for a change it survives --
+  // and a tunnel that cannot carry is handed to the reconnect
+  // (`publishCarrierLost`), never left saying "protected".
+  //
+  // Stays out of the way of what owns the tunnel or the service's
+  // attention, as the liveness poll does; a look it skips is taken on the
+  // next second, the change still there to find.
+  useEffect(() => {
+    if (!isTunnelUp(connectionState)) {
+      uplinkRef.current = NEW_UPLINK_WATCH;
+      return;
+    }
+
+    const look = async () => {
+      if (uplinkInFlightRef.current) return;
+      if (ladderInFlight() || repairUnderWay()) return;
+      if (intentRef.current.intent !== "idle") return;
+      if (statusDisturbances.busy()) return;
+      // Gaming mode has no tunnel of this screen's to re-verify or hand on.
+      if (appModeRef.current === "gaming") return;
+      uplinkInFlightRef.current = true;
+      try {
+        const seen = await invoke<string | null>("network_uplinks").catch(() => null);
+        const [next, step] = nextUplink(uplinkRef.current, seen);
+        uplinkRef.current = next;
+        if (step === "same") return;
+        // Stamped as every writer here is: a press landing meanwhile
+        // makes what follows old news.
+        const generation = intentRef.current.generation;
+        uplinkEpochRef.current += 1;
+        if (step === "lost") {
+          publishCarrierLost(generation);
+          return;
+        }
+        const verdict = await recheckAfterUplinkChange();
+        if (!isCurrent(intentRef.current, generation)) return;
+        const action = afterUplinkRecheck(verdict);
+        if (action === "lost") {
+          publishCarrierLost(generation);
+        } else if (action === "show" && verdict !== "timedOut") {
+          // Proof restores "protected", and an abstention says so; either
+          // way the strike count starts again, as the health poll's does.
+          if (publishObserved(generation, verdict) !== null) strikesRef.current = 0;
+        }
+      } finally {
+        uplinkInFlightRef.current = false;
+      }
+    };
+
+    const id = setInterval(() => void look(), UPLINK_POLL_MS);
     return () => clearInterval(id);
   }, [connectionState]);
 
