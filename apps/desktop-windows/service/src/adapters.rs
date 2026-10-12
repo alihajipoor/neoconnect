@@ -40,6 +40,10 @@ pub struct Adapter {
     /// The on-link prefix length of that address (`OnLinkPrefixLength`):
     /// what the IPv4 confinement permits as this adapter's LAN.
     pub ipv4_prefix: Option<u8>,
+    /// Every usable IPv4 address the adapter holds, `ipv4` first. A
+    /// tunnel adapter can hold a stale APIPA address beside the real one,
+    /// in either order, and a connection from either is still in it.
+    pub ipv4_all: Vec<Ipv4Addr>,
     pub is_up: bool,
     /// The DHCP server the adapter's IPv4 lease came from, when it has one.
     ///
@@ -150,6 +154,7 @@ pub fn list() -> io::Result<Vec<Adapter>> {
         // first usable IPv4 is the one a socket pinned here would use.
         let mut ipv4 = None;
         let mut ipv4_prefix = None;
+        let mut ipv4_all = Vec::new();
         let mut ua = entry.FirstUnicastAddress;
         while !ua.is_null() {
             // SAFETY: same linked-list guarantee as the gateway walk.
@@ -162,9 +167,11 @@ pub fn list() -> io::Result<Vec<Adapter>> {
                     let octets = unsafe { sa.sin_addr.S_un.S_addr }.to_ne_bytes();
                     let addr = Ipv4Addr::from(octets);
                     if !addr.is_unspecified() && !addr.is_loopback() {
-                        ipv4 = Some(addr);
-                        ipv4_prefix = Some(u.OnLinkPrefixLength);
-                        break;
+                        if ipv4.is_none() {
+                            ipv4 = Some(addr);
+                            ipv4_prefix = Some(u.OnLinkPrefixLength);
+                        }
+                        ipv4_all.push(addr);
                     }
                 }
             }
@@ -197,6 +204,7 @@ pub fn list() -> io::Result<Vec<Adapter>> {
             gateway,
             ipv4,
             ipv4_prefix,
+            ipv4_all,
             is_up: entry.OperStatus == IF_OPER_STATUS_UP,
             dhcp_server,
         });
@@ -378,6 +386,7 @@ mod tests {
             gateway,
             ipv4: Some(Ipv4Addr::new(10, 0, index as u8, 2)),
             ipv4_prefix: Some(24),
+            ipv4_all: vec![Ipv4Addr::new(10, 0, index as u8, 2)],
             is_up: true,
             dhcp_server: None,
             description: String::new(),

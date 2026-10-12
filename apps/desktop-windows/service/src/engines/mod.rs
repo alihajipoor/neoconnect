@@ -771,8 +771,8 @@ impl Engines {
         let ops = Arc::clone(&self.confinement_ops);
         let log_dir = self.config_dir.clone();
         let Some(session) = self.active.peek_mut() else { return };
-        let mut tunnel_addresses: Vec<Ipv4Addr> =
-            adapters::find_by_name(adapter_name_for(profile)).ok().flatten().and_then(|a| a.ipv4).into_iter().collect();
+        let listed = adapters::list().unwrap_or_default();
+        let mut tunnel_addresses = tunnel_addresses_in(&listed, adapter_name_for(profile), &OUR_ADAPTER_NAMES);
         if matches!(profile, ConnectProfile::XrayVlessReality(_) | ConnectProfile::XrayVlessTls(_) | ConnectProfile::XrayTrojan(_) | ConnectProfile::Shadowsocks(_))
             && !tunnel_addresses.contains(&xray::TUN_ADDRESS)
         {
@@ -2692,6 +2692,25 @@ fn our_interfaces() -> Vec<u32> {
 /// first pass is closeable a few hundred milliseconds later.
 const RESET_RESCAN_FOR: std::time::Duration = std::time::Duration::from_secs(3);
 const RESET_RESCAN_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The local addresses a connection is inside one of our tunnels from:
+/// every IPv4 address on every adapter of ours, the session's own first.
+/// Every one, because a Wintun adapter can hold a stale APIPA address
+/// beside its real one and list it first -- and a connection from either
+/// is in the tunnel, not to be reset.
+fn tunnel_addresses_in(listed: &[adapters::Adapter], session_adapter: &str, ours: &[&str]) -> Vec<Ipv4Addr> {
+    let mut addresses: Vec<Ipv4Addr> = Vec::new();
+    let session_first = listed.iter().filter(|a| a.name == session_adapter);
+    let others = listed.iter().filter(|a| a.name != session_adapter && ours.contains(&a.name.as_str()));
+    for adapter in session_first.chain(others) {
+        for address in &adapter.ipv4_all {
+            if !addresses.contains(address) {
+                addresses.push(*address);
+            }
+        }
+    }
+    addresses
+}
 
 /// One reset pass, in confinement.log: what was closed, by owner and
 /// remote, and what refused to close.
@@ -5375,6 +5394,36 @@ mod helper_tests {
         assert_eq!(passes(), settled, "the rescans did not settle");
         end_test_session(&mut engines);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A connection from any address on one of our adapters is in a tunnel
+    /// and is not reset: a Wintun adapter can hold a stale APIPA address
+    /// beside its real one, listed first, and taking only the first left
+    /// connections already inside OpenVPN's tunnel to be reset for three
+    /// seconds. The physical adapter's address is never one of them.
+    #[test]
+    fn every_address_on_our_adapters_counts_as_in_the_tunnel() {
+        let adapter = |name: &str, all: Vec<Ipv4Addr>| adapters::Adapter {
+            index: 7,
+            name: name.to_string(),
+            gateway: None,
+            ipv4: all.first().copied(),
+            ipv4_prefix: Some(24),
+            ipv4_all: all,
+            is_up: true,
+            dhcp_server: None,
+            description: String::new(),
+        };
+        let listed = vec![
+            adapter("Ethernet", vec![Ipv4Addr::new(192, 168, 1, 23)]),
+            adapter(openvpn::ADAPTER_NAME, vec![Ipv4Addr::new(169, 254, 12, 34), Ipv4Addr::new(10, 8, 0, 6)]),
+            adapter(xray::ADAPTER_NAME, vec![xray::TUN_ADDRESS]),
+        ];
+        let got = tunnel_addresses_in(&listed, openvpn::ADAPTER_NAME, &OUR_ADAPTER_NAMES);
+        for address in [Ipv4Addr::new(10, 8, 0, 6), Ipv4Addr::new(169, 254, 12, 34), xray::TUN_ADDRESS] {
+            assert!(got.contains(&address), "{address} missing from {got:?}");
+        }
+        assert!(!got.contains(&Ipv4Addr::new(192, 168, 1, 23)), "the physical adapter is not a tunnel");
     }
 
     /// No reset where there is no confinement of ours: WireGuard (its own
