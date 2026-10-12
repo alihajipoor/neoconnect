@@ -185,9 +185,14 @@
       "protocol": "blackhole",
       "tag": "block"
     },
-    { "protocol": "freedom", "tag": "direct" }
+    { "protocol": "freedom", "tag": "direct", "settings": { "domainStrategy": "ForceIPv4" } }
   ],
+  "dns": {
+    "//": "queryStrategy UseIPv4 is load-bearing (2026-10-11): routing's IPIfNonMatch resolves names for its ip rules, and with AAAA answers the block-ipv6-egress rule would block every dual-stack site. A per-server queryStrategy cannot undo it.",
+    "queryStrategy": "UseIPv4"
+  },
   "routing": {
+    "//ipv4-only": "IPv4 only, since 2026-10-11, as in xray-config.json.template -- but without its uot-direct carve-out, on purpose. Here the default outbound is block and relayed customers leave through the route rules CONFIGURE_ROUTE appends at runtime; a uot-direct rule, like every rule in this file, would sit in front of them and send relayed Shadowsocks UDP-over-TCP out of the relay itself. Without it, UoT matches its route rule by inbound tag and travels to the exit with its magic name intact, and the exit serves it. block-ipv6-egress, like the private-range rule, also sits before the route rules, so an IPv6 destination is refused at the relay instead of being forwarded to an exit that refuses it anyway. Not yet exercised on a live relay: the only proof so far is xray run -test of this rendered template. Spell queryStrategy exactly: xray run -test accepts any value and silently reads an unknown one as UseIP (infra/conf/dns.go, resolveQueryStrategy), which would put every dual-stack site behind block-ipv6-egress -- found 2026-10-11 by a deliberately misspelt negative control that passed.",
     "//": "No customer may reach this node's own loopback or private addresses through their tunnel: 127.0.0.1:10085 is the Xray API (every customer's credentials, everyone's counters) and 127.0.0.1:7505 is OpenVPN's unauthenticated management port. Found by the 2026-10-06 review; live nodes are patched with installer/maintenance/block-private-egress.sh. IPIfNonMatch is part of the fix: an ip rule never sees a domain target, so without it any name resolving to 127.0.0.1 walks past the block. Rules that match by inbound tag (api-in, and the relay rules CONFIGURE_ROUTE adds) match before any resolving.",
     "domainStrategy": "IPIfNonMatch",
     "rules": [
@@ -195,6 +200,13 @@
       {
         "type": "field",
         "ip": ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"],
+        "outboundTag": "block"
+      },
+      {
+        "//": "No IPv6 egress (2026-10-11): an IPv6 destination is refused here instead of dialled. Needs dns.queryStrategy UseIPv4 (else every dual-stack domain matches this rule) and freedom domainStrategy ForceIPv4 (else a name with no A record is dialled over IPv6). Gap: freedom's UDP socket is dual-stack and later packets of an already-routed UDP session are not re-routed, so only a kernel rule makes this absolute.",
+        "type": "field",
+        "ruleTag": "block-ipv6-egress",
+        "ip": ["::/0"],
         "outboundTag": "block"
       }
     ]

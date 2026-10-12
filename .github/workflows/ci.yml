@@ -148,6 +148,14 @@ jobs:
       - name: Xray config gate passes a good config on a running relay
         run: bash scripts/test-xray-config-gate.sh
 
+      # The IPv4-only pieces live in two places: the templates (new nodes)
+      # and installer/maintenance/xray-ipv4-only.sh (live ones). A comment
+      # that drifts between them makes install_xray report a node's rule
+      # as "NOT carried over"; a missing uot-direct breaks every
+      # Shadowsocks client's UDP, DNS included (2026-10-11).
+      - name: IPv4-only maintenance script brings an old node to the template
+        run: bash scripts/test-xray-ipv4-only.sh
+
       # Same class of silence, different pair of files. Shadowsocks and
       # IKEv2 were both live on real nodes while the panel could offer
       # neither, so a plan created there quietly granted a narrower set
@@ -184,6 +192,12 @@ jobs:
       # the rule is still enforced in all six places it has to be.
       - name: A game's binaries go to one exit or to none
         run: bash scripts/check-exit-groups.sh
+
+      # The manual test-installer build is safe only because it cannot
+      # sign for the updater, publish, tag or push. One step copied across
+      # from the release workflow would undo that without a sound.
+      - name: The test-installer build cannot publish, tag or sign
+        run: bash scripts/check-test-installer-workflow.sh
 
   desktop:
     name: Desktop client tests

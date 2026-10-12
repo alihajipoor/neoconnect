@@ -6530,6 +6530,92 @@ for a bindable address already ran; IKEv2 (A, B and E not measured, and
 not touched); for B, inbound, Java, and WireGuard with our block beside
 wireguard.exe's; for D, IPv6 TCP. Beyond the VM: everything listed above.
 
+## 2026-10-11 — sites failing through the nodes: resolvers, IPv4-only egress, and the Shadowsocks UDP it broke (branch `claude/node-ipv4`, not merged)
+
+**Status:** live on all five exit nodes; the templates, a maintenance
+script and its test are on this branch, not pushed.
+
+**What the investigation found** (evidence kept outside the repo):
+
+- **germany-1's first resolver refused every query.** The hoster's own
+  `setip` tool had written its resolver first into `/etc/resolv.conf` and
+  `/etc/netplan/99-setip.yaml`; glibc reached 8.8.8.8 only after a 5 s
+  timeout, on about one lookup in five. Xray resolves the REALITY `dest`
+  on every handshake, so in a burst 15 of 24 handshakes took over 1 s
+  (max 5.3 s). Now 1.1.1.1 then 8.8.8.8: 0 of 24 over 1 s, max 0.37 s.
+- **turkey-1 had one resolver** (8.8.8.8). 1.1.1.1 added second.
+- **IPv6:** finland1, france-1 and singapore-1 have working global IPv6,
+  and Xray dialled sites over it (finland1 had sockets out over IPv6;
+  Cloudflare saw the node's IPv6). The owner asked for IPv4-only egress
+  on every node.
+- **Seen, not fixed:** CloudFront and Netflix intermittently reset
+  germany-1's connections right after the TCP handshake. The cause was not
+  established, and nothing on the node changes it.
+
+**What changed on the nodes** (backups beside every file, `.bak-<UTC>`):
+
+- germany-1 and turkey-1: nameservers in `resolv.conf` (rewritten in
+  place) and in the netplan file (for the next boot; netplan was not
+  applied).
+- All five: Xray IPv4-only -- `dns.queryStrategy: UseIPv4`, freedom
+  `direct` with `domainStrategy: ForceIPv4`, and `::/0 -> block` after the
+  private-range rule. germany-1, turkey-1, singapore-1 and france-1 between
+  20:00 and 20:23Z. finland1 was deferred (15 established sessions) and done
+  at 21:31Z.
+- **That change broke Shadowsocks UDP on four nodes, for 66 to 86 minutes each.**
+  The desktop and mobile clients send *all* UDP, DNS included, over
+  UDP-over-TCP (`"uot": true`), and Xray serves UoT only when freedom passes
+  the magic name `sp.v2.udp-over-tcp.arpa` through unresolved. ForceIPv4
+  resolved it, found no address, and dropped every flow after about 1.3 s
+  with no reply. The desktop app in the VM could not connect over
+  Shadowsocks to germany-1 and fell back to turkey-1. The local tests had
+  covered TCP, names and UDP to IP addresses, but not a Shadowsocks client
+  with `uot: true`, which is the one that would have caught it. Fixed
+  with a `uot-direct` carve-out: a plain freedom outbound and a rule
+  sending the magic names to it, placed right after the api rule. It went
+  onto germany-1, turkey-1, singapore-1 and france-1 at 21:26-21:29Z, and
+  onto finland1 together with the IPv4-only change.
+- Each restart: one node at a time, below 15 established sessions,
+  `xray run -test` of the installed file on the node, and an automatic
+  rollback if Xray did not come up (none did). The agent re-asserted
+  users 22-38 s after each restart.
+
+**Proven:** on every node, a Shadowsocks client with `uot: true` against
+the live inbound on loopback got DNS over UoT answered. Before the fix,
+germany-1 gave no answer after 5 s. On finland1, an IPv6 literal is now
+refused and Cloudflare sees IPv4 where it saw IPv6. In the VM, desktop
+0.9.47 connected to germany-1 on Shadowsocks ("You're protected", exit IP
+germany-1), and the node logged its UoT going to `uot-direct`.
+
+**Unverified:** real customers since the fix. Between 21:26 and 21:47Z
+the only traffic on any node was the VM's, at about 01:00 in Iran.
+Android and iOS over Shadowsocks were not tested; they send the same
+`uot: true`. The relay template's change has never run on a relay, and
+its only proof is `xray run -test`.
+
+**Gotchas:**
+
+- `xray run -test` accepts any `queryStrategy` and silently reads an
+  unknown one as UseIP (`infra/conf/dns.go`). With the `::/0` rule, that
+  blocks every dual-stack site. A deliberately misspelt negative control
+  passed the test.
+- `uot-direct` sends traffic out rather than refusing it, and like every
+  rule in the file it comes before the route rules that CONFIGURE_ROUTE
+  appends at runtime. If an exit-template node were made the Xray entry
+  of a relay route on `shadowsocks-in`, it would serve that route's UoT
+  itself instead of sending it on to the exit. No live node holds a
+  route rule today; the runtime rules and outbounds of all five were
+  checked. `xray-ipv4-only.sh` refuses such a node, and the relay template
+  carries no `uot-direct`. A real fix is open, either in the agent or with
+  a design that needs no rule (freedom AsIs with sockopt
+  `domainStrategy`, untested).
+- Freedom's UDP socket and the UoT socket are dual-stack, and only a UDP
+  session's first destination is routed. On the three IPv6 nodes, later
+  packets to an IPv6 address are not blocked. Only a kernel rule would
+  close that.
+- The installer writes no resolver configuration, so it was left alone.
+  germany-1's bad resolver came from the hoster's tooling.
+
 ## 2026-10-12 — desktop capture: `d16be5c` in the VM, the audit, and three fixes (same branch, not merged, not pushed)
 
 **Status:** `d16be5c` was built, installed in `Neoxify-Test` (installed
