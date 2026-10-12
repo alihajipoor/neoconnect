@@ -610,6 +610,14 @@ const en = {
   // customer is told that rather than watching attempts fail.
   "dash.reconnectingOfflineHint":
     "The tunnel closed and there's no network. Neoxify will reconnect when the network is back. Until then, your traffic is not protected.",
+  // The service found no network to dial over, before dialling anything
+  // (network-wait.ts): the pass waits for one on the same server instead of
+  // walking the list, and says so. Nothing about a server -- none was
+  // dialled -- and, fail open being unchanged, nothing protected until the
+  // tunnel is up. Also the headline of a reconnect waiting for a network.
+  "dash.waitingForNetwork": "Waiting for a network connection",
+  "dash.waitingForNetworkHint":
+    "This computer isn't connected to a network. Neoxify will connect as soon as it is. Until then, your traffic is not protected.",
   // The orb between attempts: the customer's own connect, now, instead of
   // waiting for the next attempt.
   "dash.reconnectNow": "Reconnect now",
@@ -1390,6 +1398,9 @@ const fa: Record<TranslationKey, string> = {
     "تونل بسته شد. تا وقتی دوباره وصل شود، ترافیک شما بدون نئوکسیفای ارسال می‌شود و محافظت نمی‌شود.",
   "dash.reconnectingOfflineHint":
     "تونل بسته شد و شبکه‌ای در دسترس نیست. نئوکسیفای پس از برگشتن شبکه دوباره وصل می‌شود. تا آن زمان، ترافیک شما محافظت نمی‌شود.",
+  "dash.waitingForNetwork": "در انتظار اتصال به شبکه",
+  "dash.waitingForNetworkHint":
+    "این کامپیوتر به شبکه‌ای وصل نیست. نئوکسیفای به محض وصل شدن شبکه وصل می‌شود. تا آن زمان، ترافیک شما محافظت نمی‌شود.",
   "dash.reconnectNow": "همین حالا وصل شوید",
   "dash.reconnectStop": "توقف اتصال دوباره",
   "dash.degraded": "ترافیک عبور نمی‌کند",

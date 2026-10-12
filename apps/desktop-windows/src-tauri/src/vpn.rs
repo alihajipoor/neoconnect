@@ -1710,6 +1710,33 @@ pub fn network_fingerprint() -> Option<String> {
     }
 }
 
+/// Whether this machine has a way out to the internet right now: Windows'
+/// best route toward a public address exists, through a gateway or
+/// on-link (a PPP line has no next hop and is a way out all the same).
+///
+/// What a connect the service refused for want of a network waits on
+/// before it dials the same server again (`lib/network-wait.ts`): the
+/// service's refusal (`NO_NETWORK`, `refuse_without_a_way_out`) asks the
+/// same table. No tunnel of ours is up while it is asked -- the refused
+/// rung was torn down -- so a route found is the machine's own.
+///
+/// A hint for when to try again, no more: the service decides, and a route
+/// that leads nowhere is found out by the dial, as ever. An error reads as
+/// no way out, which costs only a wait until the app tries again anyway --
+/// never a dial, and never a server named.
+#[tauri::command]
+pub fn network_way_out() -> bool {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute, MIB_IPFORWARDROW};
+
+    // SAFETY: `route` is a valid out-parameter for the call, and only the
+    // call's result is read.
+    let err = unsafe {
+        let mut route: MIB_IPFORWARDROW = std::mem::zeroed();
+        GetBestRoute(u32::from_ne_bytes([1, 1, 1, 1]), 0, &mut route)
+    };
+    err == 0
+}
+
 /// Process ids owning a visible, titled, top-level window.
 ///
 /// The nearest thing Windows offers to "the customer can see this". A

@@ -1833,3 +1833,84 @@ describe("what the screen is told", () => {
     expect(reconnectingView(a.rc.current(), 2)).toBeNull();
   });
 });
+
+describe("an attempt that waits for a network", () => {
+  /** Every engine fails at once with no network (the service's NO_NETWORK),
+   * so a reconnect used to spend its six attempts in about a minute on a
+   * network blip and land the customer in another country (G8, g8-01: fi
+   * to sg). The Windows ladder now waits on the same rung instead; the
+   * episode hears of it, shows it, and charges it to nothing. */
+  async function waitingAttempt() {
+    const h = harness();
+    h.bind();
+    h.rc.tunnelUp({ routeId: "route-fi", fresh: true, stamp: h.rc.stamp() });
+    await h.advance(5 * 60_000);
+    h.script(["pending"]);
+    expect(h.rc.dropped()).toBe("reconnecting");
+    await h.advance(0);
+    expect(h.asked).toHaveLength(1);
+    return { h, attempt: h.asked[0]! };
+  }
+
+  it("is shown as waiting for a network, and stops being shown so when one is back", async () => {
+    const { h, attempt } = await waitingAttempt();
+    expect(reconnectingView(h.rc.current(), 1)).toEqual({ offline: false, waiting: false });
+    attempt.waitingForNetwork?.(true);
+    expect(reconnectingView(h.rc.current(), 1)).toEqual({ offline: true, waiting: false });
+    attempt.waitingForNetwork?.(false);
+    expect(reconnectingView(h.rc.current(), 1)).toEqual({ offline: false, waiting: false });
+  });
+
+  it("charges the wait to no attempt and no budget, however long it is", async () => {
+    const { h, attempt } = await waitingAttempt();
+    attempt.waitingForNetwork?.(true);
+    // Twenty minutes with no network, the pass alive throughout.
+    for (let i = 0; i < 20; i++) {
+      attempt.progress();
+      await h.advance(60_000);
+    }
+    attempt.waitingForNetwork?.(false);
+    // Back, and this rung then fails for some other reason.
+    await h.advance(10_000);
+    h.settle({ kind: "failed" });
+    await h.advance(0);
+    // The next attempt is the second, after its ordinary backoff: the
+    // twenty minutes did not spend the two-minute budget.
+    expect(h.rc.current()).toMatchObject({ kind: "waiting", attempt: 1, blockedBy: null });
+    h.script([{ outcome: { kind: "connected", routeId: "route-fi" } }]);
+    await h.advance(RECONNECT_BACKOFF_MS[1]!);
+    expect(h.asked).toHaveLength(2);
+    expect(h.rc.current()).toMatchObject({ kind: "armed", routeId: "route-fi" });
+    expect(h.reports.filter((r) => r.reason?.includes("budget"))).toEqual([]);
+  });
+
+  it("still charges the time the pass spent dialling", async () => {
+    const { h, attempt } = await waitingAttempt();
+    attempt.waitingForNetwork?.(true);
+    await h.advance(60_000);
+    attempt.waitingForNetwork?.(false);
+    // Dialling and failing for well past the budget, the network up.
+    for (let i = 0; i < 3; i++) {
+      attempt.progress();
+      await h.advance(50_000);
+    }
+    h.settle({ kind: "failed" });
+    await h.advance(0);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "budget" });
+  });
+
+  it("ends as waited too long, not as an attempt spent, when the pass gave up on the network", () => {
+    expect(reconnectOutcomeOf("failed", { errorKind: "noNetwork" })).toEqual({ kind: "stop", why: "waitedTooLong" });
+    // Every other failure is still an attempt.
+    expect(reconnectOutcomeOf("failed", { errorKind: "serverUnreachable" })).toEqual({ kind: "failed" });
+    expect(reconnectOutcomeOf("failed")).toEqual({ kind: "failed" });
+  });
+
+  it("says nothing once its attempt is over", async () => {
+    const { h, attempt } = await waitingAttempt();
+    h.rc.cancel("stopped");
+    attempt.waitingForNetwork?.(true);
+    expect(h.rc.current()).toMatchObject({ kind: "idle", stopped: "stopped" });
+    expect(reconnectingView(h.rc.current(), 1)).toBeNull();
+  });
+});

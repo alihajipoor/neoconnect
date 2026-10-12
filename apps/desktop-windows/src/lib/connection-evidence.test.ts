@@ -647,6 +647,22 @@ describe("the headline", () => {
       );
     });
 
+    it("says it is waiting for a network over the reconnect's own look, during an attempt too", () => {
+      for (const state of ["disconnected", "connecting", "verifying"] as ConnectionState[]) {
+        for (const [reconnecting, waitingForNetwork] of [
+          [OFFLINE, false],
+          [PASS, true],
+          [OFFLINE, true],
+        ] as const) {
+          expect(headlineFor(state, { dropped: true, customMode: false, reconnecting, waitingForNetwork }), state).toEqual({
+            title: "dash.waitingForNetwork",
+            hint: "dash.reconnectingOfflineHint",
+            tone: "warning",
+          });
+        }
+      }
+    });
+
     it("never stands in for evidence about a tunnel that is up", () => {
       // The pass that lands publishes its verdict before the episode is
       // told it landed. "You're protected" then is the pass's own proof,
@@ -672,6 +688,27 @@ describe("the headline", () => {
         }
       }
     });
+  });
+});
+
+describe("a connect waiting for a network", () => {
+  it("says it is waiting for a network, not that it is checking the connection", () => {
+    for (const state of ["connecting", "verifying", "disconnected"] as ConnectionState[]) {
+      expect(headlineFor(state, { dropped: false, customMode: false, waitingForNetwork: true }), state).toEqual({
+        title: "dash.waitingForNetwork",
+        hint: "dash.waitingForNetworkHint",
+        tone: "plain",
+      });
+    }
+  });
+
+  it("never over a tunnel that is up, nor a service that will not answer", () => {
+    for (const state of ["connected", "unverified", "degraded"] as ConnectionState[]) {
+      expect(headlineFor(state, { dropped: false, customMode: false, waitingForNetwork: true }), state).toEqual(
+        headlineFor(state, { dropped: false, customMode: false }),
+      );
+    }
+    expect(headlineFor("unknown", { dropped: false, customMode: false, waitingForNetwork: true }).title).toBe("dash.unknown");
   });
 });
 

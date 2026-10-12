@@ -529,7 +529,16 @@ export function headlineFor(
     customMode,
     reconnecting = null,
     unconfined = false,
-  }: { dropped: boolean; customMode: boolean; reconnecting?: ReconnectingView | null; unconfined?: boolean },
+    waitingForNetwork = false,
+  }: {
+    dropped: boolean;
+    customMode: boolean;
+    reconnecting?: ReconnectingView | null;
+    unconfined?: boolean;
+    /** A pass is waiting on its rung for a network to dial over
+     * (`lib/network-wait.ts`). */
+    waitingForNetwork?: boolean;
+  },
 ): Headline {
   // A verified tunnel whose IPv4 the service could not confine to it
   // (`warnsUnconfined`): connected, and not "You're protected".
@@ -537,11 +546,21 @@ export function headlineFor(
     return { title: "dash.connectedNotConfined", hint: "dash.connectedNotConfinedHint", tone: "warning" };
   }
   if (reconnecting !== null && !isTunnelUp(state) && state !== "unknown") {
+    // No network: between attempts, or a pass waiting on its rung for one.
+    // Said as that, in the reconnect's own tone, rather than as attempts
+    // that are not being made.
+    const offline = reconnecting.offline || waitingForNetwork;
     return {
-      title: "dash.reconnecting",
-      hint: reconnecting.offline ? "dash.reconnectingOfflineHint" : "dash.reconnectingHint",
+      title: offline ? "dash.waitingForNetwork" : "dash.reconnecting",
+      hint: offline ? "dash.reconnectingOfflineHint" : "dash.reconnectingHint",
       tone: "warning",
     };
+  }
+  // A connect the service refused for want of a network, waiting for one on
+  // the same server: not "checking the connection", and nothing about a
+  // server, none having been dialled.
+  if (waitingForNetwork && !isTunnelUp(state) && state !== "unknown") {
+    return { title: "dash.waitingForNetwork", hint: "dash.waitingForNetworkHint", tone: "plain" };
   }
   switch (state) {
     case "connected":

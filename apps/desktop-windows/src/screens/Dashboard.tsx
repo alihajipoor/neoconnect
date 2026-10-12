@@ -40,6 +40,7 @@ import {
   unconfinedLine,
   warnsUnconfined,
 } from "../lib/connection-evidence";
+import { networkWait, waitForNetwork } from "../lib/network-wait";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
@@ -738,6 +739,9 @@ export function Dashboard({
   /** Which words say what is not covered (`unconfinedLine`): Built-in's
    * own, where reconnecting changes nothing, or the general one. */
   const [unconfinedKey, setUnconfinedKey] = useState<TranslationKey>("dash.ipv4NotConfined");
+  /** A pass waiting on its rung for a network to dial over
+   * (`network-wait.ts`), from whichever screen started it. */
+  const waitingForNetwork = useSyncExternalStore(networkWait.subscribe, networkWait.current);
   /** Whether this machine could reach public IPv6 *before* connecting.
    *
    * The whole point of taking it beforehand: most machines cannot reach
@@ -2878,7 +2882,13 @@ export function Dashboard({
       // (`settleAndCaptureBaseline`).
       const nothingUpAtStart = connectionState === "disconnected" && !options.automatic;
 
-      for (const [index, candidate] of candidates.entries()) {
+      // When this rung was first refused for want of a network, while it
+      // waits for one (`network-wait.ts`). Cleared once the ladder moves on.
+      let noNetworkSince: number | null = null;
+      // Over an index, not an iterator: a rung the service refused for want
+      // of a network is dialled again, on the same server, once there is one.
+      for (let index = 0; index < candidates.length; index += 1) {
+        const candidate = candidates[index];
         if (stopped() || sessionGeneration() !== sessionAtStart) break;
         // A pass whose guard expired and that a newer pass has replaced
         // stops dialling here, rather than tearing that pass's engine
@@ -3334,6 +3344,44 @@ export function Dashboard({
           };
         } catch (err) {
           const classified = classifyConnectionError(err);
+          // No network to dial over: the service refused the rung before
+          // anything was dialled. Not a rung that failed -- moving on to the
+          // next server for it walked the whole list in seconds, and a
+          // reconnect spent its six attempts in a minute and landed in
+          // another country once the network was back (G8, g8-01: fi to
+          // sg). So wait here for a network, on this rung: nothing counted,
+          // nothing recorded against the route, the same server dialled
+          // again when there is one -- and said on screen meanwhile.
+          if (classified.kind === "noNetwork" && !stopped()) {
+            noNetworkSince ??= Date.now();
+            networkWait.set(true);
+            options.reconnect?.waitingForNetwork?.(true);
+            const waited = await waitForNetwork(
+              {
+                wayOut: () => invoke<boolean>("network_way_out"),
+                stopped: () =>
+                  stopped() || sessionGeneration() !== sessionAtStart || ladderGenerationRef.current !== generation,
+                progress: () => {
+                  ladderPass.progress(generation);
+                  options.reconnect?.progress();
+                },
+                sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+                now: () => Date.now(),
+              },
+              noNetworkSince,
+            );
+            networkWait.set(false);
+            options.reconnect?.waitingForNetwork?.(false);
+            if (waited === "back" || waited === "retry") {
+              // The same rung again, from its settle: the baseline is taken
+              // afresh on the network that is back.
+              index -= 1;
+              continue;
+            }
+            if (waited === "stopped") break;
+            // Gave up after the half hour: said below as no network, and no
+            // other server is dialled for it.
+          }
           attempts.push(`${label}: ${classified.detail}`);
           dials.push(failedDial(candidate.routeId, classified.kind));
           // A rung the service could not dial for want of a network is not
@@ -3342,8 +3390,10 @@ export function Dashboard({
           // naming anything: `err.noNetwork`.
           failedRungs.push({ routeId: candidate.routeId, fate: rungFate(classified.kind) });
           lastError = { ...classified, detail: describeAttempts(attempts, candidates.length) };
+          if (classified.kind === "noNetwork") break;
         }
 
+        noNetworkSince = null;
         // Always tear down before moving on, or the next engine inherits
         // this one's routes and fails for a reason that has nothing to
         // do with it.
@@ -3432,6 +3482,8 @@ export function Dashboard({
       // superseded does not get to declare the app idle, because its
       // replacement is still connecting.
       endIntent(intent);
+      // A wait for a network ends with its pass, however it ended.
+      if (ladderGenerationRef.current === generation) networkWait.set(false);
       // Only the pass that still owns the guard may release it. One that
       // outlived its deadline has already been replaced, and clearing
       // the guard here would unlock a newer pass that is still running.
@@ -3537,7 +3589,7 @@ export function Dashboard({
   // connection lost" is this screen's own word at the drop, or the
   // episode's once it has stopped without a tunnel; "Reconnecting..."
   // while one runs.
-  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined });
+  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined, waitingForNetwork });
 
   if (loading) {
     return (

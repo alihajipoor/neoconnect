@@ -132,7 +132,12 @@ describe("what an attempt is", () => {
     // Its ceiling runs from the last sign of life, as the guard's does;
     // renewed by nothing, it gave up on a long ladder still dialling.
     expect(ladder).toContain("ladderPass.progress(generation);\n        options.reconnect?.progress();");
-    expect(ladder.split("options.reconnect?.progress();").length - 1).toBe(1);
+    // And wherever else the guard is renewed -- a rung waiting for a network
+    // (`network-wait.ts`) -- the attempt is renewed with it.
+    const guard = ladder.split("ladderPass.progress(generation);").length - 1;
+    expect(guard).toBe(2);
+    expect(ladder.split("options.reconnect?.progress();").length - 1).toBe(guard);
+    expect(ladder).toContain("ladderPass.progress(generation);\n                  options.reconnect?.progress();");
   });
 
   it("is reported as automatic, whether it lands or not", () => {
@@ -375,7 +380,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     // nothing to cancel then, so the connect queued behind the repair's
     // teardown, the pass outlasted the repair's wait for it, and its own
     // teardown cancelled the repair mid-step.
-    const rung = ladder.slice(ladder.indexOf("for (const [index, candidate] of candidates.entries()) {"));
+    const rung = ladder.slice(ladder.indexOf("for (let index = 0; index < candidates.length; index += 1) {"));
     const settled = rung.indexOf("baselineIpRef.current = await settleAndCaptureBaseline(");
     const named = rung.indexOf('const tunnelServer = await tunnelServerOf(candidate, "windows");');
     const ipv6 = rung.indexOf("ipv6BaselineRef.current = await captureIpv6Baseline();");
@@ -526,7 +531,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
 describe("what the screen says", () => {
   it("takes the words from the table, episode included", () => {
     expect(dashboard).toContain(
-      "headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined })",
+      "headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined, waitingForNetwork })",
     );
     expect(dashboard).toContain("pressFor(connectionState, { reconnectWaiting: reconnecting?.waiting === true })");
     // Only for an episode of the session in force: one a sign-out left

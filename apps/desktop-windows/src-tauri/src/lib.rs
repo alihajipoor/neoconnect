@@ -171,6 +171,9 @@ pub fn run() {
             vpn::measure_latency,
             vpn::probe_tcp,
             vpn::network_fingerprint,
+            // Whether there is a network to dial over, for a connect the
+            // service refused for want of one (lib/network-wait.ts).
+            vpn::network_way_out,
             get_launch_deep_link,
             build_platform,
             // After a control-plane request fails: which stage each
