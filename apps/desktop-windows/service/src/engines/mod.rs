@@ -624,6 +624,15 @@ impl Engines {
         // the tunnel would drop every live connection to change
         // something the tunnel does not care about.
         if was_passive == now_passive {
+            // Nothing to intercept before or after -- an empty list
+            // flipped between "only these" and "all except these" -- is a
+            // full tunnel either way, and a redirect has nothing to do on
+            // it. Restarting one would bring Custom mode's machinery to a
+            // session that is not in Custom mode, and `start_split_tunnel`
+            // lets go of the IPv4 confinement it finds there, for good.
+            if !now_intercepting {
+                return Ok(());
+            }
             if was_intercepting != now_intercepting || was_mode != now_mode {
                 let Some(profile) = self.active.peek().map(|s| s.profile.clone()) else {
                     return Err(
@@ -5134,6 +5143,42 @@ mod helper_tests {
         assert!(engines.end_dead_session(generation));
         assert_eq!(fake.closed(), vec![1000], "dead session: closed exactly once");
         in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "routes removed"]);
+    }
+
+    /// Custom mode switched on with nothing chosen is a full tunnel --
+    /// there is nothing to intercept -- and on Xray or OpenVPN a confined
+    /// one. Flipping the list between "only these" and "all except these"
+    /// then changes nothing about that tunnel: still nothing to intercept.
+    /// It used to restart the redirect in place on it, and
+    /// `start_split_tunnel` let go of the confinement it found there --
+    /// silently in a release build, a panic in a debug one -- and nothing
+    /// ever put it back: one toggle in the settings, and the rest of the
+    /// session ran unconfined.
+    #[test]
+    fn flipping_an_empty_custom_list_leaves_a_confined_full_tunnel_alone() {
+        use neoconnect_ipc::{SplitTunnelConfig, SplitTunnelMode};
+        let config = |mode| SplitTunnelConfig {
+            enabled: true,
+            mode,
+            apps: Vec::new(),
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
+        };
+        for (from, to) in [
+            (SplitTunnelMode::OnlySelected, SplitTunnelMode::AllExcept),
+            (SplitTunnelMode::AllExcept, SplitTunnelMode::OnlySelected),
+        ] {
+            let (mut engines, fake, _) = confined_session();
+            engines.split_tunnel.set_selection(config(from));
+            assert!(!engines.split_tunnel.wants_interception(), "an empty list intercepts nothing");
+            let switched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engines.set_split_tunnel(config(to))));
+            assert!(matches!(switched, Ok(Ok(()))), "{from:?} -> {to:?}: {switched:?}");
+            assert!(fake.closed().is_empty(), "{from:?} -> {to:?}: the confinement was let go of");
+            assert_eq!(engines.ipv4_confined(), Some(true), "{from:?} -> {to:?}");
+            assert!(!engines.split_tunnel_running(), "{from:?} -> {to:?}: a redirect was started on a full tunnel");
+            end_test_session(&mut engines);
+        }
     }
 
     /// IKEv2's Disconnect hangs up with one API call and then removes the
