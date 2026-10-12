@@ -37,9 +37,11 @@ import {
   stateFromStatus,
   type HeadlineTone,
   type VpnStatus,
+  unconfinedByChoice,
   unconfinedLine,
   warnsUnconfined,
 } from "../lib/connection-evidence";
+import { orbCaution, orbTone, type OrbTone } from "../lib/orb-caution";
 import { networkWait, waitForNetwork } from "../lib/network-wait";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
@@ -189,6 +191,25 @@ function serviceDisconnect(): Promise<void> {
 
 /** The headline's colour for each tone `headlineFor` can ask for. Full
  * class names, so the stylesheet build can see them. */
+/** The status dot beside the account, by the orb's own look (`orbTone`):
+ * the one thing read from across a room, so it says what the orb says and
+ * changes when the orb does -- not on a reading of a moment. */
+const DOT_CLASS: Record<OrbTone, string> = {
+  success: "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]",
+  // Connected, not fully protected, long enough to say so in colour
+  // (`orb-caution.ts`).
+  caution: "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]",
+  // Lit, because an engine really is up -- but not in the success green,
+  // which from across a room is the claim itself.
+  highlight: "size-1.5 shrink-0 rounded-full bg-highlight shadow-[0_0_8px_var(--highlight)]",
+  warning: "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]",
+  // Neither lit nor plainly off: both of the others would answer a question
+  // the app cannot answer.
+  muted: "size-1.5 shrink-0 animate-pulse rounded-full bg-muted-foreground",
+  busy: "size-1.5 shrink-0 rounded-full bg-muted-foreground/50",
+  idle: "size-1.5 shrink-0 rounded-full bg-muted-foreground/50",
+};
+
 const HEADLINE_TONE: Record<HeadlineTone, string> = {
   success: "text-success",
   highlight: "text-highlight",
@@ -739,6 +760,24 @@ export function Dashboard({
   /** Which words say what is not covered (`unconfinedLine`): Built-in's
    * own, where reconnecting changes nothing, or the general one. */
   const [unconfinedKey, setUnconfinedKey] = useState<TranslationKey>("dash.ipv4NotConfined");
+  /** Whether the orb and the status dot show the warning colour: only for a
+   * confirmed connection that has been "not fully protected" long enough,
+   * unbroken, or is Built-in's, never confined (`orb-caution.ts`). The
+   * owner's rule: a few seconds of not being connected -- a reconnect, a
+   * rung, an engine restarted, a drop's gap -- must not change the colour.
+   * The headline's words follow `ipv4NotConfined` at once, as before. */
+  const [cautionShown, setCautionShown] = useState(() => orbCaution.current());
+  const unconfinedChosen = unconfinedByChoice(unconfinedKey);
+  useEffect(() => {
+    const look = () =>
+      setCautionShown(orbCaution.observe({ state: connectionState, unconfined: ipv4NotConfined, byChoice: unconfinedChosen }));
+    look();
+    // Looked at every second while connected, so a condition that holds is
+    // seen to hold whether or not anything else renders.
+    if (connectionState !== "connected") return;
+    const id = setInterval(look, 1_000);
+    return () => clearInterval(id);
+  }, [connectionState, ipv4NotConfined, unconfinedChosen]);
   /** A pass waiting on its rung for a network to dial over
    * (`network-wait.ts`), from whichever screen started it. */
   const waitingForNetwork = useSyncExternalStore(networkWait.subscribe, networkWait.current);
@@ -3722,26 +3761,7 @@ export function Dashboard({
           </div>
 
           <div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">
-            <span
-              className={
-                connectionState === "connected"
-                  ? "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]"
-                  : connectionState === "unverified"
-                    ? // Lit, because an engine really is up -- but not in
-                      // the success green, which from across a room is
-                      // the claim itself.
-                      "size-1.5 shrink-0 rounded-full bg-highlight shadow-[0_0_8px_var(--highlight)]"
-                    : connectionState === "degraded"
-                    ? "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]"
-                    : connectionState === "unknown"
-                      ? // Neither lit nor plainly off: the dot is the one
-                        // thing read from across a room, and both of the
-                        // other two would answer a question the app
-                        // cannot answer.
-                        "size-1.5 shrink-0 animate-pulse rounded-full bg-muted-foreground"
-                      : "size-1.5 shrink-0 rounded-full bg-muted-foreground/50"
-              }
-            />
+            <span className={DOT_CLASS[orbTone(connectionState, cautionShown)]} />
             <span className="truncate">{me?.email}</span>
           </div>
 
@@ -3767,6 +3787,7 @@ export function Dashboard({
                   <>
                     <ConnectOrb
                       state={connectionState}
+                      caution={cautionShown}
                       // The action travels with the press, decided in the
                       // same render as the label above it.
                       onToggle={() => void handleConnectToggle(press.action)}

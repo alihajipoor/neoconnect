@@ -488,6 +488,14 @@ export function unconfinedLine(status: Pick<VpnStatus, "protocol"> | null): Tran
   return status?.protocol === "IKEV2" ? "dash.ipv4NotConfinedIkev2" : "dash.ipv4NotConfined";
 }
 
+/** Whether the line `unconfinedLine` chose says the tunnel is not confined
+ * by choice -- Built-in, which this version never confines -- rather than by
+ * a confinement that failed or was let go of. A fact about the session, not a
+ * gap that may close: the orb shows it at once (`orb-caution.ts`). */
+export function unconfinedByChoice(line: TranslationKey): boolean {
+  return line === "dash.ipv4NotConfinedIkev2";
+}
+
 /** How the headline is coloured. Mapped to classes by the dashboard. */
 export type HeadlineTone = "success" | "highlight" | "warning" | "muted" | "plain" | "destructive";
 
