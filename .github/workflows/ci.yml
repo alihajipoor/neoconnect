@@ -186,6 +186,12 @@ jobs:
       - name: A game's binaries go to one exit or to none
         run: bash scripts/check-exit-groups.sh
 
+      # The manual test-installer build is safe only because it cannot
+      # sign for the updater, publish, tag or push. One step copied across
+      # from the release workflow would undo that without a sound.
+      - name: The test-installer build cannot publish, tag or sign
+        run: bash scripts/check-test-installer-workflow.sh
+
   desktop:
     name: Desktop client tests
     # The only Windows runner here, and the only reason this job exists:
