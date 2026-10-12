@@ -1835,11 +1835,25 @@ impl Engines {
             return true;
         }
         let retracted = self.ledger.retract(generation);
-        self.rearm_watch(retracted);
         // The report let go of the confinement on the watch's thread; the
-        // engine is alive, so it goes back -- after the watch, so a report
-        // from the new watch can let go of the new one too.
-        self.confine_again();
+        // engine is alive, so it goes back. Its hold is re-armed *before*
+        // the new watch starts: a report from that watch -- the engine
+        // dying a moment after it was found alive -- must find the hold
+        // marked dropped, so the confinement put back after it is let go
+        // of at once. Re-armed after, it erased that mark, and a dead
+        // engine's confinement was held until a phase one queued behind
+        // whatever the owning thread was doing (K2).
+        let owed = self.active.peek().is_some_and(|session| {
+            let owed = session.confinement.owed_after_drop();
+            if owed {
+                session.confinement.rearm();
+            }
+            owed
+        });
+        self.rearm_watch(retracted);
+        if owed {
+            self.confine_again();
+        }
         false
     }
 
@@ -1848,19 +1862,17 @@ impl Engines {
     /// a RAS interface can come back from a MOBIKE move with a new one, and
     /// a permit for the old one would block the tunnel it was for.
     ///
-    /// Nothing for a session never confined, or one whose plan the engine
-    /// tripped over (the valve's word stands). A put-back that fails leaves
-    /// the session unconfined and says why, as at connect.
+    /// Only for a confinement owed after a drop report, its hold already
+    /// re-armed (`end_dead_session`, before the new watch). A plan the
+    /// engine tripped over is never put back: `Hold::put` refuses it, as it
+    /// refuses one a later drop report let go of. A put-back that fails
+    /// leaves the session unconfined and says why, as at connect.
     fn confine_again(&mut self) {
         let ops = Arc::clone(&self.confinement_ops);
         let Some(session) = self.active.peek() else { return };
-        if !session.confinement.owed_after_drop() {
-            return;
-        }
         let Some(plan) = session.confinement_plan.clone() else { return };
         let hold = Arc::clone(&session.confinement);
         let adapter = adapter_name_for(&session.profile);
-        hold.rearm();
         let installed = ops.luid(adapter).and_then(|tunnel_luid| {
             let plan = confinement::Plan { tunnel_luid, ..plan };
             ops.install(&plan).map(|installed| (ops.witness(&plan, &installed), installed))
@@ -5155,6 +5167,101 @@ mod helper_tests {
 
         end_test_session(&mut engines);
         assert_eq!(fake.closed(), vec![1000, 1001], "the session's end closes the one put back");
+    }
+
+    /// The order K2 depends on when a drop report is taken back: the hold
+    /// is re-armed before the new watch starts, and the put-back after it
+    /// does not re-arm it again. The other way round, a report from the
+    /// new watch -- the engine dying a moment after phase one found it
+    /// alive -- set the hold's mark and the put-back's re-arm erased it,
+    /// so the confinement went back in and was held for a dead engine.
+    /// Read from the source: the window is microseconds wide (the test
+    /// below races it for real).
+    #[test]
+    fn a_retracted_drop_rearms_the_hold_before_the_new_watch_starts() {
+        let source = include_str!("mod.rs");
+        let body_of = |signature: &str| {
+            let start = source.find(signature).unwrap_or_else(|| panic!("{signature}"));
+            &source[start..start + source[start..].find("\n    }\n").expect("its end")]
+        };
+        let body = body_of("    pub fn end_dead_session(&mut self, generation: u64) -> bool {");
+        let rearm = body.find("session.confinement.rearm();").expect("the hold re-armed by phase one");
+        let watch = body.find("self.rearm_watch(retracted);").expect("the watch started again");
+        let again = body.find("self.confine_again();").expect("the confinement put back");
+        assert!(rearm < watch && watch < again, "re-arm {rearm}, watch {watch}, put back {again}");
+        let body = body_of("    fn confine_again(&mut self) {");
+        assert!(!body.contains(".rearm()"), "the put-back re-arms the hold after the new watch has started");
+    }
+
+    /// A drop report racing the put-back, thirty-two sessions at once: each
+    /// confined, its first report taken back by phase one, and its engine
+    /// killed at a different moment around that -- before phase one looks,
+    /// while it re-arms and puts the confinement back, after. Whatever the
+    /// order, a dead engine's confinement is not held: phase one tears it
+    /// down, the new watch's report lets go of it, or the put-back is let
+    /// go of at once. And every confinement installed is closed exactly
+    /// once.
+    #[test]
+    fn a_drop_report_racing_the_put_back_never_leaves_a_dead_engine_confined() {
+        use windows_sys::Win32::System::Threading::SetEvent;
+        const AT_ONCE: usize = 32;
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let handles: Vec<_> = (0..AT_ONCE)
+            .map(|i| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let fake = FakeConfinement::new();
+                    let mut engines = engines_for_test();
+                    engines.set_confinement_ops_for_test(fake.clone());
+                    let go = engine_watch::new_event().unwrap();
+                    let g = engines.begin_test_session_watched_by(
+                        "XRAY_VLESS_REALITY",
+                        engine_stand_in(),
+                        Box::new(GoneWhen(go.duplicate().unwrap())),
+                    );
+                    assert!(engines.confine_for_test());
+                    // SAFETY: a live event handle.
+                    unsafe { SetEvent(go.raw()) };
+                    assert!(wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]), "{i}: the report did not let go");
+                    let pid = match engines.active.peek() {
+                        Some(Session { engine: Active::Child { child, .. }, .. }) => child.id(),
+                        _ => panic!("{i}: no engine"),
+                    };
+                    start.wait();
+                    let killer = std::thread::spawn(move || {
+                        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+                        std::thread::sleep(Duration::from_micros((i as u64 % 8) * 150));
+                        // SAFETY: plain calls; the handle is closed below.
+                        unsafe {
+                            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                            if !h.is_null() {
+                                TerminateProcess(h, 1);
+                                windows_sys::Win32::Foundation::CloseHandle(h);
+                            }
+                        }
+                    });
+                    let _ = engines.end_dead_session(g);
+                    killer.join().unwrap();
+                    // The new watch waits out REARM_SPACING before its first
+                    // look, then reports; a margin past that.
+                    assert!(
+                        wait_for(Duration::from_secs(4), || {
+                            engines.active.peek().map_or(true, |s| s.confinement.confined() != Some(true))
+                        }),
+                        "{i}: a dead engine's confinement was held"
+                    );
+                    end_test_session(&mut engines);
+                    let installs = fake.installs.lock().unwrap().len();
+                    let mut closed = fake.closed();
+                    closed.sort_unstable();
+                    let expected: Vec<isize> = (1000..1000 + installs as isize).collect();
+                    assert_eq!(closed, expected, "{i}: each confinement closed exactly once");
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a dead engine's confinement held, or one closed other than once");
+        }
     }
 
     /// Thirty-two sessions at once, each confined, each engine killed
