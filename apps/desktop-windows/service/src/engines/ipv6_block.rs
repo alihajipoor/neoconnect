@@ -111,13 +111,19 @@
 //! visible cause and no way to undo it, which is precisely the class of
 //! leftover state being eliminated elsewhere in this client.
 //!
-//! # The residual gap
+//! # Flows already open when it goes in
 //!
-//! ALE_AUTH_CONNECT_V6 classifies a flow when it is established, not
-//! continuously. A v6 connection that was already open when the tunnel
-//! came up is not re-examined and keeps running. New flows -- which is
-//! everything a browser, a game or a resolver does from that point on --
-//! are blocked. WireGuard's kill-switch has the same property.
+//! This section used to say that ALE_AUTH_CONNECT_V6 classifies a flow
+//! only when it is established, so a v6 connection already open when the
+//! tunnel came up was not re-examined and kept running. Measured on
+//! 0.9.48 (P0-D, journal 2026-10-11), Windows does re-examine open flows
+//! when a filter is added: a connected IPv6 UDP socket opened before
+//! Connect was refused from then on, the audit log naming "Neoxify: block
+//! all outbound (IPv6)" for its sends (63 times in one Stealth run, 33 in
+//! one Compatible run). Under wireguard.exe's IPv4 block a connected UDP
+//! socket stopped at the NIC while `send()` went on reporting success, and
+//! an established TLS connection was reset. An IPv6 TCP connection
+//! already open when this block went in was not part of the measurement.
 
 use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
@@ -839,12 +845,18 @@ fn note(path: &Path, line: &str) {
 /// IPv4 at once. The two providers now overlap on purpose: theirs keeps
 /// the tunnel the only way out, ours makes IPv6 fail fast.
 ///
-/// Not verified: whether a dual-mode socket's IPv4 is classified at the V6
-/// layers, as the Custom-mode block below assumes. If it is, this block
-/// refuses that IPv4 too -- already true of the other engines, and now of
-/// WireGuard -- which the planned V6 permits for the tunnel and
-/// `::ffff:0:0/96` would undo. Settled by a VM measurement that has not
-/// run.
+/// Whether this block also refuses a dual-mode socket's IPv4 was an open
+/// question, and P0-B answered it on 0.9.48 (journal, 2026-10-11): it does
+/// not. With this block installed on Stealth and Compatible, a .NET
+/// dual-mode socket connecting to an IPv4-mapped address fetched a page
+/// through the tunnel, while a native IPv6 connect beside it was refused
+/// by "Neoxify: block all outbound (IPv6)". On Fast, wireguard.exe's own
+/// IPv4 block refused a dual-mode send exactly as it refused the plain
+/// IPv4 one. So Windows judges that traffic at the V4 layers, and this
+/// block, which is V6 only, does not see it. The V6 permits once planned
+/// for the tunnel and `::ffff:0:0/96` would have changed nothing, and
+/// were not built. One VM, one node; WireGuard with this block installed
+/// beside wireguard.exe's, as now, was not part of the measurement.
 pub fn needed_for(profile: &neoconnect_ipc::ConnectProfile) -> bool {
     use neoconnect_ipc::ConnectProfile as P;
     match profile {
@@ -1031,14 +1043,20 @@ impl Drop for AppId {
 ///   `ALE_APP_ID` condition, so this sublayer has no opinion at all
 ///   about any other program on the machine.
 ///
-/// # The IPv4-mapped permit is load-bearing
+/// # The IPv4-mapped permit
 ///
-/// `::/64` is permitted, and it is not there for `::1`. A dual-stack
-/// socket's IPv4 traffic is classified at the **V6** ALE layer carrying
-/// an IPv4-mapped address (`::ffff:a.b.c.d`), which Microsoft documents
-/// explicitly. Without that permit this block would refuse a selected
-/// application's IPv4 as well -- which is to say, it would break Custom
-/// mode outright for the traffic Custom mode is for.
+/// `::/64` is permitted, and it is not there for `::1`. This comment used
+/// to say that a dual-stack socket's IPv4 is classified at the **V6** ALE
+/// layer carrying an IPv4-mapped address (`::ffff:a.b.c.d`), so that
+/// without the permit this block would refuse a selected application's
+/// IPv4 too. Measured on 0.9.48 (P0-B, journal 2026-10-11), that is not
+/// what happens at the connect layer: the machine-wide block, which has no
+/// such permit, did not refuse a dual-mode socket's IPv4, and
+/// wireguard.exe's IPv4 block did -- see [`needed_for`]. The permit stays,
+/// because it keeps these permits the exact complement of the redirect
+/// loop's filter (the test of that is below), but it is not what carries a
+/// selected application's IPv4. This block itself was not part of that
+/// measurement.
 pub struct SelectedAppsIpv6Block {
     engine: isize,
     filters: usize,
@@ -1178,8 +1196,8 @@ unsafe fn build_split(engine: HANDLE, app_ids: &[AppId]) -> Result<usize, String
 /// the loop passes through untouched:
 ///
 /// * `::/64` -- the unspecified address, `::1`, and the IPv4-mapped
-///   range. The last of those is the important one; see the type
-///   comment.
+///   range. The last of those was once thought to be how a dual-stack
+///   socket's IPv4 arrives here; see the type comment.
 /// * `fc00::/7` + `fe00::/8` + `ff00::/8` -- exactly `>= fc00::`, which
 ///   is unique-local, link-local and multicast. The LAN.
 ///
@@ -1541,13 +1559,13 @@ mod tests {
     /// The permits and the loop's own filter must partition the address
     /// space between them, with nothing over and nothing missing.
     ///
-    /// This is the test that matters most in this file, and the reason
-    /// is the third case in the table. A dual-stack socket's **IPv4**
-    /// traffic is classified at the IPv6 ALE layer carrying an
-    /// IPv4-mapped address, so a block that forgot `::/64` would refuse
-    /// a selected application's IPv4 -- which is to say it would break
-    /// the feature it is meant to protect, on exactly the machines that
-    /// have IPv6 at all, and it would do it silently.
+    /// An address on neither side is one the loop leaves alone and this
+    /// block refuses: a selected application's traffic that nothing
+    /// carries, silently. The third case in the table, IPv4-mapped, was
+    /// thought to be how a dual-stack socket's IPv4 arrives at the V6
+    /// layer; measured on 0.9.48 it is judged at the V4 layers instead
+    /// (see the comment on `SelectedAppsIpv6Block`), and the row stays
+    /// because the partition has to hold wherever it falls.
     ///
     /// It can fail: dropping any entry from `SPLIT_PERMITTED`, or
     /// writing `/8` where `/7` belongs on `fc00::`, moves at least one
