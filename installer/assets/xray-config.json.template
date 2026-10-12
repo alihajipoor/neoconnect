@@ -172,17 +172,42 @@
     }
   ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
+    { "protocol": "freedom", "tag": "direct", "settings": { "domainStrategy": "ForceIPv4" } },
+    { "protocol": "blackhole", "tag": "block" },
+    {
+      "//": "UoT carve-out (2026-10-11). Shadowsocks UDP-over-TCP, which the desktop and mobile clients use for all UDP including DNS, is served by Xray's outbound handler only when freedom passes the magic name sp.v2.udp-over-tcp.arpa through unresolved. 'direct' is ForceIPv4, which resolves it, finds no A record and drops the flow. No domainStrategy here, deliberately; only the rule tagged uot-direct reaches this outbound. Known gap: the UoT socket is dual-stack and its inner UDP destinations are never routed, so on a node with IPv6 a client could still send UDP to an IPv6 literal through it (and to private ranges -- as before 2026-10-11); only a kernel rule closes that.",
+      "tag": "uot-direct",
+      "protocol": "freedom",
+      "settings": {}
+    }
   ],
+  "dns": {
+    "//": "queryStrategy UseIPv4 is load-bearing (2026-10-11): routing's IPIfNonMatch resolves names for its ip rules, and with AAAA answers the block-ipv6-egress rule would block every dual-stack site. A per-server queryStrategy cannot undo it.",
+    "queryStrategy": "UseIPv4"
+  },
   "routing": {
+    "//ipv4-only": "Customers leave this node over IPv4 only, since 2026-10-11 (docs/journal/log.md). Three pieces hold it together and each is broken without the others: dns.queryStrategy UseIPv4, freedom 'direct' with domainStrategy ForceIPv4, and the block-ipv6-egress rule. ForceIPv4 has a price -- it resolves every name it is handed, including Shadowsocks UDP-over-TCP's magic name, which has no address -- so uot-direct sits before anything that resolves. Every rule in this file also sits before the route rules CONFIGURE_ROUTE appends at runtime, and uot-direct is the only one that sends traffic out instead of refusing it: were this node made the Xray entry of a relay route on shadowsocks-in, that route's UoT -- all of its UDP, DNS included -- would leave from here rather than from the exit. installer/maintenance/xray-ipv4-only.sh brings a live node to this state and refuses one that holds route rules for that reason; the relay template carries no uot-direct at all. The comment texts on the pieces are the ones that script writes, so a re-run of install_xray finds the node's rules unchanged. Spell queryStrategy exactly: xray run -test accepts any value and silently reads an unknown one as UseIP (infra/conf/dns.go, resolveQueryStrategy), which would put every dual-stack site behind block-ipv6-egress -- found 2026-10-11 by a deliberately misspelt negative control that passed.",
     "//": "No customer may reach this node's own loopback or private addresses through their tunnel: 127.0.0.1:10085 is the Xray API (every customer's credentials, everyone's counters) and 127.0.0.1:7505 is OpenVPN's unauthenticated management port. Found by the 2026-10-06 review; live nodes are patched with installer/maintenance/block-private-egress.sh. IPIfNonMatch is part of the fix: an ip rule never sees a domain target, so without it any name resolving to 127.0.0.1 walks past the block. Rules that match by inbound tag (api-in, and the relay rules CONFIGURE_ROUTE adds) match before any resolving.",
     "domainStrategy": "IPIfNonMatch",
     "rules": [
       { "type": "field", "inboundTag": ["api-in"], "outboundTag": "api" },
       {
+        "//": "First, before IPIfNonMatch resolves anything: the UoT magic names never resolve, and must reach uot-direct unresolved.",
+        "type": "field",
+        "ruleTag": "uot-direct",
+        "domain": ["full:sp.v2.udp-over-tcp.arpa", "full:sp.udp-over-tcp.arpa"],
+        "outboundTag": "uot-direct"
+      },
+      {
         "type": "field",
         "ip": ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"],
+        "outboundTag": "block"
+      },
+      {
+        "//": "No IPv6 egress (2026-10-11): an IPv6 destination is refused here instead of dialled. Needs dns.queryStrategy UseIPv4 (else every dual-stack domain matches this rule) and freedom domainStrategy ForceIPv4 (else a name with no A record is dialled over IPv6). Gap: freedom's UDP socket is dual-stack and later packets of an already-routed UDP session are not re-routed, so only a kernel rule makes this absolute.",
+        "type": "field",
+        "ruleTag": "block-ipv6-egress",
+        "ip": ["::/0"],
         "outboundTag": "block"
       }
     ]
