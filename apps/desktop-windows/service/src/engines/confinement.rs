@@ -117,6 +117,7 @@ impl Prefix {
         Self::new(addr, 32)
     }
 
+    #[cfg(test)]
     pub fn contains(&self, addr: Ipv4Addr) -> bool {
         u32::from(addr) & mask(self.len) == u32::from(self.addr)
     }
@@ -170,6 +171,7 @@ pub enum Lan {
     Allowed(Vec<Prefix>),
     /// Not reachable. Kept so the plan can say it, and so a test can show
     /// what the LAN permits are by their absence; nothing ships it.
+    #[cfg_attr(not(test), allow(dead_code))]
     Refused,
 }
 
@@ -205,9 +207,26 @@ pub fn plan_for(profile: &ConnectProfile, passive: bool, inputs: Inputs) -> Opti
     plan_with(profile, passive, inputs, IKEV2_CONFINED)
 }
 
+/// Whether a session of this profile is confined at all -- the question
+/// [`plan_for`] answers first, asked on its own so a connect gathers what a
+/// plan needs (the tunnel's LUID, the LAN) only for a session that has one.
+pub fn applies_to(profile: &ConnectProfile, passive: bool) -> bool {
+    applies(profile, passive, IKEV2_CONFINED)
+}
+
+fn applies(profile: &ConnectProfile, passive: bool, ikev2: bool) -> bool {
+    use ConnectProfile as P;
+    !passive
+        && match profile {
+            P::Wireguard(_) => false,
+            P::Ikev2(_) => ikev2,
+            P::XrayVlessReality(_) | P::XrayVlessTls(_) | P::XrayTrojan(_) | P::Shadowsocks(_) | P::Openvpn(_) => true,
+        }
+}
+
 fn plan_with(profile: &ConnectProfile, passive: bool, inputs: Inputs, ikev2: bool) -> Option<Result<Plan, String>> {
     use ConnectProfile as P;
-    if passive {
+    if !applies(profile, passive, ikev2) {
         return None;
     }
     let mut nodes: Vec<Ipv4Addr> = Vec::new();
@@ -218,7 +237,6 @@ fn plan_with(profile: &ConnectProfile, passive: bool, inputs: Inputs, ikev2: boo
     }
     let transport = match profile {
         P::Wireguard(_) => return None,
-        P::Ikev2(_) if !ikev2 => return None,
         P::Ikev2(_) => {
             if nodes.is_empty() {
                 return Some(Err("the IKEv2 server's address is not known".into()));
@@ -268,10 +286,6 @@ pub enum Layer {
 }
 
 impl Layer {
-    pub fn is_v6(self) -> bool {
-        matches!(self, Layer::ConnectV6 | Layer::RecvAcceptV6)
-    }
-
     fn direction(self) -> &'static str {
         match self {
             Layer::ConnectV4 | Layer::ConnectV6 => "outbound",
@@ -518,6 +532,7 @@ pub enum Release {
     Dropped,
     /// The engine was refused by the plan (K5): let go of for the rest of
     /// the session, with the reason.
+    #[allow(dead_code)] // the plan-error valve, next
     PlanError(String),
 }
 
@@ -581,6 +596,7 @@ impl Hold {
     }
 
     /// The same with a closer of the caller's -- for tests.
+    #[cfg(test)]
     pub fn with_closer(close: Closer) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self { state: Default::default(), close, log: None })
     }

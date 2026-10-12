@@ -304,6 +304,9 @@ fn state_after_a_drop(ledger: &Ledger) -> Option<Response> {
         ipv6_blocked: false,
         tunnel_dns_unprotected: false,
         split_tunnel_restart_needed: Vec::new(),
+        // No session, so nothing to say about one.
+        ipv4_confined: None,
+        confinement_problem: None,
     })
 }
 
@@ -1163,6 +1166,8 @@ async fn dispatch(
                         ipv6_blocked: engines.ipv6_blocked(),
                         tunnel_dns_unprotected: engines.tunnel_dns_unprotected(),
                         split_tunnel_restart_needed: engines.split_tunnel_restart_needed(),
+                        ipv4_confined: engines.ipv4_confined(),
+                        confinement_problem: engines.confinement_problem(),
                     }
                 }),
             )
@@ -1210,6 +1215,11 @@ async fn dispatch(
                         ipv6_blocked: false,
                         tunnel_dns_unprotected: false,
                         split_tunnel_restart_needed: Vec::new(),
+                        // Asked of the adapters, not of the session: whether
+                        // its IPv4 is confined is not something they can say,
+                        // so nothing is said -- the app warns on false only.
+                        ipv4_confined: None,
+                        confinement_problem: None,
                     }
                 }
             }

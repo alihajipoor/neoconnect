@@ -130,7 +130,7 @@ pub enum Outbound<'a> {
 }
 
 impl Outbound<'_> {
-    fn host(&self) -> &str {
+    pub(super) fn host(&self) -> &str {
         match self {
             Outbound::VlessReality(p) => &p.host,
             Outbound::VlessTls(p) => &p.host,

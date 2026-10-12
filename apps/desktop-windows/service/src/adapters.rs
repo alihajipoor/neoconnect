@@ -37,6 +37,9 @@ pub struct Adapter {
     /// address from the interception filter is what stops the proxy
     /// intercepting its own upstream traffic in a loop.
     pub ipv4: Option<Ipv4Addr>,
+    /// The on-link prefix length of that address (`OnLinkPrefixLength`):
+    /// what the IPv4 confinement permits as this adapter's LAN.
+    pub ipv4_prefix: Option<u8>,
     pub is_up: bool,
     /// The DHCP server the adapter's IPv4 lease came from, when it has one.
     ///
@@ -146,6 +149,7 @@ pub fn list() -> io::Result<Vec<Adapter>> {
         // addresses are a list because an adapter may hold several; the
         // first usable IPv4 is the one a socket pinned here would use.
         let mut ipv4 = None;
+        let mut ipv4_prefix = None;
         let mut ua = entry.FirstUnicastAddress;
         while !ua.is_null() {
             // SAFETY: same linked-list guarantee as the gateway walk.
@@ -159,6 +163,7 @@ pub fn list() -> io::Result<Vec<Adapter>> {
                     let addr = Ipv4Addr::from(octets);
                     if !addr.is_unspecified() && !addr.is_loopback() {
                         ipv4 = Some(addr);
+                        ipv4_prefix = Some(u.OnLinkPrefixLength);
                         break;
                     }
                 }
@@ -191,6 +196,7 @@ pub fn list() -> io::Result<Vec<Adapter>> {
             description: wide_to_string(entry.Description),
             gateway,
             ipv4,
+            ipv4_prefix,
             is_up: entry.OperStatus == IF_OPER_STATUS_UP,
             dhcp_server,
         });
@@ -371,6 +377,7 @@ mod tests {
             name: name.to_string(),
             gateway,
             ipv4: Some(Ipv4Addr::new(10, 0, index as u8, 2)),
+            ipv4_prefix: Some(24),
             is_up: true,
             dhcp_server: None,
             description: String::new(),

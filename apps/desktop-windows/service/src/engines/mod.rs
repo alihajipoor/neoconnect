@@ -8,8 +8,7 @@
 //! invisibly.
 
 /// IPv4 confined to the tunnel while a full tunnel is up -- see the
-/// module's own comment. Planned here, installed nowhere yet.
-#[allow(dead_code)]
+/// module's own comment.
 mod confinement;
 // `pub(crate)` for the gaming module, which installs a second,
 // separately-tagged set of NRPT rules through the sibling functions in
@@ -673,6 +672,75 @@ impl Engines {
         self.active.peek().is_some_and(|s| s.filters.ipv6.is_some())
     }
 
+    /// Whether this session's IPv4 is confined to its tunnel, read from
+    /// its hold: `None` for a session never meant to be (the app must not
+    /// warn), else whether it is right now. See `confinement::Hold`.
+    pub fn ipv4_confined(&self) -> Option<bool> {
+        self.active.peek().and_then(|s| s.confinement.confined())
+    }
+
+    /// Why this session's IPv4 is not confined, while it should be.
+    pub fn confinement_problem(&self) -> Option<String> {
+        self.active.peek().and_then(|s| s.confinement.problem())
+    }
+
+    /// Confines the session's IPv4 to its tunnel, where `confinement::plan_for`
+    /// says so: a full Xray or OpenVPN tunnel. `nodes` are the servers the
+    /// engine's own connection goes to, as the connect resolved them.
+    ///
+    /// Never fails the connect (the owner's decision (d)): the tunnel is up
+    /// and carrying by now, and a confinement that cannot be planned or
+    /// installed leaves it up, with the hold saying why -- the status poll
+    /// reports `ipv4_confined: false` and the app does not claim full
+    /// protection. cleanup.log says why too.
+    fn confine_if_needed(&mut self, profile: &ConnectProfile, passive: bool, nodes: Vec<Ipv4Addr>) {
+        use neoconnect_ipc::ConnectProfile as P;
+        let engine_exe = match profile {
+            P::XrayVlessReality(_) | P::XrayVlessTls(_) | P::XrayTrojan(_) | P::Shadowsocks(_) => {
+                self.engine_path("xray.exe").ok()
+            }
+            P::Openvpn(_) => self.engine_path("openvpn.exe").ok(),
+            P::Wireguard(_) | P::Ikev2(_) => None,
+        };
+        // Read only for a session that is confined: nothing else needs the
+        // tunnel's LUID or the LAN.
+        if !confinement::applies_to(profile, passive) {
+            return;
+        }
+        let ops = Arc::clone(&self.confinement_ops);
+        let luid = ops.luid(adapter_name_for(profile));
+        let inputs = confinement::Inputs {
+            tunnel_luid: *luid.as_ref().unwrap_or(&0),
+            engine_exe,
+            nodes,
+            lan: confinement::Lan::Allowed(machine_lan()),
+        };
+        let Some(decision) = confinement::plan_for(profile, passive, inputs) else { return };
+        let Some(session) = self.active.peek_mut() else { return };
+        let refused = match decision {
+            // The LUID's own error says more than "could not be read".
+            Err(why) => Some(match luid {
+                Err(e) => e,
+                Ok(_) => why,
+            }),
+            Ok(plan) => match ops.install(&plan) {
+                Ok(installed) => {
+                    session.confinement_plan = Some(plan);
+                    session.confinement.put(installed);
+                    None
+                }
+                Err(why) => Some(format!("the filters could not be installed: {why}")),
+            },
+        };
+        if let Some(why) = refused {
+            session.confinement.refuse(why.clone());
+            crate::cleanup_log::note(
+                "confine IPv4 to the tunnel",
+                &format!("not confined, the tunnel left up: {why}"),
+            );
+        }
+    }
+
     /// Whether this session asked for the tunnel's DNS rule and did not
     /// get it. `false` is not a claim that DNS is protected -- see
     /// [`dns::TunnelDns`].
@@ -799,6 +867,13 @@ impl Engines {
     #[cfg(test)]
     pub(crate) fn begin_test_session(&mut self, protocol: &'static str, child: Child) -> u64 {
         self.begin_test_session_with_routes(protocol, child, InstalledRoutes::none())
+    }
+
+    /// A session around a process the test started, for `profile`.
+    #[cfg(test)]
+    fn begin_test_session_for(&mut self, profile: &ConnectProfile, protocol: &'static str, child: Child) -> u64 {
+        self.begin_session(Active::Child { protocol, child, routes: InstalledRoutes::none() }, profile);
+        self.active.peek().map_or(0, |s| s.generation)
     }
 
     /// The same, with routes for the session to own.
@@ -1113,6 +1188,11 @@ impl Engines {
         // tunnel for a customer who asked for one app.
         let passive = self.split_tunnel.wants_passive_tunnel();
 
+        // The servers the engine's own connection goes to, as this connect
+        // resolved them: what the IPv4 confinement permits the engine to
+        // reach around the tunnel, and nothing else.
+        let mut confine_nodes: Vec<Ipv4Addr> = Vec::new();
+
         match profile {
             ConnectProfile::Wireguard(p) => {
                 wireguard::connect(self, p, passive, limits)?;
@@ -1184,6 +1264,19 @@ impl Engines {
                 // routed yet -- see `xray::plan_uplink`. Custom mode
                 // routes nothing around the tunnel, so it asks nothing.
                 let uplink = if passive { None } else { Some(xray::plan_uplink(&outbound, limits)?) };
+                // The address the host route is for is the one xray.exe is
+                // permitted to: the two agree, as they must. Exits named by
+                // address are permitted too; one named by a hostname is
+                // left out -- in a full tunnel its connection is routed
+                // into the tunnel, whose interface is permitted anyway.
+                if let Some(plan) = &uplink {
+                    confine_nodes.push(plan.server);
+                    for (_, exit) in &extra {
+                        if let Ok(address) = exit.host().parse::<Ipv4Addr>() {
+                            confine_nodes.push(address);
+                        }
+                    }
+                }
 
                 let (mut child, table) =
                     xray::connect_returning_exits(self, &outbound, &extra, passive)?;
@@ -1220,6 +1313,15 @@ impl Engines {
                 let routes = self.openvpn_routes(added);
                 let engine = Active::Child { protocol: "OPENVPN", child, routes };
                 self.begin_session(engine, profile);
+                // The address openvpn.exe was told to dial: a literal, as
+                // nodes are registered, at once; a hostname resolved the way
+                // the split tunnel resolves it. One that cannot be leaves
+                // the session unconfined, and says so.
+                if !passive {
+                    if let Ok(node) = node_address(profile, limits) {
+                        confine_nodes.push(node);
+                    }
+                }
             }
         }
 
@@ -1248,6 +1350,11 @@ impl Engines {
             self.start_split_tunnel(profile, limits)?;
         }
         self.block_ipv6_if_needed(profile);
+        // And IPv4, for a full tunnel on an engine with no kill switch of
+        // its own: everything outside the tunnel refused but the engine's
+        // link to its servers, the LAN, DHCP and loopback. See
+        // `confinement`. A failure leaves the tunnel up and is reported.
+        self.confine_if_needed(profile, passive, confine_nodes);
         // Whatever the engine above reported about a full tunnel's DNS
         // rule, collected onto the session now that there is one. Read
         // rather than returned because the engines install it from free
@@ -1456,6 +1563,15 @@ impl Engines {
         limits: &crate::lifecycle::budget::Limits,
     ) -> Result<(), String> {
         let adapter = adapter_name_for(profile);
+        // Custom mode is never confined (`confinement::applies_to`): a
+        // machine-wide IPv4 block would take the internet from the
+        // applications the customer kept out of the VPN. Nothing reaches
+        // here confined; if something ever did, it is let go of rather than
+        // left under the redirect.
+        if let Some(session) = self.active.peek() {
+            debug_assert_ne!(session.confinement.confined(), Some(true), "a Custom-mode session was confined");
+            session.confinement.release(confinement::Release::Teardown);
+        }
         let node = match node_address(profile, limits) {
             Ok(node) => node,
             Err(e) => {
@@ -2447,6 +2563,28 @@ fn our_interfaces() -> Vec<u32> {
     adapters::list()
         .map(|all| all.into_iter().filter(|a| OUR_ADAPTER_NAMES.contains(&a.name.as_str())).map(|a| a.index).collect())
         .unwrap_or_default()
+}
+
+/// The LAN as this machine's adapters are on it right now, for the IPv4
+/// confinement's LAN permit -- see `confinement::lan_prefixes` for what
+/// counts. Read at connect and fixed for the session: a network joined
+/// later is refused until the next connect. Adapters that cannot be listed
+/// give no on-link prefix, which leaves the plan's link-local, multicast
+/// and broadcast permits and refuses the rest of the LAN -- the narrower
+/// failure.
+fn machine_lan() -> Vec<confinement::Prefix> {
+    let Ok(all) = adapters::list() else { return Vec::new() };
+    let lan: Vec<confinement::LanAdapter> = all
+        .iter()
+        .map(|a| confinement::LanAdapter {
+            name: &a.name,
+            description: &a.description,
+            is_up: a.is_up,
+            ipv4: a.ipv4,
+            prefix_len: a.ipv4_prefix,
+        })
+        .collect();
+    confinement::lan_prefixes(&lan, &OUR_ADAPTER_NAMES)
 }
 
 /// The physical adapter traffic to `toward` leaves by, and the next hop
@@ -4650,6 +4788,8 @@ mod helper_tests {
         installs: std::sync::Mutex<Vec<confinement::Plan>>,
         next: std::sync::atomic::AtomicIsize,
         closed: Arc<std::sync::Mutex<Vec<isize>>>,
+        /// Every install refused, as WFP would refuse a filter.
+        refuse: std::sync::atomic::AtomicBool,
     }
 
     impl FakeConfinement {
@@ -4659,6 +4799,7 @@ mod helper_tests {
                 installs: std::sync::Mutex::new(Vec::new()),
                 next: std::sync::atomic::AtomicIsize::new(1000),
                 closed: Arc::default(),
+                refuse: std::sync::atomic::AtomicBool::new(false),
             })
         }
         fn closed(&self) -> Vec<isize> {
@@ -4676,6 +4817,9 @@ mod helper_tests {
             Ok(*reads * 100)
         }
         fn install(&self, plan: &confinement::Plan) -> Result<confinement::Installed, String> {
+            if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("could not add the filter (0x80320009)".into());
+            }
             self.installs.lock().unwrap().push(plan.clone());
             let engine = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(confinement::Installed { engine, filters: confinement::specs(plan).len() })
@@ -4857,5 +5001,148 @@ mod helper_tests {
         for handle in handles {
             handle.join().expect("a confinement closed other than once");
         }
+    }
+
+    // ---- Confined at connect, and said so (3.5) ------------------------
+
+    /// Engines over a fake confinement whose engine directory holds
+    /// stand-ins for xray.exe and openvpn.exe -- the plan names the engine,
+    /// and an engine that is not installed is no permit at all.
+    fn engines_with_engine_files(name: &str) -> (Engines, Arc<FakeConfinement>, PathBuf) {
+        let dir = fresh_dir(name);
+        for exe in ["xray.exe", "openvpn.exe"] {
+            std::fs::write(dir.join(exe), b"").unwrap();
+        }
+        let fake = FakeConfinement::new();
+        let mut engines = Engines::new(dir.clone(), dir.clone());
+        engines.set_confinement_ops_for_test(fake.clone());
+        (engines, fake, dir)
+    }
+
+    fn reality_profile() -> ConnectProfile {
+        ConnectProfile::XrayVlessReality(neoconnect_ipc::XrayProfile {
+            uuid: String::new(),
+            flow: String::new(),
+            host: "203.0.113.7".into(),
+            port: 443,
+            reality_public_key: String::new(),
+            short_id: String::new(),
+            server_name: "www.example.com".into(),
+        })
+    }
+
+    fn openvpn_profile() -> ConnectProfile {
+        ConnectProfile::Openvpn(neoconnect_ipc::OpenvpnProfile {
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            ca_cert_pem: String::new(),
+            endpoint: "203.0.113.7:1194".into(),
+            proto: "udp".into(),
+            tls_crypt_key: None,
+        })
+    }
+
+    /// What the status poll says about IPv4 after a full-tunnel connect,
+    /// per engine: confined on Xray and OpenVPN; not said on WireGuard
+    /// (wireguard.exe's own kill switch, K8) or IKEv2 (not until its own
+    /// proof); not said in Custom mode on any engine.
+    #[test]
+    fn status_reports_ipv4_confined_for_xray_and_openvpn_none_for_wireguard() {
+        let node = Ipv4Addr::new(203, 0, 113, 7);
+        let shadowsocks = ConnectProfile::Shadowsocks(neoconnect_ipc::ShadowsocksProfile {
+            host: "203.0.113.7".into(),
+            port: 8388,
+            method: "2022-blake3-aes-128-gcm".into(),
+            password: String::new(),
+        });
+        for (protocol, profile, expected) in [
+            ("XRAY_VLESS_REALITY", reality_profile(), Some(true)),
+            ("SHADOWSOCKS", shadowsocks, Some(true)),
+            ("OPENVPN", openvpn_profile(), Some(true)),
+            ("WIREGUARD", wireguard_profile(), None),
+            ("IKEV2", test_profile(), None),
+        ] {
+            let (mut engines, fake, dir) = engines_with_engine_files(&format!("confined-{protocol}"));
+            engines.begin_test_session_for(&profile, protocol, engine_stand_in());
+            engines.confine_if_needed(&profile, false, vec![node]);
+            assert_eq!(engines.ipv4_confined(), expected, "{protocol}");
+            assert_eq!(engines.confinement_problem(), None, "{protocol}");
+            let installs = fake.installs.lock().unwrap().clone();
+            assert_eq!(installs.len(), usize::from(expected == Some(true)), "{protocol}");
+            if let Some(plan) = installs.first() {
+                let names_the_engine = match &plan.transport {
+                    confinement::Transport::Xray { exe, nodes } => exe.ends_with("xray.exe") && nodes == &[node],
+                    confinement::Transport::Openvpn { exe, node: n, port, .. } => {
+                        exe.ends_with("openvpn.exe") && *n == node && *port == 1194
+                    }
+                    confinement::Transport::Ikev2 { .. } => false,
+                };
+                assert!(names_the_engine, "{protocol}: {plan:?}");
+                assert_eq!(plan.tunnel_luid, 100, "{protocol}: the tunnel's LUID, read now");
+            }
+            end_test_session(&mut engines);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        // Custom mode, on the engines that would otherwise be confined.
+        for (protocol, profile) in [("XRAY_VLESS_REALITY", reality_profile()), ("OPENVPN", openvpn_profile())] {
+            let (mut engines, fake, dir) = engines_with_engine_files(&format!("custom-{protocol}"));
+            engines.begin_test_session_for(&profile, protocol, engine_stand_in());
+            engines.confine_if_needed(&profile, true, vec![node]);
+            assert_eq!(engines.ipv4_confined(), None, "{protocol} in Custom mode");
+            assert!(fake.installs.lock().unwrap().is_empty());
+            end_test_session(&mut engines);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The owner's decision (d): filters that will not go in leave the
+    /// tunnel up, and the status poll says it is not confined, with the
+    /// reason -- never a claim of full protection, and never a connect
+    /// failed over it. The same for a plan that cannot be made.
+    #[test]
+    fn failed_install_keeps_tunnel_and_reports_false() {
+        let (mut engines, fake, dir) = engines_with_engine_files("confine-refused");
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.confine_if_needed(&reality_profile(), false, vec![Ipv4Addr::new(203, 0, 113, 7)]);
+        assert_eq!(engines.ipv4_confined(), Some(false));
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("0x80320009")), "{:?}", engines.confinement_problem());
+        assert!(engines.has_session(), "the tunnel was taken down over its filters");
+        assert!(engines.status().0, "the tunnel is reported up");
+        end_test_session(&mut engines);
+
+        // No server address to permit the engine to: no plan, said so.
+        fake.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        engines.begin_test_session_for(&openvpn_profile(), "OPENVPN", engine_stand_in());
+        engines.confine_if_needed(&openvpn_profile(), false, Vec::new());
+        assert_eq!(engines.ipv4_confined(), Some(false));
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("address")), "{:?}", engines.confinement_problem());
+        assert!(fake.installs.lock().unwrap().is_empty(), "a plan without the engine's permit was installed");
+        assert!(engines.has_session());
+        end_test_session(&mut engines);
+
+        // And an engine that is not there to name.
+        let _ = std::fs::remove_file(dir.join("xray.exe"));
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.confine_if_needed(&reality_profile(), false, vec![Ipv4Addr::new(203, 0, 113, 7)]);
+        assert_eq!(engines.ipv4_confined(), Some(false));
+        assert!(fake.installs.lock().unwrap().is_empty());
+        end_test_session(&mut engines);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The connect confines once the tunnel and its IPv6 block are up, for
+    /// both the engines that are confined, and hands each its servers.
+    #[test]
+    fn the_connect_confines_after_the_ipv6_block() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn connect_inner(").expect("connect_inner");
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
+        let block = body.find("self.block_ipv6_if_needed(profile);").expect("the IPv6 block");
+        let confine = body.find("self.confine_if_needed(profile, passive, confine_nodes);").expect("the confinement");
+        assert!(block < confine);
+        assert!(body.find("confine_nodes.push(plan.server)").is_some(), "Xray's server");
+        assert!(body.find("confine_nodes.push(node)").is_some(), "OpenVPN's server");
     }
 }

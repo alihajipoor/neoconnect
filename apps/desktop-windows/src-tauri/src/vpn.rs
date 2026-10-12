@@ -733,6 +733,16 @@ pub struct VpnStatus {
     /// which is the order the app's own copy recommends.
     #[serde(rename = "splitTunnelRestartNeeded")]
     split_tunnel_restart_needed: Vec<String>,
+    /// Whether IPv4 outside the tunnel is refused on this PC while it is
+    /// up, as the service read it from the session: `null` where that does
+    /// not apply (Custom mode, WireGuard, IKEv2) or the service is older,
+    /// and the UI says nothing then; `false` is a full tunnel that should be
+    /// confined and is not, which the UI says in words (`i18n.tsx`).
+    #[serde(rename = "ipv4Confined")]
+    ipv4_confined: Option<bool>,
+    /// Why not, in English, for support -- never shown as the warning.
+    #[serde(rename = "confinementProblem", skip_serializing_if = "Option::is_none")]
+    confinement_problem: Option<String>,
 }
 
 /// How long to wait for a server to answer before calling it unreachable.
@@ -1113,6 +1123,8 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             ipv6_blocked,
             tunnel_dns_unprotected,
             split_tunnel_restart_needed,
+            ipv4_confined,
+            confinement_problem,
         } => Ok(VpnStatus {
             connected,
             protocol,
@@ -1122,6 +1134,8 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             ipv6_blocked,
             tunnel_dns_unprotected,
             split_tunnel_restart_needed,
+            ipv4_confined,
+            confinement_problem,
         }),
         Response::Error { message } => Err(message),
         Response::Ok
