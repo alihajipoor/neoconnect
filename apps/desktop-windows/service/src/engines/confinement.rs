@@ -387,11 +387,12 @@ fn lan_plumbing() -> [Prefix; 3] {
 /// DHCP, a block of DNS (outbound only), the LAN, then a block of
 /// everything. At the matching V6 layer,
 /// the same permits with their addresses IPv4-mapped, then a block of
-/// `::ffff:0:0/96` only (K4) -- native IPv6 is the IPv6 block's, in its own
-/// sublayer. P0-B measured Windows judging a dual-mode socket's IPv4 at the
-/// V4 layers, so the mapped filters are expected never to match; they keep
-/// the V6 block from refusing anything the V4 rules permit should some
-/// path classify that traffic at V6.
+/// `::ffff:0:0/96` (K4) and, outbound, of DNS on any address. Native IPv6
+/// is otherwise the IPv6 block's, in its own sublayer. P0-B measured
+/// Windows judging a dual-mode socket's IPv4 at the V4 layers, so the
+/// mapped filters are expected never to match; they keep the V6 block from
+/// refusing anything the V4 rules permit should some path classify that
+/// traffic at V6.
 pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
     let mut v4: Vec<(u8, String, Vec<Cond>)> = vec![
         (WEIGHT_LOOPBACK, "permit loopback".into(), vec![Cond::Loopback]),
@@ -524,13 +525,20 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
                 conds: conds.iter().map(mapped).collect(),
             });
         }
+        // DNS on any IPv6 address, not only IPv4-mapped: the router's
+        // link-local address is one (fe80::2:53 left the NIC on every Xray
+        // run of the P3 gate while this sublayer said confined), and the
+        // IPv6 block's own refusal of it is a separate install that can
+        // fail on its own -- the same reason the V4 DNS block is here. Under
+        // loopback, the tunnel, the engine and DHCP, as at V4; nothing else
+        // native is this sublayer's (the IPv6 block has it).
         if layer == Layer::ConnectV6 {
             specs.push(FilterSpec {
-                name: "Neoxify: block DNS outside the tunnel, IPv4-mapped (outbound)".into(),
+                name: "Neoxify: block DNS outside the tunnel, IPv6 (outbound)".into(),
                 layer,
                 action: Action::Block,
                 weight: WEIGHT_DNS,
-                conds: vec![Cond::RemoteV6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped(), 96), Cond::RemotePort(53)],
+                conds: vec![Cond::RemotePort(53)],
             });
         }
         specs.push(FilterSpec {
@@ -1458,7 +1466,7 @@ unsafe fn add_sublayer(engine: HANDLE) -> Result<(), String> {
     Err(format!("could not create the {SUBLAYER_NAME} sublayer ({err:#010x})"))
 }
 
-fn layer_key(layer: Layer) -> GUID {
+pub(super) fn layer_key(layer: Layer) -> GUID {
     match layer {
         Layer::ConnectV4 => FWPM_LAYER_ALE_AUTH_CONNECT_V4,
         Layer::RecvAcceptV4 => FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
@@ -1936,21 +1944,28 @@ mod tests {
         }
     }
 
-    /// The V6 blocks in this sublayer cover the IPv4-mapped range and
-    /// nothing else (K4). Native IPv6 is the IPv6 block's job, in its own
-    /// sublayer; a block-all here would duplicate it with a different
-    /// lifetime. The V4 block of everything is the unconditional one; the
-    /// only other block is DNS's, outbound, by port.
+    /// The V6 blocks in this sublayer are the IPv4-mapped range (K4) and,
+    /// outbound, DNS on any IPv6 address -- the router's link-local address
+    /// included, which left the NIC on every Xray run of the P3 gate while
+    /// this sublayer said confined. Nothing else native: that is the IPv6
+    /// block's job, in its own sublayer, and a block-all here would
+    /// duplicate it with a different lifetime. The V4 block of everything
+    /// is the unconditional one; the only other block is DNS's, outbound,
+    /// by port.
     #[test]
-    fn v6_block_in_this_sublayer_covers_only_ffff_0_0_96() {
+    fn v6_blocks_in_this_sublayer_are_the_mapped_range_and_dns_on_any_address() {
         let specs = specs(&xray_plan());
         let mapped_range = Cond::RemoteV6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped(), 96);
         for layer in [Layer::ConnectV6, Layer::RecvAcceptV6] {
-            let blocks: Vec<&FilterSpec> = specs.iter().filter(|s| s.layer == layer && s.action == Action::Block).collect();
-            assert!(blocks.iter().all(|b| b.conds.contains(&mapped_range)), "{layer:?}: {blocks:?}");
-            let everything: Vec<&&FilterSpec> = blocks.iter().filter(|b| b.conds == [mapped_range.clone()]).collect();
-            assert_eq!(everything.len(), 1, "{layer:?}");
-            assert!(specs.iter().filter(|s| s.layer == layer).all(|s| !s.conds.is_empty()), "{layer:?}");
+            let blocks: Vec<Vec<Cond>> =
+                specs.iter().filter(|s| s.layer == layer && s.action == Action::Block).map(|s| s.conds.clone()).collect();
+            let expected: Vec<Vec<Cond>> = if layer == Layer::ConnectV6 {
+                vec![vec![Cond::RemotePort(53)], vec![mapped_range.clone()]]
+            } else {
+                vec![vec![mapped_range.clone()]]
+            };
+            assert_eq!(blocks, expected, "{layer:?}");
+            assert!(specs.iter().filter(|s| s.layer == layer && s.action == Action::Permit).all(|s| !s.conds.is_empty()), "{layer:?}");
         }
         for layer in [Layer::ConnectV4, Layer::RecvAcceptV4] {
             let blocks: Vec<&FilterSpec> = specs.iter().filter(|s| s.layer == layer && s.action == Action::Block).collect();
@@ -2886,32 +2901,12 @@ mod tests {
         }
 
         /// Sublayer A, as `ipv6_block` installs it for an Xray full tunnel:
-        /// `add_ipv6_filters` at both V6 layers and `add_dns_filters` at
-        /// ALE_AUTH_CONNECT_V4. Written out here, by hand, from that file;
-        /// a change there has to be mirrored here for this model to mean
-        /// anything.
+        /// the IPv6 block and the DNS confinement beside it. Its own plan,
+        /// not a copy of it: a hand-written mirror here once stood in for
+        /// it, and agreed with it only for as long as somebody remembered
+        /// to change both.
         fn today_ipv6_and_dns(tunnel: u64, engine: PathBuf) -> Vec<FilterSpec> {
-            let spec = |layer, action, weight, conds| FilterSpec {
-                name: "Neoxify (IPv6 block)".into(),
-                layer,
-                action,
-                weight,
-                conds,
-            };
-            let mut a = Vec::new();
-            for layer in [Layer::ConnectV6, Layer::RecvAcceptV6] {
-                a.push(spec(layer, Action::Permit, 12, vec![Cond::Loopback]));
-                a.push(spec(layer, Action::Permit, 12, vec![Cond::RemoteV6(Ipv6Addr::LOCALHOST, 128)]));
-                a.push(spec(layer, Action::Permit, 12, vec![Cond::RemoteV6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10)]));
-                a.push(spec(layer, Action::Permit, 12, vec![Cond::RemoteV6(Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8)]));
-                a.push(spec(layer, Action::Block, 0, vec![]));
-            }
-            let v4 = Layer::ConnectV4;
-            a.push(spec(v4, Action::Permit, 12, vec![Cond::RemotePort(53), Cond::LocalInterface(tunnel)]));
-            a.push(spec(v4, Action::Permit, 12, vec![Cond::RemotePort(53), Cond::Loopback]));
-            a.push(spec(v4, Action::Permit, 12, vec![Cond::RemotePort(53), Cond::App(engine)]));
-            a.push(spec(v4, Action::Block, 0, vec![Cond::RemotePort(53)]));
-            a
+            crate::engines::ipv6_block::full_tunnel_specs(true, Some((tunnel, Some(engine.as_path()))))
         }
 
         fn v6_contains(prefix: Ipv6Addr, len: u8, addr: Ipv6Addr) -> bool {
@@ -3195,6 +3190,67 @@ mod tests {
             let to_host = Flow { local_port: 68, ..out(app(), v4(93, 184, 216, 34), 67, protocol::UDP, PHYSICAL) };
             assert_eq!(decide(&refused, &to_isp), Verdict::Permit);
             assert_eq!(decide(&refused, &to_host), Verdict::Block);
+        }
+
+        /// DNS to the router's IPv6 link-local address -- a resolver a router
+        /// advertises, or any program asking it directly -- left the NIC on
+        /// every Xray run of the P3 gate (fe80::2, port 53, 62-71 frames a
+        /// run) while the status said confined: the IPv6 block permitted
+        /// link-local on every port, and this sublayer's V6 DNS block covered
+        /// only IPv4-mapped addresses. Refused now by each sublayer on its
+        /// own -- this one, the IPv6 block with the DNS confinement, and the
+        /// IPv6 block without it (OpenVPN's) -- and by the two together.
+        /// What keeps link-local working is untouched: neighbour discovery,
+        /// DHCPv6, mDNS, a file share on a link-local address, a resolver on
+        /// this PC.
+        #[test]
+        fn dns_to_link_local_ipv6_is_refused_and_the_rest_of_link_local_is_not() {
+            const ICMPV6: u8 = 58;
+            let router: IpAddr = "fe80::2".parse().unwrap();
+            let rows: Vec<(&str, Flow, Verdict)> = vec![
+                ("DNS over UDP to the router's link-local address", out(app(), router, 53, protocol::UDP, PHYSICAL), Verdict::Block),
+                ("DNS over TCP to the router's link-local address", out(app(), router, 53, protocol::TCP, PHYSICAL), Verdict::Block),
+                (
+                    "DNS to a link-local multicast group",
+                    out(app(), "ff02::1:3".parse().unwrap(), 53, protocol::UDP, PHYSICAL),
+                    Verdict::Block,
+                ),
+                ("neighbour discovery", out(app(), router, 0, ICMPV6, PHYSICAL), Verdict::Permit),
+                (
+                    "DHCPv6 to the all-servers group",
+                    Flow { local_port: 546, ..out(app(), "ff02::1:2".parse().unwrap(), 547, protocol::UDP, PHYSICAL) },
+                    Verdict::Permit,
+                ),
+                ("mDNS", out(app(), "ff02::fb".parse().unwrap(), 5353, protocol::UDP, PHYSICAL), Verdict::Permit),
+                ("a file share on a link-local address", out(app(), router, 445, protocol::TCP, PHYSICAL), Verdict::Permit),
+                (
+                    "a resolver on ::1",
+                    Flow { loopback: true, ..out(app(), IpAddr::V6(Ipv6Addr::LOCALHOST), 53, protocol::UDP, 1) },
+                    Verdict::Permit,
+                ),
+                (
+                    "a link-local client asking a DNS server on this PC",
+                    Flow { layer: Layer::RecvAcceptV6, local_port: 53, ..out(app(), router, 50_000, protocol::UDP, PHYSICAL) },
+                    Verdict::Permit,
+                ),
+            ];
+            let ipv6_block_alone = crate::engines::ipv6_block::full_tunnel_specs(true, None);
+            let models: Vec<(&str, Vec<Vec<FilterSpec>>)> = vec![
+                ("both sublayers", sublayers()),
+                ("this sublayer alone", vec![specs(&xray_plan())]),
+                ("the IPv6 block with the DNS confinement", vec![today_ipv6_and_dns(LUID, xray_exe())]),
+                ("the IPv6 block without it", vec![ipv6_block_alone]),
+            ];
+            let mut wrong = Vec::new();
+            for (model, sublayers) in &models {
+                for (why, flow, expected) in &rows {
+                    let got = decide(sublayers, flow);
+                    if got != *expected {
+                        wrong.push(format!("{model}: {why}: expected {expected:?}, got {got:?}"));
+                    }
+                }
+            }
+            assert!(wrong.is_empty(), "{}", wrong.join("\n"));
         }
 
         /// This sublayer on its own, for IPv4-mapped traffic at V6: through
