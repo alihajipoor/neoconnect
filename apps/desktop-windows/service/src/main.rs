@@ -616,6 +616,25 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     // itself at the next boot rather than needing the app opened.
     gaming::sweep_leftovers();
 
+    // WFP filters of ours that outlived the process that made them. Every
+    // session this build opens is dynamic, so the kernel ended them with
+    // the last life and this ordinarily finds nothing -- but an IPv4
+    // confinement left by anything that was not would hold the machine's
+    // whole internet with no VPN running, so it is looked for, as Repair
+    // does. Said in cleanup.log only when there was something to say.
+    match engines::repair::sweep_leftover_filters() {
+        Some(neoconnect_ipc::RepairOutcome::AlreadyClean) => {}
+        Some(neoconnect_ipc::RepairOutcome::Fixed { detail })
+        | Some(neoconnect_ipc::RepairOutcome::Failed { detail })
+        | Some(neoconnect_ipc::RepairOutcome::Unknown { detail }) => {
+            cleanup_log::note("clear leftover filters at service start", &detail)
+        }
+        None => cleanup_log::note(
+            "clear leftover filters at service start",
+            "the Windows Filtering Platform could not be opened",
+        ),
+    }
+
     // One owner on its own thread, with a queue in front of it, rather
     // than a mutex every request contends on. See
     // docs/windows-service-rewrite.md and lifecycle::supervisor.

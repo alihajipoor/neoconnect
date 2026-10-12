@@ -424,92 +424,7 @@ fn step_firewall(found: &Survey, report: &mut RepairReport) {
 /// Removal only. Nothing here can leave the machine more restricted than
 /// it was found.
 fn step_wfp(found: &Survey, report: &mut RepairReport) {
-    let outcome = with_wfp_engine(|engine| {
-        let ids = match our_filter_ids_detailed(engine) {
-            Ok(ids) => ids,
-            Err(why) => {
-                // "under our provider" would be a lie now: the sweep asks
-                // for every filter on the machine and does the provider
-                // comparison itself. Saying so matters -- a support
-                // conversation that starts from a wrong description of
-                // what was attempted starts in the wrong place.
-                return RepairOutcome::Unknown {
-                    detail: format!("the filtering platform would not list its filters: {why}"),
-                }
-            }
-        };
-        for id in &ids {
-            // SAFETY: `engine` is a live handle from `with_wfp_engine`,
-            // and `id` came from an enumeration on the same engine.
-            //
-            // The return value is deliberately dropped: "not found"
-            // means somebody else got there first, which is the outcome
-            // being asked for, and every other failure is caught by the
-            // re-enumeration below. What is on the machine afterwards is
-            // the only thing worth reporting -- a delete that returned
-            // success over a filter that is still there is exactly the
-            // kind of evidence this codebase has learned not to accept.
-            unsafe { FwpmFilterDeleteById0(engine, *id) };
-        }
-        // The sublayer and provider after the filters, in that order,
-        // because a provider with objects still referencing it refuses
-        // rather than cascading. Best-effort by design: the copies made
-        // by a dynamic session went with the process that made them, so
-        // there is usually nothing here to remove.
-        //
-        // There are *two* sublayers under the one provider -- the
-        // full-tunnel block's and Custom mode's per-app block's -- and
-        // both have to go before the provider will. Deleting only the
-        // first would leave the second pinning the provider on every
-        // future repair.
-        // SAFETY: `engine` is live; both keys are 'static constants.
-        let sublayer = unsafe { FwpmSubLayerDeleteByKey0(engine, &ipv6_block::SUBLAYER_KEY) };
-        // SAFETY: as above.
-        let split_sublayer =
-            unsafe { FwpmSubLayerDeleteByKey0(engine, &ipv6_block::SPLIT_SUBLAYER_KEY) };
-        // SAFETY: as above.
-        let provider = unsafe { FwpmProviderDeleteByKey0(engine, &ipv6_block::PROVIDER_KEY) };
-
-        // What actually decides the outcome: are any filters of ours
-        // still installed. Nothing else here can affect a packet -- a
-        // sublayer holding no filters filters nothing, and a provider is
-        // a label. Reporting a stuck registration as a failed repair
-        // would tell a customer their networking is still broken over an
-        // object that has never touched a packet in its life.
-        let remaining = our_filter_ids(engine);
-        let registration_left: Vec<&str> = [
-            (sublayer, FWP_E_SUBLAYER_NOT_FOUND as u32, "sublayer"),
-            (split_sublayer, FWP_E_SUBLAYER_NOT_FOUND as u32, "Custom-mode sublayer"),
-            (provider, FWP_E_PROVIDER_NOT_FOUND as u32, "provider"),
-        ]
-        .iter()
-        .filter(|(err, absent, _)| *err != 0 && err != absent)
-        .map(|(_, _, what)| *what)
-        .collect();
-        let note = if registration_left.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " (our WFP {} could not be deregistered, which filters nothing)",
-                registration_left.join(" and ")
-            )
-        };
-
-        match remaining {
-            Some(left) if !left.is_empty() => RepairOutcome::Failed {
-                detail: format!("{} filter(s) of ours are still installed", left.len()),
-            },
-            Some(_) if ids.is_empty() => RepairOutcome::AlreadyClean,
-            Some(_) => RepairOutcome::Fixed {
-                detail: format!("removed {} leftover filter(s){note}", ids.len()),
-            },
-            // The deletes ran and then the engine stopped answering, so
-            // whether they took cannot be said. Not "clean".
-            None => RepairOutcome::Unknown {
-                detail: "the filters were deleted but the result could not be re-checked".into(),
-            },
-        }
-    });
+    let outcome = with_wfp_engine(|engine| sweep(&mut LiveWfp(engine)));
 
     push(
         report,
@@ -528,6 +443,149 @@ fn step_wfp(found: &Survey, report: &mut RepairReport) {
             RepairOutcome::Unknown { detail }
         }),
     );
+}
+
+/// What the WFP sweep asks of the filtering platform. A seam, so what it
+/// deletes and in which order can be tested where WFP cannot be reached.
+trait WfpSweep {
+    /// The ids of every filter under one of our providers ([`is_ours`]).
+    fn our_filters(&mut self) -> Result<Vec<u64>, String>;
+    /// Deletes one filter. The result is deliberately not returned: "not
+    /// found" means somebody else got there first, which is the outcome
+    /// being asked for, and every other failure is caught by listing
+    /// again afterwards. What is on the machine then is the only thing
+    /// worth reporting -- a delete that returned success over a filter
+    /// that is still there is exactly the kind of evidence this codebase
+    /// has learned not to accept.
+    fn delete_filter(&mut self, id: u64);
+    fn delete_sublayer(&mut self, key: &GUID) -> u32;
+    fn delete_provider(&mut self, key: &GUID) -> u32;
+}
+
+/// The machine's filtering platform, through an engine handle from
+/// [`with_wfp_engine`].
+struct LiveWfp(HANDLE);
+
+impl WfpSweep for LiveWfp {
+    fn our_filters(&mut self) -> Result<Vec<u64>, String> {
+        our_filter_ids_detailed(self.0)
+    }
+
+    fn delete_filter(&mut self, id: u64) {
+        // SAFETY: the handle is live for as long as this value is, and
+        // `id` came from an enumeration on it.
+        unsafe { FwpmFilterDeleteById0(self.0, id) };
+    }
+
+    fn delete_sublayer(&mut self, key: &GUID) -> u32 {
+        // SAFETY: the handle is live; `key` is a valid GUID.
+        unsafe { FwpmSubLayerDeleteByKey0(self.0, key) }
+    }
+
+    fn delete_provider(&mut self, key: &GUID) -> u32 {
+        // SAFETY: as above.
+        unsafe { FwpmProviderDeleteByKey0(self.0, key) }
+    }
+}
+
+/// Every provider this service registers: the IPv6 block's, and the IPv4
+/// confinement's own (`confinement`), which it keeps apart so the two
+/// dynamic sessions never share one.
+fn our_providers() -> Vec<GUID> {
+    vec![ipv6_block::PROVIDER_KEY, super::confinement::CAPTURE_PROVIDER_KEY]
+}
+
+/// Every sublayer this service registers, with the name a report gives it.
+///
+/// All of them go before the providers, because a provider with objects
+/// still referencing it refuses rather than cascading. Deleting only some
+/// would leave the rest pinning a provider on every future repair.
+fn our_sublayers() -> Vec<(GUID, &'static str)> {
+    vec![
+        (ipv6_block::SUBLAYER_KEY, "sublayer"),
+        (ipv6_block::SPLIT_SUBLAYER_KEY, "Custom-mode sublayer"),
+        (super::confinement::CAPTURE_SUBLAYER_KEY, "IPv4 confinement sublayer"),
+    ]
+}
+
+/// The sweep, on its own, for the service's start: whatever an earlier
+/// life of this service registered in a session that was not dynamic.
+/// Nothing this build installs can be there -- every session of ours is
+/// dynamic, and the kernel ended them with the process -- so this finds
+/// nothing on an ordinary start, which is the point of running it: a
+/// confinement that outlived its service would hold the machine's IPv4
+/// with no VPN running, and nothing else would ever remove it.
+///
+/// `None` when the filtering platform could not be opened.
+pub(crate) fn sweep_leftover_filters() -> Option<RepairOutcome> {
+    with_wfp_engine(|engine| sweep(&mut LiveWfp(engine)))
+}
+
+/// Whether a filter's provider is one of ours.
+fn is_ours(provider: &GUID) -> bool {
+    our_providers().iter().any(|ours| guid_eq(ours, provider))
+}
+
+/// Removes every filter of ours, then our sublayers, then our providers,
+/// and reports what is left.
+///
+/// Best-effort by design: what a dynamic session made went with the
+/// process that made it, so there is usually nothing here to remove.
+fn sweep(wfp: &mut dyn WfpSweep) -> RepairOutcome {
+    let ids = match wfp.our_filters() {
+        Ok(ids) => ids,
+        Err(why) => {
+            // "under our provider" would be a lie: the sweep asks for
+            // every filter on the machine and does the provider comparison
+            // itself. Saying so matters -- a support conversation that
+            // starts from a wrong description of what was attempted starts
+            // in the wrong place.
+            return RepairOutcome::Unknown {
+                detail: format!("the filtering platform would not list its filters: {why}"),
+            };
+        }
+    };
+    for id in &ids {
+        wfp.delete_filter(*id);
+    }
+    let mut registration_left: Vec<&str> = Vec::new();
+    for (key, what) in our_sublayers() {
+        let err = wfp.delete_sublayer(&key);
+        if err != 0 && err != FWP_E_SUBLAYER_NOT_FOUND as u32 {
+            registration_left.push(what);
+        }
+    }
+    for key in our_providers() {
+        let err = wfp.delete_provider(&key);
+        if err != 0 && err != FWP_E_PROVIDER_NOT_FOUND as u32 {
+            registration_left.push("provider");
+        }
+    }
+
+    // What actually decides the outcome: are any filters of ours still
+    // installed. Nothing else here can affect a packet -- a sublayer
+    // holding no filters filters nothing, and a provider is a label.
+    // Reporting a stuck registration as a failed repair would tell a
+    // customer their networking is still broken over an object that has
+    // never touched a packet in its life.
+    let remaining = wfp.our_filters().ok();
+    let note = if registration_left.is_empty() {
+        String::new()
+    } else {
+        format!(" (our WFP {} could not be deregistered, which filters nothing)", registration_left.join(" and "))
+    };
+    match remaining {
+        Some(left) if !left.is_empty() => {
+            RepairOutcome::Failed { detail: format!("{} filter(s) of ours are still installed", left.len()) }
+        }
+        Some(_) if ids.is_empty() => RepairOutcome::AlreadyClean,
+        Some(_) => RepairOutcome::Fixed { detail: format!("removed {} leftover filter(s){note}", ids.len()) },
+        // The deletes ran and then the engine stopped answering, so
+        // whether they took cannot be said. Not "clean".
+        None => RepairOutcome::Unknown {
+            detail: "the filters were deleted but the result could not be re-checked".into(),
+        },
+    }
 }
 
 /// A `WireGuardTunnel$neoconnect` service with nothing managing it.
@@ -824,7 +882,6 @@ fn our_filter_ids_detailed(engine: HANDLE) -> Result<Vec<u64>, String> {
     // the set of layers the *current* build installs at, and the objects
     // this step exists to find were left by some *previous* one, at
     // whatever layers that build used.
-    let ours: GUID = ipv6_block::PROVIDER_KEY;
     let mut enum_handle: HANDLE = std::ptr::null_mut();
     // SAFETY: `engine` is live; a null template is the documented way to
     // ask for every filter, and `enum_handle` is a valid out-pointer.
@@ -876,7 +933,7 @@ fn our_filter_ids_detailed(engine: HANDLE) -> Result<Vec<u64>, String> {
             }
             // SAFETY: non-null, and WFP owns it until FwpmFreeMemory0.
             let key = unsafe { *key };
-            if !guid_eq(&key, &ours) {
+            if !is_ours(&key) {
                 continue;
             }
             // SAFETY: as above.
@@ -1235,6 +1292,64 @@ mod tests {
         assert_eq!(ids.len(), count, "two repair steps share an id");
     }
 
+    /// A filtering platform holding some filters, recording what the sweep
+    /// deletes and in which order.
+    struct FakeWfp {
+        filters: Vec<(u64, GUID)>,
+        deleted: Vec<String>,
+    }
+
+    impl WfpSweep for FakeWfp {
+        fn our_filters(&mut self) -> Result<Vec<u64>, String> {
+            Ok(self.filters.iter().filter(|(_, provider)| is_ours(provider)).map(|(id, _)| *id).collect())
+        }
+        fn delete_filter(&mut self, id: u64) {
+            self.filters.retain(|(f, _)| *f != id);
+            self.deleted.push(format!("filter {id}"));
+        }
+        fn delete_sublayer(&mut self, key: &GUID) -> u32 {
+            self.deleted.push(format!("sublayer {:08x}", key.data1));
+            0
+        }
+        fn delete_provider(&mut self, key: &GUID) -> u32 {
+            self.deleted.push(format!("provider {:08x}", key.data1));
+            0
+        }
+    }
+
+    /// The IPv4 confinement registers a provider and sublayer of its own,
+    /// in a dynamic session, so a running service never leaves them -- and
+    /// Repair, and the service at start, still sweep them by key, for the
+    /// same reason the IPv6 block's are swept: a registration by some
+    /// other build that outlived it would hold a machine's IPv4 hostage
+    /// with no VPN running. Its filters go, then every sublayer, then the
+    /// providers; another product's filter is left alone.
+    #[test]
+    fn repair_deletes_capture_sublayer_and_provider() {
+        use super::super::confinement::{CAPTURE_PROVIDER_KEY, CAPTURE_SUBLAYER_KEY};
+        let mut someone_else = ipv6_block::PROVIDER_KEY;
+        someone_else.data4[7] ^= 0x01;
+        let mut wfp = FakeWfp {
+            filters: vec![(1, ipv6_block::PROVIDER_KEY), (2, CAPTURE_PROVIDER_KEY), (3, CAPTURE_PROVIDER_KEY), (4, someone_else)],
+            deleted: Vec::new(),
+        };
+        let outcome = sweep(&mut wfp);
+        assert!(
+            matches!(&outcome, RepairOutcome::Fixed { detail } if detail.contains("removed 3")),
+            "{outcome:?}"
+        );
+        let left: Vec<u64> = wfp.filters.iter().map(|(id, _)| *id).collect();
+        assert_eq!(left, vec![4], "another product's filter is not ours to delete");
+        let at = |what: String| wfp.deleted.iter().position(|d| *d == what).unwrap_or_else(|| panic!("{what} was not deleted: {:?}", wfp.deleted));
+        let sublayer = at(format!("sublayer {:08x}", CAPTURE_SUBLAYER_KEY.data1));
+        let provider = at(format!("provider {:08x}", CAPTURE_PROVIDER_KEY.data1));
+        let filters = at("filter 3".into());
+        assert!(filters < sublayer && sublayer < provider, "filters, then sublayers, then providers: {:?}", wfp.deleted);
+        for (key, _) in our_sublayers() {
+            assert!(at(format!("sublayer {:08x}", key.data1)) < at(format!("provider {:08x}", ipv6_block::PROVIDER_KEY.data1)));
+        }
+    }
+
     /// The WFP sweep decides what to delete off a customer's machine by
     /// this comparison and nothing else, so it has to be exact.
     ///
@@ -1271,5 +1386,13 @@ mod tests {
         assert!(!guid_eq(&ipv6_block::SUBLAYER_KEY, &ipv6_block::SPLIT_SUBLAYER_KEY));
         assert!(!guid_eq(&ipv6_block::SUBLAYER_KEY, &ipv6_block::PROVIDER_KEY));
         assert!(!guid_eq(&ipv6_block::SPLIT_SUBLAYER_KEY, &ipv6_block::PROVIDER_KEY));
+        // And the IPv4 confinement's two, from each other and the rest.
+        let every: Vec<GUID> = our_providers().into_iter().chain(our_sublayers().into_iter().map(|(k, _)| k)).collect();
+        for (i, a) in every.iter().enumerate() {
+            for b in &every[i + 1..] {
+                assert!(!guid_eq(a, b), "two of our WFP objects share a key");
+            }
+        }
+        assert_eq!(every.len(), 5);
     }
 }
