@@ -428,10 +428,12 @@ pub struct Engines {
     /// the machine's lookups alone, and both are `NotRequested` -- which
     /// is not a complaint and must never be shown as one.
     ///
-    /// Collected from `dns::tunnel_dns()` at the end of a connect rather
-    /// than passed back up: `xray::configure_adapter` installs the rule
-    /// from a free function two frames below any `Engines`, so there is
-    /// nowhere to return it to. See `dns::TunnelDns` for the decision it
+    /// A full tunnel's is collected from `dns::tunnel_dns()` at the end of
+    /// a connect rather than passed back up: `xray::configure_adapter`
+    /// installs the rule from a free function two frames below any
+    /// `Engines`, so there is nowhere to return it to. Custom mode's is
+    /// recorded as it goes in, once the redirect is up
+    /// (`pin_custom_mode_dns`). See `dns::TunnelDns` for the decision it
     /// records, which is that a tunnel comes up even when this fails and
     /// the customer is told.
     ///
@@ -443,8 +445,8 @@ pub struct Engines {
     /// tunnel is measured not to carry, put back when it does. See
     /// `dns::PinWatch`. Forgotten with `dns_state`.
     dns_pin: dns::PinWatch,
-    /// What giving the pin back and putting it in again do. The machine's
-    /// NRPT table, except in tests.
+    /// What putting the pin in, giving it back and putting it in again
+    /// do. The machine's NRPT table, except in tests.
     pin_ops: Arc<dyn dns::PinOps>,
     /// What the pin is told about Custom mode, in place of the split
     /// tunnel's own answer: the tests cannot run its driver.
@@ -591,6 +593,9 @@ impl Engines {
                             .to_string(),
                     );
                 };
+                // Out while the redirect is down, which carries what it
+                // pins; `start_split_tunnel` puts it back.
+                self.unpin_custom_mode_dns();
                 self.split_tunnel.stop();
                 // A separate request, so its own boundary read rather
                 // than a token borrowed from a connect that has finished.
@@ -715,6 +720,46 @@ impl Engines {
                 self.dns_state = state;
             }
         }
+    }
+
+    /// Puts Custom mode's DNS rule in, once its redirect carries lookups,
+    /// and records what became of it on the session.
+    ///
+    /// Here, and not in any engine's connect: every engine used to put it
+    /// in inside its own connect, seconds before the redirect started, and
+    /// in between every lookup on the PC was pinned to 1.1.1.1 with nothing
+    /// to carry it into the tunnel. They left by the physical adapter in
+    /// clear text, seen at the NIC on the VM during a WireGuard and an Xray
+    /// Custom-mode connect. Until this runs the lookups go where they went
+    /// before Connect, as the selected applications' connections do until
+    /// the redirect is up; the caller flushes what was answered meanwhile.
+    ///
+    /// Only Custom mode -- a passive tunnel with its redirect up, as the
+    /// pin's watch reads it (`custom_mode_view`) -- and the watch starts
+    /// afresh with the rule. A rule that will not go in is reported in the
+    /// status poll as unpinned DNS and never fails the connect
+    /// (`dns::TunnelDns`).
+    fn pin_custom_mode_dns(&mut self) {
+        let Some(resolver) = dns::custom_mode_rule(self.custom_mode_view().intercepting) else {
+            return;
+        };
+        self.dns_pin.reset();
+        self.dns_state = self.pin_ops.install(resolver);
+    }
+
+    /// Takes Custom mode's rule out before its redirect is stopped to be
+    /// started again in place: while the redirect is down nothing carries
+    /// the lookups it pins. `start_split_tunnel` puts it back. A rule the
+    /// watch has already given back is not taken out twice, and a full
+    /// tunnel's is not touched.
+    fn unpin_custom_mode_dns(&mut self) {
+        if !self.custom_mode_view().intercepting {
+            return;
+        }
+        if self.dns_state == dns::TunnelDns::Forced && !self.dns_pin.released() {
+            self.pin_ops.release();
+        }
+        self.forget_dns_state();
     }
 
     /// Installs a session around a process the test started, exactly as a
@@ -1137,11 +1182,15 @@ impl Engines {
             self.start_split_tunnel(profile, limits)?;
         }
         self.block_ipv6_if_needed(profile);
-        // Whatever the engine above reported about the tunnel's DNS
+        // Whatever the engine above reported about a full tunnel's DNS
         // rule, collected onto the session now that there is one. Read
         // rather than returned because the engines install it from free
-        // functions with no `Engines` to hand it back to.
-        self.dns_state = dns::tunnel_dns();
+        // functions with no `Engines` to hand it back to. Custom mode's
+        // was recorded as it went in, once the redirect was up
+        // (`pin_custom_mode_dns`).
+        if !passive {
+            self.dns_state = dns::tunnel_dns();
+        }
         Ok(())
     }
 
@@ -1358,11 +1407,12 @@ impl Engines {
             let _ = self.disconnect();
             return Err(e);
         }
-        // Once the redirect carries lookups, not only when the rule went
-        // in. Every engine installs Custom mode's rule inside its own
-        // connect, seconds before this; lookups in between went to 1.1.1.1
-        // in clear text by the physical link, and on a line that hijacks
-        // port 53 the block page's answer was cached and served to the
+        // Custom mode's DNS rule, now that the redirect carries what it
+        // pins (`pin_custom_mode_dns`), and not before.
+        self.pin_custom_mode_dns();
+        // Then the cache. Until the rule went in, lookups went to the
+        // network's own resolver, and on a line that hijacks port 53 the
+        // block page's answer was cached and would be served to the
         // selected applications through the redirect afterwards.
         dns::flush_cache();
         Ok(())
@@ -3992,15 +4042,16 @@ mod helper_tests {
     }
 
     /// The DNS cache is flushed once Custom mode's redirect is carrying
-    /// lookups, not only when the rule went in.
+    /// lookups.
     ///
-    /// Every engine installs Custom mode's rule inside its own connect,
-    /// and the redirect starts seconds later, after the relays and the
-    /// firewall allowance. Lookups in between went to 1.1.1.1 in clear
-    /// text over the physical link, and on a line that hijacks port 53 the
-    /// block page's answer was cached and served to selected applications
-    /// after the redirect had started. From the source, as `repair`'s
-    /// survey order is held: the order is the whole of the fix.
+    /// The redirect starts seconds into a connect, after the relays and
+    /// the firewall allowance. Lookups before it went to a resolver over
+    /// the physical link -- 1.1.1.1 while each engine put Custom mode's rule
+    /// in inside its own connect, the network's own since it goes in after
+    /// the redirect -- and on a line that hijacks port 53 the block page's
+    /// answer was cached and served to selected applications after the
+    /// redirect had started. From the source, as `repair`'s survey order
+    /// is held: the order is the whole of the fix.
     #[test]
     fn the_dns_cache_is_flushed_once_the_redirect_is_carrying_lookups() {
         let source = include_str!("mod.rs");
@@ -4023,13 +4074,19 @@ mod helper_tests {
     /// What the pin did to the machine, instead of doing it.
     #[derive(Default)]
     struct RecordingPin {
+        installed: std::sync::atomic::AtomicU32,
         released: std::sync::atomic::AtomicU32,
         restored: std::sync::atomic::AtomicU32,
+        /// What putting it in reports; `Forced` unless a test says.
+        install_fails: std::sync::atomic::AtomicBool,
         /// What putting it back reports; `Forced` unless a test says.
         restore_fails: std::sync::atomic::AtomicBool,
     }
 
     impl RecordingPin {
+        fn installed(&self) -> u32 {
+            self.installed.load(std::sync::atomic::Ordering::SeqCst)
+        }
         fn released(&self) -> u32 {
             self.released.load(std::sync::atomic::Ordering::SeqCst)
         }
@@ -4039,6 +4096,15 @@ mod helper_tests {
     }
 
     impl dns::PinOps for RecordingPin {
+        fn install(&self, resolver: &str) -> dns::TunnelDns {
+            assert_eq!(resolver, dns::CUSTOM_MODE_RESOLVER);
+            self.installed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.install_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                dns::TunnelDns::Unforced("the rule would not go in".into())
+            } else {
+                dns::TunnelDns::Forced
+            }
+        }
         fn release(&self) {
             self.released.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
@@ -4235,6 +4301,122 @@ mod helper_tests {
         let _ = service_process.kill();
         let _ = service_process.wait();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* Custom mode's DNS pin, put in only once the redirect carries lookups.
+     *
+     * Before: each engine put the rule in inside its own connect, seconds
+     * before the redirect started. In between, every lookup on the PC was
+     * pinned to 1.1.1.1 with nothing to carry it into the tunnel, and left by
+     * the physical adapter in clear text: seen at the NIC on the VM during a
+     * WireGuard Custom-mode connect (p1-22, from 2.8 s before the connect
+     * returned) and an Xray one (p1-24). */
+
+    /// The order, from the source, as the flush's is held above: the
+    /// redirect, then the rule, then the flush that drops whatever the
+    /// network's resolver answered before it.
+    #[test]
+    fn custom_modes_rule_goes_in_once_the_redirect_has_started() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn start_split_tunnel(").unwrap();
+        let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+        let started = body.find("self.split_tunnel.start(").expect("the redirect is started here");
+        let pinned = body.find("self.pin_custom_mode_dns();").expect("Custom mode's rule never goes in");
+        let flushed = body.find("dns::flush_cache();").expect("nothing flushes the cache");
+        assert!(started < pinned, "the rule goes in before the redirect can carry the lookups");
+        assert!(pinned < flushed, "the cache is flushed before the rule is in");
+    }
+
+    /// And it comes out before the redirect is stopped to be started again
+    /// in place -- Custom mode's list read the other way round while
+    /// connected -- for the same reason: while the redirect is down, nothing
+    /// carries the pinned lookups. `start_split_tunnel` puts it back.
+    #[test]
+    fn custom_modes_rule_comes_out_while_its_redirect_restarts() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    pub fn set_split_tunnel(").unwrap();
+        let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+        let branch = body
+            .find("if was_intercepting != now_intercepting || was_mode != now_mode {")
+            .expect("the in-place restart");
+        let restart = &body[branch..];
+        let unpinned = restart.find("self.unpin_custom_mode_dns();").expect("the rule stays in through the restart");
+        let stopped = restart.find("self.split_tunnel.stop();").expect("the redirect is stopped");
+        let started = restart.find("self.start_split_tunnel(").expect("and started again");
+        assert!(unpinned < stopped && stopped < started);
+    }
+
+    #[test]
+    fn custom_modes_rule_goes_in_for_the_session_and_a_failure_is_reported() {
+        let (mut engines, pin, dir) = custom_mode_engines("install");
+        engines.pin_custom_mode_dns();
+        assert_eq!(pin.installed(), 1, "Custom mode's rule never went in");
+        assert_eq!(engines.dns_state, dns::TunnelDns::Forced);
+        assert!(!engines.tunnel_dns_unprotected());
+
+        pin.install_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        engines.pin_custom_mode_dns();
+        assert!(engines.tunnel_dns_unprotected(), "a rule that would not go in was not reported");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Not a full tunnel's: its rule, where it has one, is its engine's.
+    #[test]
+    fn a_full_tunnel_gets_no_custom_mode_rule() {
+        let (mut engines, pin, dir) = custom_mode_engines("full");
+        engines.custom_mode_for_test = Some(CustomModeView { intercepting: false, interception_stopped: false });
+        engines.set_dns_state_for_test(dns::TunnelDns::Forced);
+        engines.pin_custom_mode_dns();
+        engines.unpin_custom_mode_dns();
+        assert_eq!(pin.installed(), 0);
+        assert_eq!(pin.released(), 0, "a full tunnel's rule was taken out");
+        assert_eq!(engines.dns_state, dns::TunnelDns::Forced);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each session's own, thirty-two at once: put in, given back by the
+    /// watch while OpenVPN restarts, taken out for a redirect restart --
+    /// which does not take out a rule the watch already gave back -- and put
+    /// in again, fresh, with nothing of the watch's state carried over.
+    #[test]
+    fn custom_modes_rule_belongs_to_its_session_thirty_two_at_once() {
+        let handles: Vec<_> = (0..32)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let (mut engines, pin, dir) = custom_mode_engines(&format!("own-{i}"));
+                    let generation = engines.begin_test_session("OPENVPN", engine_stand_in());
+                    engines.pin_custom_mode_dns();
+                    assert_eq!(pin.installed(), 1, "{i}: never went in");
+                    assert_eq!(engines.dns_state, dns::TunnelDns::Forced, "{i}");
+
+                    std::fs::write(dir.join("openvpn.log"), "SIGUSR1[soft,ping-restart] received, process restarting\n")
+                        .unwrap();
+                    engines.status();
+                    assert_eq!(pin.released(), 1, "{i}: the watch did not give it back");
+
+                    engines.unpin_custom_mode_dns();
+                    assert_eq!(pin.released(), 1, "{i}: taken out twice");
+                    assert_eq!(engines.dns_state, dns::TunnelDns::NotRequested, "{i}");
+                    assert!(!engines.dns_pin.released(), "{i}: the watch's state outlived the restart");
+
+                    engines.pin_custom_mode_dns();
+                    assert_eq!(pin.installed(), 2, "{i}: not put back after the restart");
+                    engines.unpin_custom_mode_dns();
+                    assert_eq!(pin.released(), 2, "{i}: a rule that was in stayed in through the restart");
+
+                    kill_engine_behind_its_back(&mut engines);
+                    let scm = Arc::clone(&engines.wireguard_scm);
+                    assert!(wait_for(Duration::from_secs(5), || {
+                        matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
+                    }));
+                    assert!(engines.end_dead_session(generation), "{i}: the dead session was not ended");
+                    let _ = std::fs::remove_dir_all(&dir);
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a session's rule was not its own");
+        }
     }
 
     /// The four engines pin Custom mode to the same resolver, which is the

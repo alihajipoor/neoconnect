@@ -464,12 +464,11 @@ fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], passive: b
 /// so leaving them in place means every lookup fails even once packets
 /// flow -- which reads to a user as "the internet is down".
 ///
-/// `passive` reaches here only to be handed to
-/// `dns::machine_wide_rule_wanted`. The answer is currently the same in
-/// both modes, so threading it changes no behaviour -- it is threaded so
-/// that the two engines ask the same named question in the same shape,
-/// which is what stopped being true the last time one of them was
-/// edited alone.
+/// `passive` reaches here only to be handed to `dns::rule_at_connect`,
+/// which installs the machine-wide rule here for a full tunnel and leaves
+/// Custom mode's to `Engines::start_split_tunnel`. Both engines that pin a
+/// rule ask that one named question in the same shape, because they
+/// stopped agreeing the last time one of them was edited alone.
 fn configure_adapter(
     tun_ip: Ipv4Addr,
     passive: bool,
@@ -538,20 +537,21 @@ fn configure_adapter(
     // has the argument, which is about poisoned answers in Iran rather
     // than about tidiness.
     //
-    // Unconditional, including in Custom mode, and that is deliberate
-    // rather than an oversight -- which is what it looked like, because
-    // this call is reached from `prepare_passive` as well as
-    // `install_routes` while IKEv2 gated the same call on `!passive`.
-    // Xray was the one that had it right: in Custom mode the redirect
-    // only carries lookups it can see, and `filter_for` excludes every
-    // RFC1918 address, so without this rule a router-supplied resolver
-    // is never redirected. IKEv2 matches this now.
+    // A full tunnel's rule only. Custom mode wants the rule as much -- in
+    // Custom mode the redirect only carries lookups it can see, and
+    // `filter_for` excludes every RFC1918 address, so without it a
+    // router-supplied resolver is never redirected; see
+    // `dns::machine_wide_rule_wanted` -- but not yet. This call is reached
+    // from `prepare_passive` too, seconds before the redirect starts, and
+    // a rule put in here pinned every lookup to 1.1.1.1 with nothing to
+    // carry it: the VM saw them leave by the physical adapter in clear
+    // text (p1-24). Custom mode's goes in once the redirect is up
+    // (`Engines::start_split_tunnel`), on every engine alike.
     //
-    // The condition is named rather than written out, so the two
-    // engines cannot drift apart again the way they just did.
-    // `dns::machine_wide_rule_wanted` carries the whole argument.
-    if super::dns::machine_wide_rule_wanted(passive) {
-        super::dns::force(TUN_DNS);
+    // The condition is named rather than written out, so the engines
+    // cannot drift apart again: `dns::rule_at_connect`.
+    if let Some(resolver) = super::dns::rule_at_connect(passive, TUN_DNS) {
+        super::dns::force(resolver);
     }
 
     Ok(())
@@ -1141,5 +1141,22 @@ mod tests {
         let body = body_of("fn wait_for_address(");
         assert!(body.contains("readiness::settle("), "the wait never asks whether the address is Preferred");
         assert!(body.contains("readiness::address_ready(held, expected)"), "the wait asks about some other address");
+    }
+
+    /// Custom mode's DNS rule is not installed with the adapter: only a
+    /// full tunnel's is (`dns::rule_at_connect`). Custom mode's goes in once
+    /// the redirect carries the lookups (`Engines::start_split_tunnel`);
+    /// installed here, it pinned them to 1.1.1.1 for the seconds before
+    /// that, and they left by the physical adapter in clear text -- seen at
+    /// the NIC on the VM (p1-24). Held from the source, as the order above
+    /// is.
+    #[test]
+    fn only_a_full_tunnels_dns_rule_goes_in_with_the_adapter() {
+        let body = body_of("fn configure_adapter(");
+        let asked = body
+            .find("if let Some(resolver) = super::dns::rule_at_connect(passive, TUN_DNS) {")
+            .expect("the rule is not asked for by the full-tunnel-only policy");
+        assert!(body[asked..].contains("super::dns::force(resolver);"), "the rule is not installed");
+        assert_eq!(body.matches("dns::force(").count(), 1, "the rule is installed some other way too");
     }
 }

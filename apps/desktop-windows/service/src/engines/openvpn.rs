@@ -416,7 +416,8 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     // mode nothing is routed to the tunnel, and its filters would refuse
     // every lookup at the adapter it leaves by, before the redirect could
     // carry it in. Custom mode pins the machine's lookups with the NRPT
-    // rule instead ([`machine_dns_rule`]), as it does on every engine.
+    // rule instead, once the redirect is up, as it does on every engine
+    // (`Engines::start_split_tunnel`).
     //
     // Two tests asserted this before it was ever written, and could not
     // fail: the job that would have run them had never once got as far
@@ -633,12 +634,6 @@ impl HostRouteWatch {
     }
 }
 
-/// The NRPT rule this engine installs for a session, if any. See
-/// `dns::custom_mode_rule`.
-fn machine_dns_rule(passive: bool) -> Option<&'static str> {
-    super::dns::custom_mode_rule(passive)
-}
-
 /// Brings OpenVPN up, and returns it with the host routes it added on
 /// the uplink for the session to own.
 pub fn connect(
@@ -717,13 +712,12 @@ pub fn connect(
     match up {
         Ok(child) => {
             HostRouteWatch::settle_unused(&owed, &ahead, &added);
-            // Once OpenVPN says the tunnel is up: a connect that failed
-            // before here has no tunnel for the lookups to be carried by.
-            // Reported in the status poll, never fatal -- see
-            // `dns::TunnelDns`.
-            if let Some(resolver) = machine_dns_rule(passive) {
-                super::dns::force(resolver);
-            }
+            // No NRPT rule here. A full tunnel's DNS is the pushed one
+            // behind `block-outside-dns`; Custom mode's rule goes in once
+            // the redirect is up to carry the lookups
+            // (`Engines::start_split_tunnel`). It used to go in here,
+            // seconds before that, pinning them to 1.1.1.1 with nothing to
+            // carry them.
             Ok((child, added))
         }
         Err(e) => {
@@ -944,22 +938,19 @@ mod tests {
         assert!(!build_config(&named, false).unwrap().contains("persist-remote-ip"));
     }
 
-    /// The Custom-mode rule is installed by `connect` itself, and only
-    /// once OpenVPN says the tunnel is up. The policy above is a function
-    /// of its own, and deleting the call that uses it brought the leak
-    /// back with every other test still passing; this holds the call where
-    /// it is, from the source, as `repair`'s survey order is held.
+    /// `connect` installs no NRPT rule. A full tunnel's DNS is the pushed
+    /// one behind `block-outside-dns`; Custom mode's rule goes in once the
+    /// redirect carries the lookups (`Engines::start_split_tunnel`, held
+    /// there by its own test). Installed here, once OpenVPN said it was up
+    /// and seconds before the redirect, it pinned them to 1.1.1.1 with
+    /// nothing yet to carry them, and they left by the physical adapter in
+    /// clear text. Held from the source.
     #[test]
-    fn connect_installs_the_custom_mode_rule_once_the_tunnel_is_up() {
+    fn connect_installs_no_dns_rule() {
         let source = include_str!("openvpn.rs");
         let start = source.find("pub fn connect(").unwrap();
         let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
-        let up = body.find("Ok(child) => {").expect("the arm for a tunnel that came up");
-        let failed = body[up..].find("Err(e) => {").map(|at| up + at).expect("the arm for a failed connect");
-        let arm = &body[up..failed];
-        let rule = arm.find("if let Some(resolver) = machine_dns_rule(passive) {").expect("the rule is asked for");
-        assert!(arm[rule..].contains("super::dns::force(resolver);"), "the rule is not installed");
-        assert!(!body[..up].contains("dns::force("), "the rule must not go in before the tunnel is up");
+        assert!(!body.contains("dns::force("), "Custom mode's rule goes in before the redirect can carry it");
     }
 
     /// Detection goes off on OpenVPN's adapter before openvpn.exe starts,
@@ -1214,21 +1205,6 @@ mod tests {
         std::fs::remove_file(dir.join(LOG_FILE)).unwrap();
         assert_eq!(log_tail(&engines), "", "no log, nothing read");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Custom mode pins the machine's lookups to 1.1.1.1, as Xray and IKEv2
-    /// already do, and the redirect carries them through the tunnel.
-    ///
-    /// Before: `route-nopull` dropped the pushed DNS and no rule replaced
-    /// it, so every lookup -- a selected application's included -- went to
-    /// the router and on to the ISP in clear text, and in Iran came back
-    /// with the block page's 10.10.34.x, which the redirect's filter leaves
-    /// alone as a private address. A full tunnel keeps its own: the pushed
-    /// DNS behind `block-outside-dns`.
-    #[test]
-    fn custom_mode_pins_the_machines_dns_like_xray_and_ikev2() {
-        assert_eq!(machine_dns_rule(true), Some("1.1.1.1"));
-        assert_eq!(machine_dns_rule(false), None);
     }
 
     /// The watch's guard: when the uplink was guessed as the wrong

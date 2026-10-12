@@ -58,7 +58,8 @@ const GAMING_NRPT_COMMENT: &str = "Neoxify gaming DNS";
 /// reports a state nothing verified, in either direction.
 ///
 /// It is *not* the ordinary state for a Custom-mode tunnel on any engine:
-/// all four call [`force`] there. This comment used to say Custom mode
+/// [`force`] is called for all four once the redirect is up
+/// (`Engines::start_split_tunnel`). This comment used to say Custom mode
 /// "deliberately leaves the machine's lookups alone", which read as a
 /// design rule and was never true of Xray; see
 /// [`machine_wide_rule_wanted`] for what Custom mode actually does and
@@ -194,10 +195,13 @@ pub(super) fn machine_wide_rule_wanted(_passive: bool) -> bool {
 /// destination, and a public address is what the filter admits.
 pub(super) const CUSTOM_MODE_RESOLVER: &str = "1.1.1.1";
 
-/// The rule WireGuard and OpenVPN install for a session: none in a full
-/// tunnel, where wireguard.exe's `DNS =` and OpenVPN's pushed DNS behind
-/// `block-outside-dns` already settle it, and [`CUSTOM_MODE_RESOLVER`] in
-/// Custom mode, for the reason [`machine_wide_rule_wanted`] gives.
+/// The rule Custom mode installs for a session, on every engine, once its
+/// redirect carries lookups (`Engines::pin_custom_mode_dns`):
+/// [`CUSTOM_MODE_RESOLVER`] in Custom mode, for the reason
+/// [`machine_wide_rule_wanted`] gives, and none otherwise. A full tunnel's
+/// is its engine's: Xray's and IKEv2's own rule ([`rule_at_connect`]),
+/// wireguard.exe's `DNS =`, OpenVPN's pushed DNS behind
+/// `block-outside-dns`.
 ///
 /// Custom mode drops both engines' own DNS -- no `DNS =` line, and
 /// `route-nopull` refuses the pushed one -- and until 2026-10-11 nothing
@@ -208,6 +212,24 @@ pub(super) const CUSTOM_MODE_RESOLVER: &str = "1.1.1.1";
 /// private address. Xray and IKEv2 never had the gap.
 pub(super) fn custom_mode_rule(passive: bool) -> Option<&'static str> {
     (passive && machine_wide_rule_wanted(passive)).then_some(CUSTOM_MODE_RESOLVER)
+}
+
+/// The rule an engine installs inside its own connect: a full tunnel's,
+/// on the two engines that pin one (Xray and IKEv2), and never Custom
+/// mode's.
+///
+/// Custom mode's rule goes in once the redirect carries lookups
+/// (`Engines::start_split_tunnel`), not here. Every engine used to put it
+/// in inside its own connect, seconds before the redirect started, and in
+/// between every lookup on the PC was pinned to 1.1.1.1 with nothing to
+/// carry it into the tunnel: it left by the physical adapter in clear
+/// text, which the VM saw at the NIC during a WireGuard and an Xray
+/// Custom-mode connect. Without the rule in that gap the lookups go where
+/// they went before Connect was pressed -- the network's own resolver --
+/// as the selected applications' connections do until the redirect is up;
+/// what that resolver answered is flushed once the rule is in.
+pub(super) fn rule_at_connect(passive: bool, resolver: &'static str) -> Option<&'static str> {
+    (!passive && machine_wide_rule_wanted(passive)).then_some(resolver)
 }
 
 /* ------------------------------------------------------------------ *
@@ -388,6 +410,9 @@ impl PinWatch {
 /// A seam, so the decision can be driven in tests without touching the
 /// machine's NRPT table.
 pub(super) trait PinOps: Send + Sync {
+    /// Puts Custom mode's rule in for a session ([`force`]), once its
+    /// redirect carries lookups. The cache is flushed by the caller.
+    fn install(&self, resolver: &str) -> TunnelDns;
     /// Takes the tunnel's rule out ([`clear`]).
     fn release(&self);
     /// Puts it back ([`force`]) and, once it is in, flushes the DNS cache:
@@ -401,6 +426,10 @@ pub(super) trait PinOps: Send + Sync {
 pub(super) struct MachinePin;
 
 impl PinOps for MachinePin {
+    fn install(&self, resolver: &str) -> TunnelDns {
+        force(resolver)
+    }
+
     fn release(&self) {
         clear();
     }
@@ -1858,6 +1887,20 @@ mod tests {
                  true, this test is no longer the guard it looks like"
             );
         }
+    }
+
+    /// Custom mode's rule does not go in inside an engine's connect.
+    ///
+    /// It used to, on all four, seconds before the redirect started; the
+    /// lookups in between were pinned to 1.1.1.1 with nothing to carry
+    /// them, and left by the physical adapter in clear text -- seen at the
+    /// NIC on the VM during a WireGuard and an Xray Custom-mode connect. It
+    /// goes in once the redirect carries them (`Engines::start_split_tunnel`).
+    /// A full tunnel's rule is unchanged.
+    #[test]
+    fn an_engine_installs_only_a_full_tunnels_rule_inside_its_connect() {
+        assert_eq!(rule_at_connect(false, "1.1.1.1"), Some("1.1.1.1"));
+        assert_eq!(rule_at_connect(true, "1.1.1.1"), None, "Custom mode's rule went in before the redirect");
     }
 
     /// A latent coupling that nothing asserted before.

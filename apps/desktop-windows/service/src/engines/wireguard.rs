@@ -40,9 +40,10 @@ const TUNNEL_SERVICE_NAME: &str = "WireGuardTunnel$neoconnect";
 ///
 /// DNS is left out of the config in passive mode: wireguard.exe would set
 /// it on a tunnel adapter that nothing is routed to. The machine's lookups
-/// are pinned by the NRPT rule instead ([`machine_dns_rule`]), and the
-/// redirect carries them through the tunnel -- which is what Custom mode
-/// does with DNS on every engine; see `dns::machine_wide_rule_wanted`.
+/// are pinned by the NRPT rule instead, once the redirect is up to carry
+/// them through the tunnel (`Engines::start_split_tunnel`) -- which is
+/// what Custom mode does with DNS on every engine; see
+/// `dns::machine_wide_rule_wanted`.
 fn build_conf(p: &WireguardProfile, passive: bool) -> String {
     let dns = if passive {
         String::new()
@@ -74,12 +75,6 @@ fn build_conf(p: &WireguardProfile, passive: bool) -> String {
         p.allowed_ips,
         p.endpoint,
     )
-}
-
-/// The NRPT rule this engine installs for a session, if any. See
-/// `dns::custom_mode_rule`.
-fn machine_dns_rule(passive: bool) -> Option<&'static str> {
-    super::dns::custom_mode_rule(passive)
 }
 
 pub fn connect(
@@ -116,13 +111,11 @@ pub fn connect(
     if !status.success() {
         return Err(format!("wireguard.exe /installtunnelservice exited with {status}"));
     }
-    // After the tunnel service is installed, as Xray installs its rule
-    // once its adapter is configured: a connect that failed before here
-    // has no tunnel for the lookups to be carried by. Reported in the
-    // status poll, never fatal -- see `dns::TunnelDns`.
-    if let Some(resolver) = machine_dns_rule(passive) {
-        super::dns::force(resolver);
-    }
+    // No NRPT rule here. A full tunnel's DNS is wireguard.exe's own; Custom
+    // mode's rule goes in once the redirect is up to carry the lookups
+    // (`Engines::start_split_tunnel`). It used to go in here, seconds
+    // before that, and the VM saw the lookups it pinned to 1.1.1.1 leave
+    // by the physical adapter in clear text (p1-22).
     Ok(())
 }
 
@@ -613,26 +606,19 @@ mod tests {
     /// with the block page's 10.10.34.x, which the filter then left alone
     /// too. `dns::machine_wide_rule_wanted` has the argument. A full tunnel
     /// keeps its own: the `DNS =` line, and wireguard.exe's rule from it.
+    /// `connect` installs no NRPT rule. A full tunnel's DNS is
+    /// wireguard.exe's own (`DNS =`); Custom mode's rule goes in once the
+    /// redirect carries the lookups (`Engines::start_split_tunnel`, held
+    /// there by its own test). Installed here, after the tunnel service and
+    /// seconds before the redirect, it pinned them to 1.1.1.1 with nothing
+    /// yet to carry them, and they left by the physical adapter in clear
+    /// text -- seen at the NIC on the VM (p1-22). Held from the source.
     #[test]
-    fn custom_mode_pins_the_machines_dns_like_xray_and_ikev2() {
-        assert_eq!(machine_dns_rule(true), Some("1.1.1.1"));
-        assert_eq!(machine_dns_rule(false), None);
-    }
-
-    /// The rule above is installed by `connect` itself, once the tunnel
-    /// service is in. The policy is a function of its own, and deleting the
-    /// call that uses it brought the leak back with every other test still
-    /// passing; this holds the call where it is, from the source, as
-    /// `repair`'s survey order is held.
-    #[test]
-    fn connect_installs_the_custom_mode_rule_after_the_tunnel_service() {
+    fn connect_installs_no_dns_rule() {
         let source = include_str!("wireguard.rs");
         let start = source.find("pub fn connect(").unwrap();
         let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
-        let installed = body.find("if !status.success() {").expect("the tunnel service install is checked");
-        let rule = body.find("if let Some(resolver) = machine_dns_rule(passive) {").expect("the rule is asked for");
-        assert!(rule > installed, "the rule must not go in before the tunnel service is installed");
-        assert!(body[rule..].contains("super::dns::force(resolver);"), "the rule is not installed");
+        assert!(!body.contains("dns::force("), "Custom mode's rule goes in before the redirect can carry it");
     }
 
     const NOW: u64 = 1_700_000_000;
