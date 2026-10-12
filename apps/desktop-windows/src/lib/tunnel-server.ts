@@ -67,6 +67,12 @@ const PHONE_THROUGH = new Set([
  *    that address takes it. **Measured** for Stealth on 2026-10-06.
  *  - OpenVPN: around. `redirect-gateway` adds a host route for the
  *    remote via the old gateway. Not measured.
+ *  - On both, while the service also confines the session's IPv4 to the
+ *    tunnel (`ipv4Confined: true`, the service's `engines::confinement`),
+ *    only the engine may use that route: this app's request to the
+ *    server's address is refused on the PC (10013) instead, and the app
+ *    does not make it (`confined` in connected-mirrors.ts). Still
+ *    "around" here -- the route is -- for the egress check's purposes.
  *  - IKEv2: around. Windows' own client routes the server via the
  *    physical interface. Not measured.
  *  - WireGuard: through. wireguard.exe installs no route for the
