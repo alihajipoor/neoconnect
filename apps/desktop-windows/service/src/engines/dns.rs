@@ -100,7 +100,7 @@ impl TunnelDns {
 /// A courier, and only a courier.
 ///
 /// The engines that install this rule do it from free functions
-/// several frames below any `Engines` value -- `xray::configure_adapter`
+/// several frames below any `Engines` value -- `xray::configure_dns`
 /// is called from both `install_routes` and `prepare_passive`, and
 /// neither has one -- so there is nowhere to return the answer to.
 /// `Engines::connect_inner` collects it from here at the end of the

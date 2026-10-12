@@ -455,7 +455,7 @@ fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], passive: b
 }
 
 
-/// Assigns the TUN adapter its address and DNS.
+/// Assigns the TUN adapter its address.
 ///
 /// Xray's `gateway` setting does not take effect on Windows -- the
 /// adapter comes up and Windows self-assigns an APIPA address instead,
@@ -464,21 +464,9 @@ fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], passive: b
 /// (198.18.0.1) not actually present on the interface, so traffic could
 /// reach the tunnel but had no way back.
 ///
-/// DNS is set here too. With the default route captured by the tunnel,
-/// the resolvers the physical link advertises are no longer reachable,
-/// so leaving them in place means every lookup fails even once packets
-/// flow -- which reads to a user as "the internet is down".
-///
-/// `passive` reaches here only to be handed to `dns::rule_at_connect`,
-/// which installs the machine-wide rule here for a full tunnel and leaves
-/// Custom mode's to `Engines::start_split_tunnel`. Both engines that pin a
-/// rule ask that one named question in the same shape, because they
-/// stopped agreeing the last time one of them was edited alone.
-fn configure_adapter(
-    tun_ip: Ipv4Addr,
-    passive: bool,
-    limits: &crate::lifecycle::budget::Limits,
-) -> Result<(), String> {
+/// Its DNS is [`configure_dns`]'s, which a full tunnel calls only once
+/// its routes are up.
+fn configure_address(tun_ip: Ipv4Addr, limits: &crate::lifecycle::budget::Limits) -> Result<(), String> {
     let netsh = PathBuf::from(r"C:\Windows\System32\netsh.exe");
     let name_arg = format!("name={ADAPTER_NAME}");
 
@@ -509,6 +497,35 @@ fn configure_adapter(
     if !status.success() {
         return Err(format!("assigning the tunnel adapter's address failed ({status})"));
     }
+    Ok(())
+}
+
+/// Gives the TUN adapter its DNS, and a full tunnel the machine-wide rule.
+///
+/// With the default route captured by the tunnel, the resolvers the
+/// physical link advertises are no longer reachable, so leaving them in
+/// place means every lookup fails even once packets flow -- which reads to
+/// a user as "the internet is down".
+///
+/// A full tunnel's, only once its routes are up (`install_routes`). Set
+/// with the address, before them, it pinned every lookup on the PC to
+/// 1.1.1.1 a second or more before any route led into the tunnel, and they
+/// left by the physical adapter in clear text -- seen at the NIC on every
+/// full-tunnel Xray connect of the P3 gate (G8), and on 0.9.48 (P0 run
+/// 09b). The DNS confinement now goes in before this as well
+/// (`Engines::connect_inner`), so a lookup in that gap is refused on this
+/// PC rather than answered by the network.
+///
+/// `passive` reaches here only to be handed to `dns::rule_at_connect`,
+/// which installs the machine-wide rule here for a full tunnel and leaves
+/// Custom mode's to `Engines::start_split_tunnel`. Both engines that pin a
+/// rule ask that one named question in the same shape, because they
+/// stopped agreeing the last time one of them was edited alone.
+fn configure_dns(passive: bool, limits: &crate::lifecycle::budget::Limits) -> Result<(), String> {
+    let netsh = PathBuf::from(r"C:\Windows\System32\netsh.exe");
+    let name_arg = format!("name={ADAPTER_NAME}");
+    // Bounded as the address's netsh is: see `configure_address`.
+    let helper = limits.clamp(super::HELPER_BUDGET);
 
     let status = super::run_hidden_within(
         &netsh,
@@ -595,7 +612,7 @@ fn wait_for_adapter(limits: &crate::lifecycle::budget::Limits) -> Result<u32, St
 /// Waits until the adapter is actually carrying `expected`, and then until
 /// Windows will use it.
 ///
-/// Called after `configure_adapter`. It began as a wait for the address
+/// Called after `configure_address`. It began as a wait for the address
 /// to be listed, because the thing which follows -- installing routes
 /// whose next hop is that address -- fails *silently* if it runs too
 /// early. See [`ADAPTER_ADDRESSED_WAIT`].
@@ -740,14 +757,20 @@ pub fn install_routes(
 
     // Before the routes: they name this address as their next hop, and a
     // route to a next hop that isn't on the interface silently goes
-    // nowhere. `configure_adapter` asks for the address; `wait_for_address`
+    // nowhere. `configure_address` asks for the address; `wait_for_address`
     // is what establishes that the stack finished giving it.
-    // `false`: this function *is* the full-tunnel branch -- `mod.rs`
-    // picks between it and `prepare_passive` on the same flag.
-    configure_adapter(tun_gateway, false, limits)?;
+    configure_address(tun_gateway, limits)?;
     wait_for_address(tun_gateway, tun_index, limits)?;
 
-    routing::install_full_tunnel(tun_gateway, tun_index, plan.server, plan.uplink.next_hop, plan.uplink.index, ops, owed)
+    let routes =
+        routing::install_full_tunnel(tun_gateway, tun_index, plan.server, plan.uplink.next_hop, plan.uplink.index, ops, owed)?;
+    // DNS once a route leads into the tunnel, and not before: see
+    // `configure_dns`. A failure returns, and the routes go with it (they
+    // are removed when dropped). `false`: this function *is* the
+    // full-tunnel branch -- `mod.rs` picks between it and `prepare_passive`
+    // on the same flag.
+    configure_dns(false, limits)?;
+    Ok(routes)
 }
 
 /// Everything `install_routes` does except install the routes.
@@ -773,8 +796,10 @@ pub fn prepare_passive(outbound: &Outbound, limits: &crate::lifecycle::budget::L
     // As in `install_routes`: detection off before the address goes on.
     super::readiness::quiet_or_note(&super::readiness::SystemInterfaces, tun_index, ADAPTER_NAME);
     // `true`: this function is the Custom-mode branch. The DNS rule is
-    // still installed -- see `dns::machine_wide_rule_wanted`.
-    configure_adapter(tun_gateway, true, limits)?;
+    // still installed -- see `dns::machine_wide_rule_wanted`. No routes
+    // here, so the adapter's DNS goes on with its address.
+    configure_address(tun_gateway, limits)?;
+    configure_dns(true, limits)?;
     // Custom mode installs no routes, so the silent-next-hop failure
     // does not apply here -- but `split_tunnel::start` runs immediately
     // after this returns and waits ten seconds for this adapter to hold
@@ -1138,7 +1163,7 @@ mod tests {
             let quiet = body
                 .find("readiness::quiet_or_note(")
                 .unwrap_or_else(|| panic!("{signature} never switches detection off"));
-            let addressed = body.find("configure_adapter(").expect("addresses the adapter");
+            let addressed = body.find("configure_address(").expect("addresses the adapter");
             assert!(
                 appeared < quiet && quiet < addressed,
                 "{signature}: detection must go off after the adapter appears and before it is addressed"
@@ -1164,11 +1189,30 @@ mod tests {
     /// is.
     #[test]
     fn only_a_full_tunnels_dns_rule_goes_in_with_the_adapter() {
-        let body = body_of("fn configure_adapter(");
+        let body = body_of("fn configure_dns(");
         let asked = body
             .find("if let Some(resolver) = super::dns::rule_at_connect(passive, TUN_DNS) {")
             .expect("the rule is not asked for by the full-tunnel-only policy");
         assert!(body[asked..].contains("super::dns::force(resolver);"), "the rule is not installed");
         assert_eq!(body.matches("dns::force(").count(), 1, "the rule is installed some other way too");
+    }
+
+    /// A full tunnel's DNS -- the adapter's resolver and the machine-wide
+    /// rule -- goes in only once its routes are up. With the address, before
+    /// them, every lookup on the PC was pinned to 1.1.1.1 with no route into
+    /// the tunnel, and left by the physical adapter in clear text (G8; on
+    /// 0.9.48 too). The address still goes on first: the routes name it as
+    /// their next hop. Held from the source, as the orders above are.
+    #[test]
+    fn a_full_tunnels_dns_goes_in_only_once_its_routes_are_up() {
+        let body = body_of("pub fn install_routes(");
+        let addressed = body.find("configure_address(tun_gateway, limits)?;").expect("addresses the adapter");
+        let routed = body.find("routing::install_full_tunnel(").expect("installs the routes");
+        let dns = body.find("configure_dns(false, limits)?;").expect("gives the adapter its DNS");
+        assert!(addressed < routed && routed < dns, "address {addressed}, routes {routed}, DNS {dns}");
+        assert_eq!(body.matches("configure_dns(").count(), 1);
+        // And the address's own step sets no DNS.
+        let address = body_of("fn configure_address(");
+        assert!(!address.contains("dnsservers") && !address.contains("dns::"), "the address step still sets DNS");
     }
 }

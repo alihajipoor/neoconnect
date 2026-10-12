@@ -465,7 +465,7 @@ pub struct Engines {
     /// is not a complaint and must never be shown as one.
     ///
     /// A full tunnel's is collected from `dns::tunnel_dns()` at the end of
-    /// a connect rather than passed back up: `xray::configure_adapter`
+    /// a connect rather than passed back up: `xray::configure_dns`
     /// installs the rule from a free function two frames below any
     /// `Engines`, so there is nowhere to return it to. Custom mode's is
     /// recorded as it goes in, once the redirect is up
@@ -1539,6 +1539,22 @@ impl Engines {
                 // start until `start_split_tunnel`, which is later
                 // still.
                 self.split_tunnel.set_exits(table);
+                // A full tunnel's IPv6 block and DNS confinement, before the
+                // adapter is given its DNS and before its routes. Installed
+                // after the connect, as on every other engine, they left the
+                // whole of it to lookups: `netsh ... set dnsservers static
+                // 1.1.1.1` and the NRPT rule pinned every lookup on the PC to
+                // 1.1.1.1 a second or more before a route into the tunnel
+                // existed, and they left by the physical adapter in clear
+                // text -- on 0.9.48 too (G8, P0 run 09b). Here, port 53 can
+                // leave only through the tunnel from the moment there is
+                // one, and a lookup in the gap is refused on this PC instead
+                // of answered by the network. The same filters, the same
+                // wait for the adapter (`dns_confinement_for`, which
+                // `install_routes` then finds done), so the connect takes no
+                // longer; `block_ipv6_if_needed` keeps them. Custom mode
+                // gets none, as ever.
+                let early_filters = if passive { None } else { Some(self.filters_for(profile)) };
                 // Xray creates the adapter but routes nothing into it, so
                 // the tunnel is inert until this succeeds. Failing here
                 // must take the engine down with it rather than leave a
@@ -1556,10 +1572,15 @@ impl Engines {
                     Err(e) => {
                         let _ = child.kill();
                         reap(&mut child);
+                        // Released with the engine gone, as a session's are.
+                        drop(early_filters);
                         return Err(e);
                     }
                 };
                 self.begin_session(Active::Child { protocol, child, routes }, profile);
+                if let (Some(filters), Some(session)) = (early_filters, self.active.peek_mut()) {
+                    session.filters = filters;
+                }
             }
             ConnectProfile::Openvpn(p) => {
                 let (child, added) = openvpn::connect(self, p, passive, limits)?;
@@ -1708,6 +1729,11 @@ impl Engines {
     /// a block either, which is why the field stays `None` and the app's
     /// status follows the field.
     fn block_ipv6_if_needed(&mut self, profile: &ConnectProfile) {
+        // Installed already, before the adapter's DNS (Xray's full tunnel;
+        // see `connect_inner`): kept, not installed twice.
+        if self.active.peek().is_some_and(|s| s.filters.ipv6.is_some()) {
+            return;
+        }
         let filters = self.filters_for(profile);
         // Owned by the session from here. There is always one at this
         // point -- this runs after the engine is in the slot -- and if
@@ -5415,6 +5441,32 @@ mod helper_tests {
         assert_eq!(engines.ipv4_confined(), Some(true), "a failed install let go of the plan that was in");
         assert!(fake.closed().is_empty());
         end_test_session(&mut engines);
+    }
+
+    /// Xray's full tunnel gets its IPv6 block and DNS confinement before
+    /// its adapter is given DNS and before its routes, not after the
+    /// connect: in between, `set dnsservers static 1.1.1.1` and the NRPT
+    /// rule pinned every lookup to 1.1.1.1 with no route into the tunnel,
+    /// and they left by the physical adapter (G8). Kept by the session --
+    /// not installed twice -- and released with the engine if the routes
+    /// fail. Read from the source: nothing here can start xray.exe.
+    #[test]
+    fn xrays_dns_block_goes_in_before_its_adapter_is_given_dns() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn connect_inner(").expect("connect_inner");
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
+        let arm = &body[body.find("ConnectProfile::XrayVlessReality(_)").expect("the Xray arm")..];
+        let early = arm.find("let early_filters = if passive { None } else { Some(self.filters_for(profile)) };").expect("the early filters");
+        let routes = arm.find("xray::install_routes(").expect("the routes, and the adapter's DNS with them");
+        let spawned = arm.find("xray::connect_returning_exits(").expect("the engine");
+        assert!(spawned < early && early < routes, "engine {spawned}, filters {early}, routes {routes}");
+        let failed = &arm[arm.find("Err(e) => {").expect("the routes failing")..];
+        assert!(failed[..failed.find("return Err(e);").unwrap()].contains("drop(early_filters);"));
+        assert!(arm.contains("session.filters = filters;"), "the session keeps them");
+        let block = &source[source.find("    fn block_ipv6_if_needed(").expect("block_ipv6_if_needed")..];
+        let block = &block[..block.find("\n    }\n").unwrap()];
+        let kept = block.find("s.filters.ipv6.is_some()").expect("filters already in are kept");
+        assert!(kept < block.find("self.filters_for(profile)").unwrap());
     }
 
     /// Every session's hold is noted in the ledger as it begins, so a

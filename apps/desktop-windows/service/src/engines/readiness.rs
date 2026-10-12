@@ -539,7 +539,7 @@ mod tests {
             made
         }
 
-        /// Sets the address the way `xray::configure_adapter` does, and
+        /// Sets the address the way `xray::configure_address` does, and
         /// returns when netsh does.
         fn address(&self, name: &str, address: Ipv4Addr) {
             let status = std::process::Command::new(r"C:\Windows\System32\netsh.exe")
