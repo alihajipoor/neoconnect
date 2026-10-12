@@ -848,6 +848,9 @@ pub trait ConfinementOps: Send + Sync {
     /// The interface LUID of the adapter Windows shows by this name, read
     /// now -- a RAS interface can come back with a new one (K2).
     fn luid(&self, adapter: &str) -> Result<u64, String>;
+    /// Whether the tunnel adapter Windows shows by this name is there now:
+    /// `None` when the adapters could not be listed.
+    fn tunnel_present(&self, adapter: &str) -> Option<bool>;
     fn install(&self, plan: &Plan) -> Result<Installed, String>;
     /// What tells the plan-error valve that WFP itself refused the engine
     /// under this installed plan ([`Witness`], [`run_valve`]).
@@ -878,6 +881,10 @@ impl ConfinementOps for System {
         }
         // SAFETY: just written by the call above.
         Ok(unsafe { luid.Value })
+    }
+
+    fn tunnel_present(&self, adapter: &str) -> Option<bool> {
+        crate::adapters::find_by_name(adapter).ok().map(|found| found.is_some())
     }
 
     fn install(&self, plan: &Plan) -> Result<Installed, String> {

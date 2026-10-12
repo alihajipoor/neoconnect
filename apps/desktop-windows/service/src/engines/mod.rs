@@ -853,6 +853,32 @@ impl Engines {
         }));
     }
 
+    /// Lets go of a confinement whose tunnel adapter is gone while its
+    /// engine still runs -- Wintun's adapter removed under a live xray.exe.
+    /// Its routes went with it, so everything now falls to the physical
+    /// adapter and the confinement refuses it: the machine offline, held
+    /// by a permit for an interface that no longer exists, until the app's
+    /// failover. Let go of for good, with the reason; whether the tunnel
+    /// carries anything is the app's egress check's to judge, as ever. An
+    /// adapter list that cannot be read is no evidence, and changes
+    /// nothing. Asked only while a confinement is held.
+    fn let_go_if_the_tunnel_adapter_is_gone(&mut self) {
+        let ops = Arc::clone(&self.confinement_ops);
+        let Some(session) = self.active.peek() else { return };
+        if session.confinement.confined() != Some(true) {
+            return;
+        }
+        let adapter = adapter_name_for(&session.profile);
+        if ops.tunnel_present(adapter) != Some(false) {
+            return;
+        }
+        let why = format!(
+            "the tunnel adapter {adapter} is gone while its engine still runs, so the IPv4 confinement was let go of"
+        );
+        session.confinement.release(confinement::Release::PlanError(why.clone()));
+        crate::cleanup_log::note("let go of the IPv4 confinement: the tunnel adapter is gone", &why);
+    }
+
     /// Starts the plan-error valve on the live session (K5): WFP's record
     /// of what it refused, through `witness`, and its engine's log from
     /// where it stands now, for `confinement::VALVE_FOR`. Owned by the
@@ -2542,6 +2568,9 @@ impl Engines {
 
         match verdict {
             Verdict::Reported(up, protocol, health) => {
+                if up {
+                    self.let_go_if_the_tunnel_adapter_is_gone();
+                }
                 // OpenVPN's own log is the one measurement of its link this
                 // poll can take; the other engines answer `Unknown` here and
                 // keep their pin through a stall, as before.
@@ -5079,6 +5108,8 @@ mod helper_tests {
         /// What every witness handed out says: WFP's record of a refusal,
         /// as the test sets it.
         wfp_says: Arc<std::sync::Mutex<Option<String>>>,
+        /// The tunnel adapter, as the test says it is: gone when set.
+        tunnel_gone: std::sync::atomic::AtomicBool,
     }
 
     impl FakeConfinement {
@@ -5091,6 +5122,7 @@ mod helper_tests {
                 refuse: std::sync::atomic::AtomicBool::new(false),
                 resets: std::sync::Mutex::new(Vec::new()),
                 wfp_says: Arc::default(),
+                tunnel_gone: std::sync::atomic::AtomicBool::new(false),
             })
         }
         fn closed(&self) -> Vec<isize> {
@@ -5106,6 +5138,9 @@ mod helper_tests {
             let mut reads = self.luid_reads.lock().unwrap();
             *reads += 1;
             Ok(*reads * 100)
+        }
+        fn tunnel_present(&self, _adapter: &str) -> Option<bool> {
+            Some(!self.tunnel_gone.load(std::sync::atomic::Ordering::SeqCst))
         }
         fn install(&self, plan: &confinement::Plan) -> Result<confinement::Installed, String> {
             if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
@@ -5217,6 +5252,31 @@ mod helper_tests {
         assert!(engines.end_dead_session(generation));
         assert_eq!(fake.closed(), vec![1000], "dead session: closed exactly once");
         in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "routes removed"]);
+    }
+
+    /// The tunnel's adapter gone while its engine still runs -- Wintun's
+    /// adapter removed under a live xray.exe -- takes its routes with it,
+    /// so everything falls to the physical adapter, where the confinement
+    /// refuses it: the whole machine offline, held by a filter whose
+    /// tunnel permit names an interface that no longer exists, until the
+    /// app's failover got round to it. The status poll that finds the
+    /// adapter gone lets go of the confinement for good and says why; the
+    /// tunnel's own fate is the app's egress check's to judge. An adapter
+    /// list that cannot be read says nothing.
+    #[test]
+    fn a_tunnel_adapter_gone_under_a_live_engine_lets_go_of_the_confinement() {
+        let (mut engines, fake, _) = confined_session();
+        assert!(engines.status().0);
+        assert_eq!(engines.ipv4_confined(), Some(true), "the adapter is there: nothing changes");
+        fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = engines.status();
+        assert_eq!(engines.ipv4_confined(), Some(false), "held over a tunnel adapter that is gone");
+        assert_eq!(fake.closed(), vec![1000]);
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("adapter")), "{:?}", engines.confinement_problem());
+        fake.tunnel_gone.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = engines.status();
+        assert_eq!(fake.closed(), vec![1000], "closed once");
+        end_test_session(&mut engines);
     }
 
     /// Every session's hold is noted in the ledger as it begins, so a
