@@ -526,7 +526,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
 describe("what the screen says", () => {
   it("takes the words from the table, episode included", () => {
     expect(dashboard).toContain(
-      "headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting })",
+      "headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined })",
     );
     expect(dashboard).toContain("pressFor(connectionState, { reconnectWaiting: reconnecting?.waiting === true })");
     // Only for an episode of the session in force: one a sign-out left

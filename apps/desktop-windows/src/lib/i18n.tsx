@@ -271,6 +271,17 @@ const en = {
   // which part is not covered.
   "dash.tunnelDnsUnforced":
     "Your traffic is going through the VPN, but Neoxify couldn't send this device's DNS lookups through it. Your internet provider's DNS can still answer, and on a filtered network those answers are often wrong — so some sites may still not open. Disconnect and reconnect to try again; if it keeps happening, use Repair network.",
+  // Shown when a full tunnel on Stealth or Compatible is up and Neoxify
+  // could not stop connections going around it on this computer (the
+  // service's `ipv4_confined: false` -- the owner's decision (d)). The
+  // tunnel carries traffic, so it must not read as "not connected"; the
+  // rest of this computer's connections are not held to it, so it must
+  // not read as "protected" either. What is not covered is said plainly:
+  // programs that send straight over the network, and connections opened
+  // before Connect. Never shown in Custom mode, on WireGuard (its own
+  // kill switch does this) or on IKEv2.
+  "dash.ipv4NotConfined":
+    "Your traffic is going through the VPN, but Neoxify couldn't stop other connections on this computer from going around it. Programs that send straight over your network, and connections opened before you connected, may still be seen by your network. Disconnect and reconnect to try again; if it keeps happening, tell support.",
   // Shown when the customer selected an application that was already
   // open. Custom mode routes the connections a program makes *after* it
   // is selected; the ones it already held cannot be moved, because a
@@ -557,6 +568,12 @@ const en = {
   "dash.disconnectToChange": "Disconnect first to change server or protocol",
   "dash.protected": "You're protected",
   "dash.protectedHint": "Your traffic is encrypted and routed through Neoxify.",
+  // The headline over a full tunnel whose IPv4 confinement did not go in
+  // (`warnsUnconfined`): the tunnel carries traffic and was verified, and
+  // "You're protected" would still be more than is true. The line under
+  // the orb (`dash.ipv4NotConfined`) says what is not covered.
+  "dash.connectedNotConfined": "Connected, not fully protected",
+  "dash.connectedNotConfinedHint": "Your traffic goes through Neoxify, but some connections on this computer may still go around it.",
   "dash.notProtected": "You're not protected",
   "dash.notProtectedHint": "Connect to encrypt your traffic and hide your IP.",
   // A tunnel the screen was vouching for closed without anyone asking.
@@ -1211,6 +1228,8 @@ const fa: Record<TranslationKey, string> = {
     "بخشی از ترافیک شما از طریق IPv6 و بیرون از VPN ارسال می‌شود. نشانی IPv6 شما برای شبکه‌تان دیده می‌شود. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
   "dash.tunnelDnsUnforced":
     "ترافیک شما از VPN عبور می‌کند، اما Neoxify نتوانست درخواست‌های DNS این دستگاه را از داخل آن بفرستد. سرویس‌دهنده اینترنت شما همچنان می‌تواند به این درخواست‌ها پاسخ بدهد و روی شبکه فیلترشده این پاسخ‌ها اغلب نادرست هستند — بنابراین ممکن است بعضی سایت‌ها همچنان باز نشوند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، از «ترمیم شبکه» استفاده کنید.",
+  "dash.ipv4NotConfined":
+    "ترافیک شما از VPN عبور می‌کند، اما Neoxify نتوانست جلوی اتصال‌های دیگر این کامپیوتر را بگیرد که از کنار VPN عبور می‌کنند. برنامه‌هایی که مستقیماً از طریق شبکه شما ارسال می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است همچنان برای شبکه‌تان قابل مشاهده باشند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
   "dash.splitTunnelRestartNeeded":
     "‏{apps} پیش از انتخاب شما باز بود. اتصال‌هایی که از این پس برقرار می‌کند از VPN عبور می‌کنند، اما اتصال‌هایی که از قبل داشته عبور نمی‌کنند — این‌ها را نمی‌توان بدون قطع شدن جابه‌جا کرد. برای اینکه همه ترافیک آن از VPN عبور کند، برنامه را ببندید و دوباره باز کنید.",
   "voucher.title": "کد هدیه دارید؟",
@@ -1339,6 +1358,8 @@ const fa: Record<TranslationKey, string> = {
   "dash.disconnectToChange": "برای تغییر سرور یا پروتکل، ابتدا قطع اتصال کنید",
   "dash.protected": "شما محافظت می‌شوید",
   "dash.protectedHint": "ترافیک شما رمزگذاری شده و از طریق نئوکسیفای عبور می‌کند.",
+  "dash.connectedNotConfined": "متصل، اما نه به‌طور کامل محافظت‌شده",
+  "dash.connectedNotConfinedHint": "ترافیک شما از طریق نئوکسیفای عبور می‌کند، اما ممکن است برخی اتصال‌های این کامپیوتر همچنان از کنار آن عبور کنند.",
   "dash.notProtected": "شما محافظت نمی‌شوید",
   "dash.notProtectedHint": "برای رمزگذاری ترافیک و پنهان‌کردن آی‌پی خود متصل شوید.",
   "dash.dropped": "اتصال VPN قطع شد",

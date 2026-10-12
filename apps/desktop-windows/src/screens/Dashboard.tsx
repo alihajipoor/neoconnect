@@ -37,6 +37,7 @@ import {
   stateFromStatus,
   type HeadlineTone,
   type VpnStatus,
+  warnsUnconfined,
 } from "../lib/connection-evidence";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
@@ -727,6 +728,10 @@ export function Dashboard({
   appModeRef.current = appMode;
   /** Whether the service says IPv6 is blocked for this session. */
   const [ipv6Blocked, setIpv6Blocked] = useState(false);
+  /** Whether the service says this full tunnel should hold the machine's
+   * IPv4 to it and does not (`warnsUnconfined`): the headline then says
+   * "connected, not fully protected", and a line says what is not covered. */
+  const [ipv4NotConfined, setIpv4NotConfined] = useState(false);
   /** Whether this machine could reach public IPv6 *before* connecting.
    *
    * The whole point of taking it beforehand: most machines cannot reach
@@ -925,6 +930,7 @@ export function Dashboard({
     setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
     setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
     setIpv6Blocked(Boolean(status.ipv6Blocked));
+    setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
     const observed = stateFromStatus(status);
     followTunnelForEndpoints(observed);
     return observed;
@@ -1863,6 +1869,7 @@ export function Dashboard({
       setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
       setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
       setIpv6Blocked(Boolean(status.ipv6Blocked));
+      setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
       const fromStatus = stateFromStatus(status);
 
       if (fromStatus === "disconnected") {
@@ -3484,7 +3491,7 @@ export function Dashboard({
   // connection lost" is this screen's own word at the drop, or the
   // episode's once it has stopped without a tunnel; "Reconnecting..."
   // while one runs.
-  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting });
+  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined });
 
   if (loading) {
     return (
@@ -3831,6 +3838,19 @@ export function Dashboard({
                           instead. */}
                       {isTunnelUp(connectionState) && tunnelDnsUnprotected ? (
                         <p className="mt-1 text-xs text-destructive">{t("dash.tunnelDnsUnforced")}</p>
+                      ) : null}
+
+                      {/* The tunnel is up and this computer's other IPv4
+                          connections are not held to it: the service's
+                          confinement would not go in, or the engine was
+                          refused by it and it was let go of. Same shape
+                          as the DNS line above -- traffic tunnelled, one
+                          way around it open -- so the same styling. The
+                          headline says "not fully protected" with it;
+                          this says what is not covered. Never in Custom
+                          mode, on WireGuard or on IKEv2 (`warnsUnconfined`). */}
+                      {isTunnelUp(connectionState) && ipv4NotConfined ? (
+                        <p className="mt-1 text-xs text-destructive">{t("dash.ipv4NotConfined")}</p>
                       ) : null}
 
                       {/* Not an error, and deliberately not styled as

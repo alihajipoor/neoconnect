@@ -15,6 +15,7 @@ import {
   showsIpv6Escape,
   stateFromStatus,
   type VpnStatus,
+  warnsUnconfined,
 } from "./connection-evidence";
 import type { EgressVerdict } from "./egress";
 import type { ConnectionState } from "../components/ConnectOrb";
@@ -524,6 +525,43 @@ describe("noticing that the tunnel has gone", () => {
         }
       }
     });
+  });
+});
+
+describe("IPv4 confined to the tunnel", () => {
+  // The owner's decision (d), 2026-10-12: a full Xray or OpenVPN tunnel
+  // whose confinement would not go in stays up, and the screen says so --
+  // never "You're protected" over it. The service's word only: `false`
+  // warns; `true`, `null` (not a confined session) and an older
+  // service's silence do not, and Custom mode never does -- it is not
+  // confined by design, on every engine.
+  it("false_warns_none_and_true_silent_custom_never", () => {
+    expect(warnsUnconfined(status({ ipv4Confined: false }), false)).toBe(true);
+    expect(warnsUnconfined(status({ ipv4Confined: true }), false)).toBe(false);
+    expect(warnsUnconfined(status({ ipv4Confined: null }), false)).toBe(false);
+    expect(warnsUnconfined(status(), false)).toBe(false);
+    expect(warnsUnconfined(null, false)).toBe(false);
+    for (const ipv4Confined of [false, true, null, undefined]) {
+      expect(warnsUnconfined(status({ ipv4Confined }), true), `custom, ${ipv4Confined}`).toBe(false);
+    }
+  });
+
+  it("never says 'protected' over a full tunnel that is not confined", () => {
+    const EVERY: ConnectionState[] = ["disconnected", "unknown", "connecting", "verifying", "connected", "unverified", "degraded", "disconnecting"];
+    for (const state of EVERY) {
+      for (const dropped of [false, true]) {
+        const { title, hint } = headlineFor(state, { dropped, customMode: false, unconfined: true });
+        expect(title === "dash.protected" || hint === "dash.protectedHint", `${state} dropped=${dropped}`).toBe(false);
+      }
+    }
+    expect(headlineFor("connected", { dropped: false, customMode: false, unconfined: true })).toEqual({
+      title: "dash.connectedNotConfined",
+      hint: "dash.connectedNotConfinedHint",
+      tone: "warning",
+    });
+    // Confined, or not said: the evidence decides, as before.
+    expect(headlineFor("connected", { dropped: false, customMode: false, unconfined: false }).title).toBe("dash.protected");
+    expect(headlineFor("connected", { dropped: false, customMode: false }).title).toBe("dash.protected");
   });
 });
 

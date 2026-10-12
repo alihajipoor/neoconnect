@@ -106,6 +106,21 @@ export type VpnStatus = {
    *
    * Empty, or absent from an older service, means nothing to say. */
   splitTunnelRestartNeeded?: string[];
+  /** Whether IPv4 outside the tunnel is refused on this PC while it is
+   * up: every connection around it refused but the engine's own link to
+   * its server, the LAN, DHCP and loopback (the service's
+   * `engines::confinement`).
+   *
+   * `null`, or absent from an older service, is not "unconfined": it is a
+   * session this does not apply to -- Custom mode; WireGuard, whose own
+   * kill switch does the same; IKEv2 for now -- and nothing is shown.
+   * `false` is a full tunnel that should be confined and is not: the
+   * tunnel carries traffic, and the screen must not claim full protection
+   * over it (`warnsUnconfined`). */
+  ipv4Confined?: boolean | null;
+  /** Why not, when `ipv4Confined` is false. English, for support; never
+   * the words the customer is shown. */
+  confinementProblem?: string;
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }
@@ -445,6 +460,23 @@ export function droppedUnseen(
   return noTunnelVerified(status);
 }
 
+/** Whether the screen must say that this tunnel's IPv4 is not confined to
+ * it: the service said `false`, about a full tunnel.
+ *
+ * The owner's decision (d), 2026-10-12: a confinement that would not go in
+ * leaves the tunnel up -- it carries traffic -- and the screen must never
+ * claim full protection over it. Only the service's `false` warns:
+ * `true` is the claim made good, `null` is a session it does not apply
+ * to (WireGuard, IKEv2), and an older service says nothing at all. Custom
+ * mode never warns: it is not confined by design, on any engine, and says
+ * what it does carry in its own words. */
+export function warnsUnconfined(
+  status: Pick<VpnStatus, "ipv4Confined"> | null,
+  customMode: boolean,
+): boolean {
+  return !customMode && status?.ipv4Confined === false;
+}
+
 /** How the headline is coloured. Mapped to classes by the dashboard. */
 export type HeadlineTone = "success" | "highlight" | "warning" | "muted" | "plain" | "destructive";
 
@@ -485,8 +517,14 @@ export function headlineFor(
     dropped,
     customMode,
     reconnecting = null,
-  }: { dropped: boolean; customMode: boolean; reconnecting?: ReconnectingView | null },
+    unconfined = false,
+  }: { dropped: boolean; customMode: boolean; reconnecting?: ReconnectingView | null; unconfined?: boolean },
 ): Headline {
+  // A verified tunnel whose IPv4 the service could not confine to it
+  // (`warnsUnconfined`): connected, and not "You're protected".
+  if (state === "connected" && unconfined && !customMode) {
+    return { title: "dash.connectedNotConfined", hint: "dash.connectedNotConfinedHint", tone: "warning" };
+  }
   if (reconnecting !== null && !isTunnelUp(state) && state !== "unknown") {
     return {
       title: "dash.reconnecting",
