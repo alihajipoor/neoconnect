@@ -424,12 +424,15 @@ pub(super) fn open_dynamic_session_named(session_name: &str, purpose: &str) -> R
         )
     };
     if err != 0 {
-        return Err(format!(
-            "the Windows Filtering Platform would not open a session ({err:#010x}), \
-             so IPv6 could not be blocked"
-        ));
+        return Err(session_refused(session_name, err));
     }
     Ok(engine)
+}
+
+/// What a session the filtering platform would not open is reported as:
+/// in the name of the block that asked, since several share this way in.
+fn session_refused(session_name: &str, err: u32) -> String {
+    format!("the Windows Filtering Platform would not open a session for the {session_name} ({err:#010x})")
 }
 
 /// Registers the provider and sublayer and adds every filter, inside one
@@ -1308,6 +1311,21 @@ unsafe fn add_split_sublayer(engine: HANDLE) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One way of opening a session serves every block that opens one --
+    /// the IPv6 block, Custom mode's, the IPv4 confinement, the
+    /// confinement's witness -- and its failure is reported in the words
+    /// of the one that asked. It said "so IPv6 could not be blocked" for
+    /// all of them, so a confinement that would not install told support
+    /// the wrong block had failed.
+    #[test]
+    fn a_refused_session_is_reported_for_the_block_that_asked() {
+        let confinement = session_refused("Neoxify IPv4 confinement", 0x8032_0008);
+        assert!(confinement.contains("Neoxify IPv4 confinement") && confinement.contains("0x80320008"), "{confinement}");
+        assert!(!confinement.contains("IPv6"), "{confinement}");
+        let ipv6 = session_refused(SUBLAYER_NAME, 5);
+        assert!(ipv6.contains(SUBLAYER_NAME), "{ipv6}");
+    }
     use neoconnect_ipc::{
         ConnectProfile, Ikev2Profile, OpenvpnProfile, ShadowsocksProfile, TrojanProfile,
         VlessTlsProfile, WireguardProfile, XrayProfile,
