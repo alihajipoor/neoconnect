@@ -7307,3 +7307,87 @@ Follow-up, same day (checker on `57766ca`):
 
 JS proven by `pnpm test` (1537) and `tsc` locally; nothing here is
 verified on a real tunnel.
+
+## 2026-10-12 — desktop capture: the xray panic, a stale "You're protected", Custom mode's DNS windows (same branch, pushed for CI, not merged)
+
+The VM run on `189a422` left three findings this round answers. Nothing
+here has been seen in the VM or at the NIC yet.
+
+**1. xray-core 26.1.23's TUN panic: bumped to v26.6.27, a prerelease.**
+Eight `panic: Net: Unknown address type` in that run, each 9-16 s
+unprotected. Upstream's fix is `e7e9254630` (#6365, 2026-06-23), a nil
+check on `conn.RemoteAddr()` in `proxy/tun/handler.go`; first released in
+v26.6.27. 26.3.27, the last release not marked prerelease, does not have
+it, and every release since is marked prerelease. No client config avoids
+it: the panic is in `HandleConnection` before routing or sniffing, on any
+TCP connection the TUN inbound carries. So the choice was a prerelease or
+our own build; a prerelease, and the earliest with the fix:
+
+- v26.6.27 against 26.1.23 (`git diff` of `proxy/tun`, `infra/conf/tun.go`,
+  and the 247 commits between): the Windows TUN gained `gateway`, `dns`,
+  `autoSystemRoutingTable` and `autoOutboundsInterface` (#5887), a
+  deterministic adapter GUID (#5811), a fake ICMP echo reply (#6015), UDP
+  full-cone fixes (#5888). Later releases add WFP rules on by default and
+  route callbacks to the Windows TUN (#6478, then `autoSystemWfpBlockLeak`
+  #6853), a transport refactor (#6754) and a Shadowsocks 2022 rewrite
+  (#6831) -- reasons to take the smallest step. The UDP double-close bug
+  fixed later (#6814) is in 26.1.23 too, not a regression.
+- The config wrote `"autoSystemRoutingTable": !passive` and
+  `"autoOutboundsInterface": true`. v26.6.27 reads them as a list of routes
+  and an interface name: as booleans the config would not load; as meant
+  they would install Xray's routes beside ours, take the default route in
+  Custom mode and flush the adapter's routes. Both are gone, and `gateway`
+  with them (v26.6.27 would address the adapter itself). Routes, address,
+  DNS and the engine's way out stay the service's, as on 26.1.23.
+- The GUID is now `md5(name)`, so Windows gives each new adapter the
+  settings the last one had -- 1.1.1.1 as its resolver from the moment it
+  appears. `forget_last_sessions_dns` deletes `NameServer` under
+  `Tcpip\Parameters\Interfaces\{F5F7E8BE-9447-2884-6F7C-FD1FB55A61BC}`
+  before each start (only while no adapter by that name exists), and
+  `configure_address` accepts a refused netsh when the adapter already
+  holds 198.18.0.1.
+- `fetch-binaries.ps1` pins v26.6.27 and the zip's SHA-256
+  (`97f16a07...dd01`, GitHub's asset digest); a mismatch stops the build.
+  A Rust test holds the pin at or after v26.6.27 and the hash checked.
+- Mobile's xray (26.3.27, same panic) is not touched.
+
+**2. "You're protected" over a dead link or a roam (20-26 s).** The engine
+stays up, so the service's status never changed, and the health poll runs
+every 15 s plus its walk. Now the app reads the machine's default routes
+and the addresses on their interfaces every second while a tunnel is up
+(`network_uplinks`, local tables only; `lib/uplink-watch.ts`). No way out
+seen twice running, or a change whose re-verification (the poll's own
+evidence, capped at 2.5 s) says degraded or does not answer, is handed to
+the automatic reconnect as a drop is (`publishCarrierLost`): the existing
+"Reconnecting..." look, "Waiting for a network connection" while there is
+none, the same server first, and "protected" only from the reconnect's
+proof. A change the tunnel survives changes nothing on screen. A health
+poll measuring across a change lands nothing. Where no reconnect will run,
+the dead tunnel is taken down. Expected: within ~2 s of the link going,
+~3.5 s after a roam; not measured.
+
+**3. Custom mode's DNS during connect and after a disconnect or crash.**
+A DNS hold (`ipv6_block::DnsHold`, its own WFP provider and sublayer, a
+dynamic session): outbound port 53 refused on IPv4 and IPv6 but loopback
+and the engine. Held on a Custom-mode Xray connect from before xray.exe
+makes its adapter until the redirect carries and the NRPT rule is in
+(released before the cache flush, and by `connect` whatever the outcome);
+and on every teardown of a Custom-mode session whose rule is in -- the
+hard stop, the thorough pass, a dead engine's -- from before the redirect
+stops until the rule is out. Repair sweeps its keys.
+
+**Proven -- on this PC:** desktop `pnpm test` 1555 (92 files) and `tsc`;
+mobile unchanged. The JS tests were seen failing first. **CI only:** the
+Rust (Smart App Control blocks cargo here); written test-first, not seen
+failing.
+
+**Unverified -- needs the VM:** that v26.6.27 starts, carries all four
+Xray protocols against 26.3.27 nodes and no longer panics; that a second
+connect comes up without the persisted resolver and with the address; the
+fake ICMP echo (the app measures no latency while connected, but probes
+that ping through the tunnel now get answers); the uplink watch's timings
+on a link drop, a roam and a blip, and that a change the tunnel survives
+shows nothing; that the DNS hold closes G2's frames and how long lookups
+fail meanwhile; whether Windows' DNS client still sends to 1.1.1.1 for a
+moment after the rule is removed. After a roam the IPv4 baseline is the
+old network's, as before. Beyond the VM: real Wi-Fi, IPv6, censored lines.
