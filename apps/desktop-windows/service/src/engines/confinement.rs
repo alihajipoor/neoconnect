@@ -799,6 +799,17 @@ impl Hold {
     }
 }
 
+/// For the status answered while the owning thread is busy: the hold says
+/// what it is without the engine state (`Ledger::confinement`).
+impl crate::lifecycle::engine_watch::ConfinementReport for Hold {
+    fn confined(&self) -> Option<bool> {
+        Hold::confined(self)
+    }
+    fn problem(&self) -> Option<String> {
+        Hold::problem(self)
+    }
+}
+
 /// The last holder letting go closes it too. Every teardown path releases
 /// it explicitly, at the moment it chooses; this is for the path nobody
 /// wrote -- an early return, a panic -- as `Ipv6Block`'s `Drop` is. And

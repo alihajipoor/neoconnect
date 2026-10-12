@@ -226,6 +226,10 @@ mod session {
             debug_assert!(self.session.is_none(), "a session was installed over a live one");
             session.generation = self.ledger.begin(session.engine.protocol());
             let generation = session.generation;
+            // So a status answered without the engine state -- the owning
+            // thread busy -- still says what the confinement is.
+            let hold: Arc<dyn crate::lifecycle::engine_watch::ConfinementReport> = session.confinement.clone();
+            self.ledger.note_confinement(generation, Arc::downgrade(&hold));
             self.session = Some(session);
             generation
         }
@@ -5143,6 +5147,20 @@ mod helper_tests {
         assert!(engines.end_dead_session(generation));
         assert_eq!(fake.closed(), vec![1000], "dead session: closed exactly once");
         in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "routes removed"]);
+    }
+
+    /// Every session's hold is noted in the ledger as it begins, so a
+    /// status answered while the owning thread is busy reads the same
+    /// confinement the session has (`pipe::fallback_state`) -- and nothing
+    /// once the session has ended.
+    #[test]
+    fn the_ledger_reads_the_live_sessions_hold() {
+        let (mut engines, _fake, _) = confined_session();
+        assert_eq!(engines.ledger().confinement(), (Some(true), None));
+        engines.active.peek().unwrap().confinement.release(confinement::Release::PlanError("refused".into()));
+        assert_eq!(engines.ledger().confinement(), (Some(false), Some("refused".to_string())));
+        engines.disconnect().expect("disconnect");
+        assert_eq!(engines.ledger().confinement(), (None, None));
     }
 
     /// Custom mode switched on with nothing chosen is a full tunnel --
