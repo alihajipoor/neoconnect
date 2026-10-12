@@ -977,4 +977,253 @@ mod tests {
         assert_eq!(Prefix::new(Ipv4Addr::new(224, 0, 0, 0), 4).wfp(), (0xE000_0000, 0xF000_0000));
         assert_eq!(Prefix::new(Ipv4Addr::new(1, 2, 3, 4), 0).wfp(), (0, 0));
     }
+
+    /// A model of WFP's arbitration over the two sublayers a confined full
+    /// tunnel has -- today's IPv6/DNS one (`ipv6_block`) and this one -- and
+    /// what it says about the flows that decide whether the plan is right.
+    ///
+    /// **The model is not evidence of WFP behaviour.** It encodes two rules
+    /// as documented and as `ipv6_block` relies on: within a sublayer the
+    /// highest-weight matching filter decides; across sublayers a block in
+    /// any of them wins over a permit that did not clear the action right
+    /// (none here does). What it pins is the reasoning built on those rules
+    /// -- above all that the LAN permit does not let the router's DNS out,
+    /// because the other sublayer still blocks port 53 off the tunnel. What
+    /// WFP actually does is for the elevated install test and the VM.
+    mod arbitration {
+        use super::*;
+        use std::net::IpAddr;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Verdict {
+            Permit,
+            Block,
+        }
+
+        const PHYSICAL: u64 = 0x0099_0000_0000_0007;
+
+        fn app() -> PathBuf {
+            PathBuf::from(r"C:\Program Files\Neoxify\neoconnect-desktop.exe")
+        }
+
+        /// One flow as ALE classifies it.
+        #[derive(Debug, Clone)]
+        struct Flow {
+            layer: Layer,
+            remote: IpAddr,
+            remote_port: u16,
+            local_port: u16,
+            protocol: u8,
+            interface: u64,
+            app: PathBuf,
+            loopback: bool,
+        }
+
+        fn out(app: PathBuf, remote: IpAddr, remote_port: u16, protocol: u8, interface: u64) -> Flow {
+            let layer = if remote.is_ipv4() { Layer::ConnectV4 } else { Layer::ConnectV6 };
+            Flow { layer, remote, remote_port, local_port: 50_000, protocol, interface, app, loopback: false }
+        }
+
+        /// Sublayer A, as `ipv6_block` installs it for an Xray full tunnel:
+        /// `add_ipv6_filters` at both V6 layers and `add_dns_filters` at
+        /// ALE_AUTH_CONNECT_V4. Written out here, by hand, from that file;
+        /// a change there has to be mirrored here for this model to mean
+        /// anything.
+        fn today_ipv6_and_dns(tunnel: u64, engine: PathBuf) -> Vec<FilterSpec> {
+            let spec = |layer, action, weight, conds| FilterSpec {
+                name: "Neoxify (IPv6 block)".into(),
+                layer,
+                action,
+                weight,
+                conds,
+            };
+            let mut a = Vec::new();
+            for layer in [Layer::ConnectV6, Layer::RecvAcceptV6] {
+                a.push(spec(layer, Action::Permit, 12, vec![Cond::Loopback]));
+                a.push(spec(layer, Action::Permit, 12, vec![Cond::RemoteV6(Ipv6Addr::LOCALHOST, 128)]));
+                a.push(spec(layer, Action::Permit, 12, vec![Cond::RemoteV6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10)]));
+                a.push(spec(layer, Action::Permit, 12, vec![Cond::RemoteV6(Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8)]));
+                a.push(spec(layer, Action::Block, 0, vec![]));
+            }
+            let v4 = Layer::ConnectV4;
+            a.push(spec(v4, Action::Permit, 12, vec![Cond::RemotePort(53), Cond::LocalInterface(tunnel)]));
+            a.push(spec(v4, Action::Permit, 12, vec![Cond::RemotePort(53), Cond::Loopback]));
+            a.push(spec(v4, Action::Permit, 12, vec![Cond::RemotePort(53), Cond::App(engine)]));
+            a.push(spec(v4, Action::Block, 0, vec![Cond::RemotePort(53)]));
+            a
+        }
+
+        fn v6_contains(prefix: Ipv6Addr, len: u8, addr: Ipv6Addr) -> bool {
+            let bits = u128::from(len.min(128));
+            let mask = if bits == 0 { 0 } else { u128::MAX << (128 - bits) };
+            u128::from(addr) & mask == u128::from(prefix) & mask
+        }
+
+        fn holds(cond: &Cond, flow: &Flow) -> bool {
+            match cond {
+                Cond::Loopback => flow.loopback,
+                Cond::RemoteV4(prefix) => matches!(flow.remote, IpAddr::V4(a) if prefix.contains(a)),
+                Cond::RemoteV6(prefix, len) => matches!(flow.remote, IpAddr::V6(a) if v6_contains(*prefix, *len, a)),
+                Cond::LocalInterface(luid) => flow.interface == *luid,
+                Cond::App(path) => &flow.app == path,
+                Cond::RemotePort(port) => flow.remote_port == *port,
+                Cond::LocalPort(port) => flow.local_port == *port,
+                Cond::Protocol(number) => flow.protocol == *number,
+            }
+        }
+
+        /// WFP's arbitration, as modelled: in each sublayer the matching
+        /// filter of highest weight gives that sublayer's answer (none
+        /// matching is no opinion); a block from any sublayer wins.
+        fn decide(sublayers: &[Vec<FilterSpec>], flow: &Flow) -> Verdict {
+            let mut verdict = Verdict::Permit;
+            for sublayer in sublayers {
+                let winner = sublayer
+                    .iter()
+                    .filter(|f| f.layer == flow.layer && f.conds.iter().all(|c| holds(c, flow)))
+                    .max_by_key(|f| f.weight);
+                if winner.is_some_and(|f| f.action == Action::Block) {
+                    verdict = Verdict::Block;
+                }
+            }
+            verdict
+        }
+
+        fn sublayers() -> Vec<Vec<FilterSpec>> {
+            vec![today_ipv6_and_dns(LUID, xray_exe()), specs(&xray_plan())]
+        }
+
+        fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+            IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+        }
+
+        fn mapped(addr: IpAddr) -> IpAddr {
+            match addr {
+                IpAddr::V4(a) => IpAddr::V6(a.to_ipv6_mapped()),
+                v6 => v6,
+            }
+        }
+
+        /// The table from the design (3.2), and the reason for each row.
+        #[test]
+        fn the_flows_that_decide_the_plan() {
+            let node = IpAddr::V4(node());
+            let rows: Vec<(&str, Flow, Verdict)> = vec![
+                (
+                    "the router's DNS, on the physical adapter: the LAN permit lets it past this sublayer, the IPv6 block's port-53 block does not",
+                    out(app(), v4(192, 168, 1, 1), 53, protocol::UDP, PHYSICAL),
+                    Verdict::Block,
+                ),
+                ("a printer on the LAN", out(app(), v4(192, 168, 1, 20), 9100, protocol::TCP, PHYSICAL), Verdict::Permit),
+                ("xray.exe to its server", out(xray_exe(), node, 443, protocol::TCP, PHYSICAL), Verdict::Permit),
+                ("the app to the server's mirror, beside the tunnel", out(app(), node, 2053, protocol::TCP, PHYSICAL), Verdict::Block),
+                ("the app to the internet through the tunnel", out(app(), v4(1, 1, 1, 1), 443, protocol::TCP, LUID), Verdict::Permit),
+                ("DNS through the tunnel", out(app(), v4(1, 1, 1, 1), 53, protocol::UDP, LUID), Verdict::Permit),
+                (
+                    // Refused by the IPv6 block, which has no ::ffff permit
+                    // (1.7 was not built: P0-B measured dual-mode IPv4 judged
+                    // at the V4 layers, where it is permitted). Exactly as
+                    // today; this sublayer permits it -- see the test below.
+                    "IPv4-mapped through the tunnel, at V6",
+                    out(app(), mapped(v4(1, 1, 1, 1)), 443, protocol::TCP, LUID),
+                    Verdict::Block,
+                ),
+                (
+                    "IPv4-mapped on the physical adapter, at V6",
+                    out(app(), mapped(v4(1, 1, 1, 1)), 443, protocol::TCP, PHYSICAL),
+                    Verdict::Block,
+                ),
+                ("a socket bound to the physical adapter", out(app(), v4(8, 8, 8, 8), 443, protocol::TCP, PHYSICAL), Verdict::Block),
+                (
+                    "a connection opened before Connect, re-examined",
+                    out(app(), v4(93, 184, 216, 34), 443, protocol::TCP, PHYSICAL),
+                    Verdict::Block,
+                ),
+                (
+                    "DHCP",
+                    Flow { local_port: 68, ..out(app(), v4(192, 168, 1, 1), 67, protocol::UDP, PHYSICAL) },
+                    Verdict::Permit,
+                ),
+                (
+                    "loopback",
+                    Flow { loopback: true, ..out(app(), v4(127, 0, 0, 1), 8080, protocol::TCP, 1) },
+                    Verdict::Permit,
+                ),
+                (
+                    "native IPv6: the IPv6 block's, not this sublayer's",
+                    out(app(), "2001:db8::1".parse().unwrap(), 443, protocol::TCP, PHYSICAL),
+                    Verdict::Block,
+                ),
+                (
+                    "an inbound connection from the internet",
+                    Flow {
+                        layer: Layer::RecvAcceptV4,
+                        local_port: 3389,
+                        ..out(app(), v4(198, 51, 100, 77), 51_000, protocol::TCP, PHYSICAL)
+                    },
+                    Verdict::Block,
+                ),
+                (
+                    "an inbound connection from the LAN",
+                    Flow { layer: Layer::RecvAcceptV4, local_port: 445, ..out(app(), v4(192, 168, 1, 30), 51_000, protocol::TCP, PHYSICAL) },
+                    Verdict::Permit,
+                ),
+                (
+                    "Windows' own multicast discovery",
+                    out(app(), v4(239, 255, 255, 250), 1900, protocol::UDP, PHYSICAL),
+                    Verdict::Permit,
+                ),
+                (
+                    "the carrier's network beyond the gateway",
+                    out(app(), v4(10, 200, 0, 1), 443, protocol::TCP, PHYSICAL),
+                    Verdict::Block,
+                ),
+            ];
+            let sublayers = sublayers();
+            let mut wrong = Vec::new();
+            for (why, flow, expected) in &rows {
+                let got = decide(&sublayers, flow);
+                if got != *expected {
+                    wrong.push(format!("{why}: expected {expected:?}, got {got:?}"));
+                }
+            }
+            assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        }
+
+        /// This sublayer on its own, for IPv4-mapped traffic at V6: through
+        /// the tunnel it is permitted, and around it refused (K4). Whether
+        /// such traffic is ever classified at V6 is P0-B's question, and it
+        /// measured no; the IPv6 block refuses it there either way.
+        #[test]
+        fn this_sublayer_alone_permits_mapped_ipv4_through_the_tunnel_only() {
+            let ours = vec![specs(&xray_plan())];
+            let through = out(app(), mapped(v4(1, 1, 1, 1)), 443, protocol::TCP, LUID);
+            let around = out(app(), mapped(v4(1, 1, 1, 1)), 443, protocol::TCP, PHYSICAL);
+            let native = out(app(), "2001:db8::1".parse().unwrap(), 443, protocol::TCP, PHYSICAL);
+            assert_eq!(decide(&ours, &through), Verdict::Permit);
+            assert_eq!(decide(&ours, &around), Verdict::Block);
+            assert_eq!(decide(&ours, &native), Verdict::Permit, "native IPv6 is not this sublayer's to refuse");
+        }
+
+        /// The control for the table: without this sublayer, the flows it
+        /// exists to stop are let through -- so the rows above that say
+        /// Block are this plan's doing, not the IPv6 block's.
+        #[test]
+        fn without_confinement_the_same_flows_go_out() {
+            let today = vec![today_ipv6_and_dns(LUID, xray_exe())];
+            let node = IpAddr::V4(node());
+            for flow in [
+                out(app(), node, 2053, protocol::TCP, PHYSICAL),
+                out(app(), v4(8, 8, 8, 8), 443, protocol::TCP, PHYSICAL),
+                out(app(), v4(10, 200, 0, 1), 443, protocol::TCP, PHYSICAL),
+            ] {
+                assert_eq!(decide(&today, &flow), Verdict::Permit, "{flow:?}");
+            }
+            // And the router's DNS was already refused by the IPv6 block's.
+            assert_eq!(
+                decide(&today, &out(app(), v4(192, 168, 1, 1), 53, protocol::UDP, PHYSICAL)),
+                Verdict::Block
+            );
+        }
+    }
 }
