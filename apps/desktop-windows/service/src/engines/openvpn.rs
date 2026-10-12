@@ -663,8 +663,17 @@ pub fn connect(
     // seconds, out of 38, to delete nothing. The two destinations are
     // known, `route.exe` deletes them without looking anything up, and
     // a route that is not there is the expected case.
-    if let Ok(Some(adapter)) = adapters::find_by_name(ADAPTER_NAME) {
-        routing::purge_pushed_half_defaults(adapter.index);
+    //
+    // And address detection off, before openvpn.exe addresses the
+    // adapter: an address is checked under the setting it was added with,
+    // and that check was the 1.6-2.8 s after a Compatible connect in which
+    // every connection failed. See `readiness`. The adapter is kept
+    // between sessions, so from the second connect on it is already off
+    // and nothing is written.
+    let tunnel_index = adapters::find_by_name(ADAPTER_NAME).ok().flatten().map(|adapter| adapter.index);
+    if let Some(index) = tunnel_index {
+        routing::purge_pushed_half_defaults(index);
+        super::readiness::quiet_or_note(&super::readiness::SystemInterfaces, index, ADAPTER_NAME);
     }
 
     let config_path = engines.config_path(CONFIG_FILE);
@@ -701,7 +710,9 @@ pub fn connect(
         }
     };
 
-    let up = confirm_started(child, "OpenVPN", &log_path).and_then(|child| wait_until_up(child, &log_path, limits));
+    let up = confirm_started(child, "OpenVPN", &log_path)
+        .and_then(|child| wait_until_up(child, &log_path, limits))
+        .and_then(|child| wait_until_usable(child, tunnel_index, limits));
     let added = watch.map(|w| w.added(&*engines.route_ops)).unwrap_or_default();
     match up {
         Ok(child) => {
@@ -793,6 +804,43 @@ fn wait_until_up(
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// Once OpenVPN says it is up, waits until the address it gave the adapter
+/// is one Windows will use.
+///
+/// OpenVPN's log line comes while the address is still being checked:
+/// on 0.9.48 it stayed Tentative until 1.6-2.8 s after the connect had
+/// returned. With detection switched off before the start this answers at
+/// the first look; if that did not take, it waits for at most
+/// `readiness::PREFERRED_WAIT` and then carries on, saying so in
+/// cleanup.log. Only Disconnect fails it, and then openvpn.exe is stopped
+/// here as `wait_until_up` stops it, so that the caller's arm for a failed
+/// connect gives the routes back.
+///
+/// Any usable address, because the server pushes it and it is not known
+/// here in advance -- see `readiness::some_address_ready`.
+fn wait_until_usable(
+    mut child: Child,
+    tunnel_index: Option<u32>,
+    limits: &crate::lifecycle::budget::Limits,
+) -> Result<Child, String> {
+    let index = tunnel_index.or_else(|| adapters::find_by_name(ADAPTER_NAME).ok().flatten().map(|a| a.index));
+    let Some(index) = index else { return Ok(child) };
+    match super::readiness::settle(
+        &super::readiness::SystemInterfaces,
+        index,
+        ADAPTER_NAME,
+        super::readiness::some_address_ready,
+        limits,
+    ) {
+        Ok(()) => Ok(child),
+        Err(e) => {
+            let _ = child.kill();
+            super::reap(&mut child);
+            Err(e)
+        }
     }
 }
 
@@ -912,6 +960,39 @@ mod tests {
         let rule = arm.find("if let Some(resolver) = machine_dns_rule(passive) {").expect("the rule is asked for");
         assert!(arm[rule..].contains("super::dns::force(resolver);"), "the rule is not installed");
         assert!(!body[..up].contains("dns::force("), "the rule must not go in before the tunnel is up");
+    }
+
+    /// Detection goes off on OpenVPN's adapter before openvpn.exe starts,
+    /// because openvpn.exe addresses it as it comes up and an address is
+    /// checked under the setting it was added with. This is the change
+    /// P0-A tested: `DadTransmits=0` on this adapter ahead of the connect
+    /// took away the window in which every connection failed, and 3 put
+    /// back brought it back. Then, once OpenVPN says it is up, the wait is
+    /// for an address that is usable, not for the log line alone -- inside
+    /// the chain that decides `up`, so a Disconnect during it reaches the
+    /// arm that gives the routes back.
+    #[test]
+    fn detection_is_switched_off_before_openvpn_starts_and_waited_out_after() {
+        let source = include_str!("openvpn.rs");
+        let body_of = |signature: &str| {
+            let start = source.find(signature).unwrap_or_else(|| panic!("{signature} is gone"));
+            &source[start..start + source[start..].find("\n}\n").unwrap()]
+        };
+        let body = body_of("pub fn connect(");
+        let quiet = body.find("readiness::quiet_or_note(").expect("detection is never switched off");
+        let spawned = body.find("spawn_hidden(").expect("openvpn.exe is started");
+        assert!(quiet < spawned, "detection must go off before openvpn.exe can address the adapter");
+        let up = body.find("let up = ").expect("the chain that decides whether the tunnel came up");
+        let decided = body[up..].find("match up {").map(|at| up + at).expect("the decision");
+        let chain = &body[up..decided];
+        let logged = chain.find("wait_until_up(").expect("waits for OpenVPN's word");
+        let usable = chain.find("wait_until_usable(").expect("a tunnel that came up is not waited on for a usable address");
+        assert!(logged < usable, "the address is waited on after OpenVPN says it is up");
+
+        let wait = body_of("fn wait_until_usable(");
+        assert!(wait.contains("readiness::settle("), "the wait never asks whether the address is Preferred");
+        assert!(wait.contains("readiness::some_address_ready"), "the wait asks the wrong question");
+        assert!(wait.contains("child.kill()"), "a Disconnect during the wait must stop openvpn.exe");
     }
 
     #[test]

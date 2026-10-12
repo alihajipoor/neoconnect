@@ -17,6 +17,7 @@ mod hard_stop;
 mod janitor;
 mod ras;
 mod openvpn;
+mod readiness;
 /// "Repair my network" -- the superset teardown, reusing every module
 /// above. A child of this one so it can call the same private teardowns
 /// the disconnect path does rather than growing second copies of them.

@@ -587,13 +587,27 @@ fn wait_for_adapter(limits: &crate::lifecycle::budget::Limits) -> Result<u32, St
     }
 }
 
-/// Waits until the adapter is actually carrying `expected`.
+/// Waits until the adapter is actually carrying `expected`, and then until
+/// Windows will use it.
 ///
-/// Called after `configure_adapter`, and the only reason it exists is
-/// that the thing which follows -- installing routes whose next hop is
-/// that address -- fails *silently* if it runs too early. See
-/// [`ADAPTER_ADDRESSED_WAIT`].
-fn wait_for_address(expected: Ipv4Addr, limits: &crate::lifecycle::budget::Limits) -> Result<(), String> {
+/// Called after `configure_adapter`. It began as a wait for the address
+/// to be listed, because the thing which follows -- installing routes
+/// whose next hop is that address -- fails *silently* if it runs too
+/// early. See [`ADAPTER_ADDRESSED_WAIT`].
+///
+/// Listed is not usable. Windows lists the address while
+/// duplicate-address detection is still checking it, and on 0.9.48 that
+/// lasted until 1.6-2.8 s after the connect had returned, every
+/// connection in between failing at once -- see `readiness`. So once it
+/// is listed, the wait goes on until it is Preferred, for at most
+/// `readiness::PREFERRED_WAIT`, and past that the connect carries on and
+/// cleanup.log says so. With detection switched off beforehand
+/// (`readiness::quiet_or_note`) the first look should answer.
+fn wait_for_address(
+    expected: Ipv4Addr,
+    tun_index: u32,
+    limits: &crate::lifecycle::budget::Limits,
+) -> Result<(), String> {
     let budget = limits.clamp(ADAPTER_ADDRESSED_WAIT);
     if budget.is_zero() {
         return Err(super::OUT_OF_TIME.to_string());
@@ -605,9 +619,15 @@ fn wait_for_address(expected: Ipv4Addr, limits: &crate::lifecycle::budget::Limit
         let held = found.and_then(|a| a.ipv4);
         let expired = std::time::Instant::now() >= deadline;
 
-        // The address that was asked for, which is the answer wanted.
+        // The address that was asked for. Listed, which is not yet usable.
         if held == Some(expected) {
-            return Ok(());
+            return super::readiness::settle(
+                &super::readiness::SystemInterfaces,
+                tun_index,
+                ADAPTER_NAME,
+                |held| super::readiness::address_ready(held, expected),
+                limits,
+            );
         }
         // Any other address, once the deadline has passed. Deliberately
         // not a failure, and the same concession
@@ -709,6 +729,10 @@ pub fn install_routes(
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
 
+    // Detection off before the address goes on: an address is checked
+    // under the setting it was added with. See `readiness`.
+    super::readiness::quiet_or_note(&super::readiness::SystemInterfaces, tun_index, ADAPTER_NAME);
+
     // Before the routes: they name this address as their next hop, and a
     // route to a next hop that isn't on the interface silently goes
     // nowhere. `configure_adapter` asks for the address; `wait_for_address`
@@ -716,7 +740,7 @@ pub fn install_routes(
     // `false`: this function *is* the full-tunnel branch -- `mod.rs`
     // picks between it and `prepare_passive` on the same flag.
     configure_adapter(tun_gateway, false, limits)?;
-    wait_for_address(tun_gateway, limits)?;
+    wait_for_address(tun_gateway, tun_index, limits)?;
 
     routing::install_full_tunnel(tun_gateway, tun_index, plan.server, plan.uplink.next_hop, plan.uplink.index, ops, owed)
 }
@@ -734,13 +758,15 @@ pub fn install_routes(
 /// tunnel is never carried through itself.
 pub fn prepare_passive(outbound: &Outbound, limits: &crate::lifecycle::budget::Limits) -> Result<Ipv4Addr, String> {
     let server_ip = resolve_server(outbound.host(), outbound.port(), limits)?;
-    wait_for_adapter(limits)?;
+    let tun_index = wait_for_adapter(limits)?;
 
     let tun_gateway: Ipv4Addr = TUN_GATEWAY
         .split('/')
         .next()
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
+    // As in `install_routes`: detection off before the address goes on.
+    super::readiness::quiet_or_note(&super::readiness::SystemInterfaces, tun_index, ADAPTER_NAME);
     // `true`: this function is the Custom-mode branch. The DNS rule is
     // still installed -- see `dns::machine_wide_rule_wanted`.
     configure_adapter(tun_gateway, true, limits)?;
@@ -751,7 +777,7 @@ pub fn prepare_passive(outbound: &Outbound, limits: &crate::lifecycle::budget::L
     // here means the engine hands back something that is ready, rather
     // than handing back early and leaving the split tunnel to discover
     // it was not.
-    wait_for_address(tun_gateway, limits)?;
+    wait_for_address(tun_gateway, tun_index, limits)?;
 
     Ok(server_ip)
 }
@@ -1074,5 +1100,46 @@ mod tests {
     fn inbound_and_outbound_tags_are_derived_together() {
         assert_eq!(exit_tags(0), ("exit-0-in".to_string(), "exit-0-out".to_string()));
         assert_eq!(exit_tags(2), ("exit-2-in".to_string(), "exit-2-out".to_string()));
+    }
+
+    /// The body of one function in this file, from its signature to the
+    /// closing brace at the start of a line.
+    fn body_of(signature: &str) -> &'static str {
+        let source = include_str!("xray.rs");
+        let start = source.find(signature).unwrap_or_else(|| panic!("{signature} is gone"));
+        &source[start..start + source[start..].find("\n}\n").unwrap()]
+    }
+
+    /// Both ways this adapter is brought up -- full tunnel and Custom mode
+    /// -- switch address detection off between the adapter appearing and
+    /// `netsh` addressing it. After the address is set is too late: an
+    /// address is checked under the setting it was added with, and that
+    /// check is the 1.6-2.8 s after a connect in which P0-A measured every
+    /// connection failing. Held from the source, because a call deleted
+    /// here leaves every other test passing and only shows on a real
+    /// adapter.
+    #[test]
+    fn detection_is_switched_off_before_the_adapter_is_addressed() {
+        for signature in ["pub fn install_routes(", "pub fn prepare_passive("] {
+            let body = body_of(signature);
+            let appeared = body.find("wait_for_adapter(limits)?").expect("waits for the adapter");
+            let quiet = body
+                .find("readiness::quiet_or_note(")
+                .unwrap_or_else(|| panic!("{signature} never switches detection off"));
+            let addressed = body.find("configure_adapter(").expect("addresses the adapter");
+            assert!(
+                appeared < quiet && quiet < addressed,
+                "{signature}: detection must go off after the adapter appears and before it is addressed"
+            );
+        }
+    }
+
+    /// And the wait that follows is for the address to be usable, not for
+    /// it to be listed: Windows lists a Tentative address.
+    #[test]
+    fn the_address_wait_is_for_a_usable_address() {
+        let body = body_of("fn wait_for_address(");
+        assert!(body.contains("readiness::settle("), "the wait never asks whether the address is Preferred");
+        assert!(body.contains("readiness::address_ready(held, expected)"), "the wait asks about some other address");
     }
 }
