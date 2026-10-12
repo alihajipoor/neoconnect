@@ -3080,6 +3080,18 @@ export function Dashboard({
               }
             }
           } else {
+            // Whether the service confined this session's IPv4 to the
+            // tunnel, read now rather than left to the first status poll:
+            // the check below takes its endpoints from the order, and while
+            // confined the connected server's own mirror is refused on this
+            // PC (10013) -- a refusal here, which must not be asked, let
+            // alone counted against the network (`setConfinedAround`).
+            await serviceStatus()
+              .then((status) => {
+                setConfinedAround(status.ipv4Confined === true);
+                setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
+              })
+              .catch(() => undefined);
             // Only the last rung can use an answer from an endpoint other
             // than the baseline's; see `VerifyOptions.sameEndpointOnly`.
             const egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer);

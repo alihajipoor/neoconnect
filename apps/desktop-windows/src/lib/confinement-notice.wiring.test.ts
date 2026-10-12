@@ -15,9 +15,11 @@ describe("the IPv4 confinement warning", () => {
   it("is decided by the tested rule from every status the screen reads", () => {
     const reads = dashboard.match(/setIpv6Blocked\(Boolean\(status\.ipv6Blocked\)\);/g) ?? [];
     expect(reads.length).toBeGreaterThan(0);
-    const decided =
-      dashboard.match(/setIpv4NotConfined\(warnsUnconfined\(status, Boolean\(status\.splitTunnelActive\)\)\);/g) ?? [];
-    expect(decided.length).toBe(reads.length);
+    const decidedAfterRead =
+      dashboard.match(
+        /setIpv6Blocked\(Boolean\(status\.ipv6Blocked\)\);\s*setIpv4NotConfined\(warnsUnconfined\(status, Boolean\(status\.splitTunnelActive\)\)\);/g,
+      ) ?? [];
+    expect(decidedAfterRead.length).toBe(reads.length);
   });
 
   it("keeps the headline from saying 'protected' over it", () => {
@@ -26,9 +28,22 @@ describe("the IPv4 confinement warning", () => {
 
   it("tells the endpoint order on every status read, so a confined session never asks its server's mirrors", () => {
     const reads = dashboard.match(/setIpv6Blocked\(Boolean\(status\.ipv6Blocked\)\);/g) ?? [];
-    const told = dashboard.match(/setConfinedAround\(status\.ipv4Confined === true\);/g) ?? [];
+    const told =
+      dashboard.match(
+        /setIpv4NotConfined\(warnsUnconfined\(status, Boolean\(status\.splitTunnelActive\)\)\);\s*setConfinedAround\(status\.ipv4Confined === true\);/g,
+      ) ?? [];
     expect(told.length).toBe(reads.length);
     expect(dashboard).toContain('import { setConfinedAround } from "../lib/connected-mirrors";');
+  });
+
+  it("is read once a full-tunnel rung is up, before its egress check asks the order", () => {
+    const ladder = dashboard.slice(dashboard.indexOf("async function runLadder("));
+    const connect = ladder.indexOf('await invoke("vpn_connect", {');
+    const egress = ladder.indexOf("const egress = await confirmEgress(");
+    const read = ladder.indexOf("setConfinedAround(status.ipv4Confined === true);", connect);
+    expect(connect).toBeGreaterThan(0);
+    expect(read).toBeGreaterThan(connect);
+    expect(read).toBeLessThan(egress);
   });
 
   it("is shown in words while the tunnel is up", () => {
