@@ -190,6 +190,10 @@ pub struct Inputs {
     /// The server's address and, for Xray, each concurrent exit's.
     pub nodes: Vec<Ipv4Addr>,
     pub lan: Lan,
+    /// The DHCP servers the machine's own adapters lease from
+    /// ([`lan_dhcp_servers`]): the only addresses DHCP is permitted to
+    /// beyond the broadcast and the LAN.
+    pub dhcp_servers: Vec<Ipv4Addr>,
 }
 
 /// One session's confinement, as decided.
@@ -198,6 +202,7 @@ pub struct Plan {
     pub tunnel_luid: u64,
     pub transport: Transport,
     pub lan: Lan,
+    pub dhcp_servers: Vec<Ipv4Addr>,
 }
 
 /// Whether a session is confined, and with what.
@@ -278,7 +283,7 @@ fn plan_with(profile: &ConnectProfile, passive: bool, inputs: Inputs, ikev2: boo
     if inputs.tunnel_luid == 0 {
         return Some(Err("the tunnel adapter's interface could not be read".into()));
     }
-    Some(Ok(Plan { tunnel_luid: inputs.tunnel_luid, transport, lan: inputs.lan }))
+    Some(Ok(Plan { tunnel_luid: inputs.tunnel_luid, transport, lan: inputs.lan, dhcp_servers: inputs.dhcp_servers }))
 }
 
 /// A WFP layer this sublayer has filters at.
@@ -413,19 +418,33 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
             }
         }
     }
-    v4.push((
-        WEIGHT_DHCP,
-        "permit DHCP".into(),
-        vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67)],
-    ));
-    // And as a DHCP server: Mobile Hotspot, a Hyper-V or WSL switch. Their
-    // clients ask from 0.0.0.0, which no LAN prefix names, and DHCP never
-    // leaves the link it is on.
-    v4.push((
-        WEIGHT_DHCP,
-        "permit DHCP to this PC's own DHCP server".into(),
-        vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(67), Cond::RemotePort(68)],
-    ));
+    // DHCP, by its ports and to where DHCP goes: the limited broadcast;
+    // 0.0.0.0, the address a client with none asks from; and the servers
+    // the machine's adapters lease from, which a relay or an ISP puts off
+    // the LAN and a renewal asks directly. The LAN itself is the LAN
+    // permit's. By ports alone, any program could bind UDP 67 or 68 and
+    // trade with any internet host around the tunnel.
+    let mut dhcp_remotes = vec![Prefix::host(Ipv4Addr::BROADCAST), Prefix::host(Ipv4Addr::UNSPECIFIED)];
+    for server in &plan.dhcp_servers {
+        let host = Prefix::host(*server);
+        if !dhcp_remotes.contains(&host) {
+            dhcp_remotes.push(host);
+        }
+    }
+    for remote in dhcp_remotes {
+        v4.push((
+            WEIGHT_DHCP,
+            format!("permit DHCP with {}", remote.addr),
+            vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67), Cond::RemoteV4(remote)],
+        ));
+        // And as a DHCP server: Mobile Hotspot, a Hyper-V or WSL switch.
+        // Their clients ask from 0.0.0.0, which no LAN prefix names.
+        v4.push((
+            WEIGHT_DHCP,
+            format!("permit DHCP to this PC's own DHCP server with {}", remote.addr),
+            vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(67), Cond::RemotePort(68), Cond::RemoteV4(remote)],
+        ));
+    }
     if let Lan::Allowed(prefixes) = &plan.lan {
         let mut lan: Vec<Prefix> = Vec::new();
         for prefix in prefixes.iter().copied().chain(lan_plumbing()) {
@@ -524,6 +543,8 @@ pub struct LanAdapter<'a> {
     pub ipv4: Option<Ipv4Addr>,
     /// `OnLinkPrefixLength` of that address.
     pub prefix_len: Option<u8>,
+    /// The DHCP server it leased that address from, if it did.
+    pub dhcp_server: Option<Ipv4Addr>,
 }
 
 /// Whether an address is private in the RFC 1918 sense. Carrier-grade NAT
@@ -562,6 +583,28 @@ pub fn lan_prefixes(adapters: &[LanAdapter], ours: &[&str]) -> Vec<Prefix> {
         }
     }
     lan
+}
+
+/// The DHCP servers the machine's own adapters lease from -- the same
+/// adapters as [`lan_prefixes`]: up, neither ours nor another VPN's. Off
+/// the LAN when a relay or the ISP serves the address, and a lease is
+/// renewed by asking that server directly, so DHCP's permits name it.
+pub fn lan_dhcp_servers(adapters: &[LanAdapter], ours: &[&str]) -> Vec<Ipv4Addr> {
+    let mut servers = Vec::new();
+    for adapter in adapters {
+        if !adapter.is_up || ours.iter().any(|o| adapter.name.eq_ignore_ascii_case(o)) {
+            continue;
+        }
+        if crate::adapters::looks_like_vpn(adapter.description) {
+            continue;
+        }
+        let Some(server) = adapter.dhcp_server else { continue };
+        if server.is_unspecified() || server.is_broadcast() || servers.contains(&server) {
+            continue;
+        }
+        servers.push(server);
+    }
+    servers
 }
 
 /// Why a confinement is let go of.
@@ -1523,12 +1566,17 @@ mod tests {
         PathBuf::from(r"C:\Program Files\Neoxify\openvpn.exe")
     }
 
+    /// A DHCP server off the LAN, as an ISP's or a relayed one is.
+    fn isp_dhcp() -> Ipv4Addr {
+        Ipv4Addr::new(198, 51, 100, 67)
+    }
+
     fn home_lan() -> Lan {
         Lan::Allowed(vec![Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24)])
     }
 
     fn inputs(engine_exe: Option<PathBuf>, nodes: Vec<Ipv4Addr>) -> Inputs {
-        Inputs { tunnel_luid: LUID, engine_exe, nodes, lan: home_lan() }
+        Inputs { tunnel_luid: LUID, engine_exe, nodes, lan: home_lan(), dhcp_servers: vec![isp_dhcp()] }
     }
 
     fn reality() -> ConnectProfile {
@@ -1890,10 +1938,11 @@ mod tests {
         }
     }
 
-    /// The tunnel is permitted by its interface, and DHCP by its ports,
-    /// in both directions and in both roles: this PC as a DHCP client, and
-    /// as the DHCP server a Mobile Hotspot or a Hyper-V or WSL switch runs
-    /// -- whose clients ask from 0.0.0.0, which no LAN prefix names.
+    /// The tunnel is permitted by its interface, and DHCP by its ports to
+    /// the limited broadcast, 0.0.0.0 and the adapters' DHCP servers, in
+    /// both directions and in both roles: this PC as a DHCP client, and as
+    /// the DHCP server a Mobile Hotspot or a Hyper-V or WSL switch runs --
+    /// whose clients ask from 0.0.0.0, which no LAN prefix names.
     #[test]
     fn the_tunnel_and_dhcp_are_permitted_both_ways() {
         let specs = specs(&xray_plan());
@@ -1901,14 +1950,13 @@ mod tests {
             let tunnel: Vec<Vec<Cond>> = at(&specs, layer, WEIGHT_TUNNEL).into_iter().map(|s| s.conds).collect();
             assert_eq!(tunnel, vec![vec![Cond::LocalInterface(LUID)]], "{layer:?}");
             let dhcp: Vec<Vec<Cond>> = at(&specs, layer, WEIGHT_DHCP).into_iter().map(|s| s.conds).collect();
-            assert_eq!(
-                dhcp,
-                vec![
-                    vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67)],
-                    vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(67), Cond::RemotePort(68)],
-                ],
-                "{layer:?}"
-            );
+            let mut expected = Vec::new();
+            for remote in [Ipv4Addr::BROADCAST, Ipv4Addr::UNSPECIFIED, isp_dhcp()] {
+                let remote = Cond::RemoteV4(Prefix::host(remote));
+                expected.push(vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67), remote.clone()]);
+                expected.push(vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(67), Cond::RemotePort(68), remote]);
+            }
+            assert_eq!(dhcp, expected, "{layer:?}");
         }
     }
 
@@ -1946,7 +1994,7 @@ mod tests {
     }
 
     fn adapter<'a>(name: &'a str, description: &'a str, ipv4: [u8; 4], prefix_len: u8) -> LanAdapter<'a> {
-        LanAdapter { name, description, is_up: true, ipv4: Some(Ipv4Addr::from(ipv4)), prefix_len: Some(prefix_len) }
+        LanAdapter { name, description, is_up: true, ipv4: Some(Ipv4Addr::from(ipv4)), prefix_len: Some(prefix_len), dhcp_server: None }
     }
 
     /// The LAN is what the machine's own up, non-tunnel adapters are on,
@@ -1989,6 +2037,31 @@ mod tests {
         );
         let no_prefix = LanAdapter { prefix_len: None, ..adapter("Ethernet", "Realtek", [192, 168, 1, 23], 24) };
         assert!(lan_prefixes(&[no_prefix], &ours).is_empty(), "an address whose prefix is not known names no LAN");
+    }
+
+    /// The DHCP servers DHCP is permitted to are the ones the machine's own
+    /// up adapters lease from, each once -- not ours, not another VPN's,
+    /// not a down adapter's, and never the unspecified or broadcast address.
+    #[test]
+    fn lan_dhcp_servers_are_what_the_machines_own_adapters_lease_from() {
+        let ours = ["neoconnect0", "Neoxify-OpenVPN"];
+        let with = |adapter: LanAdapter<'static>, server: [u8; 4]| LanAdapter { dhcp_server: Some(Ipv4Addr::from(server)), ..adapter };
+        let mut down = with(adapter("Wi-Fi", "Intel(R) Wi-Fi 6 AX201", [10, 0, 0, 5], 24), [10, 0, 0, 1]);
+        down.is_up = false;
+        let adapters = [
+            with(adapter("Ethernet", "Realtek PCIe GbE Family Controller", [192, 168, 1, 23], 24), [192, 168, 1, 1]),
+            with(adapter("Ethernet 2", "USB 4G LTE Modem", [100, 70, 1, 2], 10), [100, 64, 0, 1]),
+            with(adapter("Ethernet 3", "Intel(R) Ethernet Connection", [192, 168, 1, 40], 24), [192, 168, 1, 1]),
+            down,
+            with(adapter("Neoxify-OpenVPN", "Wintun Userspace Tunnel", [10, 8, 0, 6], 24), [10, 8, 0, 1]),
+            with(adapter("Ethernet 4", "TAP-Windows Adapter V9", [10, 9, 0, 2], 24), [10, 9, 0, 1]),
+            with(adapter("Ethernet 5", "Realtek USB GbE Family Controller", [192, 168, 2, 9], 24), [255, 255, 255, 255]),
+            adapter("Ethernet 6", "Realtek USB GbE Family Controller", [192, 168, 3, 9], 24),
+        ];
+        assert_eq!(
+            lan_dhcp_servers(&adapters, &ours),
+            vec![Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(100, 64, 0, 1)]
+        );
     }
 
     /// WFP takes IPv4 conditions in host order (`FWP_V4_ADDR_AND_MASK`).
@@ -2371,7 +2444,13 @@ mod tests {
             let mut nodes = vec![node()];
             nodes.extend(exit_nodes());
             let built = |profile: &ConnectProfile, nodes: Vec<Ipv4Addr>, ikev2: bool| {
-                let inputs = Inputs { tunnel_luid: luid, engine_exe: Some(exe.clone()), nodes, lan: lan.clone() };
+                let inputs = Inputs {
+                    tunnel_luid: luid,
+                    engine_exe: Some(exe.clone()),
+                    nodes,
+                    lan: lan.clone(),
+                    dhcp_servers: vec![Ipv4Addr::new(10, 0, 2, 2)],
+                };
                 plan_with(profile, false, inputs, ikev2).expect("planned").expect("built")
             };
             vec![
@@ -2493,6 +2572,7 @@ mod tests {
                 tunnel_luid: luid,
                 transport: Transport::Xray { exe: exe.clone(), nodes: vec![permitted] },
                 lan: Lan::Allowed(Vec::new()),
+                dhcp_servers: Vec::new(),
             };
             let installed = install(&plan, &std::env::temp_dir()).expect("installed");
             println!("installed {} filters, {} blocks", installed.filters, installed.blocks.len());
@@ -2566,6 +2646,7 @@ mod tests {
                     nodes: vec![Ipv4Addr::new(203, 0, 113, 7)],
                 },
                 lan: Lan::Allowed(vec![lan]),
+                dhcp_servers: Vec::new(),
             };
             let connect = |port: u16| {
                 let to = std::net::SocketAddr::from((router, port));
@@ -2916,6 +2997,93 @@ mod tests {
                 wrong.push("openvpn.exe to its server over UDP 53 was refused".into());
             }
             assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        }
+
+        /// DHCP is let past the block to where DHCP goes and nowhere else:
+        /// the limited broadcast, 0.0.0.0 (a client with no address yet,
+        /// asking this PC's own DHCP server), the LAN, and the DHCP servers
+        /// the machine's adapters lease from -- an ISP's or a relayed one
+        /// is off the LAN, and a lease is renewed by asking it directly.
+        /// Permitted by its ports alone, any program could bind local UDP
+        /// 67 or 68 and reach any internet host's 68 or 67 around the
+        /// tunnel, and be reached from any.
+        #[test]
+        fn dhcp_goes_only_where_dhcp_goes() {
+            let ours = vec![specs(&xray_plan())];
+            let rows: Vec<(&str, Flow, Verdict)> = vec![
+                (
+                    "a program sending from local 67 to an internet host's 68",
+                    Flow { local_port: 67, ..out(app(), v4(93, 184, 216, 34), 68, protocol::UDP, PHYSICAL) },
+                    Verdict::Block,
+                ),
+                (
+                    "a program sending from local 68 to an internet host's 67",
+                    Flow { local_port: 68, ..out(app(), v4(93, 184, 216, 34), 67, protocol::UDP, PHYSICAL) },
+                    Verdict::Block,
+                ),
+                (
+                    "an internet host's 67 into local 68",
+                    Flow {
+                        layer: Layer::RecvAcceptV4,
+                        local_port: 68,
+                        ..out(app(), v4(93, 184, 216, 34), 67, protocol::UDP, PHYSICAL)
+                    },
+                    Verdict::Block,
+                ),
+                (
+                    "a DHCP request to the limited broadcast",
+                    Flow { local_port: 68, ..out(app(), v4(255, 255, 255, 255), 67, protocol::UDP, PHYSICAL) },
+                    Verdict::Permit,
+                ),
+                (
+                    "a renewal sent to the ISP's DHCP server, off the LAN",
+                    Flow { local_port: 68, ..out(app(), IpAddr::V4(isp_dhcp()), 67, protocol::UDP, PHYSICAL) },
+                    Verdict::Permit,
+                ),
+                (
+                    "the ISP's DHCP server answering",
+                    Flow {
+                        layer: Layer::RecvAcceptV4,
+                        local_port: 68,
+                        ..out(app(), IpAddr::V4(isp_dhcp()), 67, protocol::UDP, PHYSICAL)
+                    },
+                    Verdict::Permit,
+                ),
+                (
+                    "a hotspot client with no address yet asking this PC",
+                    Flow {
+                        layer: Layer::RecvAcceptV4,
+                        local_port: 67,
+                        ..out(app(), v4(0, 0, 0, 0), 68, protocol::UDP, PHYSICAL)
+                    },
+                    Verdict::Permit,
+                ),
+                (
+                    "this PC's DHCP server answering by broadcast",
+                    Flow { local_port: 67, ..out(app(), v4(255, 255, 255, 255), 68, protocol::UDP, PHYSICAL) },
+                    Verdict::Permit,
+                ),
+                (
+                    "a DHCP request to the router on the LAN",
+                    Flow { local_port: 68, ..out(app(), v4(192, 168, 1, 1), 67, protocol::UDP, PHYSICAL) },
+                    Verdict::Permit,
+                ),
+            ];
+            let mut wrong = Vec::new();
+            for (why, flow, expected) in &rows {
+                let got = decide(&ours, flow);
+                if got != *expected {
+                    wrong.push(format!("{why}: expected {expected:?}, got {got:?}"));
+                }
+            }
+            assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+            // And so with the LAN refused: broadcast, 0.0.0.0 and the
+            // servers only.
+            let refused = vec![specs(&Plan { lan: Lan::Refused, ..xray_plan() })];
+            let to_isp = Flow { local_port: 68, ..out(app(), IpAddr::V4(isp_dhcp()), 67, protocol::UDP, PHYSICAL) };
+            let to_host = Flow { local_port: 68, ..out(app(), v4(93, 184, 216, 34), 67, protocol::UDP, PHYSICAL) };
+            assert_eq!(decide(&refused, &to_isp), Verdict::Permit);
+            assert_eq!(decide(&refused, &to_host), Verdict::Block);
         }
 
         /// This sublayer on its own, for IPv4-mapped traffic at V6: through

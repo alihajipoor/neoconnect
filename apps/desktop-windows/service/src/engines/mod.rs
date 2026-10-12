@@ -717,11 +717,13 @@ impl Engines {
         }
         let ops = Arc::clone(&self.confinement_ops);
         let luid = ops.luid(adapter_name_for(profile));
+        let (lan, dhcp_servers) = machine_lan();
         let inputs = confinement::Inputs {
             tunnel_luid: *luid.as_ref().unwrap_or(&0),
             engine_exe,
             nodes,
-            lan: confinement::Lan::Allowed(machine_lan()),
+            lan: confinement::Lan::Allowed(lan),
+            dhcp_servers,
         };
         let Some(decision) = confinement::plan_for(profile, passive, inputs) else { return };
         let Some(session) = self.active.peek_mut() else { return };
@@ -784,7 +786,7 @@ impl Engines {
         }
         let lan = match &session.confinement_plan {
             Some(plan) => confinement::lan_reachable(&plan.lan),
-            None => confinement::lan_reachable(&confinement::Lan::Allowed(machine_lan())),
+            None => confinement::lan_reachable(&confinement::Lan::Allowed(machine_lan().0)),
         };
         let engine_pid = match &session.engine {
             Active::Child { child, .. } => Some(child.id()),
@@ -1012,6 +1014,7 @@ impl Engines {
                 nodes: vec![Ipv4Addr::new(203, 0, 113, 7)],
             },
             lan: confinement::Lan::Allowed(Vec::new()),
+            dhcp_servers: Vec::new(),
         };
         let installed = ops.install(&plan).expect("installed");
         session.confinement_plan = Some(plan);
@@ -2745,8 +2748,11 @@ fn note_reset(log_dir: &Path, what: &str, outcome: &crate::split_tunnel::ResetOu
 /// give no on-link prefix, which leaves the plan's link-local, multicast
 /// and broadcast permits and refuses the rest of the LAN -- the narrower
 /// failure.
-fn machine_lan() -> Vec<confinement::Prefix> {
-    let Ok(all) = adapters::list() else { return Vec::new() };
+///
+/// With it, the DHCP servers those same adapters lease from
+/// (`confinement::lan_dhcp_servers`), the one way DHCP leaves the LAN.
+fn machine_lan() -> (Vec<confinement::Prefix>, Vec<Ipv4Addr>) {
+    let Ok(all) = adapters::list() else { return (Vec::new(), Vec::new()) };
     let lan: Vec<confinement::LanAdapter> = all
         .iter()
         .map(|a| confinement::LanAdapter {
@@ -2755,9 +2761,10 @@ fn machine_lan() -> Vec<confinement::Prefix> {
             is_up: a.is_up,
             ipv4: a.ipv4,
             prefix_len: a.ipv4_prefix,
+            dhcp_server: a.dhcp_server,
         })
         .collect();
-    confinement::lan_prefixes(&lan, &OUR_ADAPTER_NAMES)
+    (confinement::lan_prefixes(&lan, &OUR_ADAPTER_NAMES), confinement::lan_dhcp_servers(&lan, &OUR_ADAPTER_NAMES))
 }
 
 /// The physical adapter traffic to `toward` leaves by, and the next hop
