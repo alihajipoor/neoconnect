@@ -496,6 +496,7 @@ fn our_providers() -> Vec<GUID> {
         ipv6_block::PROVIDER_KEY,
         super::confinement::CAPTURE_PROVIDER_KEY,
         super::confinement::CAPTURE_PROVIDER_KEY_ALT,
+        ipv6_block::HOLD_PROVIDER_KEY,
     ]
 }
 
@@ -510,6 +511,7 @@ fn our_sublayers() -> Vec<(GUID, &'static str)> {
         (ipv6_block::SPLIT_SUBLAYER_KEY, "Custom-mode sublayer"),
         (super::confinement::CAPTURE_SUBLAYER_KEY, "IPv4 confinement sublayer"),
         (super::confinement::CAPTURE_SUBLAYER_KEY_ALT, "second IPv4 confinement sublayer"),
+        (ipv6_block::HOLD_SUBLAYER_KEY, "Custom-mode DNS hold sublayer"),
     ]
 }
 
@@ -1398,7 +1400,12 @@ mod tests {
                 assert!(!guid_eq(a, b), "two of our WFP objects share a key");
             }
         }
-        assert_eq!(every.len(), 7);
+        assert_eq!(every.len(), 9);
+        // Custom mode's DNS hold (`ipv6_block::DnsHold`): its own pair, for
+        // the same reason, and a registration of it that outlived its build
+        // would hold port 53.
+        assert!(our_providers().iter().any(|k| guid_eq(k, &ipv6_block::HOLD_PROVIDER_KEY)), "the DNS hold's provider is not swept");
+        assert!(our_sublayers().iter().any(|(k, _)| guid_eq(k, &ipv6_block::HOLD_SUBLAYER_KEY)), "the DNS hold's sublayer is not swept");
         // Both of the confinement's pairs (`confinement::CAPTURE_KEYS`): a
         // second confinement put in while the first is closed registers the
         // other, and a registration of either that outlived its build holds

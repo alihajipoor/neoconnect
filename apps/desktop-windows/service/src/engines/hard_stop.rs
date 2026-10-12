@@ -24,6 +24,15 @@ impl HardStopSteps for Engines {
     /// is the 2026-08-23 class of bug the slot type was introduced to
     /// make unrepresentable.
     fn kill_engines(&mut self) -> Result<(), String> {
+        // Custom mode: port 53 held outside the tunnel from before its
+        // redirect stops (in `end_session`) until `clear_dns_rules` has
+        // taken out the rule that pins every lookup to 1.1.1.1. In between,
+        // nothing carries those lookups into the tunnel, and they left by
+        // the physical adapter -- up to twelve frames after every Xray
+        // disconnect on the VM. One WFP session, milliseconds.
+        if self.custom_mode_pin_in() {
+            self.hold_dns("hold DNS while Custom mode is stopped");
+        }
         let Some(active) = self.end_session() else {
             return Ok(());
         };
@@ -146,6 +155,8 @@ impl HardStopSteps for Engines {
     fn clear_dns_rules(&mut self) -> Result<(), String> {
         self.mark("dns cleared");
         let cleared = dns::clear_registry_only();
+        // The rule is out: port 53 is let go of (`kill_engines`).
+        self.release_dns_hold();
         self.forget_dns_state();
         match cleared.unverified {
             // Reported, not fatal, and not retried here with cmdlets --

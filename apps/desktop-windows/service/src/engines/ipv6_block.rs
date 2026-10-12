@@ -767,8 +767,27 @@ unsafe fn add_filter(
     weight: u8,
     scopes: &[Scope],
 ) -> Result<(), String> {
+    add_filter_under(engine, PROVIDER_KEY, name, layer, sublayer, action, weight, scopes)
+}
+
+/// [`add_filter`], under a provider of the caller's: the DNS hold's
+/// filters are not the shared provider's (see [`HOLD_PROVIDER_KEY`]).
+///
+/// # Safety
+/// As [`add_filter`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn add_filter_under(
+    engine: HANDLE,
+    provider: GUID,
+    name: &str,
+    layer: GUID,
+    sublayer: GUID,
+    action: FWP_ACTION_TYPE,
+    weight: u8,
+    scopes: &[Scope],
+) -> Result<(), String> {
     let mut display_name = wide(name);
-    let mut provider_key = PROVIDER_KEY;
+    let mut provider_key = provider;
 
     // Backs the address conditions' union pointers and must outlive the
     // FwpmFilterAdd0 call below, which is why it is declared here rather
@@ -1359,6 +1378,241 @@ unsafe fn add_split_sublayer(engine: HANDLE) -> Result<(), String> {
     Err(format!("could not create the Neoxify Custom-mode filtering sublayer ({err:#010x})"))
 }
 
+// ---------------------------------------------------------------------
+// Custom mode's DNS hold: port 53 refused outside the tunnel while Custom
+// mode starts and while it ends.
+// ---------------------------------------------------------------------
+
+/// The hold's own provider. Not the shared Neoxify one: the hold is a
+/// dynamic session of its own that lives beside the Custom-mode IPv6
+/// block, which registers the shared provider, and two sessions on one
+/// provider object leave its deletion order between them to WFP, which
+/// does not document it (the IPv4 confinement has its own for the same
+/// reason). `pub(super)` so `repair` can sweep by it.
+pub(super) const HOLD_PROVIDER_KEY: GUID = GUID::from_u128(0x3d8e6f14_2a7b_4c95_b1e0_5f9a2c7d8e43);
+
+/// The hold's sublayer.
+pub(super) const HOLD_SUBLAYER_KEY: GUID = GUID::from_u128(0x4e9f7025_3b8c_4da6_82f1_6a0b3d8e9f54);
+
+const HOLD_PROVIDER_NAME: &str = "Neoxify DNS hold";
+const HOLD_SUBLAYER_NAME: &str = "Neoxify Custom-mode DNS hold";
+
+/// Below the IPv6 block's and the confinement's two. The order sublayers
+/// are consulted in, not whether a block wins -- a block in any does.
+const HOLD_SUBLAYER_WEIGHT: u16 = 0xFFFC;
+
+const HOLD_LOG_FILE: &str = "dns-hold.log";
+
+/// The hold's filters, as planned. Pure, so what it refuses can be tested
+/// where WFP cannot be.
+///
+/// Outbound port 53, on IPv4 and IPv6, refused -- with a resolver on this
+/// PC (loopback) and the engine's own connection permitted above that, as
+/// [`DnsConfinement`] permits them: a node listening on 53 stays
+/// reachable. By port rather than by address, because what has to stop is
+/// every lookup that would leave by the physical adapter in clear text,
+/// whichever resolver it is for. Nothing that is not port 53 is touched,
+/// and nothing inbound: a DNS server on this PC is asked on its local 53.
+pub(super) fn dns_hold_specs(engine: Option<&Path>) -> Vec<FilterSpec> {
+    let mut specs = Vec::new();
+    for (layer, family) in [(Layer::ConnectV4, "IPv4"), (Layer::ConnectV6, "IPv6")] {
+        specs.push(FilterSpec {
+            name: format!("Neoxify: permit loopback DNS while Custom mode starts or ends ({family})"),
+            layer,
+            action: Action::Permit,
+            weight: WEIGHT_PERMIT,
+            conds: vec![Cond::RemotePort(53), Cond::Loopback],
+        });
+        if let Some(engine) = engine {
+            specs.push(FilterSpec {
+                name: format!("Neoxify: permit the tunnel engine on port 53 ({family})"),
+                layer,
+                action: Action::Permit,
+                weight: WEIGHT_PERMIT,
+                conds: vec![Cond::RemotePort(53), Cond::App(engine.to_path_buf())],
+            });
+        }
+        specs.push(FilterSpec {
+            name: format!("Neoxify: hold DNS outside the tunnel ({family})"),
+            layer,
+            action: Action::Block,
+            weight: WEIGHT_BLOCK,
+            conds: vec![Cond::RemotePort(53)],
+        });
+    }
+    specs
+}
+
+/// Port 53 refused outside the tunnel, for exactly as long as this value
+/// lives: while Custom mode starts, until its redirect carries the
+/// lookups the NRPT rule pins to 1.1.1.1, and while it ends, until that
+/// rule is out. In both stretches a lookup has nothing to carry it into
+/// the tunnel and leaves by the physical adapter in clear text -- seen at
+/// the NIC on the VM: about six frames to 1.1.1.1:53 in the 1.5 s before
+/// the rule on a Custom-mode connect, and up to twelve after every Xray
+/// disconnect or crash (P3 run g2-01). Refused, the lookup fails on this
+/// PC instead; the hold is gone before the operation that needed it
+/// answers, so no lookup waits on it longer than the connect or the
+/// teardown itself.
+///
+/// A dynamic WFP session, like every block in this file: the kernel
+/// removes it if the service dies holding it.
+pub struct DnsHold {
+    /// The WFP engine handle, as an integer for the reason
+    /// [`Ipv6Block::engine`] gives.
+    engine: isize,
+    filters: usize,
+    log: PathBuf,
+}
+
+impl DnsHold {
+    /// Puts the hold in, or says why it could not. `engine_exe` is the
+    /// tunnel engine to permit on port 53, where there is one to name.
+    pub fn install(log_dir: &Path, engine_exe: Option<&Path>) -> Result<Self, String> {
+        let log = log_dir.join(HOLD_LOG_FILE);
+        // Held until the transaction has committed: the engine's permit
+        // points into this blob. One that cannot be resolved loses only its
+        // own permit, as in the IPv6 block's DNS confinement.
+        let engine_app = engine_exe.and_then(|exe| {
+            AppId::resolve(&exe.to_string_lossy())
+                .map_err(|e| note(&log, &format!("engine not permitted on port 53: {e}")))
+                .ok()
+        });
+        let engine_named = engine_app.as_ref().and(engine_exe);
+        let specs = dns_hold_specs(engine_named);
+        let engine = open_dynamic_session_named(
+            HOLD_SUBLAYER_NAME,
+            "Holds DNS outside the tunnel while Neoxify's Custom mode starts or ends",
+        )?;
+        // SAFETY: `engine` is live, and the blob `engine_app` holds outlives
+        // the call.
+        match unsafe { build_hold(engine, &specs, engine_app.as_ref().map(|a| a.blob as *const FWP_BYTE_BLOB)) } {
+            Ok(filters) => {
+                note(&log, &format!("held: {filters} filters, provider {HOLD_PROVIDER_NAME}, sublayer {HOLD_SUBLAYER_NAME}"));
+                Ok(Self { engine: engine as isize, filters, log })
+            }
+            Err(e) => {
+                // SAFETY: opened above and not shared; closing it ends the
+                // session and whatever a failed transaction left in it.
+                unsafe { FwpmEngineClose0(engine) };
+                note(&log, &format!("hold failed: {e}"));
+                Err(e)
+            }
+        }
+    }
+
+    /// Lets go. Safe to call any number of times.
+    pub fn remove(&mut self) {
+        if self.engine == 0 {
+            return;
+        }
+        let engine = std::mem::replace(&mut self.engine, 0) as HANDLE;
+        // SAFETY: the handle came from `open_dynamic_session_named` and is
+        // closed once -- it is taken above.
+        let err = unsafe { FwpmEngineClose0(engine) };
+        if err == 0 {
+            note(&self.log, &format!("released: {} filters", self.filters));
+        } else {
+            note(&self.log, &format!("release reported {err:#010x}; the session ends with the process"));
+        }
+    }
+}
+
+impl Drop for DnsHold {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
+/// # Safety
+/// `engine` must be live, and an app-id pointer in `app` alive for the
+/// duration.
+unsafe fn build_hold(engine: HANDLE, specs: &[FilterSpec], app: Option<*const FWP_BYTE_BLOB>) -> Result<usize, String> {
+    let err = FwpmTransactionBegin0(engine, 0);
+    if err != 0 {
+        return Err(format!("could not begin a filtering transaction ({err:#010x})"));
+    }
+    match add_hold(engine, specs, app) {
+        Ok(filters) => {
+            let err = FwpmTransactionCommit0(engine);
+            if err != 0 {
+                FwpmTransactionAbort0(engine);
+                return Err(format!("the DNS hold could not be committed ({err:#010x})"));
+            }
+            Ok(filters)
+        }
+        Err(e) => {
+            FwpmTransactionAbort0(engine);
+            Err(e)
+        }
+    }
+}
+
+/// The hold's provider, sublayer and filters.
+///
+/// # Safety
+/// Inside an open transaction; an app-id pointer in `app` alive for the
+/// duration.
+unsafe fn add_hold(engine: HANDLE, specs: &[FilterSpec], app: Option<*const FWP_BYTE_BLOB>) -> Result<usize, String> {
+    let mut name = wide(HOLD_PROVIDER_NAME);
+    let mut description = wide("Neoxify VPN: DNS held while Custom mode starts or ends");
+    let mut provider: FWPM_PROVIDER0 = std::mem::zeroed();
+    provider.providerKey = HOLD_PROVIDER_KEY;
+    provider.displayData.name = name.as_mut_ptr();
+    provider.displayData.description = description.as_mut_ptr();
+    // Not persistent: it belongs to the dynamic session.
+    provider.flags = 0;
+    let err = FwpmProviderAdd0(engine, &provider, std::ptr::null_mut());
+    if err != 0 && err != FWP_E_ALREADY_EXISTS as u32 {
+        return Err(format!("could not register the {HOLD_PROVIDER_NAME} filtering provider ({err:#010x})"));
+    }
+
+    let mut sublayer_name = wide(HOLD_SUBLAYER_NAME);
+    let mut sublayer_description = wide("DNS outside the tunnel, held while Custom mode starts or ends");
+    let mut provider_key = HOLD_PROVIDER_KEY;
+    let mut sublayer: FWPM_SUBLAYER0 = std::mem::zeroed();
+    sublayer.subLayerKey = HOLD_SUBLAYER_KEY;
+    sublayer.displayData.name = sublayer_name.as_mut_ptr();
+    sublayer.displayData.description = sublayer_description.as_mut_ptr();
+    sublayer.flags = 0;
+    sublayer.providerKey = &mut provider_key;
+    sublayer.weight = HOLD_SUBLAYER_WEIGHT;
+    let err = FwpmSubLayerAdd0(engine, &sublayer, std::ptr::null_mut());
+    if err != 0 && err != FWP_E_ALREADY_EXISTS as u32 {
+        return Err(format!("could not create the {HOLD_SUBLAYER_NAME} sublayer ({err:#010x})"));
+    }
+
+    for planned in specs {
+        let mut scopes = Vec::with_capacity(planned.conds.len());
+        for cond in &planned.conds {
+            scopes.push(match cond {
+                Cond::Loopback => Scope::Loopback,
+                Cond::RemotePort(port) => Scope::RemotePort(*port),
+                Cond::App(path) => match app {
+                    Some(blob) => Scope::App(blob),
+                    None => return Err(format!("{} was not resolved before the filters went in", path.display())),
+                },
+                other => return Err(format!("the {HOLD_SUBLAYER_NAME} has no condition like {other:?}")),
+            });
+        }
+        let action = match planned.action {
+            Action::Permit => FWP_ACTION_PERMIT,
+            Action::Block => FWP_ACTION_BLOCK,
+        };
+        add_filter_under(
+            engine,
+            HOLD_PROVIDER_KEY,
+            &planned.name,
+            super::confinement::layer_key(planned.layer),
+            HOLD_SUBLAYER_KEY,
+            action,
+            planned.weight,
+            &scopes,
+        )?;
+    }
+    Ok(specs.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1527,6 +1781,80 @@ mod tests {
     /// layer, and each is a structure WFP validates on add. A real LUID
     /// -- loopback's, which every machine has -- and this test binary's
     /// own app id, so nothing is fabricated. Aborted like the one above.
+    /// Custom mode's DNS hold, as planned: port 53 refused outbound on
+    /// IPv4 and IPv6 alike, a resolver on this PC and the engine's own
+    /// connection permitted above that, and nothing that is not port 53
+    /// touched at all -- it is held while Custom mode starts and ends, on a
+    /// machine whose other traffic is none of its business.
+    #[test]
+    fn the_dns_hold_refuses_only_port_53_and_spares_loopback_and_the_engine() {
+        let engine = std::path::PathBuf::from(r"C:\Program Files\Neoxify\xray.exe");
+        for named in [None, Some(engine.as_path())] {
+            let specs = dns_hold_specs(named);
+            assert!(specs.iter().all(|s| s.conds.contains(&Cond::RemotePort(53))), "{specs:?}");
+            for layer in [Layer::ConnectV4, Layer::ConnectV6] {
+                let blocks = find(&specs, layer, &[Cond::RemotePort(53)]);
+                assert_eq!(blocks.len(), 1, "{layer:?}: {specs:?}");
+                assert_eq!(blocks[0].action, Action::Block);
+                let loopback = find(&specs, layer, &[Cond::RemotePort(53), Cond::Loopback]);
+                assert_eq!(loopback.len(), 1, "{layer:?}: a resolver on this PC is refused");
+                assert_eq!(loopback[0].action, Action::Permit);
+                assert!(loopback[0].weight > blocks[0].weight, "the refusal outweighs its permit");
+                let app = specs
+                    .iter()
+                    .filter(|s| s.layer == layer && s.conds.iter().any(|c| matches!(c, Cond::App(_))))
+                    .collect::<Vec<_>>();
+                match named {
+                    Some(path) => {
+                        assert_eq!(app.len(), 1, "{layer:?}: the engine's own connection is refused");
+                        assert_eq!(app[0].conds, vec![Cond::RemotePort(53), Cond::App(path.to_path_buf())]);
+                        assert_eq!(app[0].action, Action::Permit);
+                        assert!(app[0].weight > blocks[0].weight);
+                    }
+                    None => assert!(app.is_empty(), "an engine permitted that was never named"),
+                }
+            }
+            assert!(specs.iter().all(|s| s.layer == Layer::ConnectV4 || s.layer == Layer::ConnectV6), "inbound touched");
+        }
+        // Its own provider and sublayer: it lives beside the Custom-mode
+        // IPv6 block (shared provider) and the IPv4 confinement, and a
+        // dynamic session must not put its objects under another's.
+        for other in [PROVIDER_KEY, SUBLAYER_KEY, SPLIT_SUBLAYER_KEY] {
+            for ours in [HOLD_PROVIDER_KEY, HOLD_SUBLAYER_KEY] {
+                assert_ne!(other.data1, ours.data1);
+            }
+        }
+    }
+
+    /// The hold's filters, added for real and aborted, as the blocks above
+    /// are: its own provider and sublayer, and this test binary's app id.
+    #[test]
+    fn wfp_accepts_the_dns_hold_then_it_is_aborted() {
+        let exe = std::env::current_exe().expect("test binary path");
+        let app = AppId::resolve(&exe.to_string_lossy()).expect("the test binary resolves to an app id");
+        let Ok(engine) = open_dynamic_session_named(HOLD_SUBLAYER_NAME, "test") else {
+            eprintln!("skipped: the filtering engine would not open (needs administrator)");
+            return;
+        };
+        let result = unsafe {
+            let begun = FwpmTransactionBegin0(engine, 0);
+            if begun != 0 {
+                FwpmEngineClose0(engine);
+                eprintln!("skipped: no filtering transaction ({begun:#010x})");
+                return;
+            }
+            let specs = dns_hold_specs(Some(exe.as_path()));
+            let result = add_hold(engine, &specs, Some(app.blob as *const FWP_BYTE_BLOB));
+            FwpmTransactionAbort0(engine);
+            FwpmEngineClose0(engine);
+            result
+        };
+        match result {
+            Ok(filters) => assert_eq!(filters, 6, "a permit for loopback and the engine, and the refusal, per family"),
+            Err(e) => panic!("the Windows Filtering Platform rejected the DNS hold: {e}"),
+        }
+    }
+
     #[test]
     fn wfp_accepts_the_dns_confinement_filters_then_they_are_aborted() {
         let Ok(confinement) =

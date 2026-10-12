@@ -436,6 +436,22 @@ impl SessionFilters {
     }
 }
 
+/// What putting Custom mode's DNS hold in does (`Engines::hold_dns`): the
+/// machine's WFP, except in tests. The hold lasts as long as the value
+/// handed back.
+pub(crate) trait DnsHoldOps: Send + Sync {
+    fn hold(&self, log_dir: &Path, engine: Option<&Path>) -> Result<Box<dyn Send + Sync>, String>;
+}
+
+/// The machine's: [`ipv6_block::DnsHold`].
+struct MachineDnsHold;
+
+impl DnsHoldOps for MachineDnsHold {
+    fn hold(&self, log_dir: &Path, engine: Option<&Path>) -> Result<Box<dyn Send + Sync>, String> {
+        ipv6_block::DnsHold::install(log_dir, engine).map(|hold| Box::new(hold) as Box<dyn Send + Sync>)
+    }
+}
+
 pub struct Engines {
     exe_dir: PathBuf,
     config_dir: PathBuf,
@@ -494,6 +510,13 @@ pub struct Engines {
     /// What putting the pin in, giving it back and putting it in again
     /// do. The machine's NRPT table, except in tests.
     pin_ops: Arc<dyn dns::PinOps>,
+    /// Custom mode's DNS hold while it is in: port 53 refused outside the
+    /// tunnel while Custom mode starts, until its redirect carries, and
+    /// while it ends, until its NRPT rule is out. `None` at every other
+    /// moment. See `hold_dns`.
+    dns_hold: Option<Box<dyn Send + Sync>>,
+    /// What putting the hold in does. The machine's WFP, except in tests.
+    dns_hold_ops: Arc<dyn DnsHoldOps>,
     /// What the pin is told about Custom mode, in place of the split
     /// tunnel's own answer: the tests cannot run its driver.
     #[cfg(test)]
@@ -556,6 +579,8 @@ impl Engines {
             dns_state: dns::TunnelDns::NotRequested,
             dns_pin: dns::PinWatch::default(),
             pin_ops: Arc::new(dns::MachinePin),
+            dns_hold: None,
+            dns_hold_ops: Arc::new(MachineDnsHold),
             #[cfg(test)]
             custom_mode_for_test: None,
             ledger,
@@ -1081,6 +1106,59 @@ impl Engines {
         self.dns_state = self.pin_ops.install(resolver);
     }
 
+    /// Whether this is a Custom-mode session whose NRPT rule is in: every
+    /// lookup on the PC pinned to 1.1.1.1, and nothing but the redirect to
+    /// carry them into the tunnel. The condition `unpin_custom_mode_dns`
+    /// takes the rule out under. Asked before a teardown forgets it.
+    fn custom_mode_pin_in(&self) -> bool {
+        self.custom_mode_view().intercepting && self.dns_state == dns::TunnelDns::Forced && !self.dns_pin.released()
+    }
+
+    /// Refuses port 53 outside the tunnel until `release_dns_hold`, for
+    /// the two stretches of a Custom-mode session in which a lookup has
+    /// nothing to carry it into the tunnel and leaves by the physical
+    /// adapter in clear text instead -- seen at the NIC on the VM (P3 run
+    /// g2-01):
+    ///
+    ///  - **starting**, from before xray.exe makes its adapter -- whose
+    ///    resolver, 1.1.1.1, Windows starts sending lookups to at once --
+    ///    until the redirect carries them and the NRPT rule is in
+    ///    (`start_split_tunnel`): about six frames to 1.1.1.1:53 in the
+    ///    1.5 s before the rule;
+    ///  - **ending**, from before the redirect stops until the NRPT rule
+    ///    that pins every lookup to 1.1.1.1 is out: up to twelve after
+    ///    every Xray disconnect or crash.
+    ///
+    /// A lookup in either fails on this PC instead, and the hold is gone
+    /// before the operation that needed it answers: DNS is held no longer
+    /// than the connect or the teardown itself. Never a full tunnel's,
+    /// whose DNS confinement does this for the whole session. A hold that
+    /// will not go in is logged and changes nothing else -- the connect or
+    /// teardown goes on, as before this existed.
+    fn hold_dns(&mut self, during: &'static str) {
+        if self.dns_hold.is_some() {
+            return;
+        }
+        // The engine keeps port 53 to its own server, as the DNS
+        // confinement lets it: a node may listen on 53.
+        let engine = self.engine_path("xray.exe").ok();
+        match self.dns_hold_ops.hold(&self.config_dir, engine.as_deref()) {
+            Ok(hold) => {
+                self.dns_hold = Some(hold);
+                self.mark("dns held");
+            }
+            Err(e) => crate::cleanup_log::note(during, &format!("port 53 could not be held outside the tunnel: {e}")),
+        }
+    }
+
+    /// Lets go of the hold `hold_dns` put in, if one is in. Safe to call
+    /// at any time.
+    fn release_dns_hold(&mut self) {
+        if self.dns_hold.take().is_some() {
+            self.mark("dns hold released");
+        }
+    }
+
     /// Takes Custom mode's rule out before its redirect is stopped to be
     /// started again in place: while the redirect is down nothing carries
     /// the lookups it pins. `start_split_tunnel` puts it back. A rule the
@@ -1364,8 +1442,12 @@ impl Engines {
         // The profile Custom mode rebuilds from is the session's own,
         // so a failed attempt -- which ends whatever session it began --
         // cannot leave one behind.
-        self.connect_inner(profile, exits, known_nodes, &limits)
-            .map_err(|e| with_rival_hint(e, &rivals))
+        let connected = self.connect_inner(profile, exits, known_nodes, &limits);
+        // A Custom-mode connect that ended before its redirect carried --
+        // refused, cancelled, a rung that failed -- lets go of its DNS hold
+        // here (`hold_dns`); one that got there let go of it then.
+        self.release_dns_hold();
+        connected.map_err(|e| with_rival_hint(e, &rivals))
     }
 
     /// Refuses a connect with no way out at all -- no route toward the
@@ -1552,6 +1634,18 @@ impl Engines {
                     }
                 }
 
+                // Custom mode: port 53 held outside the tunnel from before
+                // xray.exe makes its adapter -- whose resolver Windows asks
+                // at once -- until the redirect carries and the NRPT rule is
+                // in (`hold_dns`, let go of in `start_split_tunnel`). The node
+                // is resolved first: nodes are registered by address, but a
+                // hostname would need a lookup the hold refuses, and once
+                // resolved here `prepare_passive` and the split tunnel get
+                // it again from the cache.
+                if passive {
+                    let _ = node_address(profile, limits);
+                    self.hold_dns("hold DNS while Custom mode starts");
+                }
                 let (mut child, table) =
                     xray::connect_returning_exits(self, &outbound, &extra, passive)?;
                 // Registered before the routes and before the session
@@ -1924,6 +2018,10 @@ impl Engines {
         // Custom mode's DNS rule, now that the redirect carries what it
         // pins (`pin_custom_mode_dns`), and not before.
         self.pin_custom_mode_dns();
+        // And port 53 is let go of: the redirect carries the lookups the
+        // rule pins (`hold_dns`). Before the flush, so a lookup the flush
+        // sends out again is not refused.
+        self.release_dns_hold();
         // Then the cache. Until the rule went in, lookups went to the
         // network's own resolver, and on a line that hijacks port 53 the
         // block page's answer was cached and would be served to the
@@ -2220,6 +2318,12 @@ impl Engines {
         let Some(generation) = self.active.peek().map(|s| s.generation) else {
             return;
         };
+        // Custom mode: port 53 held outside the tunnel from before its
+        // redirect stops until the rule pinning lookups to 1.1.1.1 is out,
+        // below (`hold_dns`). Asked before `end_session` forgets the rule.
+        if self.custom_mode_pin_in() {
+            self.hold_dns("hold DNS while a dead Custom-mode session is taken down");
+        }
         // On record before the generation closes, so a death the status
         // poll found first is a drop like one the watch found. Keeps the
         // first witness's time if the watch already recorded it, and is
@@ -2264,6 +2368,7 @@ impl Engines {
         self.unblock_ipv6();
         self.mark("dns cleared");
         let dns = dns::clear_registry_only();
+        self.release_dns_hold();
         self.forget_dns_state();
 
         let mut detail = format!(
@@ -2388,6 +2493,13 @@ impl Engines {
     }
 
     pub fn disconnect(&mut self) -> Result<(), String> {
+        // A Custom-mode session's lookups are pinned to 1.1.1.1 until the
+        // rule is out below, and the redirect that carries them stops with
+        // the session: port 53 is held outside the tunnel until then
+        // (`hold_dns`). Asked first, before the rule's state is forgotten.
+        if self.custom_mode_pin_in() {
+            self.hold_dns("hold DNS while Custom mode ends");
+        }
         // The rule is going away with everything else, so what this
         // service can claim about the machine's lookups goes with it.
         self.forget_dns_state();
@@ -2520,6 +2632,9 @@ impl Engines {
         // there is nothing to remove.
         self.mark("dns cleared");
         dns::clear();
+        // The rule is out, so lookups go where they went before Connect:
+        // port 53 is let go of (`hold_dns`).
+        self.release_dns_hold();
         // After the engine, not before, and unconditionally.
         //
         // It used to run first, which left a window with the tunnel
@@ -4887,12 +5002,145 @@ mod helper_tests {
         engines.pin_ops = Arc::clone(&pin) as Arc<dyn dns::PinOps>;
         engines.dns_pin = dns::PinWatch::with_hold(Duration::ZERO);
         engines.custom_mode_for_test = Some(CustomModeView { intercepting: true, interception_stopped: false });
+        // A teardown of a session pinned this way holds port 53; recorded,
+        // not done to the machine running the tests (`hold_dns`).
+        engines.dns_hold_ops = Arc::new(RecordingHold::default());
         (engines, pin, dir)
     }
 
     /// A session's rule went in, as `connect_inner` records it.
     fn rule_went_in(engines: &mut Engines) {
         engines.set_dns_state_for_test(dns::TunnelDns::Forced);
+    }
+
+    /* Custom mode's DNS hold (`hold_dns`).
+     *
+     * Before: a Custom-mode Xray connect gave the adapter 1.1.1.1 seconds
+     * before the redirect carried anything, and every teardown stopped the
+     * redirect before it took out the rule pinning every lookup to
+     * 1.1.1.1. In both gaps Windows' DNS client sent to 1.1.1.1:53 by the
+     * physical adapter: about six frames on a connect, up to twelve after
+     * every disconnect or crash (P3 run g2-01). */
+
+    /// What the hold did, instead of doing it.
+    #[derive(Default)]
+    struct RecordingHold {
+        held: std::sync::atomic::AtomicU32,
+        released: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    struct HeldGuard(Arc<std::sync::atomic::AtomicU32>);
+
+    impl Drop for HeldGuard {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl RecordingHold {
+        fn held(&self) -> u32 {
+            self.held.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn released(&self) -> u32 {
+            self.released.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl DnsHoldOps for RecordingHold {
+        fn hold(&self, _log_dir: &Path, _engine: Option<&Path>) -> Result<Box<dyn Send + Sync>, String> {
+            self.held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(HeldGuard(Arc::clone(&self.released))))
+        }
+    }
+
+    /// A Custom-mode session whose rule went in, its hold recorded.
+    fn custom_mode_session(name: &str) -> (Engines, Arc<RecordingHold>, u64, std::path::PathBuf) {
+        let (mut engines, _pin, dir) = custom_mode_engines(name);
+        let hold = Arc::new(RecordingHold::default());
+        engines.dns_hold_ops = Arc::clone(&hold) as Arc<dyn DnsHoldOps>;
+        let generation = engines.begin_test_session("XRAY_VLESS_REALITY", engine_stand_in());
+        rule_went_in(&mut engines);
+        engines.teardown_steps.clear();
+        (engines, hold, generation, dir)
+    }
+
+    /// Every way a Custom-mode session ends -- the Disconnect's hard stop,
+    /// the thorough pass, a dead engine's teardown -- holds port 53 from
+    /// before the engine and its redirect stop until the rule is out, and
+    /// lets go then: once each, and not a step later.
+    #[test]
+    fn a_custom_mode_teardown_holds_port_53_until_its_rule_is_out() {
+        let (mut engines, hold, _, dir) = custom_mode_session("hold-hard-stop");
+        let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+        assert_eq!((hold.held(), hold.released()), (1, 1), "hard stop");
+        in_order(&engines.teardown_steps, &["dns held", "engine stopped", "dns cleared", "dns hold released"]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (mut engines, hold, _, dir) = custom_mode_session("hold-disconnect");
+        engines.disconnect().expect("disconnect");
+        assert_eq!((hold.held(), hold.released()), (1, 1), "Disconnect");
+        in_order(&engines.teardown_steps, &["dns held", "engine stopped", "dns cleared", "dns hold released", "ipv6 released"]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (mut engines, hold, generation, dir) = custom_mode_session("hold-dead");
+        kill_engine_behind_its_back(&mut engines);
+        let scm = Arc::clone(&engines.wireguard_scm);
+        assert!(wait_for(Duration::from_secs(5), || {
+            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
+        }));
+        assert!(engines.end_dead_session(generation));
+        assert_eq!((hold.held(), hold.released()), (1, 1), "dead engine");
+        in_order(&engines.teardown_steps, &["dns held", "engine stopped", "dns cleared", "dns hold released"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing is held where nothing is pinned: a full tunnel, whose DNS
+    /// confinement covers it, and a Custom-mode session whose rule did not
+    /// go in or was given back -- its lookups already go where they went
+    /// before Connect.
+    #[test]
+    fn no_hold_without_custom_modes_rule() {
+        let (mut engines, hold, _, dir) = custom_mode_session("hold-none-unpinned");
+        engines.set_dns_state_for_test(dns::TunnelDns::NotRequested);
+        engines.disconnect().expect("disconnect");
+        assert_eq!(hold.held(), 0, "a rule that never went in");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (mut engines, hold, _, dir) = custom_mode_session("hold-none-full");
+        engines.custom_mode_for_test = Some(CustomModeView { intercepting: false, interception_stopped: false });
+        let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+        assert_eq!(hold.held(), 0, "a full tunnel");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The connect's half, held from the source: the hold goes in for
+    /// Custom mode only, before xray.exe makes its adapter, and is let go
+    /// of once the redirect carries and the rule is in -- before the cache
+    /// is flushed -- and, whatever became of the connect, when it returns.
+    #[test]
+    fn custom_modes_connect_holds_port_53_until_the_redirect_carries() {
+        fn body_of(signature: &str) -> &'static str {
+            let source: &'static str = include_str!("mod.rs");
+            let start = source.find(signature).unwrap_or_else(|| panic!("{signature} is gone"));
+            &source[start..start + source[start..].find("\n    }\n").unwrap()]
+        }
+        let connect = body_of("    fn connect_inner(");
+        let held = connect.find("self.hold_dns(\"hold DNS while Custom mode starts\");").expect("no hold on a Custom-mode connect");
+        let gated = connect[..held].rfind("if passive {").expect("the hold is not Custom mode's alone");
+        assert!(held - gated < 200, "the hold is not inside the Custom-mode branch");
+        let engine = connect.find("xray::connect_returning_exits(").expect("the engine is started");
+        assert!(held < engine, "held after xray.exe made its adapter");
+
+        let split = body_of("    fn start_split_tunnel(");
+        let pinned = split.find("self.pin_custom_mode_dns();").expect("the rule");
+        let released = split.find("self.release_dns_hold();").expect("never let go of once the redirect carries");
+        let flushed = split.find("dns::flush_cache();").expect("the flush");
+        assert!(pinned < released && released < flushed, "pin {pinned}, release {released}, flush {flushed}");
+
+        let outer = body_of("    pub fn connect(");
+        let inner = outer.find("self.connect_inner(").expect("connect_inner");
+        let after = outer.find("self.release_dns_hold();").expect("a connect that fails keeps its hold");
+        assert!(inner < after);
     }
 
     fn handshake(engines: &mut Engines, reading: wireguard::HandshakeHealth) {
