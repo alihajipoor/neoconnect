@@ -2643,6 +2643,19 @@ export function Dashboard({
      * just taken the tunnel the episode was armed for down on purpose,
      * and that is not something to reconnect. */
     let landed = false;
+    // Whether this pass says it is waiting for a network (`network-wait.ts`):
+    // said once the service refuses a rung for want of one, and kept until it
+    // takes a dial again or the pass ends -- not cleared before each retry,
+    // which turned the headline to "Reconnecting..." and back every 30 s.
+    let networkWaitShown = false;
+    const showNetworkWait = (on: boolean) => {
+      if (networkWaitShown === on) return;
+      networkWaitShown = on;
+      // The store is shared: only the pass that owns the ladder speaks for
+      // it, so one superseded mid-wait cannot clear a newer pass's wait.
+      if (ladderGenerationRef.current === generation) networkWait.set(on);
+      options.reconnect?.waitingForNetwork?.(on);
+    };
     try {
       // Every phase this pass shows goes through its own stamp, progress
       // included. A pass the customer has since cancelled, or one a
@@ -3025,6 +3038,7 @@ export function Dashboard({
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
             knownNodes,
           });
+          showNetworkWait(false);
           // The session this pass was started under ended while the
           // engine was coming up. The sign-out's own teardown may have
           // run before this connect finished, in which case this tunnel
@@ -3383,6 +3397,7 @@ export function Dashboard({
           };
         } catch (err) {
           const classified = classifyConnectionError(err);
+          if (classified.kind !== "noNetwork") showNetworkWait(false);
           // No network to dial over: the service refused the rung before
           // anything was dialled. Not a rung that failed -- moving on to the
           // next server for it walked the whole list in seconds, and a
@@ -3393,8 +3408,7 @@ export function Dashboard({
           // again when there is one -- and said on screen meanwhile.
           if (classified.kind === "noNetwork" && !stopped()) {
             noNetworkSince ??= Date.now();
-            networkWait.set(true);
-            options.reconnect?.waitingForNetwork?.(true);
+            showNetworkWait(true);
             const waited = await waitForNetwork(
               {
                 wayOut: () => invoke<boolean>("network_way_out"),
@@ -3409,14 +3423,28 @@ export function Dashboard({
               },
               noNetworkSince,
             );
-            networkWait.set(false);
-            options.reconnect?.waitingForNetwork?.(false);
             if (waited === "back" || waited === "retry") {
               // The same rung again, from its settle: the baseline is taken
-              // afresh on the network that is back.
-              index -= 1;
+              // afresh on the network that is back -- the IPv6 one too,
+              // which a pass begun with no network took on none at all.
+              // Still said on screen until the service takes the dial.
+              ipv6BaselineRef.current = null;
+              // Rungs this pass dialled before the network went may have
+              // failed for that, not for their servers: fi timed out as
+              // Wi-Fi left, sg waited, and the pass went on to sg once the
+              // network was back -- another country, with a notice that fi
+              // did not get through. So it starts again from its first
+              // rung, and says nothing against the ones before.
+              if (index > 0) {
+                failedRungs.length = 0;
+                lastError = null;
+                index = -1;
+              } else {
+                index -= 1;
+              }
               continue;
             }
+            showNetworkWait(false);
             if (waited === "stopped") break;
             // Gave up after the half hour: said below as no network, and no
             // other server is dialled for it.
@@ -3522,7 +3550,7 @@ export function Dashboard({
       // replacement is still connecting.
       endIntent(intent);
       // A wait for a network ends with its pass, however it ended.
-      if (ladderGenerationRef.current === generation) networkWait.set(false);
+      showNetworkWait(false);
       // Only the pass that still owns the guard may release it. One that
       // outlived its deadline has already been replaced, and clearing
       // the guard here would unlock a newer pass that is still running.

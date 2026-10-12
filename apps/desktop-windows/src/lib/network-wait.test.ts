@@ -121,15 +121,53 @@ describe("the Windows ladder waits on the same rung", () => {
 
   it("says so on screen and tells the reconnect, both ways, and keeps the pass alive", () => {
     const waiting = caught.slice(caught.indexOf('if (classified.kind === "noNetwork"'), caught.indexOf("index -= 1;"));
-    expect(waiting).toContain("networkWait.set(true);");
-    expect(waiting).toContain("networkWait.set(false);");
-    expect(waiting).toContain("options.reconnect?.waitingForNetwork?.(true);");
-    expect(waiting).toContain("options.reconnect?.waitingForNetwork?.(false);");
+    expect(waiting).toContain("showNetworkWait(true);");
     expect(waiting).toContain("ladderPass.progress(generation);");
     expect(waiting).toContain('invoke<boolean>("network_way_out")');
-    // And the store is cleared however the pass ends.
+    // One place says it, to the store and to the reconnect, both ways.
+    const helper = ladder.slice(ladder.indexOf("const showNetworkWait = (on: boolean) => {"));
+    expect(helper.slice(0, 600)).toContain("networkWait.set(on);");
+    expect(helper.slice(0, 600)).toContain("options.reconnect?.waitingForNetwork?.(on);");
+    // And it is cleared however the pass ends.
     const finallyBlock = ladder.slice(ladder.lastIndexOf("} finally {"));
-    expect(finallyBlock).toContain("networkWait.set(false);");
+    expect(finallyBlock).toContain("showNetworkWait(false);");
+  });
+
+  const retried = caught.slice(caught.indexOf('if (waited === "back" || waited === "retry") {'), caught.indexOf("continue;"));
+
+  it("keeps saying it is waiting through a retry the service refuses again, until a dial is taken", () => {
+    // Cleared before each retry, the headline went to "Reconnecting..." for
+    // the few seconds every 30 s retry took to be refused again, and back.
+    expect(retried.length).toBeGreaterThan(0);
+    expect(retried).not.toContain("showNetworkWait(false)");
+    const taken = ladder.slice(ladder.indexOf('await invoke("vpn_connect", {'));
+    const close = taken.indexOf("});");
+    expect(taken.slice(close, close + 120)).toContain("showNetworkWait(false);");
+    // An outcome other than no network ends the wait too.
+    expect(caught.slice(0, 200)).toContain('if (classified.kind !== "noNetwork") showNetworkWait(false);');
+  });
+
+  it("lets only the pass that owns the ladder clear the shared wait", () => {
+    // A pass superseded mid-wait cleared a newer pass's "Waiting for a
+    // network connection" when its own wait came back "stopped".
+    const sets = ladder.match(/[^\n]*networkWait\.set\([^\n]*/g) ?? [];
+    expect(sets.length).toBeGreaterThan(0);
+    for (const line of sets) expect(line).toContain("if (ladderGenerationRef.current === generation) networkWait.set(");
+  });
+
+  it("starts the pass again from its first rung when rungs before the wait failed", () => {
+    // fi passed the way-out check, Wi-Fi went while it was dialled, fi
+    // timed out, sg was refused for no network and waited -- and the
+    // network back, the pass dialled sg: another country. And the notice
+    // then said fi did not get through, over a network that had left.
+    expect(retried).toMatch(/if \(index > 0\) \{[^}]*failedRungs\.length = 0;[^}]*lastError = null;[^}]*index = -1;/);
+  });
+
+  it("takes the IPv6 baseline again on the network that is back", () => {
+    // Taken at the first rung of a pass that began with no network, it
+    // said "no IPv6 here" of a network that has it, and the "IPv6 blocked"
+    // notice was never shown.
+    expect(retried).toContain("ipv6BaselineRef.current = null;");
   });
 
   it("is asked of a command the app registers", () => {
