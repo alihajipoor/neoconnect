@@ -2736,6 +2736,64 @@ mod tests {
             assert!(!ours.iter().any(|r| r.remote_port == 9), "the LAN was refused");
         }
 
+        /// WFP re-examines a TCP connection that was already open when the
+        /// confinement went in -- what the reset at connect leaves to it
+        /// (rows it misses) and what opens in a drop report's gap, which
+        /// nothing resets. P0-D measured the re-examination under
+        /// wireguard.exe's filter and the IPv6 block, never under this
+        /// sublayer. Here: a connection to the internet opened before the
+        /// install, written to after it, by a program the plan does not
+        /// name, is refused by this plan's block (WFP's record says so) and
+        /// does not carry on by the physical adapter.
+        ///
+        /// Ignored: elevated, it confines this machine's IPv4 for a few
+        /// seconds, and it needs the internet. Run it in the VM guest.
+        #[test]
+        #[ignore = "elevated, confines this machine's IPv4 for a few seconds, needs the internet: run in the VM guest"]
+        fn wfp_reexamines_a_tcp_connection_opened_before_the_install() {
+            use std::io::{Read, Write};
+            use std::time::Duration;
+            let luid = loopback_luid().expect("interface 1");
+            let mut stream = std::net::TcpStream::connect_timeout(&"1.1.1.1:443".parse().unwrap(), Duration::from_secs(5))
+                .expect("the internet before the install");
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            // The engine the plan permits is another program; this binary is
+            // just a program with a connection open.
+            let plan = Plan {
+                tunnel_luid: luid,
+                transport: Transport::Xray {
+                    exe: PathBuf::from(r"C:\Windows\System32\PING.EXE"),
+                    nodes: vec![Ipv4Addr::new(203, 0, 113, 7)],
+                },
+                lan: Lan::Allowed(Vec::new()),
+                dhcp_servers: Vec::new(),
+            };
+            let installed = install(&plan, &std::env::temp_dir()).expect("installed");
+            let wrote = stream.write(b"\x16\x03\x01\x00\x05hello");
+            let mut answer = [0u8; 64];
+            let read = stream.read(&mut answer);
+            std::thread::sleep(Duration::from_millis(500));
+            let session = crate::engines::ipv6_block::open_dynamic_session_named("Neoxify test lookup", "test")
+                .expect("a session to read WFP's record with");
+            // SAFETY: both sessions are live; each is closed once, here.
+            let recorded = unsafe {
+                let recorded = refusals_since(session, installed.since, &installed.blocks);
+                FwpmEngineClose0(session);
+                FwpmEngineClose0(installed.engine as HANDLE);
+                recorded
+            };
+            let (refusals, _) = recorded.expect("WFP's record of refusals");
+            let me = app_id_text(&std::env::current_exe().unwrap()).unwrap();
+            let mine: Vec<&Refusal> = refusals.iter().filter(|r| r.app.eq_ignore_ascii_case(&me)).collect();
+            println!("write after the install: {wrote:?}; read: {:?}", read.as_ref().map_err(|e| (e.kind(), e.raw_os_error())));
+            println!("refused by this plan's blocks: {mine:?}");
+            assert!(
+                mine.iter().any(|r| r.protocol == protocol::TCP && r.remote_port == 443),
+                "the open connection was not re-examined and refused"
+            );
+            assert!(!matches!(read, Ok(n) if n > 0), "the connection carried on: an answer came back");
+        }
+
         const CHILD: &str = "NEOXIFY_CONFINEMENT_TEST_CHILD";
 
         /// The whole crash-safety argument, run: a process installs a real
