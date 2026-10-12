@@ -7034,3 +7034,199 @@ an IKEv2 connect of this build and Built-in's new line on screen; the
 no-network sentence on Compatible, Fast and Built-in with the adapter
 off (p1-17's shape); a real engine refused by a wrong permit end to end
 (P3 step 8); and the ladder's second check on a real rung.
+
+## 2026-10-12 — desktop capture: the P3 gate on `83372cd`, and the round it called for (same branch, pushed for CI, not merged)
+
+**Status:** `83372cd` was built (bundle v5 as seed, no-updater config),
+installed in `Neoxify-Test` (installed == HEAD by the service's sha256
+and strings only `801809f`, `88869c3` and `5dea914` have) and run through
+G1-G8 and P1.4 in 32 captured runs, pktmon at the NIC miniport from
+before anything else. **Not ready to release: G1 failed on Xray**, and an
+audit of that run found a regression in the roaming path. This round
+fixes both and five more test-first (`6ebc679..657fb53`). **None of it
+has been run in the VM**, and the Rust half is verified by CI only:
+since 07:12 today Smart App Control on this PC (CodeIntegrity 3099,
+policy "VerifiedAndReputableDesktop") blocks `cargo.exe`, every newly
+built build script and every test binary (os error 4551). It was not
+touched; turning it off is the owner's call.
+
+**The P3 gate, as the captures show it.**
+- **G1, zero leaks: FAIL, Xray only.** On every Xray run (Stealth and
+  Shadowsocks on fi and fr, plus a low-load Stealth run) a program doing
+  its own lookups reached the router's IPv6 link-local resolver --
+  `fe80::2`, port 53, 62-71 frames a run -- while the app said "You're
+  protected". The IPv6 block permitted `fe80::/10` on every port, and the
+  confinement's IPv6 DNS block covered only `::ffff:0:0/96`. **The
+  `83372cd` entry's "the router's DNS stays refused" was wrong for IPv6.**
+  Both OpenVPN runs: nothing outside the tunnel at the NIC but the
+  engine's link, the LAN and ARP. The leakers: NIC-bound and
+  `IP_UNICAST_IF` TCP refused (10013); NIC-bound and connected UDP
+  silently dropped (no frames, sends report success, the program is
+  never told); global IPv6 zero frames; dual-mode, and the two reopened
+  TLS connections, exited at the node. In g1-01, 49 frames to the node in
+  its first 40 s are xray.exe's by elimination only (the Security log
+  wrapped).
+- **G2, reset at connect: PASS, 7 of 7.** 10054 at 0.07-1.90 s after
+  `vpn_connect` returned, back through the tunnel 0.7-1.1 s later. Both
+  mechanisms are needed: DELETE_TCB tells TCP to come back; WFP's
+  re-examination stops connected UDP but nothing tells that socket.
+- **G3, no blackout: PASS.** Bare line back after the engine died:
+  Xray Disconnect 7-47 ms, OpenVPN 1-45 ms (after a 140-250 ms dead-tunnel
+  timeout), engine crash 146-314 ms (9 samples), two failed ladder rungs 3
+  and 38 ms; always before the NRPT pin (421-706 ms) and the IPv6 block
+  (367-723 ms) went. The valve never tripped.
+- **G4, a confinement that will not install: PASS.** Forced with a
+  guest-only sublayer refusing links: the tunnel stayed up at the node,
+  `ipv4Confined: false` with the reason, "Connected, not fully protected"
+  in English on screen, never "You're protected". In Persian the
+  unconfined line and the mode hint were seen; **the Persian headline was
+  not** -- back from Settings the screen showed "not confirmed" instead,
+  and lost the server name and session time.
+- **G5, LAN: PASS** but for the link-local DNS above. The LAN host
+  answered 100% from unbound and NIC-bound sockets; IPv4 router DNS
+  refused with 0 frames.
+- **G6, service killed: PASS.** Filters gone within 11 ms; the orphaned
+  engine carried 101 of 102 probes on Stealth and 598 of 601 on
+  Compatible meanwhile; the restarted service reaped it and the app
+  reconnected, confined.
+- **G7: PASS.** Fast `ipv4Confined: null`; Built-in `false` with its
+  reason (the new "Connected, not fully protected" for every Built-in
+  user); Custom mode unconfined, the selected app at the node, the rest
+  at the guest's own address.
+- **G8: FAIL on one check of three.** X1 passed. With the network off
+  both messages were right and openvpn.exe never started -- but the
+  Stealth ladder then landed in **sg, not fi**, once the network was back
+  (g8-01): every engine fails at once with no network since `1ff7dbc`,
+  and the ladder moved on as if fi had failed. And **DNS during an Xray
+  connect leaked**: `set dnsservers static 1.1.1.1` and the NRPT rule
+  went in before any route into the tunnel, so the DNS Client sent to
+  1.1.1.1:53 by the physical adapter about 1.1-1.56 s before
+  `vpn_connect` returned -- in Custom mode and on every full-tunnel Xray
+  connect traced (8 of 8), and on 0.9.48 too (P0 run 09b). `878eb74` had
+  not achieved its aim on Stealth.
+- **P1.4 holds:** the first health check after connect answered 200 with
+  the node's address 10 of 10 times, 0.65-1.48 s.
+- **xray-core 26.1.23 crashes** with `panic: Net: Unknown address type`
+  (`common/net.DestinationFromAddr` from `proxy/tun/handler.go:113`),
+  exit 2: 12 crashes under the probers' ~25 connections a second, in all
+  7 xray logs copied at exit -- including g9-01, unconfined, so not this
+  branch's doing; none at ~6 a second in 342 s. Memory and handles flat.
+  Each crash left 8-10 s unconfined until the app reconnected (K2, fail
+  open by design).
+
+**What the audit of that run corrected.** The Stealth "Disconnect" runs
+(g3-01, g3-03's first session) mostly measured crashes -- xray panicked
+before Disconnect was pressed -- so the Disconnect samples are the G1
+runs' ends and g3-03's second session. g4c was not a Compatible test by
+design: a Stealth-labelled run whose service never started xray; the app
+dialled Compatible at once while the protocol card said "Stealth" (the
+last protocol used). Never seen on screen: the unconfined gaps after the
+crashes, the 5-30 s while the service was dead, the Persian headline.
+"My files were removed from the guest" was partly true: pc-cleanup.ps1,
+cdp-shot.ps1, ipv6-setup.ps1 and their outputs remain in
+`C:\Users\tester`. Two analysis faults: `analysis-nic.txt` prints the
+whole confinement.log, and the GATE "OTHER" count included an earlier
+session's engine traffic (g1-04: 538, the real leak 71). And a hazard:
+`apps/desktop-windows/target/release/bundle/nsis/Neoxify_0.9.48_x64-setup.exe`
+(and `C:\Users\aliha\Claude\vm\Neoxify-Setup-capture.exe`) is a `83372cd`
+build with the real seed, named 0.9.48 -- left where it is, not to be
+reused or handed to anyone.
+
+**This round.**
+- **B7, `6ebc679`.** `disconnect()`'s engine arm removed the routes,
+  killed the engine, then let go of the confinement: a machine-wide
+  refusal from the first route.exe delete to the kill on every replacing
+  connect, Custom-mode rebuild, Repair, idle-watchdog teardown and service
+  stop. Now kill, let go, routes (K1), as the hard stop does; OpenVPN's
+  pushed half-defaults go by route.exe before the reap.
+- **B1, `5dda271`.** Port 53 to IPv6 link-local and multicast is
+  refused outbound by the IPv6 block, above its link-local and multicast
+  permits (loopback and `::1` above that), and by the confinement on any
+  IPv6 address -- each on its own. Neighbour discovery, DHCPv6, mDNS and
+  inbound are untouched. The IPv6 block's filters are now a pure plan
+  (`full_tunnel_specs`) that the installer and the confinement's
+  arbitration model both read, in place of a hand-written mirror.
+- **B2, `c820382`.** `5dea914` held incoming DHCP to the servers and LAN
+  read at Connect, so a laptop that woke on or roamed to another network
+  got no lease while the engine ran. DHCP answers to this PC (remote 67 to
+  local 68) are permitted from any address, wireguard.exe's shape. **Not
+  the whole of what was asked**: outbound client DHCP (68 to 67) stays
+  held to the broadcast, the known servers and the LAN, because by ports
+  alone any program could send to any internet host's port 67 around the
+  tunnel. What that costs is covered by the second half: every status
+  poll reads the LAN and DHCP servers again while confined and, when they
+  differ, puts the plan in again with them (the new one installed before
+  the old one is closed), so a renewal to a server first seen after
+  Connect is permitted within a poll; a rebind is broadcast anyway.
+- **B3, `b415832`.** A full Xray tunnel installs its IPv6 block and DNS
+  confinement right after the engine starts, before its adapter is
+  addressed, and the adapter's DNS and the NRPT rule go in only once its
+  routes are up. The same work in another order: the wait for the adapter
+  happens once, in the filters.
+- **B4, no change.** The panic: `gonet.TCPConn.RemoteAddr()` returns nil
+  once the gVisor endpoint has closed -- a connection reset right after
+  its handshake -- and `HandleConnection` hands it to
+  `DestinationFromAddr`, which panics on a type it does not know, in a
+  goroutine, taking xray.exe down. **26.3.27, what the nodes run, has the
+  same lines** (`handler.go`, `destination.go` and `stack_gvisor.go`
+  compared at both tags): not fixed. Upstream fixed it in `e7e9254630`,
+  "TUN inbound: Avoid panic on nil RemoteAddr due to quickly closed
+  connection (#6365)", 2026-06-23 -- first in v26.6.27, a prerelease;
+  every release since, to v26.10.10, is a prerelease, and the latest
+  stable is still 26.3.27. No client config avoids it: it is in the TUN
+  inbound before routing and sniffing, on any TCP connection the tunnel
+  carries. So the bundled xray stays at 26.1.23 in this round; moving the
+  desktop to a prerelease is the owner's decision. Two upstream changes
+  bear on this branch: `autoSystemWfpBlockLeak` on Windows (in v26.9.30
+  and later prereleases), and Xray's own TCP/IP stack in place of gVisor
+  (#7130, committed 2026-10-12, in no release yet). Mobile's build is not
+  touched.
+- **B5, `1657bda`.** A rung the service refuses for want of a network
+  now waits for one on the same server -- no attempt counted, nothing
+  recorded against the route -- asking Windows' routing table
+  (`network_way_out`, the table the service's refusal reads) every 2 s
+  and letting the service look again every 30 s regardless, then dials
+  the same rung from its settle; it gives up after the half hour a
+  reconnect waits for a network. The reconnect shows it as waiting for a
+  network and charges it to no attempt and no budget. The headline says
+  "Waiting for a network connection" (en, fa).
+- **B6, `657fb53`.** The orb and the status dot no longer stay
+  success-green under "Connected, not fully protected", and do not change
+  for a gap either (the owner's rule of today): the warning colour only
+  once the condition has held unbroken for 10 s on a confirmed connection,
+  and given up only once the good condition has held as long; a
+  reconnect, a rung, an engine restart and a crash's gap keep their own
+  looks. **Built-in shows it from the moment it is confirmed**, not after
+  10 s as first specified: it is never confined in this version, a fact
+  about the session rather than a gap, and waiting would only make every
+  Built-in connect go green and then amber. The headline's words are
+  unchanged and immediate.
+
+**Proven -- on this PC:** desktop `pnpm test` 1527 in 91 files and
+`tsc`; mobile `pnpm test` 239 and `tsc` (auto-reconnect is shared). The
+new JS tests were run and seen failing before the code was written. The
+Rust tests were written first but **not seen failing**: nothing Rust runs
+here today.
+
+**Proven -- CI only**, run 38282691803 on `657fb53`, the first push of
+this branch, all four jobs green: "Desktop client tests" ran
+`fetch-binaries.ps1`, `cargo check --workspace --all-targets` and
+`cargo test --workspace` on windows-latest -- 50, 60 and 631 passed (6 and
+11 ignored), the new tests among them by name. The WFP add-then-abort
+tests (every confinement plan, the IPv6 block with and without the DNS
+confinement) passed there; they skip without a word where WFP will not
+open, and GitHub's runners are administrators, but the log of a passing
+test does not show which happened. The service changes have been
+compiled and tested nowhere else.
+
+**Unverified -- all of it needs the VM:** the link-local DNS refusal at
+the NIC; a lease on a network joined after Connect, and the LAN followed;
+Xray's DNS ordering at the NIC, and whether lookups refused in that
+window delay the first health check (P1.4); the no-network wait with the
+adapter off and on again (that the ladder stays on fi, the words on
+screen, that webview timers run meanwhile); the orb colour on screen in
+en and fa; the Disconnect order's timing. Beyond the VM, as before: real
+IPv6, a censored Iranian line, PPPoE (where `network_way_out` reads an
+on-link route), sleep/resume, Hotspot/WSL/Hyper-V/Docker, another VPN,
+MTU below 1500, the upgrade from 0.9.48. The xray crash is still in the
+bundled engine.
