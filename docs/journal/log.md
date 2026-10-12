@@ -6188,8 +6188,9 @@ is skipped for the hedged walk.
 
 **Status:** in code and in tests on this PC; **no VM run for this
 branch**. Commits `ccde938..c0b516e` on `origin/main` (93b5d49), this
-entry (`cbc72ca`), then the review round below (`be5b475..bb2c89c`) and
-the second one (`64039ee..`).
+entry (`cbc72ca`), then the review round below (`be5b475..bb2c89c`), the
+second one (`64039ee..28d59aa`), and the two commits P0 gated
+(`08f2044`, `db381bb`; see the last section).
 
 What changed, in the order built (the commit messages carry the why):
 
@@ -6228,13 +6229,14 @@ What changed, in the order built (the commit messages carry the why):
   reach the redirect instead of the router. A rule that will not install
   is reported as unprotected DNS, which the app already warns on.
 
-**Not built, on purpose (TODO, gated on a VM measurement that has not
-run):** 1.6, DAD readiness (`DadTransmits=0` and waiting for Preferred) --
-only if P0-A shows the 1.5-3 s dead window after connect is the address
-still Tentative with 10049s; 1.7, the IPv6 block's V6 permits for the
-tunnel LUID and `::ffff:0:0/96` -- only once P0-B says whether a dual-mode
-socket's IPv4 is classified at the V6 layers. Phase 3 (IPv4 confinement)
-waits on the owner's decisions (a)-(e) in the design; Phase 4 is optional.
+**Gated on P0, since measured (last section):** 1.6, DAD readiness, is
+built -- P0-A showed the dead window after connect is the address still
+Tentative (the errors were 10065, not the predicted 10049; a causal test
+settled it). 1.7, the IPv6 block's V6 permits for the tunnel LUID and
+`::ffff:0:0/96`, is **not** built -- P0-B showed the block never refused a
+dual-mode socket's IPv4, so they would change nothing. Phase 3 (IPv4
+confinement) waits on the owner's decisions (a)-(e) in the design; Phase 4
+is optional.
 
 **The review round.** Four reviewers read the branch; what they found,
 and what became of it (each commit message has the detail):
@@ -6309,11 +6311,13 @@ too; nothing else of this does).
 
 Gaps stated rather than closed:
 
-- **W1 widens an unverified risk.** If a dual-mode socket's IPv4 is
-  classified at the V6 layers (P0-B), our IPv6 block refuses that IPv4 --
-  already true on Xray, OpenVPN and IKEv2, now on WireGuard as well, where
-  wireguard.exe's tunnel permit had let it through. 1.7 is the fix and is
-  gated on the same measurement.
+- **W1's dual-mode risk, measured away on the other engines.** The worry
+  was that our IPv6 block refuses a dual-mode socket's IPv4, now on
+  WireGuard too. P0-B (last section): with the block installed on Xray and
+  OpenVPN it refused no such IPv4, and on WireGuard wireguard.exe's own
+  IPv4 block judged it as IPv4. WireGuard with our block beside
+  wireguard.exe's -- this branch -- was not measured, and IKEv2 not at
+  all.
 - **10013 through the HTTP plugin is still `net` in the trace.** The
   plugin's errors carry no cause (reqwest's Display drops it), so only the
   probe and our own commands can say `local`. Since the second round a
@@ -6412,3 +6416,112 @@ tunnel -- WireGuard throttled, OpenVPN restarting, an adapter pulled --
 seen to give the PC its DNS back, nor the pin and the flush seen to come
 back with the tunnel. Each needs the VM, and the stall a line that can be
 throttled on cue.
+
+**P0, measured on 0.9.48, and the two commits it gated.** Run in the VM
+(`Neoxify-Test`) against the released 0.9.48 installer (its sha256 matches
+the digest GitHub reports for the release asset): pktmon at the NIC from
+before Connect, a 1 s owner sampler, Filtering Platform failure auditing
+(event 5157). One node. The captures and analysis are kept outside the
+repo, not committed. The guest was put back afterwards (auditpol, pktmon,
+the test adapter, a leftover host route).
+
+- **A, the 1.5-3 s dead window after connect: duplicate-address
+  detection.** On Stealth and Compatible the tunnel address stayed
+  Tentative for 3.06-3.55 s, until 1.6-2.8 s after `vpn_connect` returned.
+  Every connect in that time failed within 2 ms with **10065**
+  (WSAEHOSTUNREACH), not the 10049 the design predicted, 36-53 per run, and
+  in all five runs with the window the last failure and the first success
+  fell inside the poll where the address turned Preferred. `DadTransmits`
+  was 3 on `neoconnect0` and `Neoxify-OpenVPN`, 0 on WireGuard's adapter,
+  which had no window. Causal check: `DadTransmits=0` set by hand on
+  `Neoxify-OpenVPN` -- never Tentative, no failures, the app's first health
+  check passed 0.82 s after connect; 3 put back -- Tentative 3.55 s, 53
+  failures. Health requests sent inside the window did not fail fast: they
+  waited out their 6 s timeout, even after the address was usable.
+  **1.6 is built (`08f2044`)**, on the timing and the causal check rather
+  than the error code.
+- **B, dual-mode IPv4 under the IPv6 block: not refused.** With the block
+  installed (unconditional at both V6 layers, no `::ffff` permit), a .NET
+  dual-mode socket to `::ffff:1.0.0.1:443` fetched the trace page through
+  the tunnel, exit address the node's, on Stealth and Compatible, and on
+  Fast; native IPv6 beside it was refused (10013, 5157 naming "Neoxify:
+  block all outbound (IPv6)"; on Fast a timeout). On Fast wireguard.exe's
+  IPv4 block refused a dual-mode send to the LAN exactly as it refused the
+  plain IPv4 one: Windows judges that traffic at the V4 layers. **1.7 is
+  not built** -- its permits would change nothing. The comments that said
+  or assumed the opposite are corrected (`db381bb`). Java was not run (no
+  runtime in the guest).
+- **C, what leaves the NIC while protected.** No packets to the API
+  fronts' CDN addresses at the NIC while protected in any run, including a
+  Disconnect, Connect and five-minute sit: the rows to the API fronts'
+  Cloudflare addresses on the physical address, whose owner P0-C was
+  meant to find, did not reproduce on 0.9.48 here. Once in seven runs
+  the app's main process (its Rust HTTP client, not the WebView) held two
+  connections to a node's control-plane mirror, opened on the bare line
+  about 9 s before Connect, that sent only 1-byte keep-alives every 15 s
+  while protected; what makes that happen is not known. Otherwise Windows'
+  own services. And on Stealth and Compatible an IPv4 TLS connection opened
+  before Connect went on leaving by the NIC, from the host's public
+  address, for the whole session: 0.9.48 has no IPv4 filter on those
+  engines. That is Phase 3's question, still with the owner.
+- **D, flows already open when a filter goes in are re-examined.** A
+  connected IPv6 UDP socket opened before Connect was refused by our block
+  from then on (5157 naming it, 63 times in one Stealth run, 33 in one
+  Compatible run); under wireguard.exe's IPv4 block a connected UDP socket
+  stopped at the NIC for the whole session while `send()` went on
+  reporting success, and an established TLS connection was reset (10054).
+  `ipv6_block.rs` said the opposite and is corrected (`db381bb`). An IPv6
+  TCP connection open before the block was not measured.
+- **E, the leftover host route reproduces on 0.9.48:** every Compatible
+  session left a host route to the node through the guest's gateway after
+  Disconnect; a later Stealth session to the same node removed it. That is
+  what 1.3 and 1.4 on this branch address, and they have not been run in
+  the VM yet.
+- Also seen once: the first connect after a Disconnect got no answer from
+  the service for 66.8 s (the app said the service did not answer within
+  45 s), and the app's retry then connected in 2.75 s and verified the
+  exit. Never showed protected meanwhile. Cause unknown; no service log
+  covers it.
+
+**1.6 as built (`08f2044`).** `engines/readiness.rs`: `quiet` asks for
+`DadTransmits=0` and router discovery off on the adapter's IPv4 interface
+(read, change, write back whole with `SitePrefixLength` cleared; nothing
+written when both are already off) -- on `neoconnect0` after it appears and
+before netsh addresses it, full tunnel and Custom mode alike, and on
+`Neoxify-OpenVPN` before openvpn.exe starts. A refusal goes to cleanup.log
+and the connect goes on. The waits then ask for a *Preferred* address,
+not a listed one: Xray's `wait_for_address` for 198.18.0.1, OpenVPN after
+"Initialization Sequence Completed" for any non-link-local address. At
+most 4 s (above the 3.55 s measured), after which the connect carries on
+and cleanup.log says so; Disconnect ends either wait, and on OpenVPN stops
+openvpn.exe so its failed-connect arm gives the routes back. The same two
+settings are what wireguard-windows makes on its own adapter, which fits
+the 0 P0 read there. The elevated `#[ignore]` test
+`wintun_address_preferred_within_100ms_after_dad_zero` was **run in the
+VM guest as administrator**, with the installed build's `wintun.dll`: a
+control Wintun adapter at Windows' default (`DadTransmits` 3) was
+Tentative at the first look after netsh and Preferred at 2950 ms; a second
+one after `quiet` read back `DadTransmits` 0 and was Preferred at the first
+look. Both adapters, and their interface keys, were gone afterwards.
+
+A hypothesis, not checked: the WSAEHOSTUNREACH that `split_tunnel/net/pin.rs`
+and `routing::PassiveRouteShape` record from Xray's and OpenVPN's adapters,
+and never from WireGuard's, fits the same cause. Nothing there is changed.
+
+**Proven -- tests on this PC:** desktop `cargo test --workspace` 50, 59,
+557 (7 ignored); `cargo check --workspace --all-targets` with no new
+warnings; desktop `pnpm test` 1459 / 83 files and `pnpm typecheck`. Mobile
+not run: nothing shared changed. Each new test failed first -- the pure
+ones and the waits on a stub with today's behaviour (a listed address is
+ready, nothing is written, no wait), the source-order ones before the
+calls existed.
+
+**Unverified:** a real Xray or OpenVPN connect with 1.6 -- the guest still
+runs 0.9.48, so no connect of this code has been watched, nor the first
+health check passing at once, nor the 4 s cap or the cleanup.log line;
+whether xray.exe writes `neoconnect0`'s interface row itself between our
+read and write (the API takes the row whole, so such a write would be
+undone); Custom mode on either engine, where the split tunnel's own wait
+for a bindable address already ran; IKEv2 (A, B and E not measured, and
+not touched); for B, inbound, Java, and WireGuard with our block beside
+wireguard.exe's; for D, IPv6 TCP. Beyond the VM: everything listed above.
