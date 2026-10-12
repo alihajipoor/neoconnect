@@ -101,6 +101,7 @@ import {
 import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
 import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "../lib/api-endpoints";
+import { setConfinedAround } from "../lib/connected-mirrors";
 import { repairUnderWay } from "../lib/repair";
 import {
   asReconnectReport,
@@ -931,6 +932,7 @@ export function Dashboard({
     setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
     setIpv6Blocked(Boolean(status.ipv6Blocked));
     setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
+    setConfinedAround(status.ipv4Confined === true);
     const observed = stateFromStatus(status);
     followTunnelForEndpoints(observed);
     return observed;
@@ -1870,6 +1872,7 @@ export function Dashboard({
       setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
       setIpv6Blocked(Boolean(status.ipv6Blocked));
       setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
+      setConfinedAround(status.ipv4Confined === true);
       const fromStatus = stateFromStatus(status);
 
       if (fromStatus === "disconnected") {

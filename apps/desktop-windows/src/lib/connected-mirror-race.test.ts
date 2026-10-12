@@ -41,7 +41,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 const { publicRequest, resetRaceWinnerForTests, LEAD_MS } = await import("./api");
 const { demoteEndpoint, resetDemotionsForTests } = await import("./endpoint-demotion");
-const { setConnectedMirrors } = await import("./connected-mirrors");
+const { setConnectedMirrors, setConfinedAround } = await import("./connected-mirrors");
 
 /** Every origin a request was sent to, in order. */
 let sent: string[];
@@ -56,6 +56,7 @@ beforeEach(() => {
   resetRaceWinnerForTests();
   resetDemotionsForTests();
   setConnectedMirrors([]);
+  setConfinedAround(false);
   sent = [];
   answering = new Map();
   tauriFetch.mockImplementation((url: string, init?: RequestInit) => {
@@ -137,6 +138,22 @@ describe("a race while the connected server is reached around the tunnel", () =>
     expect(sent[0]).toBe(A);
     expect(sent).not.toContain(M);
     expect(Date.now() - startedAt).toBeGreaterThan(0);
+  });
+
+  /** Confined (`ipv4Confined: true`): the connected server's mirror is
+   * refused on this PC, so a race never asks it while anything else is
+   * left -- not even last, when nothing else answers, where the test above
+   * asks it. (Here the stand-in network still answers from it; on the PC
+   * the request would fail at once with 10013.) */
+  it("does not ask it at all while the session is confined", async () => {
+    for (const base of [A, B, C]) demoteEndpoint(base);
+    setConnectedMirrors([M]);
+    setConfinedAround(true);
+    answering.set(M, 50);
+
+    await read();
+
+    expect(sent).toEqual([A, B, C]);
   });
 
   it("leaves the order alone with no tunnel server", async () => {

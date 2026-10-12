@@ -23,6 +23,29 @@ export function setConnectedMirrors(mirrors: Iterable<string>): void {
   current = new Set(mirrors);
 }
 
+/** Whether the service says the tunnel now up confines this PC's IPv4 to
+ * it (`ipv4Confined: true`, `engines::confinement` in the service).
+ *
+ * Then the connected server's address is refused on this PC for everything
+ * but the engine: a request to one of its mirrors fails at once with 10013
+ * -- refused here, which says nothing about the network and must not be
+ * recorded against it, as a block or as a demotion on this network. So
+ * while it is so, those mirrors are not asked at all (`apiEndpoints`,
+ * `connectedMirrorsLast`), unless they are all there is. Set from the
+ * service's own status by the screen; false whenever it says anything
+ * else, which puts them back last -- reachable around the tunnel again. */
+let confined = false;
+
+/** Tells the order whether the session is confined. See `confined`. */
+export function setConfinedAround(value: boolean): void {
+  confined = value;
+}
+
+/** Whether the session is confined, as last told. */
+export function confinedAround(): boolean {
+  return confined;
+}
+
 /** Whether `base` is one of the connected server's own mirrors, which
  * nothing sends to ahead of its turn: not a write's first stop for having
  * answered last (`recentWinner` in api.ts), and not a walk's next stop for
@@ -50,8 +73,10 @@ export function connectedMirrorsLast(
     return { ordered: [...ordered], healthy, aroundFrom: ordered.length };
   }
   const undemoted = ordered.slice(0, healthy).filter((base) => !current.has(base)).length;
+  // Confined: not asked at all while anything else is left (`confined`).
+  const mirrors = confined ? [] : ordered.filter((base) => current.has(base));
   return {
-    ordered: [...rest, ...ordered.filter((base) => current.has(base))],
+    ordered: [...rest, ...mirrors],
     healthy: undemoted === 0 ? rest.length : undemoted,
     aroundFrom: rest.length,
   };

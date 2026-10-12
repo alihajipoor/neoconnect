@@ -1,7 +1,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { API_BASE_URLS } from "./config";
 import { loadSnapshot } from "./credential-cache";
-import { setConnectedMirrors } from "./connected-mirrors";
+import { confinedAround, setConnectedMirrors } from "./connected-mirrors";
 import { bundledBases } from "./endpoint-bundle-store";
 import type { TunnelServer } from "./egress";
 
@@ -133,7 +133,12 @@ export async function apiEndpoints(): Promise<string[]> {
   // list by demotion, and is told which to keep last (connected-mirrors.ts).
   setConnectedMirrors(last);
   if (last.size === 0) return ordered;
-  return [...ordered.filter((url) => !last.has(url)), ...ordered.filter((url) => last.has(url))];
+  const rest = ordered.filter((url) => !last.has(url));
+  // Not at all while the session is confined, unless they are all there
+  // is: refused on this PC, they cannot answer (`confined` in
+  // connected-mirrors.ts).
+  if (confinedAround() && rest.length > 0) return rest;
+  return [...rest, ...ordered.filter((url) => last.has(url))];
 }
 
 /** The addresses of the server the tunnel now up is dialled at, while

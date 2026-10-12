@@ -24,6 +24,13 @@ describe("the IPv4 confinement warning", () => {
     expect(dashboard).toMatch(/headlineFor\(connectionState, \{[^}]*unconfined: ipv4NotConfined[^}]*\}\)/);
   });
 
+  it("tells the endpoint order on every status read, so a confined session never asks its server's mirrors", () => {
+    const reads = dashboard.match(/setIpv6Blocked\(Boolean\(status\.ipv6Blocked\)\);/g) ?? [];
+    const told = dashboard.match(/setConfinedAround\(status\.ipv4Confined === true\);/g) ?? [];
+    expect(told.length).toBe(reads.length);
+    expect(dashboard).toContain('import { setConfinedAround } from "../lib/connected-mirrors";');
+  });
+
   it("is shown in words while the tunnel is up", () => {
     expect(dashboard).toContain('{isTunnelUp(connectionState) && ipv4NotConfined ? (');
     expect(dashboard).toContain('t("dash.ipv4NotConfined")');

@@ -64,6 +64,25 @@ describe("the endpoint order with a tunnel up", () => {
     expect(ordered).toEqual([...API_BASE_URLS, FR_MIRROR, FI_MIRROR]);
   });
 
+  /** While the service says the session's IPv4 is confined to the tunnel
+   * (`ipv4Confined: true`), the connected server's address is refused on
+   * this PC for everything but the engine: a request to its mirror fails
+   * at once with 10013, which says nothing about the network and must not
+   * be filed against it. So it is not asked at all -- unless it is all
+   * there is, when it is asked and fails here, as it would. */
+  it("confined_skips_tunnel_server_endpoints", async () => {
+    const mirrors = await import("./connected-mirrors");
+    remembered.set("lastGood", FI_MIRROR);
+    endpoints.setTunnelServer({ addresses: new Set([FINLAND]), reachedAround: true });
+    mirrors.setConfinedAround(true);
+    expect(await endpoints.apiEndpoints()).toEqual([...API_BASE_URLS, FR_MIRROR]);
+
+    // Let go of -- the valve, a drop report -- and it is reachable around
+    // the tunnel again: last, as before.
+    mirrors.setConfinedAround(false);
+    expect(await endpoints.apiEndpoints()).toEqual([...API_BASE_URLS, FR_MIRROR, FI_MIRROR]);
+  });
+
   it("still_first_for_wireguard", async () => {
     // WireGuard reaches its server through the tunnel, so nothing about the
     // mirror's request is visible beside it, and the order is untouched.
