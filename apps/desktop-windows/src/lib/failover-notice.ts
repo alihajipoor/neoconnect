@@ -53,6 +53,9 @@ export interface FailoverNotice {
    * none of them was dialled: nothing failed to get through, because
    * nothing was sent. */
   noNetworkOnly: boolean;
+  /** Whether any rung before the landing was dialled and failed: the only
+   * case in which "your usual protocol didn't get through" is true. */
+  dialledFailed: boolean;
 }
 
 export function failoverNotice(input: {
@@ -68,9 +71,9 @@ export function failoverNotice(input: {
     : onShown.some((rung) => rung.fate === "noNetwork")
       ? "noNetwork"
       : "notTried";
-  const noNetworkOnly =
-    input.failed.some((rung) => rung.fate === "noNetwork") && !input.failed.some((rung) => rung.fate === "dialled");
-  return { label: input.label, fromRegion: input.fromRegion, toRegion: input.toRegion, shown, noNetworkOnly };
+  const dialledFailed = input.failed.some((rung) => rung.fate === "dialled");
+  const noNetworkOnly = input.failed.some((rung) => rung.fate === "noNetwork") && !dialledFailed;
+  return { label: input.label, fromRegion: input.fromRegion, toRegion: input.toRegion, shown, noNetworkOnly, dialledFailed };
 }
 
 /** The sentence for a notice: a key and its values, and the protocol to
@@ -93,8 +96,12 @@ export function failoverText(notice: FailoverNotice): FailoverText {
           : "dash.usedInstead";
     return { key, vars: { from: notice.fromRegion, to: notice.toRegion ?? "", protocol: notice.label } };
   }
+  // In the country: "didn't get through" only when a rung was dialled and
+  // failed. Nothing failed at all -- the ladder landed at once on a route
+  // other than the one on screen -- or every failure came before anything
+  // was dialled: then only where the connection is.
   return {
-    key: notice.noNetworkOnly ? "dash.switchedToNoNetwork" : "dash.switchedTo",
+    key: notice.dialledFailed ? "dash.switchedTo" : notice.noNetworkOnly ? "dash.switchedToNoNetwork" : "dash.nowUsing",
     trailingLabel: notice.label,
   };
 }

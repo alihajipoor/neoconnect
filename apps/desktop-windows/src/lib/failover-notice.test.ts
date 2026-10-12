@@ -119,6 +119,29 @@ describe("a server named as unreachable", () => {
     );
   });
 
+  /** In the same country, "your usual protocol didn't get through" is a
+   * claim that something was dialled and failed. It was said whenever no
+   * rung had failed for want of a network -- including when no rung had
+   * failed at all (the ladder landed at once, on a last-good or reconnect
+   * route other than the one on screen) and when every failure came before
+   * anything was dialled (the service, the installation, an error nothing
+   * recognised). Then the line only says where the connection is. */
+  it("does not say the usual protocol didn't get through when nothing was dialled", () => {
+    const nothingDialled: FailedRung[][] = [
+      [],
+      [{ routeId: "fi", fate: rungFate("engineMissing") }],
+      [
+        { routeId: "fi", fate: rungFate("serviceUnavailable") },
+        { routeId: "fr", fate: rungFate("unknown") },
+      ],
+    ];
+    for (const failed of nothingDialled) {
+      expect(line("en", failed, false), JSON.stringify(failed)).toBe("Now using Stealth");
+      expect(line("fa", failed, false), JSON.stringify(failed)).toBe("اکنون از این استفاده می‌شود: Stealth");
+      expect(line("en", failed, false)).not.toContain("didn't get through");
+    }
+  });
+
   /** A protocol that was dialled and failed before the landing is what the
    * old line says, and it still says it. */
   it("keeps the old line in the country when a rung was dialled", () => {

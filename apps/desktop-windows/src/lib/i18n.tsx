@@ -671,6 +671,12 @@ const en = {
   // asked (failover-notice.ts).
   "dash.switchedNoNetwork": "No network connection at first, so {from} wasn't tried. Now on {to} over {protocol}",
   "dash.switchedToNoNetwork": "No network connection at first. Now using",
+  // The pass stayed in the country and nothing it tried was dialled and
+  // failed -- it landed at once on a route other than the one on screen,
+  // or every failure came before anything was dialled. Only where the
+  // connection is: "didn't get through" would be a claim nothing made
+  // true (failover-notice.ts).
+  "dash.nowUsing": "Now using",
   "dash.yourIp": "Your IP:",
   "err.serviceUnavailable": "The Neoxify background service isn't running. Restarting the app usually fixes this; reinstalling will if it doesn't.",
   "err.engineMissing": "Part of the installation is missing. Please reinstall Neoxify.",
@@ -1399,6 +1405,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.usedInstead": "به‌جای {from}، {to} با {protocol} استفاده شد. برای ثابت‌ماندن، یک سرور انتخاب کنید.",
   "dash.switchedNoNetwork": "ابتدا اتصال شبکه برقرار نبود، پس {from} امتحان نشد. اکنون {to} با {protocol}",
   "dash.switchedToNoNetwork": "ابتدا اتصال شبکه برقرار نبود. اکنون از این استفاده می‌شود:",
+  "dash.nowUsing": "اکنون از این استفاده می‌شود:",
   "dash.yourIp": "آی‌پی شما:",
   "err.serviceUnavailable": "سرویس پس‌زمینه نئوکسیفای اجرا نمی‌شود. معمولاً راه‌اندازی دوباره برنامه مشکل را حل می‌کند.",
   "err.engineMissing": "بخشی از نصب ناقص است. لطفاً دوباره نصب کنید.",
