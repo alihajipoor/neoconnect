@@ -55,10 +55,20 @@ impl HardStopSteps for Engines {
                 let killed = child
                     .kill()
                     .map_err(|err| format!("could not stop the {protocol} engine: {err}"));
+                self.mark("engine stopped");
+                // The IPv4 confinement, the moment the engine is killed and
+                // before the routes: the session is ending, so it protects
+                // nothing now, and held through the route.exe deletes below
+                // it refuses everything those deletes send to the physical
+                // adapter -- the machine's whole internet, for as long as
+                // they take (K1). The step of its own after this one finds
+                // nothing left to do.
+                self.let_go_of_confinement();
                 // After the kill and regardless of it: a route left
                 // behind is worse than one removed from an engine that
                 // was already gone.
                 routes.remove();
+                self.mark("routes removed");
 
                 // OpenVPN's own routes, which `routes` does not hold:
                 // openvpn.exe adds the server's pushed `0.0.0.0/1` and
@@ -83,7 +93,6 @@ impl HardStopSteps for Engines {
                         routing::purge_pushed_half_defaults(adapter.index);
                     }
                 }
-                self.mark("engine stopped");
                 killed
             }
 

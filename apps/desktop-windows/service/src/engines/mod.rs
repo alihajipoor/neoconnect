@@ -1997,10 +1997,11 @@ impl Engines {
     /// The order is the order of harm. Custom mode first (inside
     /// `end_session`), because its redirect is pinned to an adapter that
     /// no longer exists and would otherwise go on swallowing the selected
-    /// applications' traffic. Then the routes, then the IPv4 confinement --
-    /// which permits nothing but the dead adapter, so until it goes the
-    /// machine has no internet at all; the watch's report has usually let
-    /// go of it already -- then the IPv6 block's WFP filters, whose DNS
+    /// applications' traffic. Then the IPv4 confinement -- which permits
+    /// nothing but the dead adapter, so until it goes the machine has no
+    /// internet at all; the watch's report has usually let go of it
+    /// already, and the engine is stopped by definition here -- then the
+    /// routes, then the IPv6 block's WFP filters, whose DNS
     /// confinement permits port 53 only through the dead adapter, so until
     /// they go no plain DNS lookup on the machine succeeds, then the NRPT
     /// rule, by registry.
@@ -2019,6 +2020,13 @@ impl Engines {
 
         let engine = self.end_session();
         let protocol = engine.as_ref().map_or("unknown", Active::protocol);
+        // The engine has ended already: that is why this runs.
+        self.mark("engine stopped");
+        // Usually let go of already, by the watch's report; this is the
+        // poll's path and the net under it (K2). Before the route.exe
+        // deletes, which would otherwise run with the machine refused
+        // everything they send to the physical adapter (K1).
+        self.let_go_of_confinement();
         match engine {
             Some(Active::Child { protocol, mut child, mut routes }) => {
                 routes.remove();
@@ -2030,6 +2038,7 @@ impl Engines {
                         routing::purge_pushed_half_defaults(adapter.index);
                     }
                 }
+                self.mark("routes removed");
                 // Already exited, so this is one look; it collects the
                 // process so nothing of it lingers in the kernel.
                 reap(&mut child);
@@ -2041,10 +2050,6 @@ impl Engines {
             }
             Some(Active::WireguardTunnel) | None => {}
         }
-        self.mark("engine stopped");
-        // Usually let go of already, by the watch's report; this is the
-        // poll's path and the net under it (K2).
-        self.let_go_of_confinement();
         self.unblock_ipv6();
         self.mark("dns cleared");
         let dns = dns::clear_registry_only();
@@ -2252,13 +2257,17 @@ impl Engines {
                 // about to disappear would black-hole all traffic until
                 // Windows noticed.
                 routes.remove();
+                self.mark("routes removed");
                 let _ = child.kill();
-                reap(&mut child);
                 self.mark("engine stopped");
-                // The engine is gone and its routes with it: the IPv4
-                // confinement goes now, before the OpenVPN purge below
-                // (PowerShell, seconds) and the DNS sweep (K1).
+                // The engine is killed and its routes are gone: the IPv4
+                // confinement goes now, before the reap (up to REAP_BUDGET),
+                // the OpenVPN purge below (PowerShell, seconds) and the DNS
+                // sweep. With the routes out, everything it still held was
+                // headed for the physical adapter and refused there (K1).
                 self.let_go_of_confinement();
+                reap(&mut child);
+                self.mark("engine reaped");
 
                 // OpenVPN installs the server's pushed routes itself, so
                 // they are not in `routes` above and a killed process
@@ -5092,6 +5101,39 @@ mod helper_tests {
         assert_eq!(fake.closed(), vec![1000], "hard stop: closed exactly once");
         in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "ipv6 released", "dns cleared"]);
         assert!(report.steps.iter().any(|s| s.name == "release the IPv4 confinement" && s.failed.is_none()));
+    }
+
+    /// Not a step later than it must, either. Once the engine is killed the
+    /// confinement protects nothing -- the session is ending -- and held
+    /// through the route.exe deletes and the reap it only takes the
+    /// machine's internet away for as long as they take: routes going one
+    /// at a time send traffic to the physical adapter, where it is
+    /// refused. So: the hard stop lets go the moment it has killed the
+    /// engine, before the routes; the thorough pass, whose routes come out
+    /// before its kill, lets go straight after the kill and before the
+    /// reap (up to five seconds); and a dead engine's teardown lets go
+    /// first, its engine being stopped already.
+    #[test]
+    fn confinement_released_the_moment_the_engine_is_killed_before_routes_and_reap() {
+        let (mut engines, fake, _) = confined_session();
+        let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "hard stop: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "routes removed"]);
+
+        let (mut engines, fake, _) = confined_session();
+        engines.disconnect().expect("disconnect");
+        assert_eq!(fake.closed(), vec![1000], "Disconnect: closed exactly once");
+        in_order(&engines.teardown_steps, &["routes removed", "engine stopped", "confinement released", "engine reaped"]);
+
+        let (mut engines, fake, generation) = confined_session();
+        kill_engine_behind_its_back(&mut engines);
+        let scm = Arc::clone(&engines.wireguard_scm);
+        assert!(wait_for(Duration::from_secs(5), || {
+            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
+        }));
+        assert!(engines.end_dead_session(generation));
+        assert_eq!(fake.closed(), vec![1000], "dead session: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "routes removed"]);
     }
 
     /// IKEv2's Disconnect hangs up with one API call and then removes the

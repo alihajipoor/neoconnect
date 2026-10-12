@@ -73,7 +73,9 @@ pub trait HardStopSteps {
     /// else, because it is the one filter that takes the machine's whole
     /// internet with it: held through the steps below, every Disconnect
     /// and every rung of the ladder would black the machine out for them
-    /// (K1). One handle close.
+    /// (K1). One handle close. `kill_engines` already lets go of it the
+    /// moment it has killed a process engine, before that engine's
+    /// route.exe deletes; this step is the net under every other path.
     fn release_confinement(&mut self) -> Result<(), String> {
         Ok(())
     }
