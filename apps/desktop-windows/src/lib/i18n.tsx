@@ -274,14 +274,15 @@ const en = {
   // Shown when a full tunnel on Stealth or Compatible is up and Neoxify
   // could not stop connections going around it on this computer (the
   // service's `ipv4_confined: false` -- the owner's decision (d)). The
-  // tunnel carries traffic, so it must not read as "not connected"; the
-  // rest of this computer's connections are not held to it, so it must
-  // not read as "protected" either. What is not covered is said plainly:
+  // rest of this computer's connections are not held to the tunnel, so it
+  // must not read as "protected". What is not covered is said plainly:
   // programs that send straight over the network, and connections opened
-  // before Connect. Never shown in Custom mode or on WireGuard (its own
+  // before Connect. Nothing about the tunnel itself carrying traffic: the
+  // line shows in "not confirmed" and "not carrying traffic" too, where
+  // the headline says that part. Never shown in Custom mode or on WireGuard (its own
   // kill switch does this); Built-in has a line of its own below.
   "dash.ipv4NotConfined":
-    "Your traffic is going through the VPN, but Neoxify couldn't stop other connections on this computer from going around it. Programs that send straight over your network, and connections opened before you connected, may still be seen by your network. Disconnect and reconnect to try again; if it keeps happening, tell support.",
+    "Neoxify couldn't stop other connections on this computer from going around the VPN. Programs that send straight over your network, and connections opened before you connected, may still be seen by your network. Disconnect and reconnect to try again; if it keeps happening, tell support.",
   // The same line for Built-in (IKEv2), which is not confined by choice
   // in this version: its plan waits on its own proof, so reconnecting
   // changes nothing, and the way to full protection is another protocol.
@@ -866,6 +867,11 @@ const en = {
   "dash.modeVpn": "VPN",
   "dash.modeGaming": "Gaming",
   "dash.modeVpnHint": "Everything on this computer goes through Neoxify.",
+  // The same mode's line while the tunnel is up and its IPv4 is not
+  // confined to it (`warnsUnconfined`): what the mode is for, and that it
+  // does not hold right now -- beside the warning that says why, rather
+  // than contradicting it.
+  "dash.modeVpnHintNotConfined": "Meant to send everything on this computer through Neoxify; right now some connections may go around it.",
   // The line above is false in Custom mode, and was shown there anyway.
   "dash.modeCustomHint": "Custom mode: only the apps you chose go through Neoxify.",
   "dash.modeCustomExceptHint": "Custom mode: everything goes through Neoxify except the apps you chose.",
@@ -1241,7 +1247,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.tunnelDnsUnforced":
     "ترافیک شما از VPN عبور می‌کند، اما Neoxify نتوانست درخواست‌های DNS این دستگاه را از داخل آن بفرستد. سرویس‌دهنده اینترنت شما همچنان می‌تواند به این درخواست‌ها پاسخ بدهد و روی شبکه فیلترشده این پاسخ‌ها اغلب نادرست هستند — بنابراین ممکن است بعضی سایت‌ها همچنان باز نشوند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، از «ترمیم شبکه» استفاده کنید.",
   "dash.ipv4NotConfined":
-    "ترافیک شما از VPN عبور می‌کند، اما Neoxify نتوانست جلوی اتصال‌های دیگر این کامپیوتر را بگیرد که از کنار VPN عبور می‌کنند. برنامه‌هایی که مستقیماً از طریق شبکه شما ارسال می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است همچنان برای شبکه‌تان قابل مشاهده باشند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
+    "Neoxify نتوانست جلوی اتصال‌های دیگر این کامپیوتر را بگیرد که از کنار VPN عبور می‌کنند. برنامه‌هایی که مستقیماً از طریق شبکه شما ارسال می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است همچنان برای شبکه‌تان قابل مشاهده باشند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
   "dash.ipv4NotConfinedIkev2":
     "پروتکل Built-in از VPN خود این دستگاه استفاده می‌کند و Neoxify هنوز نمی‌تواند جلوی اتصال‌های دیگر این کامپیوتر را بگیرد که از کنار آن عبور می‌کنند. برنامه‌هایی که مستقیماً از طریق شبکه شما ارسال می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است همچنان برای شبکه‌تان قابل مشاهده باشند. برای محافظت کامل، از پروتکل دیگری استفاده کنید.",
   "dash.splitTunnelRestartNeeded":
@@ -1525,6 +1531,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.modeVpn": "وی‌پی‌ان",
   "dash.modeGaming": "بازی",
   "dash.modeVpnHint": "همه‌ی ترافیک این رایانه از نئوکسیفای عبور می‌کند.",
+  "dash.modeVpnHintNotConfined": "قرار است همه‌ی ترافیک این رایانه از نئوکسیفای عبور کند؛ اما اکنون ممکن است برخی اتصال‌ها از کنار آن عبور کنند.",
   "dash.modeCustomHint": "حالت سفارشی: فقط برنامه‌هایی که انتخاب کرده‌اید از نئوکسیفای عبور می‌کنند.",
   "dash.modeCustomExceptHint": "حالت سفارشی: همه‌چیز به‌جز برنامه‌هایی که انتخاب کرده‌اید از نئوکسیفای عبور می‌کند.",
   "dash.modeGamingHint":

@@ -51,6 +51,12 @@ describe("the IPv4 confinement warning", () => {
     expect(dashboard).toContain("t(unconfinedKey)");
   });
 
+  it("keeps the VPN mode's own line from contradicting it", () => {
+    expect(dashboard).toContain(
+      'isTunnelUp(connectionState) && ipv4NotConfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint"',
+    );
+  });
+
   it("takes its words from the tested rule on every status the screen reads", () => {
     const reads = dashboard.match(/setIpv4NotConfined\(warnsUnconfined\(status, Boolean\(status\.splitTunnelActive\)\)\);/g) ?? [];
     expect(reads.length).toBeGreaterThan(0);

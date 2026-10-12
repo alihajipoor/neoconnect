@@ -3639,7 +3639,9 @@ export function Dashboard({
                 ? t("dash.modeGamingHint")
                 : (isTunnelUp(connectionState) ? splitTunnelActive : customConfigured)
                   ? t(customExcept ? "dash.modeCustomExceptHint" : "dash.modeCustomHint")
-                  : t("dash.modeVpnHint")}
+                  : // Beside the warning that some connections go around a
+                    // tunnel not confined, not contradicting it.
+                    t(isTunnelUp(connectionState) && ipv4NotConfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint")}
             </p>
           </div>
 
@@ -3865,11 +3867,13 @@ export function Dashboard({
                       {/* The tunnel is up and this computer's other IPv4
                           connections are not held to it: the service's
                           confinement would not go in, or the engine was
-                          refused by it and it was let go of. Same shape
-                          as the DNS line above -- traffic tunnelled, one
-                          way around it open -- so the same styling. The
-                          headline says "not fully protected" with it;
-                          this says what is not covered -- in Built-in's
+                          refused by it and it was let go of. One way
+                          around the tunnel open, like the DNS line above,
+                          so the same styling -- but it claims nothing
+                          about the tunnel carrying traffic, because it
+                          shows in "not confirmed" and "not carrying" too.
+                          The headline says "not fully protected" with it
+                          when verified; this says what is not covered -- in Built-in's
                           own words on IKEv2, which is not confined by
                           choice (`unconfinedLine`). Never in Custom mode
                           or on WireGuard (`warnsUnconfined`). */}
