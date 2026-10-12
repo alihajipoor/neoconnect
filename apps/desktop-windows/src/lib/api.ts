@@ -1560,6 +1560,18 @@ async function staggeredRace(
             ms: Date.now() - startedAt,
             backend: isBackendAnswer(response),
           };
+          // Arrived after the race was decided: nobody is going to read it.
+          // Every caller has chosen what it reads by now -- the winner, or
+          // the answer of last resort, each from those already in -- and
+          // stopped the rest; this one's request was stopped too, but its
+          // answer was already on its way. Under the HTTP plugin an abort
+          // sent before the answer existed is never heard by its body, so
+          // the plugin handed it back parked, with its connection, and
+          // nothing let go of it: after a Disconnect, five connections to
+          // node mirrors went on sending keep-alives by the physical adapter
+          // through the next tunnel. Still listed as an answer -- its address
+          // did answer -- but let go of here (`discardBody`).
+          if (decided) discardBody(response);
           answers.push(answer);
           // A page from the address the last write went straight to: it is
           // not offered to the next one (`forgetWinner`).

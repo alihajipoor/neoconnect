@@ -21,6 +21,9 @@ type Call = { command: string; args: Record<string, unknown> };
 const calls: Call[] = [];
 let status = 204;
 let chunks: number[][] = [];
+/** When set, `fetch_send` answers only once it settles: an answer still on
+ * its way when the request is aborted. */
+let answerArrives: Promise<void> | null = null;
 
 // Stood in at the bottom of `@tauri-apps/api`, where the real `invoke`
 // hands every call to the webview -- not by mocking a module, because the
@@ -34,6 +37,7 @@ vi.stubGlobal("window", {
         case "plugin:http|fetch":
           return 7;
         case "plugin:http|fetch_send":
+          if (answerArrives) await answerArrives;
           return { status, statusText: "", url: "https://api.example.test/x", headers: [], rid: 42 };
         case "plugin:http|fetch_read_body":
           // The plugin's framing: a chunk ends in 0, the end of the body is [1].
@@ -63,6 +67,7 @@ afterEach(() => {
   calls.length = 0;
   chunks = [];
   status = 204;
+  answerArrives = null;
 });
 
 describe("the HTTP plugin's fetch", () => {
@@ -97,5 +102,39 @@ describe("the HTTP plugin's fetch", () => {
     await res.body?.cancel();
     await settle();
     expect(cancels()).toHaveLength(1);
+  });
+
+  /** The order a VM trace showed after a race was decided: `fetch_cancel`
+   * sent for a request still waiting, then its 200 arriving anyway, 50 ms
+   * later. The plugin's own release listens for the abort on the body's
+   * stream, which does not exist until the answer does, so an abort that
+   * came first was never heard: `fetch` handed back the 200, nobody read
+   * it, and the response -- with its connection, on whatever adapter it
+   * was made -- stayed parked for the life of the app. Five such
+   * connections to node mirrors went on sending keep-alives by the
+   * physical adapter through the next tunnel. */
+  it("releases an answer that arrives after its request was aborted, and rejects as aborted", async () => {
+    for (const answer of [200, 204]) {
+      calls.length = 0;
+      status = answer;
+      let arrive: () => void = () => undefined;
+      answerArrives = new Promise((resolve) => {
+        arrive = resolve;
+      });
+      const controller = new AbortController();
+      const pending = fetch("https://api.example.test/x", { signal: controller.signal });
+      // Sent, and waiting for its answer.
+      await settle();
+      expect(calls.map((c) => c.command)).toContain("plugin:http|fetch_send");
+      controller.abort();
+      arrive();
+      await expect(pending, `a ${answer} that came after the abort was handed back`).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      await settle();
+      expect(cancels(), `a ${answer} that came after the abort was left parked`).toEqual([
+        { command: "plugin:http|fetch_cancel_body", args: { rid: 42 } },
+      ]);
+    }
   });
 });
