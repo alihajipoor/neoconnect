@@ -409,6 +409,14 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
         "permit DHCP".into(),
         vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67)],
     ));
+    // And as a DHCP server: Mobile Hotspot, a Hyper-V or WSL switch. Their
+    // clients ask from 0.0.0.0, which no LAN prefix names, and DHCP never
+    // leaves the link it is on.
+    v4.push((
+        WEIGHT_DHCP,
+        "permit DHCP to this PC's own DHCP server".into(),
+        vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(67), Cond::RemotePort(68)],
+    ));
     if let Lan::Allowed(prefixes) = &plan.lan {
         let mut lan: Vec<Prefix> = Vec::new();
         for prefix in prefixes.iter().copied().chain(lan_plumbing()) {
@@ -1557,7 +1565,9 @@ mod tests {
     }
 
     /// The tunnel is permitted by its interface, and DHCP by its ports,
-    /// in both directions.
+    /// in both directions and in both roles: this PC as a DHCP client, and
+    /// as the DHCP server a Mobile Hotspot or a Hyper-V or WSL switch runs
+    /// -- whose clients ask from 0.0.0.0, which no LAN prefix names.
     #[test]
     fn the_tunnel_and_dhcp_are_permitted_both_ways() {
         let specs = specs(&xray_plan());
@@ -1565,7 +1575,14 @@ mod tests {
             let tunnel: Vec<Vec<Cond>> = at(&specs, layer, WEIGHT_TUNNEL).into_iter().map(|s| s.conds).collect();
             assert_eq!(tunnel, vec![vec![Cond::LocalInterface(LUID)]], "{layer:?}");
             let dhcp: Vec<Vec<Cond>> = at(&specs, layer, WEIGHT_DHCP).into_iter().map(|s| s.conds).collect();
-            assert_eq!(dhcp, vec![vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67)]], "{layer:?}");
+            assert_eq!(
+                dhcp,
+                vec![
+                    vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67)],
+                    vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(67), Cond::RemotePort(68)],
+                ],
+                "{layer:?}"
+            );
         }
     }
 
@@ -2285,6 +2302,15 @@ mod tests {
                         ..out(app(), v4(198, 51, 100, 77), 51_000, protocol::TCP, PHYSICAL)
                     },
                     Verdict::Block,
+                ),
+                (
+                    "a hotspot client asking this PC for an address: DHCP from 0.0.0.0, no LAN prefix",
+                    Flow {
+                        layer: Layer::RecvAcceptV4,
+                        local_port: 67,
+                        ..out(app(), v4(0, 0, 0, 0), 68, protocol::UDP, PHYSICAL)
+                    },
+                    Verdict::Permit,
                 ),
                 (
                     "an inbound connection from the LAN",
