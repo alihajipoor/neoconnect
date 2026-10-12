@@ -691,6 +691,58 @@ impl Hold {
     }
 }
 
+/// The last holder letting go closes it too. Every teardown path releases
+/// it explicitly, at the moment it chooses; this is for the path nobody
+/// wrote -- an early return, a panic -- as `Ipv6Block`'s `Drop` is. And
+/// the process ending closes the session whatever happens here.
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.release(Release::Teardown);
+    }
+}
+
+/// What a connect and a retraction need of the machine to confine a
+/// session: the tunnel adapter's LUID, an install, and an empty hold. The
+/// machine's, except in tests.
+pub trait ConfinementOps: Send + Sync {
+    /// The interface LUID of the adapter Windows shows by this name, read
+    /// now -- a RAS interface can come back with a new one (K2).
+    fn luid(&self, adapter: &str) -> Result<u64, String>;
+    fn install(&self, plan: &Plan) -> Result<Installed, String>;
+    fn hold(&self) -> std::sync::Arc<Hold>;
+}
+
+/// The machine.
+pub struct System {
+    pub log_dir: PathBuf,
+}
+
+impl ConfinementOps for System {
+    fn luid(&self, adapter: &str) -> Result<u64, String> {
+        use windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceIndexToLuid;
+        use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+        let found = crate::adapters::find_by_name(adapter)
+            .map_err(|e| format!("could not list adapters: {e}"))?
+            .ok_or_else(|| format!("the tunnel adapter {adapter} was not found"))?;
+        let mut luid = NET_LUID_LH { Value: 0 };
+        // SAFETY: `luid` is a valid out-parameter for the call.
+        let err = unsafe { ConvertInterfaceIndexToLuid(found.index, &mut luid) };
+        if err != 0 {
+            return Err(format!("could not read the tunnel adapter's LUID (interface {}, {err})", found.index));
+        }
+        // SAFETY: just written by the call above.
+        Ok(unsafe { luid.Value })
+    }
+
+    fn install(&self, plan: &Plan) -> Result<Installed, String> {
+        install(plan, &self.log_dir)
+    }
+
+    fn hold(&self) -> std::sync::Arc<Hold> {
+        Hold::new(&self.log_dir)
+    }
+}
+
 // ---------------------------------------------------------------------
 // Installing a plan: a dynamic WFP session of its own.
 // ---------------------------------------------------------------------

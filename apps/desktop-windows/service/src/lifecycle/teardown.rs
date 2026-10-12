@@ -67,6 +67,17 @@ pub trait HardStopSteps {
     /// with them, so most of "networking back to normal" is this step.
     fn kill_engines(&mut self) -> Result<(), String>;
 
+    /// Let go of the IPv4 confinement, the moment the engine is gone.
+    ///
+    /// A step of its own, straight after the engines and before anything
+    /// else, because it is the one filter that takes the machine's whole
+    /// internet with it: held through the steps below, every Disconnect
+    /// and every rung of the ladder would black the machine out for them
+    /// (K1). One handle close.
+    fn release_confinement(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Drop the WFP and WinDivert handles.
     ///
     /// Both are handle-scoped or in dynamic sessions, so the kernel
@@ -150,7 +161,7 @@ impl HardStopReport {
 /// machine keeps a dead resolver.
 pub fn hard_stop(steps: &mut dyn HardStopSteps) -> HardStopReport {
     let began = Instant::now();
-    let mut outcomes = Vec::with_capacity(4);
+    let mut outcomes = Vec::with_capacity(5);
 
     // Order matters; see the module comment. Engines first, because
     // that is what stops traffic. Written out rather than looped: each
@@ -159,6 +170,12 @@ pub fn hard_stop(steps: &mut dyn HardStopSteps) -> HardStopReport {
     let at = Instant::now();
     let r = steps.kill_engines();
     outcomes.push(StepOutcome { name: "kill engines", took: at.elapsed(), failed: r.err() });
+
+    // The moment the engines are dead, before anything that takes longer:
+    // see `HardStopSteps::release_confinement`.
+    let at = Instant::now();
+    let r = steps.release_confinement();
+    outcomes.push(StepOutcome { name: "release the IPv4 confinement", took: at.elapsed(), failed: r.err() });
 
     let at = Instant::now();
     let r = steps.release_kernel_filters();
@@ -223,6 +240,9 @@ mod tests {
         fn kill_engines(&mut self) -> Result<(), String> {
             self.record("kill")
         }
+        fn release_confinement(&mut self) -> Result<(), String> {
+            self.record("confinement")
+        }
         fn release_kernel_filters(&mut self) -> Result<(), String> {
             self.record("filters")
         }
@@ -242,7 +262,22 @@ mod tests {
         let mut spy = Spy::new();
         let order = Arc::clone(&spy.order);
         hard_stop(&mut spy);
-        assert_eq!(order.lock().unwrap().as_slice(), &["kill", "filters", "dns", "service"]);
+        assert_eq!(order.lock().unwrap().as_slice(), &["kill", "confinement", "filters", "dns", "service"]);
+    }
+
+    /// The IPv4 confinement is let go of the moment the engines are dead:
+    /// before the IPv6 block, before DNS, before the tunnel service. Held
+    /// through any of them, a Disconnect would leave the machine with no
+    /// internet at all for as long as they take (K1).
+    #[test]
+    fn the_confinement_goes_straight_after_the_engines() {
+        let mut spy = Spy::new();
+        let order = Arc::clone(&spy.order);
+        hard_stop(&mut spy);
+        let order = order.lock().unwrap();
+        let at = |step: &str| order.iter().position(|s| *s == step).unwrap_or_else(|| panic!("{step} never ran: {order:?}"));
+        assert_eq!(at("confinement"), at("kill") + 1, "{order:?}");
+        assert!(at("confinement") < at("filters") && at("confinement") < at("dns"), "{order:?}");
     }
 
     /// The rule the old code broke. Its cleanup sat at the end of a
@@ -256,10 +291,10 @@ mod tests {
         let ran = Arc::clone(&spy.ran);
         let report = hard_stop(&mut spy);
 
-        assert_eq!(ran.load(Ordering::SeqCst), 4, "every step must run");
+        assert_eq!(ran.load(Ordering::SeqCst), 5, "every step must run");
         assert!(!report.all_succeeded());
         assert_eq!(report.steps[0].failed.as_deref(), Some("kill went wrong"));
-        assert!(report.steps[2].failed.is_none(), "DNS must still have been cleared");
+        assert!(report.steps[3].failed.is_none(), "DNS must still have been cleared");
     }
 
     /// Every step failing is still every step attempted. There is no
@@ -267,11 +302,11 @@ mod tests {
     #[test]
     fn all_steps_run_even_when_all_of_them_fail() {
         let mut spy = Spy::new();
-        spy.fail = vec!["kill", "filters", "dns", "service"];
+        spy.fail = vec!["kill", "confinement", "filters", "dns", "service"];
         let ran = Arc::clone(&spy.ran);
         let report = hard_stop(&mut spy);
-        assert_eq!(ran.load(Ordering::SeqCst), 4);
-        assert_eq!(report.steps.iter().filter(|s| s.failed.is_some()).count(), 4);
+        assert_eq!(ran.load(Ordering::SeqCst), 5);
+        assert_eq!(report.steps.iter().filter(|s| s.failed.is_some()).count(), 5);
     }
 
     #[test]
@@ -304,7 +339,7 @@ mod tests {
         let ran = Arc::clone(&spy.ran);
         let report = hard_stop(&mut spy);
 
-        assert_eq!(ran.load(Ordering::SeqCst), 4, "the overrun must not cancel later steps");
+        assert_eq!(ran.load(Ordering::SeqCst), 5, "the overrun must not cancel later steps");
         assert!(!report.within_budget());
         assert!(report.all_succeeded(), "slow is not the same as failed");
     }
@@ -324,18 +359,19 @@ mod tests {
         );
     }
 
-    /// Four steps, always, in the report. A caller reading it should not
+    /// Five steps, always, in the report. A caller reading it should not
     /// have to wonder whether something was skipped.
     #[test]
     fn the_report_covers_every_step() {
         let mut spy = Spy::new();
         let report = hard_stop(&mut spy);
-        assert_eq!(report.steps.len(), 4);
+        assert_eq!(report.steps.len(), 5);
         let names: Vec<&str> = report.steps.iter().map(|s| s.name).collect();
         assert_eq!(
             names,
             vec![
                 "kill engines",
+                "release the IPv4 confinement",
                 "release kernel filters",
                 "clear DNS rules",
                 "request tunnel service stop"

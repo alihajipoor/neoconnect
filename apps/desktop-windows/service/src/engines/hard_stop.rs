@@ -83,6 +83,7 @@ impl HardStopSteps for Engines {
                         routing::purge_pushed_half_defaults(adapter.index);
                     }
                 }
+                self.mark("engine stopped");
                 killed
             }
 
@@ -90,6 +91,7 @@ impl HardStopSteps for Engines {
             // process -- see `ras::Connection`.
             Active::Ikev2(live) => {
                 let code = live.hang_up();
+                self.mark("engine stopped");
                 if code == 0 {
                     Ok(())
                 } else {
@@ -102,6 +104,14 @@ impl HardStopSteps for Engines {
             // only the first belongs here.
             Active::WireguardTunnel => Ok(()),
         }
+    }
+
+    /// Let go of the IPv4 confinement, which `kill_engines` parked with
+    /// the session. One handle close; usually already done by the watch
+    /// when it is the engine that went first.
+    fn release_confinement(&mut self) -> Result<(), String> {
+        self.let_go_of_confinement();
+        Ok(())
     }
 
     /// Let go of the kernel's filters.
@@ -125,6 +135,7 @@ impl HardStopSteps for Engines {
     /// 48 to 64 milliseconds for the registry delete against 4.4 to 6.5
     /// seconds merely to start PowerShell.
     fn clear_dns_rules(&mut self) -> Result<(), String> {
+        self.mark("dns cleared");
         let cleared = dns::clear_registry_only();
         self.forget_dns_state();
         match cleared.unverified {

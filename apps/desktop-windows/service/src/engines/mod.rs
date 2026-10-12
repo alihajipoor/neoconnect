@@ -317,10 +317,18 @@ struct Session {
     /// [`REARM_SPACING`].
     armed_at: Instant,
     rearms: u32,
+    /// The IPv4 confinement, shared with this session's engine watch so a
+    /// drop report lets go of it from the watch's own thread (K2), and
+    /// with the plan-error valve. Empty for a session never confined --
+    /// see `confinement::Hold`.
+    confinement: Arc<confinement::Hold>,
+    /// The plan it was installed from, kept to put it back with a fresh
+    /// LUID when a drop report turns out to be wrong.
+    confinement_plan: Option<confinement::Plan>,
 }
 
 impl Session {
-    fn new(engine: Active, profile: &ConnectProfile) -> Self {
+    fn new(engine: Active, profile: &ConnectProfile, confinement: Arc<confinement::Hold>) -> Self {
         Self {
             engine,
             profile: profile.clone(),
@@ -329,6 +337,8 @@ impl Session {
             watch: None,
             armed_at: Instant::now(),
             rearms: 0,
+            confinement,
+            confinement_plan: None,
         }
     }
 }
@@ -423,6 +433,17 @@ pub struct Engines {
     /// module, so the hand-over is a field rather than a reordering; it
     /// is `None` at every other moment.
     ending_filters: Option<SessionFilters>,
+    /// The IPv4 confinement of a session that has just ended, held between
+    /// `end_session` and `let_go_of_confinement` -- which every teardown
+    /// calls the moment its engine has stopped, before DNS and phonebook
+    /// tidying (K1) -- and nowhere else.
+    ending_confinement: Option<Arc<confinement::Hold>>,
+    /// What installing and holding a confinement does: the machine's WFP,
+    /// except in tests.
+    confinement_ops: Arc<dyn confinement::ConfinementOps>,
+    /// The teardown steps as they ran, for the tests that pin their order.
+    #[cfg(test)]
+    teardown_steps: Vec<&'static str>,
     /// What happened to the tunnel's own DNS rule on this session.
     ///
     /// Beside `ipv6_block` and for the same reason: the app puts this in
@@ -495,12 +516,18 @@ pub struct Engines {
 impl Engines {
     pub fn new(exe_dir: PathBuf, config_dir: PathBuf) -> Self {
         let ledger = Arc::new(Ledger::new());
+        let confinement_ops: Arc<dyn confinement::ConfinementOps> =
+            Arc::new(confinement::System { log_dir: config_dir.clone() });
         Self {
             exe_dir,
             config_dir,
             active: Slot::with_ledger(Arc::clone(&ledger)),
             split_tunnel: SplitTunnel::new(),
             ending_filters: None,
+            ending_confinement: None,
+            confinement_ops,
+            #[cfg(test)]
+            teardown_steps: Vec::new(),
             dns_state: dns::TunnelDns::NotRequested,
             dns_pin: dns::PinWatch::default(),
             pin_ops: Arc::new(dns::MachinePin),
@@ -781,6 +808,40 @@ impl Engines {
         self.active.peek().map_or(0, |s| s.generation)
     }
 
+    /// Points this instance at a confinement the test owns. Before the
+    /// session begins: its hold is made then.
+    #[cfg(test)]
+    fn set_confinement_ops_for_test(&mut self, ops: Arc<dyn confinement::ConfinementOps>) {
+        self.confinement_ops = ops;
+    }
+
+    /// Confines the live session the way a connect does, through the ops:
+    /// an Xray plan to one server, the LAN allowed. Returns whether it is
+    /// now held.
+    #[cfg(test)]
+    fn confine_for_test(&mut self) -> bool {
+        let ops = Arc::clone(&self.confinement_ops);
+        let Some(session) = self.active.peek_mut() else { return false };
+        let luid = ops.luid(adapter_name_for(&session.profile)).expect("a LUID");
+        let plan = confinement::Plan {
+            tunnel_luid: luid,
+            transport: confinement::Transport::Xray {
+                exe: PathBuf::from(r"C:\Program Files\Neoxify\xray.exe"),
+                nodes: vec![Ipv4Addr::new(203, 0, 113, 7)],
+            },
+            lan: confinement::Lan::Allowed(Vec::new()),
+        };
+        let installed = ops.install(&plan).expect("installed");
+        session.confinement_plan = Some(plan);
+        session.confinement.put(installed)
+    }
+
+    /// Records a teardown step, for the tests that pin their order.
+    fn mark(&mut self, _step: &'static str) {
+        #[cfg(test)]
+        self.teardown_steps.push(_step);
+    }
+
     /// Points this instance at a routing table the test owns.
     #[cfg(test)]
     fn set_route_ops_for_test(&mut self, ops: Arc<dyn route_table::RouteOps>) {
@@ -801,8 +862,9 @@ impl Engines {
     ) -> u64 {
         let generation = self
             .active
-            .fill(Session::new(Active::Child { protocol, child, routes: InstalledRoutes::none() }, &test_profile()));
-        let guard = engine_watch::watch(generation, protocol, first_watch, self.report_to()).expect("starting a watch");
+            .fill(Session::new(Active::Child { protocol, child, routes: InstalledRoutes::none() }, &test_profile(), self.confinement_ops.hold()));
+        let hold = self.active.peek().map(|s| Arc::clone(&s.confinement)).expect("just filled");
+        let guard = engine_watch::watch(generation, protocol, first_watch, self.report_to(hold)).expect("starting a watch");
         if let Some(session) = self.active.peek_mut() {
             session.watch = Some(guard);
         }
@@ -1434,10 +1496,11 @@ impl Engines {
     fn begin_session(&mut self, engine: Active, profile: &ConnectProfile) {
         let label = engine.protocol();
         let liveness = engine.liveness(&self.wireguard_scm);
-        let generation = self.active.fill(Session::new(engine, profile));
+        let hold = self.confinement_ops.hold();
+        let generation = self.active.fill(Session::new(engine, profile, Arc::clone(&hold)));
 
         let started = liveness.and_then(|liveness| {
-            engine_watch::watch(generation, label, liveness, self.report_to())
+            engine_watch::watch(generation, label, liveness, self.report_to(hold))
         });
         match started {
             Ok(guard) => {
@@ -1462,10 +1525,17 @@ impl Engines {
     /// live, because the teardown checks the engine itself before it
     /// acts. An ending from a source that can come back is recorded
     /// unconfirmed, and answers no status until that check confirms it.
-    fn report_to(&self) -> engine_watch::OnGone {
+    fn report_to(&self, confinement: Arc<confinement::Hold>) -> engine_watch::OnGone {
         let ledger = Arc::clone(&self.ledger);
         let sink = self.engine_gone.clone();
         Arc::new(move |gone: engine_watch::Gone| {
+            // First, on any report -- definitive or not, news or not --
+            // and here, on the watch's own thread. The owning thread may
+            // be busy (a diagnostics snapshot, a probe), and phase one is
+            // queued behind it; a dead tunnel's IPv4 block must not wait
+            // for it (K2). If the engine turns out to be alive, phase one
+            // puts it back (`confine_again`).
+            confinement.release(confinement::Release::Dropped);
             let news = if gone.definitive {
                 ledger.record(gone.generation, gone.detail, gone.at, !gone.may_return)
             } else {
@@ -1529,7 +1599,42 @@ impl Engines {
         }
         let retracted = self.ledger.retract(generation);
         self.rearm_watch(retracted);
+        // The report let go of the confinement on the watch's thread; the
+        // engine is alive, so it goes back -- after the watch, so a report
+        // from the new watch can let go of the new one too.
+        self.confine_again();
         false
+    }
+
+    /// Puts back a confinement a drop report let go of, once the engine is
+    /// shown to be running (K2), with the tunnel adapter's LUID read again:
+    /// a RAS interface can come back from a MOBIKE move with a new one, and
+    /// a permit for the old one would block the tunnel it was for.
+    ///
+    /// Nothing for a session never confined, or one whose plan the engine
+    /// tripped over (the valve's word stands). A put-back that fails leaves
+    /// the session unconfined and says why, as at connect.
+    fn confine_again(&mut self) {
+        let ops = Arc::clone(&self.confinement_ops);
+        let Some(session) = self.active.peek() else { return };
+        if !session.confinement.owed_after_drop() {
+            return;
+        }
+        let Some(plan) = session.confinement_plan.clone() else { return };
+        let hold = Arc::clone(&session.confinement);
+        let adapter = adapter_name_for(&session.profile);
+        hold.rearm();
+        let installed =
+            ops.luid(adapter).and_then(|tunnel_luid| ops.install(&confinement::Plan { tunnel_luid, ..plan }));
+        let detail = match installed {
+            Ok(installed) if hold.put(installed) => "put back, with the tunnel adapter's LUID read again".to_string(),
+            Ok(_) => "let go of again at once: another report came in while it went back".to_string(),
+            Err(why) => {
+                hold.refuse(format!("could not be put back after the engine was reported gone: {why}"));
+                format!("not put back: {why}")
+            }
+        };
+        crate::cleanup_log::note("the IPv4 confinement after a drop report the engine contradicted", &detail);
     }
 
     /// Starts the live session's watch again, after a report its engine
@@ -1540,7 +1645,10 @@ impl Engines {
     /// reporting endings the engine keeps contradicting costs one look a
     /// second rather than a loop through this thread.
     fn rearm_watch(&mut self, retracted: bool) {
-        let report = self.report_to();
+        let Some(hold) = self.active.peek().map(|s| Arc::clone(&s.confinement)) else {
+            return;
+        };
+        let report = self.report_to(hold);
         let scm = Arc::clone(&self.wireguard_scm);
         let Some(session) = self.active.peek_mut() else {
             return;
@@ -1627,10 +1735,13 @@ impl Engines {
     /// The order is the order of harm. Custom mode first (inside
     /// `end_session`), because its redirect is pinned to an adapter that
     /// no longer exists and would otherwise go on swallowing the selected
-    /// applications' traffic. Then the routes, then the WFP filters --
-    /// whose DNS confinement permits port 53 only through the dead
-    /// adapter, so until they go no plain DNS lookup on the machine
-    /// succeeds -- then the NRPT rule, by registry.
+    /// applications' traffic. Then the routes, then the IPv4 confinement --
+    /// which permits nothing but the dead adapter, so until it goes the
+    /// machine has no internet at all; the watch's report has usually let
+    /// go of it already -- then the IPv6 block's WFP filters, whose DNS
+    /// confinement permits port 53 only through the dead adapter, so until
+    /// they go no plain DNS lookup on the machine succeeds, then the NRPT
+    /// rule, by registry.
     fn tear_down_dead_session(&mut self, noticed: Noticed) {
         let Some(generation) = self.active.peek().map(|s| s.generation) else {
             return;
@@ -1668,7 +1779,12 @@ impl Engines {
             }
             Some(Active::WireguardTunnel) | None => {}
         }
+        self.mark("engine stopped");
+        // Usually let go of already, by the watch's report; this is the
+        // poll's path and the net under it (K2).
+        self.let_go_of_confinement();
         self.unblock_ipv6();
+        self.mark("dns cleared");
         let dns = dns::clear_registry_only();
         self.forget_dns_state();
 
@@ -1749,7 +1865,27 @@ impl Engines {
         if let Some(earlier) = self.ending_filters.replace(session.filters) {
             earlier.release();
         }
+        // The IPv4 confinement is parked the same way, for the step every
+        // teardown takes the moment its engine has stopped
+        // (`let_go_of_confinement`).
+        if let Some(earlier) = self.ending_confinement.replace(session.confinement) {
+            earlier.release(confinement::Release::Teardown);
+        }
         Some(session.engine)
+    }
+
+    /// Lets go of the IPv4 confinement of the session just ended. Called
+    /// by every teardown the moment its engine has stopped and its routes
+    /// are gone, before anything slower: DNS, the phonebook entry, the
+    /// OpenVPN adapter's routes by PowerShell, the IPv6 block. Held through
+    /// those, every Disconnect and every rung of the ladder would black the
+    /// machine out for as long as they take (K1). Safe to call when there
+    /// is nothing to let go of.
+    fn let_go_of_confinement(&mut self) {
+        if let Some(hold) = self.ending_confinement.take() {
+            hold.release(confinement::Release::Teardown);
+            self.mark("confinement released");
+        }
     }
 
     /// Releases the filters of the session just ended: the machine-wide
@@ -1764,8 +1900,12 @@ impl Engines {
     /// no boot-time or persistent filter that could survive to strand a
     /// customer's networking.
     fn unblock_ipv6(&mut self) {
+        // Every teardown has let go of the confinement already, straight
+        // after its engine; this is the net under a path that did not.
+        self.let_go_of_confinement();
         if let Some(filters) = self.ending_filters.take() {
             filters.release();
+            self.mark("ipv6 released");
         }
     }
 
@@ -1827,6 +1967,11 @@ impl Engines {
                 // rest of the thorough work rather than on the path a
                 // customer is waiting on.
                 let code = live.hang_up();
+                self.mark("engine stopped");
+                // Before the phonebook entry, whose removal can fall back
+                // to PowerShell for seconds (K1).
+                self.let_go_of_confinement();
+                self.mark("phonebook removed");
                 let removed = ikev2::remove_entry();
                 if code != 0 {
                     crate::cleanup_log::note(
@@ -1847,6 +1992,11 @@ impl Engines {
                 routes.remove();
                 let _ = child.kill();
                 reap(&mut child);
+                self.mark("engine stopped");
+                // The engine is gone and its routes with it: the IPv4
+                // confinement goes now, before the OpenVPN purge below
+                // (PowerShell, seconds) and the DNS sweep (K1).
+                self.let_go_of_confinement();
 
                 // OpenVPN installs the server's pushed routes itself, so
                 // they are not in `routes` above and a killed process
@@ -1861,11 +2011,16 @@ impl Engines {
             }
         };
 
+        // The arms above that had a confinement let go of it straight after
+        // their engine; this covers the ones that had none (WireGuard, an
+        // empty slot) and an arm that returned early.
+        self.let_go_of_confinement();
         // Unconditionally, like the config wipe: an NRPT rule left
         // behind points the whole machine's lookups at a resolver that
         // is no longer reachable, which presents as "no website loads
         // at all" long after the VPN is gone. Cheap, and safe when
         // there is nothing to remove.
+        self.mark("dns cleared");
         dns::clear();
         // After the engine, not before, and unconditionally.
         //
@@ -2997,7 +3152,7 @@ mod helper_tests {
             username: String::new(),
             password: String::new(),
         });
-        Session::new(Active::WireguardTunnel, &profile)
+        Session::new(Active::WireguardTunnel, &profile, confinement::Hold::with_closer(Arc::new(|_| 0)))
     }
 
     #[test]
@@ -4476,6 +4631,231 @@ mod helper_tests {
             .collect();
         for handle in handles {
             handle.join().expect("a session's pin outlived it");
+        }
+    }
+
+    // ---- The IPv4 confinement's lifetime (K1, K2) ----------------------
+    //
+    // A confinement is a block of everything IPv4 outside the tunnel. Held
+    // a moment too long it is a machine with no internet: through DNS and
+    // phonebook tidying it blacks out every Disconnect and every rung of
+    // the ladder (K1); held by a busy owning thread after the engine died
+    // it strands the customer behind a tunnel that is gone (K2). These pin
+    // when it is let go of, with a recording closer in place of WFP.
+
+    /// The machine's confinement, standing in: LUIDs that change on every
+    /// read, installs that are recorded, closes that are counted.
+    struct FakeConfinement {
+        luid_reads: std::sync::Mutex<u64>,
+        installs: std::sync::Mutex<Vec<confinement::Plan>>,
+        next: std::sync::atomic::AtomicIsize,
+        closed: Arc<std::sync::Mutex<Vec<isize>>>,
+    }
+
+    impl FakeConfinement {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                luid_reads: std::sync::Mutex::new(0),
+                installs: std::sync::Mutex::new(Vec::new()),
+                next: std::sync::atomic::AtomicIsize::new(1000),
+                closed: Arc::default(),
+            })
+        }
+        fn closed(&self) -> Vec<isize> {
+            self.closed.lock().unwrap().clone()
+        }
+        fn luids_installed(&self) -> Vec<u64> {
+            self.installs.lock().unwrap().iter().map(|p| p.tunnel_luid).collect()
+        }
+    }
+
+    impl confinement::ConfinementOps for FakeConfinement {
+        fn luid(&self, _adapter: &str) -> Result<u64, String> {
+            let mut reads = self.luid_reads.lock().unwrap();
+            *reads += 1;
+            Ok(*reads * 100)
+        }
+        fn install(&self, plan: &confinement::Plan) -> Result<confinement::Installed, String> {
+            self.installs.lock().unwrap().push(plan.clone());
+            let engine = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(confinement::Installed { engine, filters: confinement::specs(plan).len() })
+        }
+        fn hold(&self) -> Arc<confinement::Hold> {
+            let closed = Arc::clone(&self.closed);
+            confinement::Hold::with_closer(Arc::new(move |engine| {
+                closed.lock().unwrap().push(engine);
+                0
+            }))
+        }
+    }
+
+    /// Engines over a fake confinement, with an Xray session begun and
+    /// confined.
+    fn confined_session() -> (Engines, Arc<FakeConfinement>, u64) {
+        let fake = FakeConfinement::new();
+        let mut engines = engines_for_test();
+        engines.set_confinement_ops_for_test(fake.clone());
+        let generation = engines.begin_test_session("XRAY_VLESS_REALITY", engine_stand_in());
+        assert!(engines.confine_for_test(), "the fake confinement was not held");
+        engines.teardown_steps.clear();
+        (engines, fake, generation)
+    }
+
+    /// The steps, in the order given, each present and each after the one
+    /// before it.
+    fn in_order(steps: &[&'static str], wanted: &[&str]) {
+        let at = |step: &str| {
+            steps.iter().position(|s| *s == step).unwrap_or_else(|| panic!("{step} never happened: {steps:?}"))
+        };
+        for pair in wanted.windows(2) {
+            assert!(at(pair[0]) < at(pair[1]), "{} after {}: {steps:?}", pair[0], pair[1]);
+        }
+    }
+
+    /// Disconnect, a dead engine's teardown and the hard stop each let go
+    /// of the confinement straight after the engine stops -- before DNS,
+    /// and before the IPv6 block, which goes last on purpose.
+    #[test]
+    fn confinement_released_right_after_engine_stop_before_dns_and_phonebook() {
+        // A Disconnect (and a connect clearing the decks): the thorough
+        // pass.
+        let (mut engines, fake, _) = confined_session();
+        engines.disconnect().expect("disconnect");
+        assert_eq!(fake.closed(), vec![1000], "Disconnect: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "dns cleared", "ipv6 released"]);
+
+        // An engine that died, torn down by phase one.
+        let (mut engines, fake, generation) = confined_session();
+        kill_engine_behind_its_back(&mut engines);
+        let scm = Arc::clone(&engines.wireguard_scm);
+        assert!(wait_for(Duration::from_secs(5), || {
+            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
+        }));
+        assert!(engines.end_dead_session(generation));
+        assert_eq!(fake.closed(), vec![1000], "dead session: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "ipv6 released", "dns cleared"]);
+
+        // The hard stop, phase one of a Disconnect.
+        let (mut engines, fake, _) = confined_session();
+        let report = crate::lifecycle::teardown::hard_stop(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "hard stop: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "ipv6 released", "dns cleared"]);
+        assert!(report.steps.iter().any(|s| s.name == "release the IPv4 confinement" && s.failed.is_none()));
+    }
+
+    /// IKEv2's Disconnect hangs up with one API call and then removes the
+    /// phonebook entry, which can take seconds of PowerShell. The
+    /// confinement goes between the two. Read from the source: nothing
+    /// here can dial RAS. (IKEv2 is not confined while `IKEV2_CONFINED` is
+    /// off; this holds the order for when it is.)
+    #[test]
+    fn ikev2_lets_go_of_the_confinement_between_hanging_up_and_the_phonebook() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    pub fn disconnect(&mut self) -> Result<(), String> {").expect("disconnect");
+        let body = &source[start..];
+        let arm = &body[body.find("Some(Active::Ikev2(live)) => {").expect("the IKEv2 arm")..];
+        let hang_up = arm.find("live.hang_up()").expect("hang up");
+        let release = arm.find("self.let_go_of_confinement()").expect("the confinement let go of in the IKEv2 arm");
+        let phonebook = arm.find("ikev2::remove_entry()").expect("phonebook");
+        assert!(hang_up < release && release < phonebook);
+    }
+
+    /// The engine dies while the owning thread is busy: the watch's own
+    /// thread lets go of the confinement, without waiting for phase one
+    /// to be run (K2). Also for a report that is not definitive -- a wait
+    /// that failed -- because the engine may be gone all the same.
+    #[test]
+    fn any_drop_report_lets_go_of_the_confinement_from_the_watch_thread() {
+        let (mut engines, fake, _) = confined_session();
+        kill_engine_behind_its_back(&mut engines);
+        assert!(
+            wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]),
+            "a dead engine's confinement waited for the owning thread"
+        );
+        assert_eq!(engines.active.peek().map(|s| s.confinement.confined()), Some(Some(false)));
+        end_test_session(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "and not closed a second time");
+
+        let fake = FakeConfinement::new();
+        let mut engines = engines_for_test();
+        engines.set_confinement_ops_for_test(fake.clone());
+        engines.begin_test_session_watched_by("OPENVPN", engine_stand_in(), Box::new(WaitFails));
+        // The failed wait may already have reported; a confinement put in
+        // after it is let go of at once.
+        engines.confine_for_test();
+        assert!(
+            wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]),
+            "a failed wait kept the confinement"
+        );
+        end_test_session(&mut engines);
+    }
+
+    /// A drop report the engine contradicts -- a wait that failed, a RAS
+    /// connection MOBIKE moved -- lets go of the confinement at once, and
+    /// phase one, finding the engine alive, puts it back with the tunnel's
+    /// LUID read again: an IKEv2 interface can come back with a new one.
+    #[test]
+    fn any_drop_report_releases_and_retraction_reinstalls_with_fresh_luid() {
+        use windows_sys::Win32::System::Threading::SetEvent;
+        let fake = FakeConfinement::new();
+        let mut engines = engines_for_test();
+        engines.set_confinement_ops_for_test(fake.clone());
+        let go = engine_watch::new_event().unwrap();
+        let g = engines.begin_test_session_watched_by("XRAY_VLESS_REALITY", engine_stand_in(), Box::new(GoneWhen(go.duplicate().unwrap())));
+        assert!(engines.confine_for_test());
+        assert_eq!(fake.luids_installed(), vec![100]);
+
+        // SAFETY: a live event handle.
+        unsafe { SetEvent(go.raw()) };
+        assert!(wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]), "the report did not let go of it");
+
+        assert!(!engines.end_dead_session(g), "a running engine was torn down");
+        assert_eq!(fake.luids_installed(), vec![100, 200], "put back, with the LUID read again");
+        assert_eq!(engines.active.peek().map(|s| s.confinement.confined()), Some(Some(true)));
+        assert_eq!(fake.closed(), vec![1000], "the new one is held, not closed");
+
+        end_test_session(&mut engines);
+        assert_eq!(fake.closed(), vec![1000, 1001], "the session's end closes the one put back");
+    }
+
+    /// Thirty-two sessions at once, each confined, each engine killed
+    /// behind its back at the moment the owning thread runs the hard stop:
+    /// the watch's thread and the owning thread let go of the same
+    /// confinement concurrently, and each is closed exactly once.
+    #[test]
+    fn thirty_two_confined_sessions_dying_during_a_disconnect_close_once_each() {
+        const AT_ONCE: usize = 32;
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let handles: Vec<_> = (0..AT_ONCE)
+            .map(|i| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let (mut engines, fake, _) = confined_session();
+                    let pid = match engines.active.peek() {
+                        Some(Session { engine: Active::Child { child, .. }, .. }) => child.id(),
+                        _ => panic!("{i}: no engine"),
+                    };
+                    start.wait();
+                    let killer = std::thread::spawn(move || {
+                        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+                        // SAFETY: plain calls; the handle is closed below.
+                        unsafe {
+                            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                            if !h.is_null() {
+                                TerminateProcess(h, 1);
+                                windows_sys::Win32::Foundation::CloseHandle(h);
+                            }
+                        }
+                    });
+                    let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+                    killer.join().unwrap();
+                    std::thread::sleep(Duration::from_millis(100));
+                    assert_eq!(fake.closed(), vec![1000], "{i}: closed {:?}", fake.closed());
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a confinement closed other than once");
         }
     }
 }
