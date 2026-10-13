@@ -120,6 +120,26 @@ pub(super) const TUN_ADDRESS: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
 /// anywhere.
 pub(super) const TUN_DNS: &str = "1.1.1.1";
 
+/// Where the engine's own resolver sends the tunnel's lookups: over TCP,
+/// through the proxy (see [`DNS_OUT_TAG`]). The adapter's resolver first,
+/// and a second, so one that stops answering is not the end of DNS.
+const TUNNEL_RESOLVERS: [&str; 2] = ["tcp://1.1.1.1", "tcp://8.8.8.8"];
+
+/// The DNS outbound every lookup the adapter carries -- port 53, UDP or
+/// TCP -- is routed to.
+///
+/// The lookups ride TCP inside the tunnel on every protocol. Over
+/// Shadowsocks they were UDP to the node, carried in TCP by UoT until
+/// v26.6.27 dropped it (#6286), and plain UDP dies on a network that
+/// blocks it -- common in Iran; Shadowsocks' other UDP has its mux for that
+/// (`Outbound::to_json`). This outbound answers A and AAAA from Xray's own
+/// resolver, which asks [`TUNNEL_RESOLVERS`] over TCP, and passes any other
+/// query on as it is, rewritten to TCP, to the server it was sent to. Both
+/// leave through the proxy: the resolver's connections because no rule
+/// matches them (they carry its tag, not `tun-in`) and so they go to the
+/// first outbound, and the passed-on queries by `proxySettings`.
+const DNS_OUT_TAG: &str = "dns-out";
+
 /// MD5 of [`ADAPTER_NAME`], from which xray.exe derives the adapter's GUID
 /// (`open` in `proxy/tun/tun_windows.go`, since v26.3.23: `md5.Sum` of the
 /// name, read as a `windows.GUID`). A test holds it to the name.
@@ -346,14 +366,27 @@ impl Outbound<'_> {
                         "method": p.method,
                         // Already "serverKey:userKey" -- joined by the
                         // caller, since only it holds both halves.
-                        "password": p.password,
-                        // UDP over TCP. The tunnel carries a TUN
-                        // adapter's traffic, which includes DNS and
-                        // games; without this their UDP is silently
-                        // dropped and the customer sees a connection
-                        // that works for web pages and nothing else.
-                        "uot": true
+                        "password": p.password
                     }]
+                },
+                // UDP inside TCP. The tunnel carries a TUN adapter's
+                // traffic, games and calls among it, and plain UDP to the
+                // node dies on a network that blocks UDP -- common in Iran.
+                // This was `"uot": true` until v26.6.27, which dropped
+                // Shadowsocks' UDP-over-TCP (#6286) and reads that key no
+                // more; upstream's answer is XUDP over Xray's mux, which
+                // the nodes accept on this inbound as on any other (it
+                // dispatches through `mux.Server`, v26.3.27 included).
+                // TCP stays unmuxed (`concurrency: -1`), one connection
+                // each as before. UDP/443 is carried too: QUIC rode UoT
+                // before, and where UDP is blocked nothing else would carry
+                // it. The nodes' carve-out for UoT stays, for clients still
+                // on an engine that sends it.
+                "mux": {
+                    "enabled": true,
+                    "concurrency": -1,
+                    "xudpConcurrency": 16,
+                    "xudpProxyUDP443": "allow"
                 }
             }),
         }
@@ -425,13 +458,14 @@ fn exit_tags(index: usize) -> (String, String) {
 ///
 /// xray-core sends a connection to the **first** outbound unless a
 /// routing rule says otherwise. The primary outbound is therefore still
-/// `outbounds[0]` and still tagged `proxy`, and there is deliberately
-/// no rule matching `tun-in`. So everything that was carried before --
-/// the TUN adapter's traffic, DNS, every application with no preference
-/// -- takes exactly the path it took when this function could only
-/// write one outbound. `extra` being empty reproduces the old config
-/// exactly, which is what lets [`build_config_for`] delegate here
-/// rather than the two drifting apart.
+/// `outbounds[0]` and still tagged `proxy`, and the one rule matching
+/// `tun-in` is its lookups' -- port 53 to the DNS outbound, which sends
+/// them through the same proxy over TCP ([`DNS_OUT_TAG`]). So everything
+/// else that was carried before -- the TUN adapter's traffic, every
+/// application with no preference -- takes exactly the path it took when
+/// this function could only write one outbound. `extra` being empty
+/// reproduces the single-exit config exactly, which is what lets
+/// [`build_config_for`] delegate here rather than the two drifting apart.
 ///
 /// An extra exit adds three things that only ever address each other:
 /// an inbound tagged `exit-N-in` listening on loopback, an outbound
@@ -462,7 +496,9 @@ fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], _passive: 
     // `autoSystemRoutingTable` or `autoOutboundsInterface`: the address,
     // the resolver, the routes and the engine's way out are the service's
     // (`configure_address`, `configure_dns`, `install_routes`), in both
-    // modes -- see `build_config_for`.
+    // modes -- see `build_config_for`. The engine's own resolver, further
+    // down, is another thing: it answers only what this adapter carries to
+    // port 53.
     let mut inbounds = vec![json!({
         "tag": "tun-in",
         "protocol": "tun",
@@ -515,20 +551,42 @@ fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], _passive: 
         }));
     }
 
-    let mut config = json!({
+    // The tunnel's lookups, over TCP through the proxy: see `DNS_OUT_TAG`.
+    // Last, so the primary stays first and each exit's outbound and rule
+    // keep their index. The rule names `tun-in`: the resolver's own
+    // connections to port 53 carry its tag instead, and one that matched
+    // here would loop back into this outbound.
+    outbounds.push(json!({
+        "tag": DNS_OUT_TAG,
+        "protocol": "dns",
+        "settings": {
+            // What is passed on goes over TCP, wherever it was sent.
+            "network": "tcp",
+            "rules": [
+                // A and AAAA from the resolver below.
+                { "action": "hijack", "qType": "1,28" },
+                // Anything else -- SRV, TXT, HTTPS -- as it is, rather
+                // than the empty answer this outbound gives by default.
+                { "action": "direct" }
+            ]
+        },
+        "proxySettings": { "tag": "proxy" }
+    }));
+    rules.push(json!({
+        "type": "field",
+        "inboundTag": ["tun-in"],
+        "port": "53",
+        "outboundTag": DNS_OUT_TAG
+    }));
+
+    json!({
         "log": { "loglevel": "warning" },
+        "dns": { "servers": TUNNEL_RESOLVERS },
         "inbounds": inbounds,
-        "outbounds": outbounds
-    });
-    // Absent entirely when there are no extra exits, so the generated
-    // config is byte-identical to the one this engine produced before
-    // concurrent exits existed. An empty `routing.rules` would be
-    // harmless and would still be a difference nobody could rule out
-    // when reading a config off a customer's machine.
-    if !rules.is_empty() {
-        config["routing"] = json!({ "domainStrategy": "AsIs", "rules": rules });
-    }
-    config.to_string()
+        "outbounds": outbounds,
+        "routing": { "domainStrategy": "AsIs", "rules": rules }
+    })
+    .to_string()
 }
 
 
@@ -589,6 +647,25 @@ fn configure_address(tun_ip: Ipv4Addr, limits: &crate::lifecycle::budget::Limits
     Ok(())
 }
 
+/// What `configure_dns` asks netsh: [`TUN_DNS`] as the adapter's resolver,
+/// and `validate=no`.
+///
+/// netsh validates a resolver it sets unless told not to ("The value is
+/// yes by default", `netsh interface ipv4 set dnsservers /?`): it looks
+/// something up through it and waits for the answer. Nothing here uses
+/// that answer, and in Custom mode it could not come -- the adapter carries
+/// no route, so the lookup leaves by the physical adapter, where the DNS
+/// hold refuses it. Against a resolver that cannot answer, netsh took 11.2 s
+/// on the VM with validation and 98 ms without, exit 0 both ways. That is
+/// the likeliest cause of Custom-mode Stealth's 15.2 s connect (run c-01,
+/// against 4.9 s before the hold, g2-01): a ~9 s stall after the adapter
+/// took its address, every lookup on the PC held meanwhile. Before the
+/// hold the same lookup went out in clear text; a full tunnel's went
+/// through the tunnel, a round trip for nothing.
+fn dns_server_args(name_arg: &str) -> [&str; 9] {
+    ["interface", "ipv4", "set", "dnsservers", name_arg, "static", TUN_DNS, "primary", "validate=no"]
+}
+
 /// Gives the TUN adapter its DNS, and a full tunnel the machine-wide rule.
 ///
 /// With the default route captured by the tunnel, the resolvers the
@@ -616,21 +693,9 @@ fn configure_dns(passive: bool, limits: &crate::lifecycle::budget::Limits) -> Re
     // Bounded as the address's netsh is: see `configure_address`.
     let helper = limits.clamp(super::HELPER_BUDGET);
 
-    let status = super::run_hidden_within(
-        &netsh,
-        &[
-            OsStr::new("interface"),
-            OsStr::new("ipv4"),
-            OsStr::new("set"),
-            OsStr::new("dnsservers"),
-            OsStr::new(&name_arg),
-            OsStr::new("static"),
-            OsStr::new(TUN_DNS),
-            OsStr::new("primary"),
-        ],
-        helper,
-    )
-    .map_err(|e| format!("could not set the tunnel's DNS: {e}"))?;
+    let args = dns_server_args(&name_arg).map(OsStr::new);
+    let status = super::run_hidden_within(&netsh, &args, helper)
+        .map_err(|e| format!("could not set the tunnel's DNS: {e}"))?;
     if !status.success() {
         return Err(format!("setting the tunnel's DNS failed ({status})"));
     }
@@ -995,6 +1060,7 @@ pub fn connect_returning_exits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn profile() -> XrayProfile {
         XrayProfile {
@@ -1183,7 +1249,8 @@ mod tests {
 
     /// The whole safety argument for adding inbounds rather than
     /// engines: with no extra exits, the config is not merely
-    /// equivalent to the old one, it is the same bytes.
+    /// equivalent to the single-exit one, it is the same bytes -- and the
+    /// one rule in it is the lookups' (`the_tunnels_lookups_ride_tcp...`).
     #[test]
     fn no_extra_exits_leaves_the_config_exactly_as_it_was() {
         let primary = Outbound::VlessReality(&profile());
@@ -1191,7 +1258,10 @@ mod tests {
             let one = build_config_for(&primary, passive);
             let none = build_multi_exit_config(&primary, &[], passive);
             assert_eq!(one, none, "delegation must not change a byte");
-            assert!(!one.contains("routing"), "no rules means no routing block at all");
+            let parsed: serde_json::Value = serde_json::from_str(&one).unwrap();
+            let rules = parsed["routing"]["rules"].as_array().unwrap();
+            assert_eq!(rules.len(), 1, "no extra exits means no exit rules: {rules:?}");
+            assert_eq!(rules[0]["outboundTag"], DNS_OUT_TAG);
             assert!(!one.contains("socks"), "no extra exits means no extra inbound");
         }
     }
@@ -1302,11 +1372,12 @@ mod tests {
         assert!(!config.contains("0.0.0.0"));
     }
 
-    /// Nothing may route `tun-in` anywhere. Everything with no
-    /// preference -- and all DNS -- has to keep landing on the primary
-    /// outbound, which it does only by there being no rule about it.
+    /// Nothing may route `tun-in` anywhere but its lookups. Everything
+    /// else with no preference has to keep landing on the primary
+    /// outbound, which it does only by there being no rule about it; and
+    /// the lookups reach the same node, over TCP, through the DNS outbound.
     #[test]
-    fn no_rule_ever_matches_the_tun_inbound() {
+    fn no_rule_sends_the_tun_inbound_anywhere_but_its_lookups() {
         let a = profile();
         let parsed: serde_json::Value = serde_json::from_str(&build_multi_exit_config(
             &Outbound::VlessReality(&a),
@@ -1316,7 +1387,10 @@ mod tests {
         .unwrap();
         for rule in parsed["routing"]["rules"].as_array().unwrap() {
             for tag in rule["inboundTag"].as_array().unwrap() {
-                assert_ne!(tag, "tun-in");
+                if tag == "tun-in" {
+                    assert_eq!(rule["port"], "53", "{rule}");
+                    assert_eq!(rule["outboundTag"], DNS_OUT_TAG, "{rule}");
+                }
             }
         }
     }
@@ -1369,6 +1443,183 @@ mod tests {
         let body = body_of("fn wait_for_address(");
         assert!(body.contains("readiness::settle("), "the wait never asks whether the address is Preferred");
         assert!(body.contains("readiness::address_ready(held, expected)"), "the wait asks about some other address");
+    }
+
+    // ---------------------------------------------------------------
+    // Lookups over TCP, and Shadowsocks' UDP inside TCP.
+    // ---------------------------------------------------------------
+
+    fn tls_profile() -> VlessTlsProfile {
+        VlessTlsProfile {
+            uuid: "3f2504e0-4f89-11d3-9a0c-0305e82c3301".into(),
+            flow: String::new(),
+            host: "203.0.113.5".into(),
+            port: 443,
+            server_name: "cdn.example.com".into(),
+            ws_path: Some("/ws".into()),
+        }
+    }
+
+    fn shadowsocks_profile() -> ShadowsocksProfile {
+        ShadowsocksProfile {
+            host: "203.0.113.5".into(),
+            port: 8388,
+            method: "2022-blake3-aes-256-gcm".into(),
+            password: "c2VydmVyS2V5c2VydmVyS2V5c2VydmVyS2V5MTIzNDU=:dXNlcktleXVzZXJLZXl1c2VyS2V5dXNlcktleTEyMzQ=".into(),
+        }
+    }
+
+    /// `profile()` with a public key xray.exe will take: 32 bytes, base64url.
+    fn engine_reality_profile() -> XrayProfile {
+        XrayProfile { reality_public_key: "CzBVep_E6Q4zWH2ix-wRNluApcrvFDleg6jN8hc8YYY".into(), ..profile() }
+    }
+
+    /// Every config this file writes: each Xray protocol in both modes, and
+    /// one with concurrent exits (a Shadowsocks one among them). Every
+    /// credential in them is one xray.exe would accept.
+    fn every_config() -> Vec<(String, serde_json::Value)> {
+        let (reality, tls, trojan, ss) = (engine_reality_profile(), tls_profile(), trojan_profile(), shadowsocks_profile());
+        let mut out = Vec::new();
+        for (name, outbound) in [
+            ("vless-reality", Outbound::VlessReality(&reality)),
+            ("vless-tls-ws", Outbound::VlessTls(&tls)),
+            ("trojan", Outbound::Trojan(&trojan)),
+            ("shadowsocks", Outbound::Shadowsocks(&ss)),
+        ] {
+            for passive in [false, true] {
+                let config = serde_json::from_str(&build_config_for(&outbound, passive)).unwrap();
+                out.push((format!("{name} passive={passive}"), config));
+            }
+        }
+        let multi = build_multi_exit_config(
+            &Outbound::VlessReality(&reality),
+            &[
+                ExitInbound { exit: "finland-1", outbound: Outbound::Shadowsocks(&ss), port: 41080 },
+                ExitInbound { exit: "turkey-1", outbound: Outbound::Trojan(&trojan), port: 41081 },
+            ],
+            true,
+        );
+        out.push(("multi-exit".to_string(), serde_json::from_str(&multi).unwrap()));
+        out
+    }
+
+    /// The bundled v26.6.27 dropped Shadowsocks' UDP-over-TCP (#6286), so a
+    /// lookup over Shadowsocks would have left as plain UDP to the node --
+    /// dead on a network that blocks UDP, which in Iran is common. The
+    /// tunnel's lookups now ride TCP on every protocol: port 53 from the
+    /// adapter goes to Xray's DNS outbound, which answers A and AAAA from
+    /// Xray's own resolver over `tcp://` and passes any other query on as
+    /// it is, over TCP; both through the proxy.
+    #[test]
+    fn the_tunnels_lookups_ride_tcp_through_the_proxy_on_every_protocol() {
+        for (name, config) in every_config() {
+            let rules = config["routing"]["rules"].as_array().unwrap_or_else(|| panic!("{name}: no rules"));
+            let to_dns: Vec<_> = rules.iter().filter(|r| r["outboundTag"] == DNS_OUT_TAG).collect();
+            assert_eq!(to_dns.len(), 1, "{name}: {rules:?}");
+            // The adapter's port 53 only. Without the inbound tag the
+            // resolver's own connections to port 53 would come back here.
+            assert_eq!(to_dns[0]["inboundTag"], json!(["tun-in"]), "{name}");
+            assert_eq!(to_dns[0]["port"], "53", "{name}");
+
+            let outbounds = config["outbounds"].as_array().unwrap();
+            let dns_out = outbounds.iter().find(|o| o["tag"] == DNS_OUT_TAG).unwrap_or_else(|| panic!("{name}: no DNS outbound"));
+            assert_eq!(dns_out["protocol"], "dns", "{name}");
+            assert_eq!(dns_out["settings"]["network"], "tcp", "{name}: a query passed on would keep its UDP");
+            assert_eq!(dns_out["settings"]["rules"], json!([{ "action": "hijack", "qType": "1,28" }, { "action": "direct" }]), "{name}");
+            assert_eq!(dns_out["proxySettings"]["tag"], "proxy", "{name}: a query passed on would leave outside the tunnel");
+
+            let servers = config["dns"]["servers"].as_array().unwrap_or_else(|| panic!("{name}: no resolver"));
+            assert!(servers.contains(&json!(format!("tcp://{TUN_DNS}"))), "{name}: {servers:?}");
+            assert!(servers.len() >= 2, "{name}: one resolver, no fallback");
+            for server in servers {
+                assert!(server.as_str().is_some_and(|s| s.starts_with("tcp://")), "{name}: {server} is not TCP");
+            }
+            // The resolver's connections carry no inbound tag a rule names,
+            // so they go where everything unmatched goes: the first
+            // outbound, the proxy -- and so does what passes through the
+            // DNS outbound.
+            assert_eq!(outbounds[0]["tag"], "proxy", "{name}");
+            for rule in rules {
+                let tags = rule["inboundTag"].as_array().unwrap_or_else(|| panic!("{name}: a rule with no inbound tag: {rule}"));
+                assert!(!tags.is_empty(), "{name}: {rule}");
+            }
+        }
+    }
+
+    /// Shadowsocks' UDP -- games, calls, a lookup an application sends to
+    /// its own resolver -- inside one TCP connection to the node, through
+    /// Xray's mux (XUDP), which the nodes' Shadowsocks inbound accepts like
+    /// any inbound: it dispatches through `mux.Server`. TCP is left unmuxed
+    /// (`concurrency: -1`), as it was. UDP/443 is carried too: QUIC went over
+    /// UoT before #6286, and on a network that blocks UDP nothing else would
+    /// carry it. VLESS and Trojan carry UDP inside their own TCP stream
+    /// already, and Vision refuses a mux, so only Shadowsocks has one.
+    #[test]
+    fn shadowsocks_carries_its_udp_inside_tcp() {
+        let ss = shadowsocks_profile();
+        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::Shadowsocks(&ss), false)).unwrap();
+        let outbound = &parsed["outbounds"][0];
+        assert_eq!(
+            outbound["mux"],
+            json!({ "enabled": true, "concurrency": -1, "xudpConcurrency": 16, "xudpProxyUDP443": "allow" })
+        );
+        assert!(
+            outbound["settings"]["servers"][0].get("uot").is_none(),
+            "v26.6.27 reads no `uot` (#6286): a key that looks like it carries UDP and does nothing"
+        );
+        for (name, config) in every_config() {
+            for outbound in config["outbounds"].as_array().unwrap() {
+                let muxed = outbound.get("mux").is_some();
+                assert_eq!(muxed, outbound["protocol"] == "shadowsocks", "{name}: {outbound}");
+            }
+        }
+    }
+
+    /// And the bundled engine reads every one of them. `xray run -test`
+    /// builds the config and exits before starting anything -- the TUN
+    /// inbound makes its adapter in `Start` (`proxy/tun/handler.go`) -- so it
+    /// needs no elevation and touches no adapter. Skipped where the engine
+    /// has not been fetched, except on CI, which fetches it first.
+    #[test]
+    fn the_bundled_engine_accepts_every_config() {
+        let exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src-tauri/resources/xray.exe");
+        if !exe.exists() {
+            assert!(std::env::var_os("CI").is_none(), "CI fetches the engine before the tests: {}", exe.display());
+            eprintln!("skipped: {} has not been fetched", exe.display());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("neoxify-xray-config-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (index, (name, config)) in every_config().into_iter().enumerate() {
+            let path = dir.join(format!("config-{index}.json"));
+            std::fs::write(&path, config.to_string()).unwrap();
+            let out = std::process::Command::new(&exe).arg("run").arg("-test").arg("-c").arg(&path).output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("Configuration OK."),
+                "{name}: xray.exe refused the config ({})\n{stdout}\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// netsh validates a resolver it sets unless told not to: it looks
+    /// something up through it and waits for the answer -- 11.2 s on the VM
+    /// against one that cannot answer. Custom mode's adapter carries no
+    /// route, so that lookup leaves by the physical adapter, where the DNS
+    /// hold refuses it: the likeliest cause of a 15.2 s Custom-mode connect
+    /// (c-01) against 4.9 s before the hold (g2-01). See `dns_server_args`.
+    #[test]
+    fn the_tunnels_resolver_is_set_without_netsh_trying_it() {
+        let args = dns_server_args("name=neoconnect0");
+        assert_eq!(args.last(), Some(&"validate=no"), "{args:?}");
+        let expected: [&str; 8] = ["interface", "ipv4", "set", "dnsservers", "name=neoconnect0", "static", TUN_DNS, "primary"];
+        assert_eq!(&args[..8], &expected[..]);
+        let body = body_of("fn configure_dns(");
+        assert!(body.contains("dns_server_args(&name_arg)"), "configure_dns sets the resolver some other way");
+        assert!(!body.contains("OsStr::new(\"dnsservers\")"), "configure_dns sets the resolver some other way");
     }
 
     /// Custom mode's DNS rule is not installed with the adapter: only a
