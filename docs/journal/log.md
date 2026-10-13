@@ -7391,3 +7391,70 @@ shows nothing; that the DNS hold closes G2's frames and how long lookups
 fail meanwhile; whether Windows' DNS client still sends to 1.1.1.1 for a
 moment after the rule is removed. After a roam the IPv4 baseline is the
 old network's, as before. Beyond the VM: real Wi-Fi, IPv6, censored lines.
+
+## 2026-10-12 — desktop capture: lookups over TCP, Shadowsocks' UDP in XUDP, the 15 s Custom-mode connect (same branch, pushed for CI, not merged)
+
+**1. Shadowsocks' UDP after xray v26.6.27.** v26.6.27 dropped Shadowsocks'
+UDP-over-TCP (#6286), and `"uot": true` was ignored without a word: every
+Shadowsocks UDP flow, DNS included, went to the node as plain UDP, which
+dies where UDP is blocked. Upstream's answer in the PR thread is XUDP over
+Xray's mux. The Shadowsocks outbound now carries
+`mux: {enabled, concurrency: -1, xudpConcurrency: 16, xudpProxyUDP443: allow}`:
+UDP rides one TCP connection, TCP stays one connection each as before, and
+QUIC is carried as UoT carried it. The nodes' 26.3.27 Shadowsocks 2022
+multi-user inbound dispatches through the inbound handler's `mux.Server`
+(source read at the tag), so it takes `v1.mux.cool` like any inbound. The
+inner UDP destinations are routed on the node, unlike UoT's. The nodes'
+UoT carve-out stays for mobile (26.3.27, still `uot`).
+
+And the tunnel's lookups ride TCP on every Xray protocol. Port 53 from
+`tun-in` is routed to a `dns` outbound. A and AAAA are answered by Xray's
+own resolver (`tcp://1.1.1.1`, then `tcp://8.8.8.8`), whose connections
+carry its own tag. No rule matches that tag, so they go to the first
+outbound, the proxy. Any other query type is passed on as it is, rewritten
+to TCP, to the server it was sent to, through the proxy (`proxySettings`).
+The default would have answered SRV/TXT/HTTPS with an empty NOERROR.
+
+**2. Custom-mode Stealth: 15.2 s to connect against 4.9 s (c-01 vs g2-01).**
+Not `wait_for_address`. In c-01 the adapter held 198.18.0.1 about 1 s after
+xray started, and the split tunnel's first probe came about 9 s later. In
+between, WFP dropped the DNS client's lookups to 1.1.1.1 on the DNS hold's
+filters at +0.0, +0.8, +2.3 and +5.4 s. The likely cause, not seen
+directly: `netsh ... set dnsservers` validating the resolver it had just
+set ("yes by default"). The hold refuses the lookup, and netsh waits out
+the retries. Before the hold, the
+same lookup went out in clear text. In the VM, elevated, with a resolver
+that cannot answer, netsh took 11.2 s with validation and 98 ms with
+`validate=no`. Both returned exit 0. The guest's DNS was put back to DHCP
+afterwards. `configure_dns` now passes `validate=no`.
+
+**3. Idle screen vs Connect after an automatic switch.** The ladder replaces
+the screen's credential with the one it settles on. Once the tunnel was
+down, the PROTOCOL tile still named that credential, and the location
+picker marked its route as current. Connect, though, dials the pin first.
+Both now follow the SERVER tile's rule (`displayedRouteId`): the pin while
+nothing is up, the tunnel's route once one is (`displayedProtocol`).
+
+**Proven:**
+- On this PC: desktop `pnpm test` 1569 (93 files) and `tsc`. The JS tests
+  were seen failing first.
+- In the VM, with its installed xray 26.6.27, against hand-written copies of
+  what the service now writes:
+  - `run -test` accepts all four protocols and a multi-exit config.
+  - Loopback end to end: a client with the Shadowsocks outbound and the TUN
+    inbound swapped for loopback listeners, against a Shadowsocks 2022
+    server that listens on TCP only. Run with a 26.6.27 server and with a
+    26.1.23 one.
+  - Through that setup, A, AAAA, TXT, SRV, HTTPS, NXDOMAIN and a TCP lookup
+    all answered via `dns-out`, over TCP through Shadowsocks.
+  - Two ordinary UDP flows shared one `v1.mux.cool` connection.
+
+**CI only:** the Rust. One new test runs the fetched xray.exe `run -test`
+on every config the service writes.
+
+**Unverified:**
+- A real connect on the new config: all four Xray protocols through the
+  real TUN, Custom mode's connect time with the hold, and lookups with UDP
+  blocked.
+- Against a 26.3.27 node, only the source has been read.
+- XUDP's cost on a lossy line.
