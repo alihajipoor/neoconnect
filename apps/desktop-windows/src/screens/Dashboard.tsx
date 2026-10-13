@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronRight, Clock, Gamepad2, Globe, MapPin, Settings as SettingsIcon, Shield, Sparkles, Tag } from "lucide-react";
-import { displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
+import { displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
@@ -3757,6 +3757,13 @@ export function Dashboard({
     () => displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId),
     [routes, protocolUser, chosenRouteId, connectionState],
   );
+  /** The same route, by id, for the location picker's "current" row, and
+   * its protocol for the PROTOCOL tile. Both used to read the credential
+   * the screen holds, which after an automatic switch is the one the
+   * session ended on: the idle screen then named a protocol, and marked a
+   * row, that Connect does not dial first. See `displayedProtocol`. */
+  const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
+  const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes);
   /** Nothing pinned and no settled tunnel yet: the honest name for the
    * next connect's server is "Automatic", not whichever route happens to
    * be provisioned. */
@@ -4309,8 +4316,8 @@ export function Dashboard({
                   value={
                     automaticPending
                       ? t("loc.automaticShort")
-                      : protocolUser
-                        ? customerProtocolLabel(protocolUser.protocol, protocolUser.connection?.transport)
+                      : shownProtocol
+                        ? customerProtocolLabel(shownProtocol.protocol, shownProtocol.transport)
                         : "—"
                   }
                   onClick={() => setShowLocationPicker(true)}
@@ -4470,7 +4477,9 @@ export function Dashboard({
       {showLocationPicker && subscription ? (
         <LocationPicker
           subscriptionId={subscription.id}
-          currentRouteId={protocolUser?.routeId}
+          // What the SERVER tile names: the pin while nothing is up, the
+          // route the tunnel is on once one is (`screenRouteId`).
+          currentRouteId={screenRouteId ?? undefined}
           // Latency cannot be measured from inside the tunnel; see
           // the prop's own note. Anything but "disconnected" means
           // routes are installed, including the verifying and
