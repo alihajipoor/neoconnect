@@ -21,6 +21,7 @@ export type ConnectionErrorKind =
   | "concurrentLimit"
   | "quotaExhausted"
   | "subscriptionInactive"
+  | "noNetwork"
   | "unknown";
 
 export interface ClassifiedError {
@@ -75,6 +76,19 @@ const PATTERNS: { kind: ConnectionErrorKind; messageKey: TranslationKey; match: 
     kind: "subscriptionInactive",
     messageKey: "err.subscriptionInactive",
     match: /suspended|expired|not active|inactive/,
+  },
+  {
+    // The Windows service's own sentence when it found no network
+    // connection with a gateway to dial the server over -- for every
+    // engine, before any dials (`NO_NETWORK` and
+    // `refuse_without_a_way_out` in the service's engines/mod.rs; Xray's
+    // `plan_uplink` too). Nothing was dialled, so this is never a
+    // failed route: it records no dial (`failedDial`) and names no server
+    // (failover-notice.ts). Above the pattern below so that no wording of
+    // it can ever be read as a server that did not answer.
+    kind: "noNetwork",
+    messageKey: "err.noNetwork",
+    match: /no network connection with a gateway/,
   },
   {
     kind: "serverUnreachable",

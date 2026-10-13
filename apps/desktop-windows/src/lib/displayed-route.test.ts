@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { displayedRoute, displayedRouteId } from "./displayed-route";
+import { displayedProtocol, displayedRoute, displayedRouteId } from "./displayed-route";
 
 const routes = [
   { id: "de-germany", label: "Germany" },
@@ -57,5 +57,68 @@ describe("displayedRoute", () => {
 
   it("is null when no candidate is in the list", () => {
     expect(displayedRoute(routes, "connected", "xx-a", "xx-b", "xx-c")).toBeNull();
+  });
+});
+
+// After an automatic protocol switch the screen held the credential the
+// session ended on, and the PROTOCOL tile went on naming it once the
+// tunnel was down -- while Connect dialled the pin first. Seen on the VM:
+// Shadowsocks pinned, the ladder settled on Stealth, and the idle screen
+// read "Stealth" over a Connect that dialled Shadowsocks.
+describe("displayedProtocol", () => {
+  const shadowsocks = { routeId: "fi-ss", protocol: "SHADOWSOCKS" as const, connection: {} };
+  const stealth = { routeId: "fi-reality", protocol: "XRAY_VLESS_REALITY" as const, connection: {} };
+  const web = { routeId: "fi-ws", protocol: "XRAY_VLESS_TLS" as const, connection: { transport: "WS" } };
+  const held = [shadowsocks, stealth, web];
+  const catalogue = [
+    { id: "fi-ss", protocol: "SHADOWSOCKS" as const },
+    { id: "fi-reality", protocol: "XRAY_VLESS_REALITY" as const },
+    { id: "fi-ws", protocol: "XRAY_VLESS_TLS" as const, transport: "WS" },
+  ];
+
+  it.each(["disconnected", "disconnecting", "connecting", "unknown"] as const)(
+    "names the pin's protocol in %s, because that is what Connect dials first",
+    (state) => {
+      expect(displayedProtocol(state, stealth, "fi-ss", held, catalogue)).toEqual({ protocol: "SHADOWSOCKS" });
+    },
+  );
+
+  it.each(["connected", "verifying", "unverified", "degraded"] as const)(
+    "names the protocol the tunnel is on in %s, not the pin",
+    (state) => {
+      expect(displayedProtocol(state, stealth, "fi-ss", held, catalogue)).toEqual({ protocol: "XRAY_VLESS_REALITY" });
+    },
+  );
+
+  it("keeps the transport, which names Stealth Web apart from Stealth HTTPS", () => {
+    expect(displayedProtocol("disconnected", stealth, "fi-ws", held, catalogue)).toEqual({
+      protocol: "XRAY_VLESS_TLS",
+      transport: "WS",
+    });
+  });
+
+  it("reads a pin the screen holds no credential for from the route list", () => {
+    expect(displayedProtocol("disconnected", stealth, "fi-ws", [stealth], catalogue)).toEqual({
+      protocol: "XRAY_VLESS_TLS",
+      transport: "WS",
+    });
+  });
+
+  it("names what the screen holds when nothing is pinned, or the pin is nowhere", () => {
+    expect(displayedProtocol("disconnected", stealth, null, held, catalogue)).toEqual({ protocol: "XRAY_VLESS_REALITY" });
+    expect(displayedProtocol("disconnected", stealth, "xx-gone", held, catalogue)).toEqual({
+      protocol: "XRAY_VLESS_REALITY",
+    });
+    expect(displayedProtocol("disconnected", null, null, [], [])).toBeNull();
+  });
+
+  // The PROTOCOL tile and the SERVER tile describe one route: whatever
+  // the SERVER tile names, the PROTOCOL tile names that route's protocol.
+  it("agrees with the SERVER tile in every state", () => {
+    for (const state of ["disconnected", "connecting", "verifying", "connected", "degraded"] as const) {
+      const server = displayedRouteId(state, stealth.routeId, "fi-ss", stealth.routeId);
+      const route = catalogue.find((r) => r.id === server);
+      expect(displayedProtocol(state, stealth, "fi-ss", held, catalogue)?.protocol, state).toBe(route?.protocol);
+    }
   });
 });

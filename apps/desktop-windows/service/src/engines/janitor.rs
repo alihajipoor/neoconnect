@@ -21,7 +21,8 @@
 //! remove, and one that refuses to let the service start would cost the
 //! customer the ability to connect at all.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -34,6 +35,7 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::adapters;
 
+use super::route_table::{OwedRoutes, Replayed, RouteOps};
 use super::{openvpn, routing, xray};
 
 /// The engines that are plain child processes of this service, and so
@@ -50,11 +52,79 @@ const ORPHANABLE: [&str; 2] = ["xray.exe", "openvpn.exe"];
 ///
 /// `exe_dir` is this service's own directory, which is where the
 /// engines it starts live -- and the only thing that makes killing by
-/// image name safe.
-pub(super) fn reconcile(exe_dir: &Path) {
+/// image name safe. `owed` is the ledger of host routes this service put
+/// on adapters that are not its own; see [`settle_owed_routes`].
+pub(super) fn reconcile(exe_dir: &Path, owed: &OwedRoutes, ops: &dyn RouteOps) {
     kill_orphaned_engines(exe_dir);
     crate::split_tunnel::firewall::delete_rule();
     purge_adapter_routes();
+    settle_owed_routes(owed, ops);
+}
+
+/// Removes the host routes a previous life left on the physical adapter.
+///
+/// The one leftover [`purge_adapter_routes`] cannot reach, because it is
+/// not on an adapter of ours: the node's host route, which Xray's routing
+/// and OpenVPN's `redirect-gateway` both put on the uplink. Measured on
+/// the VM after Compatible sessions: two of them, still there, sending
+/// every later request to those nodes -- the app's own mirror checks
+/// included -- around the tunnel.
+///
+/// Only what the ledger names, each scoped by the interface and next hop
+/// it was recorded with. Nothing is inferred from the table, because a
+/// host route on the physical adapter may perfectly well be somebody
+/// else's.
+pub(super) fn settle_owed_routes(owed: &OwedRoutes, ops: &dyn RouteOps) -> Replayed {
+    let replayed = owed.replay(ops);
+    if !replayed.removed.is_empty() {
+        // Destinations only: the next hop is the customer's own gateway,
+        // which says where they are and is no part of answering "did
+        // Neoxify leave a route behind".
+        let removed: Vec<String> = replayed.removed.iter().map(|r| format!("{}/{}", r.dest, r.prefix)).collect();
+        crate::cleanup_log::note(
+            "remove host routes an earlier session left on another adapter",
+            &format!("removed {}", removed.join(", ")),
+        );
+    }
+    let still_owed = (!replayed.failed.is_empty()).then(|| format!("still owed: {}", replayed.failed.join("; ")));
+    if let Some(line) = still_owed.as_deref().filter(|line| first_time_said(owed, line)) {
+        crate::cleanup_log::note("remove host routes an earlier session left on another adapter", line);
+    }
+    if still_owed.is_none() {
+        forget_said(owed);
+    }
+    replayed
+}
+
+/// The "still owed" line last written for each ledger.
+///
+/// This runs on every idle status poll -- the app sends one every few
+/// seconds for as long as it is open and disconnected -- so a route that
+/// will not delete wrote the same line to cleanup.log on every one of
+/// them. Said once, and again only when what is owed changes or has been
+/// cleared in between. Per ledger file, so the tests' ledgers, each in a
+/// directory of its own, do not speak over each other.
+static STILL_OWED_SAID: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+
+/// Whether `line` is news for this ledger, remembering it if so.
+fn first_time_said(owed: &OwedRoutes, line: &str) -> bool {
+    let mut said = STILL_OWED_SAID.lock().unwrap_or_else(|e| e.into_inner());
+    match said.iter_mut().find(|(path, _)| path == owed.file()) {
+        Some((_, last)) if last == line => false,
+        Some((_, last)) => {
+            *last = line.to_string();
+            true
+        }
+        None => {
+            said.push((owed.file().to_path_buf(), line.to_string()));
+            true
+        }
+    }
+}
+
+/// Nothing is owed that would not delete: the next failure is news.
+fn forget_said(owed: &OwedRoutes) {
+    STILL_OWED_SAID.lock().unwrap_or_else(|e| e.into_inner()).retain(|(path, _)| path != owed.file());
 }
 
 /// What one sweep for orphaned engines found.
@@ -287,4 +357,93 @@ pub(super) struct Purged {
     /// Adapters that could not be looked up, which is not the same as
     /// adapters that were absent.
     pub unknown: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engines::route_table::fake::{FakeRoutes, Op};
+    use crate::engines::route_table::RouteRow;
+    use std::net::Ipv4Addr;
+
+    fn ledger_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("neoconnect-janitor-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The route a killed service left, and only that one.
+    ///
+    /// Two look-alikes share the table with it: the same node routed
+    /// through another gateway on the same adapter, and through the same
+    /// gateway on another adapter. Either could be somebody else's, so a
+    /// delete matched on the destination alone -- which is what
+    /// `route delete <node>` with no interface does -- would take them
+    /// too. Before this, the janitor never touched a non-ours adapter at
+    /// all, and the owed route stayed until a reboot.
+    #[test]
+    fn reconcile_deletes_each_owed_route_scoped_by_interface_and_next_hop_then_clears() {
+        let node = Ipv4Addr::new(203, 0, 113, 7);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let ours = RouteRow::host(node, 14, gateway, 1);
+        let other_gateway = RouteRow::host(node, 14, Ipv4Addr::new(192, 0, 2, 254), 1);
+        let other_adapter = RouteRow::host(node, 9, gateway, 1);
+        let table = FakeRoutes::with(&[ours, other_gateway, other_adapter]);
+
+        let dir = ledger_dir("reconcile");
+        let owed = OwedRoutes::in_dir(&dir);
+        owed.owe(ours);
+
+        let replayed = settle_owed_routes(&owed, &*table);
+
+        assert_eq!(table.log(), vec![Op::Delete(ours)], "exactly the owed route, by its own key");
+        assert_eq!(table.table(), vec![other_gateway, other_adapter], "the look-alikes are not ours");
+        assert_eq!(replayed.removed, vec![ours]);
+        assert!(owed.read().is_empty(), "a removed route is struck off");
+        assert!(!dir.join("owed-routes.json").exists(), "nothing owed leaves no file behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A route that will not delete is put in cleanup.log once, not on
+    /// every pass. The janitor runs on every idle status poll, for as long
+    /// as the app is open and disconnected, and each wrote the same "still
+    /// owed" line again. Said again when what is owed changes.
+    #[test]
+    fn a_route_that_will_not_delete_is_logged_once_not_on_every_poll() {
+        let route = RouteRow::host(Ipv4Addr::new(203, 0, 113, 77), 14, Ipv4Addr::new(192, 0, 2, 1), 1);
+        let other = RouteRow::host(Ipv4Addr::new(203, 0, 113, 78), 14, Ipv4Addr::new(192, 0, 2, 1), 1);
+        let table = FakeRoutes::with(&[route, other]);
+        table.refuses_deletes();
+        let dir = ledger_dir("still-owed-once");
+        let owed = OwedRoutes::in_dir(&dir);
+        owed.owe(route);
+
+        for _ in 0..3 {
+            settle_owed_routes(&owed, &*table);
+        }
+        assert_eq!(crate::cleanup_log::noted_containing("203.0.113.77/32").len(), 1);
+
+        owed.owe(other);
+        settle_owed_routes(&owed, &*table);
+        settle_owed_routes(&owed, &*table);
+        assert_eq!(crate::cleanup_log::noted_containing("203.0.113.78/32").len(), 1, "a change was not said");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A route that is already gone -- the machine rebooted, which clears
+    /// every route `route.exe` adds -- is struck off rather than owed for
+    /// ever.
+    #[test]
+    fn an_owed_route_that_is_already_gone_is_struck_off() {
+        let route = RouteRow::host(Ipv4Addr::new(203, 0, 113, 8), 14, Ipv4Addr::new(192, 0, 2, 1), 1);
+        let table = FakeRoutes::with(&[]);
+        let dir = ledger_dir("gone");
+        let owed = OwedRoutes::in_dir(&dir);
+        owed.owe(route);
+
+        settle_owed_routes(&owed, &*table);
+        assert!(owed.read().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

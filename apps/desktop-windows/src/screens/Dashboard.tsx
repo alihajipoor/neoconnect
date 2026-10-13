@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronRight, Clock, Gamepad2, Globe, MapPin, Settings as SettingsIcon, Shield, Sparkles, Tag } from "lucide-react";
-import { displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
+import { displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
@@ -20,7 +20,7 @@ import {
   type EgressVerdict,
   type TunnelServer,
 } from "../lib/egress";
-import { literalTunnelServer, nodeAddressesOf, tunnelServerOf } from "../lib/tunnel-server";
+import { knownServerHosts, literalTunnelServer, nodeAddressesOf, tunnelServerOf } from "../lib/tunnel-server";
 import {
   combineEvidence,
   customModePollState,
@@ -37,7 +37,22 @@ import {
   stateFromStatus,
   type HeadlineTone,
   type VpnStatus,
+  unconfinedByChoice,
+  unconfinedLine,
+  warnsUnconfined,
 } from "../lib/connection-evidence";
+import { orbCaution, orbHold, orbTone, type OrbTone } from "../lib/orb-caution";
+import { networkWait, waitForNetwork } from "../lib/network-wait";
+import {
+  NEW_UPLINK_WATCH,
+  UPLINK_POLL_MS,
+  UPLINK_RECHECK_MS,
+  afterUplinkRecheck,
+  nextUplink,
+  withinMs,
+  type RecheckVerdict,
+  type UplinkWatch,
+} from "../lib/uplink-watch";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
@@ -79,6 +94,13 @@ import { useRefreshOnResume } from "../lib/resume";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
+import {
+  failoverNotice,
+  failoverText,
+  rungFate,
+  type FailedRung,
+  type FailoverNotice,
+} from "../lib/failover-notice";
 import { snapshotAge, traceRequests } from "../lib/unanswered-report";
 import {
   deviceSlot,
@@ -92,6 +114,9 @@ import {
 } from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
+import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "../lib/api-endpoints";
+import { setConfinedAround } from "../lib/connected-mirrors";
+import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
 import {
   asReconnectReport,
@@ -127,7 +152,7 @@ import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { RepairNetwork } from "../components/RepairNetwork";
 import { DeviceSlotCard } from "../components/DeviceSlotCard";
-import { useI18n } from "../lib/i18n";
+import { useI18n, type TranslationKey } from "../lib/i18n";
 import { failureText, offlineReason as reasonFor, offlineText, type OfflineReason, type ShownFailure } from "../lib/failure-text";
 import { STILL_TRYING_AFTER_MS, useStillTrying } from "../lib/still-trying";
 import { onBackendAnswer } from "../lib/api";
@@ -176,6 +201,25 @@ function serviceDisconnect(): Promise<void> {
 
 /** The headline's colour for each tone `headlineFor` can ask for. Full
  * class names, so the stylesheet build can see them. */
+/** The status dot beside the account, by the orb's own look (`orbTone`):
+ * the one thing read from across a room, so it says what the orb says and
+ * changes when the orb does -- not on a reading of a moment. */
+const DOT_CLASS: Record<OrbTone, string> = {
+  success: "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]",
+  // Connected, not fully protected, long enough to say so in colour
+  // (`orb-caution.ts`).
+  caution: "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]",
+  // Lit, because an engine really is up -- but not in the success green,
+  // which from across a room is the claim itself.
+  highlight: "size-1.5 shrink-0 rounded-full bg-highlight shadow-[0_0_8px_var(--highlight)]",
+  warning: "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]",
+  // Neither lit nor plainly off: both of the others would answer a question
+  // the app cannot answer.
+  muted: "size-1.5 shrink-0 animate-pulse rounded-full bg-muted-foreground",
+  busy: "size-1.5 shrink-0 rounded-full bg-muted-foreground/50",
+  idle: "size-1.5 shrink-0 rounded-full bg-muted-foreground/50",
+};
+
 const HEADLINE_TONE: Record<HeadlineTone, string> = {
   success: "text-success",
   highlight: "text-highlight",
@@ -533,16 +577,10 @@ export function Dashboard({
    * insufficient: someone who chose Singapore chose it for a reason, and
    * the fact that they are now leaving from France should not have to be
    * inferred from a field elsewhere on the screen. */
-  const [failedOverTo, setFailedOverTo] = useState<{
-    label: string;
-    /** Region we meant to use, only when it differs from where we landed. */
-    fromRegion: string | null;
-    toRegion: string | null;
-    /** Whether `fromRegion` was actually dialled and failed, as opposed
-     * to never being attempted. Picks between two different sentences,
-     * because only one of them is true in each case. */
-    intendedWasTried: boolean;
-  } | null>(null);
+  // And what became of the server on screen -- dialled and failed, never
+  // dialled for want of a network, or never asked -- because each takes a
+  // different sentence and only one of them is true (`failoverNotice`).
+  const [failedOverTo, setFailedOverTo] = useState<FailoverNotice | null>(null);
   /** Guards the ladder against running twice at once. The health poll
    * and the Connect button can both start one, and two of them
    * interleaving would have each tearing down the other's engine.
@@ -619,6 +657,15 @@ export function Dashboard({
   const healthCheckInFlightRef = useRef(false);
   /** A newer run's first check, waiting for the one in flight to end. */
   const healthCheckWantedRef = useRef<(() => Promise<void>) | null>(null);
+  /** The way out this session's tunnel was proven over, as the watch last
+   * saw it (`lib/uplink-watch.ts`). Back to "not looked at" whenever no
+   * tunnel is up, so each session's first look is its own. */
+  const uplinkRef = useRef<UplinkWatch>(NEW_UPLINK_WATCH);
+  /** Single-flight for that watch, its re-verification included. */
+  const uplinkInFlightRef = useRef(false);
+  /** Moved on each change of the way out, so a health poll measuring
+   * across one lands nothing: its reading is about the way out that was. */
+  const uplinkEpochRef = useRef(0);
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
   /** What the plan's device limit has to say, when it is why this device
    * is not connected: refused before dialling, taken over by another
@@ -725,6 +772,40 @@ export function Dashboard({
   appModeRef.current = appMode;
   /** Whether the service says IPv6 is blocked for this session. */
   const [ipv6Blocked, setIpv6Blocked] = useState(false);
+  /** Whether the service says this full tunnel should hold the machine's
+   * IPv4 to it and does not (`warnsUnconfined`): the headline then says
+   * "connected, not fully protected", and a line says what is not covered. */
+  const [ipv4NotConfined, setIpv4NotConfined] = useState(false);
+  /** Which words say what is not covered (`unconfinedLine`): Built-in's
+   * own, where reconnecting changes nothing, or the general one. */
+  const [unconfinedKey, setUnconfinedKey] = useState<TranslationKey>("dash.ipv4NotConfined");
+  /** Whether the orb and the status dot show the warning colour: only for a
+   * confirmed connection that has been "not fully protected" long enough,
+   * unbroken, or is Built-in's, never confined (`orb-caution.ts`). The
+   * owner's rule: a few seconds of not being connected -- a reconnect, a
+   * rung, an engine restarted, a drop's gap -- must not change the colour.
+   * The headline's words follow `ipv4NotConfined` at once, as before. */
+  const [cautionShown, setCautionShown] = useState(() => orbCaution.current());
+  /** The state the orb and the status dot are drawn as: a confirmed
+   * session's, held over a short "degraded" / "unverified" / "unknown"
+   * (`orbHold`). The headline still follows `connectionState`. */
+  const [orbState, setOrbState] = useState<ConnectionState>(() => orbHold.current());
+  const unconfinedChosen = unconfinedByChoice(unconfinedKey);
+  useEffect(() => {
+    const look = () => {
+      setOrbState(orbHold.observe(connectionState));
+      setCautionShown(orbCaution.observe({ state: connectionState, unconfined: ipv4NotConfined, byChoice: unconfinedChosen }));
+    };
+    look();
+    // Looked at every second while up, so a condition that holds is seen to
+    // hold whether or not anything else renders.
+    if (connectionState !== "connected" && connectionState !== "degraded" && connectionState !== "unverified" && connectionState !== "unknown") return;
+    const id = setInterval(look, 1_000);
+    return () => clearInterval(id);
+  }, [connectionState, ipv4NotConfined, unconfinedChosen]);
+  /** A pass waiting on its rung for a network to dial over
+   * (`network-wait.ts`), from whichever screen started it. */
+  const waitingForNetwork = useSyncExternalStore(networkWait.subscribe, networkWait.current);
   /** Whether this machine could reach public IPv6 *before* connecting.
    *
    * The whole point of taking it beforehand: most machines cannot reach
@@ -871,6 +952,61 @@ export function Dashboard({
     return true;
   }
 
+  /** A tunnel whose way out has gone (`lib/uplink-watch.ts`): the link
+   * dropped, or a roam the tunnel did not survive. Its engine may still be
+   * running, but it cannot carry anything, and the screen must not go on
+   * saying "You're protected" over it -- measured on the VM at 20 s after
+   * the link went and 26 s after a roam.
+   *
+   * Said as a drop is said, and handed to the same automatic reconnect: the
+   * existing "Reconnecting..." look, "Waiting for a network connection"
+   * while there is none, the same server first, and "protected" only from
+   * that reconnect's own proof. Its first attempt takes the dead tunnel
+   * down. Where no reconnect will run -- the episode would not start --
+   * the dead tunnel is taken down here, so nothing is left running behind
+   * "VPN connection lost". Not over the device limit's own teardown. */
+  function publishCarrierLost(generation: number): void {
+    if (slotLostRef.current || slotTeardown.owed()) return;
+    if (!publishDrop(generation)) return;
+    const phase = autoReconnect.current().kind;
+    if (phase !== "waiting" && phase !== "attempting") void serviceDisconnect().catch(() => undefined);
+  }
+
+  /** The tunnel measured again, now, after its way out changed: what the
+   * routine health poll would conclude -- the same evidence, from the
+   * status, the egress check or Custom mode's probe -- within
+   * `UPLINK_RECHECK_MS`, or "timedOut". Nothing here is shown or counted;
+   * the watch decides what it means (`afterUplinkRecheck`). */
+  async function recheckAfterUplinkChange(): Promise<RecheckVerdict> {
+    let status: VpnStatus;
+    try {
+      status = await serviceStatus();
+    } catch {
+      return "unknown";
+    }
+    const fromStatus = stateFromStatus(status);
+    if (fromStatus === "disconnected") return "disconnected";
+    let measured: Promise<ConnectionState>;
+    if (status.splitTunnelActive) {
+      // The probe holds the service's owning thread, as the health poll's
+      // does: marked, so a liveness answer it causes is not read as a drop.
+      const probed = statusDisturbances.begin(PROBE_CAP_MS);
+      measured = invoke("vpn_probe_split_tunnel")
+        .then(() => true)
+        .catch(() => false)
+        .finally(probed)
+        .then((carried) => customModePollState(fromStatus, carried));
+    } else {
+      const tunnelServer = ladderPass.tunnelServer.current ?? undefined;
+      measured = verifyEgress(baselineIpRef.current, {
+        totalMs: UPLINK_RECHECK_MS,
+        tunnelServer,
+        baselineFirst: true,
+      }).then((egress) => fullTunnelPollState(fromStatus, egress));
+    }
+    return withinMs(measured, UPLINK_RECHECK_MS, "timedOut" as const);
+  }
+
   /** What, at this moment, rules an automatic reconnect out -- asked at
    * the drop and again before every attempt.
    *
@@ -923,7 +1059,24 @@ export function Dashboard({
     setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
     setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
     setIpv6Blocked(Boolean(status.ipv6Blocked));
-    return stateFromStatus(status);
+    setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
+    setConfinedAround(status.ipv4Confined === true);
+    setUnconfinedKey(unconfinedLine(status));
+    const observed = stateFromStatus(status);
+    followTunnelForEndpoints(observed);
+    return observed;
+  }
+
+  /** Tells the control plane's endpoint order what the service just said
+   * about the tunnel (`tunnelServerFromService` in api-endpoints.ts): the
+   * connected server's own mirrors stay last while it is up and reached
+   * around, and the usual order comes back once it is down. From the
+   * service's answer, never from this screen's state, whose first value
+   * on every mount is its own "disconnected". */
+  function followTunnelForEndpoints(observed: ConnectionState): void {
+    const tunnelUp = isTunnelUp(observed) ? true : observed === "disconnected" ? false : null;
+    const told = tunnelServerFromService(tunnelUp, ladderPass.inFlight(), ladderPass.tunnelServer.current);
+    if (told !== undefined) setEndpointTunnelServer(told);
   }
 
   /** Replaces what the screen believes with what the service says.
@@ -1774,6 +1927,10 @@ export function Dashboard({
       // over a connect that had already begun, and the next press then
       // meant Disconnect.
       const generation = intentRef.current.generation;
+      // And which way out it measures over: one that changes meanwhile is
+      // re-verified by the watch (`uplink-watch.ts`), and this reading,
+      // about the way out that was, must not land over it or count.
+      const uplinkEpoch = uplinkEpochRef.current;
       // And marked, so an answer one of our own Custom-mode changes or
       // probes may have caught can be told apart afterwards. See
       // `status-disturbance`.
@@ -1847,6 +2004,9 @@ export function Dashboard({
       setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
       setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
       setIpv6Blocked(Boolean(status.ipv6Blocked));
+      setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
+      setConfinedAround(status.ipv4Confined === true);
+      setUnconfinedKey(unconfinedLine(status));
       const fromStatus = stateFromStatus(status);
 
       if (fromStatus === "disconnected") {
@@ -1940,6 +2100,9 @@ export function Dashboard({
       // reading taken through a tunnel that has since ended must not
       // count towards the per-ISP tags.
       if (!isCurrent(intentRef.current, generation)) return false;
+      // Or by a change of the way out, which the watch re-verified on its
+      // own: this reading straddles it, and is neither shown nor a strike.
+      if (uplinkEpochRef.current !== uplinkEpoch) return false;
 
       // "It kept working", for the per-ISP tags: a proven check advances
       // the session clock, a failed one restarts it. `unverified` does
@@ -2091,6 +2254,68 @@ export function Dashboard({
     };
 
     const id = setInterval(() => void look(), LIVENESS_POLL_MS);
+    return () => clearInterval(id);
+  }, [connectionState]);
+
+  // Is the way out the tunnel was proven over still there -- asked every
+  // second, of the machine's own tables (`lib/uplink-watch.ts`).
+  //
+  // The liveness poll above cannot tell: the engine of a tunnel whose link
+  // has gone is still running, and the service says what it always says.
+  // The health poll can, but every fifteen seconds and then after its own
+  // walk, and that is how "You're protected" stood 20 s over a dropped link
+  // and 26 s after a roam on the VM. So a change of the way out is noticed
+  // here within a second and the tunnel re-verified at once: what that
+  // proves is shown -- nothing changes on screen for a change it survives --
+  // and a tunnel that cannot carry is handed to the reconnect
+  // (`publishCarrierLost`), never left saying "protected".
+  //
+  // Stays out of the way of what owns the tunnel or the service's
+  // attention, as the liveness poll does; a look it skips is taken on the
+  // next second, the change still there to find.
+  useEffect(() => {
+    if (!isTunnelUp(connectionState)) {
+      uplinkRef.current = NEW_UPLINK_WATCH;
+      return;
+    }
+
+    const look = async () => {
+      if (uplinkInFlightRef.current) return;
+      if (ladderInFlight() || repairUnderWay()) return;
+      if (intentRef.current.intent !== "idle") return;
+      if (statusDisturbances.busy()) return;
+      // Gaming mode has no tunnel of this screen's to re-verify or hand on.
+      if (appModeRef.current === "gaming") return;
+      uplinkInFlightRef.current = true;
+      try {
+        const seen = await invoke<string | null>("network_uplinks").catch(() => null);
+        const [next, step] = nextUplink(uplinkRef.current, seen);
+        uplinkRef.current = next;
+        if (step === "same") return;
+        // Stamped as every writer here is: a press landing meanwhile
+        // makes what follows old news.
+        const generation = intentRef.current.generation;
+        uplinkEpochRef.current += 1;
+        if (step === "lost") {
+          publishCarrierLost(generation);
+          return;
+        }
+        const verdict = await recheckAfterUplinkChange();
+        if (!isCurrent(intentRef.current, generation)) return;
+        const action = afterUplinkRecheck(verdict);
+        if (action === "lost") {
+          publishCarrierLost(generation);
+        } else if (action === "show" && verdict !== "timedOut") {
+          // Proof restores "protected", and an abstention says so; either
+          // way the strike count starts again, as the health poll's does.
+          if (publishObserved(generation, verdict) !== null) strikesRef.current = 0;
+        }
+      } finally {
+        uplinkInFlightRef.current = false;
+      }
+    };
+
+    const id = setInterval(() => void look(), UPLINK_POLL_MS);
     return () => clearInterval(id);
   }, [connectionState]);
 
@@ -2567,6 +2792,19 @@ export function Dashboard({
      * just taken the tunnel the episode was armed for down on purpose,
      * and that is not something to reconnect. */
     let landed = false;
+    // Whether this pass says it is waiting for a network (`network-wait.ts`):
+    // said once the service refuses a rung for want of one, and kept until it
+    // takes a dial again or the pass ends -- not cleared before each retry,
+    // which turned the headline to "Reconnecting..." and back every 30 s.
+    let networkWaitShown = false;
+    const showNetworkWait = (on: boolean) => {
+      if (networkWaitShown === on) return;
+      networkWaitShown = on;
+      // The store is shared: only the pass that owns the ladder speaks for
+      // it, so one superseded mid-wait cannot clear a newer pass's wait.
+      if (ladderGenerationRef.current === generation) networkWait.set(on);
+      options.reconnect?.waitingForNetwork?.(on);
+    };
     try {
       // Every phase this pass shows goes through its own stamp, progress
       // included. A pass the customer has since cancelled, or one a
@@ -2798,8 +3036,9 @@ export function Dashboard({
       // about a route it never dialled.
       const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
 
-      // Whether the route on screen was actually dialled before we
-      // settled somewhere else.
+      // Every rung that failed, with what it did with its route: whether
+      // the route on screen was actually dialled before we settled
+      // somewhere else, or only refused for want of a network.
       //
       // Without this the app tells the customer "Couldn't reach
       // sg-singapore" in the one case it never tried Singapore at all --
@@ -2807,8 +3046,12 @@ export function Dashboard({
       // continent won at index 0. Observed exactly that. Asserting a
       // failure that did not happen is the same dishonesty as the
       // silence it replaced, just louder, and it sends the customer to
-      // support over a server that is fine.
-      let triedShownRoute = false;
+      // support over a server that is fine. Being reached by the ladder
+      // is not being dialled either: with the network adapter off, every
+      // rung failed in the service before anything was sent, and the
+      // screen said "Couldn't reach fi-finland" once the network was back
+      // and another country answered (`failoverNotice`).
+      const failedRungs: FailedRung[] = [];
 
       let lastError: ClassifiedError | null = null;
       // Why each attempt failed, in order. Kept because diagnosing the
@@ -2829,6 +3072,10 @@ export function Dashboard({
       // Every node the account holds a credential on, for the baselines:
       // a reading of one of them is never this machine's own address.
       const nodeAddresses = nodeAddressesOf(dialable);
+      // The same servers as the service reads them: before each rung's
+      // tunnel is built it removes host routes to any of these that an
+      // earlier session left on the physical adapter (`knownServerHosts`).
+      const knownNodes = knownServerHosts(dialable);
       // Whether this pass began with nothing up: pressed on a screen that
       // showed nothing connected, rather than a failover or a reconnect
       // from a tunnel that was there. Its first rung then has no previous
@@ -2836,7 +3083,13 @@ export function Dashboard({
       // (`settleAndCaptureBaseline`).
       const nothingUpAtStart = connectionState === "disconnected" && !options.automatic;
 
-      for (const [index, candidate] of candidates.entries()) {
+      // When this rung was first refused for want of a network, while it
+      // waits for one (`network-wait.ts`). Cleared once the ladder moves on.
+      let noNetworkSince: number | null = null;
+      // Over an index, not an iterator: a rung the service refused for want
+      // of a network is dialled again, on the same server, once there is one.
+      for (let index = 0; index < candidates.length; index += 1) {
+        const candidate = candidates[index];
         if (stopped() || sessionGeneration() !== sessionAtStart) break;
         // A pass whose guard expired and that a newer pass has replaced
         // stops dialling here, rather than tearing that pass's engine
@@ -2852,7 +3105,6 @@ export function Dashboard({
         options.reconnect?.progress();
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
-        if (candidate.routeId === shownRouteId) triedShownRoute = true;
 
         // Patient only for the last candidate. With another protocol
         // sitting untried, waiting out a long budget on this one is
@@ -2929,10 +3181,13 @@ export function Dashboard({
           // poll -- from whichever Dashboard is mounted -- needs to know
           // which endpoints it reaches around it.
           ladderPass.tunnelServer.current = tunnelServer;
+          setEndpointTunnelServer(tunnelServer);
           await invoke("vpn_connect", {
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
+            knownNodes,
           });
+          showNetworkWait(false);
           // The session this pass was started under ended while the
           // engine was coming up. The sign-out's own teardown may have
           // run before this connect finished, in which case this tunnel
@@ -3044,9 +3299,45 @@ export function Dashboard({
               }
             }
           } else {
+            // Whether the service confined this session's IPv4 to the
+            // tunnel, read now rather than left to the first status poll:
+            // the check below takes its endpoints from the order, and while
+            // confined the connected server's own mirror is refused on this
+            // PC (10013) -- a refusal here, which must not be asked, let
+            // alone counted against the network (`setConfinedAround`).
+            const confinedBefore = await serviceStatus()
+              .then((status) => {
+                setConfinedAround(status.ipv4Confined === true);
+                setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
+                setUnconfinedKey(unconfinedLine(status));
+                return status.ipv4Confined;
+              })
+              .catch(() => undefined);
             // Only the last rung can use an answer from an endpoint other
             // than the baseline's; see `VerifyOptions.sameEndpointOnly`.
-            const egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer);
+            let egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer);
+            // And again once the check is over. The service's plan-error
+            // valve trips during it -- the check is what makes the engine
+            // dial -- and lets go of a confinement the engine itself was
+            // refused by. Read only before, the screen said "You're
+            // protected" over it until the next health poll; and the rung
+            // was judged on a check our own filter had failed, so a protocol
+            // it broke was dropped as if the network had blocked it. A
+            // confinement let go of during a failed check earns the rung one
+            // more check, now that it runs as it would have without it
+            // (`egressWorthAnotherLook`).
+            const after = await serviceStatus().catch(() => null);
+            if (after) {
+              setConfinedAround(after.ipv4Confined === true);
+              setIpv4NotConfined(warnsUnconfined(after, Boolean(after.splitTunnelActive)));
+              setUnconfinedKey(unconfinedLine(after));
+            }
+            // Said in the rung's line if it still fails -- not as a line of
+            // its own: `attempts` and `dials` pair by index.
+            const checkedAgain = egressWorthAnotherLook(confinedBefore, after, egress.state);
+            if (checkedAgain) {
+              egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast, tunnelServer);
+            }
             setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
 
             // The reachability check is worth its eight seconds only
@@ -3067,7 +3358,7 @@ export function Dashboard({
                     })
                   ? combineEvidence(await confirmReachable(), egress)
                   : "degraded";
-            reason = egress.state;
+            reason = checkedAgain ? `${egress.state}, checked again after the IPv4 confinement was let go of` : egress.state;
           }
 
           // `unverified` lands the pass rather than rejecting it, and the
@@ -3145,13 +3436,16 @@ export function Dashboard({
               const landed = routes.find((r) => r.id === candidate.routeId);
               const from = intended?.location.region ?? null;
               const to = landed?.location.region ?? null;
-              setFailedOverTo({
-                label,
-                fromRegion: from && to && from !== to ? from : null,
-                toRegion: to,
-                // Only "couldn't reach it" if we actually tried it.
-                intendedWasTried: triedShownRoute,
-              });
+              setFailedOverTo(
+                failoverNotice({
+                  label,
+                  fromRegion: from && to && from !== to ? from : null,
+                  toRegion: to,
+                  // Only "couldn't reach it" if we actually dialled it.
+                  shownRouteId: shownRouteId ?? null,
+                  failed: failedRungs,
+                }),
+              );
             }
             // Remembered only on proof it carried traffic. Recording a
             // merely-started engine would teach the app to lead with a
@@ -3243,6 +3537,8 @@ export function Dashboard({
 
           attempts.push(`${label}: up but ${reason}`);
           dials.push({ routeId: candidate.routeId, carried: false });
+          // Its tunnel came up: dialled, whatever else is true of it.
+          failedRungs.push({ routeId: candidate.routeId, fate: "dialled" });
           lastError = {
             kind: "serverUnreachable",
             messageKey: candidates.length > 1 ? "err.allProtocolsFailed" : "err.notCarryingTraffic",
@@ -3250,11 +3546,73 @@ export function Dashboard({
           };
         } catch (err) {
           const classified = classifyConnectionError(err);
+          if (classified.kind !== "noNetwork") showNetworkWait(false);
+          // No network to dial over: the service refused the rung before
+          // anything was dialled. Not a rung that failed -- moving on to the
+          // next server for it walked the whole list in seconds, and a
+          // reconnect spent its six attempts in a minute and landed in
+          // another country once the network was back (G8, g8-01: fi to
+          // sg). So wait here for a network, on this rung: nothing counted,
+          // nothing recorded against the route, the same server dialled
+          // again when there is one -- and said on screen meanwhile.
+          if (classified.kind === "noNetwork" && !stopped()) {
+            noNetworkSince ??= Date.now();
+            showNetworkWait(true);
+            const waited = await waitForNetwork(
+              {
+                wayOut: () => invoke<boolean>("network_way_out"),
+                stopped: () =>
+                  stopped() || sessionGeneration() !== sessionAtStart || ladderGenerationRef.current !== generation,
+                progress: () => {
+                  ladderPass.progress(generation);
+                  options.reconnect?.progress();
+                },
+                sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+                now: () => Date.now(),
+              },
+              noNetworkSince,
+            );
+            if (waited === "back" || waited === "retry") {
+              // The same rung again, from its settle: the baseline is taken
+              // afresh on the network that is back -- the IPv6 one too,
+              // which a pass begun with no network took on none at all.
+              // Still said on screen until the service takes the dial.
+              ipv6BaselineRef.current = null;
+              // Rungs this pass dialled before the network went may have
+              // failed for that, not for their servers: fi timed out as
+              // Wi-Fi left, sg waited, and the pass went on to sg once the
+              // network was back -- another country, with a notice that fi
+              // did not get through. So it starts again from its first
+              // rung, and says nothing against the ones before -- on screen
+              // or in the pass's report, which pairs `attempts` and `dials`.
+              if (index > 0) {
+                failedRungs.length = 0;
+                attempts.length = 0;
+                dials.length = 0;
+                lastError = null;
+                index = -1;
+              } else {
+                index -= 1;
+              }
+              continue;
+            }
+            showNetworkWait(false);
+            if (waited === "stopped") break;
+            // Gave up after the half hour: said below as no network, and no
+            // other server is dialled for it.
+          }
           attempts.push(`${label}: ${classified.detail}`);
           dials.push(failedDial(candidate.routeId, classified.kind));
+          // A rung the service could not dial for want of a network is not
+          // one that failed to reach its server (`rungFate`). And when it is
+          // the last word, the screen says there is no network rather than
+          // naming anything: `err.noNetwork`.
+          failedRungs.push({ routeId: candidate.routeId, fate: rungFate(classified.kind) });
           lastError = { ...classified, detail: describeAttempts(attempts, candidates.length) };
+          if (classified.kind === "noNetwork") break;
         }
 
+        noNetworkSince = null;
         // Always tear down before moving on, or the next engine inherits
         // this one's routes and fails for a reason that has nothing to
         // do with it.
@@ -3343,6 +3701,8 @@ export function Dashboard({
       // superseded does not get to declare the app idle, because its
       // replacement is still connecting.
       endIntent(intent);
+      // A wait for a network ends with its pass, however it ended.
+      showNetworkWait(false);
       // Only the pass that still owns the guard may release it. One that
       // outlived its deadline has already been replaced, and clearing
       // the guard here would unlock a newer pass that is still running.
@@ -3397,6 +3757,13 @@ export function Dashboard({
     () => displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId),
     [routes, protocolUser, chosenRouteId, connectionState],
   );
+  /** The same route, by id, for the location picker's "current" row, and
+   * its protocol for the PROTOCOL tile. Both used to read the credential
+   * the screen holds, which after an automatic switch is the one the
+   * session ended on: the idle screen then named a protocol, and marked a
+   * row, that Connect does not dial first. See `displayedProtocol`. */
+  const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
+  const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes);
   /** Nothing pinned and no settled tunnel yet: the honest name for the
    * next connect's server is "Automatic", not whichever route happens to
    * be provisioned. */
@@ -3448,7 +3815,7 @@ export function Dashboard({
   // connection lost" is this screen's own word at the drop, or the
   // episode's once it has stopped without a tunnel; "Reconnecting..."
   // while one runs.
-  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting });
+  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined, waitingForNetwork });
 
   if (loading) {
     return (
@@ -3574,31 +3941,14 @@ export function Dashboard({
                 ? t("dash.modeGamingHint")
                 : (isTunnelUp(connectionState) ? splitTunnelActive : customConfigured)
                   ? t(customExcept ? "dash.modeCustomExceptHint" : "dash.modeCustomHint")
-                  : t("dash.modeVpnHint")}
+                  : // Beside the warning that some connections go around a
+                    // tunnel not confined, not contradicting it.
+                    t(isTunnelUp(connectionState) && ipv4NotConfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint")}
             </p>
           </div>
 
           <div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">
-            <span
-              className={
-                connectionState === "connected"
-                  ? "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]"
-                  : connectionState === "unverified"
-                    ? // Lit, because an engine really is up -- but not in
-                      // the success green, which from across a room is
-                      // the claim itself.
-                      "size-1.5 shrink-0 rounded-full bg-highlight shadow-[0_0_8px_var(--highlight)]"
-                    : connectionState === "degraded"
-                    ? "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]"
-                    : connectionState === "unknown"
-                      ? // Neither lit nor plainly off: the dot is the one
-                        // thing read from across a room, and both of the
-                        // other two would answer a question the app
-                        // cannot answer.
-                        "size-1.5 shrink-0 animate-pulse rounded-full bg-muted-foreground"
-                      : "size-1.5 shrink-0 rounded-full bg-muted-foreground/50"
-              }
-            />
+            <span className={DOT_CLASS[orbTone(orbState, cautionShown)]} />
             <span className="truncate">{me?.email}</span>
           </div>
 
@@ -3623,7 +3973,8 @@ export function Dashboard({
                 ) : (
                   <>
                     <ConnectOrb
-                      state={connectionState}
+                      state={orbState}
+                      caution={cautionShown}
                       // The action travels with the press, decided in the
                       // same render as the label above it.
                       onToggle={() => void handleConnectToggle(press.action)}
@@ -3697,32 +4048,29 @@ export function Dashboard({
                           "Connected" -- and a customer who is told which
                           transport got through has something useful to
                           report when none of them do. */}
-                      {isTunnelUp(connectionState) && failedOverTo ? (
-                        <p className="mt-1 text-xs text-amber-400/90">
-                          {failedOverTo.fromRegion ? (
-                            // Crossed a border, so the country is named
-                            // -- and which sentence depends on whether
-                            // that country was ever dialled. "Couldn't
-                            // reach it" is a claim about the server, and
-                            // it must not be made about one we skipped.
-                            t(
-                              failedOverTo.intendedWasTried
-                                ? "dash.switchedServer"
-                                : "dash.usedInstead",
-                              {
-                                from: failedOverTo.fromRegion,
-                                to: failedOverTo.toRegion ?? "",
-                                protocol: failedOverTo.label,
-                              },
-                            )
-                          ) : (
-                            <>
-                              {t("dash.switchedTo")}{" "}
-                              <span className="font-medium">{failedOverTo.label}</span>
-                            </>
-                          )}
-                        </p>
-                      ) : null}
+                      {isTunnelUp(connectionState) && failedOverTo
+                        ? (() => {
+                            // Which sentence depends on whether the server
+                            // on screen was ever dialled. "Couldn't reach
+                            // it" is a claim about the server, and it must
+                            // not be made about one we skipped, nor about
+                            // one there was no network to dial
+                            // (`failoverText`).
+                            const said = failoverText(failedOverTo);
+                            return (
+                              <p className="mt-1 text-xs text-amber-400/90">
+                                {said.trailingLabel ? (
+                                  <>
+                                    {t(said.key, said.vars)}{" "}
+                                    <span className="font-medium">{said.trailingLabel}</span>
+                                  </>
+                                ) : (
+                                  t(said.key, said.vars)
+                                )}
+                              </p>
+                            );
+                          })()
+                        : null}
 
                       {/* Custom mode changes what "protected" covers, so
                           the same word must not stand for both. Read
@@ -3798,6 +4146,23 @@ export function Dashboard({
                           instead. */}
                       {isTunnelUp(connectionState) && tunnelDnsUnprotected ? (
                         <p className="mt-1 text-xs text-destructive">{t("dash.tunnelDnsUnforced")}</p>
+                      ) : null}
+
+                      {/* The tunnel is up and this computer's other IPv4
+                          connections are not held to it: the service's
+                          confinement would not go in, or the engine was
+                          refused by it and it was let go of. One way
+                          around the tunnel open, like the DNS line above,
+                          so the same styling -- but it claims nothing
+                          about the tunnel carrying traffic, because it
+                          shows in "not confirmed" and "not carrying" too.
+                          The headline says "not fully protected" with it
+                          when verified; this says what is not covered -- in Built-in's
+                          own words on IKEv2, which is not confined by
+                          choice (`unconfinedLine`). Never in Custom mode
+                          or on WireGuard (`warnsUnconfined`). */}
+                      {isTunnelUp(connectionState) && ipv4NotConfined ? (
+                        <p className="mt-1 text-xs text-destructive">{t(unconfinedKey)}</p>
                       ) : null}
 
                       {/* Not an error, and deliberately not styled as
@@ -3951,8 +4316,8 @@ export function Dashboard({
                   value={
                     automaticPending
                       ? t("loc.automaticShort")
-                      : protocolUser
-                        ? customerProtocolLabel(protocolUser.protocol, protocolUser.connection?.transport)
+                      : shownProtocol
+                        ? customerProtocolLabel(shownProtocol.protocol, shownProtocol.transport)
                         : "—"
                   }
                   onClick={() => setShowLocationPicker(true)}
@@ -4112,7 +4477,9 @@ export function Dashboard({
       {showLocationPicker && subscription ? (
         <LocationPicker
           subscriptionId={subscription.id}
-          currentRouteId={protocolUser?.routeId}
+          // What the SERVER tile names: the pin while nothing is up, the
+          // route the tunnel is on once one is (`screenRouteId`).
+          currentRouteId={screenRouteId ?? undefined}
           // Latency cannot be measured from inside the tunnel; see
           // the prop's own note. Anything but "disconnected" means
           // routes are installed, including the verifying and

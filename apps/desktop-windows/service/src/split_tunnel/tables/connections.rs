@@ -130,6 +130,10 @@ pub struct ResetOutcome {
     /// stayed there, which is the failure the open item since 2026-08-22
     /// describes; zero on the final pass says convergence did its job.
     pub skipped_handshaking: usize,
+    /// What was closed, one "owner -> remote:port" per row, for the log a
+    /// packet capture is checked against: every RST or FIN seen at the NIC
+    /// after a reset should be to a remote listed here.
+    pub closed_rows: Vec<String>,
 }
 
 /// Returns what was closed and what refused to close, for the log.
@@ -161,85 +165,214 @@ fn reset_with(
     carried: &dyn Fn(Transport, u16, Ipv4Addr, u16) -> bool,
     close: &dyn Fn(&mut [u32; 5]) -> u32,
 ) -> ResetOutcome {
-    let mut outcome = ResetOutcome::default();
-    let Some(words) = query_table(|buf, size| {
-        // SAFETY: `buf` is null (sizing) or a buffer of `*size` bytes.
-        unsafe { GetExtendedTcpTable(buf, size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_ALL, 0) }
-    }) else {
-        return outcome;
-    };
-
     let mut images: HashMap<u32, Option<String>> = HashMap::new();
-
-    for row in rows(&words, Layout::Tcp4) {
-        let (Some(state), pid) = (row.state(), row.pid()) else { continue };
-
-        // Only connections that actually carry traffic. A listener has
-        // no peer to re-route and killing one would stop a program
-        // accepting connections, which is not what was asked for.
-        //
-        // SYN_SENT is let through to the candidacy checks below but never
-        // closed: it is the one non-established state whose remote fields
-        // are real, so a row skipped here is a connection that escapes the
-        // reset and completes outside the tunnel. It is counted rather
-        // than closed -- see ResetOutcome::skipped_handshaking.
-        let handshaking = state == MIB_TCP_STATE_SYN_SENT;
-        if state != MIB_TCP_STATE_ESTAB && !handshaking {
-            continue;
-        }
-
-        // Where the far end is, decided before the more expensive
-        // question of who owns the row.
-        let Some((IpAddr::V4(remote), remote_port)) = row.remote() else { continue };
-
+    let mut selected = |row: &TcpRow4| -> Option<String> {
         // The node is the tunnel itself; everything else excluded here
         // is a destination the kernel filter would never have handed to
         // the redirect loop anyway. Closing them would break a printer,
-        // a NAS or a local service to gain exactly nothing.
-        if remote == node || !is_public_v4(remote) {
-            continue;
+        // a NAS or a local service to gain exactly nothing. Where the far
+        // end is, decided before the more expensive question of who owns
+        // the row.
+        if row.remote == node || !is_public_v4(row.remote) {
+            return None;
         }
 
         // Already in the tunnel, so closing it would undo this
         // function's own work -- see the doc comment. Asked before the
         // owner is resolved, because this is a hash lookup under a
         // mutex and `image_path` opens a process handle.
-        let local_port = row.local_port();
-        if carried(Transport::Tcp, local_port, remote, remote_port) {
-            continue;
+        if carried(Transport::Tcp, row.local_port, row.remote, row.remote_port) {
+            return None;
         }
 
-        let image = images
-            .entry(pid)
-            .or_insert_with(|| image_path(pid))
-            .clone();
-        let Some(image) = image else { continue };
+        let image = images.entry(row.pid).or_insert_with(|| image_path(row.pid)).clone()?;
         // Never Neoxify's own. In AllExcept the app and the service are
         // carried by default, and closing the app's link to its own API
         // on every activation is the 0.9.22 failure arriving by another
         // route.
         if own_images.iter().any(|own| image.eq_ignore_ascii_case(own)) {
-            continue;
+            return None;
         }
-        if !selection.should_tunnel(&image) {
-            continue;
-        }
+        selection.should_tunnel(&image).then_some(image)
+    };
+    reset_rows(&tcp_rows4(), &mut selected, close)
+}
 
-        // Every candidacy test above has passed, so this row would have
-        // been closed had it been established. Count it and move on.
+/// What a full tunnel's reset at connect leaves alone; everything else
+/// established outside the tunnel is closed, so it comes back through it.
+///
+/// # Why a reset, when the confinement already stops these flows
+///
+/// Measured on 0.9.48 (P0-D, journal 2026-10-11): Windows re-examines
+/// flows already open when a WFP filter is added. Under wireguard.exe's
+/// IPv4 block a connected UDP socket opened before Connect stopped at the
+/// NIC for the whole session, and an established TLS connection was
+/// refused once and then reset (10054). So once the confinement is in,
+/// nothing of an old flow leaves -- that is what keeps them from leaking.
+/// But the re-examination happens at a flow's *next* packet: an idle
+/// connection hears nothing until it sends, and a connected UDP socket
+/// never hears anything (its sends go on "succeeding"). The owner asked
+/// for them to come back through the tunnel (decision (c)), and for TCP
+/// that needs telling: `SetTcpEntry(DELETE_TCB)`, from this service, which
+/// runs as SYSTEM. Both, then -- the filter so nothing leaks, the reset so
+/// TCP reconnects at once. UDP cannot be reset by any API, and IPv6 TCP is
+/// not reachable by `SetTcpEntry`; the IPv6 block refuses those.
+#[derive(Debug, Clone, Default)]
+pub struct OutsideTunnel {
+    /// The tunnel adapter's own addresses: a connection from one of them
+    /// is in the tunnel already.
+    pub tunnel_addresses: Vec<Ipv4Addr>,
+    /// The engine's process: every connection it holds is the tunnel's own
+    /// link to its servers.
+    pub engine_pid: Option<u32>,
+    /// What the confinement leaves reachable as the LAN, as (address,
+    /// prefix length): connections there were never meant for the tunnel.
+    pub lan: Vec<(Ipv4Addr, u8)>,
+}
+
+impl OutsideTunnel {
+    /// Whether an established row is outside the tunnel and not one of the
+    /// things a full tunnel leaves alone. Neoxify's own rows are not
+    /// spared: here the app's requests belong in the tunnel.
+    pub fn wants_closed(&self, row: &TcpRow4) -> bool {
+        if row.remote.is_unspecified() || row.remote.is_loopback() || row.local.is_loopback() {
+            return false;
+        }
+        if self.tunnel_addresses.contains(&row.local) {
+            return false;
+        }
+        if self.engine_pid == Some(row.pid) {
+            return false;
+        }
+        let in_lan = self.lan.iter().any(|&(prefix, len)| {
+            let mask = if len == 0 { 0 } else { u32::MAX << (32 - u32::from(len.min(32))) };
+            u32::from(row.remote) & mask == u32::from(prefix) & mask
+        });
+        !in_lan
+    }
+}
+
+/// One pass of the full tunnel's reset, against this machine's table.
+pub fn reset_outside_the_tunnel(rules: &OutsideTunnel) -> ResetOutcome {
+    // SAFETY: `row` is a correctly shaped MIB_TCPROW; the call only reads it.
+    reset_outside_with(&tcp_rows4(), rules, &|row| unsafe { SetTcpEntry(row.as_mut_ptr() as *mut _) })
+}
+
+/// The same over rows already read, with the closer handed in -- so the
+/// classification can be tested without closing anybody's connections.
+fn reset_outside_with(rows: &[TcpRow4], rules: &OutsideTunnel, close: &dyn Fn(&mut [u32; 5]) -> u32) -> ResetOutcome {
+    let mut images: HashMap<u32, Option<String>> = HashMap::new();
+    let mut outside = |row: &TcpRow4| -> Option<String> {
+        if !rules.wants_closed(row) {
+            return None;
+        }
+        // Named by file for the log, resolved only for rows being closed.
+        let image = images.entry(row.pid).or_insert_with(|| image_path(row.pid)).clone();
+        Some(
+            image
+                .and_then(|path| std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| format!("pid {}", row.pid)),
+        )
+    };
+    reset_rows(rows, &mut outside, close)
+}
+
+/// One IPv4 TCP row, decoded, with the words `SetTcpEntry` takes back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TcpRow4 {
+    pub state: u32,
+    pub local: Ipv4Addr,
+    pub local_port: u16,
+    pub remote: Ipv4Addr,
+    pub remote_port: u16,
+    pub pid: u32,
+    /// `MIB_TCPROW`'s five leading fields as they arrived -- the one place
+    /// a row is wanted raw rather than decoded.
+    raw: [u32; 5],
+}
+
+impl TcpRow4 {
+    /// A row as a test writes one: addresses and ports in the usual way,
+    /// the raw words derived from them as the table would hold them.
+    #[cfg(test)]
+    pub fn new(state: u32, local: (Ipv4Addr, u16), remote: (Ipv4Addr, u16), pid: u32) -> Self {
+        let port = |p: u16| u32::from(p.swap_bytes());
+        let raw = [
+            state,
+            u32::from_ne_bytes(local.0.octets()),
+            port(local.1),
+            u32::from_ne_bytes(remote.0.octets()),
+            port(remote.1),
+        ];
+        Self { state, local: local.0, local_port: local.1, remote: remote.0, remote_port: remote.1, pid, raw }
+    }
+}
+
+/// The machine's IPv4 TCP rows. Empty when the table cannot be read.
+fn tcp_rows4() -> Vec<TcpRow4> {
+    let Some(words) = query_table(|buf, size| {
+        // SAFETY: `buf` is null (sizing) or a buffer of `*size` bytes.
+        unsafe { GetExtendedTcpTable(buf, size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_ALL, 0) }
+    }) else {
+        return Vec::new();
+    };
+    rows(&words, Layout::Tcp4)
+        .filter_map(|row| {
+            let state = row.state()?;
+            let (IpAddr::V4(remote), remote_port) = row.remote()? else { return None };
+            let f = row.fields;
+            Some(TcpRow4 {
+                state,
+                local: Ipv4Addr::from(f[1].to_ne_bytes()),
+                local_port: row.local_port(),
+                remote,
+                remote_port,
+                pid: row.pid(),
+                raw: [f[0], f[1], f[2], f[3], f[4]],
+            })
+        })
+        .collect()
+}
+
+/// One reset pass over rows already read.
+///
+/// `candidate` is the decision -- `Some(label)` for a row that should be
+/// closed, the label naming it in the log; `None` to leave it -- and is
+/// asked only of rows in a state that matters. Only connections that
+/// actually carry traffic are closed: a listener has no peer to re-route,
+/// and killing one would stop a program accepting connections.
+///
+/// SYN_SENT is asked about but never closed: it is the one
+/// non-established state whose remote fields are real, so a row skipped
+/// outright is a connection that escapes the reset and completes outside
+/// the tunnel. It is counted rather than closed -- see
+/// [`ResetOutcome::skipped_handshaking`].
+fn reset_rows(
+    rows: &[TcpRow4],
+    candidate: &mut dyn FnMut(&TcpRow4) -> Option<String>,
+    close: &dyn Fn(&mut [u32; 5]) -> u32,
+) -> ResetOutcome {
+    let mut outcome = ResetOutcome::default();
+    for row in rows {
+        let handshaking = row.state == MIB_TCP_STATE_SYN_SENT;
+        if row.state != MIB_TCP_STATE_ESTAB && !handshaking {
+            continue;
+        }
+        let Some(label) = candidate(row) else { continue };
+
+        // Every candidacy test has passed, so this row would have been
+        // closed had it been established. Count it and move on.
         if handshaking {
             outcome.skipped_handshaking += 1;
             continue;
         }
 
-        // MIB_TCPROW is the same five leading fields without the pid,
-        // handed back to Windows exactly as they arrived -- the one
-        // place a row is wanted raw rather than decoded.
-        let f = row.fields;
-        let mut set = [MIB_TCP_STATE_DELETE_TCB, f[1], f[2], f[3], f[4]];
+        let mut set = row.raw;
+        set[0] = MIB_TCP_STATE_DELETE_TCB;
         let ret = close(&mut set);
         if ret == NO_ERROR {
             outcome.closed += 1;
+            outcome.closed_rows.push(format!("{label} -> {}:{}", row.remote, row.remote_port));
         } else {
             // Said out loud rather than swallowed. A connection that
             // will not close is one that goes on carrying the
@@ -249,7 +382,7 @@ fn reset_with(
             // "Windows refused every attempt".
             outcome
                 .failures
-                .push(format!("could not close {image} -> {remote}:{remote_port} (error {ret})"));
+                .push(format!("could not close {label} -> {}:{} (error {ret})", row.remote, row.remote_port));
         }
     }
     outcome
@@ -625,6 +758,82 @@ mod tests {
 
         println!("{} connection(s) would have been closed", attempts.get());
         assert_eq!(outcome.closed, attempts.get());
+    }
+
+    /// A full tunnel's reset at connect, over rows written by hand and a
+    /// closer that only records: what is closed so it comes back through
+    /// the tunnel, and what is left because it is the tunnel, the engine's
+    /// own link, the LAN or the machine itself.
+    ///
+    /// Neoxify's own connections are closed like anybody's -- the inverse
+    /// of Custom mode's rule, because here the app's own requests belong in
+    /// the tunnel and the ones it opened on the bare line before Connect
+    /// (a node mirror's keep-alives, seen at the NIC on the VM) are exactly
+    /// what this is for.
+    #[test]
+    fn full_tunnel_reset_classifier() {
+        const LISTEN: u32 = 2;
+        let home = Ipv4Addr::new(192, 168, 1, 23);
+        let node = Ipv4Addr::new(203, 0, 113, 7);
+        let (app, browser, xray) = (500, 600, 42);
+        let rules = OutsideTunnel {
+            tunnel_addresses: vec![Ipv4Addr::new(198, 18, 0, 1)],
+            engine_pid: Some(xray),
+            lan: vec![
+                (Ipv4Addr::new(192, 168, 1, 0), 24),
+                (Ipv4Addr::new(169, 254, 0, 0), 16),
+                (Ipv4Addr::new(224, 0, 0, 0), 4),
+                (Ipv4Addr::BROADCAST, 32),
+            ],
+        };
+        let row = |state, local: (Ipv4Addr, u16), remote: (Ipv4Addr, u16), pid| TcpRow4::new(state, local, remote, pid);
+        let est = MIB_TCP_STATE_ESTAB;
+        let rows = [
+            // Closed: they would otherwise stay outside the tunnel.
+            row(est, (home, 50000), (Ipv4Addr::new(93, 184, 216, 34), 443), app),
+            row(est, (home, 50001), (node, 2053), app),
+            row(est, (home, 50002), (Ipv4Addr::new(104, 16, 0, 1), 443), browser),
+            row(est, (home, 50003), (Ipv4Addr::new(10, 200, 0, 1), 443), app),
+            // Left: the engine's link, the LAN, loopback, the tunnel,
+            // link-local, and a listener.
+            row(est, (home, 50010), (node, 443), xray),
+            row(est, (home, 50011), (Ipv4Addr::new(192, 168, 1, 20), 445), app),
+            row(est, (Ipv4Addr::LOCALHOST, 50012), (Ipv4Addr::LOCALHOST, 8080), app),
+            row(est, (Ipv4Addr::new(198, 18, 0, 1), 50013), (Ipv4Addr::new(1, 1, 1, 1), 443), app),
+            row(est, (Ipv4Addr::new(169, 254, 10, 1), 50014), (Ipv4Addr::new(169, 254, 10, 2), 80), app),
+            row(LISTEN, (Ipv4Addr::UNSPECIFIED, 445), (Ipv4Addr::UNSPECIFIED, 0), 4),
+            // Counted, not closed: SetTcpEntry cannot close a handshake.
+            row(MIB_TCP_STATE_SYN_SENT, (home, 50020), (Ipv4Addr::new(8, 8, 8, 8), 443), app),
+        ];
+        let handed: std::cell::RefCell<Vec<[u32; 5]>> = Default::default();
+        let outcome = reset_outside_with(&rows, &rules, &|set| {
+            handed.borrow_mut().push(*set);
+            NO_ERROR
+        });
+        assert_eq!(outcome.closed, 4, "{:?}", outcome.closed_rows);
+        assert_eq!(outcome.skipped_handshaking, 1);
+        assert!(outcome.failures.is_empty());
+        let handed = handed.into_inner();
+        assert!(handed.iter().all(|set| set[0] == MIB_TCP_STATE_DELETE_TCB));
+        let remotes: Vec<String> = outcome.closed_rows.iter().map(|r| r.rsplit(" -> ").next().unwrap().to_string()).collect();
+        assert_eq!(remotes, ["93.184.216.34:443", "203.0.113.7:2053", "104.16.0.1:443", "10.200.0.1:443"]);
+        // The words handed back are the row's own, the state aside.
+        assert_eq!(handed[1][1..], rows[1].raw[1..]);
+    }
+
+    /// Without rules for it there is nothing to leave alone but the
+    /// machine itself: the control for the test above, showing the rows
+    /// that test keeps are kept by the rules and not by accident.
+    #[test]
+    fn a_full_tunnel_reset_with_no_tunnel_named_closes_the_engines_link_too() {
+        let rows = [TcpRow4::new(
+            MIB_TCP_STATE_ESTAB,
+            (Ipv4Addr::new(192, 168, 1, 23), 50010),
+            (Ipv4Addr::new(203, 0, 113, 7), 443),
+            42,
+        )];
+        let outcome = reset_outside_with(&rows, &OutsideTunnel::default(), &|_| NO_ERROR);
+        assert_eq!(outcome.closed, 1);
     }
 
     #[test]

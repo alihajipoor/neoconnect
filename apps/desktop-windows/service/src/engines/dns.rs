@@ -53,16 +53,19 @@ const GAMING_NRPT_COMMENT: &str = "Neoxify gaming DNS";
 /// protocol name.
 ///
 /// [`NotRequested`] must never be reported as a problem. It is the
-/// ordinary state for WireGuard and OpenVPN, which install their own
-/// DNS and drop it in Custom mode -- and this product's rule is that
-/// the app never reports a state nothing verified, in either direction.
+/// ordinary state for a full tunnel on WireGuard and OpenVPN, which
+/// install their own DNS -- and this product's rule is that the app never
+/// reports a state nothing verified, in either direction.
 ///
-/// It is *not* the ordinary state for a Custom-mode tunnel on the two
-/// engines that call [`force`]. This comment used to say Custom mode
+/// It is *not* the ordinary state for a Custom-mode tunnel on any engine:
+/// [`force`] is called for all four once the redirect is up
+/// (`Engines::start_split_tunnel`). This comment used to say Custom mode
 /// "deliberately leaves the machine's lookups alone", which read as a
 /// design rule and was never true of Xray; see
 /// [`machine_wide_rule_wanted`] for what Custom mode actually does and
-/// why the rule is load-bearing there rather than over-broad.
+/// why the rule is load-bearing there rather than over-broad. WireGuard
+/// and OpenVPN did leave them alone until 2026-10-11, which was that
+/// leak; see [`custom_mode_rule`].
 ///
 /// [`NotRequested`]: TunnelDns::NotRequested
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -96,8 +99,8 @@ impl TunnelDns {
 
 /// A courier, and only a courier.
 ///
-/// The two engines that install this rule do it from free functions
-/// several frames below any `Engines` value -- `xray::configure_adapter`
+/// The engines that install this rule do it from free functions
+/// several frames below any `Engines` value -- `xray::configure_dns`
 /// is called from both `install_routes` and `prepare_passive`, and
 /// neither has one -- so there is nowhere to return the answer to.
 /// `Engines::connect_inner` collects it from here at the end of the
@@ -183,13 +186,272 @@ pub(super) fn machine_wide_rule_wanted(_passive: bool) -> bool {
     true
 }
 
+/// The resolver Custom mode pins the machine to on the engines that bring
+/// their own DNS in a full tunnel.
+///
+/// The same as Xray's and IKEv2's. Which public resolver it is matters
+/// less than that it is public: the redirect carries every port-53
+/// packet its filter admits to 1.1.1.1 through the tunnel whatever its
+/// destination, and a public address is what the filter admits.
+pub(super) const CUSTOM_MODE_RESOLVER: &str = "1.1.1.1";
+
+/// The rule Custom mode installs for a session, on every engine, once its
+/// redirect carries lookups (`Engines::pin_custom_mode_dns`):
+/// [`CUSTOM_MODE_RESOLVER`] in Custom mode, for the reason
+/// [`machine_wide_rule_wanted`] gives, and none otherwise. A full tunnel's
+/// is its engine's: Xray's and IKEv2's own rule ([`rule_at_connect`]),
+/// wireguard.exe's `DNS =`, OpenVPN's pushed DNS behind
+/// `block-outside-dns`.
+///
+/// Custom mode drops both engines' own DNS -- no `DNS =` line, and
+/// `route-nopull` refuses the pushed one -- and until 2026-10-11 nothing
+/// replaced it. On a home network that left every lookup, a selected
+/// application's included, going to the router and on to the ISP in
+/// clear text; in Iran the answer for a filtered name is the block page's
+/// 10.10.34.x, which the redirect's filter then leaves alone too, as a
+/// private address. Xray and IKEv2 never had the gap.
+pub(super) fn custom_mode_rule(passive: bool) -> Option<&'static str> {
+    (passive && machine_wide_rule_wanted(passive)).then_some(CUSTOM_MODE_RESOLVER)
+}
+
+/// The rule an engine installs inside its own connect: a full tunnel's,
+/// on the two engines that pin one (Xray and IKEv2), and never Custom
+/// mode's.
+///
+/// Custom mode's rule goes in once the redirect carries lookups
+/// (`Engines::start_split_tunnel`), not here. Every engine used to put it
+/// in inside its own connect, seconds before the redirect started, and in
+/// between every lookup on the PC was pinned to 1.1.1.1 with nothing to
+/// carry it into the tunnel: it left by the physical adapter in clear
+/// text, which the VM saw at the NIC during a WireGuard and an Xray
+/// Custom-mode connect. Without the rule in that gap the lookups go where
+/// they went before Connect was pressed -- the network's own resolver --
+/// as the selected applications' connections do until the redirect is up;
+/// what that resolver answered is flushed once the rule is in.
+pub(super) fn rule_at_connect(passive: bool, resolver: &'static str) -> Option<&'static str> {
+    (!passive && machine_wide_rule_wanted(passive)).then_some(resolver)
+}
+
+/* ------------------------------------------------------------------ *
+ * Custom mode's pin, given back while the tunnel is shown not to carry.
+ *
+ * The pin is a trade, and [`machine_wide_rule_wanted`] makes it: every
+ * lookup on the machine goes to 1.1.1.1 and the redirect carries it
+ * through the tunnel, because the DNS Client resolves for everybody
+ * under svchost's name and there is no telling a selected application's
+ * lookup from anyone else's. A lookup of a selected application's that
+ * reached the router instead went on to the ISP, and in Iran came back
+ * as the block page.
+ *
+ * What it costs is paid when the tunnel stops carrying. Then every
+ * lookup on the machine -- those of the applications the customer kept
+ * out of the VPN included -- is carried into a tunnel that answers
+ * nothing, and the whole PC stops resolving names until somebody presses
+ * Disconnect. A redirect of the selected applications' lookups alone
+ * would avoid that, and is not possible for the same reason the pin
+ * exists: their lookups mostly leave as svchost's.
+ *
+ * So the pin is held while the tunnel carries, and given back while it
+ * is measured not to: the machine resolves through its own network again
+ * and the applications left out of the VPN keep working. It goes back in
+ * -- and the DNS cache is flushed, dropping whatever the network's
+ * resolver answered meanwhile -- the moment the tunnel is shown to carry
+ * again, before that is reported to anyone. The price, while it is out:
+ * a selected application's lookups go to the network's resolver too, in
+ * clear text; its connections still go into the tunnel, which is not
+ * carrying them either.
+ *
+ * Given back only on a measurement, never on an absence of one: a
+ * WireGuard handshake gone stale or never made, OpenVPN's own log saying
+ * it is restarting, or the split tunnel's backstop having switched
+ * interception off. A failed split-tunnel probe is not one -- it has been
+ * seen to fail while the tunnel carried, which is why the app reads it as
+ * "unverified" rather than "degraded" -- so Xray and IKEv2, which have no
+ * such measurement while their adapter is up, keep the pin through a
+ * stall as before, and give it back only when interception is switched
+ * off under them.
+ * ------------------------------------------------------------------ */
+
+/// What one look at a Custom-mode tunnel says about whether it carries
+/// traffic, for [`PinWatch`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Carrying {
+    /// Measured: the peer answered lately (a fresh WireGuard handshake),
+    /// or a reply the destination had to send came back through the tunnel
+    /// (the split tunnel's probe).
+    Yes,
+    /// Measured: it is not -- a WireGuard handshake gone stale or never
+    /// made, OpenVPN's own log saying it is restarting.
+    No,
+    /// The split tunnel's backstop has switched interception off under the
+    /// session. Nothing carries the pinned lookups to the tunnel any more,
+    /// whatever the tunnel does, so the pin only sends them to 1.1.1.1 over
+    /// the customer's own line.
+    InterceptionStopped,
+    /// Nothing either way.
+    Unknown,
+}
+
+/// What to do with the pin after a look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PinMove {
+    Keep,
+    /// Take the rule out: the machine resolves through its own network.
+    Release,
+    /// Put it back in.
+    Restore,
+}
+
+/// How long a tunnel has to have been measured not to carry before the pin
+/// is given back.
+///
+/// Fifteen seconds: past an OpenVPN restart that recovers by itself -- a
+/// five-second pause and a handshake -- and three of WireGuard's handshake
+/// attempts, five seconds apart. A stale WireGuard handshake is already
+/// three minutes old when it is first seen, so this adds little to the
+/// outage it ends.
+pub(super) const RELEASE_AFTER: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Custom mode's pin, through one session: when it is to be given back
+/// and when it is to be put in again. Decides; does nothing to the
+/// machine. See the section above for the policy.
+#[derive(Debug)]
+pub(super) struct PinWatch {
+    hold: std::time::Duration,
+    /// When the run of "not carrying" readings that is still unbroken
+    /// began.
+    not_carrying_since: Option<std::time::Instant>,
+    /// Given back by this watch, and not yet put back.
+    released: bool,
+    /// Nothing more to manage this session: interception is off, or a
+    /// restore failed and the session now reports its DNS as unpinned.
+    done: bool,
+}
+
+impl Default for PinWatch {
+    fn default() -> Self {
+        Self::with_hold(RELEASE_AFTER)
+    }
+}
+
+impl PinWatch {
+    pub(super) fn with_hold(hold: std::time::Duration) -> Self {
+        Self { hold, not_carrying_since: None, released: false, done: false }
+    }
+
+    /// Forgets the session, keeping the hold.
+    pub(super) fn reset(&mut self) {
+        *self = Self::with_hold(self.hold);
+    }
+
+    /// Whether the pin is out because this watch gave it back.
+    pub(super) fn released(&self) -> bool {
+        self.released
+    }
+
+    /// One look at the tunnel, at `now`.
+    pub(super) fn observe(&mut self, reading: Carrying, now: std::time::Instant) -> PinMove {
+        if self.done {
+            return PinMove::Keep;
+        }
+        match reading {
+            Carrying::InterceptionStopped => {
+                // Nothing will carry the lookups again this session, so
+                // nothing will put the pin back either.
+                self.done = true;
+                self.not_carrying_since = None;
+                if self.released {
+                    PinMove::Keep
+                } else {
+                    self.released = true;
+                    PinMove::Release
+                }
+            }
+            Carrying::No => {
+                let since = *self.not_carrying_since.get_or_insert(now);
+                if !self.released && now.saturating_duration_since(since) >= self.hold {
+                    self.released = true;
+                    PinMove::Release
+                } else {
+                    PinMove::Keep
+                }
+            }
+            Carrying::Yes => {
+                self.not_carrying_since = None;
+                if self.released {
+                    PinMove::Restore
+                } else {
+                    PinMove::Keep
+                }
+            }
+            // An unbroken run of measurements, or nothing: a reading that
+            // says nothing breaks it.
+            Carrying::Unknown => {
+                self.not_carrying_since = None;
+                PinMove::Keep
+            }
+        }
+    }
+
+    /// Whether the [`PinMove::Restore`] asked for put the pin back. One that
+    /// did not leaves the session reporting its DNS as unpinned, as a rule
+    /// that would not install at connect does (`TunnelDns::Unforced`), and
+    /// this watch done: there is no rule to give back, and trying again on
+    /// every poll would run the same failing install each time.
+    pub(super) fn restored(&mut self, pinned: bool) {
+        self.released = false;
+        if !pinned {
+            self.done = true;
+        }
+    }
+}
+
+/// What giving the pin back and putting it in again do to the machine.
+/// A seam, so the decision can be driven in tests without touching the
+/// machine's NRPT table.
+pub(super) trait PinOps: Send + Sync {
+    /// Puts Custom mode's rule in for a session ([`force`]), once its
+    /// redirect carries lookups. The cache is flushed by the caller.
+    fn install(&self, resolver: &str) -> TunnelDns;
+    /// Takes the tunnel's rule out ([`clear`]).
+    fn release(&self);
+    /// Puts it back ([`force`]) and, once it is in, flushes the DNS cache:
+    /// what the network's resolver answered while it was out -- in Iran,
+    /// the block page for a filtered name -- must not be served to a
+    /// selected application afterwards.
+    fn restore(&self, resolver: &str) -> TunnelDns;
+}
+
+/// The machine's own NRPT table.
+pub(super) struct MachinePin;
+
+impl PinOps for MachinePin {
+    fn install(&self, resolver: &str) -> TunnelDns {
+        force(resolver)
+    }
+
+    fn release(&self) {
+        clear();
+    }
+
+    fn restore(&self, resolver: &str) -> TunnelDns {
+        let state = force(resolver);
+        // The registry path flushes as it pokes the resolver; the cmdlet
+        // fallback does not. Once more here costs one `ipconfig`.
+        if state == TunnelDns::Forced {
+            flush_cache();
+        }
+        state
+    }
+}
+
 /// Installs the tunnel's DNS rule and reports what happened.
 ///
-/// **Returns no error on purpose.** This is the single entry point both
-/// engines use, and its type is the mechanism that keeps them
+/// **Returns no error on purpose.** This is the single entry point every
+/// engine uses, and its type is the mechanism that keeps them
 /// consistent: there is no `Result` here for a caller to `?`, so
 /// "refuse the connect because the DNS rule would not install" is not
-/// an option either engine can take unilaterally again. See
+/// an option any engine can take unilaterally again. See
 /// [`TunnelDns`] for why that is the decision.
 ///
 /// The failure is not swallowed -- it goes to the cleanup log for
@@ -1357,6 +1619,112 @@ mod tests {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
     use winreg::RegKey;
 
+    /* Custom mode's pin through a session (`PinWatch`). Before it, the pin
+     * stayed in for as long as the session did: a tunnel that stopped
+     * carrying took every lookup on the PC with it, those of the
+     * applications kept out of the VPN included, until Disconnect. */
+
+    const HOLD: std::time::Duration = std::time::Duration::from_secs(15);
+
+    fn secs(n: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(n)
+    }
+
+    #[test]
+    fn a_tunnel_measured_not_to_carry_gets_the_pin_back_once_the_hold_has_passed() {
+        let t0 = std::time::Instant::now();
+        let mut watch = PinWatch::with_hold(HOLD);
+        assert_eq!(watch.observe(Carrying::No, t0), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(14)), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(15)), PinMove::Release);
+        assert!(watch.released());
+        // Once: it is out already.
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(30)), PinMove::Keep);
+    }
+
+    /// An OpenVPN restart that recovers, or a wg.exe that could not be
+    /// read in between: the run starts again.
+    #[test]
+    fn only_an_unbroken_run_of_measurements_gives_it_back() {
+        let t0 = std::time::Instant::now();
+        let mut watch = PinWatch::with_hold(HOLD);
+        assert_eq!(watch.observe(Carrying::No, t0), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::Unknown, t0 + secs(10)), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(16)), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::Yes, t0 + secs(20)), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(21)), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(36)), PinMove::Release);
+    }
+
+    /// Never on an absence of evidence, however long.
+    #[test]
+    fn nothing_known_is_never_grounds_to_give_it_back() {
+        let t0 = std::time::Instant::now();
+        let mut watch = PinWatch::with_hold(HOLD);
+        for n in 0..20 {
+            assert_eq!(watch.observe(Carrying::Unknown, t0 + secs(n * 10)), PinMove::Keep);
+        }
+        assert_eq!(watch.observe(Carrying::Yes, t0 + secs(300)), PinMove::Keep);
+        assert!(!watch.released());
+    }
+
+    #[test]
+    fn the_pin_goes_back_the_moment_the_tunnel_is_shown_to_carry() {
+        let t0 = std::time::Instant::now();
+        let mut watch = PinWatch::with_hold(HOLD);
+        watch.observe(Carrying::No, t0);
+        assert_eq!(watch.observe(Carrying::No, t0 + HOLD), PinMove::Release);
+        assert_eq!(watch.observe(Carrying::Yes, t0 + secs(40)), PinMove::Restore);
+        watch.restored(true);
+        assert!(!watch.released());
+        assert_eq!(watch.observe(Carrying::Yes, t0 + secs(41)), PinMove::Keep);
+        // And it can go out again, after a fresh run.
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(50)), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(65)), PinMove::Release);
+    }
+
+    /// A restore that failed leaves the session reporting unpinned DNS, as
+    /// a rule that would not install at connect does. Nothing more is done
+    /// with it: no rule to give back, and no retry on every poll.
+    #[test]
+    fn a_failed_restore_is_left_to_the_status_poll_to_report() {
+        let t0 = std::time::Instant::now();
+        let mut watch = PinWatch::with_hold(HOLD);
+        watch.observe(Carrying::No, t0);
+        watch.observe(Carrying::No, t0 + HOLD);
+        assert_eq!(watch.observe(Carrying::Yes, t0 + secs(40)), PinMove::Restore);
+        watch.restored(false);
+        assert!(!watch.released());
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(50)), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(90)), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::Yes, t0 + secs(91)), PinMove::Keep);
+    }
+
+    /// Nothing carries the pinned lookups once interception is off, so the
+    /// pin only sends them to 1.1.1.1 over the customer's own line: out at
+    /// once, and not put back by anything the tunnel does afterwards.
+    #[test]
+    fn interception_switched_off_gives_it_back_at_once_and_for_good() {
+        let t0 = std::time::Instant::now();
+        let mut watch = PinWatch::with_hold(HOLD);
+        assert_eq!(watch.observe(Carrying::InterceptionStopped, t0), PinMove::Release);
+        assert_eq!(watch.observe(Carrying::Yes, t0 + secs(1)), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::InterceptionStopped, t0 + secs(2)), PinMove::Keep);
+        assert!(watch.released());
+    }
+
+    #[test]
+    fn a_reset_forgets_the_session_and_keeps_the_hold() {
+        let t0 = std::time::Instant::now();
+        let mut watch = PinWatch::with_hold(HOLD);
+        watch.observe(Carrying::InterceptionStopped, t0);
+        watch.reset();
+        assert!(!watch.released());
+        assert_eq!(watch.observe(Carrying::Yes, t0), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(1)), PinMove::Keep);
+        assert_eq!(watch.observe(Carrying::No, t0 + secs(1) + HOLD), PinMove::Release);
+    }
+
 
     /// The NRPT rule's shape, pinned to what Windows actually wrote.
     ///
@@ -1519,6 +1887,20 @@ mod tests {
                  true, this test is no longer the guard it looks like"
             );
         }
+    }
+
+    /// Custom mode's rule does not go in inside an engine's connect.
+    ///
+    /// It used to, on all four, seconds before the redirect started; the
+    /// lookups in between were pinned to 1.1.1.1 with nothing to carry
+    /// them, and left by the physical adapter in clear text -- seen at the
+    /// NIC on the VM during a WireGuard and an Xray Custom-mode connect. It
+    /// goes in once the redirect carries them (`Engines::start_split_tunnel`).
+    /// A full tunnel's rule is unchanged.
+    #[test]
+    fn an_engine_installs_only_a_full_tunnels_rule_inside_its_connect() {
+        assert_eq!(rule_at_connect(false, "1.1.1.1"), Some("1.1.1.1"));
+        assert_eq!(rule_at_connect(true, "1.1.1.1"), None, "Custom mode's rule went in before the redirect");
     }
 
     /// A latent coupling that nothing asserted before.

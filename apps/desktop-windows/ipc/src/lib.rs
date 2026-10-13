@@ -105,6 +105,20 @@ pub enum Request {
         /// pretend, not the place the customer finds out.
         #[serde(default)]
         exits: Vec<ExitProfile>,
+        /// Every server address the app holds a credential for, as the
+        /// credentials write them.
+        ///
+        /// So the service can remove host routes to those servers that an
+        /// earlier session left on the physical adapter before it builds
+        /// this one -- releases up to 0.9.48 left one after every OpenVPN
+        /// session, and nothing removed it until a reboot. Data only:
+        /// what is not an IPv4 address is ignored, and the service only
+        /// ever deletes a host route to one of these, never adds one.
+        ///
+        /// Additive like `exits`: an older app sends none and the purge
+        /// is skipped, and an older service ignores the field.
+        #[serde(default)]
+        known_nodes: Vec<String>,
     },
     Disconnect,
     Status,
@@ -1242,6 +1256,24 @@ pub enum Response {
         /// claim. See `engines::dns::TunnelDns`.
         #[serde(default)]
         tunnel_dns_unprotected: bool,
+        /// Whether IPv4 is confined to the tunnel on this PC: every IPv4
+        /// connection outside it refused but the engine's own link to its
+        /// server, the LAN, DHCP and loopback. See `engines::confinement`.
+        ///
+        /// `None` is not "unconfined". It is a session this does not apply
+        /// to -- Custom mode; WireGuard, whose wireguard.exe brings its own
+        /// kill switch -- or a service too old to say, and the app shows
+        /// nothing for it. `Some(false)` is a full tunnel that is not
+        /// confined: one whose confinement failed or was let go of, or IKEv2,
+        /// unconfined by choice until its own proof. The tunnel is up and
+        /// carrying, and the app must not claim full protection over it --
+        /// it says so in words, in the customer's language.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ipv4_confined: Option<bool>,
+        /// Why not, when `ipv4_confined` is `Some(false)`. English, for
+        /// support and diagnostics; the customer is shown the app's words.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confinement_problem: Option<String>,
     },
     /// Where each selected application's traffic is leaving from.
     ///
@@ -2375,6 +2407,64 @@ mod tests {
             Request::Connect { exits, .. } => assert!(exits.is_empty()),
             other => panic!("expected a connect, got {other:?}"),
         }
+    }
+
+    /// The same additive rule for the servers the app knows: an older app
+    /// sends none and still connects, and a newer one's list arrives.
+    #[test]
+    fn connect_without_known_nodes_still_parses() {
+        let older = r#"{"type":"connect","profile":{"protocol":"IKEV2","server":"a.example.com","username":"u","password":"p"}}"#;
+        match serde_json::from_str::<Request>(older).expect("an older app must still connect") {
+            Request::Connect { known_nodes, .. } => assert!(known_nodes.is_empty()),
+            other => panic!("expected a connect, got {other:?}"),
+        }
+
+        let newer = r#"{"type":"connect","profile":{"protocol":"IKEV2","server":"a.example.com","username":"u","password":"p"},"known_nodes":["203.0.113.7","node.example.com"]}"#;
+        match serde_json::from_str::<Request>(newer).expect("a newer app must connect") {
+            Request::Connect { known_nodes, .. } => assert_eq!(known_nodes, ["203.0.113.7", "node.example.com"]),
+            other => panic!("expected a connect, got {other:?}"),
+        }
+    }
+
+    /// An app newer than its service reads a status with no word on IPv4
+    /// confinement as "not said" -- `None`, on which the app must not warn
+    /// -- and an older app reading a newer service's status ignores the
+    /// fields it does not know. A `None` is not written at all.
+    #[test]
+    fn old_status_without_field_is_none() {
+        let older = r#"{"status":"state","connected":true,"protocol":"XRAY_VLESS_REALITY","health":{"state":"unknown"},"ipv6_blocked":true}"#;
+        match serde_json::from_str::<Response>(older).expect("an older service's status must parse") {
+            Response::State { ipv4_confined, confinement_problem, ipv6_blocked, .. } => {
+                assert_eq!(ipv4_confined, None);
+                assert_eq!(confinement_problem, None);
+                assert!(ipv6_blocked);
+            }
+            other => panic!("expected a state, got {other:?}"),
+        }
+
+        let newer = r#"{"status":"state","connected":true,"protocol":"OPENVPN","ipv4_confined":false,"confinement_problem":"the filters could not be installed"}"#;
+        match serde_json::from_str::<Response>(newer).expect("a newer service's status must parse") {
+            Response::State { ipv4_confined, confinement_problem, .. } => {
+                assert_eq!(ipv4_confined, Some(false));
+                assert_eq!(confinement_problem.as_deref(), Some("the filters could not be installed"));
+            }
+            other => panic!("expected a state, got {other:?}"),
+        }
+
+        let unsaid = Response::State {
+            connected: true,
+            protocol: Some("WIREGUARD".into()),
+            health: TunnelHealth::Unknown,
+            split_tunnel_active: false,
+            split_tunnel_problem: None,
+            split_tunnel_restart_needed: Vec::new(),
+            ipv6_blocked: true,
+            tunnel_dns_unprotected: false,
+            ipv4_confined: None,
+            confinement_problem: None,
+        };
+        let text = serde_json::to_string(&unsaid).unwrap();
+        assert!(!text.contains("ipv4_confined") && !text.contains("confinement_problem"), "{text}");
     }
 
     #[test]

@@ -303,3 +303,21 @@ describe("what the strings are allowed to claim", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe("waiting for a network", () => {
+  /** A connect the service refused for want of a network waits for one, on
+   * the same server, and says so -- in both languages, and without a word
+   * about a server that was never dialled. Fail open is unchanged, so the
+   * hint says the traffic is not protected until the tunnel is up. */
+  it("says it is waiting, and that traffic is not protected meanwhile, in both languages", () => {
+    expect(en["dash.waitingForNetwork"]).toBe("Waiting for a network connection");
+    expect(fa["dash.waitingForNetwork"]).toContain("شبکه");
+    expect(en["dash.waitingForNetworkHint"]).toMatch(/not protected/);
+    expect(fa["dash.waitingForNetworkHint"]).toContain("محافظت نمی‌شود");
+    expect(fa["dash.waitingForNetworkHint"]).toContain("شما");
+    for (const key of ["dash.waitingForNetwork", "dash.waitingForNetworkHint"] as const) {
+      expect(en[key], key).not.toMatch(/server|unreachable|blocked|couldn't reach|you're protected/i);
+      expect(fa[key], key).not.toBe(en[key]);
+    }
+  });
+});

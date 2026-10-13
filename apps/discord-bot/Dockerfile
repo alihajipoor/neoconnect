@@ -6,6 +6,10 @@ WORKDIR /repo
 
 FROM base AS deps
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+# pnpm reads every patch the root package.json lists before it installs
+# anything, used here or not, and stops with ENOENT on a missing one.
+# scripts/check-docker-install-inputs.mjs holds every Dockerfile to this.
+COPY patches ./patches
 # Only this app's manifest. pnpm skips a lockfile importer whose directory is
 # absent from the build context, so the other workspace packages do not need
 # to be here -- which is also why adding this app required no change to the

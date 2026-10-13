@@ -144,7 +144,7 @@ describe("the Dashboard's wiring", () => {
   });
 
   it("renews the guard at every rung, right after checking it is still the current pass", () => {
-    const loop = dashboard.indexOf("for (const [index, candidate] of candidates.entries()) {");
+    const loop = dashboard.indexOf("for (let index = 0; index < candidates.length; index += 1) {");
     expect(loop).toBeGreaterThan(0);
     const checked = dashboard.indexOf("if (ladderGenerationRef.current !== generation) break;", loop);
     const renewed = dashboard.indexOf("ladderPass.progress(generation);", loop);

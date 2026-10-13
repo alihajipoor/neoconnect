@@ -56,7 +56,10 @@
 //! machines, by a component this product already ships. This module is
 //! that mechanism, in our code, for the engines that do not bring one --
 //! so that all eight protocols behave the same way instead of one of
-//! them being accidentally safe.
+//! them being accidentally safe. Since 2026-10-11 it is installed beside
+//! WireGuard's own as well: that one permits its tunnel, and IPv6 routed
+//! into it went unanswered for seconds instead of failing (see
+//! [`needed_for`]).
 //!
 //! # Why blocking and not carrying
 //!
@@ -108,13 +111,19 @@
 //! visible cause and no way to undo it, which is precisely the class of
 //! leftover state being eliminated elsewhere in this client.
 //!
-//! # The residual gap
+//! # Flows already open when it goes in
 //!
-//! ALE_AUTH_CONNECT_V6 classifies a flow when it is established, not
-//! continuously. A v6 connection that was already open when the tunnel
-//! came up is not re-examined and keeps running. New flows -- which is
-//! everything a browser, a game or a resolver does from that point on --
-//! are blocked. WireGuard's kill-switch has the same property.
+//! This section used to say that ALE_AUTH_CONNECT_V6 classifies a flow
+//! only when it is established, so a v6 connection already open when the
+//! tunnel came up was not re-examined and kept running. Measured on
+//! 0.9.48 (P0-D, journal 2026-10-11), Windows does re-examine open flows
+//! when a filter is added: a connected IPv6 UDP socket opened before
+//! Connect was refused from then on, the audit log naming "Neoxify: block
+//! all outbound (IPv6)" for its sends (63 times in one Stealth run, 33 in
+//! one Compatible run). Under wireguard.exe's IPv4 block a connected UDP
+//! socket stopped at the NIC while `send()` went on reporting success, and
+//! an established TLS connection was reset. An IPv6 TCP connection
+//! already open when this block went in was not part of the measurement.
 
 use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
@@ -127,14 +136,15 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID,
     FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_LOCAL_INTERFACE, FWPM_CONDITION_IP_REMOTE_ADDRESS,
     FWPM_CONDITION_IP_REMOTE_PORT, FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAG_NONE,
-    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0, FWPM_SESSION0, FWPM_SESSION_FLAG_DYNAMIC,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_PROVIDER0, FWPM_SESSION0, FWPM_SESSION_FLAG_DYNAMIC,
     FWPM_SUBLAYER0, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_ACTION_TYPE, FWP_BYTE_BLOB,
     FWP_BYTE_BLOB_TYPE, FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0,
     FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET, FWP_UINT16, FWP_UINT32,
     FWP_UINT64, FWP_UINT8, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
 };
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
+
+use super::confinement::{Action, Cond, FilterSpec, Layer};
 
 /// Ours, and nobody else's.
 ///
@@ -170,6 +180,11 @@ const SUBLAYER_WEIGHT: u16 = 0xFFFF;
 /// which is what would let it veto the permits above it.
 const WEIGHT_BLOCK: u8 = 0;
 const WEIGHT_PERMIT: u8 = 12;
+/// DNS to a link-local or multicast IPv6 address refused, over the
+/// permits that keep those ranges working (see [`full_tunnel_specs`]).
+const WEIGHT_DNS_V6_BLOCK: u8 = 13;
+/// A resolver on this PC itself, over that refusal.
+const WEIGHT_DNS_V6_PERMIT: u8 = 14;
 
 /// The names `netsh wfp show filters` will print. Kept as constants
 /// because the log line quotes them: a support conversation that says
@@ -230,8 +245,17 @@ const LOG_FILE: &str = "ipv6-block.log";
 /// loopback, and from the engine itself (which is what OpenVPN's version
 /// permits too -- a node that listens on 53 must stay reachable), and
 /// blocked everywhere else. By port rather than by protocol, so TCP DNS
-/// is covered with UDP. IPv6 DNS needs nothing new: the IPv6 block above
-/// already refuses every global v6 destination.
+/// is covered with UDP.
+///
+/// IPv6 DNS is the IPv6 block's, and it once needed nothing there: that
+/// block refuses every global v6 destination. Not link-local, though,
+/// which it permits on every port so neighbour discovery keeps working --
+/// and DNS to the router's link-local address (fe80::2, port 53) left the
+/// NIC on every Xray run of the P3 gate, 62-71 frames a run, while the
+/// app said "You're protected" (journal, 2026-10-12). So the IPv6 block
+/// now refuses port 53 above its link-local and multicast permits, on
+/// its own and whether or not this confinement is asked for: see
+/// [`full_tunnel_specs`].
 pub struct DnsConfinement {
     /// The tunnel adapter's interface LUID.
     tunnel_luid: u64,
@@ -287,8 +311,8 @@ pub struct Ipv6Block {
     /// two lines in `ipv6-block.log` naming the same count is the
     /// cheapest possible check that the teardown matched the setup.
     filters: usize,
-    /// What removing it gives back, for the log line: "IPv6", "DNS", or
-    /// both. A DNS-only session (WireGuard) restores no IPv6.
+    /// What removing it gives back, for the log line: "IPv6", or "IPv6
+    /// and DNS".
     restores: &'static str,
     log: PathBuf,
 }
@@ -307,18 +331,6 @@ impl Ipv6Block {
         Self::install_with(log_dir, true, dns)
     }
 
-    /// DNS confinement alone, with no IPv6 block -- for WireGuard, whose
-    /// own kill-switch blocks IPv6 but permits DNS to its configured
-    /// resolver on *every* interface. Measured: a query bound to the
-    /// physical NIC's address left it in clear text and was answered,
-    /// while the same test was refused on OpenVPN.
-    ///
-    /// Held apart from the IPv6 block by the caller, so that what the app
-    /// is told about IPv6 still follows only the IPv6 block.
-    pub fn install_dns_only(log_dir: &Path, dns: &DnsConfinement) -> Result<Self, String> {
-        Self::install_with(log_dir, false, Some(dns))
-    }
-
     fn install_with(log_dir: &Path, ipv6: bool, dns: Option<&DnsConfinement>) -> Result<Self, String> {
         let log = log_dir.join(LOG_FILE);
         // Resolved before the session opens and held until the
@@ -331,10 +343,14 @@ impl Ipv6Block {
                 .map_err(|e| note(&log, &format!("engine not permitted for DNS: {e}")))
                 .ok()
         });
+        // The engine is named in the plan only when it resolved, so the
+        // permit that points into its blob is planned exactly when there
+        // is a blob to point into.
+        let engine_named = engine_app.as_ref().and(dns.and_then(|dns| dns.engine_exe.as_deref()));
+        let specs = full_tunnel_specs(ipv6, dns.map(|dns| (dns.tunnel_luid, engine_named)));
         let engine = open_dynamic_session()?;
 
-        let dns_filters = dns.map(|dns| (dns.tunnel_luid, engine_app.as_ref().map(|a| a.blob as *const _)));
-        match unsafe { build(engine, ipv6, dns_filters) } {
+        match unsafe { build(engine, &specs, engine_app.as_ref().map(|a| a.blob as *const FWP_BYTE_BLOB)) } {
             Ok(filters) => {
                 note(
                     &log,
@@ -404,7 +420,7 @@ fn open_dynamic_session() -> Result<HANDLE, String> {
 /// The same, named for whichever of the two blocks is opening it, so a
 /// support engineer reading `netsh wfp show state` sees which feature
 /// owns the session rather than one generic string for both.
-fn open_dynamic_session_named(session_name: &str, purpose: &str) -> Result<HANDLE, String> {
+pub(super) fn open_dynamic_session_named(session_name: &str, purpose: &str) -> Result<HANDLE, String> {
     let mut name = wide(session_name);
     let mut description = wide(purpose);
 
@@ -427,26 +443,30 @@ fn open_dynamic_session_named(session_name: &str, purpose: &str) -> Result<HANDL
         )
     };
     if err != 0 {
-        return Err(format!(
-            "the Windows Filtering Platform would not open a session ({err:#010x}), \
-             so IPv6 could not be blocked"
-        ));
+        return Err(session_refused(session_name, err));
     }
     Ok(engine)
+}
+
+/// What a session the filtering platform would not open is reported as:
+/// in the name of the block that asked, since several share this way in.
+fn session_refused(session_name: &str, err: u32) -> String {
+    format!("the Windows Filtering Platform would not open a session for the {session_name} ({err:#010x})")
 }
 
 /// Registers the provider and sublayer and adds every filter, inside one
 /// transaction. Returns how many filters were added.
 ///
 /// # Safety
-/// `engine` must be a live handle from [`open_dynamic_session`].
-unsafe fn build(engine: HANDLE, ipv6: bool, dns: Option<DnsFilters>) -> Result<usize, String> {
+/// `engine` must be a live handle from [`open_dynamic_session`], and an
+/// app-id pointer in `app` must be alive for the duration.
+unsafe fn build(engine: HANDLE, specs: &[FilterSpec], app: Option<*const FWP_BYTE_BLOB>) -> Result<usize, String> {
     let err = FwpmTransactionBegin0(engine, 0);
     if err != 0 {
         return Err(format!("could not begin a filtering transaction ({err:#010x})"));
     }
 
-    match add_everything(engine, ipv6, dns) {
+    match add_everything(engine, specs, app) {
         Ok(filters) => {
             let err = FwpmTransactionCommit0(engine);
             if err != 0 {
@@ -462,172 +482,203 @@ unsafe fn build(engine: HANDLE, ipv6: bool, dns: Option<DnsFilters>) -> Result<u
     }
 }
 
-/// What [`add_everything`] needs to confine DNS: the tunnel's LUID, and
-/// the engine's application id when it resolved.
-type DnsFilters = (u64, Option<*const FWP_BYTE_BLOB>);
+/// The filters of this sublayer for a full tunnel, as planned: the IPv6
+/// block when `ipv6`, and DNS confined to the tunnel when `dns` names the
+/// tunnel's interface LUID -- with the engine permitted to port 53 when
+/// it could be named to WFP. Pure, so what the sublayer lets past can be
+/// tested where WFP cannot be; `confinement`'s model of the two sublayers
+/// reads this, not a copy of it.
+///
+/// # The IPv6 block
+///
+/// The set, and why it is this set: deliberately the same shape the
+/// WireGuard provider installs, because that shape is the one already
+/// proven on customer machines -- the measurement that started this file
+/// read it off a live capture. Two machine-wide blocks, one per
+/// direction, and permits above them for the traffic that is not "the
+/// internet".
+///
+/// Loopback appears twice on purpose. `::1` is the address form and is
+/// what a person reading `netsh wfp show filters` expects to see; the
+/// `FWP_CONDITION_FLAG_IS_LOOPBACK` form is what WireGuard uses and
+/// catches the case the address form misses -- a socket looping back
+/// through one of the machine's *own global* addresses, which is still
+/// local traffic and still indistinguishable from the internet by
+/// address alone.
+///
+/// Link-local and multicast are what keeps the LAN working. Neighbour
+/// discovery, router advertisements, duplicate-address detection and
+/// DHCPv6 are all ICMPv6 or UDP to `fe80::/10` and `ff00::/8` addresses,
+/// so permitting those two ranges covers everything WireGuard enumerates
+/// by ICMPv6 type and DHCPv6 port. Without them the block does not merely
+/// stop internet IPv6, it stops the machine being able to speak to its
+/// own router.
+///
+/// Except DNS. Permitted on every port, those two ranges let a lookup to
+/// the router's link-local address out in clear text -- seen at the NIC on
+/// every Xray run of the P3 gate (fe80::2, port 53) -- which is the
+/// router's DNS the owner's decision (a) keeps refused. So port 53 is
+/// refused outbound above them, whatever the address, and a resolver on
+/// this PC itself (loopback, `::1`) is permitted above that. Outbound
+/// only: a DNS server *on* this PC -- a Mobile Hotspot's -- is asked on
+/// its local port 53, and inbound is left as it was. No ICMPv6 type and no
+/// DHCPv6 port is 53, so neighbour discovery and DHCPv6 are untouched.
+///
+/// What is left for the blocks is global unicast -- `2000::/3` and
+/// anything else routable -- which is exactly the traffic the capture saw
+/// leaving in clear text.
+///
+/// # DNS confined to the tunnel
+///
+/// See [`DnsConfinement`]: at `ALE_AUTH_CONNECT_V4`, port 53 permitted
+/// through the tunnel, on loopback and from the engine, and refused
+/// everywhere else.
+pub(super) fn full_tunnel_specs(ipv6: bool, dns: Option<(u64, Option<&Path>)>) -> Vec<FilterSpec> {
+    let spec = |name: String, layer: Layer, action: Action, weight: u8, conds: Vec<Cond>| FilterSpec {
+        name,
+        layer,
+        action,
+        weight,
+        conds,
+    };
+    let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0);
+    let multicast = Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0);
+    let mut specs = Vec::new();
+    if ipv6 {
+        for (layer, direction) in [(Layer::ConnectV6, "outbound"), (Layer::RecvAcceptV6, "inbound")] {
+            specs.push(spec(
+                format!("Neoxify: permit loopback IPv6 ({direction})"),
+                layer,
+                Action::Permit,
+                WEIGHT_PERMIT,
+                vec![Cond::Loopback],
+            ));
+            specs.push(spec(
+                format!("Neoxify: permit ::1 ({direction})"),
+                layer,
+                Action::Permit,
+                WEIGHT_PERMIT,
+                vec![Cond::RemoteV6(Ipv6Addr::LOCALHOST, 128)],
+            ));
+            specs.push(spec(
+                format!("Neoxify: permit link-local fe80::/10 ({direction})"),
+                layer,
+                Action::Permit,
+                WEIGHT_PERMIT,
+                vec![Cond::RemoteV6(link_local, 10)],
+            ));
+            specs.push(spec(
+                format!("Neoxify: permit multicast ff00::/8 ({direction})"),
+                layer,
+                Action::Permit,
+                WEIGHT_PERMIT,
+                vec![Cond::RemoteV6(multicast, 8)],
+            ));
+            specs.push(spec(
+                format!("Neoxify: block all {direction} (IPv6)"),
+                layer,
+                Action::Block,
+                WEIGHT_BLOCK,
+                Vec::new(),
+            ));
+        }
+        specs.push(spec(
+            "Neoxify: permit loopback DNS (IPv6)".into(),
+            Layer::ConnectV6,
+            Action::Permit,
+            WEIGHT_DNS_V6_PERMIT,
+            vec![Cond::RemotePort(53), Cond::Loopback],
+        ));
+        specs.push(spec(
+            "Neoxify: permit DNS to ::1".into(),
+            Layer::ConnectV6,
+            Action::Permit,
+            WEIGHT_DNS_V6_PERMIT,
+            vec![Cond::RemotePort(53), Cond::RemoteV6(Ipv6Addr::LOCALHOST, 128)],
+        ));
+        specs.push(spec(
+            "Neoxify: block DNS to link-local and multicast IPv6".into(),
+            Layer::ConnectV6,
+            Action::Block,
+            WEIGHT_DNS_V6_BLOCK,
+            vec![Cond::RemotePort(53)],
+        ));
+    }
+    if let Some((tunnel_luid, engine)) = dns {
+        let layer = Layer::ConnectV4;
+        specs.push(spec(
+            "Neoxify: permit DNS through the tunnel".into(),
+            layer,
+            Action::Permit,
+            WEIGHT_PERMIT,
+            vec![Cond::RemotePort(53), Cond::LocalInterface(tunnel_luid)],
+        ));
+        specs.push(spec(
+            "Neoxify: permit loopback DNS".into(),
+            layer,
+            Action::Permit,
+            WEIGHT_PERMIT,
+            vec![Cond::RemotePort(53), Cond::Loopback],
+        ));
+        if let Some(engine) = engine {
+            specs.push(spec(
+                "Neoxify: permit the tunnel engine on port 53".into(),
+                layer,
+                Action::Permit,
+                WEIGHT_PERMIT,
+                vec![Cond::RemotePort(53), Cond::App(engine.to_path_buf())],
+            ));
+        }
+        specs.push(spec(
+            "Neoxify: block DNS outside the tunnel".into(),
+            layer,
+            Action::Block,
+            WEIGHT_BLOCK,
+            vec![Cond::RemotePort(53)],
+        ));
+    }
+    specs
+}
 
+/// Adds the provider, the sublayer and every planned filter. `app` is
+/// the engine's app id, for the one condition that names it.
+///
 /// # Safety
 /// Called only from [`build`], inside an open transaction. An app-id
-/// pointer in `dns` must be alive for the duration.
-unsafe fn add_everything(engine: HANDLE, ipv6: bool, dns: Option<DnsFilters>) -> Result<usize, String> {
+/// pointer in `app` must be alive for the duration.
+unsafe fn add_everything(engine: HANDLE, specs: &[FilterSpec], app: Option<*const FWP_BYTE_BLOB>) -> Result<usize, String> {
     add_provider(engine)?;
     add_sublayer(engine)?;
-    let mut filters = 0usize;
-    if ipv6 {
-        filters += add_ipv6_filters(engine)?;
-    }
-    if let Some(dns) = dns {
-        filters += add_dns_filters(engine, dns)?;
-    }
-    Ok(filters)
-}
-
-/// The IPv6 block proper: five filters per direction.
-///
-/// # Safety
-/// Called only from [`add_everything`].
-unsafe fn add_ipv6_filters(engine: HANDLE) -> Result<usize, String> {
-    // The set, and why it is this set.
-    //
-    // It is deliberately the same shape the WireGuard provider installs,
-    // because that shape is the one already proven on customer machines
-    // -- the measurement that started this file read it off a live
-    // capture. Two machine-wide blocks, one per direction, and permits
-    // above them for the traffic that is not "the internet".
-    //
-    // Loopback appears twice on purpose. `::1` is the address form and
-    // is what a person reading `netsh wfp show filters` expects to see;
-    // the `FWP_CONDITION_FLAG_IS_LOOPBACK` form is what WireGuard uses
-    // and catches the case the address form misses -- a socket looping
-    // back through one of the machine's *own global* addresses, which is
-    // still local traffic and still indistinguishable from the internet
-    // by address alone.
-    //
-    // Link-local and multicast are what keeps the LAN working. Neighbour
-    // discovery, router advertisements, duplicate-address detection and
-    // DHCPv6 are all ICMPv6 or UDP to `fe80::/10` and `ff00::/8`
-    // addresses, so permitting those two ranges covers everything
-    // WireGuard enumerates by ICMPv6 type and DHCPv6 port. Without them
-    // the block does not merely stop internet IPv6, it stops the machine
-    // being able to speak to its own router.
-    //
-    // What is left for the blocks is global unicast -- `2000::/3` and
-    // anything else routable -- which is exactly the traffic the capture
-    // saw leaving in clear text.
-    // Paired with the word for the direction rather than compared
-    // against the layer constant afterwards: `GUID` in windows-sys has
-    // no `PartialEq`, and inventing one by comparing fields is exactly
-    // the sort of hand-rolled Windows detail this file avoids.
-    let layers = [
-        (FWPM_LAYER_ALE_AUTH_CONNECT_V6, "outbound"),
-        (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, "inbound"),
-    ];
-
-    let mut filters = 0usize;
-    for (layer, direction) in layers {
-        add_filter(
-            engine,
-            &format!("Neoxify: permit loopback IPv6 ({direction})"),
-            layer,
-            SUBLAYER_KEY,
-            FWP_ACTION_PERMIT,
-            WEIGHT_PERMIT,
-            &[Scope::Loopback],
-        )?;
-        add_filter(
-            engine,
-            &format!("Neoxify: permit ::1 ({direction})"),
-            layer,
-            SUBLAYER_KEY,
-            FWP_ACTION_PERMIT,
-            WEIGHT_PERMIT,
-            &[Scope::RemotePrefix(Ipv6Addr::LOCALHOST, 128)],
-        )?;
-        add_filter(
-            engine,
-            &format!("Neoxify: permit link-local fe80::/10 ({direction})"),
-            layer,
-            SUBLAYER_KEY,
-            FWP_ACTION_PERMIT,
-            WEIGHT_PERMIT,
-            &[Scope::RemotePrefix(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10)],
-        )?;
-        add_filter(
-            engine,
-            &format!("Neoxify: permit multicast ff00::/8 ({direction})"),
-            layer,
-            SUBLAYER_KEY,
-            FWP_ACTION_PERMIT,
-            WEIGHT_PERMIT,
-            &[Scope::RemotePrefix(Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8)],
-        )?;
-        add_filter(
-            engine,
-            &format!("Neoxify: block all {direction} (IPv6)"),
-            layer,
-            SUBLAYER_KEY,
-            FWP_ACTION_BLOCK,
-            WEIGHT_BLOCK,
-            &[],
-        )?;
-        filters += 5;
-    }
-    Ok(filters)
-}
-
-/// DNS confined to the tunnel. See [`DnsConfinement`].
-///
-/// # Safety
-/// Called only from [`add_everything`]; an app-id pointer in `dns` must
-/// be alive for the duration.
-unsafe fn add_dns_filters(engine: HANDLE, dns: DnsFilters) -> Result<usize, String> {
-    let mut filters = 0usize;
-    {
-        let (tunnel_luid, engine_app) = dns;
-        let layer = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
-        add_filter(
-            engine,
-            "Neoxify: permit DNS through the tunnel",
-            layer,
-            SUBLAYER_KEY,
-            FWP_ACTION_PERMIT,
-            WEIGHT_PERMIT,
-            &[Scope::RemotePort(53), Scope::LocalInterface(tunnel_luid)],
-        )?;
-        add_filter(
-            engine,
-            "Neoxify: permit loopback DNS",
-            layer,
-            SUBLAYER_KEY,
-            FWP_ACTION_PERMIT,
-            WEIGHT_PERMIT,
-            &[Scope::RemotePort(53), Scope::Loopback],
-        )?;
-        filters += 2;
-        if let Some(app) = engine_app {
-            add_filter(
-                engine,
-                "Neoxify: permit the tunnel engine on port 53",
-                layer,
-                SUBLAYER_KEY,
-                FWP_ACTION_PERMIT,
-                WEIGHT_PERMIT,
-                &[Scope::RemotePort(53), Scope::App(app)],
-            )?;
-            filters += 1;
+    for planned in specs {
+        let mut scopes = Vec::with_capacity(planned.conds.len());
+        for cond in &planned.conds {
+            scopes.push(match cond {
+                Cond::Loopback => Scope::Loopback,
+                Cond::RemoteV6(prefix, length) => Scope::RemotePrefix(*prefix, *length),
+                Cond::RemotePort(port) => Scope::RemotePort(*port),
+                Cond::LocalInterface(luid) => Scope::LocalInterface(*luid),
+                Cond::App(path) => match app {
+                    Some(blob) => Scope::App(blob),
+                    None => return Err(format!("{} was not resolved before the filters went in", path.display())),
+                },
+                other => return Err(format!("the {SUBLAYER_NAME} has no condition like {other:?}")),
+            });
         }
+        let action = match planned.action {
+            Action::Permit => FWP_ACTION_PERMIT,
+            Action::Block => FWP_ACTION_BLOCK,
+        };
         add_filter(
             engine,
-            "Neoxify: block DNS outside the tunnel",
-            layer,
+            &planned.name,
+            super::confinement::layer_key(planned.layer),
             SUBLAYER_KEY,
-            FWP_ACTION_BLOCK,
-            WEIGHT_BLOCK,
-            &[Scope::RemotePort(53)],
+            action,
+            planned.weight,
+            &scopes,
         )?;
-        filters += 1;
     }
-    Ok(filters)
+    Ok(specs.len())
 }
 
 /// # Safety
@@ -716,8 +767,27 @@ unsafe fn add_filter(
     weight: u8,
     scopes: &[Scope],
 ) -> Result<(), String> {
+    add_filter_under(engine, PROVIDER_KEY, name, layer, sublayer, action, weight, scopes)
+}
+
+/// [`add_filter`], under a provider of the caller's: the DNS hold's
+/// filters are not the shared provider's (see [`HOLD_PROVIDER_KEY`]).
+///
+/// # Safety
+/// As [`add_filter`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn add_filter_under(
+    engine: HANDLE,
+    provider: GUID,
+    name: &str,
+    layer: GUID,
+    sublayer: GUID,
+    action: FWP_ACTION_TYPE,
+    weight: u8,
+    scopes: &[Scope],
+) -> Result<(), String> {
     let mut display_name = wide(name);
-    let mut provider_key = PROVIDER_KEY;
+    let mut provider_key = provider;
 
     // Backs the address conditions' union pointers and must outlive the
     // FwpmFilterAdd0 call below, which is why it is declared here rather
@@ -816,37 +886,55 @@ unsafe fn add_filter(
 }
 
 /// A NUL-terminated UTF-16 buffer for a Win32 display string.
-fn wide(s: &str) -> Vec<u16> {
+pub(super) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// Best-effort, like every other log in this service: a line that cannot
 /// be written must never affect the connection it describes.
-fn note(path: &Path, line: &str) {
+pub(super) fn note(path: &Path, line: &str) {
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
         let _ = writeln!(file, "{line}");
     }
 }
 
-/// Whether a profile needs this block installed.
+/// Whether a profile needs this block installed. Every one does.
 ///
-/// WireGuard is exempt, and deliberately so. `wireguard.exe` arms its own
-/// WFP kill-switch -- the capture that produced this module read
-/// provider "WireGuard" owning `Block all outbound (IPv6)` at the same
-/// layer this one uses -- and it was the one protocol of the four
-/// measured that did not leak. Adding a second provider blocking the
-/// same traffic buys nothing and costs clarity: whoever debugs a
-/// customer's filtering table next would find two kill-switches and have
-/// to work out which one was responsible for what.
+/// All five Xray protocols share one code path and one adapter and
+/// therefore one gap; OpenVPN and IKEv2 were measured leaking without it.
 ///
-/// Every other engine gets it, including all five Xray protocols, which
-/// share one code path and one adapter and therefore one gap.
+/// WireGuard was exempt until 2026-10-11, on the argument that `wireguard.exe`
+/// arms its own WFP kill-switch -- the capture that produced this module
+/// read provider "WireGuard" owning `Block all outbound (IPv6)` -- and a
+/// second provider blocking the same traffic would only confuse whoever
+/// read the filtering table next. That kill-switch does not leak, and it
+/// is kept. But it permits everything on its own tunnel, and our
+/// AllowedIPs (`0.0.0.0/0, ::/0`, from the backend) route IPv6 into that
+/// tunnel, which has no IPv6 address at either end: nothing refuses an
+/// IPv6 connect, it is simply never answered. Measured on the VM, a forced
+/// IPv6 connection on WireGuard waited 6-8 s before failing, where every
+/// other engine refuses it in milliseconds and a program falls back to
+/// IPv4 at once. The two providers now overlap on purpose: theirs keeps
+/// the tunnel the only way out, ours makes IPv6 fail fast.
+///
+/// Whether this block also refuses a dual-mode socket's IPv4 was an open
+/// question, and P0-B answered it on 0.9.48 (journal, 2026-10-11): it does
+/// not. With this block installed on Stealth and Compatible, a .NET
+/// dual-mode socket connecting to an IPv4-mapped address fetched a page
+/// through the tunnel, while a native IPv6 connect beside it was refused
+/// by "Neoxify: block all outbound (IPv6)". On Fast, wireguard.exe's own
+/// IPv4 block refused a dual-mode send exactly as it refused the plain
+/// IPv4 one. So Windows judges that traffic at the V4 layers, and this
+/// block, which is V6 only, does not see it. The V6 permits once planned
+/// for the tunnel and `::ffff:0:0/96` would have changed nothing, and
+/// were not built. One VM, one node; WireGuard with this block installed
+/// beside wireguard.exe's, as now, was not part of the measurement.
 pub fn needed_for(profile: &neoconnect_ipc::ConnectProfile) -> bool {
     use neoconnect_ipc::ConnectProfile as P;
     match profile {
-        P::Wireguard(_) => false,
-        P::Openvpn(_)
+        P::Wireguard(_)
+        | P::Openvpn(_)
         | P::Ikev2(_)
         | P::XrayVlessReality(_)
         | P::XrayVlessTls(_)
@@ -890,8 +978,8 @@ const SPLIT_LOG_FILE: &str = "ipv6-block-custom.log";
 /// `FwpmFilterAdd0` that references it and then be handed back to
 /// `FwpmFreeMemory0` -- and the failure mode of getting that wrong is a
 /// filter pointing at freed memory inside the filtering engine.
-struct AppId {
-    blob: *mut FWP_BYTE_BLOB,
+pub(super) struct AppId {
+    pub(super) blob: *mut FWP_BYTE_BLOB,
     /// Kept for the log line, which names what could not be resolved.
     path: String,
 }
@@ -902,7 +990,7 @@ impl AppId {
     /// A missing file is the common failure -- a customer's selection
     /// outlives the program they uninstalled -- and it is not fatal to
     /// anything: a program that is not there cannot leak.
-    fn resolve(path: &str) -> Result<Self, String> {
+    pub(super) fn resolve(path: &str) -> Result<Self, String> {
         let wide_path = wide(path);
         let mut blob: *mut FWP_BYTE_BLOB = std::ptr::null_mut();
         // SAFETY: `wide_path` is a live NUL-terminated UTF-16 buffer for
@@ -1028,14 +1116,20 @@ impl Drop for AppId {
 ///   `ALE_APP_ID` condition, so this sublayer has no opinion at all
 ///   about any other program on the machine.
 ///
-/// # The IPv4-mapped permit is load-bearing
+/// # The IPv4-mapped permit
 ///
-/// `::/64` is permitted, and it is not there for `::1`. A dual-stack
-/// socket's IPv4 traffic is classified at the **V6** ALE layer carrying
-/// an IPv4-mapped address (`::ffff:a.b.c.d`), which Microsoft documents
-/// explicitly. Without that permit this block would refuse a selected
-/// application's IPv4 as well -- which is to say, it would break Custom
-/// mode outright for the traffic Custom mode is for.
+/// `::/64` is permitted, and it is not there for `::1`. This comment used
+/// to say that a dual-stack socket's IPv4 is classified at the **V6** ALE
+/// layer carrying an IPv4-mapped address (`::ffff:a.b.c.d`), so that
+/// without the permit this block would refuse a selected application's
+/// IPv4 too. Measured on 0.9.48 (P0-B, journal 2026-10-11), that is not
+/// what happens at the connect layer: the machine-wide block, which has no
+/// such permit, did not refuse a dual-mode socket's IPv4, and
+/// wireguard.exe's IPv4 block did -- see [`needed_for`]. The permit stays,
+/// because it keeps these permits the exact complement of the redirect
+/// loop's filter (the test of that is below), but it is not what carries a
+/// selected application's IPv4. This block itself was not part of that
+/// measurement.
 pub struct SelectedAppsIpv6Block {
     engine: isize,
     filters: usize,
@@ -1175,8 +1269,8 @@ unsafe fn build_split(engine: HANDLE, app_ids: &[AppId]) -> Result<usize, String
 /// the loop passes through untouched:
 ///
 /// * `::/64` -- the unspecified address, `::1`, and the IPv4-mapped
-///   range. The last of those is the important one; see the type
-///   comment.
+///   range. The last of those was once thought to be how a dual-stack
+///   socket's IPv4 arrives here; see the type comment.
 /// * `fc00::/7` + `fe00::/8` + `ff00::/8` -- exactly `>= fc00::`, which
 ///   is unique-local, link-local and multicast. The LAN.
 ///
@@ -1284,9 +1378,259 @@ unsafe fn add_split_sublayer(engine: HANDLE) -> Result<(), String> {
     Err(format!("could not create the Neoxify Custom-mode filtering sublayer ({err:#010x})"))
 }
 
+// ---------------------------------------------------------------------
+// Custom mode's DNS hold: port 53 refused outside the tunnel while Custom
+// mode starts and while it ends.
+// ---------------------------------------------------------------------
+
+/// The hold's own provider. Not the shared Neoxify one: the hold is a
+/// dynamic session of its own that lives beside the Custom-mode IPv6
+/// block, which registers the shared provider, and two sessions on one
+/// provider object leave its deletion order between them to WFP, which
+/// does not document it (the IPv4 confinement has its own for the same
+/// reason). `pub(super)` so `repair` can sweep by it.
+pub(super) const HOLD_PROVIDER_KEY: GUID = GUID::from_u128(0x3d8e6f14_2a7b_4c95_b1e0_5f9a2c7d8e43);
+
+/// The hold's sublayer.
+pub(super) const HOLD_SUBLAYER_KEY: GUID = GUID::from_u128(0x4e9f7025_3b8c_4da6_82f1_6a0b3d8e9f54);
+
+const HOLD_PROVIDER_NAME: &str = "Neoxify DNS hold";
+const HOLD_SUBLAYER_NAME: &str = "Neoxify Custom-mode DNS hold";
+
+/// Below the IPv6 block's and the confinement's two. The order sublayers
+/// are consulted in, not whether a block wins -- a block in any does.
+const HOLD_SUBLAYER_WEIGHT: u16 = 0xFFFC;
+
+const HOLD_LOG_FILE: &str = "dns-hold.log";
+
+/// The hold's filters, as planned. Pure, so what it refuses can be tested
+/// where WFP cannot be.
+///
+/// Outbound port 53, on IPv4 and IPv6, refused -- with a resolver on this
+/// PC (loopback) and the engine's own connection permitted above that, as
+/// [`DnsConfinement`] permits them: a node listening on 53 stays
+/// reachable. By port rather than by address, because what has to stop is
+/// every lookup that would leave by the physical adapter in clear text,
+/// whichever resolver it is for. Nothing that is not port 53 is touched,
+/// and nothing inbound: a DNS server on this PC is asked on its local 53.
+pub(super) fn dns_hold_specs(engine: Option<&Path>) -> Vec<FilterSpec> {
+    let mut specs = Vec::new();
+    for (layer, family) in [(Layer::ConnectV4, "IPv4"), (Layer::ConnectV6, "IPv6")] {
+        specs.push(FilterSpec {
+            name: format!("Neoxify: permit loopback DNS while Custom mode starts or ends ({family})"),
+            layer,
+            action: Action::Permit,
+            weight: WEIGHT_PERMIT,
+            conds: vec![Cond::RemotePort(53), Cond::Loopback],
+        });
+        if let Some(engine) = engine {
+            specs.push(FilterSpec {
+                name: format!("Neoxify: permit the tunnel engine on port 53 ({family})"),
+                layer,
+                action: Action::Permit,
+                weight: WEIGHT_PERMIT,
+                conds: vec![Cond::RemotePort(53), Cond::App(engine.to_path_buf())],
+            });
+        }
+        specs.push(FilterSpec {
+            name: format!("Neoxify: hold DNS outside the tunnel ({family})"),
+            layer,
+            action: Action::Block,
+            weight: WEIGHT_BLOCK,
+            conds: vec![Cond::RemotePort(53)],
+        });
+    }
+    specs
+}
+
+/// Port 53 refused outside the tunnel, for exactly as long as this value
+/// lives: while Custom mode starts, until its redirect carries the
+/// lookups the NRPT rule pins to 1.1.1.1, and while it ends, until that
+/// rule is out. In both stretches a lookup has nothing to carry it into
+/// the tunnel and leaves by the physical adapter in clear text -- seen at
+/// the NIC on the VM: about six frames to 1.1.1.1:53 in the 1.5 s before
+/// the rule on a Custom-mode connect, and up to twelve after every Xray
+/// disconnect or crash (P3 run g2-01). Refused, the lookup fails on this
+/// PC instead; the hold is gone before the operation that needed it
+/// answers, so no lookup waits on it longer than the connect or the
+/// teardown itself.
+///
+/// A dynamic WFP session, like every block in this file: the kernel
+/// removes it if the service dies holding it.
+pub struct DnsHold {
+    /// The WFP engine handle, as an integer for the reason
+    /// [`Ipv6Block::engine`] gives.
+    engine: isize,
+    filters: usize,
+    log: PathBuf,
+}
+
+impl DnsHold {
+    /// Puts the hold in, or says why it could not. `engine_exe` is the
+    /// tunnel engine to permit on port 53, where there is one to name.
+    pub fn install(log_dir: &Path, engine_exe: Option<&Path>) -> Result<Self, String> {
+        let log = log_dir.join(HOLD_LOG_FILE);
+        // Held until the transaction has committed: the engine's permit
+        // points into this blob. One that cannot be resolved loses only its
+        // own permit, as in the IPv6 block's DNS confinement.
+        let engine_app = engine_exe.and_then(|exe| {
+            AppId::resolve(&exe.to_string_lossy())
+                .map_err(|e| note(&log, &format!("engine not permitted on port 53: {e}")))
+                .ok()
+        });
+        let engine_named = engine_app.as_ref().and(engine_exe);
+        let specs = dns_hold_specs(engine_named);
+        let engine = open_dynamic_session_named(
+            HOLD_SUBLAYER_NAME,
+            "Holds DNS outside the tunnel while Neoxify's Custom mode starts or ends",
+        )?;
+        // SAFETY: `engine` is live, and the blob `engine_app` holds outlives
+        // the call.
+        match unsafe { build_hold(engine, &specs, engine_app.as_ref().map(|a| a.blob as *const FWP_BYTE_BLOB)) } {
+            Ok(filters) => {
+                note(&log, &format!("held: {filters} filters, provider {HOLD_PROVIDER_NAME}, sublayer {HOLD_SUBLAYER_NAME}"));
+                Ok(Self { engine: engine as isize, filters, log })
+            }
+            Err(e) => {
+                // SAFETY: opened above and not shared; closing it ends the
+                // session and whatever a failed transaction left in it.
+                unsafe { FwpmEngineClose0(engine) };
+                note(&log, &format!("hold failed: {e}"));
+                Err(e)
+            }
+        }
+    }
+
+    /// Lets go. Safe to call any number of times.
+    pub fn remove(&mut self) {
+        if self.engine == 0 {
+            return;
+        }
+        let engine = std::mem::replace(&mut self.engine, 0) as HANDLE;
+        // SAFETY: the handle came from `open_dynamic_session_named` and is
+        // closed once -- it is taken above.
+        let err = unsafe { FwpmEngineClose0(engine) };
+        if err == 0 {
+            note(&self.log, &format!("released: {} filters", self.filters));
+        } else {
+            note(&self.log, &format!("release reported {err:#010x}; the session ends with the process"));
+        }
+    }
+}
+
+impl Drop for DnsHold {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
+/// # Safety
+/// `engine` must be live, and an app-id pointer in `app` alive for the
+/// duration.
+unsafe fn build_hold(engine: HANDLE, specs: &[FilterSpec], app: Option<*const FWP_BYTE_BLOB>) -> Result<usize, String> {
+    let err = FwpmTransactionBegin0(engine, 0);
+    if err != 0 {
+        return Err(format!("could not begin a filtering transaction ({err:#010x})"));
+    }
+    match add_hold(engine, specs, app) {
+        Ok(filters) => {
+            let err = FwpmTransactionCommit0(engine);
+            if err != 0 {
+                FwpmTransactionAbort0(engine);
+                return Err(format!("the DNS hold could not be committed ({err:#010x})"));
+            }
+            Ok(filters)
+        }
+        Err(e) => {
+            FwpmTransactionAbort0(engine);
+            Err(e)
+        }
+    }
+}
+
+/// The hold's provider, sublayer and filters.
+///
+/// # Safety
+/// Inside an open transaction; an app-id pointer in `app` alive for the
+/// duration.
+unsafe fn add_hold(engine: HANDLE, specs: &[FilterSpec], app: Option<*const FWP_BYTE_BLOB>) -> Result<usize, String> {
+    let mut name = wide(HOLD_PROVIDER_NAME);
+    let mut description = wide("Neoxify VPN: DNS held while Custom mode starts or ends");
+    let mut provider: FWPM_PROVIDER0 = std::mem::zeroed();
+    provider.providerKey = HOLD_PROVIDER_KEY;
+    provider.displayData.name = name.as_mut_ptr();
+    provider.displayData.description = description.as_mut_ptr();
+    // Not persistent: it belongs to the dynamic session.
+    provider.flags = 0;
+    let err = FwpmProviderAdd0(engine, &provider, std::ptr::null_mut());
+    if err != 0 && err != FWP_E_ALREADY_EXISTS as u32 {
+        return Err(format!("could not register the {HOLD_PROVIDER_NAME} filtering provider ({err:#010x})"));
+    }
+
+    let mut sublayer_name = wide(HOLD_SUBLAYER_NAME);
+    let mut sublayer_description = wide("DNS outside the tunnel, held while Custom mode starts or ends");
+    let mut provider_key = HOLD_PROVIDER_KEY;
+    let mut sublayer: FWPM_SUBLAYER0 = std::mem::zeroed();
+    sublayer.subLayerKey = HOLD_SUBLAYER_KEY;
+    sublayer.displayData.name = sublayer_name.as_mut_ptr();
+    sublayer.displayData.description = sublayer_description.as_mut_ptr();
+    sublayer.flags = 0;
+    sublayer.providerKey = &mut provider_key;
+    sublayer.weight = HOLD_SUBLAYER_WEIGHT;
+    let err = FwpmSubLayerAdd0(engine, &sublayer, std::ptr::null_mut());
+    if err != 0 && err != FWP_E_ALREADY_EXISTS as u32 {
+        return Err(format!("could not create the {HOLD_SUBLAYER_NAME} sublayer ({err:#010x})"));
+    }
+
+    for planned in specs {
+        let mut scopes = Vec::with_capacity(planned.conds.len());
+        for cond in &planned.conds {
+            scopes.push(match cond {
+                Cond::Loopback => Scope::Loopback,
+                Cond::RemotePort(port) => Scope::RemotePort(*port),
+                Cond::App(path) => match app {
+                    Some(blob) => Scope::App(blob),
+                    None => return Err(format!("{} was not resolved before the filters went in", path.display())),
+                },
+                other => return Err(format!("the {HOLD_SUBLAYER_NAME} has no condition like {other:?}")),
+            });
+        }
+        let action = match planned.action {
+            Action::Permit => FWP_ACTION_PERMIT,
+            Action::Block => FWP_ACTION_BLOCK,
+        };
+        add_filter_under(
+            engine,
+            HOLD_PROVIDER_KEY,
+            &planned.name,
+            super::confinement::layer_key(planned.layer),
+            HOLD_SUBLAYER_KEY,
+            action,
+            planned.weight,
+            &scopes,
+        )?;
+    }
+    Ok(specs.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One way of opening a session serves every block that opens one --
+    /// the IPv6 block, Custom mode's, the IPv4 confinement, the
+    /// confinement's witness -- and its failure is reported in the words
+    /// of the one that asked. It said "so IPv6 could not be blocked" for
+    /// all of them, so a confinement that would not install told support
+    /// the wrong block had failed.
+    #[test]
+    fn a_refused_session_is_reported_for_the_block_that_asked() {
+        let confinement = session_refused("Neoxify IPv4 confinement", 0x8032_0008);
+        assert!(confinement.contains("Neoxify IPv4 confinement") && confinement.contains("0x80320008"), "{confinement}");
+        assert!(!confinement.contains("IPv6"), "{confinement}");
+        let ipv6 = session_refused(SUBLAYER_NAME, 5);
+        assert!(ipv6.contains(SUBLAYER_NAME), "{ipv6}");
+    }
     use neoconnect_ipc::{
         ConnectProfile, Ikev2Profile, OpenvpnProfile, ShadowsocksProfile, TrojanProfile,
         VlessTlsProfile, WireguardProfile, XrayProfile,
@@ -1305,7 +1649,7 @@ mod tests {
     /// share an engine, an adapter and therefore a gap, so they are
     /// listed individually here rather than trusted to be equivalent.
     #[test]
-    fn every_engine_but_wireguard_needs_the_block() {
+    fn every_engine_needs_the_block() {
         let wireguard = ConnectProfile::Wireguard(WireguardProfile {
             private_key: String::new(),
             address: "10.77.0.8/32".into(),
@@ -1315,8 +1659,9 @@ mod tests {
             endpoint: "203.0.113.1:51820".into(),
         });
         assert!(
-            !needed_for(&wireguard),
-            "wireguard.exe arms its own WFP kill-switch; a second one only confuses the table"
+            needed_for(&wireguard),
+            "wireguard.exe's own kill-switch carries IPv6 into a tunnel with nowhere to send it, \
+             where a forced IPv6 connect waited 6-8 s; ours refuses it on the PC"
         );
 
         let xray = XrayProfile {
@@ -1383,7 +1728,7 @@ mod tests {
     /// and value type -- and it does that validation *inside* the
     /// transaction, before anything is committed. So aborting afterwards
     /// exercises `FwpmEngineOpen0`, the provider, the sublayer and all
-    /// ten `FwpmFilterAdd0` calls against the actual operating system
+    /// thirteen `FwpmFilterAdd0` calls against the actual operating system
     /// while never filtering a single packet.
     ///
     /// What it does **not** prove is that IPv6 stops. Nothing that runs
@@ -1411,7 +1756,8 @@ mod tests {
                 eprintln!("skipped: no filtering transaction ({begun:#010x})");
                 return;
             }
-            let result = add_everything(engine, true, None);
+            let specs = full_tunnel_specs(true, None);
+            let result = add_everything(engine, &specs, None);
             // Unconditionally, and before the assertion below, so a
             // failing assertion cannot leave a transaction open. Closing
             // the handle would end the dynamic session anyway, which is
@@ -1423,8 +1769,8 @@ mod tests {
 
         match result {
             Ok(filters) => assert_eq!(
-                filters, 10,
-                "five filters per layer, two layers -- see add_everything"
+                filters, 13,
+                "five filters per layer, two layers, and three for DNS to link-local and multicast -- see full_tunnel_specs"
             ),
             Err(e) => panic!("the Windows Filtering Platform rejected our filter set: {e}"),
         }
@@ -1435,6 +1781,80 @@ mod tests {
     /// layer, and each is a structure WFP validates on add. A real LUID
     /// -- loopback's, which every machine has -- and this test binary's
     /// own app id, so nothing is fabricated. Aborted like the one above.
+    /// Custom mode's DNS hold, as planned: port 53 refused outbound on
+    /// IPv4 and IPv6 alike, a resolver on this PC and the engine's own
+    /// connection permitted above that, and nothing that is not port 53
+    /// touched at all -- it is held while Custom mode starts and ends, on a
+    /// machine whose other traffic is none of its business.
+    #[test]
+    fn the_dns_hold_refuses_only_port_53_and_spares_loopback_and_the_engine() {
+        let engine = std::path::PathBuf::from(r"C:\Program Files\Neoxify\xray.exe");
+        for named in [None, Some(engine.as_path())] {
+            let specs = dns_hold_specs(named);
+            assert!(specs.iter().all(|s| s.conds.contains(&Cond::RemotePort(53))), "{specs:?}");
+            for layer in [Layer::ConnectV4, Layer::ConnectV6] {
+                let blocks = find(&specs, layer, &[Cond::RemotePort(53)]);
+                assert_eq!(blocks.len(), 1, "{layer:?}: {specs:?}");
+                assert_eq!(blocks[0].action, Action::Block);
+                let loopback = find(&specs, layer, &[Cond::RemotePort(53), Cond::Loopback]);
+                assert_eq!(loopback.len(), 1, "{layer:?}: a resolver on this PC is refused");
+                assert_eq!(loopback[0].action, Action::Permit);
+                assert!(loopback[0].weight > blocks[0].weight, "the refusal outweighs its permit");
+                let app = specs
+                    .iter()
+                    .filter(|s| s.layer == layer && s.conds.iter().any(|c| matches!(c, Cond::App(_))))
+                    .collect::<Vec<_>>();
+                match named {
+                    Some(path) => {
+                        assert_eq!(app.len(), 1, "{layer:?}: the engine's own connection is refused");
+                        assert_eq!(app[0].conds, vec![Cond::RemotePort(53), Cond::App(path.to_path_buf())]);
+                        assert_eq!(app[0].action, Action::Permit);
+                        assert!(app[0].weight > blocks[0].weight);
+                    }
+                    None => assert!(app.is_empty(), "an engine permitted that was never named"),
+                }
+            }
+            assert!(specs.iter().all(|s| s.layer == Layer::ConnectV4 || s.layer == Layer::ConnectV6), "inbound touched");
+        }
+        // Its own provider and sublayer: it lives beside the Custom-mode
+        // IPv6 block (shared provider) and the IPv4 confinement, and a
+        // dynamic session must not put its objects under another's.
+        for other in [PROVIDER_KEY, SUBLAYER_KEY, SPLIT_SUBLAYER_KEY] {
+            for ours in [HOLD_PROVIDER_KEY, HOLD_SUBLAYER_KEY] {
+                assert_ne!(other.data1, ours.data1);
+            }
+        }
+    }
+
+    /// The hold's filters, added for real and aborted, as the blocks above
+    /// are: its own provider and sublayer, and this test binary's app id.
+    #[test]
+    fn wfp_accepts_the_dns_hold_then_it_is_aborted() {
+        let exe = std::env::current_exe().expect("test binary path");
+        let app = AppId::resolve(&exe.to_string_lossy()).expect("the test binary resolves to an app id");
+        let Ok(engine) = open_dynamic_session_named(HOLD_SUBLAYER_NAME, "test") else {
+            eprintln!("skipped: the filtering engine would not open (needs administrator)");
+            return;
+        };
+        let result = unsafe {
+            let begun = FwpmTransactionBegin0(engine, 0);
+            if begun != 0 {
+                FwpmEngineClose0(engine);
+                eprintln!("skipped: no filtering transaction ({begun:#010x})");
+                return;
+            }
+            let specs = dns_hold_specs(Some(exe.as_path()));
+            let result = add_hold(engine, &specs, Some(app.blob as *const FWP_BYTE_BLOB));
+            FwpmTransactionAbort0(engine);
+            FwpmEngineClose0(engine);
+            result
+        };
+        match result {
+            Ok(filters) => assert_eq!(filters, 6, "a permit for loopback and the engine, and the refusal, per family"),
+            Err(e) => panic!("the Windows Filtering Platform rejected the DNS hold: {e}"),
+        }
+    }
+
     #[test]
     fn wfp_accepts_the_dns_confinement_filters_then_they_are_aborted() {
         let Ok(confinement) =
@@ -1457,15 +1877,16 @@ mod tests {
                 eprintln!("skipped: no filtering transaction ({begun:#010x})");
                 return;
             }
-            let result =
-                add_everything(engine, true, Some((confinement.tunnel_luid, Some(app.blob as *const _))));
+            let exe = confinement.engine_exe.as_deref();
+            let specs = full_tunnel_specs(true, Some((confinement.tunnel_luid, exe)));
+            let result = add_everything(engine, &specs, Some(app.blob as *const FWP_BYTE_BLOB));
             FwpmTransactionAbort0(engine);
             FwpmEngineClose0(engine);
             result
         };
 
         match result {
-            Ok(filters) => assert_eq!(filters, 14, "ten IPv6 filters and four for DNS"),
+            Ok(filters) => assert_eq!(filters, 17, "thirteen IPv6 filters and four for DNS over IPv4"),
             Err(e) => panic!("the Windows Filtering Platform rejected the DNS filters: {e}"),
         }
     }
@@ -1484,6 +1905,88 @@ mod tests {
         assert_eq!(multicast[0], 0xff);
 
         assert_eq!(Ipv6Addr::LOCALHOST.octets()[15], 1);
+    }
+
+    fn find<'a>(specs: &'a [FilterSpec], layer: Layer, conds: &[Cond]) -> Vec<&'a FilterSpec> {
+        specs.iter().filter(|s| s.layer == layer && s.conds.as_slice() == conds).collect()
+    }
+
+    /// DNS to the router's link-local address -- fe80::2, port 53, seen at
+    /// the NIC on every Xray run of the P3 gate while the app said "You're
+    /// protected" -- is refused above the permits that keep link-local and
+    /// multicast working, with or without the DNS confinement beside it
+    /// (OpenVPN has none of ours). A resolver on this PC stays reachable
+    /// over that refusal, and inbound is not touched: a DNS server on this
+    /// PC, a Mobile Hotspot's, is asked on its local port.
+    #[test]
+    fn dns_to_link_local_and_multicast_ipv6_is_refused_above_their_permits() {
+        let engine = std::path::PathBuf::from(r"C:\Program Files\Neoxify\xray.exe");
+        for dns in [None, Some((7u64, None)), Some((7u64, Some(engine.as_path())))] {
+            let specs = full_tunnel_specs(true, dns);
+            let blocks = find(&specs, Layer::ConnectV6, &[Cond::RemotePort(53)]);
+            assert_eq!(blocks.len(), 1, "{dns:?}: {specs:?}");
+            let block = blocks[0];
+            assert_eq!(block.action, Action::Block);
+            for range in [
+                Cond::RemoteV6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
+                Cond::RemoteV6(Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
+            ] {
+                let permits = find(&specs, Layer::ConnectV6, &[range.clone()]);
+                assert_eq!(permits.len(), 1, "{range:?}");
+                assert_eq!(permits[0].action, Action::Permit);
+                assert!(block.weight > permits[0].weight, "{range:?}: the permit outweighs the DNS block");
+            }
+            for local in [
+                vec![Cond::RemotePort(53), Cond::Loopback],
+                vec![Cond::RemotePort(53), Cond::RemoteV6(Ipv6Addr::LOCALHOST, 128)],
+            ] {
+                let permits = find(&specs, Layer::ConnectV6, &local);
+                assert_eq!(permits.len(), 1, "{local:?}");
+                assert_eq!(permits[0].action, Action::Permit);
+                assert!(permits[0].weight > block.weight, "{local:?}: a resolver on this PC is refused");
+                assert!(permits[0].weight <= 15, "FWP_UINT8 weights run 0-15");
+            }
+            assert!(
+                specs.iter().filter(|s| s.layer == Layer::RecvAcceptV6).all(|s| !s.conds.contains(&Cond::RemotePort(53))),
+                "inbound DNS is not this block's"
+            );
+            // Global IPv6 is still refused by the block under everything.
+            for layer in [Layer::ConnectV6, Layer::RecvAcceptV6] {
+                let everything = find(&specs, layer, &[]);
+                assert_eq!(everything.len(), 1, "{layer:?}");
+                assert_eq!((everything[0].action, everything[0].weight), (Action::Block, WEIGHT_BLOCK));
+            }
+        }
+    }
+
+    /// DNS over IPv4 is confined only when asked, and the engine is named
+    /// in it only when it could be: a permit with no app id behind it is a
+    /// filter WFP would refuse, taking the IPv6 block down with it. And the
+    /// IPv6 block's filters only when it is asked for.
+    #[test]
+    fn the_plan_confines_ipv4_dns_only_when_asked_and_names_the_engine_only_when_given() {
+        let v4 = |specs: &[FilterSpec]| specs.iter().filter(|s| s.layer == Layer::ConnectV4).count();
+        let v6 = |specs: &[FilterSpec]| specs.iter().filter(|s| s.layer != Layer::ConnectV4).count();
+        let engine = std::path::PathBuf::from(r"C:\Program Files\Neoxify\xray.exe");
+
+        let alone = full_tunnel_specs(true, None);
+        assert_eq!((v6(&alone), v4(&alone)), (13, 0));
+
+        let unnamed = full_tunnel_specs(true, Some((7, None)));
+        assert_eq!(v4(&unnamed), 3);
+        assert!(unnamed.iter().all(|s| !s.conds.iter().any(|c| matches!(c, Cond::App(_)))));
+
+        let named = full_tunnel_specs(true, Some((7, Some(engine.as_path()))));
+        assert_eq!(v4(&named), 4);
+        assert_eq!(
+            find(&named, Layer::ConnectV4, &[Cond::RemotePort(53), Cond::App(engine.clone())]).len(),
+            1
+        );
+        assert_eq!(find(&named, Layer::ConnectV4, &[Cond::RemotePort(53), Cond::LocalInterface(7)]).len(), 1);
+
+        let dns_only = full_tunnel_specs(false, Some((7, None)));
+        assert_eq!((v6(&dns_only), v4(&dns_only)), (0, 3));
+        assert!(named.iter().all(|s| s.name.starts_with("Neoxify")));
     }
 
     // -----------------------------------------------------------------
@@ -1537,13 +2040,13 @@ mod tests {
     /// The permits and the loop's own filter must partition the address
     /// space between them, with nothing over and nothing missing.
     ///
-    /// This is the test that matters most in this file, and the reason
-    /// is the third case in the table. A dual-stack socket's **IPv4**
-    /// traffic is classified at the IPv6 ALE layer carrying an
-    /// IPv4-mapped address, so a block that forgot `::/64` would refuse
-    /// a selected application's IPv4 -- which is to say it would break
-    /// the feature it is meant to protect, on exactly the machines that
-    /// have IPv6 at all, and it would do it silently.
+    /// An address on neither side is one the loop leaves alone and this
+    /// block refuses: a selected application's traffic that nothing
+    /// carries, silently. The third case in the table, IPv4-mapped, was
+    /// thought to be how a dual-stack socket's IPv4 arrives at the V6
+    /// layer; measured on 0.9.48 it is judged at the V4 layers instead
+    /// (see the comment on `SelectedAppsIpv6Block`), and the row stays
+    /// because the partition has to hold wherever it falls.
     ///
     /// It can fail: dropping any entry from `SPLIT_PERMITTED`, or
     /// writing `/8` where `/7` belongs on `fc00::`, moves at least one

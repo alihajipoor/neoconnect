@@ -271,6 +271,24 @@ const en = {
   // which part is not covered.
   "dash.tunnelDnsUnforced":
     "Your traffic is going through the VPN, but Neoxify couldn't send this device's DNS lookups through it. Your internet provider's DNS can still answer, and on a filtered network those answers are often wrong — so some sites may still not open. Disconnect and reconnect to try again; if it keeps happening, use Repair network.",
+  // Shown when a full tunnel on Stealth or Compatible is up and Neoxify
+  // could not stop connections going around it on this computer (the
+  // service's `ipv4_confined: false` -- the owner's decision (d)). The
+  // rest of this computer's connections are not held to the tunnel, so it
+  // must not read as "protected". What is not covered is said plainly:
+  // programs that send straight over the network, and connections opened
+  // before Connect. Nothing about the tunnel itself carrying traffic: the
+  // line shows in "not confirmed" and "not carrying traffic" too, where
+  // the headline says that part. Never shown in Custom mode or on WireGuard (its own
+  // kill switch does this); Built-in has a line of its own below.
+  "dash.ipv4NotConfined":
+    "Neoxify couldn't stop other connections on this computer from going around the VPN. Programs that send straight over your network, and connections opened before you connected, may still be seen by your network. Disconnect and reconnect to try again; if it keeps happening, tell support.",
+  // The same line for Built-in (IKEv2), which is not confined by choice
+  // in this version: its plan waits on its own proof, so reconnecting
+  // changes nothing, and the way to full protection is another protocol.
+  // The service says so with `ipv4_confined: false` (unconfinedLine).
+  "dash.ipv4NotConfinedIkev2":
+    "Built-in uses this device's own VPN, and Neoxify can't yet stop other connections on this computer from going around it. Programs that send straight over your network, and connections opened before you connected, may still be seen by your network. For full protection, use another protocol.",
   // Shown when the customer selected an application that was already
   // open. Custom mode routes the connections a program makes *after* it
   // is selected; the ones it already held cannot be moved, because a
@@ -557,6 +575,12 @@ const en = {
   "dash.disconnectToChange": "Disconnect first to change server or protocol",
   "dash.protected": "You're protected",
   "dash.protectedHint": "Your traffic is encrypted and routed through Neoxify.",
+  // The headline over a full tunnel whose IPv4 confinement did not go in
+  // (`warnsUnconfined`): the tunnel carries traffic and was verified, and
+  // "You're protected" would still be more than is true. The line under
+  // the orb (`dash.ipv4NotConfined`) says what is not covered.
+  "dash.connectedNotConfined": "Connected, not fully protected",
+  "dash.connectedNotConfinedHint": "Your traffic goes through Neoxify, but some connections on this computer may still go around it.",
   "dash.notProtected": "You're not protected",
   "dash.notProtectedHint": "Connect to encrypt your traffic and hide your IP.",
   // A tunnel the screen was vouching for closed without anyone asking.
@@ -586,6 +610,14 @@ const en = {
   // customer is told that rather than watching attempts fail.
   "dash.reconnectingOfflineHint":
     "The tunnel closed and there's no network. Neoxify will reconnect when the network is back. Until then, your traffic is not protected.",
+  // The service found no network to dial over, before dialling anything
+  // (network-wait.ts): the pass waits for one on the same server instead of
+  // walking the list, and says so. Nothing about a server -- none was
+  // dialled -- and, fail open being unchanged, nothing protected until the
+  // tunnel is up. Also the headline of a reconnect waiting for a network.
+  "dash.waitingForNetwork": "Waiting for a network connection",
+  "dash.waitingForNetworkHint":
+    "This computer isn't connected to a network. Neoxify will connect as soon as it is. Until then, your traffic is not protected.",
   // The orb between attempts: the customer's own connect, now, instead of
   // waiting for the next attempt.
   "dash.reconnectNow": "Reconnect now",
@@ -639,6 +671,21 @@ const en = {
   // customer at a problem that does not exist; it also buries the one
   // thing they can act on, which is that pinning a choice makes it stick.
   "dash.usedInstead": "Used {to} over {protocol}, not {from}. Pick a server to stay on it.",
+  // The pass started with no network at all -- the service found no
+  // connection with a gateway to dial over -- and landed once one came
+  // back. The server on screen was never dialled, so it is not blamed; and
+  // "your usual protocol didn't get through" would be the same claim about
+  // a protocol. Seen on the VM with the network adapter switched off
+  // mid-connect: "Couldn't reach fi-finland" about a server nothing had
+  // asked (failover-notice.ts).
+  "dash.switchedNoNetwork": "No network connection at first, so {from} wasn't tried. Now on {to} over {protocol}",
+  "dash.switchedToNoNetwork": "No network connection at first. Now using",
+  // The pass stayed in the country and nothing it tried was dialled and
+  // failed -- it landed at once on a route other than the one on screen,
+  // or every failure came before anything was dialled. Only where the
+  // connection is: "didn't get through" would be a claim nothing made
+  // true (failover-notice.ts).
+  "dash.nowUsing": "Now using",
   "dash.yourIp": "Your IP:",
   "err.serviceUnavailable": "The Neoxify background service isn't running. Restarting the app usually fixes this; reinstalling will if it doesn't.",
   "err.engineMissing": "Part of the installation is missing. Please reinstall Neoxify.",
@@ -663,6 +710,9 @@ const en = {
   // nothing, and it deliberately names no server -- nothing was dialled,
   // so there is nothing to report about one.
   "err.connectBusy": "A connection attempt is already running. Give it a moment, then try again.",
+  // The service found no network connection with a gateway to dial over:
+  // nothing was dialled, so no server is named and none is blamed.
+  "err.noNetwork": "No network connection. Check that this device is online, then try again.",
   "err.unknown": "Couldn't connect.",
   "err.showDetail": "Technical details",
 
@@ -825,6 +875,11 @@ const en = {
   "dash.modeVpn": "VPN",
   "dash.modeGaming": "Gaming",
   "dash.modeVpnHint": "Everything on this computer goes through Neoxify.",
+  // The same mode's line while the tunnel is up and its IPv4 is not
+  // confined to it (`warnsUnconfined`): what the mode is for, and that it
+  // does not hold right now -- beside the warning that says why, rather
+  // than contradicting it.
+  "dash.modeVpnHintNotConfined": "Meant to send everything on this computer through Neoxify; right now some connections may go around it.",
   // The line above is false in Custom mode, and was shown there anyway.
   "dash.modeCustomHint": "Custom mode: only the apps you chose go through Neoxify.",
   "dash.modeCustomExceptHint": "Custom mode: everything goes through Neoxify except the apps you chose.",
@@ -1199,6 +1254,10 @@ const fa: Record<TranslationKey, string> = {
     "بخشی از ترافیک شما از طریق IPv6 و بیرون از VPN ارسال می‌شود. نشانی IPv6 شما برای شبکه‌تان دیده می‌شود. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
   "dash.tunnelDnsUnforced":
     "ترافیک شما از VPN عبور می‌کند، اما Neoxify نتوانست درخواست‌های DNS این دستگاه را از داخل آن بفرستد. سرویس‌دهنده اینترنت شما همچنان می‌تواند به این درخواست‌ها پاسخ بدهد و روی شبکه فیلترشده این پاسخ‌ها اغلب نادرست هستند — بنابراین ممکن است بعضی سایت‌ها همچنان باز نشوند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، از «ترمیم شبکه» استفاده کنید.",
+  "dash.ipv4NotConfined":
+    "Neoxify نتوانست جلوی اتصال‌های دیگر این کامپیوتر را بگیرد که از کنار VPN عبور می‌کنند. برنامه‌هایی که مستقیماً از طریق شبکه شما ارسال می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است همچنان برای شبکه‌تان قابل مشاهده باشند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
+  "dash.ipv4NotConfinedIkev2":
+    "پروتکل Built-in از VPN خود این دستگاه استفاده می‌کند و Neoxify هنوز نمی‌تواند جلوی اتصال‌های دیگر این کامپیوتر را بگیرد که از کنار آن عبور می‌کنند. برنامه‌هایی که مستقیماً از طریق شبکه شما ارسال می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است همچنان برای شبکه‌تان قابل مشاهده باشند. برای محافظت کامل، از پروتکل دیگری استفاده کنید.",
   "dash.splitTunnelRestartNeeded":
     "‏{apps} پیش از انتخاب شما باز بود. اتصال‌هایی که از این پس برقرار می‌کند از VPN عبور می‌کنند، اما اتصال‌هایی که از قبل داشته عبور نمی‌کنند — این‌ها را نمی‌توان بدون قطع شدن جابه‌جا کرد. برای اینکه همه ترافیک آن از VPN عبور کند، برنامه را ببندید و دوباره باز کنید.",
   "voucher.title": "کد هدیه دارید؟",
@@ -1327,6 +1386,8 @@ const fa: Record<TranslationKey, string> = {
   "dash.disconnectToChange": "برای تغییر سرور یا پروتکل، ابتدا قطع اتصال کنید",
   "dash.protected": "شما محافظت می‌شوید",
   "dash.protectedHint": "ترافیک شما رمزگذاری شده و از طریق نئوکسیفای عبور می‌کند.",
+  "dash.connectedNotConfined": "متصل، اما نه به‌طور کامل محافظت‌شده",
+  "dash.connectedNotConfinedHint": "ترافیک شما از طریق نئوکسیفای عبور می‌کند، اما ممکن است برخی اتصال‌های این کامپیوتر همچنان از کنار آن عبور کنند.",
   "dash.notProtected": "شما محافظت نمی‌شوید",
   "dash.notProtectedHint": "برای رمزگذاری ترافیک و پنهان‌کردن آی‌پی خود متصل شوید.",
   "dash.dropped": "اتصال VPN قطع شد",
@@ -1337,6 +1398,9 @@ const fa: Record<TranslationKey, string> = {
     "تونل بسته شد. تا وقتی دوباره وصل شود، ترافیک شما بدون نئوکسیفای ارسال می‌شود و محافظت نمی‌شود.",
   "dash.reconnectingOfflineHint":
     "تونل بسته شد و شبکه‌ای در دسترس نیست. نئوکسیفای پس از برگشتن شبکه دوباره وصل می‌شود. تا آن زمان، ترافیک شما محافظت نمی‌شود.",
+  "dash.waitingForNetwork": "در انتظار اتصال به شبکه",
+  "dash.waitingForNetworkHint":
+    "این کامپیوتر به شبکه‌ای وصل نیست. نئوکسیفای به محض وصل شدن شبکه وصل می‌شود. تا آن زمان، ترافیک شما محافظت نمی‌شود.",
   "dash.reconnectNow": "همین حالا وصل شوید",
   "dash.reconnectStop": "توقف اتصال دوباره",
   "dash.degraded": "ترافیک عبور نمی‌کند",
@@ -1356,6 +1420,9 @@ const fa: Record<TranslationKey, string> = {
   "dash.switchedTo": "پروتکل همیشگی شما عبور نکرد. اکنون از این استفاده می‌شود:",
   "dash.switchedServer": "دسترسی به {from} ممکن نشد. اکنون {to} با {protocol}",
   "dash.usedInstead": "به‌جای {from}، {to} با {protocol} استفاده شد. برای ثابت‌ماندن، یک سرور انتخاب کنید.",
+  "dash.switchedNoNetwork": "ابتدا اتصال شبکه برقرار نبود، پس {from} امتحان نشد. اکنون {to} با {protocol}",
+  "dash.switchedToNoNetwork": "ابتدا اتصال شبکه برقرار نبود. اکنون از این استفاده می‌شود:",
+  "dash.nowUsing": "اکنون از این استفاده می‌شود:",
   "dash.yourIp": "آی‌پی شما:",
   "err.serviceUnavailable": "سرویس پس‌زمینه نئوکسیفای اجرا نمی‌شود. معمولاً راه‌اندازی دوباره برنامه مشکل را حل می‌کند.",
   "err.engineMissing": "بخشی از نصب ناقص است. لطفاً دوباره نصب کنید.",
@@ -1372,6 +1439,7 @@ const fa: Record<TranslationKey, string> = {
   "err.quotaExhausted": "حجم پلن شما تمام شده است.",
   "err.subscriptionInactive": "اشتراک شما فعال نیست.",
   "err.connectBusy": "یک تلاش برای اتصال در حال انجام است. کمی صبر کنید و دوباره امتحان کنید.",
+  "err.noNetwork": "اتصال شبکه برقرار نیست. مطمئن شوید این دستگاه به اینترنت وصل است و دوباره امتحان کنید.",
   "err.unknown": "اتصال برقرار نشد.",
   "err.showDetail": "جزئیات فنی",
 
@@ -1474,6 +1542,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.modeVpn": "وی‌پی‌ان",
   "dash.modeGaming": "بازی",
   "dash.modeVpnHint": "همه‌ی ترافیک این رایانه از نئوکسیفای عبور می‌کند.",
+  "dash.modeVpnHintNotConfined": "قرار است همه‌ی ترافیک این رایانه از نئوکسیفای عبور کند؛ اما اکنون ممکن است برخی اتصال‌ها از کنار آن عبور کنند.",
   "dash.modeCustomHint": "حالت سفارشی: فقط برنامه‌هایی که انتخاب کرده‌اید از نئوکسیفای عبور می‌کنند.",
   "dash.modeCustomExceptHint": "حالت سفارشی: همه‌چیز به‌جز برنامه‌هایی که انتخاب کرده‌اید از نئوکسیفای عبور می‌کند.",
   "dash.modeGamingHint":

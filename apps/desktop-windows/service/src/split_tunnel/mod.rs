@@ -59,7 +59,7 @@ mod policy;
 mod relay;
 mod session;
 mod tables;
-mod worker;
+pub(crate) mod worker;
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -74,6 +74,8 @@ use session::Session;
 pub(crate) use net::firewall;
 pub use policy::{Selection, SharedSelection};
 pub use picker::running_apps;
+// For a full tunnel's reset at connect -- see `engines::confinement`.
+pub(crate) use tables::{reset_outside_the_tunnel, OutsideTunnel, ResetOutcome};
 
 /// Whether Custom mode is running, readable without the `Engines` lock.
 ///
@@ -494,6 +496,14 @@ impl SplitTunnel {
     pub fn complaint(&self) -> Option<String> {
         let active = self.active.as_ref()?;
         active.complaint()
+    }
+
+    /// Whether the backstop has switched interception off under the
+    /// running session because its tunnel adapter went away. Nothing is
+    /// redirected after that, whatever the tunnel does, until the session
+    /// is rebuilt. `false` when nothing is running.
+    pub fn interception_stopped(&self) -> bool {
+        self.active.as_ref().is_some_and(|active| active.interception_stopped())
     }
 
     /// Whether the tunnel is really carrying traffic, checked over the

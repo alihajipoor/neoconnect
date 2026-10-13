@@ -20,6 +20,8 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
 
+use crate::engines::route_table::RouteRow;
+
 #[derive(Debug, Clone)]
 pub struct Adapter {
     pub index: u32,
@@ -35,7 +37,21 @@ pub struct Adapter {
     /// address from the interception filter is what stops the proxy
     /// intercepting its own upstream traffic in a loop.
     pub ipv4: Option<Ipv4Addr>,
+    /// The on-link prefix length of that address (`OnLinkPrefixLength`):
+    /// what the IPv4 confinement permits as this adapter's LAN.
+    pub ipv4_prefix: Option<u8>,
+    /// Every usable IPv4 address the adapter holds, `ipv4` first. A
+    /// tunnel adapter can hold a stale APIPA address beside the real one,
+    /// in either order, and a connection from either is still in it.
+    pub ipv4_all: Vec<Ipv4Addr>,
     pub is_up: bool,
+    /// The DHCP server the adapter's IPv4 lease came from, when it has one.
+    ///
+    /// OpenVPN's `bypass-dhcp` routes this address around the tunnel with
+    /// a host route on the uplink, which is one of the two routes this
+    /// service owes for an OpenVPN session before openvpn.exe has added
+    /// it -- see `openvpn::HostRouteWatch::owe_ahead`.
+    pub dhcp_server: Option<Ipv4Addr>,
     /// The driver's own description, e.g. "WireGuard Tunnel" or
     /// "TAP-Windows Adapter V9". FriendlyName is whatever the user
     /// renamed the connection to, so it cannot identify what a thing is;
@@ -137,6 +153,8 @@ pub fn list() -> io::Result<Vec<Adapter>> {
         // addresses are a list because an adapter may hold several; the
         // first usable IPv4 is the one a socket pinned here would use.
         let mut ipv4 = None;
+        let mut ipv4_prefix = None;
+        let mut ipv4_all = Vec::new();
         let mut ua = entry.FirstUnicastAddress;
         while !ua.is_null() {
             // SAFETY: same linked-list guarantee as the gateway walk.
@@ -149,12 +167,32 @@ pub fn list() -> io::Result<Vec<Adapter>> {
                     let octets = unsafe { sa.sin_addr.S_un.S_addr }.to_ne_bytes();
                     let addr = Ipv4Addr::from(octets);
                     if !addr.is_unspecified() && !addr.is_loopback() {
-                        ipv4 = Some(addr);
-                        break;
+                        if ipv4.is_none() {
+                            ipv4 = Some(addr);
+                            ipv4_prefix = Some(u.OnLinkPrefixLength);
+                        }
+                        ipv4_all.push(addr);
                     }
                 }
             }
             ua = u.Next;
+        }
+
+        // The lease's server, which the API fills only for an adapter whose
+        // address came from DHCP.
+        let mut dhcp_server = None;
+        if !entry.Dhcpv4Server.lpSockaddr.is_null() {
+            // SAFETY: a non-null SOCKET_ADDRESS the API wrote; family was
+            // restricted to AF_INET, and the family is checked before the
+            // address is read.
+            let sa = unsafe { &*(entry.Dhcpv4Server.lpSockaddr as *const SOCKADDR_IN) };
+            if sa.sin_family == AF_INET {
+                // SAFETY: reading the union's IPv4 representation.
+                let addr = Ipv4Addr::from(unsafe { sa.sin_addr.S_un.S_addr }.to_ne_bytes());
+                if !addr.is_unspecified() {
+                    dhcp_server = Some(addr);
+                }
+            }
         }
 
         adapters.push(Adapter {
@@ -165,7 +203,10 @@ pub fn list() -> io::Result<Vec<Adapter>> {
             description: wide_to_string(entry.Description),
             gateway,
             ipv4,
+            ipv4_prefix,
+            ipv4_all,
             is_up: entry.OperStatus == IF_OPER_STATUS_UP,
+            dhcp_server,
         });
 
         current = entry.Next;
@@ -188,10 +229,117 @@ pub fn find_by_name(name: &str) -> io::Result<Option<Adapter>> {
 /// a gateway is what makes an adapter capable of off-link traffic, which
 /// rules out loopback and idle virtual adapters without needing to match
 /// on vendor names.
+///
+/// The *first* such adapter, which is not necessarily the one Windows
+/// sends anything by. Custom mode still uses it for its own bookkeeping;
+/// a host route to a server should be placed with [`best_uplink_for`].
 pub fn physical_uplink(exclude: &[&str]) -> io::Result<Option<Adapter>> {
     Ok(list()?
         .into_iter()
         .find(|a| a.is_up && a.gateway.is_some() && !exclude.contains(&a.name.as_str())))
+}
+
+/// Where traffic to one destination leaves the machine: an interface and
+/// the next hop on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Uplink {
+    pub index: u32,
+    /// `0.0.0.0` when the route is on-link -- a PPP or PPPoE dial-up
+    /// link, and some mobile dongles, have no gateway to name.
+    pub next_hop: Ipv4Addr,
+}
+
+/// The adapter and next hop Windows itself would use to reach `dest`,
+/// asked of Windows before the tunnel takes over.
+///
+/// Replaces "the first adapter with a gateway" for placing the host route
+/// that keeps an engine's own connection off the tunnel. That rule picked
+/// the wrong adapter on any machine with two that qualify -- Wi-Fi and
+/// Ethernet both up, a VM host's virtual switch -- and refused a PPP
+/// uplink outright, whose default route is on-link and whose gateway
+/// therefore reads as 0.0.0.0. Real customers hit the second one: ten
+/// desktop connects in fourteen days failed with "no network connection
+/// with a gateway was found".
+///
+/// When Windows' answer is a host route to `dest` itself -- one an earlier
+/// session left, which the stale purge could not name -- the address
+/// beside it is asked about too (see [`neighbour`]). Falls back to the old
+/// rule when Windows has no usable answer -- see [`choose_uplink`].
+pub fn best_uplink_for(dest: Ipv4Addr, exclude: &[&str]) -> io::Result<Option<Uplink>> {
+    let adapters = list()?;
+    let best = best_route_to(dest).ok();
+    let leftover = best.is_some_and(|route| route.is_host() && route.dest == dest);
+    let beside = if leftover { best_route_to(neighbour(dest)).ok() } else { None };
+    Ok(choose_uplink(&adapters, best, beside, dest, exclude))
+}
+
+/// The decision behind [`best_uplink_for`], on facts already gathered.
+///
+/// Windows' best route is taken unless it is one of three things that
+/// cannot be the way out: a route on one of our own adapters (a tunnel
+/// not yet torn down), a host route to the destination itself (one an
+/// earlier session left, whose gateway may be from another network), or
+/// a route on an adapter that is not up. Then Windows' best route to the
+/// address beside `dest`, `beside`, on the same terms -- which is the
+/// answer for `dest` with any host route to it left out. Then the first
+/// adapter with a gateway, as before.
+pub fn choose_uplink(
+    adapters: &[Adapter],
+    best: Option<RouteRow>,
+    beside: Option<RouteRow>,
+    dest: Ipv4Addr,
+    exclude: &[&str],
+) -> Option<Uplink> {
+    let usable = |route: &RouteRow, to: Ipv4Addr| {
+        let leftover = route.is_host() && route.dest == to;
+        let adapter = adapters.iter().find(|a| a.index == route.if_index);
+        !leftover && adapter.is_some_and(|a| a.is_up && !exclude.contains(&a.name.as_str()))
+    };
+    let answer =
+        best.filter(|route| usable(route, dest)).or_else(|| beside.filter(|route| usable(route, neighbour(dest))));
+    if let Some(route) = answer {
+        return Some(Uplink { index: route.if_index, next_hop: route.next_hop });
+    }
+    adapters
+        .iter()
+        .find(|a| a.is_up && a.gateway.is_some() && !exclude.contains(&a.name.as_str()))
+        .and_then(|a| a.gateway.map(|gateway| Uplink { index: a.index, next_hop: gateway }))
+}
+
+/// The address beside `dest`: the same but for its last bit.
+///
+/// Every prefix of 31 bits or fewer covers both or neither, so Windows'
+/// best route to it is its best route to `dest` with any host route to
+/// `dest` left out -- which is the question when a leftover host route is
+/// what answers for `dest` itself.
+fn neighbour(dest: Ipv4Addr) -> Ipv4Addr {
+    Ipv4Addr::from(u32::from(dest) ^ 1)
+}
+
+/// `GetBestRoute2` toward one IPv4 address.
+fn best_route_to(dest: Ipv4Addr) -> Result<RouteRow, String> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute2, MIB_IPFORWARD_ROW2};
+    use windows_sys::Win32::Networking::WinSock::SOCKADDR_INET;
+
+    // SAFETY: all-zero is a valid value for these plain-data structures;
+    // the destination's family and address are set below, and the two
+    // outputs are written by the call.
+    let mut destination: SOCKADDR_INET = unsafe { std::mem::zeroed() };
+    destination.si_family = AF_INET;
+    // The IPv4 arm, which the family above names. The address is stored
+    // in network byte order, which is its octets in memory order.
+    destination.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(dest.octets());
+    let mut route: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
+    let mut source: SOCKADDR_INET = unsafe { std::mem::zeroed() };
+    // SAFETY: every pointer is to a live local of the declared type; a
+    // null interface LUID and index 0 ask about every interface.
+    let rc = unsafe {
+        GetBestRoute2(std::ptr::null(), 0, std::ptr::null(), &destination, 0, &mut route, &mut source)
+    };
+    if rc != 0 {
+        return Err(format!("GetBestRoute2 found no route to {dest} ({rc})"));
+    }
+    Ok(crate::engines::route_table::row_from(&route))
 }
 
 #[cfg(test)]
@@ -217,6 +365,128 @@ mod tests {
         assert!(uplink.gateway.is_some(), "uplink must have a gateway to route through");
         assert!(uplink.index != 0, "interface index must be usable in a route command");
         println!("uplink: {} idx={} gw={:?}", uplink.name, uplink.index, uplink.gateway);
+    }
+
+    /// Windows' own answer on this machine: an adapter that is up and
+    /// carries the route to the internet.
+    #[test]
+    fn finds_the_best_uplink_toward_a_public_address() {
+        let uplink = best_uplink_for(Ipv4Addr::new(1, 1, 1, 1), &["neoconnect0"])
+            .expect("lookup should succeed")
+            .expect("a machine running this test has internet");
+        let adapter = list().unwrap().into_iter().find(|a| a.index == uplink.index).expect("an adapter that exists");
+        assert!(adapter.is_up);
+        println!("uplink: {} idx={} next hop={}", adapter.name, uplink.index, uplink.next_hop);
+    }
+
+    fn adapter(index: u32, name: &str, gateway: Option<Ipv4Addr>) -> Adapter {
+        Adapter {
+            index,
+            name: name.to_string(),
+            gateway,
+            ipv4: Some(Ipv4Addr::new(10, 0, index as u8, 2)),
+            ipv4_prefix: Some(24),
+            ipv4_all: vec![Ipv4Addr::new(10, 0, index as u8, 2)],
+            is_up: true,
+            dhcp_server: None,
+            description: String::new(),
+        }
+    }
+
+    /// The API row a PPP link's default route comes back as: on-link,
+    /// next hop 0.0.0.0. The old rule threw that adapter away for having
+    /// no gateway, and the connect failed with "no network connection
+    /// with a gateway was found".
+    #[test]
+    fn best_uplink_accepts_on_link_zero_next_hop() {
+        use windows_sys::Win32::NetworkManagement::IpHelper::MIB_IPFORWARD_ROW2;
+        // SAFETY: all-zero is a valid row: destination 0.0.0.0/0, next hop
+        // 0.0.0.0, and the AF_INET family set below.
+        let mut raw: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
+        raw.InterfaceIndex = 23;
+        raw.DestinationPrefix.Prefix.si_family = AF_INET;
+        raw.NextHop.si_family = AF_INET;
+        let route = crate::engines::route_table::row_from(&raw);
+        assert_eq!(route.next_hop, Ipv4Addr::UNSPECIFIED);
+        assert_eq!(route.prefix, 0);
+
+        let dialup = adapter(23, "Broadband Connection", None);
+        assert_eq!(
+            choose_uplink(&[dialup], Some(route), None, Ipv4Addr::new(203, 0, 113, 7), &["neoconnect0"]),
+            Some(Uplink { index: 23, next_hop: Ipv4Addr::UNSPECIFIED })
+        );
+    }
+
+    /// Two adapters with gateways -- Ethernet and Wi-Fi both up -- and
+    /// Windows sends by the second. The old rule took the first.
+    #[test]
+    fn uplink_is_the_best_route_not_the_first_adapter() {
+        let ethernet = adapter(5, "Ethernet", Some(Ipv4Addr::new(192, 0, 2, 1)));
+        let wifi = adapter(9, "Wi-Fi", Some(Ipv4Addr::new(198, 51, 100, 1)));
+        let best = RouteRow { dest: Ipv4Addr::UNSPECIFIED, prefix: 0, if_index: 9, next_hop: Ipv4Addr::new(198, 51, 100, 1), metric: 0, netmgmt: true };
+        assert_eq!(
+            choose_uplink(&[ethernet, wifi], Some(best), None, Ipv4Addr::new(203, 0, 113, 7), &["neoconnect0"]),
+            Some(Uplink { index: 9, next_hop: Ipv4Addr::new(198, 51, 100, 1) })
+        );
+    }
+
+    /// The three answers that cannot be the way out, each falling back to
+    /// the first adapter with a gateway: our own tunnel, a host route to
+    /// the server that an earlier session left, and no answer at all.
+    #[test]
+    fn a_leftover_host_route_or_our_own_adapter_is_not_the_uplink() {
+        let server = Ipv4Addr::new(203, 0, 113, 7);
+        let ethernet = adapter(5, "Ethernet", Some(Ipv4Addr::new(192, 0, 2, 1)));
+        let tunnel = adapter(30, "neoconnect0", None);
+        let first = Some(Uplink { index: 5, next_hop: Ipv4Addr::new(192, 0, 2, 1) });
+        let adapters = [ethernet, tunnel];
+
+        let through_tunnel = RouteRow { dest: Ipv4Addr::UNSPECIFIED, prefix: 1, if_index: 30, next_hop: Ipv4Addr::new(198, 18, 0, 1), metric: 0, netmgmt: true };
+        assert_eq!(choose_uplink(&adapters, Some(through_tunnel), None, server, &["neoconnect0"]), first);
+
+        let leftover = RouteRow::host(server, 5, Ipv4Addr::new(192, 0, 2, 254), 0);
+        assert_eq!(choose_uplink(&adapters, Some(leftover), None, server, &["neoconnect0"]), first);
+
+        assert_eq!(choose_uplink(&adapters, None, None, server, &["neoconnect0"]), first);
+        assert_eq!(choose_uplink(&[], None, None, server, &["neoconnect0"]), None, "offline is no uplink");
+    }
+
+    /// A leftover host route to the server hides Windows' answer for it,
+    /// but not for the address beside it, which every other route covers
+    /// the same way -- so the uplink is still the one Windows would use,
+    /// not merely the first adapter with a gateway.
+    ///
+    /// The leftover survives the stale purge whenever the purge cannot name
+    /// the server: no known servers sent, or one dialled by name -- a
+    /// CDN-fronted Xray endpoint, whose address is in no credential. With
+    /// Ethernet and Wi-Fi both up and Windows sending by Wi-Fi, the
+    /// fallback put the engine's route on Ethernet.
+    #[test]
+    fn a_leftover_host_route_is_seen_past_by_asking_about_the_address_beside_it() {
+        let server = Ipv4Addr::new(203, 0, 113, 7);
+        let ethernet = adapter(5, "Ethernet", Some(Ipv4Addr::new(192, 0, 2, 1)));
+        let wifi = adapter(9, "Wi-Fi", Some(Ipv4Addr::new(198, 51, 100, 1)));
+        let leftover = RouteRow::host(server, 5, Ipv4Addr::new(192, 0, 2, 254), 0);
+        let default_by_wifi = RouteRow { prefix: 0, ..RouteRow::host(Ipv4Addr::UNSPECIFIED, 9, Ipv4Addr::new(198, 51, 100, 1), 0) };
+
+        assert_eq!(
+            choose_uplink(&[ethernet.clone(), wifi.clone()], Some(leftover), Some(default_by_wifi), server, &["neoconnect0"]),
+            Some(Uplink { index: 9, next_hop: Ipv4Addr::new(198, 51, 100, 1) })
+        );
+        // A leftover beside it too says nothing either.
+        let beside_leftover = RouteRow::host(neighbour(server), 5, Ipv4Addr::new(192, 0, 2, 254), 0);
+        assert_eq!(
+            choose_uplink(&[ethernet, wifi], Some(leftover), Some(beside_leftover), server, &["neoconnect0"]),
+            Some(Uplink { index: 5, next_hop: Ipv4Addr::new(192, 0, 2, 1) })
+        );
+    }
+
+    /// The address beside one is covered by every prefix but a host route
+    /// that covers it.
+    #[test]
+    fn the_address_beside_one_differs_only_in_its_last_bit() {
+        assert_eq!(neighbour(Ipv4Addr::new(203, 0, 113, 7)), Ipv4Addr::new(203, 0, 113, 6));
+        assert_eq!(neighbour(Ipv4Addr::new(203, 0, 113, 0)), Ipv4Addr::new(203, 0, 113, 1));
     }
 
     #[test]
@@ -259,6 +529,15 @@ const VPN_DRIVER_MARKERS: &[&str] = &[
     "wintun",
 ];
 
+/// Whether a driver description is another VPN's adapter, by
+/// [`VPN_DRIVER_MARKERS`]. What "a tunnel" means wherever an adapter has
+/// to be told apart from the customer's own network -- the rival-VPN hint
+/// below, and the LAN that IPv4 confinement leaves reachable.
+pub fn looks_like_vpn(description: &str) -> bool {
+    let d = description.to_ascii_lowercase();
+    VPN_DRIVER_MARKERS.iter().any(|m| d.contains(m))
+}
+
 /// Other VPN adapters that are currently up, by friendly name.
 ///
 /// Only ones that are UP and carrying an address: a VPN that is merely
@@ -274,10 +553,7 @@ pub fn other_vpns_up(ours: &[&str]) -> io::Result<Vec<String>> {
         .into_iter()
         .filter(|a| a.is_up && a.ipv4.is_some())
         .filter(|a| !ours.iter().any(|o| a.name.eq_ignore_ascii_case(o)))
-        .filter(|a| {
-            let d = a.description.to_ascii_lowercase();
-            VPN_DRIVER_MARKERS.iter().any(|m| d.contains(m))
-        })
+        .filter(|a| looks_like_vpn(&a.description))
         .map(|a| a.name)
         .collect())
 }
@@ -285,11 +561,6 @@ pub fn other_vpns_up(ours: &[&str]) -> io::Result<Vec<String>> {
 #[cfg(test)]
 mod vpn_detection_tests {
     use super::*;
-
-    fn looks_like_vpn(description: &str) -> bool {
-        let d = description.to_ascii_lowercase();
-        VPN_DRIVER_MARKERS.iter().any(|m| d.contains(m))
-    }
 
     #[test]
     fn recognises_the_drivers_customers_actually_have() {

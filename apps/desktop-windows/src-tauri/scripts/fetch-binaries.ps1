@@ -44,7 +44,25 @@ Write-Host "  wireguard.exe, wg.exe"
 # required for the TUN inbound (full-tunnel) and is loaded at runtime
 # from the directory next to xray.exe, which is why both land in the
 # same resources folder and are kept together.
-$xrayVersion = "v26.1.23"
+#
+# v26.6.27 is a prerelease, chosen on purpose. 26.1.23 panicked in its
+# TUN inbound ("Net: Unknown address type", proxy/tun/handler.go) whenever
+# a TCP connection the tunnel carried was reset right after its handshake
+# -- eight times in one VM run, each leaving 9-16 s unprotected while the
+# app reconnected. Upstream fixed it in e7e9254630 (#6365), first released
+# in v26.6.27; 26.3.27, the last release not marked prerelease, still has
+# it, and every release since is marked prerelease. v26.6.27 is the
+# smallest step to the fix: later ones add WFP rules and route callbacks
+# to the Windows TUN (#6478, #6853), a transport refactor (#6754) and a
+# Shadowsocks 2022 rewrite (#6831). The TUN keys this version reads that
+# 26.1.23 ignored are left out of the client config -- see
+# service/src/engines/xray.rs.
+#
+# Pinned by hash as well as by tag: a tag can be moved, and a prerelease
+# is the kind most likely to be. The hash is GitHub's digest of the
+# release asset; a download that does not match stops the build.
+$xrayVersion = "v26.6.27"
+$xraySha256 = "97f16a0701dbf931c9c4375399f8188e31615fdd5c863be5c612f946acd4dd01"
 $xrayTemp = Join-Path $env:TEMP "neoconnect-xray-fetch"
 if (Test-Path $xrayTemp) { Remove-Item $xrayTemp -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $xrayTemp | Out-Null
@@ -53,6 +71,22 @@ $xrayZip = Join-Path $xrayTemp "xray.zip"
 $xrayUrl = "https://github.com/XTLS/Xray-core/releases/download/$xrayVersion/Xray-windows-64.zip"
 Write-Host "Downloading $xrayUrl ..."
 Invoke-WebRequest -Uri $xrayUrl -OutFile $xrayZip
+# Hashed with .NET, not the Utility module's file-hash cmdlet:
+# `pnpm run fetch-binaries` from a pwsh step (the release and the
+# test-installer workflows) starts this Windows PowerShell with
+# PowerShell 7's modules first on PSModulePath, and that cmdlet is then
+# not found.
+$xraySha = [System.Security.Cryptography.SHA256]::Create()
+$xrayStream = [System.IO.File]::OpenRead($xrayZip)
+try {
+    $xrayActual = ([BitConverter]::ToString($xraySha.ComputeHash($xrayStream)) -replace "-", "").ToLowerInvariant()
+} finally {
+    $xrayStream.Dispose()
+    $xraySha.Dispose()
+}
+if ($xrayActual -ne $xraySha256) {
+    throw "Xray $xrayVersion zip has SHA-256 $xrayActual, expected $xraySha256 -- not using it."
+}
 Expand-Archive -Path $xrayZip -DestinationPath (Join-Path $xrayTemp "extract") -Force
 
 Copy-Item (Join-Path $xrayTemp "extract\xray.exe") (Join-Path $resourcesDir "xray.exe") -Force

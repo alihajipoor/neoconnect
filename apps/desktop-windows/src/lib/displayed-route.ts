@@ -1,4 +1,5 @@
 import type { ConnectionState } from "../components/ConnectOrb";
+import type { Protocol } from "./types";
 
 /** Which route the SERVER tile should name.
  *
@@ -105,3 +106,51 @@ export function showsAutomatic(connectionState: ConnectionState, pinnedRouteId: 
 }
 
 const SETTLED: ReadonlySet<ConnectionState> = new Set<ConnectionState>(["connected", "unverified", "degraded"]);
+
+/** A held credential, as far as naming its protocol needs it. */
+export interface CredentialLike {
+  routeId: string;
+  protocol: Protocol;
+  connection?: { transport?: string } | null;
+}
+
+/** A route in the list, as far as naming its protocol needs it. */
+export interface RouteProtocolLike {
+  id: string;
+  protocol: Protocol;
+  transport?: string;
+}
+
+/** Which protocol the PROTOCOL tile should name: that of the route the
+ * SERVER tile names, by the same rule (`displayedRouteId`).
+ *
+ * The tile read the credential the screen holds, and the ladder replaces
+ * that with whatever it settles on. After an automatic switch the tunnel
+ * came down with the screen still holding the switch's credential, so the
+ * idle screen named the protocol the session ended on while Connect dialled
+ * the pin first -- Stealth on the tile over a Connect that dialled
+ * Shadowsocks, on the VM. While nothing is up the tile is a promise about
+ * the next connect, as the SERVER tile is: the pin's credential, or the
+ * pin's route when the screen holds no credential for it. Once an engine
+ * is up it is the credential the tunnel is on. With nothing pinned the
+ * tile reads "Automatic" until a tunnel settles (`showsAutomatic`), and
+ * this answers what the screen holds. */
+export function displayedProtocol(
+  connectionState: ConnectionState,
+  /** The credential the screen holds: the ladder's settled candidate. */
+  settled: CredentialLike | null | undefined,
+  pinnedRouteId: string | null | undefined,
+  /** Every credential the screen holds -- the ladder's candidates. */
+  held: readonly CredentialLike[],
+  routes: readonly RouteProtocolLike[],
+): { protocol: Protocol; transport?: string } | null {
+  const ofCredential = (c: CredentialLike) => ({ protocol: c.protocol, transport: c.connection?.transport });
+  if (TUNNEL_UP.has(connectionState) && settled) return ofCredential(settled);
+  if (pinnedRouteId) {
+    const credential = held.find((c) => c.routeId === pinnedRouteId);
+    if (credential) return ofCredential(credential);
+    const route = routes.find((r) => r.id === pinnedRouteId);
+    if (route) return { protocol: route.protocol, transport: route.transport };
+  }
+  return settled ? ofCredential(settled) : null;
+}

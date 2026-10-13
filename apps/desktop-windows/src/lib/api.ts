@@ -2,6 +2,7 @@ import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints, forgetEndpoint, rememberedEndpoint, rememberEndpoint } from "./api-endpoints";
 import { deviceHeaders } from "./device-identity";
 import { announceBackendAnswer, DOUBTFUL_STATUSES, type BackendAnswer } from "./backend-answer";
+import { connectedMirrorsLast, isConnectedMirror } from "./connected-mirrors";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
 import {
   clearDemotion,
@@ -225,8 +226,11 @@ function foreignResponse(response: Response): boolean {
  * instead, every blackholed address would read as one that was refused,
  * which is the opposite diagnosis -- `timeout` is how a blackhole has
  * always read in these reports. A reset that happens to land in that same
- * second is recorded as a timeout; nothing else is. */
-function failedAs(err: unknown, timedOut: boolean, startedAt: number): "timeout" | "scope" | "net" {
+ * second is recorded as a timeout; nothing else is.
+ *
+ * A refusal by this machine (`local`, see endpoint-trace.ts) is never
+ * either: it is not demoted, not probed, and not the network's. */
+function failedAs(err: unknown, timedOut: boolean, startedAt: number): "timeout" | "scope" | "local" | "net" {
   if (timedOut) return "timeout";
   const outcome = failureOutcome(err);
   const elapsed = Date.now() - startedAt;
@@ -379,6 +383,10 @@ function recentWinner(forRefresh = false): AnsweredBase | null {
   if (age < 0 || age >= PROVEN_FOR_MS) return null;
   if (isDemoted(lastWinner.base) || notBackend.has(lastWinner.base)) return null;
   if (lastWinner.refusal && !forRefresh) return null;
+  // The connected server's own mirror, which won before the connect, is
+  // asked last while that server is reached around the tunnel, never
+  // first (connected-mirrors.ts).
+  if (isConnectedMirror(lastWinner.base)) return null;
   return { base: lastWinner.base, ms: lastWinner.ms };
 }
 
@@ -586,6 +594,9 @@ async function followRemembered(queue: Stop[], walk: Walk): Promise<void> {
   if (walk.listedOnly) return;
   const remembered = await rememberedNow();
   if (remembered === undefined || remembered === walk.remembered) return;
+  // Not the connected server's own mirror, which keeps its place at the
+  // back while that server is reached around the tunnel.
+  if (isConnectedMirror(remembered)) return;
   walk.remembered = remembered;
   if (walk.tried.has(remembered)) return;
   const at = queue.findIndex((stop) => stop.base === remembered);
@@ -674,10 +685,19 @@ async function fetchOneEndpointAtATime(
         // the backend acted still ends a write that must not be sent
         // twice; any other page is kept, and the next address is tried.
         forgetWinner(base);
-        if (MAY_HAVE_REACHED_BACKEND.has(response.status) && !REPEATABLE_WRITES.has(path)) return response;
-        walk.page ??= response;
+        if (MAY_HAVE_REACHED_BACKEND.has(response.status) && !REPEATABLE_WRITES.has(path)) {
+          letGoOfKeptPage(walk);
+          return response;
+        }
+        // The first page is kept as the answer of last resort; any other
+        // is let go of now, since nothing will read it (`discardBody`).
+        if (walk.page === null) walk.page = response;
+        else discardBody(response);
         continue;
       }
+      // The answer, which the page kept so far will never be returned in
+      // place of.
+      letGoOfKeptPage(walk);
       void rememberEndpoint(base);
       // The backend answered here, so the next write may come straight
       // here too (`recentWinner`), and the address bundle may be asked
@@ -707,6 +727,16 @@ async function fetchOneEndpointAtATime(
     }
   }
   return null;
+}
+
+/** Lets go of the page a walk kept as its answer of last resort, once
+ * something else is to be returned instead. Under the HTTP plugin it would
+ * otherwise stay parked, with its connection, for the life of the app --
+ * nothing reads it, and its request was never aborted (`discardBody`). */
+function letGoOfKeptPage(walk: Walk): void {
+  if (walk.page === null) return;
+  discardBody(walk.page);
+  walk.page = null;
 }
 
 /** What a walk that got no answer ends with. Something did answer, if
@@ -754,7 +784,9 @@ function recentStop(path: string, outer: AbortSignal | null, walk: Walk): Stop |
   const recent = recentWinner(path === REFRESH_PATH);
   if (recent !== null) return { base: recent.base, timeoutMs: followUpTimeout(recent), blockPageLook: true };
   const remembered = walk.remembered;
-  if (outer === null || remembered === undefined || notBackend.has(remembered)) return null;
+  if (outer === null || remembered === undefined || notBackend.has(remembered) || isConnectedMirror(remembered)) {
+    return null;
+  }
   return { base: remembered, timeoutMs: timeoutAt(remembered), blockPageLook: true };
 }
 
@@ -1186,6 +1218,28 @@ function bodyFailure(err: unknown, res: Response): RequestFailure {
   return { ok: false, error: requestFailed(res.status), status: res.status };
 }
 
+/** Lets go of a body nobody is going to read.
+ *
+ * Under the HTTP plugin a response is parked on the Rust side until its
+ * body is read to the end or cancelled, and while it is parked its
+ * connection stays open. A page from in front of the backend was returned
+ * unread, so a request made on the bare line before a connect kept its
+ * connection -- and its keep-alives, by the physical adapter -- for the
+ * whole session that followed. Cancelling the stream is what tells the
+ * plugin to release it.
+ *
+ * Never throws: a body already read or locked, or none at all (a null-body
+ * status, or a test's stand-in), has nothing to give back. */
+function discardBody(res: Response): void {
+  const body = (res as { body?: ReadableStream<Uint8Array> | null }).body;
+  if (!body || typeof body.cancel !== "function") return;
+  try {
+    void body.cancel().catch(() => undefined);
+  } catch {
+    // A locked stream throws rather than rejecting; it is someone else's.
+  }
+}
+
 /** The sentence for an answer that carried no message of its own: a page
  * from in front of the backend, or a body that was not the JSON promised.
  *
@@ -1205,8 +1259,12 @@ export function requestFailed(status: number): string {
  * other failure to every caller. */
 async function failureFrom(res: Response, signal?: AbortSignal | null, foreign = false): Promise<RequestFailure> {
   // Not the backend's answer (`foreignResponse`): whatever its body says,
-  // it is not a sentence the backend wrote, nor one of its codes.
-  if (foreign) return { ok: false, error: requestFailed(res.status), status: res.status, page: true };
+  // it is not a sentence the backend wrote, nor one of its codes. Nobody
+  // reads it, so it is let go of here (`discardBody`).
+  if (foreign) {
+    discardBody(res);
+    return { ok: false, error: requestFailed(res.status), status: res.status, page: true };
+  }
   const body: unknown = await readWithin(res.json(), signal).catch(() => null);
   const fields = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : null;
   const message = fields?.message;
@@ -1344,11 +1402,14 @@ function blockPageLook(base: string): { found: Promise<boolean>; beforeSending: 
  * Without `leadAlone`, the first is asked with the rest of those not
  * demoted: for a write sent after the path to the API has changed
  * (`afterPathChange`), where the address that answered last says nothing
- * about the path now in use. */
-function stagesOf(count: number, healthy: number, leadAlone = true): [number, number][] {
+ * about the path now in use.
+ *
+ * From `aroundFrom` on, the connected server's own mirrors, in a stage of
+ * their own after all the rest (`connectedMirrorsLast`). */
+function stagesOf(count: number, healthy: number, leadAlone = true, aroundFrom = count): [number, number][] {
   const stages: [number, number][] = [];
   let from = 0;
-  for (const to of leadAlone ? [1, healthy, count] : [healthy, count]) {
+  for (const to of leadAlone ? [1, healthy, aroundFrom, count] : [healthy, aroundFrom, count]) {
     if (to > from) {
       stages.push([from, to]);
       from = to;
@@ -1409,12 +1470,16 @@ async function staggeredRace(
   giveUp?: GiveUp,
   leadAlone = true,
 ): Promise<Staggered> {
-  const { ordered, healthy } = demotedLast(endpoints);
+  const byHealth = demotedLast(endpoints);
+  // The connected server's own mirrors behind everything else, demoted
+  // addresses included, while it is reached around the tunnel -- see
+  // connected-mirrors.ts.
+  const { ordered, healthy, aroundFrom } = connectedMirrorsLast(byHealth.ordered, byHealth.healthy);
   // With nothing to ask there is no stage to settle the race; every
   // caller checks first, and this keeps one that did not from waiting for
   // ever.
   if (ordered.length === 0) return { winner: null, answers: [], failed: [], blockPage: false, stop: () => undefined };
-  const stages = stagesOf(ordered.length, healthy, leadAlone);
+  const stages = stagesOf(ordered.length, healthy, leadAlone, aroundFrom);
   const outer = request.signal ?? null;
   const controllers = ordered.map(() => new AbortController());
   // Which aborts were our own deadline, so the trace can say "timeout"
@@ -1495,6 +1560,18 @@ async function staggeredRace(
             ms: Date.now() - startedAt,
             backend: isBackendAnswer(response),
           };
+          // Arrived after the race was decided: nobody is going to read it.
+          // Every caller has chosen what it reads by now -- the winner, or
+          // the answer of last resort, each from those already in -- and
+          // stopped the rest; this one's request was stopped too, but its
+          // answer was already on its way. Under the HTTP plugin an abort
+          // sent before the answer existed is never heard by its body, so
+          // the plugin handed it back parked, with its connection, and
+          // nothing let go of it: after a Disconnect, five connections to
+          // node mirrors went on sending keep-alives by the physical adapter
+          // through the next tunnel. Still listed as an answer -- its address
+          // did answer -- but let go of here (`discardBody`).
+          if (decided) discardBody(response);
           answers.push(answer);
           // A page from the address the last write went straight to: it is
           // not offered to the next one (`forgetWinner`).
@@ -1975,7 +2052,12 @@ async function refreshTokens(trace?: EndpointTrace): Promise<Refresh> {
   // leaves one more out, so this ends.
   const excluded = new Set<string>();
   for (;;) {
-    if (await refusedByBackend(res, trace)) return { kind: "refused" };
+    if (await refusedByBackend(res, trace)) {
+      // The refusal is the whole answer; its body is not read
+      // (`discardBody`).
+      discardBody(res);
+      return { kind: "refused" };
+    }
     // JSON that `refusedByBackend` has just shown is not the backend's:
     // the refresh goes on to the other addresses, which the one that
     // refused it may have been answering ahead of. It may be sent twice
@@ -1987,6 +2069,9 @@ async function refreshTokens(trace?: EndpointTrace): Promise<Refresh> {
     forgetRemembered(base);
     const rest = (await apiEndpoints()).filter((other) => !excluded.has(other));
     if (rest.length === 0) break;
+    // Replaced by whatever the rest answer, or by nothing if none does;
+    // either way never read (`discardBody`).
+    discardBody(res);
     try {
       res = await sendWrite(REFRESH_PATH, init, rest, trace);
     } catch {
@@ -2126,6 +2211,13 @@ async function authenticatedAttempt(path: string, init?: ApiInit, trace?: Endpoi
   // last resort -- nothing better replied -- and says nothing about this
   // session's tokens; it is returned as it is.
   if (res.status === 401 && isBackendAnswer(res) && !foreignResponse(res)) {
+    // Whatever the refresh comes to, this 401 is never read: the request
+    // is retried, or ends in words of its own. Its body is JSON, so the
+    // plugin's null-body patch does not release it, and unread it kept its
+    // connection open for the life of the app -- the first signed-in
+    // request after any idle, usually made on the bare line before a
+    // connect (`discardBody`).
+    discardBody(res);
     if (trace) trace.phase = "refresh";
     const refreshed = await renewSession(tokens.accessToken, trace);
     if (refreshed.kind === "unavailable") {

@@ -41,6 +41,42 @@ describe("failureOutcome", () => {
   });
 });
 
+describe("a request this machine refused", () => {
+  /** WSAEACCES, Windows' "os error 10013": a filter on this PC refused the
+   * socket before anything was sent -- ours (the IPv6 block, or a future
+   * IPv4 one) or another product's firewall. Not a fact about the network,
+   * and above all not censorship: read as `net`, it would be probed as a
+   * blocked address and counted in the panel against a network that never
+   * saw the request.
+   *
+   * For an error that carries its cause -- this app's own commands, or a
+   * plugin that one day passes it on. The HTTP plugin's do not; see the
+   * next test. The string below is a stand-in shaped like one that does,
+   * not one the plugin produces. */
+  it("wsaeacces_is_not_recorded_as_blocking", () => {
+    const refused = "connect failed: An attempt was made to access a socket in a way forbidden by its access permissions. (os error 10013)";
+    expect(failureOutcome(refused)).toBe("local");
+    expect(failureOutcome(new Error(refused))).toBe("local");
+    expect(failureOutcome("connect failed: WSAEACCES")).toBe("local");
+    // Not every number that starts the same way.
+    expect(failureOutcome("connect failed (os error 100130)")).toBe("net");
+
+    const trace = newTrace();
+    settleAttempt(beginAttempt(trace, MIRROR, 1_000), failureOutcome(refused), 1_012);
+    expect(renderTrace(trace)).toBe("req: edge-1.example.org:2053=local@12");
+  });
+
+  /** What the HTTP plugin (2.5.9) actually rejects with when a filter on
+   * this PC refuses the connect: reqwest's Display, which names the URL and
+   * leaves the OS error out. Pinned so that nobody reads the test above as
+   * covering a request: through the plugin, a local refusal is `net`, and
+   * only the probe tells it apart (`REFUSED_HERE_REASON` in
+   * control-plane-probe.ts). */
+  it("cannot tell a local refusal through the HTTP plugin, whose error has no cause", () => {
+    expect(failureOutcome("error sending request for url (https://edge-1.example.org:2053/api/health)")).toBe("net");
+  });
+});
+
 describe("renderTrace", () => {
   it("writes each attempt as host=outcome@ms, grouped by leg, in order", () => {
     const trace = newTrace();

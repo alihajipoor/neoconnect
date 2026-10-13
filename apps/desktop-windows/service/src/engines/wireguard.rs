@@ -38,9 +38,12 @@ const TUNNEL_SERVICE_NAME: &str = "WireGuardTunnel$neoconnect";
 /// the machine's routing policy, and `Table = off` is exactly the line
 /// between the two.
 ///
-/// DNS is also dropped in passive mode. Setting a tunnel resolver would
-/// point the whole machine's lookups at the VPN, which is a full-tunnel
-/// behaviour arriving through a setting that promised the opposite.
+/// DNS is left out of the config in passive mode: wireguard.exe would set
+/// it on a tunnel adapter that nothing is routed to. The machine's lookups
+/// are pinned by the NRPT rule instead, once the redirect is up to carry
+/// them through the tunnel (`Engines::start_split_tunnel`) -- which is
+/// what Custom mode does with DNS on every engine; see
+/// `dns::machine_wide_rule_wanted`.
 fn build_conf(p: &WireguardProfile, passive: bool) -> String {
     let dns = if passive {
         String::new()
@@ -108,6 +111,11 @@ pub fn connect(
     if !status.success() {
         return Err(format!("wireguard.exe /installtunnelservice exited with {status}"));
     }
+    // No NRPT rule here. A full tunnel's DNS is wireguard.exe's own; Custom
+    // mode's rule goes in once the redirect is up to carry the lookups
+    // (`Engines::start_split_tunnel`). It used to go in here, seconds
+    // before that, and the VM saw the lookups it pinned to 1.1.1.1 leave
+    // by the physical adapter in clear text (p1-22).
     Ok(())
 }
 
@@ -468,6 +476,23 @@ pub fn handshake_health(engines: &Engines) -> HandshakeHealth {
     parse_handshake(&out, now)
 }
 
+/// What a handshake reading says about whether the tunnel carries, for
+/// Custom mode's DNS pin (`dns::PinWatch`).
+///
+/// A stale handshake is a measurement: with `PersistentKeepalive = 25` the
+/// peer is asked every few seconds and rehandshakes every two minutes, so
+/// three minutes without one is a peer that stopped answering. A tunnel
+/// that never handshook is one whose peer never answered. Neither is an
+/// absence of evidence, and only `Unknown` -- wg.exe unreadable -- is.
+pub(super) fn carrying(health: HandshakeHealth) -> super::dns::Carrying {
+    use super::dns::Carrying;
+    match health {
+        HandshakeHealth::Alive { .. } => Carrying::Yes,
+        HandshakeHealth::Stale { .. } | HandshakeHealth::NeverHandshaked => Carrying::No,
+        HandshakeHealth::Unknown => Carrying::Unknown,
+    }
+}
+
 /// Split out from the process call so the decision itself can be tested.
 /// This is the judgement that decides whether a customer is told they are
 /// protected, so it should not only be exercisable by having a real
@@ -551,14 +576,49 @@ mod tests {
         assert!(conf.contains("AllowedIPs = 0.0.0.0/0"), "the peer must still accept everything");
     }
 
+    /// What Custom mode's DNS pin is told by a handshake reading: a stale
+    /// one and one never made are measurements, wg.exe unreadable is not.
     #[test]
-    fn custom_mode_leaves_the_machines_dns_alone() {
-        // Pointing every lookup at the VPN resolver is a full-tunnel
-        // behaviour. Arriving through a setting that promises the
-        // opposite would send the whole machine's browsing history to
-        // the node for a customer who selected one game.
+    fn a_stale_or_missing_handshake_reads_as_not_carrying() {
+        use super::super::dns::Carrying;
+        assert_eq!(carrying(HandshakeHealth::Alive { age_secs: 30 }), Carrying::Yes);
+        assert_eq!(carrying(HandshakeHealth::Stale { age_secs: 600 }), Carrying::No);
+        assert_eq!(carrying(HandshakeHealth::NeverHandshaked), Carrying::No);
+        assert_eq!(carrying(HandshakeHealth::Unknown), Carrying::Unknown);
+    }
+
+    /// No `DNS =` line in Custom mode: wireguard.exe would set it on the
+    /// tunnel adapter, which nothing routes to in this mode. The machine's
+    /// lookups are pinned by the NRPT rule instead -- see the next test.
+    #[test]
+    fn custom_mode_leaves_dns_out_of_the_config() {
         let conf = build_conf(&profile(), true);
         assert!(!conf.contains("DNS ="));
+    }
+
+    /// Custom mode pins the machine's lookups to 1.1.1.1, as Xray and IKEv2
+    /// already do, and the redirect carries them through the tunnel.
+    ///
+    /// Before: no rule. The redirect only sees packets its filter admits,
+    /// and the filter leaves every private range alone, so on a home
+    /// network every lookup -- a selected application's included -- went
+    /// to the router and on to the ISP in clear text, and in Iran came back
+    /// with the block page's 10.10.34.x, which the filter then left alone
+    /// too. `dns::machine_wide_rule_wanted` has the argument. A full tunnel
+    /// keeps its own: the `DNS =` line, and wireguard.exe's rule from it.
+    /// `connect` installs no NRPT rule. A full tunnel's DNS is
+    /// wireguard.exe's own (`DNS =`); Custom mode's rule goes in once the
+    /// redirect carries the lookups (`Engines::start_split_tunnel`, held
+    /// there by its own test). Installed here, after the tunnel service and
+    /// seconds before the redirect, it pinned them to 1.1.1.1 with nothing
+    /// yet to carry them, and they left by the physical adapter in clear
+    /// text -- seen at the NIC on the VM (p1-22). Held from the source.
+    #[test]
+    fn connect_installs_no_dns_rule() {
+        let source = include_str!("wireguard.rs");
+        let start = source.find("pub fn connect(").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        assert!(!body.contains("dns::force("), "Custom mode's rule goes in before the redirect can carry it");
     }
 
     const NOW: u64 = 1_700_000_000;

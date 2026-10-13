@@ -11,10 +11,22 @@
 //!   turn that into a clear message instead of an opaque engine exit.
 //! * Routing `0.0.0.0/0` into the TUN naively causes an infinite loop,
 //!   because Xray's own outbound to the node has to reach the internet
-//!   like anything else. `autoSystemRoutingTable` installs the system
-//!   routes and `autoOutboundsInterface` pins outbound traffic to the
-//!   real physical interface, which is upstream's own answer to that
-//!   loop rather than something improvised here.
+//!   like anything else. What keeps the engine's connection off the
+//!   tunnel is the host route to the node that
+//!   `routing::install_full_tunnel` adds through the uplink
+//!   [`plan_uplink`] picks.
+//!
+//! The bundled xray.exe is v26.6.27 (`fetch-binaries.ps1`), a prerelease,
+//! and the first build with upstream's fix for the TUN panic 26.1.23 died
+//! of (`e7e9254630`: a connection reset right after its handshake took
+//! the process down, eight times in one VM run). Its TUN inbound reads
+//! three keys 26.1.23 ignored -- `autoSystemRoutingTable`,
+//! `autoOutboundsInterface` and `gateway` -- which would have Xray install
+//! routes, bind its sockets and address the adapter itself, beside the
+//! service doing all three. The config no longer carries them; the
+//! service does what it did. And it names the adapter's GUID after the
+//! adapter's name, so Windows remembers its settings between sessions:
+//! [`forget_last_sessions_dns`] and [`address_in_place`] are why.
 
 use std::ffi::OsStr;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
@@ -29,7 +41,7 @@ use super::{confirm_started, spawn_hidden, write_config, Engines};
 use crate::adapters;
 
 const CONFIG_FILE: &str = "xray-client.json";
-const LOG_FILE: &str = "xray.log";
+pub(super) const LOG_FILE: &str = "xray.log";
 pub const ADAPTER_NAME: &str = "neoconnect0";
 
 /// How long to wait for the TUN adapter to show up after Xray starts.
@@ -97,11 +109,103 @@ const ADAPTER_ADDRESSED_WAIT: std::time::Duration = std::time::Duration::from_se
 /// changed nothing.
 const TUN_GATEWAY: &str = "198.18.0.1/30";
 
+/// The same address, as the reset at connect needs it: a connection from
+/// it is in the tunnel already. Kept beside the string it must agree with;
+/// a test below holds the two together.
+pub(super) const TUN_ADDRESS: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
+
 /// Resolver handed to the tunnel adapter. The physical link's resolvers
 /// are usually LAN or ISP addresses that stop being reachable once the
 /// default route moves, so the tunnel needs one that works from
 /// anywhere.
 pub(super) const TUN_DNS: &str = "1.1.1.1";
+
+/// Where the engine's own resolver sends the tunnel's lookups: over TCP,
+/// through the proxy (see [`DNS_OUT_TAG`]). The adapter's resolver first,
+/// and a second, so one that stops answering is not the end of DNS.
+const TUNNEL_RESOLVERS: [&str; 2] = ["tcp://1.1.1.1", "tcp://8.8.8.8"];
+
+/// The DNS outbound every lookup the adapter carries -- port 53, UDP or
+/// TCP -- is routed to.
+///
+/// The lookups ride TCP inside the tunnel on every protocol. Over
+/// Shadowsocks they were UDP to the node, carried in TCP by UoT until
+/// v26.6.27 dropped it (#6286), and plain UDP dies on a network that
+/// blocks it -- common in Iran; Shadowsocks' other UDP has its mux for that
+/// (`Outbound::to_json`). This outbound answers A and AAAA from Xray's own
+/// resolver, which asks [`TUNNEL_RESOLVERS`] over TCP, and passes any other
+/// query on as it is, rewritten to TCP, to the server it was sent to. Both
+/// leave through the proxy: the resolver's connections because no rule
+/// matches them (they carry its tag, not `tun-in`) and so they go to the
+/// first outbound, and the passed-on queries by `proxySettings`.
+const DNS_OUT_TAG: &str = "dns-out";
+
+/// MD5 of [`ADAPTER_NAME`], from which xray.exe derives the adapter's GUID
+/// (`open` in `proxy/tun/tun_windows.go`, since v26.3.23: `md5.Sum` of the
+/// name, read as a `windows.GUID`). A test holds it to the name.
+const ADAPTER_NAME_MD5: [u8; 16] = [
+    0xbe, 0xe8, 0xf7, 0xf5, 0x47, 0x94, 0x84, 0x28, 0x6f, 0x7c, 0xfd, 0x1f, 0xb5, 0x5a, 0x61, 0xbc,
+];
+
+/// A 16-byte digest as the GUID Windows reads from the same bytes: the
+/// first three fields little-endian, the last eight bytes as they are.
+fn wintun_guid(d: [u8; 16]) -> String {
+    format!(
+        "{{{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        d[3], d[2], d[1], d[0], d[5], d[4], d[7], d[6], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]
+    )
+}
+
+/// Where Windows keeps the TCP/IP settings of the adapter xray.exe makes,
+/// under HKLM -- the static resolver `configure_dns` sets among them.
+fn tcpip_interface_key() -> String {
+    format!(r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}", wintun_guid(ADAPTER_NAME_MD5))
+}
+
+/// Forgets the resolver an earlier session gave the adapter, before
+/// xray.exe makes the adapter again.
+///
+/// 26.1.23 made its adapter with a new GUID every time, so each one came
+/// up bare. Since v26.3.23 the GUID is derived from the name, and Windows
+/// gives an adapter on a GUID it has seen the settings it had: 1.1.1.1 as
+/// its resolver, from the moment it appears -- seconds before a full
+/// tunnel's routes lead into it, and before Custom mode's redirect. Lookups
+/// sent to it then leave by the physical adapter, the leak `configure_dns`
+/// waits for the routes to avoid. Deleted here, the adapter comes up as it
+/// did on 26.1.23, and `configure_dns` sets the resolver when it means to.
+///
+/// Only while no adapter by that name exists: the settings of a live one
+/// are not this function's to touch. Best effort -- a key that is not
+/// there is a first connect -- and a failure is logged, not fatal: the
+/// DNS confinement (full tunnel) and Custom mode's DNS hold refuse port 53
+/// outside the tunnel through the same window.
+fn forget_last_sessions_dns() {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
+    use winreg::RegKey;
+
+    if !matches!(adapters::find_by_name(ADAPTER_NAME), Ok(None)) {
+        return;
+    }
+    let key = match RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(tcpip_interface_key(), KEY_SET_VALUE) {
+        Ok(key) => key,
+        // Never made, or never given settings: nothing to forget.
+        Err(_) => return,
+    };
+    match key.delete_value("NameServer") {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => crate::cleanup_log::note("forget the tunnel adapter's last resolver", &e.to_string()),
+    }
+}
+
+/// Whether the adapter has the address the connect needs: netsh set it,
+/// or -- refused -- the adapter holds it already. Windows can bring the
+/// adapter up holding the address it held last session (its GUID is the
+/// same every time since v26.3.23), and netsh is not documented to accept
+/// setting what is already set.
+fn address_in_place(set: bool, held: &[Ipv4Addr], wanted: Ipv4Addr) -> bool {
+    set || held.contains(&wanted)
+}
 
 /// Which proxy the generated config dials out through.
 ///
@@ -127,7 +231,7 @@ pub enum Outbound<'a> {
 }
 
 impl Outbound<'_> {
-    fn host(&self) -> &str {
+    pub(super) fn host(&self) -> &str {
         match self {
             Outbound::VlessReality(p) => &p.host,
             Outbound::VlessTls(p) => &p.host,
@@ -262,14 +366,27 @@ impl Outbound<'_> {
                         "method": p.method,
                         // Already "serverKey:userKey" -- joined by the
                         // caller, since only it holds both halves.
-                        "password": p.password,
-                        // UDP over TCP. The tunnel carries a TUN
-                        // adapter's traffic, which includes DNS and
-                        // games; without this their UDP is silently
-                        // dropped and the customer sees a connection
-                        // that works for web pages and nothing else.
-                        "uot": true
+                        "password": p.password
                     }]
+                },
+                // UDP inside TCP. The tunnel carries a TUN adapter's
+                // traffic, games and calls among it, and plain UDP to the
+                // node dies on a network that blocks UDP -- common in Iran.
+                // This was `"uot": true` until v26.6.27, which dropped
+                // Shadowsocks' UDP-over-TCP (#6286) and reads that key no
+                // more; upstream's answer is XUDP over Xray's mux, which
+                // the nodes accept on this inbound as on any other (it
+                // dispatches through `mux.Server`, v26.3.27 included).
+                // TCP stays unmuxed (`concurrency: -1`), one connection
+                // each as before. UDP/443 is carried too: QUIC rode UoT
+                // before, and where UDP is blocked nothing else would carry
+                // it. The nodes' carve-out for UoT stays, for clients still
+                // on an engine that sends it.
+                "mux": {
+                    "enabled": true,
+                    "concurrency": -1,
+                    "xudpConcurrency": 16,
+                    "xudpProxyUDP443": "allow"
                 }
             }),
         }
@@ -280,15 +397,15 @@ impl Outbound<'_> {
 /// into it, so only the applications the customer selected reach it --
 /// via sockets the split tunnel pins to it by hand.
 ///
-/// That makes `autoSystemRoutingTable` the one setting that must differ.
-/// Left on, Xray installs system routes of its own and takes the default
-/// route, which is precisely the behaviour Custom mode exists to avoid;
-/// the customer would ask for one game and get their whole machine
-/// tunnelled.
-///
-/// `autoOutboundsInterface` stays on either way. It pins Xray's own
-/// connection to the node onto the physical link, which is what stops
-/// the engine's uplink being carried through the tunnel it is creating.
+/// The config is the same either way. It used to differ in
+/// `autoSystemRoutingTable`, on in a full tunnel and off in Custom mode,
+/// which the bundled 26.1.23 never read; v26.6.27 reads it as a list of
+/// routes to install, and on in Custom mode it would take the default
+/// route -- the customer asks for one game and gets their whole machine
+/// tunnelled. No key here asks Xray for routes, an address or a binding
+/// in either mode: the service installs the routes (or none), addresses
+/// the adapter, and keeps the engine's own connection off the tunnel with
+/// the host route to the node. See the module comment.
 fn build_config_for(outbound: &Outbound, passive: bool) -> String {
     build_multi_exit_config(outbound, &[], passive)
 }
@@ -341,13 +458,14 @@ fn exit_tags(index: usize) -> (String, String) {
 ///
 /// xray-core sends a connection to the **first** outbound unless a
 /// routing rule says otherwise. The primary outbound is therefore still
-/// `outbounds[0]` and still tagged `proxy`, and there is deliberately
-/// no rule matching `tun-in`. So everything that was carried before --
-/// the TUN adapter's traffic, DNS, every application with no preference
-/// -- takes exactly the path it took when this function could only
-/// write one outbound. `extra` being empty reproduces the old config
-/// exactly, which is what lets [`build_config_for`] delegate here
-/// rather than the two drifting apart.
+/// `outbounds[0]` and still tagged `proxy`, and the one rule matching
+/// `tun-in` is its lookups' -- port 53 to the DNS outbound, which sends
+/// them through the same proxy over TCP ([`DNS_OUT_TAG`]). So everything
+/// else that was carried before -- the TUN adapter's traffic, every
+/// application with no preference -- takes exactly the path it took when
+/// this function could only write one outbound. `extra` being empty
+/// reproduces the single-exit config exactly, which is what lets
+/// [`build_config_for`] delegate here rather than the two drifting apart.
 ///
 /// An extra exit adds three things that only ever address each other:
 /// an inbound tagged `exit-N-in` listening on loopback, an outbound
@@ -373,17 +491,21 @@ fn exit_tags(index: usize) -> (String, String) {
 /// inbound without it accepts the TCP handshake and silently drops
 /// every datagram -- which presents as a game that connects, shows a
 /// server list and then never updates.
-fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], passive: bool) -> String {
+fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], _passive: bool) -> String {
+    // Name, description and MTU only. No `gateway`, `dns`,
+    // `autoSystemRoutingTable` or `autoOutboundsInterface`: the address,
+    // the resolver, the routes and the engine's way out are the service's
+    // (`configure_address`, `configure_dns`, `install_routes`), in both
+    // modes -- see `build_config_for`. The engine's own resolver, further
+    // down, is another thing: it answers only what this adapter carries to
+    // port 53.
     let mut inbounds = vec![json!({
         "tag": "tun-in",
         "protocol": "tun",
         "settings": {
             "name": ADAPTER_NAME,
             "desc": "Wintun",
-            "mtu": 1500,
-            "gateway": [TUN_GATEWAY],
-            "autoSystemRoutingTable": !passive,
-            "autoOutboundsInterface": true
+            "mtu": 1500
         }
     })];
     let mut outbounds = vec![primary.to_json()];
@@ -429,48 +551,59 @@ fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], passive: b
         }));
     }
 
-    let mut config = json!({
+    // The tunnel's lookups, over TCP through the proxy: see `DNS_OUT_TAG`.
+    // Last, so the primary stays first and each exit's outbound and rule
+    // keep their index. The rule names `tun-in`: the resolver's own
+    // connections to port 53 carry its tag instead, and one that matched
+    // here would loop back into this outbound.
+    outbounds.push(json!({
+        "tag": DNS_OUT_TAG,
+        "protocol": "dns",
+        "settings": {
+            // What is passed on goes over TCP, wherever it was sent.
+            "network": "tcp",
+            "rules": [
+                // A and AAAA from the resolver below.
+                { "action": "hijack", "qType": "1,28" },
+                // Anything else -- SRV, TXT, HTTPS -- as it is, rather
+                // than the empty answer this outbound gives by default.
+                { "action": "direct" }
+            ]
+        },
+        "proxySettings": { "tag": "proxy" }
+    }));
+    rules.push(json!({
+        "type": "field",
+        "inboundTag": ["tun-in"],
+        "port": "53",
+        "outboundTag": DNS_OUT_TAG
+    }));
+
+    json!({
         "log": { "loglevel": "warning" },
+        "dns": { "servers": TUNNEL_RESOLVERS },
         "inbounds": inbounds,
-        "outbounds": outbounds
-    });
-    // Absent entirely when there are no extra exits, so the generated
-    // config is byte-identical to the one this engine produced before
-    // concurrent exits existed. An empty `routing.rules` would be
-    // harmless and would still be a difference nobody could rule out
-    // when reading a config off a customer's machine.
-    if !rules.is_empty() {
-        config["routing"] = json!({ "domainStrategy": "AsIs", "rules": rules });
-    }
-    config.to_string()
+        "outbounds": outbounds,
+        "routing": { "domainStrategy": "AsIs", "rules": rules }
+    })
+    .to_string()
 }
 
 
-/// Assigns the TUN adapter its address and DNS.
+/// Assigns the TUN adapter its address.
 ///
-/// Xray's `gateway` setting does not take effect on Windows -- the
-/// adapter comes up and Windows self-assigns an APIPA address instead,
+/// Xray's `gateway` setting did not take effect on Windows in 26.1.23 --
+/// v26.6.27 reads it, and the config no longer sends it, so the address
+/// stays this function's alone. On 26.1.23 the
+/// adapter came up and Windows self-assigned an APIPA address instead,
 /// which was visible in the engine's own log as every packet arriving
 /// from a 169.254.x source. That left the next hop in our routes
 /// (198.18.0.1) not actually present on the interface, so traffic could
 /// reach the tunnel but had no way back.
 ///
-/// DNS is set here too. With the default route captured by the tunnel,
-/// the resolvers the physical link advertises are no longer reachable,
-/// so leaving them in place means every lookup fails even once packets
-/// flow -- which reads to a user as "the internet is down".
-///
-/// `passive` reaches here only to be handed to
-/// `dns::machine_wide_rule_wanted`. The answer is currently the same in
-/// both modes, so threading it changes no behaviour -- it is threaded so
-/// that the two engines ask the same named question in the same shape,
-/// which is what stopped being true the last time one of them was
-/// edited alone.
-fn configure_adapter(
-    tun_ip: Ipv4Addr,
-    passive: bool,
-    limits: &crate::lifecycle::budget::Limits,
-) -> Result<(), String> {
+/// Its DNS is [`configure_dns`]'s, which a full tunnel calls only once
+/// its routes are up.
+fn configure_address(tun_ip: Ipv4Addr, limits: &crate::lifecycle::budget::Limits) -> Result<(), String> {
     let netsh = PathBuf::from(r"C:\Windows\System32\netsh.exe");
     let name_arg = format!("name={ADAPTER_NAME}");
 
@@ -499,24 +632,70 @@ fn configure_adapter(
     )
     .map_err(|e| format!("could not configure the tunnel adapter: {e}"))?;
     if !status.success() {
-        return Err(format!("assigning the tunnel adapter's address failed ({status})"));
+        // Refused, but perhaps over an address the adapter already holds:
+        // see `address_in_place`. Asked once; `wait_for_address` then waits
+        // for it to be usable, as after a netsh that succeeded.
+        let held = adapters::find_by_name(ADAPTER_NAME).ok().flatten().map(|a| a.ipv4_all).unwrap_or_default();
+        if !address_in_place(false, &held, tun_ip) {
+            return Err(format!("assigning the tunnel adapter's address failed ({status})"));
+        }
+        crate::cleanup_log::note(
+            "address the tunnel adapter",
+            &format!("netsh refused ({status}), but the adapter already holds {tun_ip}; going on"),
+        );
     }
+    Ok(())
+}
 
-    let status = super::run_hidden_within(
-        &netsh,
-        &[
-            OsStr::new("interface"),
-            OsStr::new("ipv4"),
-            OsStr::new("set"),
-            OsStr::new("dnsservers"),
-            OsStr::new(&name_arg),
-            OsStr::new("static"),
-            OsStr::new(TUN_DNS),
-            OsStr::new("primary"),
-        ],
-        helper,
-    )
-    .map_err(|e| format!("could not set the tunnel's DNS: {e}"))?;
+/// What `configure_dns` asks netsh: [`TUN_DNS`] as the adapter's resolver,
+/// and `validate=no`.
+///
+/// netsh validates a resolver it sets unless told not to ("The value is
+/// yes by default", `netsh interface ipv4 set dnsservers /?`): it looks
+/// something up through it and waits for the answer. Nothing here uses
+/// that answer, and in Custom mode it could not come -- the adapter carries
+/// no route, so the lookup leaves by the physical adapter, where the DNS
+/// hold refuses it. Against a resolver that cannot answer, netsh took 11.2 s
+/// on the VM with validation and 98 ms without, exit 0 both ways. That is
+/// the likeliest cause of Custom-mode Stealth's 15.2 s connect (run c-01,
+/// against 4.9 s before the hold, g2-01): a ~9 s stall after the adapter
+/// took its address, every lookup on the PC held meanwhile. Before the
+/// hold the same lookup went out in clear text; a full tunnel's went
+/// through the tunnel, a round trip for nothing.
+fn dns_server_args(name_arg: &str) -> [&str; 9] {
+    ["interface", "ipv4", "set", "dnsservers", name_arg, "static", TUN_DNS, "primary", "validate=no"]
+}
+
+/// Gives the TUN adapter its DNS, and a full tunnel the machine-wide rule.
+///
+/// With the default route captured by the tunnel, the resolvers the
+/// physical link advertises are no longer reachable, so leaving them in
+/// place means every lookup fails even once packets flow -- which reads to
+/// a user as "the internet is down".
+///
+/// A full tunnel's, only once its routes are up (`install_routes`). Set
+/// with the address, before them, it pinned every lookup on the PC to
+/// 1.1.1.1 a second or more before any route led into the tunnel, and they
+/// left by the physical adapter in clear text -- seen at the NIC on every
+/// full-tunnel Xray connect of the P3 gate (G8), and on 0.9.48 (P0 run
+/// 09b). The DNS confinement now goes in before this as well
+/// (`Engines::connect_inner`), so a lookup in that gap is refused on this
+/// PC rather than answered by the network.
+///
+/// `passive` reaches here only to be handed to `dns::rule_at_connect`,
+/// which installs the machine-wide rule here for a full tunnel and leaves
+/// Custom mode's to `Engines::start_split_tunnel`. Both engines that pin a
+/// rule ask that one named question in the same shape, because they
+/// stopped agreeing the last time one of them was edited alone.
+fn configure_dns(passive: bool, limits: &crate::lifecycle::budget::Limits) -> Result<(), String> {
+    let netsh = PathBuf::from(r"C:\Windows\System32\netsh.exe");
+    let name_arg = format!("name={ADAPTER_NAME}");
+    // Bounded as the address's netsh is: see `configure_address`.
+    let helper = limits.clamp(super::HELPER_BUDGET);
+
+    let args = dns_server_args(&name_arg).map(OsStr::new);
+    let status = super::run_hidden_within(&netsh, &args, helper)
+        .map_err(|e| format!("could not set the tunnel's DNS: {e}"))?;
     if !status.success() {
         return Err(format!("setting the tunnel's DNS failed ({status})"));
     }
@@ -534,20 +713,21 @@ fn configure_adapter(
     // has the argument, which is about poisoned answers in Iran rather
     // than about tidiness.
     //
-    // Unconditional, including in Custom mode, and that is deliberate
-    // rather than an oversight -- which is what it looked like, because
-    // this call is reached from `prepare_passive` as well as
-    // `install_routes` while IKEv2 gated the same call on `!passive`.
-    // Xray was the one that had it right: in Custom mode the redirect
-    // only carries lookups it can see, and `filter_for` excludes every
-    // RFC1918 address, so without this rule a router-supplied resolver
-    // is never redirected. IKEv2 matches this now.
+    // A full tunnel's rule only. Custom mode wants the rule as much -- in
+    // Custom mode the redirect only carries lookups it can see, and
+    // `filter_for` excludes every RFC1918 address, so without it a
+    // router-supplied resolver is never redirected; see
+    // `dns::machine_wide_rule_wanted` -- but not yet. This call is reached
+    // from `prepare_passive` too, seconds before the redirect starts, and
+    // a rule put in here pinned every lookup to 1.1.1.1 with nothing to
+    // carry it: the VM saw them leave by the physical adapter in clear
+    // text (p1-24). Custom mode's goes in once the redirect is up
+    // (`Engines::start_split_tunnel`), on every engine alike.
     //
-    // The condition is named rather than written out, so the two
-    // engines cannot drift apart again the way they just did.
-    // `dns::machine_wide_rule_wanted` carries the whole argument.
-    if super::dns::machine_wide_rule_wanted(passive) {
-        super::dns::force(TUN_DNS);
+    // The condition is named rather than written out, so the engines
+    // cannot drift apart again: `dns::rule_at_connect`.
+    if let Some(resolver) = super::dns::rule_at_connect(passive, TUN_DNS) {
+        super::dns::force(resolver);
     }
 
     Ok(())
@@ -583,13 +763,27 @@ fn wait_for_adapter(limits: &crate::lifecycle::budget::Limits) -> Result<u32, St
     }
 }
 
-/// Waits until the adapter is actually carrying `expected`.
+/// Waits until the adapter is actually carrying `expected`, and then until
+/// Windows will use it.
 ///
-/// Called after `configure_adapter`, and the only reason it exists is
-/// that the thing which follows -- installing routes whose next hop is
-/// that address -- fails *silently* if it runs too early. See
-/// [`ADAPTER_ADDRESSED_WAIT`].
-fn wait_for_address(expected: Ipv4Addr, limits: &crate::lifecycle::budget::Limits) -> Result<(), String> {
+/// Called after `configure_address`. It began as a wait for the address
+/// to be listed, because the thing which follows -- installing routes
+/// whose next hop is that address -- fails *silently* if it runs too
+/// early. See [`ADAPTER_ADDRESSED_WAIT`].
+///
+/// Listed is not usable. Windows lists the address while
+/// duplicate-address detection is still checking it, and on 0.9.48 that
+/// lasted until 1.6-2.8 s after the connect had returned, every
+/// connection in between failing at once -- see `readiness`. So once it
+/// is listed, the wait goes on until it is Preferred, for at most
+/// `readiness::PREFERRED_WAIT`, and past that the connect carries on and
+/// cleanup.log says so. With detection switched off beforehand
+/// (`readiness::quiet_or_note`) the first look should answer.
+fn wait_for_address(
+    expected: Ipv4Addr,
+    tun_index: u32,
+    limits: &crate::lifecycle::budget::Limits,
+) -> Result<(), String> {
     let budget = limits.clamp(ADAPTER_ADDRESSED_WAIT);
     if budget.is_zero() {
         return Err(super::OUT_OF_TIME.to_string());
@@ -601,9 +795,15 @@ fn wait_for_address(expected: Ipv4Addr, limits: &crate::lifecycle::budget::Limit
         let held = found.and_then(|a| a.ipv4);
         let expired = std::time::Instant::now() >= deadline;
 
-        // The address that was asked for, which is the answer wanted.
+        // The address that was asked for. Listed, which is not yet usable.
         if held == Some(expected) {
-            return Ok(());
+            return super::readiness::settle(
+                &super::readiness::SystemInterfaces,
+                tun_index,
+                ADAPTER_NAME,
+                |held| super::readiness::address_ready(held, expected),
+                limits,
+            );
         }
         // Any other address, once the deadline has passed. Deliberately
         // not a failure, and the same concession
@@ -661,27 +861,43 @@ fn resolve_server(
         .ok_or_else(|| format!("{host} has no IPv4 address to route around the tunnel"))
 }
 
+/// The server's address and the way out to it, for a full tunnel.
+pub struct UplinkPlan {
+    pub server: Ipv4Addr,
+    pub uplink: adapters::Uplink,
+}
+
+/// Where the engine's own connection to the server must leave the
+/// machine, asked before xray.exe starts.
+///
+/// Before the engine, not after it: nothing of ours is routed yet, so
+/// Windows' best route to the server is the physical one, and a machine
+/// with no way out fails here without an engine having been started and
+/// killed. Asked of Windows rather than taken as the first adapter with a
+/// gateway -- see `adapters::best_uplink_for`.
+pub fn plan_uplink(outbound: &Outbound, limits: &crate::lifecycle::budget::Limits) -> Result<UplinkPlan, String> {
+    let server = resolve_server(outbound.host(), outbound.port(), limits)?;
+    let uplink = adapters::best_uplink_for(server, &super::OUR_ADAPTER_NAMES)
+        .map_err(|e| format!("could not enumerate network adapters: {e}"))?
+        .ok_or_else(|| super::NO_NETWORK.to_string())?;
+    Ok(UplinkPlan { server, uplink })
+}
+
 /// Brings up the routes that actually put traffic through the tunnel.
 ///
 /// Split out from `connect` so a routing failure can tear down the engine
 /// it belongs to -- a running Xray with no routes is the exact state that
 /// previously looked connected while changing nothing.
+///
+/// `plan` was taken before the engine started: afterwards the best route
+/// to the server would be the tunnel itself, and the bypass would point
+/// into the loop it exists to prevent.
 pub fn install_routes(
-    outbound: &Outbound,
+    plan: UplinkPlan,
+    ops: std::sync::Arc<dyn super::route_table::RouteOps>,
+    owed: super::route_table::OwedRoutes,
     limits: &crate::lifecycle::budget::Limits,
 ) -> Result<InstalledRoutes, String> {
-    let server_ip = resolve_server(outbound.host(), outbound.port(), limits)?;
-
-    // Captured before the tunnel takes over: afterwards the best route to
-    // the server would be the tunnel itself, and the bypass would point
-    // into the loop it exists to prevent.
-    let uplink = adapters::physical_uplink(&[ADAPTER_NAME])
-        .map_err(|e| format!("could not enumerate network adapters: {e}"))?
-        .ok_or_else(|| "no network connection with a gateway was found".to_string())?;
-    let gateway = uplink
-        .gateway
-        .ok_or_else(|| "the active network connection has no gateway".to_string())?;
-
     let tun_index = wait_for_adapter(limits)?;
     let tun_gateway: Ipv4Addr = TUN_GATEWAY
         .split('/')
@@ -689,16 +905,26 @@ pub fn install_routes(
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
 
+    // Detection off before the address goes on: an address is checked
+    // under the setting it was added with. See `readiness`.
+    super::readiness::quiet_or_note(&super::readiness::SystemInterfaces, tun_index, ADAPTER_NAME);
+
     // Before the routes: they name this address as their next hop, and a
     // route to a next hop that isn't on the interface silently goes
-    // nowhere. `configure_adapter` asks for the address; `wait_for_address`
+    // nowhere. `configure_address` asks for the address; `wait_for_address`
     // is what establishes that the stack finished giving it.
-    // `false`: this function *is* the full-tunnel branch -- `mod.rs`
-    // picks between it and `prepare_passive` on the same flag.
-    configure_adapter(tun_gateway, false, limits)?;
-    wait_for_address(tun_gateway, limits)?;
+    configure_address(tun_gateway, limits)?;
+    wait_for_address(tun_gateway, tun_index, limits)?;
 
-    routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
+    let routes =
+        routing::install_full_tunnel(tun_gateway, tun_index, plan.server, plan.uplink.next_hop, plan.uplink.index, ops, owed)?;
+    // DNS once a route leads into the tunnel, and not before: see
+    // `configure_dns`. A failure returns, and the routes go with it (they
+    // are removed when dropped). `false`: this function *is* the
+    // full-tunnel branch -- `mod.rs` picks between it and `prepare_passive`
+    // on the same flag.
+    configure_dns(false, limits)?;
+    Ok(routes)
 }
 
 /// Everything `install_routes` does except install the routes.
@@ -714,16 +940,20 @@ pub fn install_routes(
 /// tunnel is never carried through itself.
 pub fn prepare_passive(outbound: &Outbound, limits: &crate::lifecycle::budget::Limits) -> Result<Ipv4Addr, String> {
     let server_ip = resolve_server(outbound.host(), outbound.port(), limits)?;
-    wait_for_adapter(limits)?;
+    let tun_index = wait_for_adapter(limits)?;
 
     let tun_gateway: Ipv4Addr = TUN_GATEWAY
         .split('/')
         .next()
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
+    // As in `install_routes`: detection off before the address goes on.
+    super::readiness::quiet_or_note(&super::readiness::SystemInterfaces, tun_index, ADAPTER_NAME);
     // `true`: this function is the Custom-mode branch. The DNS rule is
-    // still installed -- see `dns::machine_wide_rule_wanted`.
-    configure_adapter(tun_gateway, true, limits)?;
+    // still installed -- see `dns::machine_wide_rule_wanted`. No routes
+    // here, so the adapter's DNS goes on with its address.
+    configure_address(tun_gateway, limits)?;
+    configure_dns(true, limits)?;
     // Custom mode installs no routes, so the silent-next-hop failure
     // does not apply here -- but `split_tunnel::start` runs immediately
     // after this returns and waits ten seconds for this adapter to hold
@@ -731,7 +961,7 @@ pub fn prepare_passive(outbound: &Outbound, limits: &crate::lifecycle::budget::L
     // here means the engine hands back something that is ready, rather
     // than handing back early and leaving the split tunnel to discover
     // it was not.
-    wait_for_address(tun_gateway, limits)?;
+    wait_for_address(tun_gateway, tun_index, limits)?;
 
     Ok(server_ip)
 }
@@ -810,6 +1040,9 @@ pub fn connect_returning_exits(
         .parent()
         .ok_or_else(|| "could not resolve the engine directory".to_string())?;
 
+    // Before the engine makes its adapter: see the function.
+    forget_last_sessions_dns();
+
     // Working directory is the engine directory so xray.exe finds
     // wintun.dll beside itself.
     let log_path = engines.config_path(LOG_FILE);
@@ -827,6 +1060,7 @@ pub fn connect_returning_exits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn profile() -> XrayProfile {
         XrayProfile {
@@ -881,14 +1115,120 @@ mod tests {
         assert!(!json.contains("allowInsecure"));
     }
 
+    /// The reset at connect leaves connections from the tunnel's own
+    /// address alone; that address is the one the adapter is given.
     #[test]
-    fn tun_inbound_enables_the_anti_loop_helpers() {
-        // Without these two, routing 0.0.0.0/0 into the TUN loops
-        // forever -- see this module's doc comment.
-        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()), false)).unwrap();
-        let settings = &parsed["inbounds"][0]["settings"];
-        assert_eq!(settings["autoSystemRoutingTable"], true);
-        assert_eq!(settings["autoOutboundsInterface"], true);
+    fn the_tunnel_address_the_reset_spares_is_the_one_the_adapter_gets() {
+        assert_eq!(TUN_GATEWAY.split('/').next().and_then(|a| a.parse::<Ipv4Addr>().ok()), Some(TUN_ADDRESS));
+    }
+
+    /// The routes, the adapter's address and its DNS are the service's,
+    /// in both modes. 26.1.23 ignored `autoSystemRoutingTable`,
+    /// `autoOutboundsInterface` and `gateway`; every release with the TUN
+    /// panic fixed reads them (from v26.4.13), and as this config wrote
+    /// them -- two booleans where it takes a list and a name -- xray.exe
+    /// would refuse the config outright. Read as meant, it would install
+    /// its own routes beside the service's and the confinement, take the
+    /// default route in Custom mode, flush the adapter's routes as it
+    /// starts, and assign the address `configure_address` assigns.
+    #[test]
+    fn tun_inbound_leaves_routes_address_and_dns_to_the_service() {
+        for passive in [false, true] {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()), passive)).unwrap();
+            let settings = parsed["inbounds"][0]["settings"].as_object().expect("the TUN inbound's settings");
+            for key in ["autoSystemRoutingTable", "autoOutboundsInterface", "gateway", "dns"] {
+                assert!(!settings.contains_key(key), "passive={passive}: {key} hands xray.exe what the service does");
+            }
+            assert_eq!(settings["name"], ADAPTER_NAME, "the adapter everything else looks for by name");
+        }
+    }
+
+    /// The bundled engine must carry upstream's fix for the TUN panic
+    /// (`e7e9254630`, "Avoid panic on nil RemoteAddr due to quickly
+    /// closed connection", #6365): 26.1.23 died on `Unknown address type`
+    /// whenever a TCP connection the tunnel carried was reset right after
+    /// its handshake -- eight times in one VM run, each leaving 9-16 s
+    /// unprotected. The first build with the fix is v26.6.27. And the zip
+    /// is pinned by its SHA-256, not only by its tag.
+    #[test]
+    fn the_bundled_engine_has_the_tun_panic_fix_and_is_pinned_by_hash() {
+        let script = include_str!("../../../src-tauri/scripts/fetch-binaries.ps1");
+        let line = script
+            .lines()
+            .find(|line| line.trim_start().starts_with("$xrayVersion = \"v"))
+            .expect("the Xray version is pinned");
+        let version: Vec<u32> = line
+            .split('"')
+            .nth(1)
+            .and_then(|v| v.strip_prefix('v'))
+            .expect("a quoted vX.Y.Z")
+            .split('.')
+            .map(|part| part.parse().expect("a number"))
+            .collect();
+        assert!(version >= vec![26, 6, 27], "{line}: before the TUN panic fix");
+        let hash = script
+            .lines()
+            .find(|line| line.trim_start().starts_with("$xraySha256 = \""))
+            .and_then(|line| line.split('"').nth(1))
+            .expect("the Xray zip's SHA-256 is pinned");
+        assert_eq!(hash.len(), 64, "{hash}");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{hash}");
+        assert!(script.contains("[System.IO.File]::OpenRead($xrayZip)"), "the pinned hash is never computed");
+        assert!(script.contains("$xrayActual -ne $xraySha256"), "the pinned hash is never compared");
+        // `pnpm run fetch-binaries` under a pwsh step (the release, the
+        // test installer) hands Windows PowerShell a module path with
+        // PowerShell 7's modules first, and Get-FileHash is then not found:
+        // the test-installer build of 59ebd99 stopped here.
+        assert!(!script.contains("Get-FileHash"), "Get-FileHash is missing when pnpm runs this under pwsh");
+    }
+
+    /// xray.exe names its adapter's GUID after its name since v26.3.23, so
+    /// Windows brings the adapter up with whatever an earlier session left
+    /// on that GUID. Held to the derivation upstream uses: MD5 of the name,
+    /// laid out as Windows lays out a GUID (`proxy/tun/tun_windows.go`).
+    #[test]
+    fn the_adapter_guid_is_the_one_xray_derives_from_its_name() {
+        // MD5 of the empty string: d41d8cd98f00b204e9800998ecf8427e.
+        let empty = [
+            0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8, 0x42, 0x7e,
+        ];
+        assert_eq!(wintun_guid(empty), "{D98C1DD4-008F-04B2-E980-0998ECF8427E}");
+        assert_eq!(ADAPTER_NAME, "neoconnect0", "ADAPTER_NAME_MD5 is the MD5 of the old name");
+        assert_eq!(wintun_guid(ADAPTER_NAME_MD5), "{F5F7E8BE-9447-2884-6F7C-FD1FB55A61BC}");
+        assert_eq!(
+            tcpip_interface_key(),
+            r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{F5F7E8BE-9447-2884-6F7C-FD1FB55A61BC}"
+        );
+    }
+
+    /// The resolver an earlier session put on the adapter is forgotten
+    /// before xray.exe creates it again, in both modes: brought up with it,
+    /// the adapter sent lookups to 1.1.1.1 before any route led into the
+    /// tunnel. Held from the source: it shows only on a real adapter.
+    #[test]
+    fn the_last_sessions_resolver_is_forgotten_before_the_engine_starts() {
+        let body = body_of("pub fn connect_returning_exits(");
+        let forgotten = body.find("forget_last_sessions_dns();").expect("the old resolver is never forgotten");
+        let spawned = body.find("spawn_hidden(").expect("the engine is started");
+        assert!(forgotten < spawned, "forgotten {forgotten}, started {spawned}");
+        let forget = body_of("fn forget_last_sessions_dns(");
+        assert!(forget.contains("delete_value(\"NameServer\")"), "the resolver is not what is deleted");
+        assert!(forget.contains("find_by_name(ADAPTER_NAME)"), "deleted under a live adapter");
+    }
+
+    /// netsh may refuse to set an address the adapter already holds --
+    /// which it can, brought up on a GUID Windows remembers. What the
+    /// connect needs is the address on the adapter, not netsh's word.
+    #[test]
+    fn an_address_already_held_is_as_good_as_one_set() {
+        let wanted = TUN_ADDRESS;
+        let apipa = Ipv4Addr::new(169, 254, 3, 4);
+        assert!(address_in_place(true, &[], wanted), "netsh's success stands");
+        assert!(address_in_place(false, &[wanted], wanted), "refused, but the adapter has it");
+        assert!(address_in_place(false, &[apipa, wanted], wanted));
+        assert!(!address_in_place(false, &[], wanted), "refused, and nothing there");
+        assert!(!address_in_place(false, &[apipa], wanted), "refused, and only APIPA there");
     }
 
     // ---------------------------------------------------------------
@@ -909,7 +1249,8 @@ mod tests {
 
     /// The whole safety argument for adding inbounds rather than
     /// engines: with no extra exits, the config is not merely
-    /// equivalent to the old one, it is the same bytes.
+    /// equivalent to the single-exit one, it is the same bytes -- and the
+    /// one rule in it is the lookups' (`the_tunnels_lookups_ride_tcp...`).
     #[test]
     fn no_extra_exits_leaves_the_config_exactly_as_it_was() {
         let primary = Outbound::VlessReality(&profile());
@@ -917,7 +1258,10 @@ mod tests {
             let one = build_config_for(&primary, passive);
             let none = build_multi_exit_config(&primary, &[], passive);
             assert_eq!(one, none, "delegation must not change a byte");
-            assert!(!one.contains("routing"), "no rules means no routing block at all");
+            let parsed: serde_json::Value = serde_json::from_str(&one).unwrap();
+            let rules = parsed["routing"]["rules"].as_array().unwrap();
+            assert_eq!(rules.len(), 1, "no extra exits means no exit rules: {rules:?}");
+            assert_eq!(rules[0]["outboundTag"], DNS_OUT_TAG);
             assert!(!one.contains("socks"), "no extra exits means no extra inbound");
         }
     }
@@ -1028,11 +1372,12 @@ mod tests {
         assert!(!config.contains("0.0.0.0"));
     }
 
-    /// Nothing may route `tun-in` anywhere. Everything with no
-    /// preference -- and all DNS -- has to keep landing on the primary
-    /// outbound, which it does only by there being no rule about it.
+    /// Nothing may route `tun-in` anywhere but its lookups. Everything
+    /// else with no preference has to keep landing on the primary
+    /// outbound, which it does only by there being no rule about it; and
+    /// the lookups reach the same node, over TCP, through the DNS outbound.
     #[test]
-    fn no_rule_ever_matches_the_tun_inbound() {
+    fn no_rule_sends_the_tun_inbound_anywhere_but_its_lookups() {
         let a = profile();
         let parsed: serde_json::Value = serde_json::from_str(&build_multi_exit_config(
             &Outbound::VlessReality(&a),
@@ -1042,7 +1387,10 @@ mod tests {
         .unwrap();
         for rule in parsed["routing"]["rules"].as_array().unwrap() {
             for tag in rule["inboundTag"].as_array().unwrap() {
-                assert_ne!(tag, "tun-in");
+                if tag == "tun-in" {
+                    assert_eq!(rule["port"], "53", "{rule}");
+                    assert_eq!(rule["outboundTag"], DNS_OUT_TAG, "{rule}");
+                }
             }
         }
     }
@@ -1054,5 +1402,259 @@ mod tests {
     fn inbound_and_outbound_tags_are_derived_together() {
         assert_eq!(exit_tags(0), ("exit-0-in".to_string(), "exit-0-out".to_string()));
         assert_eq!(exit_tags(2), ("exit-2-in".to_string(), "exit-2-out".to_string()));
+    }
+
+    /// The body of one function in this file, from its signature to the
+    /// closing brace at the start of a line.
+    fn body_of(signature: &str) -> &'static str {
+        let source = include_str!("xray.rs");
+        let start = source.find(signature).unwrap_or_else(|| panic!("{signature} is gone"));
+        &source[start..start + source[start..].find("\n}\n").unwrap()]
+    }
+
+    /// Both ways this adapter is brought up -- full tunnel and Custom mode
+    /// -- switch address detection off between the adapter appearing and
+    /// `netsh` addressing it. After the address is set is too late: an
+    /// address is checked under the setting it was added with, and that
+    /// check is the 1.6-2.8 s after a connect in which P0-A measured every
+    /// connection failing. Held from the source, because a call deleted
+    /// here leaves every other test passing and only shows on a real
+    /// adapter.
+    #[test]
+    fn detection_is_switched_off_before_the_adapter_is_addressed() {
+        for signature in ["pub fn install_routes(", "pub fn prepare_passive("] {
+            let body = body_of(signature);
+            let appeared = body.find("wait_for_adapter(limits)?").expect("waits for the adapter");
+            let quiet = body
+                .find("readiness::quiet_or_note(")
+                .unwrap_or_else(|| panic!("{signature} never switches detection off"));
+            let addressed = body.find("configure_address(").expect("addresses the adapter");
+            assert!(
+                appeared < quiet && quiet < addressed,
+                "{signature}: detection must go off after the adapter appears and before it is addressed"
+            );
+        }
+    }
+
+    /// And the wait that follows is for the address to be usable, not for
+    /// it to be listed: Windows lists a Tentative address.
+    #[test]
+    fn the_address_wait_is_for_a_usable_address() {
+        let body = body_of("fn wait_for_address(");
+        assert!(body.contains("readiness::settle("), "the wait never asks whether the address is Preferred");
+        assert!(body.contains("readiness::address_ready(held, expected)"), "the wait asks about some other address");
+    }
+
+    // ---------------------------------------------------------------
+    // Lookups over TCP, and Shadowsocks' UDP inside TCP.
+    // ---------------------------------------------------------------
+
+    fn tls_profile() -> VlessTlsProfile {
+        VlessTlsProfile {
+            uuid: "3f2504e0-4f89-11d3-9a0c-0305e82c3301".into(),
+            flow: String::new(),
+            host: "203.0.113.5".into(),
+            port: 443,
+            server_name: "cdn.example.com".into(),
+            ws_path: Some("/ws".into()),
+        }
+    }
+
+    fn shadowsocks_profile() -> ShadowsocksProfile {
+        ShadowsocksProfile {
+            host: "203.0.113.5".into(),
+            port: 8388,
+            method: "2022-blake3-aes-256-gcm".into(),
+            password: "c2VydmVyS2V5c2VydmVyS2V5c2VydmVyS2V5MTIzNDU=:dXNlcktleXVzZXJLZXl1c2VyS2V5dXNlcktleTEyMzQ=".into(),
+        }
+    }
+
+    /// `profile()` with a public key xray.exe will take: 32 bytes, base64url.
+    fn engine_reality_profile() -> XrayProfile {
+        XrayProfile { reality_public_key: "CzBVep_E6Q4zWH2ix-wRNluApcrvFDleg6jN8hc8YYY".into(), ..profile() }
+    }
+
+    /// Every config this file writes: each Xray protocol in both modes, and
+    /// one with concurrent exits (a Shadowsocks one among them). Every
+    /// credential in them is one xray.exe would accept.
+    fn every_config() -> Vec<(String, serde_json::Value)> {
+        let (reality, tls, trojan, ss) = (engine_reality_profile(), tls_profile(), trojan_profile(), shadowsocks_profile());
+        let mut out = Vec::new();
+        for (name, outbound) in [
+            ("vless-reality", Outbound::VlessReality(&reality)),
+            ("vless-tls-ws", Outbound::VlessTls(&tls)),
+            ("trojan", Outbound::Trojan(&trojan)),
+            ("shadowsocks", Outbound::Shadowsocks(&ss)),
+        ] {
+            for passive in [false, true] {
+                let config = serde_json::from_str(&build_config_for(&outbound, passive)).unwrap();
+                out.push((format!("{name} passive={passive}"), config));
+            }
+        }
+        let multi = build_multi_exit_config(
+            &Outbound::VlessReality(&reality),
+            &[
+                ExitInbound { exit: "finland-1", outbound: Outbound::Shadowsocks(&ss), port: 41080 },
+                ExitInbound { exit: "turkey-1", outbound: Outbound::Trojan(&trojan), port: 41081 },
+            ],
+            true,
+        );
+        out.push(("multi-exit".to_string(), serde_json::from_str(&multi).unwrap()));
+        out
+    }
+
+    /// The bundled v26.6.27 dropped Shadowsocks' UDP-over-TCP (#6286), so a
+    /// lookup over Shadowsocks would have left as plain UDP to the node --
+    /// dead on a network that blocks UDP, which in Iran is common. The
+    /// tunnel's lookups now ride TCP on every protocol: port 53 from the
+    /// adapter goes to Xray's DNS outbound, which answers A and AAAA from
+    /// Xray's own resolver over `tcp://` and passes any other query on as
+    /// it is, over TCP; both through the proxy.
+    #[test]
+    fn the_tunnels_lookups_ride_tcp_through_the_proxy_on_every_protocol() {
+        for (name, config) in every_config() {
+            let rules = config["routing"]["rules"].as_array().unwrap_or_else(|| panic!("{name}: no rules"));
+            let to_dns: Vec<_> = rules.iter().filter(|r| r["outboundTag"] == DNS_OUT_TAG).collect();
+            assert_eq!(to_dns.len(), 1, "{name}: {rules:?}");
+            // The adapter's port 53 only. Without the inbound tag the
+            // resolver's own connections to port 53 would come back here.
+            assert_eq!(to_dns[0]["inboundTag"], json!(["tun-in"]), "{name}");
+            assert_eq!(to_dns[0]["port"], "53", "{name}");
+
+            let outbounds = config["outbounds"].as_array().unwrap();
+            let dns_out = outbounds.iter().find(|o| o["tag"] == DNS_OUT_TAG).unwrap_or_else(|| panic!("{name}: no DNS outbound"));
+            assert_eq!(dns_out["protocol"], "dns", "{name}");
+            assert_eq!(dns_out["settings"]["network"], "tcp", "{name}: a query passed on would keep its UDP");
+            assert_eq!(dns_out["settings"]["rules"], json!([{ "action": "hijack", "qType": "1,28" }, { "action": "direct" }]), "{name}");
+            assert_eq!(dns_out["proxySettings"]["tag"], "proxy", "{name}: a query passed on would leave outside the tunnel");
+
+            let servers = config["dns"]["servers"].as_array().unwrap_or_else(|| panic!("{name}: no resolver"));
+            assert!(servers.contains(&json!(format!("tcp://{TUN_DNS}"))), "{name}: {servers:?}");
+            assert!(servers.len() >= 2, "{name}: one resolver, no fallback");
+            for server in servers {
+                assert!(server.as_str().is_some_and(|s| s.starts_with("tcp://")), "{name}: {server} is not TCP");
+            }
+            // The resolver's connections carry no inbound tag a rule names,
+            // so they go where everything unmatched goes: the first
+            // outbound, the proxy -- and so does what passes through the
+            // DNS outbound.
+            assert_eq!(outbounds[0]["tag"], "proxy", "{name}");
+            for rule in rules {
+                let tags = rule["inboundTag"].as_array().unwrap_or_else(|| panic!("{name}: a rule with no inbound tag: {rule}"));
+                assert!(!tags.is_empty(), "{name}: {rule}");
+            }
+        }
+    }
+
+    /// Shadowsocks' UDP -- games, calls, a lookup an application sends to
+    /// its own resolver -- inside one TCP connection to the node, through
+    /// Xray's mux (XUDP), which the nodes' Shadowsocks inbound accepts like
+    /// any inbound: it dispatches through `mux.Server`. TCP is left unmuxed
+    /// (`concurrency: -1`), as it was. UDP/443 is carried too: QUIC went over
+    /// UoT before #6286, and on a network that blocks UDP nothing else would
+    /// carry it. VLESS and Trojan carry UDP inside their own TCP stream
+    /// already, and Vision refuses a mux, so only Shadowsocks has one.
+    #[test]
+    fn shadowsocks_carries_its_udp_inside_tcp() {
+        let ss = shadowsocks_profile();
+        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::Shadowsocks(&ss), false)).unwrap();
+        let outbound = &parsed["outbounds"][0];
+        assert_eq!(
+            outbound["mux"],
+            json!({ "enabled": true, "concurrency": -1, "xudpConcurrency": 16, "xudpProxyUDP443": "allow" })
+        );
+        assert!(
+            outbound["settings"]["servers"][0].get("uot").is_none(),
+            "v26.6.27 reads no `uot` (#6286): a key that looks like it carries UDP and does nothing"
+        );
+        for (name, config) in every_config() {
+            for outbound in config["outbounds"].as_array().unwrap() {
+                let muxed = outbound.get("mux").is_some();
+                assert_eq!(muxed, outbound["protocol"] == "shadowsocks", "{name}: {outbound}");
+            }
+        }
+    }
+
+    /// And the bundled engine reads every one of them. `xray run -test`
+    /// builds the config and exits before starting anything -- the TUN
+    /// inbound makes its adapter in `Start` (`proxy/tun/handler.go`) -- so it
+    /// needs no elevation and touches no adapter. Skipped where the engine
+    /// has not been fetched, except on CI, which fetches it first.
+    #[test]
+    fn the_bundled_engine_accepts_every_config() {
+        let exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src-tauri/resources/xray.exe");
+        if !exe.exists() {
+            assert!(std::env::var_os("CI").is_none(), "CI fetches the engine before the tests: {}", exe.display());
+            eprintln!("skipped: {} has not been fetched", exe.display());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("neoxify-xray-config-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (index, (name, config)) in every_config().into_iter().enumerate() {
+            let path = dir.join(format!("config-{index}.json"));
+            std::fs::write(&path, config.to_string()).unwrap();
+            let out = std::process::Command::new(&exe).arg("run").arg("-test").arg("-c").arg(&path).output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("Configuration OK."),
+                "{name}: xray.exe refused the config ({})\n{stdout}\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// netsh validates a resolver it sets unless told not to: it looks
+    /// something up through it and waits for the answer -- 11.2 s on the VM
+    /// against one that cannot answer. Custom mode's adapter carries no
+    /// route, so that lookup leaves by the physical adapter, where the DNS
+    /// hold refuses it: the likeliest cause of a 15.2 s Custom-mode connect
+    /// (c-01) against 4.9 s before the hold (g2-01). See `dns_server_args`.
+    #[test]
+    fn the_tunnels_resolver_is_set_without_netsh_trying_it() {
+        let args = dns_server_args("name=neoconnect0");
+        assert_eq!(args.last(), Some(&"validate=no"), "{args:?}");
+        let expected: [&str; 8] = ["interface", "ipv4", "set", "dnsservers", "name=neoconnect0", "static", TUN_DNS, "primary"];
+        assert_eq!(&args[..8], &expected[..]);
+        let body = body_of("fn configure_dns(");
+        assert!(body.contains("dns_server_args(&name_arg)"), "configure_dns sets the resolver some other way");
+        assert!(!body.contains("OsStr::new(\"dnsservers\")"), "configure_dns sets the resolver some other way");
+    }
+
+    /// Custom mode's DNS rule is not installed with the adapter: only a
+    /// full tunnel's is (`dns::rule_at_connect`). Custom mode's goes in once
+    /// the redirect carries the lookups (`Engines::start_split_tunnel`);
+    /// installed here, it pinned them to 1.1.1.1 for the seconds before
+    /// that, and they left by the physical adapter in clear text -- seen at
+    /// the NIC on the VM (p1-24). Held from the source, as the order above
+    /// is.
+    #[test]
+    fn only_a_full_tunnels_dns_rule_goes_in_with_the_adapter() {
+        let body = body_of("fn configure_dns(");
+        let asked = body
+            .find("if let Some(resolver) = super::dns::rule_at_connect(passive, TUN_DNS) {")
+            .expect("the rule is not asked for by the full-tunnel-only policy");
+        assert!(body[asked..].contains("super::dns::force(resolver);"), "the rule is not installed");
+        assert_eq!(body.matches("dns::force(").count(), 1, "the rule is installed some other way too");
+    }
+
+    /// A full tunnel's DNS -- the adapter's resolver and the machine-wide
+    /// rule -- goes in only once its routes are up. With the address, before
+    /// them, every lookup on the PC was pinned to 1.1.1.1 with no route into
+    /// the tunnel, and left by the physical adapter in clear text (G8; on
+    /// 0.9.48 too). The address still goes on first: the routes name it as
+    /// their next hop. Held from the source, as the orders above are.
+    #[test]
+    fn a_full_tunnels_dns_goes_in_only_once_its_routes_are_up() {
+        let body = body_of("pub fn install_routes(");
+        let addressed = body.find("configure_address(tun_gateway, limits)?;").expect("addresses the adapter");
+        let routed = body.find("routing::install_full_tunnel(").expect("installs the routes");
+        let dns = body.find("configure_dns(false, limits)?;").expect("gives the adapter its DNS");
+        assert!(addressed < routed && routed < dns, "address {addressed}, routes {routed}, DNS {dns}");
+        assert_eq!(body.matches("configure_dns(").count(), 1);
+        // And the address's own step sets no DNS.
+        let address = body_of("fn configure_address(");
+        assert!(!address.contains("dnsservers") && !address.contains("dns::"), "the address step still sets DNS");
     }
 }

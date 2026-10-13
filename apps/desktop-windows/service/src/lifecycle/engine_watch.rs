@@ -37,7 +37,7 @@
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
@@ -434,6 +434,18 @@ struct LedgerState {
     /// The last session that ended on its own, until something newer
     /// makes it irrelevant.
     ended: Option<Ended>,
+    /// What the live session can say about its IPv4 confinement, and the
+    /// generation it was noted for. Weak: the ledger must not keep a
+    /// confinement alive past its session.
+    confinement: Option<(u64, Weak<dyn ConfinementReport>)>,
+}
+
+/// What a session's IPv4 confinement says of itself -- `engines::
+/// confinement::Hold` -- readable without the engine state, so a status
+/// answered while the owning thread is busy can still say it.
+pub trait ConfinementReport: Send + Sync {
+    fn confined(&self) -> Option<bool>;
+    fn problem(&self) -> Option<String>;
 }
 
 /// Which session is live, and whether the last one ended on its own.
@@ -605,6 +617,30 @@ impl Ledger {
     /// holds the owning thread be answered without asking Windows.
     pub fn forget(&self) {
         self.state().ended = None;
+    }
+
+    /// Notes where the live session's IPv4 confinement can be read from.
+    /// Ignored for a generation that is not the live one.
+    pub fn note_confinement(&self, generation: u64, report: Weak<dyn ConfinementReport>) {
+        let mut state = self.state();
+        if generation != 0 && state.live == generation {
+            state.confinement = Some((generation, report));
+        }
+    }
+
+    /// What the live session says about its IPv4 confinement --
+    /// `ipv4_confined` and `confinement_problem` -- or nothing, when no
+    /// session is live or the live one noted none. Read outside the
+    /// ledger's lock: the confinement has a lock of its own.
+    pub fn confinement(&self) -> (Option<bool>, Option<String>) {
+        let report = {
+            let state = self.state();
+            match &state.confinement {
+                Some((generation, report)) if *generation == state.live && state.live != 0 => report.upgrade(),
+                _ => None,
+            }
+        };
+        report.map_or((None, None), |report| (report.confined(), report.problem()))
     }
 }
 

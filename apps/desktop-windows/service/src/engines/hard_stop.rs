@@ -24,6 +24,15 @@ impl HardStopSteps for Engines {
     /// is the 2026-08-23 class of bug the slot type was introduced to
     /// make unrepresentable.
     fn kill_engines(&mut self) -> Result<(), String> {
+        // Custom mode: port 53 held outside the tunnel from before its
+        // redirect stops (in `end_session`) until `clear_dns_rules` has
+        // taken out the rule that pins every lookup to 1.1.1.1. In between,
+        // nothing carries those lookups into the tunnel, and they left by
+        // the physical adapter -- up to twelve frames after every Xray
+        // disconnect on the VM. One WFP session, milliseconds.
+        if self.custom_mode_pin_in() {
+            self.hold_dns("hold DNS while Custom mode is stopped");
+        }
         let Some(active) = self.end_session() else {
             return Ok(());
         };
@@ -41,23 +50,34 @@ impl HardStopSteps for Engines {
             // the record of what was installed is gone with it. The one
             // route that does not vanish with the adapter is the host
             // route to the node, which sits on the *physical* interface;
-            // leaving it would be a small leak that nothing cleans until
-            // the machine reboots.
+            // leaving it would be a leak that, before the ledger, nothing
+            // cleaned until the machine rebooted.
             //
             // This is the one step that runs an executable, and it is a
             // deliberate exception rather than a hole in the rule. The
             // rule is about PowerShell, where 4.4 to 6.5 seconds is
             // spent before the first statement runs; `route.exe` is a
             // small native program with no runtime to start, and there
-            // are at most three of them.
+            // are at most two of them -- the half-defaults. The host
+            // route is deleted natively and starts nothing.
             Active::Child { protocol, mut child, mut routes } => {
                 let killed = child
                     .kill()
                     .map_err(|err| format!("could not stop the {protocol} engine: {err}"));
+                self.mark("engine stopped");
+                // The IPv4 confinement, the moment the engine is killed and
+                // before the routes: the session is ending, so it protects
+                // nothing now, and held through the route.exe deletes below
+                // it refuses everything those deletes send to the physical
+                // adapter -- the machine's whole internet, for as long as
+                // they take (K1). The step of its own after this one finds
+                // nothing left to do.
+                self.let_go_of_confinement();
                 // After the kill and regardless of it: a route left
                 // behind is worse than one removed from an engine that
                 // was already gone.
                 routes.remove();
+                self.mark("routes removed");
 
                 // OpenVPN's own routes, which `routes` does not hold:
                 // openvpn.exe adds the server's pushed `0.0.0.0/1` and
@@ -73,9 +93,10 @@ impl HardStopSteps for Engines {
                 //
                 // By destination, with `route.exe`: the same two deletes
                 // the connect path makes, no enumeration and no cmdlet.
-                // OpenVPN installs no routes of ours, so `routes` above
-                // was empty and this stays inside the three `route.exe`
-                // runs phase one allows.
+                // What `routes` above holds for OpenVPN is the host route
+                // it put on the physical uplink, taken over at connect;
+                // that is deleted natively and starts no process, so this
+                // stays inside the three `route.exe` runs phase one allows.
                 if protocol == "OPENVPN" {
                     if let Ok(Some(adapter)) = adapters::find_by_name(openvpn::ADAPTER_NAME) {
                         routing::purge_pushed_half_defaults(adapter.index);
@@ -88,6 +109,7 @@ impl HardStopSteps for Engines {
             // process -- see `ras::Connection`.
             Active::Ikev2(live) => {
                 let code = live.hang_up();
+                self.mark("engine stopped");
                 if code == 0 {
                     Ok(())
                 } else {
@@ -100,6 +122,14 @@ impl HardStopSteps for Engines {
             // only the first belongs here.
             Active::WireguardTunnel => Ok(()),
         }
+    }
+
+    /// Let go of the IPv4 confinement, which `kill_engines` parked with
+    /// the session. One handle close; usually already done by the watch
+    /// when it is the engine that went first.
+    fn release_confinement(&mut self) -> Result<(), String> {
+        self.let_go_of_confinement();
+        Ok(())
     }
 
     /// Let go of the kernel's filters.
@@ -123,7 +153,10 @@ impl HardStopSteps for Engines {
     /// 48 to 64 milliseconds for the registry delete against 4.4 to 6.5
     /// seconds merely to start PowerShell.
     fn clear_dns_rules(&mut self) -> Result<(), String> {
+        self.mark("dns cleared");
         let cleared = dns::clear_registry_only();
+        // The rule is out: port 53 is let go of (`kill_engines`).
+        self.release_dns_hold();
         self.forget_dns_state();
         match cleared.unverified {
             // Reported, not fatal, and not retried here with cmdlets --

@@ -106,6 +106,22 @@ export type VpnStatus = {
    *
    * Empty, or absent from an older service, means nothing to say. */
   splitTunnelRestartNeeded?: string[];
+  /** Whether IPv4 outside the tunnel is refused on this PC while it is
+   * up: every connection around it refused but the engine's own link to
+   * its server, the LAN, DHCP and loopback (the service's
+   * `engines::confinement`).
+   *
+   * `null`, or absent from an older service, is not "unconfined": it is a
+   * session this does not apply to -- Custom mode; WireGuard, whose own
+   * kill switch does the same -- and nothing is shown. `false` is a full
+   * tunnel that is not confined: one whose confinement failed or was let
+   * go of, or Built-in (IKEv2), not confined by choice until its own
+   * proof. The screen must not claim full protection over it
+   * (`warnsUnconfined`, `unconfinedLine`). */
+  ipv4Confined?: boolean | null;
+  /** Why not, when `ipv4Confined` is false. English, for support; never
+   * the words the customer is shown. */
+  confinementProblem?: string;
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }
@@ -445,6 +461,41 @@ export function droppedUnseen(
   return noTunnelVerified(status);
 }
 
+/** Whether the screen must say that this tunnel's IPv4 is not confined to
+ * it: the service said `false`, about a full tunnel.
+ *
+ * The owner's decision (d), 2026-10-12: a confinement that would not go in
+ * leaves the tunnel up -- it carries traffic -- and the screen must never
+ * claim full protection over it. Only the service's `false` warns:
+ * `true` is the claim made good, `null` is a session it does not apply
+ * to (WireGuard), and an older service says nothing at all. Custom
+ * mode never warns: it is not confined by design, on any engine, and says
+ * what it does carry in its own words. */
+export function warnsUnconfined(
+  status: Pick<VpnStatus, "ipv4Confined"> | null,
+  customMode: boolean,
+): boolean {
+  return !customMode && status?.ipv4Confined === false;
+}
+
+/** Which words say what is not covered, when `warnsUnconfined` holds.
+ *
+ * Built-in (IKEv2) is not confined by choice in this version -- its plan
+ * waits on its own proof -- so reconnecting changes nothing there, and its
+ * line says so and points at the protocols that are held. Every other
+ * protocol that warns has a confinement that failed or was let go of. */
+export function unconfinedLine(status: Pick<VpnStatus, "protocol"> | null): TranslationKey {
+  return status?.protocol === "IKEV2" ? "dash.ipv4NotConfinedIkev2" : "dash.ipv4NotConfined";
+}
+
+/** Whether the line `unconfinedLine` chose says the tunnel is not confined
+ * by choice -- Built-in, which this version never confines -- rather than by
+ * a confinement that failed or was let go of. A fact about the session, not a
+ * gap that may close: the orb shows it at once (`orb-caution.ts`). */
+export function unconfinedByChoice(line: TranslationKey): boolean {
+  return line === "dash.ipv4NotConfinedIkev2";
+}
+
 /** How the headline is coloured. Mapped to classes by the dashboard. */
 export type HeadlineTone = "success" | "highlight" | "warning" | "muted" | "plain" | "destructive";
 
@@ -485,14 +536,39 @@ export function headlineFor(
     dropped,
     customMode,
     reconnecting = null,
-  }: { dropped: boolean; customMode: boolean; reconnecting?: ReconnectingView | null },
+    unconfined = false,
+    waitingForNetwork = false,
+  }: {
+    dropped: boolean;
+    customMode: boolean;
+    reconnecting?: ReconnectingView | null;
+    unconfined?: boolean;
+    /** A pass is waiting on its rung for a network to dial over
+     * (`lib/network-wait.ts`). */
+    waitingForNetwork?: boolean;
+  },
 ): Headline {
+  // A verified tunnel whose IPv4 the service could not confine to it
+  // (`warnsUnconfined`): connected, and not "You're protected".
+  if (state === "connected" && unconfined && !customMode) {
+    return { title: "dash.connectedNotConfined", hint: "dash.connectedNotConfinedHint", tone: "warning" };
+  }
   if (reconnecting !== null && !isTunnelUp(state) && state !== "unknown") {
+    // No network: between attempts, or a pass waiting on its rung for one.
+    // Said as that, in the reconnect's own tone, rather than as attempts
+    // that are not being made.
+    const offline = reconnecting.offline || waitingForNetwork;
     return {
-      title: "dash.reconnecting",
-      hint: reconnecting.offline ? "dash.reconnectingOfflineHint" : "dash.reconnectingHint",
+      title: offline ? "dash.waitingForNetwork" : "dash.reconnecting",
+      hint: offline ? "dash.reconnectingOfflineHint" : "dash.reconnectingHint",
       tone: "warning",
     };
+  }
+  // A connect the service refused for want of a network, waiting for one on
+  // the same server: not "checking the connection", and nothing about a
+  // server, none having been dialled.
+  if (waitingForNetwork && !isTunnelUp(state) && state !== "unknown") {
+    return { title: "dash.waitingForNetwork", hint: "dash.waitingForNetworkHint", tone: "plain" };
   }
   switch (state) {
     case "connected":

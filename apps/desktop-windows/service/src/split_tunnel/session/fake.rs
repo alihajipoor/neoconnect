@@ -225,7 +225,10 @@ impl Parts for Fake {
             name: adapter_name.to_string(),
             gateway: None,
             ipv4: Some(Ipv4Addr::LOCALHOST),
+            ipv4_prefix: Some(8),
+            ipv4_all: vec![Ipv4Addr::LOCALHOST],
             is_up: true,
+            dhcp_server: None,
             description: "stand-in tunnel".to_string(),
         })
     }
@@ -238,7 +241,10 @@ impl Parts for Fake {
             name: "stand-in uplink".to_string(),
             gateway: None,
             ipv4: Some(Ipv4Addr::LOCALHOST),
+            ipv4_prefix: Some(8),
+            ipv4_all: vec![Ipv4Addr::LOCALHOST],
             is_up: true,
+            dhcp_server: None,
             description: "stand-in uplink".to_string(),
         })
     }

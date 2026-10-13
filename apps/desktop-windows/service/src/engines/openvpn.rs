@@ -32,6 +32,7 @@
 //! text.
 
 use std::ffi::{c_void, OsStr};
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::Child;
 
@@ -40,6 +41,8 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 use neoconnect_ipc::OpenvpnProfile;
 
+use super::route_table::{new_host_routes, OwedRoutes, RouteOps, RouteRow};
+use crate::adapters::Uplink;
 use super::{
     confirm_started, routing, run_hidden_capture, run_hidden_capture_within, spawn_hidden,
     write_config, Engines,
@@ -47,7 +50,7 @@ use super::{
 use crate::adapters;
 
 const CONFIG_FILE: &str = "neoconnect.ovpn";
-const LOG_FILE: &str = "openvpn.log";
+pub(super) const LOG_FILE: &str = "openvpn.log";
 
 /// The largest encapsulated packet this client will put on the wire,
 /// counted the way `mssfix ... mtu` counts it: outer IP header included.
@@ -409,15 +412,29 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     // installed a VPN for refuse to load.
     //
     // block-outside-dns is OpenVPN's own fix: it drops DNS leaving any
-    // other adapter while the tunnel is up. Full tunnel only -- in
-    // Custom mode most applications are deliberately off the tunnel,
-    // and seizing the machine's resolver would push their lookups
-    // through a tunnel they are not using.
+    // other adapter while the tunnel is up. Full tunnel only. In Custom
+    // mode nothing is routed to the tunnel, and its filters would refuse
+    // every lookup at the adapter it leaves by, before the redirect could
+    // carry it in. Custom mode pins the machine's lookups with the NRPT
+    // rule instead, once the redirect is up, as it does on every engine
+    // (`Engines::start_split_tunnel`).
     //
     // Two tests asserted this before it was ever written, and could not
     // fail: the job that would have run them had never once got as far
     // as running a test.
     let dns = if passive { "" } else { "block-outside-dns\n" };
+
+    // Custom mode keeps the server's address across OpenVPN's own restarts.
+    //
+    // A ping-restart looks `remote` up again unless told not to, through
+    // the DNS Client like any other lookup. In Custom mode that lookup is
+    // pinned to 1.1.1.1 by the NRPT rule and carried into the tunnel by
+    // the redirect -- the tunnel that is down and restarting -- so it
+    // times out, and with `resolv-retry infinite` OpenVPN never reconnects.
+    // Only a server named by a hostname is exposed; the first lookup, at
+    // connect, happens before the rule exists. A full tunnel is left as
+    // it was.
+    let keep_remote = if passive { "persist-remote-ip\n" } else { "" };
 
     // The tunnel's MTU, pinned, and the server's pushed value refused.
     //
@@ -480,6 +497,7 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
          nobind\n\
          persist-key\n\
          persist-tun\n\
+         {keep_remote}\
          remote-cert-tls server\n\
          cipher AES-256-GCM\n\
          auth SHA256\n\
@@ -501,12 +519,129 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     ))
 }
 
+/// The host routes openvpn.exe adds on the uplink, found by reading the
+/// table before it starts and again once it says the tunnel is up.
+///
+/// openvpn.exe does not report what it routed, and its `redirect-gateway`
+/// puts a host route to the server -- and with `bypass-dhcp`, one to the
+/// DHCP server -- on the physical adapter, where nothing of ours would
+/// otherwise ever remove it. See `InstalledRoutes::adopted`.
+pub(super) struct HostRouteWatch {
+    /// The table before openvpn.exe started. `None` when it could not be
+    /// read, in which case nothing on the uplink can be told apart from
+    /// the customer's own routes and only routes to the server itself
+    /// are taken.
+    before: Option<Vec<RouteRow>>,
+    /// The adapter openvpn.exe's `net_gateway` is expected on, and the
+    /// gateway itself.
+    uplink: Option<Uplink>,
+    /// The server's address, when the profile names it as one.
+    remote: Option<Ipv4Addr>,
+    /// The uplink's DHCP server, which `bypass-dhcp` routes around the
+    /// tunnel, when its lease came from one.
+    dhcp_server: Option<Ipv4Addr>,
+    /// Our own adapters, whose routes are never the uplink's.
+    ours: Vec<u32>,
+}
+
+impl HostRouteWatch {
+    pub(super) fn begin(
+        ops: &dyn RouteOps,
+        uplink: Option<Uplink>,
+        remote: Option<Ipv4Addr>,
+        dhcp_server: Option<Ipv4Addr>,
+        ours: Vec<u32>,
+    ) -> Self {
+        Self { before: ops.rows().ok(), uplink, remote, dhcp_server, ours }
+    }
+
+    /// Owes the routes openvpn.exe is about to add that can be named before
+    /// it starts, and returns them. Called just before it is started.
+    ///
+    /// `redirect-gateway` adds the server's host route, and `bypass-dhcp`
+    /// the DHCP server's, early in the connect, through the uplink's
+    /// gateway. They used to be owed only once the connect returned, so a
+    /// service killed, crashed or stopped in between left both with no
+    /// record: the server's waited for the next connect's known-node
+    /// purge, and the DHCP server's stayed until a reboot. Owed now, the
+    /// janitor at the next start removes them like Xray's.
+    ///
+    /// Only what was not there before -- a route already on the table is
+    /// not openvpn.exe's to add, and owing it would have a crash take the
+    /// customer's -- and nothing when the table could not be read or the
+    /// uplink is unknown. Keyed by the gateway the uplink was found
+    /// through; openvpn.exe finds its own `net_gateway`, and where the two
+    /// differ the route is owed under the wrong key and still only owed
+    /// from the moment the connect returns, as before.
+    pub(super) fn owe_ahead(&self, owed: &OwedRoutes) -> Vec<RouteRow> {
+        let (Some(before), Some(uplink)) = (&self.before, self.uplink) else { return Vec::new() };
+        let ahead: Vec<RouteRow> = [self.remote, self.dhcp_server]
+            .into_iter()
+            .flatten()
+            .map(|dest| RouteRow::host(dest, uplink.index, uplink.next_hop, 0))
+            .filter(|row| !before.iter().any(|old| old.same_route(row)))
+            .collect();
+        for row in &ahead {
+            owed.owe(*row);
+        }
+        ahead
+    }
+
+    /// After a connect that came up: strikes off what was owed ahead and
+    /// never added. What was added stays owed, and the session owns it.
+    pub(super) fn settle_unused(owed: &OwedRoutes, ahead: &[RouteRow], added: &[RouteRow]) {
+        for row in ahead.iter().filter(|row| !added.iter().any(|a| a.same_route(row))) {
+            owed.settle(row);
+        }
+    }
+
+    /// After a connect that failed, when openvpn.exe has ended and no
+    /// session will exist to remove anything: deletes what it added and
+    /// what was owed ahead, each struck off once gone and owed until then,
+    /// so one that will not delete is the next start's to remove.
+    pub(super) fn give_back(ops: &dyn RouteOps, owed: &OwedRoutes, ahead: &[RouteRow], added: &[RouteRow]) {
+        let unadded = ahead.iter().filter(|row| !added.iter().any(|a| a.same_route(row)));
+        for row in added.iter().chain(unadded) {
+            owed.owe(*row);
+            if ops.delete(row).is_ok() {
+                owed.settle(row);
+            }
+        }
+    }
+
+    /// What was added since [`Self::begin`]: new host routes added through
+    /// `NETMGMT` on the uplink through its gateway (`new_host_routes`), and
+    /// any new one added that way to the server on an adapter that is not
+    /// ours. The second is a guard on the first -- if the uplink was
+    /// guessed wrongly, the route that matters most is still found.
+    pub(super) fn added(&self, ops: &dyn RouteOps) -> Vec<RouteRow> {
+        let Ok(after) = ops.rows() else { return Vec::new() };
+        let mut added = match (&self.before, self.uplink) {
+            (Some(before), Some(uplink)) => new_host_routes(before, &after, uplink.index, uplink.next_hop),
+            _ => Vec::new(),
+        };
+        let before = self.before.as_deref().unwrap_or(&[]);
+        if let Some(remote) = self.remote {
+            let to_server = |r: &&RouteRow| r.is_host() && r.netmgmt && r.dest == remote && !self.ours.contains(&r.if_index);
+            for row in after.iter().filter(to_server) {
+                let known = before.iter().chain(added.iter()).any(|old| old.same_route(row));
+                if !known {
+                    added.push(*row);
+                }
+            }
+        }
+        added
+    }
+}
+
+/// Brings OpenVPN up, and returns it with the host routes it added on
+/// the uplink for the session to own.
 pub fn connect(
     engines: &Engines,
     profile: &OpenvpnProfile,
     passive: bool,
     limits: &crate::lifecycle::budget::Limits,
-) -> Result<Child, String> {
+) -> Result<(Child, Vec<RouteRow>), String> {
     let exe = engines.engine_path("openvpn.exe")?;
     engines.engine_path("wintun.dll")?;
     ensure_adapter(engines)?;
@@ -523,8 +658,17 @@ pub fn connect(
     // seconds, out of 38, to delete nothing. The two destinations are
     // known, `route.exe` deletes them without looking anything up, and
     // a route that is not there is the expected case.
-    if let Ok(Some(adapter)) = adapters::find_by_name(ADAPTER_NAME) {
-        routing::purge_pushed_half_defaults(adapter.index);
+    //
+    // And address detection off, before openvpn.exe addresses the
+    // adapter: an address is checked under the setting it was added with,
+    // and that check was the 1.6-2.8 s after a Compatible connect in which
+    // every connection failed. See `readiness`. The adapter is kept
+    // between sessions, so from the second connect on it is already off
+    // and nothing is written.
+    let tunnel_index = adapters::find_by_name(ADAPTER_NAME).ok().flatten().map(|adapter| adapter.index);
+    if let Some(index) = tunnel_index {
+        routing::purge_pushed_half_defaults(index);
+        super::readiness::quiet_or_note(&super::readiness::SystemInterfaces, index, ADAPTER_NAME);
     }
 
     let config_path = engines.config_path(CONFIG_FILE);
@@ -534,17 +678,58 @@ pub fn connect(
         .parent()
         .ok_or_else(|| "could not resolve the engine directory".to_string())?;
 
+    // Custom mode refuses the pushed routes (`route-nopull`), so there is
+    // nothing to watch for.
+    let watch = (!passive).then(|| {
+        let remote = profile.endpoint.rsplit_once(':').and_then(|(host, _)| host.parse().ok());
+        let uplink = super::uplink_toward(remote);
+        let dhcp_server = uplink.and_then(|u| {
+            adapters::list().ok()?.into_iter().find(|a| a.index == u.index)?.dhcp_server
+        });
+        HostRouteWatch::begin(&*engines.route_ops, uplink, remote, dhcp_server, super::our_interfaces())
+    });
+
+    let owed = engines.owed_routes();
+    let ahead = watch.as_ref().map(|w| w.owe_ahead(&owed)).unwrap_or_default();
     let log_path = engines.config_path(LOG_FILE);
-    let child = spawn_hidden(
+    let child = match spawn_hidden(
         &exe,
         &[OsStr::new("--config"), config_path.as_os_str()],
         exe_dir,
         &log_path,
-    )
-    .map_err(|e| format!("could not start openvpn.exe: {e}"))?;
+    ) {
+        Ok(child) => child,
+        Err(e) => {
+            HostRouteWatch::give_back(&*engines.route_ops, &owed, &ahead, &[]);
+            return Err(format!("could not start openvpn.exe: {e}"));
+        }
+    };
 
-    let child = confirm_started(child, "OpenVPN", &log_path)?;
-    wait_until_up(child, &log_path, limits)
+    let up = confirm_started(child, "OpenVPN", &log_path)
+        .and_then(|child| wait_until_up(child, &log_path, limits))
+        .and_then(|child| wait_until_usable(child, tunnel_index, limits));
+    let added = watch.map(|w| w.added(&*engines.route_ops)).unwrap_or_default();
+    match up {
+        Ok(child) => {
+            HostRouteWatch::settle_unused(&owed, &ahead, &added);
+            // No NRPT rule here. A full tunnel's DNS is the pushed one
+            // behind `block-outside-dns`; Custom mode's rule goes in once
+            // the redirect is up to carry the lookups
+            // (`Engines::start_split_tunnel`). It used to go in here,
+            // seconds before that, pinning them to 1.1.1.1 with nothing to
+            // carry them.
+            Ok((child, added))
+        }
+        Err(e) => {
+            // openvpn.exe has ended on every path that reaches here, so
+            // nothing is left to put these back -- and no session will
+            // exist to remove them. A connect that is cancelled after the
+            // pushed routes went in, but before OpenVPN said it was done,
+            // used to leave them behind.
+            HostRouteWatch::give_back(&*engines.route_ops, &owed, &ahead, &added);
+            Err(e)
+        }
+    }
 }
 
 /// Waits until OpenVPN says its tunnel is up, rather than until it has
@@ -616,6 +801,85 @@ fn wait_until_up(
     }
 }
 
+/// Once OpenVPN says it is up, waits until the address it gave the adapter
+/// is one Windows will use.
+///
+/// OpenVPN's log line comes while the address is still being checked:
+/// on 0.9.48 it stayed Tentative until 1.6-2.8 s after the connect had
+/// returned. With detection switched off before the start this answers at
+/// the first look; if that did not take, it waits for at most
+/// `readiness::PREFERRED_WAIT` and then carries on, saying so in
+/// cleanup.log. Only Disconnect fails it, and then openvpn.exe is stopped
+/// here as `wait_until_up` stops it, so that the caller's arm for a failed
+/// connect gives the routes back.
+///
+/// Any usable address, because the server pushes it and it is not known
+/// here in advance -- see `readiness::some_address_ready`.
+fn wait_until_usable(
+    mut child: Child,
+    tunnel_index: Option<u32>,
+    limits: &crate::lifecycle::budget::Limits,
+) -> Result<Child, String> {
+    let index = tunnel_index.or_else(|| adapters::find_by_name(ADAPTER_NAME).ok().flatten().map(|a| a.index));
+    let Some(index) = index else { return Ok(child) };
+    match super::readiness::settle(
+        &super::readiness::SystemInterfaces,
+        index,
+        ADAPTER_NAME,
+        super::readiness::some_address_ready,
+        limits,
+    ) {
+        Ok(()) => Ok(child),
+        Err(e) => {
+            let _ = child.kill();
+            super::reap(&mut child);
+            Err(e)
+        }
+    }
+}
+
+/// What OpenVPN logs each time it goes round again: a ping-restart after
+/// the server went quiet, a TLS error, a reset connection -- every soft
+/// or hard restart ends its line with this. Its last word on the link
+/// until [`TUNNEL_UP_MARK`] follows it.
+const RESTART_MARK: &str = "process restarting";
+
+/// How much of the end of the log [`link_reading`] reads. At `verb 3` a
+/// tunnel that is up logs next to nothing, so its last restart or
+/// completion is well inside this; one that is not is logging little else.
+const LOG_TAIL_BYTES: u64 = 16 * 1024;
+
+/// What OpenVPN's own log says about its link, for Custom mode's DNS pin
+/// (`dns::PinWatch`).
+///
+/// `No` while the last thing it logged about the link is a restart, and
+/// `Unknown` otherwise. Never `Yes`: [`TUNNEL_UP_MARK`] is OpenVPN's word
+/// that it set the tunnel up, not that anything has crossed it since --
+/// what puts the pin back is the split tunnel's probe getting a reply.
+pub(super) fn link_reading(log_tail: &str) -> super::dns::Carrying {
+    match (log_tail.rfind(RESTART_MARK), log_tail.rfind(TUNNEL_UP_MARK)) {
+        (Some(restart), Some(up)) if restart > up => super::dns::Carrying::No,
+        (Some(_), None) => super::dns::Carrying::No,
+        _ => super::dns::Carrying::Unknown,
+    }
+}
+
+/// The end of the session's log, as [`link_reading`] wants it: the last
+/// [`LOG_TAIL_BYTES`], or nothing if it cannot be read.
+pub(super) fn log_tail(engines: &Engines) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(engines.config_path(LOG_FILE)) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if file.seek(SeekFrom::Start(len.saturating_sub(LOG_TAIL_BYTES))).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    let _ = file.take(LOG_TAIL_BYTES).read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// The last few lines of an engine log, for an error message.
 fn tail(log: &str) -> String {
     let lines: Vec<&str> = log.lines().rev().take(6).collect();
@@ -651,6 +915,75 @@ mod tests {
         // silently becomes a full tunnel.
         assert!(build_config(&profile(), true).unwrap().contains("route-nopull"));
         assert!(!build_config(&profile(), false).unwrap().contains("route-nopull"));
+    }
+
+    /// Custom mode keeps the server's address across OpenVPN's own
+    /// restarts instead of looking its name up again.
+    ///
+    /// Custom mode now pins the machine's lookups to 1.1.1.1, and the
+    /// redirect carries them into the tunnel. A ping-restart re-resolves
+    /// `remote` unless told not to, and that lookup -- through the DNS
+    /// Client like any other -- then went into the very tunnel that was
+    /// down and restarting; with `resolv-retry infinite` OpenVPN waited on
+    /// it for ever, where before W2 it went to the router and the
+    /// reconnect worked. Only a server named by a hostname is exposed, which
+    /// the installer allows. The first lookup, at connect, happens before
+    /// the rule exists.
+    #[test]
+    fn custom_mode_keeps_the_servers_address_across_its_own_restarts() {
+        let named = OpenvpnProfile { endpoint: "vpn.example.test:1194".into(), ..profile() };
+        assert!(build_config(&named, true).unwrap().contains("\npersist-remote-ip\n"));
+        // A full tunnel is as it was: its DNS is the pushed one, and nothing
+        // of Custom mode's applies.
+        assert!(!build_config(&named, false).unwrap().contains("persist-remote-ip"));
+    }
+
+    /// `connect` installs no NRPT rule. A full tunnel's DNS is the pushed
+    /// one behind `block-outside-dns`; Custom mode's rule goes in once the
+    /// redirect carries the lookups (`Engines::start_split_tunnel`, held
+    /// there by its own test). Installed here, once OpenVPN said it was up
+    /// and seconds before the redirect, it pinned them to 1.1.1.1 with
+    /// nothing yet to carry them, and they left by the physical adapter in
+    /// clear text. Held from the source.
+    #[test]
+    fn connect_installs_no_dns_rule() {
+        let source = include_str!("openvpn.rs");
+        let start = source.find("pub fn connect(").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        assert!(!body.contains("dns::force("), "Custom mode's rule goes in before the redirect can carry it");
+    }
+
+    /// Detection goes off on OpenVPN's adapter before openvpn.exe starts,
+    /// because openvpn.exe addresses it as it comes up and an address is
+    /// checked under the setting it was added with. This is the change
+    /// P0-A tested: `DadTransmits=0` on this adapter ahead of the connect
+    /// took away the window in which every connection failed, and 3 put
+    /// back brought it back. Then, once OpenVPN says it is up, the wait is
+    /// for an address that is usable, not for the log line alone -- inside
+    /// the chain that decides `up`, so a Disconnect during it reaches the
+    /// arm that gives the routes back.
+    #[test]
+    fn detection_is_switched_off_before_openvpn_starts_and_waited_out_after() {
+        let source = include_str!("openvpn.rs");
+        let body_of = |signature: &str| {
+            let start = source.find(signature).unwrap_or_else(|| panic!("{signature} is gone"));
+            &source[start..start + source[start..].find("\n}\n").unwrap()]
+        };
+        let body = body_of("pub fn connect(");
+        let quiet = body.find("readiness::quiet_or_note(").expect("detection is never switched off");
+        let spawned = body.find("spawn_hidden(").expect("openvpn.exe is started");
+        assert!(quiet < spawned, "detection must go off before openvpn.exe can address the adapter");
+        let up = body.find("let up = ").expect("the chain that decides whether the tunnel came up");
+        let decided = body[up..].find("match up {").map(|at| up + at).expect("the decision");
+        let chain = &body[up..decided];
+        let logged = chain.find("wait_until_up(").expect("waits for OpenVPN's word");
+        let usable = chain.find("wait_until_usable(").expect("a tunnel that came up is not waited on for a usable address");
+        assert!(logged < usable, "the address is waited on after OpenVPN says it is up");
+
+        let wait = body_of("fn wait_until_usable(");
+        assert!(wait.contains("readiness::settle("), "the wait never asks whether the address is Preferred");
+        assert!(wait.contains("readiness::some_address_ready"), "the wait asks the wrong question");
+        assert!(wait.contains("child.kill()"), "a Disconnect during the wait must stop openvpn.exe");
     }
 
     #[test]
@@ -820,12 +1153,245 @@ mod tests {
         assert!(conf.contains("block-outside-dns"), "full tunnel must claim DNS");
     }
 
+    /// No `block-outside-dns` in Custom mode: its filters refuse port 53
+    /// on every adapter but the tunnel, before the redirect can carry a
+    /// lookup in, and nothing is routed to the tunnel in this mode. The
+    /// machine's lookups are pinned by the NRPT rule instead -- see the
+    /// next test.
     #[test]
-    fn custom_mode_leaves_the_machines_dns_alone() {
-        // Most applications are deliberately NOT on the tunnel in Custom
-        // mode, and seizing the machine's DNS would push their lookups
-        // through a tunnel they are not using.
+    fn custom_mode_does_not_block_dns_outside_the_tunnel() {
         let conf = build_config(&profile(), true).unwrap();
         assert!(!conf.contains("block-outside-dns"), "custom mode must not claim DNS");
+    }
+
+    /// What Custom mode's DNS pin reads from OpenVPN's own log: a restart
+    /// that has not been followed by the tunnel coming up again is a link
+    /// that is down. In OpenVPN 2.6's own words, at `verb 3`.
+    #[test]
+    fn a_restart_not_followed_by_the_tunnel_coming_up_reads_as_not_carrying() {
+        use super::super::dns::Carrying;
+        const UP: &str = "2026-10-11 14:00:01 Initialization Sequence Completed\n";
+        const QUIET: &str = "2026-10-11 14:20:11 [server] Inactivity timeout (--ping-restart), restarting\n\
+                             2026-10-11 14:20:11 SIGUSR1[soft,ping-restart] received, process restarting\n\
+                             2026-10-11 14:20:11 Restart pause, 5 second(s)\n";
+        const TLS: &str = "2026-10-11 14:21:16 TLS Error: TLS key negotiation failed to occur within 60 seconds\n\
+                           2026-10-11 14:21:16 SIGUSR1[soft,tls-error] received, process restarting\n";
+
+        assert_eq!(link_reading(UP), Carrying::Unknown, "up is OpenVPN's word, not a measurement of traffic");
+        assert_eq!(link_reading(&format!("{UP}{QUIET}")), Carrying::No);
+        assert_eq!(link_reading(&format!("{UP}{QUIET}{TLS}")), Carrying::No);
+        assert_eq!(link_reading(&format!("{UP}{QUIET}{UP}")), Carrying::Unknown, "it came back by itself");
+        assert_eq!(link_reading(""), Carrying::Unknown);
+    }
+
+    /// Read from the end, and only so much of it: a status poll reads this
+    /// for as long as the session lasts.
+    #[test]
+    fn only_the_end_of_the_log_is_read() {
+        use super::super::dns::Carrying;
+        let dir = std::env::temp_dir().join(format!("neoconnect-openvpn-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let engines = Engines::new(dir.clone(), dir.clone());
+        let filler = "2026-10-11 14:30:00 Data Channel: cipher 'AES-256-GCM'\n".repeat(1_000);
+
+        std::fs::write(dir.join(LOG_FILE), format!("SIGUSR1[soft,ping-restart] received, process restarting\n{filler}")).unwrap();
+        let tail = log_tail(&engines);
+        assert!(tail.len() as u64 <= LOG_TAIL_BYTES);
+        assert_eq!(link_reading(&tail), Carrying::Unknown, "a restart that far back is not this poll's business");
+
+        std::fs::write(dir.join(LOG_FILE), format!("{filler}SIGUSR1[soft,ping-restart] received, process restarting\n")).unwrap();
+        assert_eq!(link_reading(&log_tail(&engines)), Carrying::No);
+
+        std::fs::remove_file(dir.join(LOG_FILE)).unwrap();
+        assert_eq!(log_tail(&engines), "", "no log, nothing read");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The watch's guard: when the uplink was guessed as the wrong
+    /// adapter, the route that matters -- the one to the server -- is
+    /// still taken, and nothing on our own adapters ever is.
+    #[test]
+    fn the_watch_takes_the_route_to_the_server_wherever_it_landed_but_never_on_ours() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let table = FakeRoutes::with(&[]);
+        // Guessed uplink 14; our OpenVPN adapter is 30.
+        let watch = HostRouteWatch::begin(&*table, Some(Uplink { index: 14, next_hop: gateway }), Some(server), None, vec![30]);
+        let on_other_adapter = RouteRow::host(server, 9, gateway, 0);
+        let on_ours = RouteRow::host(server, 30, Ipv4Addr::new(10, 8, 0, 1), 0);
+        let unrelated = RouteRow::host(Ipv4Addr::new(198, 51, 100, 9), 9, gateway, 0);
+        table.gain(on_other_adapter);
+        table.gain(on_ours);
+        table.gain(unrelated);
+
+        assert_eq!(watch.added(&*table), vec![on_other_adapter]);
+    }
+
+    /// A table that could not be read beforehand cannot tell OpenVPN's
+    /// routes from the customer's, so only the route to the server is
+    /// taken -- never every host route on the uplink.
+    #[test]
+    fn a_watch_that_saw_nothing_before_takes_only_the_route_to_the_server() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let customers = RouteRow::host(Ipv4Addr::new(198, 51, 100, 9), 14, gateway, 0);
+        let pushed = RouteRow::host(server, 14, gateway, 0);
+        let table = FakeRoutes::with(&[customers, pushed]);
+        let watch = HostRouteWatch { before: None, uplink: Some(Uplink { index: 14, next_hop: gateway }), remote: Some(server), dhcp_server: None, ours: Vec::new() };
+
+        assert_eq!(watch.added(&*table), vec![pushed]);
+    }
+
+    /// Only what openvpn.exe could have added is taken: a host route added
+    /// through `NETMGMT`, through the uplink's own gateway, which is where
+    /// `redirect-gateway` puts the server's route and the `bypass-dhcp`
+    /// one.
+    ///
+    /// The watch spans the whole connect, and the machine goes on changing
+    /// in that time. The uplink taking a new address -- a DHCP renewal
+    /// that moved it, or Wi-Fi roaming to another network on the same
+    /// adapter -- makes Windows add a local and a broadcast /32 for it on
+    /// that very adapter. Taken as OpenVPN's, they were deleted at
+    /// Disconnect and owed in the ledger, which replays them by key on
+    /// every idle status poll and at the next start: Windows' own routes,
+    /// on the customer's active adapter.
+    #[test]
+    fn the_watch_never_takes_a_route_windows_made_or_one_through_another_gateway() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let table = FakeRoutes::with(&[]);
+        let watch = HostRouteWatch::begin(&*table, Some(Uplink { index: 14, next_hop: gateway }), Some(server), None, vec![30]);
+
+        let pushed = RouteRow::host(server, 14, gateway, 0);
+        let bypass_dhcp = RouteRow::host(Ipv4Addr::new(192, 0, 2, 254), 14, gateway, 0);
+        // What Windows adds for a new address on the uplink: on-link, and
+        // protocol `LOCAL`.
+        let windows = |dest| RouteRow { netmgmt: false, ..RouteRow::host(dest, 14, Ipv4Addr::UNSPECIFIED, 256) };
+        let new_address = windows(Ipv4Addr::new(198, 51, 100, 23));
+        let new_broadcast = windows(Ipv4Addr::new(198, 51, 100, 255));
+        // Added through `NETMGMT`, but not through the gateway openvpn.exe
+        // uses.
+        let elsewhere = RouteRow::host(Ipv4Addr::new(198, 18, 7, 7), 14, Ipv4Addr::new(192, 0, 2, 9), 0);
+        for row in [pushed, new_address, new_broadcast, bypass_dhcp, elsewhere] {
+            table.gain(row);
+        }
+
+        assert_eq!(watch.added(&*table), vec![pushed, bypass_dhcp]);
+    }
+
+    fn ledger_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("neoconnect-openvpn-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The server's and the DHCP server's routes are owed before
+    /// openvpn.exe starts, so a service killed, crashed or stopped while it
+    /// is still connecting leaves nothing the next start cannot remove.
+    ///
+    /// openvpn.exe adds both early in its connect, and they used to be
+    /// owed only once the connect returned. The janitor at the next start
+    /// kills the orphaned openvpn.exe, but had no record of its routes: the
+    /// server's waited for the next connect's known-node purge, and the
+    /// DHCP server's stayed until a reboot.
+    #[test]
+    fn the_routes_openvpn_will_add_are_owed_before_it_starts() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let dhcp = Ipv4Addr::new(192, 0, 2, 254);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let default = RouteRow { prefix: 0, ..RouteRow::host(Ipv4Addr::UNSPECIFIED, 14, gateway, 25) };
+        let table = FakeRoutes::with(&[default]);
+        let dir = ledger_dir("ahead");
+        let owed = OwedRoutes::in_dir(&dir);
+        let uplink = Some(Uplink { index: 14, next_hop: gateway });
+
+        let watch = HostRouteWatch::begin(&*table, uplink, Some(server), Some(dhcp), Vec::new());
+        let ahead = watch.owe_ahead(&owed);
+        // openvpn.exe adds both, and then the service is killed: nothing
+        // of this life runs again.
+        table.gain(RouteRow::host(server, 14, gateway, 0));
+        table.gain(RouteRow::host(dhcp, 14, gateway, 0));
+
+        // The next life's janitor.
+        super::super::janitor::settle_owed_routes(&OwedRoutes::in_dir(&dir), &*table);
+        assert_eq!(table.table(), vec![default], "the pushed routes outlived the service; owed ahead: {ahead:?}");
+        assert!(owed.read().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing is owed ahead that was there before -- such a route is not
+    /// openvpn.exe's to add, and deleting it on a crash would take the
+    /// customer's -- and nothing ahead stays owed once the connect is up
+    /// without it.
+    #[test]
+    fn owed_ahead_is_only_what_was_not_there_and_is_settled_if_never_added() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let dhcp = Ipv4Addr::new(192, 0, 2, 254);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let customers = RouteRow::host(dhcp, 14, gateway, 0);
+        let table = FakeRoutes::with(&[customers]);
+        let dir = ledger_dir("ahead-settled");
+        let owed = OwedRoutes::in_dir(&dir);
+
+        let watch = HostRouteWatch::begin(&*table, Some(Uplink { index: 14, next_hop: gateway }), Some(server), Some(dhcp), Vec::new());
+        let ahead = watch.owe_ahead(&owed);
+        let pushed = RouteRow::host(server, 14, gateway, 0);
+        assert_eq!(ahead, vec![pushed], "the DHCP route was there before, and is not openvpn.exe's");
+        assert_eq!(owed.read(), vec![pushed]);
+
+        // Up, and the server's route was added through another gateway
+        // than the one expected: what was owed ahead is struck off.
+        table.gain(RouteRow::host(server, 14, Ipv4Addr::new(192, 0, 2, 9), 0));
+        let added = watch.added(&*table);
+        HostRouteWatch::settle_unused(&owed, &ahead, &added);
+        assert!(owed.read().is_empty(), "a route never added is still owed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A connect that failed removes what openvpn.exe added and what was
+    /// owed ahead, and owes whatever will not delete for the next start.
+    /// It used to delete what was added and owe nothing, so a refused
+    /// delete left the route behind with no record of it.
+    #[test]
+    fn a_failed_connect_gives_back_its_routes_or_owes_them() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let pushed = RouteRow::host(server, 14, gateway, 0);
+        let bypass = RouteRow::host(Ipv4Addr::new(192, 0, 2, 254), 14, gateway, 0);
+        let dir = ledger_dir("give-back");
+        let owed = OwedRoutes::in_dir(&dir);
+
+        let table = FakeRoutes::with(&[pushed, bypass]);
+        owed.owe(pushed);
+        HostRouteWatch::give_back(&*table, &owed, &[pushed], &[pushed, bypass]);
+        assert!(table.table().is_empty());
+        assert!(owed.read().is_empty());
+
+        let table = FakeRoutes::with(&[pushed, bypass]);
+        table.refuses_deletes();
+        owed.owe(pushed);
+        HostRouteWatch::give_back(&*table, &owed, &[pushed], &[pushed, bypass]);
+        assert_eq!(owed.read(), vec![pushed, bypass], "a route the failed connect left is not owed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The guard for a wrongly guessed uplink takes the server's route
+    /// wherever it landed -- but never one Windows made itself.
+    #[test]
+    fn the_guard_for_the_server_route_never_takes_one_windows_made() {
+        use super::super::route_table::fake::FakeRoutes;
+        let server = Ipv4Addr::new(203, 0, 113, 5);
+        let table = FakeRoutes::with(&[]);
+        let watch = HostRouteWatch::begin(&*table, None, Some(server), None, Vec::new());
+        table.gain(RouteRow { netmgmt: false, ..RouteRow::host(server, 9, Ipv4Addr::UNSPECIFIED, 256) });
+
+        assert!(watch.added(&*table).is_empty());
     }
 }

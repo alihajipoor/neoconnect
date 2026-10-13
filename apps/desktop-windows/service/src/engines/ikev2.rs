@@ -220,28 +220,29 @@ pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<ras::Connection,
             // first, with a poisoned address, for exactly the domains
             // they connected to reach.
             //
-            // Both modes, and that is a change. This used to be `if
-            // !passive`, on the reasoning that Custom mode is not where
-            // most traffic goes so the whole machine's lookups should
-            // not point down it -- and that the selected applications
-            // "still resolve through the tunnel, because their DNS is
-            // redirected with the rest of their traffic".
+            // A full tunnel's rule only, here. Custom mode wants one too,
+            // which this once denied: it was `if !passive`, on the
+            // reasoning that the selected applications "still resolve
+            // through the tunnel, because their DNS is redirected with
+            // the rest of their traffic". That was wrong. Custom mode's
+            // redirect only sees packets the WinDivert filter admits, and
+            // that filter excludes every RFC1918 range -- so on any
+            // network whose resolver is the router, the lookup was never
+            // redirected at all. It went to the ISP.
             //
-            // The second half was wrong, and it is the half the first
-            // half rested on. Custom mode's redirect only sees packets
-            // the WinDivert filter admits, and that filter excludes
-            // every RFC1918 range -- so on any network whose resolver is
-            // the router, which is most of them, the lookup was never
-            // redirected at all. It went to the ISP. Xray had this
-            // right by forcing unconditionally; the two engines
-            // disagreed and, once again, neither comment acknowledged
-            // the other.
+            // But Custom mode's rule goes in once the redirect is up
+            // (`Engines::start_split_tunnel`), on every engine alike, not
+            // here. Put in with the dial, it pinned every lookup to
+            // 1.1.1.1 for the seconds before the redirect started, with
+            // nothing to carry them: they left by the physical adapter in
+            // clear text, as the VM saw on WireGuard and Xray.
             //
-            // The condition now lives in one place both engines call.
-            // `dns::machine_wide_rule_wanted` carries the full argument,
-            // including why this is not the over-reach it looks like.
-            if super::dns::machine_wide_rule_wanted(passive) {
-                super::dns::force(IKEV2_DNS);
+            // The condition lives in one place both engines call:
+            // `dns::rule_at_connect`, and `dns::machine_wide_rule_wanted`
+            // behind it, which carries the full argument, including why
+            // the rule is not the over-reach it looks like.
+            if let Some(resolver) = super::dns::rule_at_connect(passive, IKEV2_DNS) {
+                super::dns::force(resolver);
             }
             // Handed to the caller to hold for the life of the session.
             // Dropping it hangs the tunnel up, which is what makes the
@@ -1075,5 +1076,25 @@ mod tests {
         for code in [626, 628, 691, 703, 800, 809, 13801, 13806] {
             assert!(!phonebook_refused(code), "{code}");
         }
+    }
+
+    /// Custom mode's DNS rule is not installed when the dial succeeds: only
+    /// a full tunnel's is (`dns::rule_at_connect`). Custom mode's goes in
+    /// once the redirect carries the lookups (`Engines::start_split_tunnel`);
+    /// installed here, it pinned them to 1.1.1.1 with nothing yet to carry
+    /// them, and they left by the physical adapter in clear text. Held from
+    /// the source.
+    #[test]
+    fn only_a_full_tunnels_dns_rule_goes_in_with_the_dial() {
+        let source = include_str!("ikev2.rs");
+        let start = source.find("pub fn connect(").unwrap();
+        let body = &source[start..start + source[start..].find("
+}
+").unwrap()];
+        let asked = body
+            .find("if let Some(resolver) = super::dns::rule_at_connect(passive, IKEV2_DNS) {")
+            .expect("the rule is not asked for by the full-tunnel-only policy");
+        assert!(body[asked..].contains("super::dns::force(resolver);"), "the rule is not installed");
+        assert_eq!(body.matches("dns::force(").count(), 1, "the rule is installed some other way too");
     }
 }

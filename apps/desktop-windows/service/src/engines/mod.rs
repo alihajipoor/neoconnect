@@ -7,6 +7,9 @@
 //! job is to write the right config file and drive the right process,
 //! invisibly.
 
+/// IPv4 confined to the tunnel while a full tunnel is up -- see the
+/// module's own comment.
+mod confinement;
 // `pub(crate)` for the gaming module, which installs a second,
 // separately-tagged set of NRPT rules through the sibling functions in
 // here. Nothing about `apply`/`clear` changes for the engines.
@@ -17,10 +20,12 @@ mod hard_stop;
 mod janitor;
 mod ras;
 mod openvpn;
+mod readiness;
 /// "Repair my network" -- the superset teardown, reusing every module
 /// above. A child of this one so it can call the same private teardowns
 /// the disconnect path does rather than growing second copies of them.
 pub(crate) mod repair;
+pub mod route_table;
 pub mod routing;
 mod wireguard;
 mod xray;
@@ -70,10 +75,12 @@ enum Active {
     Child {
         protocol: &'static str,
         child: Child,
-        /// Routes this service installed on the engine's behalf. Empty
-        /// for engines that manage their own (OpenVPN acts on the
-        /// server's pushed directives); populated for Xray, which does
-        /// not route anything by itself.
+        /// Routes this session removes when it ends. For Xray, which
+        /// routes nothing by itself, every route the service installed on
+        /// its behalf. For OpenVPN, which acts on the server's pushed
+        /// directives, the host routes it put on the physical uplink --
+        /// taken over because nothing else would ever remove them; the
+        /// half-defaults on its own adapter are purged by interface.
         routes: InstalledRoutes,
     },
 }
@@ -219,6 +226,10 @@ mod session {
             debug_assert!(self.session.is_none(), "a session was installed over a live one");
             session.generation = self.ledger.begin(session.engine.protocol());
             let generation = session.generation;
+            // So a status answered without the engine state -- the owning
+            // thread busy -- still says what the confinement is.
+            let hold: Arc<dyn crate::lifecycle::engine_watch::ConfinementReport> = session.confinement.clone();
+            self.ledger.note_confinement(generation, Arc::downgrade(&hold));
             self.session = Some(session);
             generation
         }
@@ -309,10 +320,27 @@ struct Session {
     /// [`REARM_SPACING`].
     armed_at: Instant,
     rearms: u32,
+    /// The IPv4 confinement, shared with this session's engine watch so a
+    /// drop report lets go of it from the watch's own thread (K2), and
+    /// with the plan-error valve. Empty for a session never confined --
+    /// see `confinement::Hold`.
+    confinement: Arc<confinement::Hold>,
+    /// The plan it was installed from, kept to put it back with a fresh
+    /// LUID when a drop report turns out to be wrong.
+    confinement_plan: Option<confinement::Plan>,
+    /// The plan-error valve watching the engine's log after an install;
+    /// stopped and joined with the session. See `confinement::run_valve`.
+    valve: Option<crate::split_tunnel::worker::Worker>,
+    /// The reset at connect's rescans, for its first seconds; stopped and
+    /// joined with the session. See `Engines::reset_outside_the_tunnel`.
+    rescan: Option<crate::split_tunnel::worker::Worker>,
+    /// The last LAN plan WFP refused, and when: not tried again until
+    /// `LAN_RETRY_AFTER` has passed (`Engines::follow_the_lan`).
+    lan_refused: Option<(confinement::Plan, Instant)>,
 }
 
 impl Session {
-    fn new(engine: Active, profile: &ConnectProfile) -> Self {
+    fn new(engine: Active, profile: &ConnectProfile, confinement: Arc<confinement::Hold>) -> Self {
         Self {
             engine,
             profile: profile.clone(),
@@ -321,6 +349,11 @@ impl Session {
             watch: None,
             armed_at: Instant::now(),
             rearms: 0,
+            confinement,
+            confinement_plan: None,
+            valve: None,
+            rescan: None,
+            lan_refused: None,
         }
     }
 }
@@ -372,6 +405,12 @@ fn test_profile() -> ConnectProfile {
     })
 }
 
+/// How long a LAN whose plan WFP refused waits before it is tried again
+/// (`Engines::follow_the_lan`). Tried on every 1 s status poll, it opened a
+/// WFP session, added and aborted every filter and wrote a line to
+/// confinement.log each second for the rest of the session.
+const LAN_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The WFP filters a session installed, released when this is dropped.
 #[derive(Default)]
 struct SessionFilters {
@@ -382,26 +421,34 @@ struct SessionFilters {
     /// `Some` exactly while it is installed, which is what the status
     /// poll reports to the app -- the customer is told IPv6 is blocked
     /// because it *is* blocked, not because the protocol usually implies
-    /// it. See `ipv6_block` for the measurement, and for why WireGuard
-    /// is the one engine that never has one here.
+    /// it. See `ipv6_block` for the measurement, and for why WireGuard,
+    /// once the exception, has one too.
     ipv6: Option<Ipv6Block>,
-    /// DNS confined to the tunnel with no IPv6 block, for WireGuard --
-    /// whose own kill-switch blocks IPv6 but lets DNS out by the physical
-    /// NIC. Separate so that `ipv6_blocked`, and what the app tells the
-    /// customer about IPv6, still follows only `ipv6`.
-    dns_only: Option<Ipv6Block>,
 }
 
 impl SessionFilters {
-    /// Releases both, now. Dropping does the same; this exists so the
+    /// Releases them, now. Dropping does the same; this exists so the
     /// teardown can say *when*.
     fn release(mut self) {
         if let Some(mut block) = self.ipv6.take() {
             block.remove();
         }
-        if let Some(mut block) = self.dns_only.take() {
-            block.remove();
-        }
+    }
+}
+
+/// What putting Custom mode's DNS hold in does (`Engines::hold_dns`): the
+/// machine's WFP, except in tests. The hold lasts as long as the value
+/// handed back.
+pub(crate) trait DnsHoldOps: Send + Sync {
+    fn hold(&self, log_dir: &Path, engine: Option<&Path>) -> Result<Box<dyn Send + Sync>, String>;
+}
+
+/// The machine's: [`ipv6_block::DnsHold`].
+struct MachineDnsHold;
+
+impl DnsHoldOps for MachineDnsHold {
+    fn hold(&self, log_dir: &Path, engine: Option<&Path>) -> Result<Box<dyn Send + Sync>, String> {
+        ipv6_block::DnsHold::install(log_dir, engine).map(|hold| Box::new(hold) as Box<dyn Send + Sync>)
     }
 }
 
@@ -423,6 +470,17 @@ pub struct Engines {
     /// module, so the hand-over is a field rather than a reordering; it
     /// is `None` at every other moment.
     ending_filters: Option<SessionFilters>,
+    /// The IPv4 confinement of a session that has just ended, held between
+    /// `end_session` and `let_go_of_confinement` -- which every teardown
+    /// calls the moment its engine has stopped, before DNS and phonebook
+    /// tidying (K1) -- and nowhere else.
+    ending_confinement: Option<Arc<confinement::Hold>>,
+    /// What installing and holding a confinement does: the machine's WFP,
+    /// except in tests.
+    confinement_ops: Arc<dyn confinement::ConfinementOps>,
+    /// The teardown steps as they ran, for the tests that pin their order.
+    #[cfg(test)]
+    teardown_steps: Vec<&'static str>,
     /// What happened to the tunnel's own DNS rule on this session.
     ///
     /// Beside `ipv6_block` and for the same reason: the app puts this in
@@ -432,13 +490,37 @@ pub struct Engines {
     /// the machine's lookups alone, and both are `NotRequested` -- which
     /// is not a complaint and must never be shown as one.
     ///
-    /// Collected from `dns::tunnel_dns()` at the end of a connect rather
-    /// than passed back up: `xray::configure_adapter` installs the rule
-    /// from a free function two frames below any `Engines`, so there is
-    /// nowhere to return it to. See `dns::TunnelDns` for the decision it
+    /// A full tunnel's is collected from `dns::tunnel_dns()` at the end of
+    /// a connect rather than passed back up: `xray::configure_dns`
+    /// installs the rule from a free function two frames below any
+    /// `Engines`, so there is nowhere to return it to. Custom mode's is
+    /// recorded as it goes in, once the redirect is up
+    /// (`pin_custom_mode_dns`). See `dns::TunnelDns` for the decision it
     /// records, which is that a tunnel comes up even when this fails and
     /// the customer is told.
+    ///
+    /// A Custom-mode pin given back while the tunnel is measured not to
+    /// carry leaves this `Forced`: that is not a complaint the customer is
+    /// shown, whose words say traffic flows. See `dns_pin`.
     dns_state: dns::TunnelDns,
+    /// Custom mode's pin through this session: given back while the
+    /// tunnel is measured not to carry, put back when it does. See
+    /// `dns::PinWatch`. Forgotten with `dns_state`.
+    dns_pin: dns::PinWatch,
+    /// What putting the pin in, giving it back and putting it in again
+    /// do. The machine's NRPT table, except in tests.
+    pin_ops: Arc<dyn dns::PinOps>,
+    /// Custom mode's DNS hold while it is in: port 53 refused outside the
+    /// tunnel while Custom mode starts, until its redirect carries, and
+    /// while it ends, until its NRPT rule is out. `None` at every other
+    /// moment. See `hold_dns`.
+    dns_hold: Option<Box<dyn Send + Sync>>,
+    /// What putting the hold in does. The machine's WFP, except in tests.
+    dns_hold_ops: Arc<dyn DnsHoldOps>,
+    /// What the pin is told about Custom mode, in place of the split
+    /// tunnel's own answer: the tests cannot run its driver.
+    #[cfg(test)]
+    custom_mode_for_test: Option<CustomModeView>,
     /// Which session is live and whether the last one ended on its own.
     /// Shared with the pipe, which reads it without the owning thread --
     /// see `lifecycle::engine_watch::Ledger`.
@@ -452,6 +534,14 @@ pub struct Engines {
     handshake_reading: Option<(Instant, wireguard::HandshakeHealth)>,
     /// How the WireGuard tunnel service's state is read. See [`ScmQuery`].
     wireguard_scm: ScmQuery,
+    /// The routing table, for the host routes this service owns on
+    /// adapters that are not its own. The machine's, except in tests --
+    /// see `route_table`.
+    route_ops: Arc<dyn route_table::RouteOps>,
+    /// Windows' way out toward an address, as `adapters::best_uplink_for`
+    /// gives it: what a connect asks before any engine dials
+    /// (`refuse_without_a_way_out`). The machine's, except in tests.
+    uplink_lookup: UplinkLookup,
     /// The most recent generation a thorough pass -- `disconnect()` --
     /// has run after, with nothing begun since. Phase two after a drop
     /// is skipped for a generation already swept: a Disconnect or the app
@@ -474,17 +564,31 @@ pub struct Engines {
 impl Engines {
     pub fn new(exe_dir: PathBuf, config_dir: PathBuf) -> Self {
         let ledger = Arc::new(Ledger::new());
+        let confinement_ops: Arc<dyn confinement::ConfinementOps> =
+            Arc::new(confinement::System { log_dir: config_dir.clone() });
         Self {
             exe_dir,
             config_dir,
             active: Slot::with_ledger(Arc::clone(&ledger)),
             split_tunnel: SplitTunnel::new(),
             ending_filters: None,
+            ending_confinement: None,
+            confinement_ops,
+            #[cfg(test)]
+            teardown_steps: Vec::new(),
             dns_state: dns::TunnelDns::NotRequested,
+            dns_pin: dns::PinWatch::default(),
+            pin_ops: Arc::new(dns::MachinePin),
+            dns_hold: None,
+            dns_hold_ops: Arc::new(MachineDnsHold),
+            #[cfg(test)]
+            custom_mode_for_test: None,
             ledger,
             engine_gone: None,
             handshake_reading: None,
             wireguard_scm: Arc::new(wireguard::scm_view),
+            route_ops: route_table::system(),
+            uplink_lookup: Arc::new(|dest| adapters::best_uplink_for(dest, &OUR_ADAPTER_NAMES)),
             swept_after: 0,
             drop_logged: 0,
             #[cfg(test)]
@@ -564,6 +668,15 @@ impl Engines {
         // the tunnel would drop every live connection to change
         // something the tunnel does not care about.
         if was_passive == now_passive {
+            // Nothing to intercept before or after -- an empty list
+            // flipped between "only these" and "all except these" -- is a
+            // full tunnel either way, and a redirect has nothing to do on
+            // it. Restarting one would bring Custom mode's machinery to a
+            // session that is not in Custom mode, and `start_split_tunnel`
+            // lets go of the IPv4 confinement it finds there, for good.
+            if !now_intercepting {
+                return Ok(());
+            }
             if was_intercepting != now_intercepting || was_mode != now_mode {
                 let Some(profile) = self.active.peek().map(|s| s.profile.clone()) else {
                     return Err(
@@ -571,6 +684,9 @@ impl Engines {
                             .to_string(),
                     );
                 };
+                // Out while the redirect is down, which carries what it
+                // pins; `start_split_tunnel` puts it back.
+                self.unpin_custom_mode_dns();
                 self.split_tunnel.stop();
                 // A separate request, so its own boundary read rather
                 // than a token borrowed from a connect that has finished.
@@ -595,7 +711,10 @@ impl Engines {
                     .to_string(),
             );
         };
-        self.connect(&profile, &[])
+        // No known servers: the rebuild has just torn down the session
+        // whose own host route it would have found, and the delete before
+        // the add covers a leftover to this server.
+        self.connect(&profile, &[], &[])
     }
 
     pub fn split_tunnel_running(&self) -> bool {
@@ -606,12 +725,280 @@ impl Engines {
     ///
     /// Read from the installed block rather than inferred from the
     /// protocol, because the app puts this in front of the customer in
-    /// words and the two can differ: a WireGuard session has no block of
-    /// ours at all, and an install that failed leaves none either. The
+    /// words and the two can differ: a Custom-mode session has no block
+    /// of ours at all, and an install that failed leaves none either. The
     /// rule in this product is that the UI never reports a state nothing
     /// verified, and "IPv6 is blocked" is exactly such a state.
     pub fn ipv6_blocked(&self) -> bool {
         self.active.peek().is_some_and(|s| s.filters.ipv6.is_some())
+    }
+
+    /// Whether this session's IPv4 is confined to its tunnel, read from
+    /// its hold: `None` for a session never meant to be (the app must not
+    /// warn), else whether it is right now. See `confinement::Hold`.
+    pub fn ipv4_confined(&self) -> Option<bool> {
+        self.active.peek().and_then(|s| s.confinement.confined())
+    }
+
+    /// Why this session's IPv4 is not confined, while it should be.
+    pub fn confinement_problem(&self) -> Option<String> {
+        self.active.peek().and_then(|s| s.confinement.problem())
+    }
+
+    /// Confines the session's IPv4 to its tunnel, where `confinement::plan_for`
+    /// says so: a full Xray or OpenVPN tunnel. `nodes` are the servers the
+    /// engine's own connection goes to, as the connect resolved them.
+    ///
+    /// Never fails the connect (the owner's decision (d)): the tunnel is up
+    /// and carrying by now, and a confinement that cannot be planned or
+    /// installed leaves it up, with the hold saying why -- the status poll
+    /// reports `ipv4_confined: false` and the app does not claim full
+    /// protection. cleanup.log says why too.
+    fn confine_if_needed(&mut self, profile: &ConnectProfile, passive: bool, nodes: Vec<Ipv4Addr>) {
+        use neoconnect_ipc::ConnectProfile as P;
+        let engine_exe = match profile {
+            P::XrayVlessReality(_) | P::XrayVlessTls(_) | P::XrayTrojan(_) | P::Shadowsocks(_) => {
+                self.engine_path("xray.exe").ok()
+            }
+            P::Openvpn(_) => self.engine_path("openvpn.exe").ok(),
+            P::Wireguard(_) | P::Ikev2(_) => None,
+        };
+        // A full tunnel left unconfined by choice -- IKEv2, until its own
+        // proof -- is said to be, with the reason, so the app does not
+        // claim full protection over it. Nothing is installed.
+        if let Some(why) = confinement::not_confined_by_choice(profile, passive) {
+            if let Some(session) = self.active.peek_mut() {
+                session.confinement.refuse(why.to_string());
+            }
+            return;
+        }
+        // Read only for a session that is confined: nothing else needs the
+        // tunnel's LUID or the LAN.
+        if !confinement::applies_to(profile, passive) {
+            return;
+        }
+        let ops = Arc::clone(&self.confinement_ops);
+        let luid = ops.luid(adapter_name_for(profile));
+        let (lan, dhcp_servers) = ops.lan().unwrap_or_default();
+        let inputs = confinement::Inputs {
+            tunnel_luid: *luid.as_ref().unwrap_or(&0),
+            engine_exe,
+            nodes,
+            lan: confinement::Lan::Allowed(lan),
+            dhcp_servers,
+        };
+        let Some(decision) = confinement::plan_for(profile, passive, inputs) else { return };
+        let Some(session) = self.active.peek_mut() else { return };
+        let mut witness = None;
+        let refused = match decision {
+            // The LUID's own error says more than "could not be read".
+            Err(why) => Some(match luid {
+                Err(e) => e,
+                Ok(_) => why,
+            }),
+            Ok(plan) => match ops.install(&plan) {
+                Ok(installed) => {
+                    witness = Some(ops.witness(&plan, &installed));
+                    session.confinement_plan = Some(plan);
+                    session.confinement.put(installed);
+                    None
+                }
+                Err(why) => Some(format!("the filters could not be installed: {why}")),
+            },
+        };
+        if let Some(why) = refused {
+            session.confinement.refuse(why.clone());
+            crate::cleanup_log::note(
+                "confine IPv4 to the tunnel",
+                &format!("not confined, the tunnel left up: {why}"),
+            );
+            return;
+        }
+        if let Some(witness) = witness {
+            self.start_valve(witness);
+        }
+    }
+
+    /// The owner's decision (c): established IPv4 TCP connections outside
+    /// the tunnel -- opened before Connect, or in the gap between two rungs
+    /// -- are reset once at connect, so they come back through it.
+    ///
+    /// For the sessions that are confined (`confinement::applies_to`),
+    /// whether or not the filters went in: a confinement re-examines open
+    /// flows at their next packet (P0-D) and so stops them leaking, but only
+    /// a reset tells an idle connection to come back. See
+    /// `split_tunnel::OutsideTunnel` for what is left alone. One pass now,
+    /// then the session's own rescans every quarter-second for
+    /// [`RESET_RESCAN_FOR`], for rows that were mid-handshake at the first:
+    /// `SetTcpEntry` cannot close a handshake. What each pass closed goes to
+    /// confinement.log, which a capture's resets are checked against.
+    fn reset_outside_the_tunnel(&mut self, profile: &ConnectProfile, passive: bool) {
+        if !confinement::applies_to(profile, passive) {
+            return;
+        }
+        let ops = Arc::clone(&self.confinement_ops);
+        let log_dir = self.config_dir.clone();
+        let Some(session) = self.active.peek_mut() else { return };
+        let listed = adapters::list().unwrap_or_default();
+        let mut tunnel_addresses = tunnel_addresses_in(&listed, adapter_name_for(profile), &OUR_ADAPTER_NAMES);
+        if matches!(profile, ConnectProfile::XrayVlessReality(_) | ConnectProfile::XrayVlessTls(_) | ConnectProfile::XrayTrojan(_) | ConnectProfile::Shadowsocks(_))
+            && !tunnel_addresses.contains(&xray::TUN_ADDRESS)
+        {
+            tunnel_addresses.push(xray::TUN_ADDRESS);
+        }
+        let lan = match &session.confinement_plan {
+            Some(plan) => confinement::lan_reachable(&plan.lan),
+            None => confinement::lan_reachable(&confinement::Lan::Allowed(ops.lan().unwrap_or_default().0)),
+        };
+        let engine_pid = match &session.engine {
+            Active::Child { child, .. } => Some(child.id()),
+            Active::Ikev2(_) | Active::WireguardTunnel => None,
+        };
+        let rules = crate::split_tunnel::OutsideTunnel { tunnel_addresses, engine_pid, lan };
+
+        let first = ops.reset(&rules);
+        note_reset(&log_dir, "reset at connect", &first);
+        let closed_at_first = first.closed;
+        session.rescan = Some(crate::split_tunnel::worker::Worker::spawn(move |stop| {
+            let deadline = Instant::now() + RESET_RESCAN_FOR;
+            let (mut closed, mut passes, mut handshaking) = (closed_at_first, 0usize, first.skipped_handshaking);
+            while Instant::now() < deadline {
+                if !crate::split_tunnel::worker::sleep_unless_stopped(&stop, RESET_RESCAN_EVERY) {
+                    return;
+                }
+                let outcome = ops.reset(&rules);
+                closed += outcome.closed;
+                handshaking = outcome.skipped_handshaking;
+                passes += 1;
+                if !outcome.closed_rows.is_empty() || !outcome.failures.is_empty() {
+                    note_reset(&log_dir, "reset rescan", &outcome);
+                }
+            }
+            confinement::note(
+                &log_dir,
+                &format!(
+                    "reset settled after {passes} rescan(s): {closed} connection(s) closed in all{}",
+                    if handshaking > 0 {
+                        format!("; {handshaking} still mid-handshake at the end, which completed outside the tunnel or were refused")
+                    } else {
+                        String::new()
+                    }
+                ),
+            );
+        }));
+    }
+
+    /// Lets go of a confinement whose tunnel adapter is gone while its
+    /// engine still runs -- Wintun's adapter removed under a live xray.exe.
+    /// Its routes went with it, so everything now falls to the physical
+    /// adapter and the confinement refuses it: the machine offline, held
+    /// by a permit for an interface that no longer exists, until the app's
+    /// failover. Let go of for good, with the reason; whether the tunnel
+    /// carries anything is the app's egress check's to judge, as ever. An
+    /// adapter list that cannot be read is no evidence, and changes
+    /// nothing. Asked only while a confinement is held.
+    fn let_go_if_the_tunnel_adapter_is_gone(&mut self) {
+        let ops = Arc::clone(&self.confinement_ops);
+        let Some(session) = self.active.peek() else { return };
+        if session.confinement.confined() != Some(true) {
+            return;
+        }
+        let adapter = adapter_name_for(&session.profile);
+        if ops.tunnel_present(adapter) != Some(false) {
+            return;
+        }
+        let why = format!(
+            "the tunnel adapter {adapter} is gone while its engine still runs, so the IPv4 confinement was let go of"
+        );
+        session.confinement.release(confinement::Release::PlanError(why.clone()));
+        crate::cleanup_log::note("let go of the IPv4 confinement: the tunnel adapter is gone", &why);
+    }
+
+    /// Decision (a) on a network that changes under a connected session.
+    /// The LAN and the DHCP servers a confinement permits were read at
+    /// connect; a laptop that wakes on, or roams to, another network while
+    /// the tunnel is up is on prefixes the plan never named, and its
+    /// printer, its file shares and its router's DHCP renewals there were
+    /// refused until the next connect. Read again on every status poll, and
+    /// when they differ (`confinement::lan_changed`) the plan goes in again
+    /// with them -- the new one installed before the old one is closed
+    /// (`Hold::put`), so nothing is unconfined meanwhile -- and is watched
+    /// like any plan installed. Only while a confinement is held. An
+    /// adapter list that cannot be read is no evidence, and changes
+    /// nothing; an install that fails keeps the old plan, says so, and is
+    /// not tried again for that LAN until `LAN_RETRY_AFTER` has passed.
+    fn follow_the_lan(&mut self) {
+        let ops = Arc::clone(&self.confinement_ops);
+        let Some(session) = self.active.peek() else { return };
+        if session.confinement.confined() != Some(true) {
+            return;
+        }
+        let Some(plan) = session.confinement_plan.clone() else { return };
+        let hold = Arc::clone(&session.confinement);
+        let Some((lan, dhcp_servers)) = ops.lan() else { return };
+        if !confinement::lan_changed(&plan, &lan, &dhcp_servers) {
+            return;
+        }
+        // Refused already, and not long ago: not tried on every poll.
+        if let Some((refused, at)) = &session.lan_refused {
+            if !confinement::lan_changed(refused, &lan, &dhcp_servers) && at.elapsed() < LAN_RETRY_AFTER {
+                return;
+            }
+        }
+        let prefixes = lan.len();
+        let next = confinement::Plan { lan: confinement::Lan::Allowed(lan), dhcp_servers, ..plan };
+        let installed = match ops.install(&next) {
+            Ok(installed) => installed,
+            Err(why) => {
+                confinement::note(
+                    &self.config_dir,
+                    &format!("the network changed, and its LAN could not be put in the plan; the old one stays: {why}"),
+                );
+                if let Some(session) = self.active.peek_mut() {
+                    session.lan_refused = Some((next, Instant::now()));
+                }
+                return;
+            }
+        };
+        let witness = ops.witness(&next, &installed);
+        if !hold.put(installed) {
+            // Let go of meanwhile -- a drop report, the valve: closed at
+            // once by the put, and nothing more to do here.
+            return;
+        }
+        confinement::note(
+            &self.config_dir,
+            &format!("the network changed: the plan now permits {prefixes} on-link prefix(es) and their DHCP servers"),
+        );
+        if let Some(session) = self.active.peek_mut() {
+            session.confinement_plan = Some(next);
+            session.lan_refused = None;
+        }
+        self.start_valve(witness);
+    }
+
+    /// Starts the plan-error valve on the live session (K5): WFP's record
+    /// of what it refused, through `witness`, and its engine's log from
+    /// where it stands now, for `confinement::VALVE_FOR`. Owned by the
+    /// session, so it stops and is joined when the session ends. Xray and
+    /// OpenVPN only, the engines confined.
+    fn start_valve(&mut self, mut witness: confinement::Witness) {
+        let config_dir = self.config_dir.clone();
+        let Some(session) = self.active.peek_mut() else { return };
+        let Some(plan) = &session.confinement_plan else { return };
+        let log = match plan.transport {
+            confinement::Transport::Xray { .. } => config_dir.join(xray::LOG_FILE),
+            confinement::Transport::Openvpn { .. } => config_dir.join(openvpn::LOG_FILE),
+            confinement::Transport::Ikev2 { .. } => return,
+        };
+        // Read before the thread starts, so a refusal written in between
+        // is after it.
+        let from = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+        let transport = plan.transport.clone();
+        let hold = Arc::clone(&session.confinement);
+        session.valve = Some(crate::split_tunnel::worker::Worker::spawn(move |stop| {
+            confinement::run_valve(&log, from, &transport, &hold, &stop, confinement::VALVE_FOR, &mut witness);
+        }));
     }
 
     /// Whether this session asked for the tunnel's DNS rule and did not
@@ -630,6 +1017,161 @@ impl Engines {
     /// a one-line mistake to make.
     fn forget_dns_state(&mut self) {
         self.dns_state = dns::TunnelDns::NotRequested;
+        // And whether this session had given its pin back: the next one
+        // starts with its own, and nothing of this one's is put back.
+        self.dns_pin.reset();
+    }
+
+    /// What Custom mode looks like to the pin right now.
+    fn custom_mode_view(&self) -> CustomModeView {
+        #[cfg(test)]
+        if let Some(view) = self.custom_mode_for_test {
+            return view;
+        }
+        CustomModeView {
+            intercepting: self.split_tunnel.wants_passive_tunnel() && self.split_tunnel.is_running(),
+            interception_stopped: self.split_tunnel.interception_stopped(),
+        }
+    }
+
+    /// Gives Custom mode's DNS pin back while the tunnel is measured not to
+    /// carry, and puts it back when it is shown to. See `dns::PinWatch` for
+    /// the policy and what it costs.
+    ///
+    /// Only a Custom-mode session -- a passive tunnel with the redirect up --
+    /// whose rule went in, or that this gave back: a full tunnel's rule is
+    /// left alone, since every lookup there is meant to go through the
+    /// tunnel and, with it stalled, so is every connection. `read` is asked
+    /// only then, so a poll of any other session reads no log.
+    fn keep_dns_pin(&mut self, read: impl FnOnce(&Self) -> dns::Carrying) {
+        let custom = self.custom_mode_view();
+        if !custom.intercepting {
+            return;
+        }
+        if self.dns_state != dns::TunnelDns::Forced && !self.dns_pin.released() {
+            return;
+        }
+        let reading = if custom.interception_stopped { dns::Carrying::InterceptionStopped } else { read(self) };
+        match self.dns_pin.observe(reading, Instant::now()) {
+            dns::PinMove::Keep => {}
+            dns::PinMove::Release => {
+                self.pin_ops.release();
+                crate::cleanup_log::note(
+                    "give the machine its own DNS back while Custom mode's tunnel is not carrying",
+                    &format!(
+                        "{reading:?}; the NRPT rule is out and this PC resolves through its own network, \
+                         the selected applications' lookups included, until the tunnel is shown to carry again"
+                    ),
+                );
+            }
+            dns::PinMove::Restore => {
+                let state = self.pin_ops.restore(dns::CUSTOM_MODE_RESOLVER);
+                self.dns_pin.restored(state == dns::TunnelDns::Forced);
+                if state == dns::TunnelDns::Forced {
+                    crate::cleanup_log::note(
+                        "pin DNS to the tunnel again now that Custom mode's tunnel carries",
+                        "the NRPT rule is back and the DNS cache was flushed",
+                    );
+                }
+                // Unforced is reported in the status poll from here, as at
+                // connect: the tunnel carries and the lookups are not
+                // pinned to it.
+                self.dns_state = state;
+            }
+        }
+    }
+
+    /// Puts Custom mode's DNS rule in, once its redirect carries lookups,
+    /// and records what became of it on the session.
+    ///
+    /// Here, and not in any engine's connect: every engine used to put it
+    /// in inside its own connect, seconds before the redirect started, and
+    /// in between every lookup on the PC was pinned to 1.1.1.1 with nothing
+    /// to carry it into the tunnel. They left by the physical adapter in
+    /// clear text, seen at the NIC on the VM during a WireGuard and an Xray
+    /// Custom-mode connect. Until this runs the lookups go where they went
+    /// before Connect, as the selected applications' connections do until
+    /// the redirect is up; the caller flushes what was answered meanwhile.
+    ///
+    /// Only Custom mode -- a passive tunnel with its redirect up, as the
+    /// pin's watch reads it (`custom_mode_view`) -- and the watch starts
+    /// afresh with the rule. A rule that will not go in is reported in the
+    /// status poll as unpinned DNS and never fails the connect
+    /// (`dns::TunnelDns`).
+    fn pin_custom_mode_dns(&mut self) {
+        let Some(resolver) = dns::custom_mode_rule(self.custom_mode_view().intercepting) else {
+            return;
+        };
+        self.dns_pin.reset();
+        self.dns_state = self.pin_ops.install(resolver);
+    }
+
+    /// Whether this is a Custom-mode session whose NRPT rule is in: every
+    /// lookup on the PC pinned to 1.1.1.1, and nothing but the redirect to
+    /// carry them into the tunnel. The condition `unpin_custom_mode_dns`
+    /// takes the rule out under. Asked before a teardown forgets it.
+    fn custom_mode_pin_in(&self) -> bool {
+        self.custom_mode_view().intercepting && self.dns_state == dns::TunnelDns::Forced && !self.dns_pin.released()
+    }
+
+    /// Refuses port 53 outside the tunnel until `release_dns_hold`, for
+    /// the two stretches of a Custom-mode session in which a lookup has
+    /// nothing to carry it into the tunnel and leaves by the physical
+    /// adapter in clear text instead -- seen at the NIC on the VM (P3 run
+    /// g2-01):
+    ///
+    ///  - **starting**, from before xray.exe makes its adapter -- whose
+    ///    resolver, 1.1.1.1, Windows starts sending lookups to at once --
+    ///    until the redirect carries them and the NRPT rule is in
+    ///    (`start_split_tunnel`): about six frames to 1.1.1.1:53 in the
+    ///    1.5 s before the rule;
+    ///  - **ending**, from before the redirect stops until the NRPT rule
+    ///    that pins every lookup to 1.1.1.1 is out: up to twelve after
+    ///    every Xray disconnect or crash.
+    ///
+    /// A lookup in either fails on this PC instead, and the hold is gone
+    /// before the operation that needed it answers: DNS is held no longer
+    /// than the connect or the teardown itself. Never a full tunnel's,
+    /// whose DNS confinement does this for the whole session. A hold that
+    /// will not go in is logged and changes nothing else -- the connect or
+    /// teardown goes on, as before this existed.
+    fn hold_dns(&mut self, during: &'static str) {
+        if self.dns_hold.is_some() {
+            return;
+        }
+        // The engine keeps port 53 to its own server, as the DNS
+        // confinement lets it: a node may listen on 53.
+        let engine = self.engine_path("xray.exe").ok();
+        match self.dns_hold_ops.hold(&self.config_dir, engine.as_deref()) {
+            Ok(hold) => {
+                self.dns_hold = Some(hold);
+                self.mark("dns held");
+            }
+            Err(e) => crate::cleanup_log::note(during, &format!("port 53 could not be held outside the tunnel: {e}")),
+        }
+    }
+
+    /// Lets go of the hold `hold_dns` put in, if one is in. Safe to call
+    /// at any time.
+    fn release_dns_hold(&mut self) {
+        if self.dns_hold.take().is_some() {
+            self.mark("dns hold released");
+        }
+    }
+
+    /// Takes Custom mode's rule out before its redirect is stopped to be
+    /// started again in place: while the redirect is down nothing carries
+    /// the lookups it pins. `start_split_tunnel` puts it back. A rule the
+    /// watch has already given back is not taken out twice, and a full
+    /// tunnel's is not touched.
+    fn unpin_custom_mode_dns(&mut self) {
+        if !self.custom_mode_view().intercepting {
+            return;
+        }
+        if self.dns_state == dns::TunnelDns::Forced && !self.dns_pin.released() {
+            self.pin_ops.release();
+        }
+        self.forget_dns_state();
     }
 
     /// Installs a session around a process the test started, exactly as a
@@ -637,8 +1179,68 @@ impl Engines {
     /// Returns its generation.
     #[cfg(test)]
     pub(crate) fn begin_test_session(&mut self, protocol: &'static str, child: Child) -> u64 {
-        self.begin_session(Active::Child { protocol, child, routes: InstalledRoutes::none() }, &test_profile());
+        self.begin_test_session_with_routes(protocol, child, InstalledRoutes::none())
+    }
+
+    /// A session around a process the test started, for `profile`.
+    #[cfg(test)]
+    fn begin_test_session_for(&mut self, profile: &ConnectProfile, protocol: &'static str, child: Child) -> u64 {
+        self.begin_session(Active::Child { protocol, child, routes: InstalledRoutes::none() }, profile);
         self.active.peek().map_or(0, |s| s.generation)
+    }
+
+    /// The same, with routes for the session to own.
+    #[cfg(test)]
+    fn begin_test_session_with_routes(&mut self, protocol: &'static str, child: Child, routes: InstalledRoutes) -> u64 {
+        self.begin_session(Active::Child { protocol, child, routes }, &test_profile());
+        self.active.peek().map_or(0, |s| s.generation)
+    }
+
+    /// Points this instance at a confinement the test owns. Before the
+    /// session begins: its hold is made then.
+    #[cfg(test)]
+    fn set_confinement_ops_for_test(&mut self, ops: Arc<dyn confinement::ConfinementOps>) {
+        self.confinement_ops = ops;
+    }
+
+    /// Confines the live session the way a connect does, through the ops:
+    /// an Xray plan to one server, the LAN allowed. Returns whether it is
+    /// now held.
+    #[cfg(test)]
+    fn confine_for_test(&mut self) -> bool {
+        let ops = Arc::clone(&self.confinement_ops);
+        let Some(session) = self.active.peek_mut() else { return false };
+        let luid = ops.luid(adapter_name_for(&session.profile)).expect("a LUID");
+        let plan = confinement::Plan {
+            tunnel_luid: luid,
+            transport: confinement::Transport::Xray {
+                exe: PathBuf::from(r"C:\Program Files\Neoxify\xray.exe"),
+                nodes: vec![Ipv4Addr::new(203, 0, 113, 7)],
+            },
+            lan: confinement::Lan::Allowed(Vec::new()),
+            dhcp_servers: Vec::new(),
+        };
+        let installed = ops.install(&plan).expect("installed");
+        session.confinement_plan = Some(plan);
+        session.confinement.put(installed)
+    }
+
+    /// Records a teardown step, for the tests that pin their order.
+    fn mark(&mut self, _step: &'static str) {
+        #[cfg(test)]
+        self.teardown_steps.push(_step);
+    }
+
+    /// Points this instance at a routing table the test owns.
+    #[cfg(test)]
+    fn set_route_ops_for_test(&mut self, ops: Arc<dyn route_table::RouteOps>) {
+        self.route_ops = ops;
+    }
+
+    /// Points this instance at a way out the test decides.
+    #[cfg(test)]
+    fn set_uplink_lookup_for_test(&mut self, lookup: UplinkLookup) {
+        self.uplink_lookup = lookup;
     }
 
     /// The same, with the first watch on `first_watch` instead of the
@@ -655,8 +1257,9 @@ impl Engines {
     ) -> u64 {
         let generation = self
             .active
-            .fill(Session::new(Active::Child { protocol, child, routes: InstalledRoutes::none() }, &test_profile()));
-        let guard = engine_watch::watch(generation, protocol, first_watch, self.report_to()).expect("starting a watch");
+            .fill(Session::new(Active::Child { protocol, child, routes: InstalledRoutes::none() }, &test_profile(), self.confinement_ops.hold()));
+        let hold = self.active.peek().map(|s| Arc::clone(&s.confinement)).expect("just filled");
+        let guard = engine_watch::watch(generation, protocol, first_watch, self.report_to(hold)).expect("starting a watch");
         if let Some(session) = self.active.peek_mut() {
             session.watch = Some(guard);
         }
@@ -742,8 +1345,28 @@ impl Engines {
     /// Proves the tunnel carries traffic, over the path selected apps
     /// use. See `SplitTunnel::probe` for why the app cannot check this
     /// for itself once Custom mode is on.
-    pub fn probe_split_tunnel(&self) -> Result<(), String> {
-        self.split_tunnel.probe()
+    ///
+    /// A reply is also what puts Custom mode's DNS pin back after it was
+    /// given back (`keep_dns_pin`), before the answer reaches the app: the
+    /// "connected" it leads to is never shown over a pin still out, unless
+    /// putting it back failed -- which the status poll then reports as
+    /// unpinned DNS, as it would at connect.
+    pub fn probe_split_tunnel(&mut self) -> Result<(), String> {
+        let outcome = self.split_tunnel.probe();
+        self.note_probe(&outcome);
+        outcome
+    }
+
+    /// What a split-tunnel probe tells the pin. A reply the destination had
+    /// to send is the strongest "carrying" there is. A failure is told
+    /// nothing: it has been seen to fail while the tunnel carried, which is
+    /// why the app reads it as "unverified", and the pin is given back only
+    /// on a measurement (`dns::PinWatch`) -- nor does it interrupt the run of
+    /// readings that one is building up.
+    fn note_probe(&mut self, outcome: &Result<(), String>) {
+        if outcome.is_ok() {
+            self.keep_dns_pin(|_| dns::Carrying::Yes);
+        }
     }
 
     /// Resolves an engine binary from the service's own directory.
@@ -765,12 +1388,23 @@ impl Engines {
         self.config_dir.join(file_name)
     }
 
+    /// The ledger of host routes this service owes the machine. See
+    /// `route_table::OwedRoutes`.
+    fn owed_routes(&self) -> route_table::OwedRoutes {
+        route_table::OwedRoutes::in_dir(&self.config_dir)
+    }
+
     /// Tears down whatever is up, then brings up `profile`. Teardown
     /// happens first and unconditionally so that switching servers can
     /// never leave two engines fighting over the system routing table.
     /// Wraps the real work so that EVERY failure path picks up the hint,
     /// rather than the two or three someone remembered to decorate.
-    pub fn connect(&mut self, profile: &ConnectProfile, exits: &[ExitProfile]) -> Result<(), String> {
+    pub fn connect(
+        &mut self,
+        profile: &ConnectProfile,
+        exits: &[ExitProfile],
+        known_nodes: &[String],
+    ) -> Result<(), String> {
         // Noted before the attempt, reported only if it fails.
         //
         // Another VPN that is up owns the default route, and two clients
@@ -790,13 +1424,7 @@ impl Engines {
         // hypothetical: enabling Custom mode on a live OpenVPN connection
         // reported "Another VPN is connected on this machine
         // (Neoxify-OpenVPN)", pointing at the very tunnel being rebuilt.
-        let rivals = adapters::other_vpns_up(&[
-            xray::ADAPTER_NAME,
-            wireguard::TUNNEL_NAME,
-            openvpn::ADAPTER_NAME,
-            ikev2::ENTRY_NAME,
-        ])
-        .unwrap_or_default();
+        let rivals = adapters::other_vpns_up(&OUR_ADAPTER_NAMES).unwrap_or_default();
         // The one place the published token is read on this path.
         //
         // Below here cancellation is a parameter. That is the whole
@@ -814,14 +1442,39 @@ impl Engines {
         // The profile Custom mode rebuilds from is the session's own,
         // so a failed attempt -- which ends whatever session it began --
         // cannot leave one behind.
-        self.connect_inner(profile, exits, &limits)
-            .map_err(|e| with_rival_hint(e, &rivals))
+        let connected = self.connect_inner(profile, exits, known_nodes, &limits);
+        // A Custom-mode connect that ended before its redirect carried --
+        // refused, cancelled, a rung that failed -- lets go of its DNS hold
+        // here (`hold_dns`); one that got there let go of it then.
+        self.release_dns_hold();
+        connected.map_err(|e| with_rival_hint(e, &rivals))
+    }
+
+    /// Refuses a connect with no way out at all -- no route toward the
+    /// server and no up adapter with a gateway, ours aside -- in
+    /// [`NO_NETWORK`]'s words, which the app reads as no network: nothing
+    /// was dialled, so no server is named and no dial is counted against
+    /// a route. Every engine, before it dials. Without it, only Xray's full
+    /// tunnel said so (`xray::plan_uplink`); WireGuard, OpenVPN and IKEv2
+    /// failed in their own words -- a handshake that never came, a RAS
+    /// error -- read as a server that did not answer.
+    ///
+    /// A way out, or adapters that could not be listed, says nothing: the
+    /// connect goes on. The same question Xray's routes ask, so a line
+    /// whose way out Windows names -- PPP's on-link next hop included --
+    /// passes here as it does there.
+    fn refuse_without_a_way_out(&self, profile: &ConnectProfile) -> Result<(), String> {
+        match (self.uplink_lookup)(way_out_probe(profile)) {
+            Ok(None) => Err(NO_NETWORK.to_string()),
+            Ok(Some(_)) | Err(_) => Ok(()),
+        }
     }
 
     fn connect_inner(
         &mut self,
         profile: &ConnectProfile,
         exits: &[ExitProfile],
+        known_nodes: &[String],
         limits: &crate::lifecycle::budget::Limits,
     ) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
@@ -858,6 +1511,9 @@ impl Engines {
         // "no tunnel" is then exactly the answer that must not stand.
         self.ledger.forget();
         cleared?;
+        // Before anything of the new session is built, and on a table the
+        // teardown above has just cleared of everything this process held.
+        self.purge_stale_node_routes(known_nodes, &our_interfaces());
         // Belt and braces with `disconnect`'s own reset: a connect that
         // fails part way must not leave the previous session's DNS
         // complaint attached to nothing.
@@ -876,6 +1532,15 @@ impl Engines {
         // tunnel for a customer who asked for one app.
         let passive = self.split_tunnel.wants_passive_tunnel();
 
+        // No way out at all is said as that, for every engine, before any
+        // is asked to dial: see `refuse_without_a_way_out`.
+        self.refuse_without_a_way_out(profile)?;
+
+        // The servers the engine's own connection goes to, as this connect
+        // resolved them: what the IPv4 confinement permits the engine to
+        // reach around the tunnel, and nothing else.
+        let mut confine_nodes: Vec<Ipv4Addr> = Vec::new();
+
         match profile {
             ConnectProfile::Wireguard(p) => {
                 wireguard::connect(self, p, passive, limits)?;
@@ -889,6 +1554,14 @@ impl Engines {
             ConnectProfile::Ikev2(p) => {
                 let live = ikev2::connect(p, passive)?;
                 self.begin_session(Active::Ikev2(live), profile);
+                // ESP's permit names the server's address; IKE's does not
+                // (K3). Only asked while IKEv2's plan is on, which it is
+                // not until its own VM gate passes (`IKEV2_CONFINED`).
+                if confinement::applies_to(profile, passive) {
+                    if let Ok(node) = node_address(profile, limits) {
+                        confine_nodes.push(node);
+                    }
+                }
             }
             // Both Xray protocols take the same path: one engine, one
             // adapter, one set of routes -- only the outbound differs.
@@ -943,6 +1616,36 @@ impl Engines {
                     extra.push((exit.exit.clone(), exit_outbound));
                 }
 
+                // The way out to the server, while nothing of ours is
+                // routed yet -- see `xray::plan_uplink`. Custom mode
+                // routes nothing around the tunnel, so it asks nothing.
+                let uplink = if passive { None } else { Some(xray::plan_uplink(&outbound, limits)?) };
+                // The address the host route is for is the one xray.exe is
+                // permitted to: the two agree, as they must. Exits named by
+                // address are permitted too; one named by a hostname is
+                // left out -- in a full tunnel its connection is routed
+                // into the tunnel, whose interface is permitted anyway.
+                if let Some(plan) = &uplink {
+                    confine_nodes.push(plan.server);
+                    for (_, exit) in &extra {
+                        if let Ok(address) = exit.host().parse::<Ipv4Addr>() {
+                            confine_nodes.push(address);
+                        }
+                    }
+                }
+
+                // Custom mode: port 53 held outside the tunnel from before
+                // xray.exe makes its adapter -- whose resolver Windows asks
+                // at once -- until the redirect carries and the NRPT rule is
+                // in (`hold_dns`, let go of in `start_split_tunnel`). The node
+                // is resolved first: nodes are registered by address, but a
+                // hostname would need a lookup the hold refuses, and once
+                // resolved here `prepare_passive` and the split tunnel get
+                // it again from the cache.
+                if passive {
+                    let _ = node_address(profile, limits);
+                    self.hold_dns("hold DNS while Custom mode starts");
+                }
                 let (mut child, table) =
                     xray::connect_returning_exits(self, &outbound, &extra, passive)?;
                 // Registered before the routes and before the session
@@ -951,6 +1654,24 @@ impl Engines {
                 // start until `start_split_tunnel`, which is later
                 // still.
                 self.split_tunnel.set_exits(table);
+                // A full tunnel's IPv6 block and DNS confinement, before the
+                // adapter is given its DNS and before its routes. Installed
+                // after the connect, as on every other engine, they left the
+                // whole of it to lookups: `netsh ... set dnsservers static
+                // 1.1.1.1` and the NRPT rule pinned every lookup on the PC to
+                // 1.1.1.1 a second or more before a route into the tunnel
+                // existed, and they left by the physical adapter in clear
+                // text -- on 0.9.48 too (G8, P0 run 09b). Here, port 53 can
+                // leave only through the tunnel from the moment there is
+                // one, and a lookup in the gap is refused on this PC instead
+                // of answered by the network. The same filters, the same
+                // wait for the adapter (`dns_confinement_for`, which
+                // `install_routes` then finds done), so the connect takes no
+                // longer; `block_ipv6_if_needed` keeps them. An adapter not
+                // up within that wait (a fresh install's first connect)
+                // gets them after its routes instead, DNS confinement and
+                // all (`early_filters_for`). Custom mode gets none, as ever.
+                let early_filters = if passive { None } else { self.early_filters_for(profile) };
                 // Xray creates the adapter but routes nothing into it, so
                 // the tunnel is inert until this succeeds. Failing here
                 // must take the engine down with it rather than leave a
@@ -959,25 +1680,42 @@ impl Engines {
                 // given an address -- a socket pinned to an interface
                 // with none has no source to send from -- but nothing is
                 // routed into it.
-                let prepared = if passive {
-                    xray::prepare_passive(&outbound, limits).map(|_| InstalledRoutes::none())
-                } else {
-                    xray::install_routes(&outbound, limits)
+                let prepared = match uplink {
+                    None => xray::prepare_passive(&outbound, limits).map(|_| InstalledRoutes::none()),
+                    Some(plan) => xray::install_routes(plan, Arc::clone(&self.route_ops), self.owed_routes(), limits),
                 };
                 let routes = match prepared {
                     Ok(routes) => routes,
                     Err(e) => {
                         let _ = child.kill();
+                        // Released the moment the engine is killed, as a
+                        // session's are (K1): not after the reap, with port
+                        // 53 and IPv6 refused machine-wide for up to
+                        // REAP_BUDGET over a rung already given up.
+                        drop(early_filters);
                         reap(&mut child);
                         return Err(e);
                     }
                 };
                 self.begin_session(Active::Child { protocol, child, routes }, profile);
+                if let (Some(filters), Some(session)) = (early_filters, self.active.peek_mut()) {
+                    session.filters = filters;
+                }
             }
             ConnectProfile::Openvpn(p) => {
-                let child = openvpn::connect(self, p, passive, limits)?;
-                let engine = Active::Child { protocol: "OPENVPN", child, routes: InstalledRoutes::none() };
+                let (child, added) = openvpn::connect(self, p, passive, limits)?;
+                let routes = self.openvpn_routes(added);
+                let engine = Active::Child { protocol: "OPENVPN", child, routes };
                 self.begin_session(engine, profile);
+                // The address openvpn.exe was told to dial: a literal, as
+                // nodes are registered, at once; a hostname resolved the way
+                // the split tunnel resolves it. One that cannot be leaves
+                // the session unconfined, and says so.
+                if !passive {
+                    if let Ok(node) = node_address(profile, limits) {
+                        confine_nodes.push(node);
+                    }
+                }
             }
         }
 
@@ -1006,12 +1744,78 @@ impl Engines {
             self.start_split_tunnel(profile, limits)?;
         }
         self.block_ipv6_if_needed(profile);
-        // Whatever the engine above reported about the tunnel's DNS
+        // And IPv4, for a full tunnel on an engine with no kill switch of
+        // its own: everything outside the tunnel refused but the engine's
+        // link to its servers, the LAN, DHCP and loopback. See
+        // `confinement`. A failure leaves the tunnel up and is reported.
+        self.confine_if_needed(profile, passive, confine_nodes);
+        // Then what was opened outside it before, so it comes back through
+        // it: the owner's decision (c).
+        self.reset_outside_the_tunnel(profile, passive);
+        // Whatever the engine above reported about a full tunnel's DNS
         // rule, collected onto the session now that there is one. Read
         // rather than returned because the engines install it from free
-        // functions with no `Engines` to hand it back to.
-        self.dns_state = dns::tunnel_dns();
+        // functions with no `Engines` to hand it back to. Custom mode's
+        // was recorded as it went in, once the redirect was up
+        // (`pin_custom_mode_dns`).
+        if !passive {
+            self.dns_state = dns::tunnel_dns();
+        }
         Ok(())
+    }
+
+    /// Removes host routes to our own servers that an earlier session left
+    /// on an adapter that is not ours.
+    ///
+    /// The second net under the ledger, and the only one for what was
+    /// left before the ledger existed: releases up to 0.9.48 left a host
+    /// route to the server on the physical adapter after every OpenVPN
+    /// session, and those are on customers' machines now. Measured on the
+    /// VM, one of them sent the next session's checks against that node's
+    /// mirror around the tunnel and moved the customer off a working
+    /// server. See `route_table::stale_node_routes` for what qualifies.
+    ///
+    /// Only addresses: a name in the list is ignored rather than resolved,
+    /// because a host route is to an address, and the names the app sends
+    /// are IKEv2 certificate names whose server it also lists by address.
+    /// Bounded, so a caller cannot make this walk the table for an
+    /// unbounded list.
+    fn purge_stale_node_routes(&self, known_nodes: &[String], ours: &[u32]) {
+        let nodes: Vec<Ipv4Addr> =
+            known_nodes.iter().take(MAX_KNOWN_NODES).filter_map(|host| host.trim().parse().ok()).collect();
+        if nodes.is_empty() {
+            return;
+        }
+        let Ok(rows) = self.route_ops.rows() else { return };
+        let owed = self.owed_routes();
+        let mut removed = Vec::new();
+        for row in route_table::stale_node_routes(&rows, &nodes, ours) {
+            match self.route_ops.delete(&row) {
+                Ok(()) => {
+                    owed.settle(&row);
+                    removed.push(format!("{}/{}", row.dest, row.prefix));
+                }
+                Err(why) => crate::cleanup_log::note(
+                    "remove a host route to a server an earlier session left",
+                    &format!("{}/{}: {why}", row.dest, row.prefix),
+                ),
+            }
+        }
+        if !removed.is_empty() {
+            crate::cleanup_log::note(
+                "remove a host route to a server an earlier session left",
+                &format!("removed {}", removed.join(", ")),
+            );
+        }
+    }
+
+    /// The routes an OpenVPN session owns: the host routes openvpn.exe
+    /// added on the uplink, taken over so that every teardown -- a
+    /// Disconnect, a dead engine's, the hard stop -- removes them, and owed
+    /// in the ledger in case none of those runs. See
+    /// `InstalledRoutes::adopted`.
+    fn openvpn_routes(&self, added: Vec<route_table::RouteRow>) -> InstalledRoutes {
+        InstalledRoutes::adopted(added, Arc::clone(&self.route_ops), self.owed_routes())
     }
 
     /// Blocks IPv6 for a full tunnel, on the engines that would
@@ -1034,8 +1838,9 @@ impl Engines {
     /// everything else on the machine, because that mode also runs
     /// through the redirect. It is stated here rather than papered over.
     ///
-    /// **WireGuard is excluded** because `wireguard.exe` installs its
-    /// own; see `ipv6_block::needed_for`.
+    /// **WireGuard is included**, beside `wireguard.exe`'s own kill-switch,
+    /// so that IPv6 fails on the PC at once rather than vanishing into a
+    /// tunnel with no IPv6 at either end; see `ipv6_block::needed_for`.
     ///
     /// A failure is logged and not returned. The tunnel is up and
     /// carrying IPv4 at this point, and tearing it down over a filter
@@ -1044,6 +1849,11 @@ impl Engines {
     /// a block either, which is why the field stays `None` and the app's
     /// status follows the field.
     fn block_ipv6_if_needed(&mut self, profile: &ConnectProfile) {
+        // Installed already, before the adapter's DNS (Xray's full tunnel;
+        // see `connect_inner`): kept, not installed twice.
+        if self.active.peek().is_some_and(|s| s.filters.ipv6.is_some()) {
+            return;
+        }
         let filters = self.filters_for(profile);
         // Owned by the session from here. There is always one at this
         // point -- this runs after the engine is in the slot -- and if
@@ -1055,24 +1865,38 @@ impl Engines {
     }
 
     /// Installs whatever this tunnel needs, and returns it to be owned by
-    /// the session.
+    /// the session. What that is, is [`filter_plan`]'s to say.
     fn filters_for(&self, profile: &ConnectProfile) -> SessionFilters {
+        let plan = filter_plan(profile, self.split_tunnel.wants_interception());
+        if !plan.ipv6_block {
+            return SessionFilters::default();
+        }
+        let dns = if plan.dns_confinement { self.dns_confinement_for(profile) } else { None };
+        self.install_filters(dns)
+    }
+
+    /// [`Self::filters_for`] for a full Xray tunnel before its routes and
+    /// its DNS (`connect_inner`) -- or `None`, leaving them all to
+    /// `block_ipv6_if_needed` after the routes, when the DNS confinement
+    /// they should carry cannot be had yet. On a fresh install Xray
+    /// installs Wintun on first use and its adapter was measured appearing
+    /// 8.5 s in, past `dns_confinement_for`'s 5 s: the IPv6 block went in
+    /// alone, `block_ipv6_if_needed` kept it, and DNS was never confined
+    /// for that session. Left to after the routes, it is as it was before
+    /// the early install: the adapter's DNS then goes in only once routes
+    /// into the tunnel are up (`xray::install_routes`).
+    fn early_filters_for(&self, profile: &ConnectProfile) -> Option<SessionFilters> {
+        let plan = filter_plan(profile, self.split_tunnel.wants_interception());
+        if !plan.ipv6_block {
+            return None;
+        }
+        let dns = if plan.dns_confinement { Some(self.dns_confinement_for(profile)?) } else { None };
+        Some(self.install_filters(dns))
+    }
+
+    /// The IPv6 block, with `dns` in the same WFP session when given.
+    fn install_filters(&self, dns: Option<ipv6_block::DnsConfinement>) -> SessionFilters {
         let mut filters = SessionFilters::default();
-        if self.split_tunnel.wants_interception() {
-            return filters;
-        }
-        let dns = self.dns_confinement_for(profile);
-        if !ipv6_block::needed_for(profile) {
-            // WireGuard: its own kill-switch blocks IPv6, but not DNS
-            // leaving by the physical NIC. See `Ipv6Block::install_dns_only`.
-            if let Some(dns) = dns {
-                match Ipv6Block::install_dns_only(&self.config_dir, &dns) {
-                    Ok(block) => filters.dns_only = Some(block),
-                    Err(e) => eprintln!("DNS could not be confined to the tunnel: {e}"),
-                }
-            }
-            return filters;
-        }
         let installed = match Ipv6Block::install(&self.config_dir, dns.as_ref()) {
             // The DNS filters share the IPv6 block's transaction, so a
             // rejection of theirs would take the IPv6 block down with
@@ -1096,7 +1920,7 @@ impl Engines {
     /// Whether this tunnel's DNS needs confining to it, and to what.
     ///
     /// Every engine but OpenVPN, whose config already carries
-    /// `block-outside-dns`. Measured on a Windows 11 guest with a query
+    /// `block-outside-dns` (`filter_plan`). Measured on a Windows 11 guest with a query
     /// deliberately made the way Windows' own connectivity probes make
     /// theirs, capture at the NIC miniport: Xray leaked those probes;
     /// WireGuard let a query bound to the physical NIC reach its
@@ -1165,6 +1989,15 @@ impl Engines {
         limits: &crate::lifecycle::budget::Limits,
     ) -> Result<(), String> {
         let adapter = adapter_name_for(profile);
+        // Custom mode is never confined (`confinement::applies_to`): a
+        // machine-wide IPv4 block would take the internet from the
+        // applications the customer kept out of the VPN. Nothing reaches
+        // here confined; if something ever did, it is let go of rather than
+        // left under the redirect.
+        if let Some(session) = self.active.peek() {
+            debug_assert_ne!(session.confinement.confined(), Some(true), "a Custom-mode session was confined");
+            session.confinement.release(confinement::Release::Teardown);
+        }
         let node = match node_address(profile, limits) {
             Ok(node) => node,
             Err(e) => {
@@ -1182,6 +2015,18 @@ impl Engines {
             let _ = self.disconnect();
             return Err(e);
         }
+        // Custom mode's DNS rule, now that the redirect carries what it
+        // pins (`pin_custom_mode_dns`), and not before.
+        self.pin_custom_mode_dns();
+        // And port 53 is let go of: the redirect carries the lookups the
+        // rule pins (`hold_dns`). Before the flush, so a lookup the flush
+        // sends out again is not refused.
+        self.release_dns_hold();
+        // Then the cache. Until the rule went in, lookups went to the
+        // network's own resolver, and on a line that hijacks port 53 the
+        // block page's answer was cached and would be served to the
+        // selected applications through the redirect afterwards.
+        dns::flush_cache();
         Ok(())
     }
 
@@ -1197,10 +2042,11 @@ impl Engines {
     fn begin_session(&mut self, engine: Active, profile: &ConnectProfile) {
         let label = engine.protocol();
         let liveness = engine.liveness(&self.wireguard_scm);
-        let generation = self.active.fill(Session::new(engine, profile));
+        let hold = self.confinement_ops.hold();
+        let generation = self.active.fill(Session::new(engine, profile, Arc::clone(&hold)));
 
         let started = liveness.and_then(|liveness| {
-            engine_watch::watch(generation, label, liveness, self.report_to())
+            engine_watch::watch(generation, label, liveness, self.report_to(hold))
         });
         match started {
             Ok(guard) => {
@@ -1225,10 +2071,17 @@ impl Engines {
     /// live, because the teardown checks the engine itself before it
     /// acts. An ending from a source that can come back is recorded
     /// unconfirmed, and answers no status until that check confirms it.
-    fn report_to(&self) -> engine_watch::OnGone {
+    fn report_to(&self, confinement: Arc<confinement::Hold>) -> engine_watch::OnGone {
         let ledger = Arc::clone(&self.ledger);
         let sink = self.engine_gone.clone();
         Arc::new(move |gone: engine_watch::Gone| {
+            // First, on any report -- definitive or not, news or not --
+            // and here, on the watch's own thread. The owning thread may
+            // be busy (a diagnostics snapshot, a probe), and phase one is
+            // queued behind it; a dead tunnel's IPv4 block must not wait
+            // for it (K2). If the engine turns out to be alive, phase one
+            // puts it back (`confine_again`).
+            confinement.release(confinement::Release::Dropped);
             let news = if gone.definitive {
                 ledger.record(gone.generation, gone.detail, gone.at, !gone.may_return)
             } else {
@@ -1291,8 +2144,68 @@ impl Engines {
             return true;
         }
         let retracted = self.ledger.retract(generation);
+        // The report let go of the confinement on the watch's thread; the
+        // engine is alive, so it goes back. Its hold is re-armed *before*
+        // the new watch starts: a report from that watch -- the engine
+        // dying a moment after it was found alive -- must find the hold
+        // marked dropped, so the confinement put back after it is let go
+        // of at once. Re-armed after, it erased that mark, and a dead
+        // engine's confinement was held until a phase one queued behind
+        // whatever the owning thread was doing (K2).
+        let owed = self.active.peek().is_some_and(|session| {
+            let owed = session.confinement.owed_after_drop();
+            if owed {
+                session.confinement.rearm();
+            }
+            owed
+        });
         self.rearm_watch(retracted);
+        if owed {
+            self.confine_again();
+        }
         false
+    }
+
+    /// Puts back a confinement a drop report let go of, once the engine is
+    /// shown to be running (K2), with the tunnel adapter's LUID read again:
+    /// a RAS interface can come back from a MOBIKE move with a new one, and
+    /// a permit for the old one would block the tunnel it was for.
+    ///
+    /// Only for a confinement owed after a drop report, its hold already
+    /// re-armed (`end_dead_session`, before the new watch). A plan the
+    /// engine tripped over is never put back: `Hold::put` refuses it, as it
+    /// refuses one a later drop report let go of. A put-back that fails
+    /// leaves the session unconfined and says why, as at connect.
+    fn confine_again(&mut self) {
+        let ops = Arc::clone(&self.confinement_ops);
+        let Some(session) = self.active.peek() else { return };
+        let Some(plan) = session.confinement_plan.clone() else { return };
+        let hold = Arc::clone(&session.confinement);
+        let adapter = adapter_name_for(&session.profile);
+        let installed = ops.luid(adapter).and_then(|tunnel_luid| {
+            let plan = confinement::Plan { tunnel_luid, ..plan };
+            ops.install(&plan).map(|installed| (ops.witness(&plan, &installed), installed))
+        });
+        let mut put_back = None;
+        let detail = match installed {
+            Ok((witness, installed)) => {
+                if hold.put(installed) {
+                    put_back = Some(witness);
+                    "put back, with the tunnel adapter's LUID read again".to_string()
+                } else {
+                    "let go of again at once: another report came in while it went back".to_string()
+                }
+            }
+            Err(why) => {
+                hold.refuse(format!("could not be put back after the engine was reported gone: {why}"));
+                format!("not put back: {why}")
+            }
+        };
+        crate::cleanup_log::note("the IPv4 confinement after a drop report the engine contradicted", &detail);
+        if let Some(witness) = put_back {
+            // A plan put back is a plan installed: watched like one.
+            self.start_valve(witness);
+        }
     }
 
     /// Starts the live session's watch again, after a report its engine
@@ -1303,7 +2216,10 @@ impl Engines {
     /// reporting endings the engine keeps contradicting costs one look a
     /// second rather than a loop through this thread.
     fn rearm_watch(&mut self, retracted: bool) {
-        let report = self.report_to();
+        let Some(hold) = self.active.peek().map(|s| Arc::clone(&s.confinement)) else {
+            return;
+        };
+        let report = self.report_to(hold);
         let scm = Arc::clone(&self.wireguard_scm);
         let Some(session) = self.active.peek_mut() else {
             return;
@@ -1381,22 +2297,33 @@ impl Engines {
     /// to forget a step; the history of this file is mostly that.
     ///
     /// Phase-one rules (docs/windows-service-rewrite.md): no PowerShell,
-    /// no waiting for anything to disappear. At most three `route.exe`
-    /// for Xray's own routes or two for OpenVPN's pushed ones, the same
-    /// allowance the hard stop has, and for the same reason -- the record
-    /// of which routes were installed ends with the session.
+    /// no waiting for anything to disappear. At most two `route.exe`, for
+    /// Xray's half-defaults or OpenVPN's pushed ones, the same allowance
+    /// the hard stop has, and for the same reason -- the record of which
+    /// routes were installed ends with the session. The host route to the
+    /// node is deleted natively.
     ///
     /// The order is the order of harm. Custom mode first (inside
     /// `end_session`), because its redirect is pinned to an adapter that
     /// no longer exists and would otherwise go on swallowing the selected
-    /// applications' traffic. Then the routes, then the WFP filters --
-    /// whose DNS confinement permits port 53 only through the dead
-    /// adapter, so until they go no plain DNS lookup on the machine
-    /// succeeds -- then the NRPT rule, by registry.
+    /// applications' traffic. Then the IPv4 confinement -- which permits
+    /// nothing but the dead adapter, so until it goes the machine has no
+    /// internet at all; the watch's report has usually let go of it
+    /// already, and the engine is stopped by definition here -- then the
+    /// routes, then the IPv6 block's WFP filters, whose DNS
+    /// confinement permits port 53 only through the dead adapter, so until
+    /// they go no plain DNS lookup on the machine succeeds, then the NRPT
+    /// rule, by registry.
     fn tear_down_dead_session(&mut self, noticed: Noticed) {
         let Some(generation) = self.active.peek().map(|s| s.generation) else {
             return;
         };
+        // Custom mode: port 53 held outside the tunnel from before its
+        // redirect stops until the rule pinning lookups to 1.1.1.1 is out,
+        // below (`hold_dns`). Asked before `end_session` forgets the rule.
+        if self.custom_mode_pin_in() {
+            self.hold_dns("hold DNS while a dead Custom-mode session is taken down");
+        }
         // On record before the generation closes, so a death the status
         // poll found first is a drop like one the watch found. Keeps the
         // first witness's time if the watch already recorded it, and is
@@ -1408,6 +2335,13 @@ impl Engines {
 
         let engine = self.end_session();
         let protocol = engine.as_ref().map_or("unknown", Active::protocol);
+        // The engine has ended already: that is why this runs.
+        self.mark("engine stopped");
+        // Usually let go of already, by the watch's report; this is the
+        // poll's path and the net under it (K2). Before the route.exe
+        // deletes, which would otherwise run with the machine refused
+        // everything they send to the physical adapter (K1).
+        self.let_go_of_confinement();
         match engine {
             Some(Active::Child { protocol, mut child, mut routes }) => {
                 routes.remove();
@@ -1419,6 +2353,7 @@ impl Engines {
                         routing::purge_pushed_half_defaults(adapter.index);
                     }
                 }
+                self.mark("routes removed");
                 // Already exited, so this is one look; it collects the
                 // process so nothing of it lingers in the kernel.
                 reap(&mut child);
@@ -1431,7 +2366,9 @@ impl Engines {
             Some(Active::WireguardTunnel) | None => {}
         }
         self.unblock_ipv6();
+        self.mark("dns cleared");
         let dns = dns::clear_registry_only();
+        self.release_dns_hold();
         self.forget_dns_state();
 
         let mut detail = format!(
@@ -1511,12 +2448,31 @@ impl Engines {
         if let Some(earlier) = self.ending_filters.replace(session.filters) {
             earlier.release();
         }
+        // The IPv4 confinement is parked the same way, for the step every
+        // teardown takes the moment its engine has stopped
+        // (`let_go_of_confinement`).
+        if let Some(earlier) = self.ending_confinement.replace(session.confinement) {
+            earlier.release(confinement::Release::Teardown);
+        }
         Some(session.engine)
     }
 
+    /// Lets go of the IPv4 confinement of the session just ended. Called
+    /// by every teardown the moment its engine has stopped and its routes
+    /// are gone, before anything slower: DNS, the phonebook entry, the
+    /// OpenVPN adapter's routes by PowerShell, the IPv6 block. Held through
+    /// those, every Disconnect and every rung of the ladder would black the
+    /// machine out for as long as they take (K1). Safe to call when there
+    /// is nothing to let go of.
+    fn let_go_of_confinement(&mut self) {
+        if let Some(hold) = self.ending_confinement.take() {
+            hold.release(confinement::Release::Teardown);
+            self.mark("confinement released");
+        }
+    }
+
     /// Releases the filters of the session just ended: the machine-wide
-    /// IPv6 block (with the DNS confinement in it) and WireGuard's
-    /// DNS-only confinement.
+    /// IPv6 block, with the DNS confinement in it.
     ///
     /// Dropping a block's handle ends its dynamic WFP session, which is
     /// what removes the filters, so releasing twice is a no-op.
@@ -1527,12 +2483,23 @@ impl Engines {
     /// no boot-time or persistent filter that could survive to strand a
     /// customer's networking.
     fn unblock_ipv6(&mut self) {
+        // Every teardown has let go of the confinement already, straight
+        // after its engine; this is the net under a path that did not.
+        self.let_go_of_confinement();
         if let Some(filters) = self.ending_filters.take() {
             filters.release();
+            self.mark("ipv6 released");
         }
     }
 
     pub fn disconnect(&mut self) -> Result<(), String> {
+        // A Custom-mode session's lookups are pinned to 1.1.1.1 until the
+        // rule is out below, and the redirect that carries them stops with
+        // the session: port 53 is held outside the tunnel until then
+        // (`hold_dns`). Asked first, before the rule's state is forgotten.
+        if self.custom_mode_pin_in() {
+            self.hold_dns("hold DNS while Custom mode ends");
+        }
         // The rule is going away with everything else, so what this
         // service can claim about the machine's lookups goes with it.
         self.forget_dns_state();
@@ -1577,7 +2544,7 @@ impl Engines {
                 // both rather than stranding the machine; and on this
                 // arm `self.ipv6_block` is `None` by construction, since
                 // it is only ever set alongside `self.active`.
-                janitor::reconcile(&self.exe_dir);
+                janitor::reconcile(&self.exe_dir, &self.owed_routes(), &*self.route_ops);
                 Ok(())
             }
             Some(Active::WireguardTunnel) => wireguard::disconnect(self),
@@ -1590,6 +2557,11 @@ impl Engines {
                 // rest of the thorough work rather than on the path a
                 // customer is waiting on.
                 let code = live.hang_up();
+                self.mark("engine stopped");
+                // Before the phonebook entry, whose removal can fall back
+                // to PowerShell for seconds (K1).
+                self.let_go_of_confinement();
+                self.mark("phonebook removed");
                 let removed = ikev2::remove_entry();
                 if code != 0 {
                     crate::cleanup_log::note(
@@ -1604,12 +2576,37 @@ impl Engines {
                 mut routes,
                 protocol,
             }) => {
-                // Routes first: leaving them pointed at an adapter that is
-                // about to disappear would black-hole all traffic until
-                // Windows noticed.
-                routes.remove();
+                // The engine first, and the IPv4 confinement the moment it is
+                // gone (K1), as the hard stop does. Routes used to come out
+                // first, while the confinement still held: from the first
+                // route.exe delete to the kill, everything went to the
+                // physical adapter and was refused there -- the machine's
+                // whole internet, on every replacing connect, Custom-mode
+                // rebuild, Repair, idle-watchdog teardown and service stop.
+                // Killed first, the engine's adapter goes with it -- and with
+                // Xray's, the routes on it -- so the deletes below find the
+                // bare line already working.
                 let _ = child.kill();
+                self.mark("engine stopped");
+                // Before the routes, the reap (up to REAP_BUDGET), the
+                // OpenVPN purge below (PowerShell, seconds) and the DNS
+                // sweep: the session is ending, so it protects nothing now.
+                self.let_go_of_confinement();
+                routes.remove();
+                self.mark("routes removed");
+                // OpenVPN's pushed half-defaults, which `routes` does not
+                // hold and which outlive the kill on an adapter kept between
+                // sessions: by destination with route.exe, as the hard stop
+                // and a dead engine's teardown take them, rather than only by
+                // the PowerShell purge after the reap -- seconds of two /1
+                // routes into a dead adapter beating the real default.
+                if protocol == "OPENVPN" {
+                    if let Ok(Some(adapter)) = adapters::find_by_name(openvpn::ADAPTER_NAME) {
+                        routing::purge_pushed_half_defaults(adapter.index);
+                    }
+                }
                 reap(&mut child);
+                self.mark("engine reaped");
 
                 // OpenVPN installs the server's pushed routes itself, so
                 // they are not in `routes` above and a killed process
@@ -1624,12 +2621,20 @@ impl Engines {
             }
         };
 
+        // The arms above that had a confinement let go of it straight after
+        // their engine; this covers the ones that had none (WireGuard, an
+        // empty slot) and an arm that returned early.
+        self.let_go_of_confinement();
         // Unconditionally, like the config wipe: an NRPT rule left
         // behind points the whole machine's lookups at a resolver that
         // is no longer reachable, which presents as "no website loads
         // at all" long after the VPN is gone. Cheap, and safe when
         // there is nothing to remove.
+        self.mark("dns cleared");
         dns::clear();
+        // The rule is out, so lookups go where they went before Connect:
+        // port 53 is let go of (`hold_dns`).
+        self.release_dns_hold();
         // After the engine, not before, and unconditionally.
         //
         // It used to run first, which left a window with the tunnel
@@ -1821,7 +2826,24 @@ impl Engines {
         };
 
         match verdict {
-            Verdict::Reported(up, protocol, health) => (up, protocol, health),
+            Verdict::Reported(up, protocol, health) => {
+                if up {
+                    self.let_go_if_the_tunnel_adapter_is_gone();
+                    self.follow_the_lan();
+                }
+                // OpenVPN's own log is the one measurement of its link this
+                // poll can take; the other engines answer `Unknown` here and
+                // keep their pin through a stall, as before.
+                let openvpn = up && protocol.as_deref() == Some("OPENVPN");
+                self.keep_dns_pin(|engines| {
+                    if openvpn {
+                        openvpn::link_reading(&openvpn::log_tail(engines))
+                    } else {
+                        dns::Carrying::Unknown
+                    }
+                });
+                (up, protocol, health)
+            }
             Verdict::WireguardUp => {
                 // Reused for a few seconds rather than read per poll; see
                 // HANDSHAKE_REUSE_FOR. Cleared with the session.
@@ -1843,6 +2865,7 @@ impl Engines {
                     wireguard::HandshakeHealth::NeverHandshaked => TunnelHealth::NeverHandshaked,
                     wireguard::HandshakeHealth::Unknown => TunnelHealth::Unknown,
                 };
+                self.keep_dns_pin(|_| wireguard::carrying(reading));
                 (true, Some("WIREGUARD".into()), health)
             }
             // Whatever this session was built on is gone. Everything
@@ -1909,12 +2932,23 @@ impl Engines {
                 // orphaned xray.exe or openvpn.exe holding routes and,
                 // in OpenVPN's case, block-outside-dns filters that drop
                 // every lookup off the tunnel adapter.
-                janitor::reconcile(&self.exe_dir);
+                janitor::reconcile(&self.exe_dir, &self.owed_routes(), &*self.route_ops);
 
                 (false, None, health)
             }
         }
     }
+}
+
+/// What Custom mode's DNS pin is told about the split tunnel. See
+/// [`Engines::keep_dns_pin`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CustomModeView {
+    /// A passive tunnel with the redirect up: Custom mode, whose pin this
+    /// is.
+    intercepting: bool,
+    /// The backstop has switched interception off under it.
+    interception_stopped: bool,
 }
 
 /// What one look at the engine slot concluded, before anything was done
@@ -1980,6 +3014,166 @@ pub fn os_visible_tunnel() -> (bool, Option<String>, TunnelHealth) {
     // Shipped apps read every `connected: false` the same way whatever the
     // health says, so to them nothing changes.
     (false, None, TunnelHealth::Unknown)
+}
+
+/// Which WFP filters a session gets: the machine-wide IPv6 block, and DNS
+/// confined to the tunnel. Decided before anything is installed, so the
+/// decision can be tested where WFP cannot be.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FilterPlan {
+    ipv6_block: bool,
+    dns_confinement: bool,
+}
+
+/// The filters for a tunnel of `profile`, in Custom mode or not.
+///
+/// Custom mode gets none: its redirect covers the selected applications
+/// per application, and a machine-wide filter would change the behaviour
+/// of the ones the customer kept out of the VPN (see
+/// `Engines::block_ipv6_if_needed`). A full tunnel gets the IPv6 block
+/// where `ipv6_block::needed_for` says so, and DNS confinement on every
+/// engine but OpenVPN, whose config carries `block-outside-dns` -- the
+/// same filters, written by OpenVPN (`Engines::dns_confinement_for`).
+fn filter_plan(profile: &ConnectProfile, custom_mode: bool) -> FilterPlan {
+    if custom_mode {
+        return FilterPlan::default();
+    }
+    FilterPlan {
+        ipv6_block: ipv6_block::needed_for(profile),
+        dns_confinement: !matches!(profile, ConnectProfile::Openvpn(_)),
+    }
+}
+
+/// The most server addresses a connect will look for host routes to. An
+/// account holds a handful of credentials, each naming its server two or
+/// three ways; this is far above that, and far below anything that would
+/// make the purge cost noticeable.
+const MAX_KNOWN_NODES: usize = 256;
+
+/// Every adapter this service's engines bring up, by the name Windows
+/// shows. What "ours" means wherever a route or an adapter has to be told
+/// apart from the customer's -- the rival-VPN hint, the uplink, and the
+/// host routes taken over from OpenVPN.
+const OUR_ADAPTER_NAMES: [&str; 4] =
+    [xray::ADAPTER_NAME, wireguard::TUNNEL_NAME, openvpn::ADAPTER_NAME, ikev2::ENTRY_NAME];
+
+/// The interface indexes of [`OUR_ADAPTER_NAMES`] that exist right now.
+/// Empty when the adapters cannot be listed, which only ever makes the
+/// callers take fewer routes for the customer's.
+fn our_interfaces() -> Vec<u32> {
+    adapters::list()
+        .map(|all| all.into_iter().filter(|a| OUR_ADAPTER_NAMES.contains(&a.name.as_str())).map(|a| a.index).collect())
+        .unwrap_or_default()
+}
+
+/// How long the reset at connect goes on rescanning, and how often. The
+/// same shape as Custom mode's activation reset (`split_tunnel::session::
+/// convergence`), for the same reason: a connection in SYN_SENT at the
+/// first pass is closeable a few hundred milliseconds later.
+const RESET_RESCAN_FOR: std::time::Duration = std::time::Duration::from_secs(3);
+const RESET_RESCAN_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The local addresses a connection is inside one of our tunnels from:
+/// every IPv4 address on every adapter of ours, the session's own first.
+/// Every one, because a Wintun adapter can hold a stale APIPA address
+/// beside its real one and list it first -- and a connection from either
+/// is in the tunnel, not to be reset.
+fn tunnel_addresses_in(listed: &[adapters::Adapter], session_adapter: &str, ours: &[&str]) -> Vec<Ipv4Addr> {
+    let mut addresses: Vec<Ipv4Addr> = Vec::new();
+    let session_first = listed.iter().filter(|a| a.name == session_adapter);
+    let others = listed.iter().filter(|a| a.name != session_adapter && ours.contains(&a.name.as_str()));
+    for adapter in session_first.chain(others) {
+        for address in &adapter.ipv4_all {
+            if !addresses.contains(address) {
+                addresses.push(*address);
+            }
+        }
+    }
+    addresses
+}
+
+/// One reset pass, in confinement.log: what was closed, by owner and
+/// remote, and what refused to close.
+fn note_reset(log_dir: &Path, what: &str, outcome: &crate::split_tunnel::ResetOutcome) {
+    let mut line = format!("{what}: {} connection(s) closed", outcome.closed);
+    if !outcome.closed_rows.is_empty() {
+        line.push_str(&format!(" ({})", outcome.closed_rows.join(", ")));
+    }
+    if outcome.skipped_handshaking > 0 {
+        line.push_str(&format!("; {} mid-handshake, left for the rescans", outcome.skipped_handshaking));
+    }
+    for failure in &outcome.failures {
+        line.push_str(&format!("; {failure}"));
+    }
+    confinement::note(log_dir, &line);
+}
+
+/// The LAN as this machine's adapters are on it right now, for the IPv4
+/// confinement's LAN permit -- see `confinement::lan_prefixes` for what
+/// counts. Read at connect, and again on every status poll while a
+/// confinement is held (`Engines::follow_the_lan`). `None` when the
+/// adapters cannot be listed: a connect then plans no on-link prefix, which
+/// leaves the plan's link-local, multicast and broadcast permits and
+/// refuses the rest of the LAN -- the narrower failure -- and a poll changes
+/// nothing.
+///
+/// With it, the DHCP servers those same adapters lease from
+/// (`confinement::lan_dhcp_servers`), the one way DHCP leaves the LAN.
+fn machine_lan() -> Option<(Vec<confinement::Prefix>, Vec<Ipv4Addr>)> {
+    let all = adapters::list().ok()?;
+    let lan: Vec<confinement::LanAdapter> = all
+        .iter()
+        .map(|a| confinement::LanAdapter {
+            name: &a.name,
+            description: &a.description,
+            is_up: a.is_up,
+            ipv4: a.ipv4,
+            prefix_len: a.ipv4_prefix,
+            dhcp_server: a.dhcp_server,
+        })
+        .collect();
+    Some((confinement::lan_prefixes(&lan, &OUR_ADAPTER_NAMES), confinement::lan_dhcp_servers(&lan, &OUR_ADAPTER_NAMES)))
+}
+
+/// Windows' way out toward an address: the adapter and next hop, `None`
+/// when there is none at all, or an error when the adapters could not be
+/// listed. See `Engines::refuse_without_a_way_out`.
+type UplinkLookup = Arc<dyn Fn(Ipv4Addr) -> std::io::Result<Option<adapters::Uplink>> + Send + Sync>;
+
+/// What a connect that found no way out says -- the same words for every
+/// engine, which the app recognises as no network rather than a server
+/// that did not answer (connection-errors.ts, `noNetwork`).
+pub(crate) const NO_NETWORK: &str = "no network connection with a gateway was found";
+
+/// The address a connect's way out is asked about: the server's own when
+/// the profile names it by address, otherwise any public one -- the
+/// question is whether there is a way out at all, and nothing is sent.
+fn way_out_probe(profile: &ConnectProfile) -> Ipv4Addr {
+    let host = match profile {
+        ConnectProfile::Wireguard(p) => split_host_port(&p.endpoint).ok().map(|(host, _)| host),
+        ConnectProfile::Openvpn(p) => split_host_port(&p.endpoint).ok().map(|(host, _)| host),
+        ConnectProfile::XrayVlessReality(p) => Some(p.host.clone()),
+        ConnectProfile::XrayVlessTls(p) => Some(p.host.clone()),
+        ConnectProfile::XrayTrojan(p) => Some(p.host.clone()),
+        ConnectProfile::Shadowsocks(p) => Some(p.host.clone()),
+        ConnectProfile::Ikev2(p) => Some(p.server.clone()),
+    };
+    host.and_then(|host| host.parse().ok()).unwrap_or(Ipv4Addr::new(1, 1, 1, 1))
+}
+
+/// The physical adapter traffic to `toward` leaves by, and the next hop
+/// on it, for an engine that routes its own way around the tunnel.
+/// Windows' own answer when there is an address to ask about -- see
+/// `adapters::best_uplink_for` -- and the first adapter with a gateway
+/// when there is not.
+fn uplink_toward(toward: Option<Ipv4Addr>) -> Option<adapters::Uplink> {
+    match toward {
+        Some(dest) => adapters::best_uplink_for(dest, &OUR_ADAPTER_NAMES).ok().flatten(),
+        None => adapters::physical_uplink(&OUR_ADAPTER_NAMES)
+            .ok()
+            .flatten()
+            .and_then(|a| a.gateway.map(|gateway| adapters::Uplink { index: a.index, next_hop: gateway })),
+    }
 }
 
 /// The network adapter a given protocol's engine creates.
@@ -2670,7 +3864,7 @@ mod helper_tests {
             username: String::new(),
             password: String::new(),
         });
-        Session::new(Active::WireguardTunnel, &profile)
+        Session::new(Active::WireguardTunnel, &profile, confinement::Hold::with_closer(Arc::new(|_| 0)))
     }
 
     #[test]
@@ -3460,7 +4654,7 @@ mod helper_tests {
             crate::lifecycle::cancel::CancelToken::new(),
             crate::lifecycle::budget::CONNECT_BUDGET.limit,
         );
-        assert!(engines.connect_inner(&profile, &[], &limits).is_err(), "there is no wireguard.exe to connect with here");
+        assert!(engines.connect_inner(&profile, &[], &[], &limits).is_err(), "there is no wireguard.exe to connect with here");
         assert!(!engines.end_dead_session(g));
         assert!(engines.ledger().ended_without_successor().is_none(), "the connect left the old drop answering");
 
@@ -3484,5 +4678,1823 @@ mod helper_tests {
         let lines = crate::cleanup_log::noted_containing(LABEL);
         assert_eq!(lines.len(), 1, "{lines:#?}");
         assert!(lines[0].contains(&format!("{LABEL}, exit code 1, noticed by the engine watch; routes, filters")), "{}", lines[0]);
+    }
+
+    // ---- Which filters a session gets --------------------------------
+
+    fn wireguard_profile() -> ConnectProfile {
+        ConnectProfile::Wireguard(neoconnect_ipc::WireguardProfile {
+            private_key: String::new(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0, ::/0".into(),
+            server_public_key: String::new(),
+            endpoint: "203.0.113.1:51820".into(),
+        })
+    }
+
+    /// WireGuard's full tunnel refuses IPv6 on the PC, as every other
+    /// engine's does, with its DNS confined in the same set.
+    ///
+    /// Before: no block of ours, and wireguard.exe's AllowedIPs carried
+    /// IPv6 into a tunnel that has no IPv6 address at either end. A forced
+    /// IPv6 connect waited 6-8 s on the VM before failing, where the other
+    /// engines refuse it in milliseconds; wireguard.exe's own kill switch
+    /// permits its tunnel, so nothing refused it sooner. Custom mode stays
+    /// without any machine-wide filter, as for every engine.
+    #[test]
+    fn wireguard_full_tunnel_refuses_ipv6_on_the_pc() {
+        let full = filter_plan(&wireguard_profile(), false);
+        assert_eq!(full, FilterPlan { ipv6_block: true, dns_confinement: true });
+        assert_eq!(filter_plan(&wireguard_profile(), true), FilterPlan::default(), "Custom mode gets none");
+
+        // The rest, unchanged: OpenVPN brings block-outside-dns of its own.
+        assert_eq!(filter_plan(&test_profile(), false), FilterPlan { ipv6_block: true, dns_confinement: true });
+        let openvpn = ConnectProfile::Openvpn(neoconnect_ipc::OpenvpnProfile {
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            ca_cert_pem: String::new(),
+            endpoint: "203.0.113.1:1194".into(),
+            proto: "udp".into(),
+            tls_crypt_key: None,
+        });
+        assert_eq!(filter_plan(&openvpn, false), FilterPlan { ipv6_block: true, dns_confinement: false });
+    }
+
+    // ---- OpenVPN's host route to its server ---------------------------
+    //
+    // Measured on the VM: after Compatible sessions, a host route to each
+    // node stayed on the guest's Ethernet adapter, and the next Stealth
+    // connect's check against one of those nodes' mirrors went around the
+    // tunnel and moved the customer off a server that worked. openvpn.exe
+    // adds that route itself and is always ended by TerminateProcess, so
+    // it never takes it back; these pin the session taking it over. What
+    // they cannot pin is the real table, which is the VM's job.
+
+    /// A recording table with the customer's default route on the uplink.
+    fn uplink_table() -> (Arc<route_table::fake::FakeRoutes>, Ipv4Addr) {
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let default =
+            route_table::RouteRow { dest: Ipv4Addr::UNSPECIFIED, prefix: 0, if_index: 14, next_hop: gateway, metric: 25, netmgmt: true };
+        (route_table::fake::FakeRoutes::with(&[default]), gateway)
+    }
+
+    fn fresh_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("neoconnect-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The route openvpn.exe pushed while it connected belongs to the
+    /// session, and is owed in the ledger before anything can end it.
+    #[test]
+    fn openvpn_session_owns_the_host_route_it_pushed() {
+        let (table, gateway) = uplink_table();
+        let node = route_table::RouteRow::host(Ipv4Addr::new(203, 0, 113, 7), 14, gateway, 0);
+        let dir = fresh_dir("openvpn-owns");
+        let mut engines = Engines::new(dir.clone(), dir.clone());
+        engines.set_route_ops_for_test(table.clone());
+
+        let watch = openvpn::HostRouteWatch::begin(&*table, Some(adapters::Uplink { index: 14, next_hop: gateway }), Some(node.dest), None, Vec::new());
+        table.gain(node);
+        let routes = engines.openvpn_routes(watch.added(&*table));
+        assert_eq!(routes.foreign_rows(), vec![node], "the session does not own the route OpenVPN pushed");
+        assert_eq!(engines.owed_routes().read(), vec![node], "the route is not owed, so a killed service leaves it");
+
+        engines.begin_test_session_with_routes("OPENVPN", engine_stand_in(), routes);
+        let _ = engines.disconnect();
+        assert!(!table.table().contains(&node), "the disconnect left the host route behind");
+        assert!(engines.owed_routes().read().is_empty(), "a removed route is still owed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every way an OpenVPN session ends removes its host route, once:
+    /// a Disconnect, the hard stop, the engine dying on its own, and the
+    /// engine dying while the hard stop races it.
+    ///
+    /// Thirty-two at once on one table, per CLAUDE.md: the relay teardown
+    /// passed every single-instance run and failed under load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn every_openvpn_teardown_deletes_the_adopted_route() {
+        use crate::lifecycle::supervisor::Supervisor;
+        use route_table::fake::Op;
+        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+        const AT_ONCE: usize = 32;
+        let (table, gateway) = uplink_table();
+        let node = |i: usize| route_table::RouteRow::host(Ipv4Addr::new(203, 0, 113, i as u8 + 1), 14, gateway, 0);
+        let base = fresh_dir("openvpn-teardowns");
+
+        let mut racers = Vec::new();
+        for i in 0..AT_ONCE {
+            let dir = base.join(i.to_string());
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut engines = Engines::new(dir.clone(), dir.clone());
+            engines.set_route_ops_for_test(table.clone());
+            let watch = openvpn::HostRouteWatch::begin(&*table, Some(adapters::Uplink { index: 14, next_hop: gateway }), Some(node(i).dest), None, Vec::new());
+            table.gain(node(i));
+            let routes = engines.openvpn_routes(watch.added(&*table));
+            assert_eq!(routes.foreign_rows(), vec![node(i)], "racer {i}: the pushed route was not taken over");
+
+            let sup = Supervisor::spawn(engines, "test-openvpn-routes");
+            let teardown = sup.clone();
+            let pid = sup
+                .run(move |engines: &mut Engines, _| {
+                    engines.when_an_engine_ends(Arc::new(move |generation| {
+                        let _ = teardown.run_detached(move |engines: &mut Engines, _| {
+                            engines.end_dead_session(generation);
+                        });
+                    }));
+                    let child = engine_stand_in();
+                    let pid = child.id();
+                    engines.begin_test_session_with_routes("OPENVPN", child, routes);
+                    pid
+                })
+                .await
+                .unwrap();
+            racers.push((i, sup, pid, dir));
+        }
+
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let mut threads = Vec::new();
+        for (i, sup, pid, _) in &racers {
+            let (i, sup, pid, start) = (*i, sup.clone(), *pid, Arc::clone(&start));
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                let kill = || {
+                    // SAFETY: plain calls; the handle is closed below.
+                    unsafe {
+                        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                        if !h.is_null() {
+                            TerminateProcess(h, 1);
+                            windows_sys::Win32::Foundation::CloseHandle(h);
+                        }
+                    }
+                };
+                let hard_stop = || {
+                    let _ = sup.run_detached(|engines: &mut Engines, token| {
+                        adopt_token(token);
+                        let _ = crate::lifecycle::teardown::hard_stop(engines);
+                    });
+                };
+                match i % 4 {
+                    0 => {
+                        let _ = sup.run_detached(|engines: &mut Engines, _| {
+                            let _ = engines.disconnect();
+                        });
+                    }
+                    1 => hard_stop(),
+                    2 => kill(),
+                    // Both orders, so neither side always wins.
+                    _ if i % 8 == 3 => {
+                        kill();
+                        hard_stop();
+                    }
+                    _ => {
+                        hard_stop();
+                        kill();
+                    }
+                }
+            }));
+        }
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        for (i, sup, _, dir) in racers {
+            let mut settled = None;
+            for _ in 0..250 {
+                let empty = !sup.run(|engines: &mut Engines, _| engines.has_session()).await.unwrap();
+                if empty {
+                    // Long enough for a report still in flight to land and
+                    // be run, and so be counted if it did anything.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    settled = Some(sup.run(|engines: &mut Engines, _| engines.sessions_ended()).await.unwrap());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let ended = settled.unwrap_or_else(|| panic!("racer {i}: the session was never ended"));
+            assert_eq!(ended, 1, "racer {i}: the session was ended {ended} times");
+            let deletes = table.log().iter().filter(|op| **op == Op::Delete(node(i))).count();
+            assert_eq!(deletes, 1, "racer {i}: the host route was deleted {deletes} times");
+            assert!(!table.table().contains(&node(i)), "racer {i}: the host route was left behind");
+            assert!(route_table::OwedRoutes::in_dir(&dir).read().is_empty(), "racer {i}: the route is still owed");
+            // Drop the sink, which holds a handle to this supervisor, so
+            // its thread can end with the test.
+            let _ = sup.run(|engines: &mut Engines, _| engines.engine_gone = None).await;
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A host route to a known server that an earlier session left on the
+    /// uplink is gone before the next session is built, and struck off the
+    /// ledger if it was owed there. Names in the list are ignored, and a
+    /// host route to any other address is the customer's.
+    #[test]
+    fn a_connect_removes_host_routes_to_known_servers_an_earlier_session_left() {
+        let (table, gateway) = uplink_table();
+        let left = route_table::RouteRow::host(Ipv4Addr::new(203, 0, 113, 7), 14, gateway, 0);
+        let customers = route_table::RouteRow::host(Ipv4Addr::new(198, 51, 100, 9), 14, gateway, 0);
+        table.gain(left);
+        table.gain(customers);
+        let dir = fresh_dir("stale-purge");
+        let mut engines = Engines::new(dir.clone(), dir.clone());
+        engines.set_route_ops_for_test(table.clone());
+        engines.owed_routes().owe(left);
+
+        engines.purge_stale_node_routes(&["203.0.113.7".into(), "node.example.com".into(), "not an address".into()], &[]);
+
+        assert!(!table.table().contains(&left), "the leftover host route survived the connect");
+        assert!(table.table().contains(&customers), "a host route to an unknown address was taken");
+        assert!(engines.owed_routes().read().is_empty(), "a removed route is still owed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The DNS cache is flushed once Custom mode's redirect is carrying
+    /// lookups.
+    ///
+    /// The redirect starts seconds into a connect, after the relays and
+    /// the firewall allowance. Lookups before it went to a resolver over
+    /// the physical link -- 1.1.1.1 while each engine put Custom mode's rule
+    /// in inside its own connect, the network's own since it goes in after
+    /// the redirect -- and on a line that hijacks port 53 the block page's
+    /// answer was cached and served to selected applications after the
+    /// redirect had started. From the source, as `repair`'s survey order
+    /// is held: the order is the whole of the fix.
+    #[test]
+    fn the_dns_cache_is_flushed_once_the_redirect_is_carrying_lookups() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn start_split_tunnel(").unwrap();
+        let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+        let started = body.find("self.split_tunnel.start(").expect("the redirect is started here");
+        let flushed = body.find("dns::flush_cache();").expect("nothing flushes the cache once it has");
+        assert!(flushed > started, "the cache is flushed before the redirect carries anything");
+    }
+
+    /* Custom mode's DNS pin through a live session (`keep_dns_pin`).
+     *
+     * Before: once the rule was in it stayed in for the life of the
+     * session. A WireGuard handshake gone stale, an OpenVPN stuck
+     * restarting, interception switched off under the session -- every
+     * lookup on the PC still went to 1.1.1.1 and the redirect carried it
+     * into a tunnel that answered nothing, so the applications the customer
+     * kept out of the VPN stopped resolving names too. */
+
+    /// What the pin did to the machine, instead of doing it.
+    #[derive(Default)]
+    struct RecordingPin {
+        installed: std::sync::atomic::AtomicU32,
+        released: std::sync::atomic::AtomicU32,
+        restored: std::sync::atomic::AtomicU32,
+        /// What putting it in reports; `Forced` unless a test says.
+        install_fails: std::sync::atomic::AtomicBool,
+        /// What putting it back reports; `Forced` unless a test says.
+        restore_fails: std::sync::atomic::AtomicBool,
+    }
+
+    impl RecordingPin {
+        fn installed(&self) -> u32 {
+            self.installed.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn released(&self) -> u32 {
+            self.released.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn restored(&self) -> u32 {
+            self.restored.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl dns::PinOps for RecordingPin {
+        fn install(&self, resolver: &str) -> dns::TunnelDns {
+            assert_eq!(resolver, dns::CUSTOM_MODE_RESOLVER);
+            self.installed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.install_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                dns::TunnelDns::Unforced("the rule would not go in".into())
+            } else {
+                dns::TunnelDns::Forced
+            }
+        }
+        fn release(&self) {
+            self.released.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn restore(&self, resolver: &str) -> dns::TunnelDns {
+            assert_eq!(resolver, dns::CUSTOM_MODE_RESOLVER);
+            self.restored.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.restore_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                dns::TunnelDns::Unforced("the rule would not go back in".into())
+            } else {
+                dns::TunnelDns::Forced
+            }
+        }
+    }
+
+    /// An `Engines` in its own directory, as a Custom-mode session whose
+    /// rule went in would leave it: the pin recorded, no hold, so one
+    /// reading is a run.
+    fn custom_mode_engines(name: &str) -> (Engines, Arc<RecordingPin>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("neoconnect-pin-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut engines = Engines::new(dir.clone(), dir.clone());
+        let pin = Arc::new(RecordingPin::default());
+        engines.pin_ops = Arc::clone(&pin) as Arc<dyn dns::PinOps>;
+        engines.dns_pin = dns::PinWatch::with_hold(Duration::ZERO);
+        engines.custom_mode_for_test = Some(CustomModeView { intercepting: true, interception_stopped: false });
+        // A teardown of a session pinned this way holds port 53; recorded,
+        // not done to the machine running the tests (`hold_dns`).
+        engines.dns_hold_ops = Arc::new(RecordingHold::default());
+        (engines, pin, dir)
+    }
+
+    /// A session's rule went in, as `connect_inner` records it.
+    fn rule_went_in(engines: &mut Engines) {
+        engines.set_dns_state_for_test(dns::TunnelDns::Forced);
+    }
+
+    /* Custom mode's DNS hold (`hold_dns`).
+     *
+     * Before: a Custom-mode Xray connect gave the adapter 1.1.1.1 seconds
+     * before the redirect carried anything, and every teardown stopped the
+     * redirect before it took out the rule pinning every lookup to
+     * 1.1.1.1. In both gaps Windows' DNS client sent to 1.1.1.1:53 by the
+     * physical adapter: about six frames on a connect, up to twelve after
+     * every disconnect or crash (P3 run g2-01). */
+
+    /// What the hold did, instead of doing it.
+    #[derive(Default)]
+    struct RecordingHold {
+        held: std::sync::atomic::AtomicU32,
+        released: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    struct HeldGuard(Arc<std::sync::atomic::AtomicU32>);
+
+    impl Drop for HeldGuard {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl RecordingHold {
+        fn held(&self) -> u32 {
+            self.held.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn released(&self) -> u32 {
+            self.released.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl DnsHoldOps for RecordingHold {
+        fn hold(&self, _log_dir: &Path, _engine: Option<&Path>) -> Result<Box<dyn Send + Sync>, String> {
+            self.held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(HeldGuard(Arc::clone(&self.released))))
+        }
+    }
+
+    /// A Custom-mode session whose rule went in, its hold recorded.
+    fn custom_mode_session(name: &str) -> (Engines, Arc<RecordingHold>, u64, std::path::PathBuf) {
+        let (mut engines, _pin, dir) = custom_mode_engines(name);
+        let hold = Arc::new(RecordingHold::default());
+        engines.dns_hold_ops = Arc::clone(&hold) as Arc<dyn DnsHoldOps>;
+        let generation = engines.begin_test_session("XRAY_VLESS_REALITY", engine_stand_in());
+        rule_went_in(&mut engines);
+        engines.teardown_steps.clear();
+        (engines, hold, generation, dir)
+    }
+
+    /// Every way a Custom-mode session ends -- the Disconnect's hard stop,
+    /// the thorough pass, a dead engine's teardown -- holds port 53 from
+    /// before the engine and its redirect stop until the rule is out, and
+    /// lets go then: once each, and not a step later.
+    #[test]
+    fn a_custom_mode_teardown_holds_port_53_until_its_rule_is_out() {
+        let (mut engines, hold, _, dir) = custom_mode_session("hold-hard-stop");
+        let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+        assert_eq!((hold.held(), hold.released()), (1, 1), "hard stop");
+        in_order(&engines.teardown_steps, &["dns held", "engine stopped", "dns cleared", "dns hold released"]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (mut engines, hold, _, dir) = custom_mode_session("hold-disconnect");
+        engines.disconnect().expect("disconnect");
+        assert_eq!((hold.held(), hold.released()), (1, 1), "Disconnect");
+        in_order(&engines.teardown_steps, &["dns held", "engine stopped", "dns cleared", "dns hold released", "ipv6 released"]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (mut engines, hold, generation, dir) = custom_mode_session("hold-dead");
+        kill_engine_behind_its_back(&mut engines);
+        let scm = Arc::clone(&engines.wireguard_scm);
+        assert!(wait_for(Duration::from_secs(5), || {
+            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
+        }));
+        assert!(engines.end_dead_session(generation));
+        assert_eq!((hold.held(), hold.released()), (1, 1), "dead engine");
+        in_order(&engines.teardown_steps, &["dns held", "engine stopped", "dns cleared", "dns hold released"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing is held where nothing is pinned: a full tunnel, whose DNS
+    /// confinement covers it, and a Custom-mode session whose rule did not
+    /// go in or was given back -- its lookups already go where they went
+    /// before Connect.
+    #[test]
+    fn no_hold_without_custom_modes_rule() {
+        let (mut engines, hold, _, dir) = custom_mode_session("hold-none-unpinned");
+        engines.set_dns_state_for_test(dns::TunnelDns::NotRequested);
+        engines.disconnect().expect("disconnect");
+        assert_eq!(hold.held(), 0, "a rule that never went in");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (mut engines, hold, _, dir) = custom_mode_session("hold-none-full");
+        engines.custom_mode_for_test = Some(CustomModeView { intercepting: false, interception_stopped: false });
+        let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+        assert_eq!(hold.held(), 0, "a full tunnel");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The connect's half, held from the source: the hold goes in for
+    /// Custom mode only, before xray.exe makes its adapter, and is let go
+    /// of once the redirect carries and the rule is in -- before the cache
+    /// is flushed -- and, whatever became of the connect, when it returns.
+    #[test]
+    fn custom_modes_connect_holds_port_53_until_the_redirect_carries() {
+        fn body_of(signature: &str) -> &'static str {
+            let source: &'static str = include_str!("mod.rs");
+            let start = source.find(signature).unwrap_or_else(|| panic!("{signature} is gone"));
+            &source[start..start + source[start..].find("\n    }\n").unwrap()]
+        }
+        let connect = body_of("    fn connect_inner(");
+        let held = connect.find("self.hold_dns(\"hold DNS while Custom mode starts\");").expect("no hold on a Custom-mode connect");
+        let gated = connect[..held].rfind("if passive {").expect("the hold is not Custom mode's alone");
+        assert!(held - gated < 200, "the hold is not inside the Custom-mode branch");
+        let engine = connect.find("xray::connect_returning_exits(").expect("the engine is started");
+        assert!(held < engine, "held after xray.exe made its adapter");
+
+        let split = body_of("    fn start_split_tunnel(");
+        let pinned = split.find("self.pin_custom_mode_dns();").expect("the rule");
+        let released = split.find("self.release_dns_hold();").expect("never let go of once the redirect carries");
+        let flushed = split.find("dns::flush_cache();").expect("the flush");
+        assert!(pinned < released && released < flushed, "pin {pinned}, release {released}, flush {flushed}");
+
+        let outer = body_of("    pub fn connect(");
+        let inner = outer.find("self.connect_inner(").expect("connect_inner");
+        let after = outer.find("self.release_dns_hold();").expect("a connect that fails keeps its hold");
+        assert!(inner < after);
+    }
+
+    fn handshake(engines: &mut Engines, reading: wireguard::HandshakeHealth) {
+        engines.handshake_reading = Some((Instant::now(), reading));
+    }
+
+    #[test]
+    fn a_stale_wireguard_handshake_gives_the_pin_back_and_a_fresh_one_puts_it_back() {
+        let (mut engines, pin, dir) = custom_mode_engines("wireguard");
+        let mut service_process = engine_stand_in();
+        let pid = service_process.id();
+        engines.begin_test_wireguard_session(move || wireguard::ScmView::Running(Some(pid)));
+        rule_went_in(&mut engines);
+
+        handshake(&mut engines, wireguard::HandshakeHealth::Alive { age_secs: 20 });
+        engines.status();
+        assert_eq!(pin.released(), 0, "a tunnel that carries keeps its pin");
+
+        handshake(&mut engines, wireguard::HandshakeHealth::Stale { age_secs: 600 });
+        let (up, _, health) = engines.status();
+        assert!(up);
+        assert_eq!(health, TunnelHealth::Stale { age_secs: 600 }, "the status poll says what it said before");
+        assert_eq!(pin.released(), 1, "a stale handshake left every lookup on the PC in a dead tunnel");
+        engines.status();
+        assert_eq!(pin.released(), 1, "given back once");
+        assert!(!engines.tunnel_dns_unprotected(), "not the connect-time complaint, whose words say traffic flows");
+
+        handshake(&mut engines, wireguard::HandshakeHealth::Alive { age_secs: 3 });
+        engines.status();
+        assert_eq!(pin.restored(), 1, "the pin did not go back when the tunnel carried again");
+        assert!(!engines.dns_pin.released());
+        assert!(!engines.tunnel_dns_unprotected());
+
+        let _ = service_process.kill();
+        let _ = service_process.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tunnel that never handshook is measured too: the peer never answered.
+    #[test]
+    fn a_wireguard_tunnel_that_never_handshook_gives_the_pin_back() {
+        let (mut engines, pin, dir) = custom_mode_engines("wireguard-never");
+        let mut service_process = engine_stand_in();
+        let pid = service_process.id();
+        engines.begin_test_wireguard_session(move || wireguard::ScmView::Running(Some(pid)));
+        rule_went_in(&mut engines);
+
+        handshake(&mut engines, wireguard::HandshakeHealth::NeverHandshaked);
+        engines.status();
+        assert_eq!(pin.released(), 1);
+
+        let _ = service_process.kill();
+        let _ = service_process.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn openvpn_stuck_restarting_gives_the_pin_back_and_a_probe_that_carried_puts_it_back() {
+        let (mut engines, pin, dir) = custom_mode_engines("openvpn");
+        engines.begin_test_session("OPENVPN", engine_stand_in());
+        rule_went_in(&mut engines);
+
+        std::fs::write(dir.join("openvpn.log"), "Initialization Sequence Completed\n").unwrap();
+        engines.status();
+        assert_eq!(pin.released(), 0, "up, as far as OpenVPN says");
+
+        // A failed probe is not a measurement: nothing is given back on it.
+        std::fs::write(
+            dir.join("openvpn.log"),
+            "Initialization Sequence Completed\nSIGUSR1[soft,ping-restart] received, process restarting\n",
+        )
+        .unwrap();
+        engines.note_probe(&Err("the tunnel did not carry a test connection".into()));
+        assert_eq!(pin.released(), 0, "a failed probe gave the pin back");
+
+        engines.status();
+        assert_eq!(pin.released(), 1, "OpenVPN restarting left every lookup on the PC in a dead tunnel");
+
+        // OpenVPN's word that it is up again does not put it back...
+        std::fs::write(
+            dir.join("openvpn.log"),
+            "SIGUSR1[soft,ping-restart] received, process restarting\nInitialization Sequence Completed\n",
+        )
+        .unwrap();
+        engines.status();
+        assert_eq!(pin.restored(), 0);
+        // ...a reply through the tunnel does.
+        engines.note_probe(&Ok(()));
+        assert_eq!(pin.restored(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing measures an Xray or IKEv2 link while its adapter is up, so a
+    /// stall keeps the pin as it always has. Interception switched off is
+    /// another matter, on every engine: nothing carries the pinned lookups
+    /// any more, and the pin only sends them to 1.1.1.1 over the bare line.
+    #[test]
+    fn interception_switched_off_gives_the_pin_back_for_good_on_any_engine() {
+        let (mut engines, pin, dir) = custom_mode_engines("xray");
+        engines.begin_test_session("XRAY_VLESS_REALITY", engine_stand_in());
+        rule_went_in(&mut engines);
+
+        engines.status();
+        engines.note_probe(&Err("nothing came back".into()));
+        assert_eq!(pin.released(), 0, "an Xray stall has no measurement to give the pin back on");
+
+        engines.custom_mode_for_test = Some(CustomModeView { intercepting: true, interception_stopped: true });
+        engines.status();
+        assert_eq!(pin.released(), 1);
+        engines.note_probe(&Ok(()));
+        engines.status();
+        assert_eq!(pin.restored(), 0, "put back with nothing to carry the lookups");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only Custom mode's pin, and only one that went in.
+    #[test]
+    fn a_full_tunnel_or_a_rule_that_never_went_in_is_left_alone() {
+        for (intercepting, state) in [
+            (false, dns::TunnelDns::Forced),
+            (true, dns::TunnelDns::NotRequested),
+            (true, dns::TunnelDns::Unforced("refused".into())),
+        ] {
+            let (mut engines, pin, dir) = custom_mode_engines("left-alone");
+            let mut service_process = engine_stand_in();
+            let pid = service_process.id();
+            engines.begin_test_wireguard_session(move || wireguard::ScmView::Running(Some(pid)));
+            engines.custom_mode_for_test = Some(CustomModeView { intercepting, interception_stopped: false });
+            engines.set_dns_state_for_test(state.clone());
+
+            handshake(&mut engines, wireguard::HandshakeHealth::Stale { age_secs: 600 });
+            engines.status();
+            assert_eq!(pin.released(), 0, "{intercepting} {state:?}: given back");
+
+            let _ = service_process.kill();
+            let _ = service_process.wait();
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Putting it back can fail as installing it can at connect, and is
+    /// reported the same way: the tunnel carries, its lookups are not
+    /// pinned to it.
+    #[test]
+    fn a_pin_that_will_not_go_back_is_reported_as_unpinned_dns() {
+        let (mut engines, pin, dir) = custom_mode_engines("restore-fails");
+        let mut service_process = engine_stand_in();
+        let pid = service_process.id();
+        engines.begin_test_wireguard_session(move || wireguard::ScmView::Running(Some(pid)));
+        rule_went_in(&mut engines);
+        pin.restore_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        handshake(&mut engines, wireguard::HandshakeHealth::Stale { age_secs: 600 });
+        engines.status();
+        handshake(&mut engines, wireguard::HandshakeHealth::Alive { age_secs: 3 });
+        engines.status();
+        assert_eq!(pin.restored(), 1);
+        assert!(engines.tunnel_dns_unprotected(), "a pin that is out was not reported");
+        engines.status();
+        assert_eq!(pin.restored(), 1, "tried again on every poll");
+
+        let _ = service_process.kill();
+        let _ = service_process.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* Custom mode's DNS pin, put in only once the redirect carries lookups.
+     *
+     * Before: each engine put the rule in inside its own connect, seconds
+     * before the redirect started. In between, every lookup on the PC was
+     * pinned to 1.1.1.1 with nothing to carry it into the tunnel, and left by
+     * the physical adapter in clear text: seen at the NIC on the VM during a
+     * WireGuard Custom-mode connect (p1-22, from 2.8 s before the connect
+     * returned) and an Xray one (p1-24). */
+
+    /// The order, from the source, as the flush's is held above: the
+    /// redirect, then the rule, then the flush that drops whatever the
+    /// network's resolver answered before it.
+    #[test]
+    fn custom_modes_rule_goes_in_once_the_redirect_has_started() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn start_split_tunnel(").unwrap();
+        let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+        let started = body.find("self.split_tunnel.start(").expect("the redirect is started here");
+        let pinned = body.find("self.pin_custom_mode_dns();").expect("Custom mode's rule never goes in");
+        let flushed = body.find("dns::flush_cache();").expect("nothing flushes the cache");
+        assert!(started < pinned, "the rule goes in before the redirect can carry the lookups");
+        assert!(pinned < flushed, "the cache is flushed before the rule is in");
+    }
+
+    /// And it comes out before the redirect is stopped to be started again
+    /// in place -- Custom mode's list read the other way round while
+    /// connected -- for the same reason: while the redirect is down, nothing
+    /// carries the pinned lookups. `start_split_tunnel` puts it back.
+    #[test]
+    fn custom_modes_rule_comes_out_while_its_redirect_restarts() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    pub fn set_split_tunnel(").unwrap();
+        let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+        let branch = body
+            .find("if was_intercepting != now_intercepting || was_mode != now_mode {")
+            .expect("the in-place restart");
+        let restart = &body[branch..];
+        let unpinned = restart.find("self.unpin_custom_mode_dns();").expect("the rule stays in through the restart");
+        let stopped = restart.find("self.split_tunnel.stop();").expect("the redirect is stopped");
+        let started = restart.find("self.start_split_tunnel(").expect("and started again");
+        assert!(unpinned < stopped && stopped < started);
+    }
+
+    #[test]
+    fn custom_modes_rule_goes_in_for_the_session_and_a_failure_is_reported() {
+        let (mut engines, pin, dir) = custom_mode_engines("install");
+        engines.pin_custom_mode_dns();
+        assert_eq!(pin.installed(), 1, "Custom mode's rule never went in");
+        assert_eq!(engines.dns_state, dns::TunnelDns::Forced);
+        assert!(!engines.tunnel_dns_unprotected());
+
+        pin.install_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        engines.pin_custom_mode_dns();
+        assert!(engines.tunnel_dns_unprotected(), "a rule that would not go in was not reported");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Not a full tunnel's: its rule, where it has one, is its engine's.
+    #[test]
+    fn a_full_tunnel_gets_no_custom_mode_rule() {
+        let (mut engines, pin, dir) = custom_mode_engines("full");
+        engines.custom_mode_for_test = Some(CustomModeView { intercepting: false, interception_stopped: false });
+        engines.set_dns_state_for_test(dns::TunnelDns::Forced);
+        engines.pin_custom_mode_dns();
+        engines.unpin_custom_mode_dns();
+        assert_eq!(pin.installed(), 0);
+        assert_eq!(pin.released(), 0, "a full tunnel's rule was taken out");
+        assert_eq!(engines.dns_state, dns::TunnelDns::Forced);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each session's own, thirty-two at once: put in, given back by the
+    /// watch while OpenVPN restarts, taken out for a redirect restart --
+    /// which does not take out a rule the watch already gave back -- and put
+    /// in again, fresh, with nothing of the watch's state carried over.
+    #[test]
+    fn custom_modes_rule_belongs_to_its_session_thirty_two_at_once() {
+        let handles: Vec<_> = (0..32)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let (mut engines, pin, dir) = custom_mode_engines(&format!("own-{i}"));
+                    let generation = engines.begin_test_session("OPENVPN", engine_stand_in());
+                    engines.pin_custom_mode_dns();
+                    assert_eq!(pin.installed(), 1, "{i}: never went in");
+                    assert_eq!(engines.dns_state, dns::TunnelDns::Forced, "{i}");
+
+                    std::fs::write(dir.join("openvpn.log"), "SIGUSR1[soft,ping-restart] received, process restarting\n")
+                        .unwrap();
+                    engines.status();
+                    assert_eq!(pin.released(), 1, "{i}: the watch did not give it back");
+
+                    engines.unpin_custom_mode_dns();
+                    assert_eq!(pin.released(), 1, "{i}: taken out twice");
+                    assert_eq!(engines.dns_state, dns::TunnelDns::NotRequested, "{i}");
+                    assert!(!engines.dns_pin.released(), "{i}: the watch's state outlived the restart");
+
+                    engines.pin_custom_mode_dns();
+                    assert_eq!(pin.installed(), 2, "{i}: not put back after the restart");
+                    engines.unpin_custom_mode_dns();
+                    assert_eq!(pin.released(), 2, "{i}: a rule that was in stayed in through the restart");
+
+                    kill_engine_behind_its_back(&mut engines);
+                    let scm = Arc::clone(&engines.wireguard_scm);
+                    assert!(wait_for(Duration::from_secs(5), || {
+                        matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
+                    }));
+                    assert!(engines.end_dead_session(generation), "{i}: the dead session was not ended");
+                    let _ = std::fs::remove_dir_all(&dir);
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a session's rule was not its own");
+        }
+    }
+
+    /// The four engines pin Custom mode to the same resolver, which is the
+    /// one it is put back to.
+    #[test]
+    fn the_pin_goes_back_to_the_resolver_every_engine_pins() {
+        assert_eq!(xray::TUN_DNS, dns::CUSTOM_MODE_RESOLVER);
+        assert_eq!(ikev2::IKEV2_DNS, dns::CUSTOM_MODE_RESOLVER);
+        assert_eq!(dns::custom_mode_rule(true), Some(dns::CUSTOM_MODE_RESOLVER));
+    }
+
+    /// A pin given back goes with its session, by whichever teardown ends
+    /// it: nothing of it is put back in the next one, and the next one's is
+    /// its own. Thirty-two at once, each on its own `Engines`, because the
+    /// state that decides this must belong to the session and not to the
+    /// process -- `dns::tunnel_dns` is a process-wide static, and two tests
+    /// that shared one were how a per-session field came to exist.
+    #[test]
+    fn a_pin_given_back_ends_with_its_session_thirty_two_at_once() {
+        let handles: Vec<_> = (0..32)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let (mut engines, pin, dir) = custom_mode_engines(&format!("teardown-{i}"));
+                    let generation = engines.begin_test_session("OPENVPN", engine_stand_in());
+                    rule_went_in(&mut engines);
+                    std::fs::write(dir.join("openvpn.log"), "SIGUSR1[soft,ping-restart] received, process restarting\n")
+                        .unwrap();
+                    engines.status();
+                    assert_eq!(pin.released(), 1, "{i}: not given back");
+
+                    // The engine dies; the watch ends the session.
+                    kill_engine_behind_its_back(&mut engines);
+                    let scm = Arc::clone(&engines.wireguard_scm);
+                    assert!(wait_for(Duration::from_secs(5), || {
+                        matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
+                    }));
+                    assert!(engines.end_dead_session(generation), "{i}: the dead session was not ended");
+                    assert!(!engines.dns_pin.released(), "{i}: the given-back pin outlived its session");
+                    assert_eq!(engines.dns_state, dns::TunnelDns::NotRequested);
+
+                    // The next session: up, carrying, and nothing of the old
+                    // one's is put back.
+                    engines.begin_test_session("OPENVPN", engine_stand_in());
+                    rule_went_in(&mut engines);
+                    std::fs::write(dir.join("openvpn.log"), "Initialization Sequence Completed\n").unwrap();
+                    engines.status();
+                    engines.note_probe(&Ok(()));
+                    assert_eq!(pin.restored(), 0, "{i}: the old session's pin was put back");
+                    assert_eq!(pin.released(), 1, "{i}: another session's evidence reached this one");
+                    let _ = std::fs::remove_dir_all(&dir);
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a session's pin outlived it");
+        }
+    }
+
+    // ---- The IPv4 confinement's lifetime (K1, K2) ----------------------
+    //
+    // A confinement is a block of everything IPv4 outside the tunnel. Held
+    // a moment too long it is a machine with no internet: through DNS and
+    // phonebook tidying it blacks out every Disconnect and every rung of
+    // the ladder (K1); held by a busy owning thread after the engine died
+    // it strands the customer behind a tunnel that is gone (K2). These pin
+    // when it is let go of, with a recording closer in place of WFP.
+
+    /// The machine's confinement, standing in: LUIDs that change on every
+    /// read, installs that are recorded, closes that are counted.
+    struct FakeConfinement {
+        luid_reads: std::sync::Mutex<u64>,
+        installs: std::sync::Mutex<Vec<confinement::Plan>>,
+        next: std::sync::atomic::AtomicIsize,
+        closed: Arc<std::sync::Mutex<Vec<isize>>>,
+        /// Every install refused, as WFP would refuse a filter.
+        refuse: std::sync::atomic::AtomicBool,
+        /// How many installs were refused.
+        refused: std::sync::atomic::AtomicUsize,
+        /// The rules of every reset pass asked for.
+        resets: std::sync::Mutex<Vec<crate::split_tunnel::OutsideTunnel>>,
+        /// What every witness handed out says: WFP's record of a refusal,
+        /// as the test sets it.
+        wfp_says: Arc<std::sync::Mutex<Option<String>>>,
+        /// The tunnel adapter, as the test says it is: gone when set.
+        tunnel_gone: std::sync::atomic::AtomicBool,
+        /// The LAN and DHCP servers the machine's adapters are on, as the
+        /// test says: none until it sets some, the plan `confine_for_test`
+        /// installs; `None` for adapters that could not be listed.
+        lan: std::sync::Mutex<Option<(Vec<confinement::Prefix>, Vec<Ipv4Addr>)>>,
+    }
+
+    impl FakeConfinement {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                luid_reads: std::sync::Mutex::new(0),
+                installs: std::sync::Mutex::new(Vec::new()),
+                next: std::sync::atomic::AtomicIsize::new(1000),
+                closed: Arc::default(),
+                refuse: std::sync::atomic::AtomicBool::new(false),
+                refused: std::sync::atomic::AtomicUsize::new(0),
+                resets: std::sync::Mutex::new(Vec::new()),
+                wfp_says: Arc::default(),
+                tunnel_gone: std::sync::atomic::AtomicBool::new(false),
+                lan: std::sync::Mutex::new(Some((Vec::new(), Vec::new()))),
+            })
+        }
+        fn closed(&self) -> Vec<isize> {
+            self.closed.lock().unwrap().clone()
+        }
+        fn luids_installed(&self) -> Vec<u64> {
+            self.installs.lock().unwrap().iter().map(|p| p.tunnel_luid).collect()
+        }
+    }
+
+    impl confinement::ConfinementOps for FakeConfinement {
+        fn luid(&self, _adapter: &str) -> Result<u64, String> {
+            let mut reads = self.luid_reads.lock().unwrap();
+            *reads += 1;
+            Ok(*reads * 100)
+        }
+        fn tunnel_present(&self, _adapter: &str) -> Option<bool> {
+            Some(!self.tunnel_gone.load(std::sync::atomic::Ordering::SeqCst))
+        }
+        fn install(&self, plan: &confinement::Plan) -> Result<confinement::Installed, String> {
+            if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                self.refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err("could not add the filter (0x80320009)".into());
+            }
+            self.installs.lock().unwrap().push(plan.clone());
+            let engine = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(confinement::Installed { engine, filters: confinement::specs(plan).len(), blocks: vec![1, 2, 3, 4], since: 0 })
+        }
+        fn witness(&self, _plan: &confinement::Plan, _installed: &confinement::Installed) -> confinement::Witness {
+            let says = Arc::clone(&self.wfp_says);
+            Box::new(move || says.lock().unwrap().clone())
+        }
+        fn reset(&self, rules: &crate::split_tunnel::OutsideTunnel) -> crate::split_tunnel::ResetOutcome {
+            self.resets.lock().unwrap().push(rules.clone());
+            crate::split_tunnel::ResetOutcome::default()
+        }
+        fn lan(&self) -> Option<(Vec<confinement::Prefix>, Vec<Ipv4Addr>)> {
+            self.lan.lock().unwrap().clone()
+        }
+        fn hold(&self) -> Arc<confinement::Hold> {
+            let closed = Arc::clone(&self.closed);
+            confinement::Hold::with_closer(Arc::new(move |engine| {
+                closed.lock().unwrap().push(engine);
+                0
+            }))
+        }
+    }
+
+    /// Engines over a fake confinement, with an Xray session begun and
+    /// confined.
+    fn confined_session() -> (Engines, Arc<FakeConfinement>, u64) {
+        let fake = FakeConfinement::new();
+        let mut engines = engines_for_test();
+        engines.set_confinement_ops_for_test(fake.clone());
+        let generation = engines.begin_test_session("XRAY_VLESS_REALITY", engine_stand_in());
+        assert!(engines.confine_for_test(), "the fake confinement was not held");
+        engines.teardown_steps.clear();
+        (engines, fake, generation)
+    }
+
+    /// The steps, in the order given, each present and each after the one
+    /// before it.
+    fn in_order(steps: &[&'static str], wanted: &[&str]) {
+        let at = |step: &str| {
+            steps.iter().position(|s| *s == step).unwrap_or_else(|| panic!("{step} never happened: {steps:?}"))
+        };
+        for pair in wanted.windows(2) {
+            assert!(at(pair[0]) < at(pair[1]), "{} after {}: {steps:?}", pair[0], pair[1]);
+        }
+    }
+
+    /// Disconnect, a dead engine's teardown and the hard stop each let go
+    /// of the confinement straight after the engine stops -- before DNS,
+    /// and before the IPv6 block, which goes last on purpose.
+    #[test]
+    fn confinement_released_right_after_engine_stop_before_dns_and_phonebook() {
+        // A Disconnect (and a connect clearing the decks): the thorough
+        // pass.
+        let (mut engines, fake, _) = confined_session();
+        engines.disconnect().expect("disconnect");
+        assert_eq!(fake.closed(), vec![1000], "Disconnect: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "dns cleared", "ipv6 released"]);
+
+        // An engine that died, torn down by phase one.
+        let (mut engines, fake, generation) = confined_session();
+        kill_engine_behind_its_back(&mut engines);
+        let scm = Arc::clone(&engines.wireguard_scm);
+        assert!(wait_for(Duration::from_secs(5), || {
+            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
+        }));
+        assert!(engines.end_dead_session(generation));
+        assert_eq!(fake.closed(), vec![1000], "dead session: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "ipv6 released", "dns cleared"]);
+
+        // The hard stop, phase one of a Disconnect.
+        let (mut engines, fake, _) = confined_session();
+        let report = crate::lifecycle::teardown::hard_stop(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "hard stop: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "ipv6 released", "dns cleared"]);
+        assert!(report.steps.iter().any(|s| s.name == "release the IPv4 confinement" && s.failed.is_none()));
+    }
+
+    /// Not a step later than it must, either. Once the engine is killed the
+    /// confinement protects nothing -- the session is ending -- and held
+    /// through the route.exe deletes and the reap it only takes the
+    /// machine's internet away for as long as they take: routes going one
+    /// at a time send traffic to the physical adapter, where it is
+    /// refused. So every teardown lets go the moment its engine is gone,
+    /// before the routes: the hard stop; the thorough pass -- a
+    /// Disconnect, a replacing connect, a Custom-mode rebuild, Repair, the
+    /// idle watchdog, service stop -- whose routes used to come out before
+    /// its kill, with the confinement held through them; and a dead
+    /// engine's teardown, its engine being stopped already.
+    #[test]
+    fn confinement_released_the_moment_the_engine_is_killed_before_routes_and_reap() {
+        let (mut engines, fake, _) = confined_session();
+        let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "hard stop: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "routes removed"]);
+
+        let (mut engines, fake, _) = confined_session();
+        engines.disconnect().expect("disconnect");
+        assert_eq!(fake.closed(), vec![1000], "Disconnect: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "routes removed", "engine reaped"]);
+
+        let (mut engines, fake, generation) = confined_session();
+        kill_engine_behind_its_back(&mut engines);
+        let scm = Arc::clone(&engines.wireguard_scm);
+        assert!(wait_for(Duration::from_secs(5), || {
+            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
+        }));
+        assert!(engines.end_dead_session(generation));
+        assert_eq!(fake.closed(), vec![1000], "dead session: closed exactly once");
+        in_order(&engines.teardown_steps, &["engine stopped", "confinement released", "routes removed"]);
+    }
+
+    /// The tunnel's adapter gone while its engine still runs -- Wintun's
+    /// adapter removed under a live xray.exe -- takes its routes with it,
+    /// so everything falls to the physical adapter, where the confinement
+    /// refuses it: the whole machine offline, held by a filter whose
+    /// tunnel permit names an interface that no longer exists, until the
+    /// app's failover got round to it. The status poll that finds the
+    /// adapter gone lets go of the confinement for good and says why; the
+    /// tunnel's own fate is the app's egress check's to judge. An adapter
+    /// list that cannot be read says nothing.
+    #[test]
+    fn a_tunnel_adapter_gone_under_a_live_engine_lets_go_of_the_confinement() {
+        let (mut engines, fake, _) = confined_session();
+        assert!(engines.status().0);
+        assert_eq!(engines.ipv4_confined(), Some(true), "the adapter is there: nothing changes");
+        fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = engines.status();
+        assert_eq!(engines.ipv4_confined(), Some(false), "held over a tunnel adapter that is gone");
+        assert_eq!(fake.closed(), vec![1000]);
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("adapter")), "{:?}", engines.confinement_problem());
+        fake.tunnel_gone.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = engines.status();
+        assert_eq!(fake.closed(), vec![1000], "closed once");
+        end_test_session(&mut engines);
+    }
+
+    /// Decision (a) on a network that changes under a connected session: the
+    /// status poll reads the LAN again, and a changed one goes into the plan
+    /// -- installed before the old one is closed, so the session is never
+    /// unconfined for it -- with the LUID, engine and servers as they were.
+    /// The same LAN read again, or in another order, installs nothing; an
+    /// adapter list that cannot be read changes nothing; a session no longer
+    /// confined is not confined again by it; and the one put in is the one
+    /// the session's end closes.
+    #[test]
+    fn a_network_that_changes_under_a_confined_session_is_followed() {
+        let (mut engines, fake, _) = confined_session();
+        let installs = || fake.installs.lock().unwrap().clone();
+        assert!(engines.status().0);
+        assert_eq!(installs().len(), 1, "the LAN the plan has: nothing to put in");
+
+        let cafe = confinement::Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24);
+        let cafe_dhcp = Ipv4Addr::new(10, 20, 30, 1);
+        *fake.lan.lock().unwrap() = Some((vec![cafe], vec![cafe_dhcp]));
+        assert!(engines.status().0);
+        let now = installs();
+        assert_eq!(now.len(), 2, "the new network's LAN was not put in");
+        let (first, next) = (&now[0], &now[1]);
+        assert_eq!(next.lan, confinement::Lan::Allowed(vec![cafe]));
+        assert_eq!(next.dhcp_servers, vec![cafe_dhcp]);
+        assert_eq!((next.tunnel_luid, &next.transport), (first.tunnel_luid, &first.transport), "only the LAN changes");
+        assert_eq!(fake.closed(), vec![1000], "the old one closed once the new one was in");
+        assert_eq!(engines.ipv4_confined(), Some(true));
+        assert_eq!(engines.active.peek().and_then(|s| s.confinement_plan.clone()).map(|p| p.lan), Some(confinement::Lan::Allowed(vec![cafe])));
+
+        let _ = engines.status();
+        assert_eq!(installs().len(), 2, "the same LAN put in again");
+        *fake.lan.lock().unwrap() = Some((vec![cafe], vec![cafe_dhcp, cafe_dhcp]));
+        let _ = engines.status();
+        assert_eq!(installs().len(), 2, "the same LAN, read with a server listed twice, put in again");
+        *fake.lan.lock().unwrap() = None;
+        let _ = engines.status();
+        assert_eq!(installs().len(), 2, "adapters that could not be listed changed the plan");
+        end_test_session(&mut engines);
+        assert_eq!(fake.closed(), vec![1000, 1001], "the one put in closed with the session");
+
+        // A session no longer confined is not confined again by it.
+        let (mut engines, fake, _) = confined_session();
+        engines.active.peek().unwrap().confinement.release(confinement::Release::PlanError("refused".into()));
+        *fake.lan.lock().unwrap() = Some((vec![cafe], vec![cafe_dhcp]));
+        let _ = engines.status();
+        assert_eq!(fake.installs.lock().unwrap().len(), 1, "a session let go of was confined again by a network change");
+        assert_eq!(engines.ipv4_confined(), Some(false));
+        end_test_session(&mut engines);
+
+        // An install that fails keeps the old plan in place.
+        let (mut engines, fake, _) = confined_session();
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        *fake.lan.lock().unwrap() = Some((vec![cafe], vec![cafe_dhcp]));
+        let _ = engines.status();
+        assert_eq!(engines.ipv4_confined(), Some(true), "a failed install let go of the plan that was in");
+        assert!(fake.closed().is_empty());
+        end_test_session(&mut engines);
+    }
+
+    /// A LAN whose plan WFP refuses is tried again only after
+    /// `LAN_RETRY_AFTER`, not on every 1 s status poll: each try opened a
+    /// WFP session, added and aborted the filters and wrote a line to
+    /// confinement.log, for the rest of the session. Another LAN is tried
+    /// at once.
+    #[test]
+    fn a_lan_that_will_not_go_in_is_not_tried_on_every_poll() {
+        let (mut engines, fake, _) = confined_session();
+        let refused = || fake.refused.load(std::sync::atomic::Ordering::SeqCst);
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let cafe = confinement::Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24);
+        *fake.lan.lock().unwrap() = Some((vec![cafe], vec![Ipv4Addr::new(10, 20, 30, 1)]));
+        for _ in 0..5 {
+            let _ = engines.status();
+        }
+        assert_eq!(refused(), 1, "the same refused LAN was tried on every poll");
+        let home = confinement::Prefix::new(Ipv4Addr::new(192, 168, 7, 0), 24);
+        *fake.lan.lock().unwrap() = Some((vec![home], vec![Ipv4Addr::new(192, 168, 7, 1)]));
+        let _ = engines.status();
+        let _ = engines.status();
+        assert_eq!(refused(), 2, "another network was not tried at once, or was tried twice");
+        // Once the wait is over, the same one is tried again -- and put in.
+        fake.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some((_, at)) = engines.active.peek_mut().and_then(|s| s.lan_refused.as_mut()) {
+            *at = at.checked_sub(LAN_RETRY_AFTER).expect("an instant a minute back");
+        }
+        let _ = engines.status();
+        assert_eq!(fake.installs.lock().unwrap().len(), 2, "the LAN was not tried again after the wait");
+        assert_eq!(engines.ipv4_confined(), Some(true));
+        end_test_session(&mut engines);
+    }
+
+    /// Xray's full tunnel gets its IPv6 block and DNS confinement before
+    /// its adapter is given DNS and before its routes, not after the
+    /// connect: in between, `set dnsservers static 1.1.1.1` and the NRPT
+    /// rule pinned every lookup to 1.1.1.1 with no route into the tunnel,
+    /// and they left by the physical adapter (G8). Kept by the session --
+    /// not installed twice -- and released with the engine if the routes
+    /// fail. Read from the source: nothing here can start xray.exe.
+    #[test]
+    fn xrays_dns_block_goes_in_before_its_adapter_is_given_dns() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn connect_inner(").expect("connect_inner");
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
+        let arm = &body[body.find("ConnectProfile::XrayVlessReality(_)").expect("the Xray arm")..];
+        let early = arm.find("let early_filters = if passive { None } else { self.early_filters_for(profile) };").expect("the early filters");
+        let routes = arm.find("xray::install_routes(").expect("the routes, and the adapter's DNS with them");
+        let spawned = arm.find("xray::connect_returning_exits(").expect("the engine");
+        assert!(spawned < early && early < routes, "engine {spawned}, filters {early}, routes {routes}");
+        // A rung whose routes failed lets go of them with its engine,
+        // before the reap -- not up to REAP_BUDGET later, with port 53 and
+        // IPv6 refused machine-wide for a rung already given up (K1).
+        let failed = &arm[arm.find("Err(e) => {").expect("the routes failing")..];
+        let failed = &failed[..failed.find("return Err(e);").unwrap()];
+        let killed = failed.find("let _ = child.kill();").expect("the kill");
+        let dropped = failed.find("drop(early_filters);").expect("the filters let go of");
+        let reaped = failed.find("reap(&mut child);").expect("the reap");
+        assert!(killed < dropped && dropped < reaped, "kill {killed}, filters {dropped}, reap {reaped}");
+        assert!(arm.contains("session.filters = filters;"), "the session keeps them");
+        let block = &source[source.find("    fn block_ipv6_if_needed(").expect("block_ipv6_if_needed")..];
+        let block = &block[..block.find("\n    }\n").unwrap()];
+        let kept = block.find("s.filters.ipv6.is_some()").expect("filters already in are kept");
+        assert!(kept < block.find("self.filters_for(profile)").unwrap());
+    }
+
+    /// The early filters go in only with the DNS confinement they should
+    /// carry. On a fresh install Xray installs Wintun on first use and its
+    /// adapter was measured appearing 8.5 s in, past `dns_confinement_for`'s
+    /// 5 s: the IPv6 block went in alone, `block_ipv6_if_needed` kept it,
+    /// and DNS was never confined for that session. Now that case is left
+    /// to `block_ipv6_if_needed` after the routes, when the adapter is
+    /// there, as before the early install existed.
+    #[test]
+    fn early_filters_wait_for_the_dns_confinement_they_should_carry() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn early_filters_for(").expect("early_filters_for");
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("-> Option<SessionFilters>"), "it can decline");
+        let dns = body.find("self.dns_confinement_for(profile)?").expect("no confinement yet: declined");
+        let installs = body.find("self.install_filters(").expect("installed with it");
+        assert!(dns < installs);
+        // And the later install is the same one.
+        let later = &source[source.find("    fn filters_for(").expect("filters_for")..];
+        assert!(later[..later.find("\n    }\n").unwrap()].contains("self.install_filters("));
+    }
+
+    /// Every session's hold is noted in the ledger as it begins, so a
+    /// status answered while the owning thread is busy reads the same
+    /// confinement the session has (`pipe::fallback_state`) -- and nothing
+    /// once the session has ended.
+    #[test]
+    fn the_ledger_reads_the_live_sessions_hold() {
+        let (mut engines, _fake, _) = confined_session();
+        assert_eq!(engines.ledger().confinement(), (Some(true), None));
+        engines.active.peek().unwrap().confinement.release(confinement::Release::PlanError("refused".into()));
+        assert_eq!(engines.ledger().confinement(), (Some(false), Some("refused".to_string())));
+        engines.disconnect().expect("disconnect");
+        assert_eq!(engines.ledger().confinement(), (None, None));
+    }
+
+    /// Custom mode switched on with nothing chosen is a full tunnel --
+    /// there is nothing to intercept -- and on Xray or OpenVPN a confined
+    /// one. Flipping the list between "only these" and "all except these"
+    /// then changes nothing about that tunnel: still nothing to intercept.
+    /// It used to restart the redirect in place on it, and
+    /// `start_split_tunnel` let go of the confinement it found there --
+    /// silently in a release build, a panic in a debug one -- and nothing
+    /// ever put it back: one toggle in the settings, and the rest of the
+    /// session ran unconfined.
+    #[test]
+    fn flipping_an_empty_custom_list_leaves_a_confined_full_tunnel_alone() {
+        use neoconnect_ipc::{SplitTunnelConfig, SplitTunnelMode};
+        let config = |mode| SplitTunnelConfig {
+            enabled: true,
+            mode,
+            apps: Vec::new(),
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
+        };
+        for (from, to) in [
+            (SplitTunnelMode::OnlySelected, SplitTunnelMode::AllExcept),
+            (SplitTunnelMode::AllExcept, SplitTunnelMode::OnlySelected),
+        ] {
+            let (mut engines, fake, _) = confined_session();
+            engines.split_tunnel.set_selection(config(from));
+            assert!(!engines.split_tunnel.wants_interception(), "an empty list intercepts nothing");
+            let switched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engines.set_split_tunnel(config(to))));
+            assert!(matches!(switched, Ok(Ok(()))), "{from:?} -> {to:?}: {switched:?}");
+            assert!(fake.closed().is_empty(), "{from:?} -> {to:?}: the confinement was let go of");
+            assert_eq!(engines.ipv4_confined(), Some(true), "{from:?} -> {to:?}");
+            assert!(!engines.split_tunnel_running(), "{from:?} -> {to:?}: a redirect was started on a full tunnel");
+            end_test_session(&mut engines);
+        }
+    }
+
+    /// IKEv2's Disconnect hangs up with one API call and then removes the
+    /// phonebook entry, which can take seconds of PowerShell. The
+    /// confinement goes between the two. Read from the source: nothing
+    /// here can dial RAS. (IKEv2 is not confined while `IKEV2_CONFINED` is
+    /// off; this holds the order for when it is.)
+    #[test]
+    fn ikev2_lets_go_of_the_confinement_between_hanging_up_and_the_phonebook() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    pub fn disconnect(&mut self) -> Result<(), String> {").expect("disconnect");
+        let body = &source[start..];
+        let arm = &body[body.find("Some(Active::Ikev2(live)) => {").expect("the IKEv2 arm")..];
+        let hang_up = arm.find("live.hang_up()").expect("hang up");
+        let release = arm.find("self.let_go_of_confinement()").expect("the confinement let go of in the IKEv2 arm");
+        let phonebook = arm.find("ikev2::remove_entry()").expect("phonebook");
+        assert!(hang_up < release && release < phonebook);
+    }
+
+    /// The engine dies while the owning thread is busy: the watch's own
+    /// thread lets go of the confinement, without waiting for phase one
+    /// to be run (K2). Also for a report that is not definitive -- a wait
+    /// that failed -- because the engine may be gone all the same.
+    #[test]
+    fn any_drop_report_lets_go_of_the_confinement_from_the_watch_thread() {
+        let (mut engines, fake, _) = confined_session();
+        kill_engine_behind_its_back(&mut engines);
+        assert!(
+            wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]),
+            "a dead engine's confinement waited for the owning thread"
+        );
+        assert_eq!(engines.active.peek().map(|s| s.confinement.confined()), Some(Some(false)));
+        end_test_session(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "and not closed a second time");
+
+        let fake = FakeConfinement::new();
+        let mut engines = engines_for_test();
+        engines.set_confinement_ops_for_test(fake.clone());
+        engines.begin_test_session_watched_by("OPENVPN", engine_stand_in(), Box::new(WaitFails));
+        // The failed wait may already have reported; a confinement put in
+        // after it is let go of at once.
+        engines.confine_for_test();
+        assert!(
+            wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]),
+            "a failed wait kept the confinement"
+        );
+        end_test_session(&mut engines);
+    }
+
+    /// A drop report the engine contradicts -- a wait that failed, a RAS
+    /// connection MOBIKE moved -- lets go of the confinement at once, and
+    /// phase one, finding the engine alive, puts it back with the tunnel's
+    /// LUID read again: an IKEv2 interface can come back with a new one.
+    #[test]
+    fn any_drop_report_releases_and_retraction_reinstalls_with_fresh_luid() {
+        use windows_sys::Win32::System::Threading::SetEvent;
+        let fake = FakeConfinement::new();
+        let mut engines = engines_for_test();
+        engines.set_confinement_ops_for_test(fake.clone());
+        let go = engine_watch::new_event().unwrap();
+        let g = engines.begin_test_session_watched_by("XRAY_VLESS_REALITY", engine_stand_in(), Box::new(GoneWhen(go.duplicate().unwrap())));
+        assert!(engines.confine_for_test());
+        assert_eq!(fake.luids_installed(), vec![100]);
+
+        // SAFETY: a live event handle.
+        unsafe { SetEvent(go.raw()) };
+        assert!(wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]), "the report did not let go of it");
+
+        assert!(!engines.end_dead_session(g), "a running engine was torn down");
+        assert_eq!(fake.luids_installed(), vec![100, 200], "put back, with the LUID read again");
+        assert_eq!(engines.active.peek().map(|s| s.confinement.confined()), Some(Some(true)));
+        assert_eq!(fake.closed(), vec![1000], "the new one is held, not closed");
+
+        end_test_session(&mut engines);
+        assert_eq!(fake.closed(), vec![1000, 1001], "the session's end closes the one put back");
+    }
+
+    /// The order K2 depends on when a drop report is taken back: the hold
+    /// is re-armed before the new watch starts, and the put-back after it
+    /// does not re-arm it again. The other way round, a report from the
+    /// new watch -- the engine dying a moment after phase one found it
+    /// alive -- set the hold's mark and the put-back's re-arm erased it,
+    /// so the confinement went back in and was held for a dead engine.
+    /// Read from the source: the window is microseconds wide (the test
+    /// below races it for real).
+    #[test]
+    fn a_retracted_drop_rearms_the_hold_before_the_new_watch_starts() {
+        let source = include_str!("mod.rs");
+        let body_of = |signature: &str| {
+            let start = source.find(signature).unwrap_or_else(|| panic!("{signature}"));
+            &source[start..start + source[start..].find("\n    }\n").expect("its end")]
+        };
+        let body = body_of("    pub fn end_dead_session(&mut self, generation: u64) -> bool {");
+        let rearm = body.find("session.confinement.rearm();").expect("the hold re-armed by phase one");
+        let watch = body.find("self.rearm_watch(retracted);").expect("the watch started again");
+        let again = body.find("self.confine_again();").expect("the confinement put back");
+        assert!(rearm < watch && watch < again, "re-arm {rearm}, watch {watch}, put back {again}");
+        let body = body_of("    fn confine_again(&mut self) {");
+        assert!(!body.contains(".rearm()"), "the put-back re-arms the hold after the new watch has started");
+    }
+
+    /// A drop report racing the put-back, thirty-two sessions at once: each
+    /// confined, its first report taken back by phase one, and its engine
+    /// killed at a different moment around that -- before phase one looks,
+    /// while it re-arms and puts the confinement back, after. Whatever the
+    /// order, a dead engine's confinement is not held: phase one tears it
+    /// down, the new watch's report lets go of it, or the put-back is let
+    /// go of at once. And every confinement installed is closed exactly
+    /// once.
+    #[test]
+    fn a_drop_report_racing_the_put_back_never_leaves_a_dead_engine_confined() {
+        use windows_sys::Win32::System::Threading::SetEvent;
+        const AT_ONCE: usize = 32;
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let handles: Vec<_> = (0..AT_ONCE)
+            .map(|i| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let fake = FakeConfinement::new();
+                    let mut engines = engines_for_test();
+                    engines.set_confinement_ops_for_test(fake.clone());
+                    let go = engine_watch::new_event().unwrap();
+                    let g = engines.begin_test_session_watched_by(
+                        "XRAY_VLESS_REALITY",
+                        engine_stand_in(),
+                        Box::new(GoneWhen(go.duplicate().unwrap())),
+                    );
+                    assert!(engines.confine_for_test());
+                    // SAFETY: a live event handle.
+                    unsafe { SetEvent(go.raw()) };
+                    assert!(wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]), "{i}: the report did not let go");
+                    let pid = match engines.active.peek() {
+                        Some(Session { engine: Active::Child { child, .. }, .. }) => child.id(),
+                        _ => panic!("{i}: no engine"),
+                    };
+                    start.wait();
+                    let killer = std::thread::spawn(move || {
+                        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+                        std::thread::sleep(Duration::from_micros((i as u64 % 8) * 150));
+                        // SAFETY: plain calls; the handle is closed below.
+                        unsafe {
+                            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                            if !h.is_null() {
+                                TerminateProcess(h, 1);
+                                windows_sys::Win32::Foundation::CloseHandle(h);
+                            }
+                        }
+                    });
+                    let _ = engines.end_dead_session(g);
+                    killer.join().unwrap();
+                    // The new watch waits out REARM_SPACING before its first
+                    // look, then reports; a margin past that.
+                    assert!(
+                        wait_for(Duration::from_secs(4), || {
+                            engines.active.peek().map_or(true, |s| s.confinement.confined() != Some(true))
+                        }),
+                        "{i}: a dead engine's confinement was held"
+                    );
+                    end_test_session(&mut engines);
+                    let installs = fake.installs.lock().unwrap().len();
+                    let mut closed = fake.closed();
+                    closed.sort_unstable();
+                    let expected: Vec<isize> = (1000..1000 + installs as isize).collect();
+                    assert_eq!(closed, expected, "{i}: each confinement closed exactly once");
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a dead engine's confinement held, or one closed other than once");
+        }
+    }
+
+    /// Thirty-two sessions at once, each confined, each engine killed
+    /// behind its back at the moment the owning thread runs the hard stop:
+    /// the watch's thread and the owning thread let go of the same
+    /// confinement concurrently, and each is closed exactly once.
+    #[test]
+    fn thirty_two_confined_sessions_dying_during_a_disconnect_close_once_each() {
+        const AT_ONCE: usize = 32;
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let handles: Vec<_> = (0..AT_ONCE)
+            .map(|i| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let (mut engines, fake, _) = confined_session();
+                    let pid = match engines.active.peek() {
+                        Some(Session { engine: Active::Child { child, .. }, .. }) => child.id(),
+                        _ => panic!("{i}: no engine"),
+                    };
+                    start.wait();
+                    let killer = std::thread::spawn(move || {
+                        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+                        // SAFETY: plain calls; the handle is closed below.
+                        unsafe {
+                            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                            if !h.is_null() {
+                                TerminateProcess(h, 1);
+                                windows_sys::Win32::Foundation::CloseHandle(h);
+                            }
+                        }
+                    });
+                    let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+                    killer.join().unwrap();
+                    std::thread::sleep(Duration::from_millis(100));
+                    assert_eq!(fake.closed(), vec![1000], "{i}: closed {:?}", fake.closed());
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a confinement closed other than once");
+        }
+    }
+
+    // ---- Confined at connect, and said so (3.5) ------------------------
+
+    /// Engines over a fake confinement whose engine directory holds
+    /// stand-ins for xray.exe and openvpn.exe -- the plan names the engine,
+    /// and an engine that is not installed is no permit at all.
+    fn engines_with_engine_files(name: &str) -> (Engines, Arc<FakeConfinement>, PathBuf) {
+        let dir = fresh_dir(name);
+        for exe in ["xray.exe", "openvpn.exe"] {
+            std::fs::write(dir.join(exe), b"").unwrap();
+        }
+        let fake = FakeConfinement::new();
+        let mut engines = Engines::new(dir.clone(), dir.clone());
+        engines.set_confinement_ops_for_test(fake.clone());
+        (engines, fake, dir)
+    }
+
+    fn reality_profile() -> ConnectProfile {
+        ConnectProfile::XrayVlessReality(neoconnect_ipc::XrayProfile {
+            uuid: String::new(),
+            flow: String::new(),
+            host: "203.0.113.7".into(),
+            port: 443,
+            reality_public_key: String::new(),
+            short_id: String::new(),
+            server_name: "www.example.com".into(),
+        })
+    }
+
+    fn openvpn_profile() -> ConnectProfile {
+        ConnectProfile::Openvpn(neoconnect_ipc::OpenvpnProfile {
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            ca_cert_pem: String::new(),
+            endpoint: "203.0.113.7:1194".into(),
+            proto: "udp".into(),
+            tls_crypt_key: None,
+        })
+    }
+
+    /// What the status poll says about IPv4 after a full-tunnel connect,
+    /// per engine: confined on Xray and OpenVPN; not said on WireGuard
+    /// (wireguard.exe's own kill switch, K8); not confined, and said so, on
+    /// IKEv2 (not until its own proof); not said in Custom mode on any
+    /// engine.
+    #[test]
+    fn status_reports_ipv4_confined_for_xray_and_openvpn_none_for_wireguard() {
+        let node = Ipv4Addr::new(203, 0, 113, 7);
+        let shadowsocks = ConnectProfile::Shadowsocks(neoconnect_ipc::ShadowsocksProfile {
+            host: "203.0.113.7".into(),
+            port: 8388,
+            method: "2022-blake3-aes-128-gcm".into(),
+            password: String::new(),
+        });
+        for (protocol, profile, expected) in [
+            ("XRAY_VLESS_REALITY", reality_profile(), Some(true)),
+            ("SHADOWSOCKS", shadowsocks, Some(true)),
+            ("OPENVPN", openvpn_profile(), Some(true)),
+            ("WIREGUARD", wireguard_profile(), None),
+            ("IKEV2", test_profile(), Some(false)),
+        ] {
+            let (mut engines, fake, dir) = engines_with_engine_files(&format!("confined-{protocol}"));
+            engines.begin_test_session_for(&profile, protocol, engine_stand_in());
+            engines.confine_if_needed(&profile, false, vec![node]);
+            assert_eq!(engines.ipv4_confined(), expected, "{protocol}");
+            assert_eq!(engines.confinement_problem().is_some(), expected == Some(false), "{protocol}");
+            let installs = fake.installs.lock().unwrap().clone();
+            assert_eq!(installs.len(), usize::from(expected == Some(true)), "{protocol}");
+            if let Some(plan) = installs.first() {
+                let names_the_engine = match &plan.transport {
+                    confinement::Transport::Xray { exe, nodes } => exe.ends_with("xray.exe") && nodes == &[node],
+                    confinement::Transport::Openvpn { exe, node: n, port, .. } => {
+                        exe.ends_with("openvpn.exe") && *n == node && *port == 1194
+                    }
+                    confinement::Transport::Ikev2 { .. } => false,
+                };
+                assert!(names_the_engine, "{protocol}: {plan:?}");
+                assert_eq!(plan.tunnel_luid, 100, "{protocol}: the tunnel's LUID, read now");
+            }
+            end_test_session(&mut engines);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        // Custom mode, on the engines that would otherwise be confined.
+        for (protocol, profile) in [("XRAY_VLESS_REALITY", reality_profile()), ("OPENVPN", openvpn_profile())] {
+            let (mut engines, fake, dir) = engines_with_engine_files(&format!("custom-{protocol}"));
+            engines.begin_test_session_for(&profile, protocol, engine_stand_in());
+            engines.confine_if_needed(&profile, true, vec![node]);
+            assert_eq!(engines.ipv4_confined(), None, "{protocol} in Custom mode");
+            assert!(fake.installs.lock().unwrap().is_empty());
+            end_test_session(&mut engines);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// With no way out at all -- no route anywhere, no adapter with a
+    /// gateway -- every engine's connect says so in the one sentence the
+    /// app reads as no network (\`NO_NETWORK\`), before anything is asked to
+    /// dial. Only Xray's full tunnel did (\`xray::plan_uplink\`); WireGuard,
+    /// OpenVPN and IKEv2 went on to fail in their own words -- a handshake
+    /// that never came, a RAS error -- which the app reads as a server that
+    /// did not answer, and the screen then named a server nothing had
+    /// reached as unreachable. With a way out, or adapters that could not
+    /// be listed, the connect goes on as before: no claim without a reason.
+    #[test]
+    fn with_no_way_out_every_engine_says_no_network_before_dialling() {
+        let limits = || {
+            crate::lifecycle::budget::Limits::new(
+                crate::lifecycle::cancel::CancelToken::new(),
+                crate::lifecycle::budget::CONNECT_BUDGET.limit,
+            )
+        };
+        let wireguard = ConnectProfile::Wireguard(neoconnect_ipc::WireguardProfile {
+            private_key: "GMSgBTYpH7yC6bV88xblWmViQlk+bHxiTDsdsi+WgXI=".into(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
+            endpoint: "203.0.113.5:51888".into(),
+        });
+        let openvpn = ConnectProfile::Openvpn(neoconnect_ipc::OpenvpnProfile {
+            cert_pem: "-----BEGIN CERTIFICATE-----\nQ0VSVA==\n-----END CERTIFICATE-----".into(),
+            key_pem: "-----BEGIN PRIVATE KEY-----\nS0VZ\n-----END PRIVATE KEY-----".into(),
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nQ0E=\n-----END CERTIFICATE-----".into(),
+            endpoint: "203.0.113.7:1194".into(),
+            proto: "udp".into(),
+            tls_crypt_key: None,
+        });
+        let asked: Arc<std::sync::Mutex<Vec<Ipv4Addr>>> = Arc::default();
+        for profile in [wireguard.clone(), openvpn] {
+            let mut engines = engines_for_test();
+            let seen = Arc::clone(&asked);
+            engines.set_uplink_lookup_for_test(Arc::new(move |dest| {
+                seen.lock().unwrap().push(dest);
+                Ok(None)
+            }));
+            let refused = engines.connect_inner(&profile, &[], &[], &limits()).expect_err("no way out");
+            assert!(refused.contains(NO_NETWORK), "{profile:?}: {refused}");
+            assert!(!engines.has_session());
+        }
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![Ipv4Addr::new(203, 0, 113, 5), Ipv4Addr::new(203, 0, 113, 7)],
+            "asked about the servers themselves"
+        );
+
+        // A way out, or no answer: the connect goes on and fails as it would
+        // have here (no wireguard.exe), not with a claim about the network.
+        for lookup in [
+            Arc::new(|_| Ok(Some(adapters::Uplink { index: 7, next_hop: Ipv4Addr::new(192, 168, 1, 1) }))) as UplinkLookup,
+            Arc::new(|_| Err(std::io::Error::other("could not list adapters"))) as UplinkLookup,
+        ] {
+            let mut engines = engines_for_test();
+            engines.set_uplink_lookup_for_test(lookup);
+            let failed = engines.connect_inner(&wireguard, &[], &[], &limits()).expect_err("no wireguard.exe here");
+            assert!(!failed.contains(NO_NETWORK), "{failed}");
+        }
+
+        // IKEv2, read from the source: nothing here can dial RAS.
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn connect_inner(").expect("connect_inner");
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
+        let check = body.find("self.refuse_without_a_way_out(profile)?;").expect("the way out asked about");
+        let ikev2 = body.find("ikev2::connect(p, passive)").expect("IKEv2's dial");
+        assert!(check < ikev2, "IKEv2 dials before the way out is asked about");
+        assert_eq!(way_out_probe(&test_profile()), Ipv4Addr::new(1, 1, 1, 1), "a hostname: any public address");
+    }
+
+    /// An IKEv2 full tunnel is not confined -- its plan stays off until its
+    /// own VM gate passes -- and the status says so, with the reason,
+    /// rather than nothing. Nothing is what the app reads as "not a
+    /// session this applies to", and it then claimed "You're protected"
+    /// over a tunnel that has no kill switch of its own: P0-D's leak --
+    /// a connection opened before Connect going on by the physical adapter
+    /// -- and sockets bound to that adapter, unrefused. WireGuard (its own
+    /// kill switch) and Custom mode stay unsaid; IKEv2 still connects and
+    /// carries as before, nothing is installed for it.
+    #[test]
+    fn an_ikev2_full_tunnel_says_it_is_not_confined() {
+        let (mut engines, fake, dir) = engines_with_engine_files("ikev2-unconfined");
+        engines.begin_test_session_for(&test_profile(), "IKEV2", engine_stand_in());
+        engines.confine_if_needed(&test_profile(), false, Vec::new());
+        assert_eq!(engines.ipv4_confined(), Some(false), "IKEv2 full tunnel");
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("IKEv2")), "{:?}", engines.confinement_problem());
+        assert!(fake.installs.lock().unwrap().is_empty(), "nothing is installed for IKEv2");
+        assert!(engines.has_session());
+        end_test_session(&mut engines);
+
+        // Custom mode on IKEv2: not confined by design, and not said.
+        engines.begin_test_session_for(&test_profile(), "IKEV2", engine_stand_in());
+        engines.confine_if_needed(&test_profile(), true, Vec::new());
+        assert_eq!(engines.ipv4_confined(), None, "IKEv2 in Custom mode");
+        end_test_session(&mut engines);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The owner's decision (d): filters that will not go in leave the
+    /// tunnel up, and the status poll says it is not confined, with the
+    /// reason -- never a claim of full protection, and never a connect
+    /// failed over it. The same for a plan that cannot be made.
+    #[test]
+    fn failed_install_keeps_tunnel_and_reports_false() {
+        let (mut engines, fake, dir) = engines_with_engine_files("confine-refused");
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.confine_if_needed(&reality_profile(), false, vec![Ipv4Addr::new(203, 0, 113, 7)]);
+        assert_eq!(engines.ipv4_confined(), Some(false));
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("0x80320009")), "{:?}", engines.confinement_problem());
+        assert!(engines.has_session(), "the tunnel was taken down over its filters");
+        assert!(engines.status().0, "the tunnel is reported up");
+        end_test_session(&mut engines);
+
+        // No server address to permit the engine to: no plan, said so.
+        fake.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        engines.begin_test_session_for(&openvpn_profile(), "OPENVPN", engine_stand_in());
+        engines.confine_if_needed(&openvpn_profile(), false, Vec::new());
+        assert_eq!(engines.ipv4_confined(), Some(false));
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("address")), "{:?}", engines.confinement_problem());
+        assert!(fake.installs.lock().unwrap().is_empty(), "a plan without the engine's permit was installed");
+        assert!(engines.has_session());
+        end_test_session(&mut engines);
+
+        // And an engine that is not there to name.
+        let _ = std::fs::remove_file(dir.join("xray.exe"));
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.confine_if_needed(&reality_profile(), false, vec![Ipv4Addr::new(203, 0, 113, 7)]);
+        assert_eq!(engines.ipv4_confined(), Some(false));
+        assert!(fake.installs.lock().unwrap().is_empty());
+        end_test_session(&mut engines);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The connect confines once the tunnel and its IPv6 block are up, for
+    /// both the engines that are confined, and hands each its servers.
+    #[test]
+    fn the_connect_confines_after_the_ipv6_block() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn connect_inner(").expect("connect_inner");
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
+        let block = body.find("self.block_ipv6_if_needed(profile);").expect("the IPv6 block");
+        let confine = body.find("self.confine_if_needed(profile, passive, confine_nodes);").expect("the confinement");
+        assert!(block < confine);
+        // And the reset after it: the old flows are refused from the moment
+        // the filters go in, then told to come back.
+        let reset = body.find("self.reset_outside_the_tunnel(profile, passive);").expect("the reset");
+        assert!(confine < reset);
+        assert!(body.find("confine_nodes.push(plan.server)").is_some(), "Xray's server");
+        assert!(body.find("confine_nodes.push(node)").is_some(), "OpenVPN's server");
+        // IKEv2's, only while its plan is on: no lookup otherwise.
+        let ikev2 = &body[body.find("ConnectProfile::Ikev2(p) => {").expect("the IKEv2 arm")..];
+        let ikev2 = &ikev2[..ikev2.find("\n            }\n").expect("its end")];
+        assert!(ikev2.contains("if confinement::applies_to(profile, passive) {"));
+        assert!(ikev2.contains("confine_nodes.push(node)"));
+    }
+
+    /// K5, through the session: a confined Xray tunnel whose engine then
+    /// writes that its own connection was refused has the confinement let
+    /// go of within the valve's window, the tunnel left up, and the reason
+    /// said -- so a wrong permit costs the confinement, never the protocol.
+    /// The line is a provisional fixture (see `confinement`'s valve tests).
+    #[test]
+    fn engine_log_wsaeacces_releases_confinement_and_reports_reason() {
+        let (mut engines, fake, dir) = engines_with_engine_files("valve");
+        std::fs::write(dir.join(xray::LOG_FILE), "2026/10/12 21:04:01 [Warning] core: Xray 26.1.23 started\n").unwrap();
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.confine_if_needed(&reality_profile(), false, vec![Ipv4Addr::new(203, 0, 113, 7)]);
+        assert_eq!(engines.ipv4_confined(), Some(true));
+
+        use std::io::Write;
+        let mut log = std::fs::OpenOptions::new().append(true).open(dir.join(xray::LOG_FILE)).unwrap();
+        writeln!(log, "2026/10/12 21:04:05 [Warning] [3123123] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > common/retry: [dial tcp 203.0.113.7:443: connectex: An attempt was made to access a socket in a way forbidden by its access permissions.] > common/retry: all retry attempts failed").unwrap();
+        drop(log);
+
+        assert!(
+            wait_for(Duration::from_secs(5), || engines.ipv4_confined() == Some(false)),
+            "the engine's own refusal did not let go of the confinement"
+        );
+        assert_eq!(fake.closed(), vec![1000]);
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("refused")), "{:?}", engines.confinement_problem());
+        assert!(engines.has_session(), "the tunnel was taken down over its plan");
+        assert!(engines.status().0);
+        end_test_session(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "closed once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// K5 by WFP's own record, the witness that does not depend on the
+    /// engine: the log says nothing -- the bundled xray-core writes a
+    /// refused dial at Info, below the config's level; OpenVPN's dropped UDP
+    /// is never told -- and WFP records this plan's block refusing the
+    /// engine. The confinement is let go of within the valve's window, the
+    /// tunnel left up, and the reason said.
+    #[test]
+    fn a_refusal_wfp_recorded_releases_confinement_though_the_engine_log_is_quiet() {
+        let (mut engines, fake, dir) = engines_with_engine_files("valve-wfp");
+        std::fs::write(dir.join(xray::LOG_FILE), "2026/10/12 21:04:01 [Warning] core: Xray 26.1.23 started
+").unwrap();
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.confine_if_needed(&reality_profile(), false, vec![Ipv4Addr::new(203, 0, 113, 7)]);
+        assert_eq!(engines.ipv4_confined(), Some(true));
+
+        *fake.wfp_says.lock().unwrap() =
+            Some("the tunnel engine's own connection was refused by the IPv4 confinement: TCP to port 443".into());
+        assert!(
+            wait_for(Duration::from_secs(5), || engines.ipv4_confined() == Some(false)),
+            "WFP's record of refusing the engine did not let go of the confinement"
+        );
+        assert_eq!(fake.closed(), vec![1000]);
+        assert!(engines.confinement_problem().is_some_and(|p| p.contains("refused")), "{:?}", engines.confinement_problem());
+        assert!(engines.has_session(), "the tunnel was taken down over its plan");
+        end_test_session(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "closed once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- The reset at connect (decision (c)) -------------------------
+
+    /// A full Xray tunnel's connect resets what is open outside it: one
+    /// pass at once, then again every quarter-second for its first three
+    /// seconds -- for connections that were mid-handshake at the first --
+    /// leaving the engine's own process, the tunnel's address and the LAN
+    /// alone. The rescans are the session's: they stop when it ends, and
+    /// settle on their own.
+    #[test]
+    fn a_full_tunnel_resets_what_is_outside_it_and_the_rescans_end_with_the_session() {
+        let node = Ipv4Addr::new(203, 0, 113, 7);
+        let (mut engines, fake, dir) = engines_with_engine_files("reset");
+        let child = engine_stand_in();
+        let pid = child.id();
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", child);
+        engines.confine_if_needed(&reality_profile(), false, vec![node]);
+        engines.reset_outside_the_tunnel(&reality_profile(), false);
+        let passes = || fake.resets.lock().unwrap().len();
+        assert!(passes() >= 1, "no pass at connect");
+        let rules = fake.resets.lock().unwrap()[0].clone();
+        assert_eq!(rules.engine_pid, Some(pid), "the engine's link would be cut");
+        assert!(rules.tunnel_addresses.contains(&xray::TUN_ADDRESS), "{rules:?}");
+        assert!(rules.lan.contains(&(Ipv4Addr::new(169, 254, 0, 0), 16)), "{rules:?}");
+        assert!(wait_for(Duration::from_secs(2), || passes() >= 3), "no rescans");
+        end_test_session(&mut engines);
+        let after = passes();
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(passes(), after, "a rescan outlived its session");
+
+        // Left alone, the rescans settle within their window.
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.reset_outside_the_tunnel(&reality_profile(), false);
+        std::thread::sleep(Duration::from_millis(3_600));
+        let settled = passes();
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(passes(), settled, "the rescans did not settle");
+        end_test_session(&mut engines);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A connection from any address on one of our adapters is in a tunnel
+    /// and is not reset: a Wintun adapter can hold a stale APIPA address
+    /// beside its real one, listed first, and taking only the first left
+    /// connections already inside OpenVPN's tunnel to be reset for three
+    /// seconds. The physical adapter's address is never one of them.
+    #[test]
+    fn every_address_on_our_adapters_counts_as_in_the_tunnel() {
+        let adapter = |name: &str, all: Vec<Ipv4Addr>| adapters::Adapter {
+            index: 7,
+            name: name.to_string(),
+            gateway: None,
+            ipv4: all.first().copied(),
+            ipv4_prefix: Some(24),
+            ipv4_all: all,
+            is_up: true,
+            dhcp_server: None,
+            description: String::new(),
+        };
+        let listed = vec![
+            adapter("Ethernet", vec![Ipv4Addr::new(192, 168, 1, 23)]),
+            adapter(openvpn::ADAPTER_NAME, vec![Ipv4Addr::new(169, 254, 12, 34), Ipv4Addr::new(10, 8, 0, 6)]),
+            adapter(xray::ADAPTER_NAME, vec![xray::TUN_ADDRESS]),
+        ];
+        let got = tunnel_addresses_in(&listed, openvpn::ADAPTER_NAME, &OUR_ADAPTER_NAMES);
+        for address in [Ipv4Addr::new(10, 8, 0, 6), Ipv4Addr::new(169, 254, 12, 34), xray::TUN_ADDRESS] {
+            assert!(got.contains(&address), "{address} missing from {got:?}");
+        }
+        assert!(!got.contains(&Ipv4Addr::new(192, 168, 1, 23)), "the physical adapter is not a tunnel");
+    }
+
+    /// No reset where there is no confinement of ours: WireGuard (its own
+    /// kill switch re-examines open flows -- P0-D saw it reset one), IKEv2
+    /// while it is not confined, and Custom mode, whose own reset covers
+    /// the applications it carries and leaves the rest alone.
+    #[test]
+    fn no_reset_for_wireguard_ikev2_or_custom_mode() {
+        let (mut engines, fake, dir) = engines_with_engine_files("no-reset");
+        for (protocol, profile, passive) in [
+            ("WIREGUARD", wireguard_profile(), false),
+            ("IKEV2", test_profile(), false),
+            ("XRAY_VLESS_REALITY", reality_profile(), true),
+            ("OPENVPN", openvpn_profile(), true),
+        ] {
+            engines.begin_test_session_for(&profile, protocol, engine_stand_in());
+            engines.reset_outside_the_tunnel(&profile, passive);
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(fake.resets.lock().unwrap().is_empty(), "{protocol}, passive {passive}");
+            end_test_session(&mut engines);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

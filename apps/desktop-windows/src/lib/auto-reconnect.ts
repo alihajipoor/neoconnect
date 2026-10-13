@@ -231,8 +231,15 @@ export type ReconnectPhase =
       readonly blockedSince: number | null;
       readonly episode: Episode;
     }
-  /** A pass is running. */
-  | { readonly kind: "attempting"; readonly attempt: number; readonly startedAt: number; readonly episode: Episode };
+  /** A pass is running. `offline` while it waits on its rung for a network
+   * to dial over (`ReconnectAttempt.waitingForNetwork`); absent otherwise. */
+  | {
+      readonly kind: "attempting";
+      readonly attempt: number;
+      readonly startedAt: number;
+      readonly episode: Episode;
+      readonly offline?: true;
+    };
 
 /** What a screen is told about an attempt it is asked to run. */
 export interface ReconnectAttempt {
@@ -258,6 +265,14 @@ export interface ReconnectAttempt {
    * waited for while a step that never returns is still given up on.
    * Nothing once the attempt is over. */
   readonly progress: () => void;
+  /** The pass is waiting on its rung for a network to dial over (true), or
+   * has one again (false): the service refused the rung for want of one,
+   * before anything was dialled (`lib/network-wait.ts`). Shown as waiting
+   * for a network, and none of that time is charged to the budget -- a
+   * wait costs nothing, as a blocked wait between attempts costs nothing.
+   * Nothing once the attempt is over. Optional: a pass that never waits
+   * (the phone's) need not call it. */
+  readonly waitingForNetwork?: (waiting: boolean) => void;
 }
 
 /** Whether a ladder pass has been told to stop: the stop flag a press
@@ -369,6 +384,11 @@ interface RunningAttempt {
   awaySince: number | null;
   /** How long it had spent there before that, in all. */
   awayMs: number;
+  /** When the pass began waiting for a network on its rung, while it waits
+   * (`ReconnectAttempt.waitingForNetwork`). */
+  networkSince: number | null;
+  /** How long it had waited for one before that, in all. */
+  networkMs: number;
 }
 
 /** Whether an episode that ended this way leaves "VPN connection lost"
@@ -498,6 +518,10 @@ export function reconnectOutcomeOf(
     case "declined":
       return { kind: "failed" };
     case "failed":
+      // A pass that waited on its rung for a network for the whole half
+      // hour and gave up (`lib/network-wait.ts`): the episode's own wait
+      // for a network has run out, which is not an attempt spent.
+      if (errorKind === "noNetwork") return { kind: "stop", why: "waitedTooLong" };
       return errorKind !== null && NOT_ENTITLED_KINDS.has(errorKind)
         ? { kind: "stop", why: "notEntitled" }
         : { kind: "failed" };
@@ -524,7 +548,7 @@ export function reconnectingView(phase: ReconnectPhase, session: number): Reconn
     case "waiting":
       return phase.episode.session === session ? { offline: phase.blockedBy === "network", waiting: true } : null;
     case "attempting":
-      return phase.episode.session === session ? { offline: false, waiting: false } : null;
+      return phase.episode.session === session ? { offline: phase.offline === true, waiting: false } : null;
     default:
       return null;
   }
@@ -1178,6 +1202,8 @@ export class AutoReconnect {
       ceilingFrom: this.deps.elapsed(),
       awaySince: null,
       awayMs: 0,
+      networkSince: null,
+      networkMs: 0,
     };
     this.running = running;
     let outcome: ReconnectOutcome;
@@ -1193,6 +1219,19 @@ export class AutoReconnect {
           live,
           progress: () => {
             if (live()) this.watch(running, true);
+          },
+          waitingForNetwork: (waiting) => {
+            const phase = this.phase;
+            if (!live() || phase.kind !== "attempting") return;
+            const now = this.deps.now();
+            if (waiting && running.networkSince === null) {
+              running.networkSince = now;
+              this.set({ ...phase, offline: true });
+            } else if (!waiting && running.networkSince !== null) {
+              running.networkMs += Math.max(0, now - running.networkSince);
+              running.networkSince = null;
+              this.set({ kind: "attempting", attempt: phase.attempt, startedAt: phase.startedAt, episode: phase.episode });
+            }
           },
         }).then(resolve, reject);
       });
@@ -1220,6 +1259,9 @@ export class AutoReconnect {
     // Time a phone app spent in the background is the customer's, not the
     // pass's (`awayChanged`).
     const awayMs = running.awayMs + (running.awaySince !== null ? Math.max(0, now - running.awaySince) : 0);
+    // And the time it waited on its rung for a network, which is no more the
+    // pass's to account for than a blocked wait between attempts is.
+    const networkMs = running.networkMs + (running.networkSince !== null ? Math.max(0, now - running.networkSince) : 0);
     switch (outcome.kind) {
       case "connected":
         // The ceiling on a background stay, if the pass landed in one.
@@ -1244,7 +1286,7 @@ export class AutoReconnect {
         this.token += 1;
         this.schedule(
           attempt + 1,
-          { ...episode, spentMs: episode.spentMs + Math.max(0, now - startedAt - awayMs) },
+          { ...episode, spentMs: episode.spentMs + Math.max(0, now - startedAt - awayMs - networkMs) },
           running.awaySince,
         );
         return;

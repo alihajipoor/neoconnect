@@ -40,7 +40,22 @@ import { watchBackground } from "./visibility";
  * probe that failed:
  *
  *     probe: skipped=connect
- *     probe: abandoned=connect@1200     (a connect started 1200ms in) */
+ *     probe: abandoned=connect@1200     (a connect started 1200ms in)
+ *
+ * One thing the probe can tell that the request cannot is a refusal by
+ * this machine (`local`: a permission error on the connect, os error
+ * 10013 on Windows -- a firewall here, or one of this app's own filters).
+ * The HTTP plugin's error drops the OS error, so such a request is traced
+ * `net` like a filtered one. When every attempt failed at once
+ * (`failedAtOnce`) and the probe's connect was refused here, the report is
+ * filed as OTHER with `REFILED_HERE_REASON` rather than as an unreachable
+ * control plane, which the panel reads as the network's doing. What this
+ * still misses, and files as unreachable: a failed pre-connect refresh,
+ * which is never probed (above); a refusal met while a connect was under
+ * way or within `CONNECT_QUIET_MS` of one; a local refusal whose lookup
+ * took longer than `AT_ONCE_MS`; and a filter here that blocks the lookup
+ * itself, which the probe sees as `dns`. Telling those apart needs the OS
+ * error from the plugin, which means forking it. */
 
 /** The classes the probe can answer with. Anything else is not passed on. */
 const OUTCOMES = new Set([
@@ -53,6 +68,9 @@ const OUTCOMES = new Set([
   "tls",
   "tls-timeout",
   "cert",
+  // This machine refused the TCP connect before sending anything: a filter
+  // on this PC, never the network's doing (`classify_connect_error`).
+  "local",
   // The probe itself crashed: a fault here, not a fact about the network.
   "error",
   // The app's requests to the name go through a proxy, so it was not
@@ -166,23 +184,93 @@ interface ProbeRun {
   /** Whether it is the network's answer, rather than a note that the
    * probe was skipped or abandoned. */
   answered: boolean;
+  /** Whether this PC refused every address the probe tried (`local`). */
+  allLocal?: boolean;
+  /** Whether every attempt of the request failed in transport at once
+   * (`failedAtOnce`). */
+  atOnce?: boolean;
 }
+
+/** How quickly an attempt has to have failed for its failure to be read as
+ * a refusal on this machine, once the probe has shown one.
+ *
+ * A filter here refuses the connect before anything is sent, so the
+ * attempt fails in the time a cached lookup and a system call take. Not
+ * proof on its own -- a reset from a box near the customer can be nearly
+ * as quick, and so is "no route" when the PC is offline -- which is why
+ * the probe's `local` is required as well. A local refusal whose lookup
+ * was slower than this is missed, and its report stays as it was, with
+ * `REFUSED_HERE_REASON` when the probe ran. */
+export const AT_ONCE_MS = 50;
+
+/** Whether every attempt in `entries` failed in transport -- `net`, or
+ * `local` where the error said so -- within `AT_ONCE_MS` of starting.
+ * Nothing answered, nothing timed out, nothing is still running. */
+export function failedAtOnce(entries: TraceEntry[]): boolean {
+  return (
+    entries.length > 0 &&
+    entries.every(
+      (entry) =>
+        (entry.outcome === "net" || entry.outcome === "local") &&
+        entry.settledAt !== undefined &&
+        entry.settledAt - entry.startedAt < AT_ONCE_MS,
+    )
+  );
+}
+
+/** The reason a report carries when the probe found every address refused
+ * by this machine.
+ *
+ * The HTTP plugin's errors carry no cause -- its message is reqwest's,
+ * which leaves out the OS error -- so a request a filter on this PC
+ * refused is traced `net`, like a filtered one, and the report is filed as
+ * CONTROL_PLANE_UNREACHABLE, which the panel reads as the network's doing.
+ * The probe connects by itself and sees WSAEACCES; this puts what it saw
+ * where the report's reader looks first. The outcome stays as it is: it is
+ * the backend's enum, and a new member of it is a backend change. */
+export const REFUSED_HERE_REASON =
+  "every address probed was refused by a filter on this PC (os error 10013), not by the network";
+
+/** The reason a report carries when it is filed as OTHER instead of
+ * CONTROL_PLANE_UNREACHABLE: every attempt failed at once
+ * (`failedAtOnce`), and the probe's connect was refused by this machine.
+ *
+ * Why OTHER, of the backend's outcomes: REJECTED is "the server answered
+ * and said no", and nothing answered; ENGINE_FAILED is the VPN engine; and
+ * a new member for a local refusal is a backend and panel change. OTHER is
+ * "see the reason on the row", which is what this is. Worded for both
+ * apps: the probe's `local` is a permission error on any platform, os
+ * error 10013 on Windows. */
+export const REFILED_HERE_REASON =
+  `refused by this device, not by the network: every attempt failed within ${AT_ONCE_MS}ms and the probe's connect ` +
+  "was refused here (permission denied: os error 10013 on Windows); filed as OTHER, not CONTROL_PLANE_UNREACHABLE";
 
 /** Settles the race below when a connect starts. */
 const CONNECT_STARTED = Symbol("connect started");
 
 async function runProbe(entries: TraceEntry[], now: number, options: ProbeOptions): Promise<ProbeRun | undefined> {
   try {
-    if (lastProbeAt !== null && now - lastProbeAt < PROBE_INTERVAL_MS) return undefined;
-    const targets = probeTargets(entries);
+    const atOnce = failedAtOnce(entries);
+    // Within the interval only a request that failed at once is looked at,
+    // and only at its first address: enough to tell a refusal on this
+    // machine, which the HTTP plugin's error cannot, from the network's.
+    // Where nothing leaves the PC it sends nothing either; otherwise it is
+    // one lookup and one handshake. It does not spend the interval, which
+    // is for probing every address of a blocked network.
+    const quickCheck = lastProbeAt !== null && now - lastProbeAt < PROBE_INTERVAL_MS;
+    if (quickCheck && !atOnce) return undefined;
+    const failed = probeTargets(entries);
+    const targets = quickCheck ? failed.slice(0, 1) : failed;
     if (targets.length === 0) return undefined;
     // Past this point a probe would have run. One that does not is said,
-    // and does not count against the interval: nothing was learned.
+    // and does not count against the interval: nothing was learned. Above
+    // all a quick check: a connect may be putting up filters of its own,
+    // and a refusal by one of them is not what the request met.
     if (options.pathChanging || (lastConnectAt !== null && now - lastConnectAt < CONNECT_QUIET_MS)) {
       return { section: "probe: skipped=connect", answered: false };
     }
     const previous = lastProbeAt;
-    lastProbeAt = now;
+    if (!quickCheck) lastProbeAt = now;
     const startedAt = Date.now();
 
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -214,6 +302,7 @@ async function runProbe(entries: TraceEntry[], now: number, options: ProbeOption
     }
 
     if (!Array.isArray(answer) || answer.length !== targets.length) return undefined;
+    const outcomes: string[] = [];
     const parts = targets.map((target, i) => {
       const result = answer[i] as { outcome?: unknown; ms?: unknown } | null;
       const outcome = typeof result?.outcome === "string" && OUTCOMES.has(result.outcome) ? result.outcome : "?";
@@ -225,9 +314,15 @@ async function runProbe(entries: TraceEntry[], now: number, options: ProbeOption
       // one, and a name that resolves into the block page and somewhere
       // else as well, which the race leaves alone.
       if (outcome === "blockpage") demoteName(target.host);
+      outcomes.push(outcome);
       return `${target.label}=${outcome}@${ms}`;
     });
-    return { section: `probe: ${parts.join(" ")}`, answered: true };
+    return {
+      section: `probe: ${parts.join(" ")}`,
+      answered: true,
+      allLocal: outcomes.every((o) => o === "local"),
+      atOnce,
+    };
   } catch {
     // Decorates a report about a failure; must never become a second one.
     return undefined;
@@ -266,10 +361,20 @@ export async function probeAddendum(
   const run = await runProbe(entries, Date.now(), options);
   const hidden = backgrounded();
   if (run === undefined) return undefined;
+  const reasons: string[] = [];
   // Only an answer can have been distorted by a suspension.
-  return run.answered && hidden
-    ? { apiEndpoint: run.section, reason: "app was in the background during the probe" }
-    : { apiEndpoint: run.section };
+  if (run.answered && hidden) reasons.push("app was in the background during the probe");
+  // Refused here, by the probe's own connect. The request's failure is
+  // read as the same refusal only when it, too, came at once; otherwise
+  // the reason says what the probe saw and the outcome stays the network's.
+  const refusedHere = run.answered && run.allLocal === true;
+  const refile = refusedHere && run.atOnce === true;
+  if (refusedHere) reasons.push(refile ? REFILED_HERE_REASON : REFUSED_HERE_REASON);
+  return {
+    apiEndpoint: run.section,
+    ...(reasons.length > 0 ? { reason: reasons.join("; ") } : {}),
+    ...(refile ? { outcome: "OTHER" as const } : {}),
+  };
 }
 
 /** For tests: forget the last probe and connect, as a fresh process would. */

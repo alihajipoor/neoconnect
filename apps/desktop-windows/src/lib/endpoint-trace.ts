@@ -60,6 +60,12 @@ export type TracePhase = "challenge" | "health" | "req" | "refresh" | "retry";
  *   blackholed address now usually shows. See `failedAs` in api.ts.
  * - `scope`: refused before leaving the device, because the address is
  *   not in the app's HTTP permission. A build problem, not a network one.
+ * - `local`: refused before leaving the device by a filter on this
+ *   machine -- Windows' WSAEACCES, "os error 10013": the service's own
+ *   IPv6 block, or another product's firewall. Not the network's doing,
+ *   and never to be read as a block. Only where the error carries the
+ *   cause: the HTTP plugin's own errors do not (reqwest's Display drops
+ *   it), so through the plugin this is recorded as `net` still.
  * - `cancel`: another address answered first, so this one was stopped.
  * - `net`: any other transport failure. DNS, TCP and TLS all land here:
  *   the HTTP plugin reports every one as the same sentence (reqwest's
@@ -73,7 +79,7 @@ export type TracePhase = "challenge" | "health" | "req" | "refresh" | "retry";
  * - `pending`: not settled yet. Rendered as `budget` when a caller gives
  *   up waiting -- see `renderTrace`.
  */
-export type TraceOutcome = `h${number}` | "timeout" | "scope" | "cancel" | "net" | "blockpage" | "pending";
+export type TraceOutcome = `h${number}` | "timeout" | "scope" | "local" | "cancel" | "net" | "blockpage" | "pending";
 
 export interface TraceEntry {
   phase: TracePhase;
@@ -133,9 +139,12 @@ export function settleAttempt(
  * says nothing about the network, and means the build's permission list
  * is wrong. Everything else is the network's doing and indistinguishable
  * from here. */
-export function failureOutcome(err: unknown): "scope" | "net" {
+export function failureOutcome(err: unknown): "scope" | "local" | "net" {
   const text = typeof err === "string" ? err : err instanceof Error ? err.message : "";
-  return /not allowed on the configured scope/i.test(text) ? "scope" : "net";
+  if (/not allowed on the configured scope/i.test(text)) return "scope";
+  // Windows' WSAEACCES, by its number, its name or its sentence.
+  if (/os error 10013\b|WSAEACCES|forbidden by its access permissions/i.test(text)) return "local";
+  return "net";
 }
 
 /** `host` or `host:port` -- the unit that gets blocked. No scheme, no

@@ -67,6 +67,12 @@ const PHONE_THROUGH = new Set([
  *    that address takes it. **Measured** for Stealth on 2026-10-06.
  *  - OpenVPN: around. `redirect-gateway` adds a host route for the
  *    remote via the old gateway. Not measured.
+ *  - On both, while the service also confines the session's IPv4 to the
+ *    tunnel (`ipv4Confined: true`, the service's `engines::confinement`),
+ *    only the engine may use that route: this app's request to the
+ *    server's address is refused on the PC (10013) instead, and the app
+ *    does not make it (`confined` in connected-mirrors.ts). Still
+ *    "around" here -- the route is -- for the egress check's purposes.
  *  - IKEv2: around. Windows' own client routes the server via the
  *    physical interface. Not measured.
  *  - WireGuard: through. wireguard.exe installs no route for the
@@ -109,6 +115,25 @@ export function serverHostsOf(user: DialledCredential): string[] {
   add(user.connection?.publicParams?.endpointHost);
   const endpoint = user.credentials?.endpoint;
   if (typeof endpoint === "string") add(hostOfEndpoint(endpoint));
+  return hosts;
+}
+
+/** Every host the given credentials' engines may dial, once across all of
+ * them.
+ *
+ * What the Windows connect sends the service as `knownNodes`: before it
+ * builds a tunnel, the service removes host routes to these servers that
+ * an earlier session left on the physical adapter. Releases up to 0.9.48
+ * left one after every OpenVPN session, and the next session's checks
+ * against that node's mirror then went around the tunnel (measured on the
+ * VM). Names are sent as written; the service acts on addresses only. */
+export function knownServerHosts(users: readonly DialledCredential[]): string[] {
+  const hosts: string[] = [];
+  for (const user of users) {
+    for (const host of serverHostsOf(user)) {
+      if (!hosts.includes(host)) hosts.push(host);
+    }
+  }
   return hosts;
 }
 

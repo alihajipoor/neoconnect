@@ -301,3 +301,34 @@ describe("a write, sent one endpoint at a time", () => {
     expect(seen).toEqual([MIRROR]);
   });
 });
+
+describe("a page the request ends on", () => {
+  /** The page is never read -- whatever it says is not the backend's -- and
+   * under the HTTP plugin an unread body is a response parked on the Rust
+   * side, holding its connection open for the life of the app. A request
+   * made on the bare line before a connect then went on sending
+   * keep-alives by the physical adapter for the whole session. Cancelling
+   * the body is what tells the plugin to let it go. */
+  it("foreign_answer_body_is_cancelled", async () => {
+    const cancelled: string[] = [];
+    const trackedPage = (status: number) =>
+      new Response(
+        new ReadableStream({
+          start: (controller) => controller.enqueue(new TextEncoder().encode(`<html>${status}</html>`)),
+          cancel: () => {
+            cancelled.push(String(status));
+          },
+        }),
+        { status, headers: { "content-type": "text/html" } },
+      );
+    serve({
+      [MIRROR]: { after: 0, reply: () => trackedPage(404) },
+      [CDN]: "unreachable",
+      [OTHER]: "unreachable",
+    });
+    const result = await publicRequest("/config");
+    expect(result).toMatchObject({ ok: false, status: 404, page: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cancelled).toEqual(["404"]);
+  });
+});

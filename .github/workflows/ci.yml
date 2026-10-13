@@ -76,6 +76,13 @@ jobs:
       - name: Committed capability files are not build output
         run: bash scripts/check-committed-capabilities.sh
 
+      # No job builds the backend, panel or discord-bot images, so a
+      # Dockerfile that installs before the files pnpm reads first is
+      # otherwise found by the next production deploy. The first patched
+      # dependency did exactly that to all three.
+      - name: Dockerfiles copy what pnpm install reads
+        run: node scripts/check-docker-install-inputs.mjs
+
       - run: pnpm --filter @neoxify/backend prisma:generate
 
       # The one place a migration meets a real Postgres before production.

@@ -1,0 +1,70 @@
+diff --git a/dist-js/index.cjs b/dist-js/index.cjs
+index f1bba4502af349efbde8b94ac1b1773a490f4836..c1f6f24a6c77408a75ff32d29aa6a4bcd0049bf2 100644
+--- a/dist-js/index.cjs
++++ b/dist-js/index.cjs
+@@ -119,6 +119,16 @@ async function fetch(input, init) {
+     const dropBody = () => {
+         return core.invoke('plugin:http|fetch_cancel_body', { rid: responseRid });
+     };
++    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
++    // aborted while the answer was on its way. The body below hears an abort
++    // only through a listener on its stream, which an abort that has already
++    // happened never reaches: the answer was handed back with nothing to free
++    // it, and the Rust side kept it -- and its connection -- for the life of
++    // the webview. Release it, and reject as an aborted fetch does.
++    if (signal?.aborted) {
++        dropBody().catch(() => undefined);
++        throw new DOMException(ERROR_REQUEST_CANCELLED, 'AbortError');
++    }
+     const readChunk = async (controller) => {
+         let data;
+         try {
+@@ -161,6 +171,13 @@ async function fetch(input, init) {
+                 void dropBody();
+             }
+         });
++    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
++    // a null-body response is never read or cancelled, so nothing above
++    // ever frees it, and the Rust side keeps it -- and its HTTP/2 stream and
++    // connection -- for the life of the webview. Release it now.
++    if (body === null) {
++        dropBody().catch(() => undefined);
++    }
+     const res = new Response(body, {
+         status,
+         statusText
+diff --git a/dist-js/index.js b/dist-js/index.js
+index 01f0ea49e0fe45425adcb8596f57e97a92c8c958..8da26d6068aa25eca5102cdcce036ec83225a4ce 100644
+--- a/dist-js/index.js
++++ b/dist-js/index.js
+@@ -117,6 +117,16 @@ async function fetch(input, init) {
+     const dropBody = () => {
+         return invoke('plugin:http|fetch_cancel_body', { rid: responseRid });
+     };
++    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
++    // aborted while the answer was on its way. The body below hears an abort
++    // only through a listener on its stream, which an abort that has already
++    // happened never reaches: the answer was handed back with nothing to free
++    // it, and the Rust side kept it -- and its connection -- for the life of
++    // the webview. Release it, and reject as an aborted fetch does.
++    if (signal?.aborted) {
++        dropBody().catch(() => undefined);
++        throw new DOMException(ERROR_REQUEST_CANCELLED, 'AbortError');
++    }
+     const readChunk = async (controller) => {
+         let data;
+         try {
+@@ -159,6 +169,13 @@ async function fetch(input, init) {
+                 void dropBody();
+             }
+         });
++    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
++    // a null-body response is never read or cancelled, so nothing above
++    // ever frees it, and the Rust side keeps it -- and its HTTP/2 stream and
++    // connection -- for the life of the webview. Release it now.
++    if (body === null) {
++        dropBody().catch(() => undefined);
++    }
+     const res = new Response(body, {
+         status,
+         statusText

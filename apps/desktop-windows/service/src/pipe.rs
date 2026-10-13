@@ -304,6 +304,9 @@ fn state_after_a_drop(ledger: &Ledger) -> Option<Response> {
         ipv6_blocked: false,
         tunnel_dns_unprotected: false,
         split_tunnel_restart_needed: Vec::new(),
+        // No session, so nothing to say about one.
+        ipv4_confined: None,
+        confinement_problem: None,
     })
 }
 
@@ -624,7 +627,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888\nPostUp = calc.exe".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
         let reply = round_trip(name, &request).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
@@ -873,6 +876,61 @@ mod tests {
         assert!(gone, "the teardown queued behind the busy job never ran");
     }
 
+    /// A status answered while the owning thread is busy -- a diagnostics
+    /// snapshot holding it past STATUS_LOCK_WAIT -- still says what the
+    /// live session's IPv4 confinement is. It answered `None`, which the
+    /// app reads as "not a confined session": the warning over a tunnel
+    /// whose confinement failed went away and "You're protected" came back
+    /// until the next poll, and the refused server mirror was put back in
+    /// the order.
+    #[test]
+    fn a_busy_service_still_says_what_the_live_sessions_confinement_is() {
+        use crate::lifecycle::engine_watch::ConfinementReport;
+        struct Said(Option<bool>, Option<String>);
+        impl ConfinementReport for Said {
+            fn confined(&self) -> Option<bool> {
+                self.0
+            }
+            fn problem(&self) -> Option<String> {
+                self.1.clone()
+            }
+        }
+        let seen = || (true, Some("XRAY_VLESS_REALITY".to_string()), TunnelHealth::Unknown);
+        let read = |ledger: &Ledger| match fallback_state(ledger, seen(), false) {
+            Response::State { ipv4_confined, confinement_problem, connected, .. } => {
+                assert!(connected, "what the operating system shows is kept");
+                (ipv4_confined, confinement_problem)
+            }
+            other => panic!("expected a state, got {other:?}"),
+        };
+
+        let ledger = Ledger::new();
+        let live = ledger.begin("XRAY_VLESS_REALITY");
+        let report: Arc<dyn ConfinementReport> = Arc::new(Said(Some(false), Some("the filters could not be installed".into())));
+        ledger.note_confinement(live, Arc::downgrade(&report));
+        assert_eq!(read(&ledger), (Some(false), Some("the filters could not be installed".to_string())));
+
+        // A session that was never to be confined says nothing, as before.
+        let ledger = Ledger::new();
+        let live = ledger.begin("WIREGUARD");
+        let none: Arc<dyn ConfinementReport> = Arc::new(Said(None, None));
+        ledger.note_confinement(live, Arc::downgrade(&none));
+        assert_eq!(read(&ledger), (None, None));
+
+        // Nor does a session that has ended, or one whose hold is gone.
+        let ledger = Ledger::new();
+        let live = ledger.begin("OPENVPN");
+        ledger.note_confinement(live, Arc::downgrade(&report));
+        ledger.close(live);
+        assert_eq!(read(&ledger), (None, None));
+        let ledger = Ledger::new();
+        let live = ledger.begin("OPENVPN");
+        let gone: Arc<dyn ConfinementReport> = Arc::new(Said(Some(false), None));
+        ledger.note_confinement(live, Arc::downgrade(&gone));
+        drop(gone);
+        assert_eq!(read(&ledger), (None, None));
+    }
+
     /// The fallback answers from the ledger only when the kernel has
     /// said the engine ended and nothing has started since -- never on a
     /// live session, never on a fresh service.
@@ -1019,7 +1077,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
         let connect = tokio::spawn(async move { round_trip(name, &request).await });
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
@@ -1050,7 +1108,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(round_trip(name, &request).await.trim()).unwrap();
         assert!(parsed["message"].as_str().unwrap().contains("wireguard.exe"), "{parsed}");
     }
@@ -1067,7 +1125,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
         let reply = round_trip(name, &request).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
@@ -1117,6 +1175,30 @@ const GAMING_DNS_ARMABLE: bool = false;
 
 const GAMING_UNAVAILABLE: &str = "Gaming mode is not available in this version.";
 
+/// The status answered without the engine state, while the owning thread
+/// is busy: what the operating system shows of the tunnel (`seen`, from
+/// `engines::os_visible_tunnel`) and nothing it cannot vouch for -- except
+/// the live session's IPv4 confinement, which its hold says of itself
+/// through the ledger. Saying nothing there reads to the app as "not a
+/// confined session", and a warning that the confinement failed would
+/// vanish for as long as the owning thread was busy.
+fn fallback_state(ledger: &Ledger, seen: (bool, Option<String>, TunnelHealth), split_tunnel_active: bool) -> Response {
+    let (connected, protocol, health) = seen;
+    let (ipv4_confined, confinement_problem) = ledger.confinement();
+    Response::State {
+        connected,
+        protocol,
+        health,
+        split_tunnel_active,
+        split_tunnel_problem: None,
+        ipv6_blocked: false,
+        tunnel_dns_unprotected: false,
+        split_tunnel_restart_needed: Vec::new(),
+        ipv4_confined,
+        confinement_problem,
+    }
+}
+
 /// One request, one answer.
 ///
 /// The lock is taken per request rather than for the whole function, and
@@ -1163,6 +1245,8 @@ async fn dispatch(
                         ipv6_blocked: engines.ipv6_blocked(),
                         tunnel_dns_unprotected: engines.tunnel_dns_unprotected(),
                         split_tunnel_restart_needed: engines.split_tunnel_restart_needed(),
+                        ipv4_confined: engines.ipv4_confined(),
+                        confinement_problem: engines.confinement_problem(),
                     }
                 }),
             )
@@ -1196,21 +1280,10 @@ async fn dispatch(
                     // both say "nothing" while a Custom-mode rebuild has
                     // the adapter down or PowerShell fails. The app tells
                     // a customer their connection was lost only on `Down`.
-                    let Ok((connected, protocol, health)) =
-                        tokio::task::spawn_blocking(crate::engines::os_visible_tunnel).await
-                    else {
+                    let Ok(seen) = tokio::task::spawn_blocking(crate::engines::os_visible_tunnel).await else {
                         return Response::Error { message: "could not read the tunnel state".to_string() };
                     };
-                    Response::State {
-                        connected,
-                        protocol,
-                        health,
-                        split_tunnel_active: crate::split_tunnel::running_without_the_lock(),
-                        split_tunnel_problem: None,
-                        ipv6_blocked: false,
-                        tunnel_dns_unprotected: false,
-                        split_tunnel_restart_needed: Vec::new(),
-                    }
+                    fallback_state(ledger, seen, crate::split_tunnel::running_without_the_lock())
                 }
             }
         }
@@ -1342,7 +1415,7 @@ async fn dispatch(
                 }
             }
         }
-        Request::Connect { profile, exits } => {
+        Request::Connect { profile, exits, known_nodes } => {
             if crate::gaming::is_armed() {
                 return Response::Error {
                     message: "Gaming mode is on, and a VPN connection cannot run alongside it. \
@@ -1362,7 +1435,7 @@ async fn dispatch(
                         };
                     }
                     crate::engines::adopt_token(token);
-                    match engines.connect(&profile, &exits) {
+                    match engines.connect(&profile, &exits, &known_nodes) {
                         Ok(()) => Response::Ok,
                         Err(message) => Response::Error { message },
                     }

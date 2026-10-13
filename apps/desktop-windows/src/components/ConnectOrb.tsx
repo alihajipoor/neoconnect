@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { AlertTriangle, HelpCircle, Power } from "lucide-react";
+import { orbTone } from "../lib/orb-caution";
 import { cn } from "../lib/utils";
 
 export type ConnectionState =
@@ -64,11 +65,16 @@ export type ConnectionState =
  */
 export function ConnectOrb({
   state,
+  caution = false,
   disabled,
   onToggle,
   label,
 }: {
   state: ConnectionState;
+  /** A confirmed connection that has been "not fully protected" long
+   * enough to say so in colour (`lib/orb-caution.ts`): never a reading of
+   * a moment, which would turn every reconnect into an alarm. */
+  caution?: boolean;
   disabled?: boolean;
   onToggle: () => void;
   label: string;
@@ -77,17 +83,26 @@ export function ConnectOrb({
   // so the id has to be per-instance.
   const gradientId = useId();
 
-  const busy = state === "connecting" || state === "disconnecting" || state === "verifying";
-  const on = state === "connected";
-  const degraded = state === "degraded";
+  // One rule for every look, shared with the status dot (`orbTone`).
+  const tone = orbTone(state, caution);
+  const busy = tone === "busy";
+  const on = tone === "success";
+  // Connected, and not fully protected -- the IPv4 confinement would not go
+  // in, or Built-in, which is never confined. The tunnel is up and carrying,
+  // so the dial is a connected one; but not in the success green, which from
+  // across a room is the claim "fully protected", and without the success
+  // rings, which are that claim too. Not the "not carrying" triangle either:
+  // that is a different, worse fact.
+  const cautioned = tone === "caution";
+  const degraded = tone === "warning";
   // Up, but nothing has confirmed traffic is flowing. Deliberately given
   // neither the success rings nor the warning triangle: the rings are
   // the claim being withheld, and the triangle is the opposite claim.
-  const unconfirmed = state === "unverified";
+  const unconfirmed = tone === "highlight";
   // Rendered in grey rather than in the idle violet. The idle orb reads
   // as "press me to connect", which is a claim about the tunnel being
   // down, and that is precisely the claim this state exists to withhold.
-  const unsure = state === "unknown";
+  const unsure = tone === "muted";
 
   // r=54 in a 128 viewBox -> circumference 339.29. The arc is a quarter
   // while spinning, and 88% once connected (the gap keeps it reading as a
@@ -99,7 +114,7 @@ export function ConnectOrb({
   const CIRCUMFERENCE = 2 * Math.PI * 54;
   const dash = busy
     ? CIRCUMFERENCE * 0.25
-    : on
+    : on || cautioned
       ? CIRCUMFERENCE * 0.88
       : unconfirmed
         ? CIRCUMFERENCE * 0.72
@@ -126,7 +141,9 @@ export function ConnectOrb({
           "absolute size-28 rounded-full blur-2xl transition-colors duration-500",
           on
             ? "bg-success/35"
-            : degraded
+            : cautioned
+              ? "bg-warning/30"
+              : degraded
               ? "bg-warning/35"
               : unconfirmed
                 ? "bg-highlight/30"
@@ -146,7 +163,9 @@ export function ConnectOrb({
               stopColor={
                 on
                   ? "#10b981"
-                  : degraded
+                  : cautioned
+                    ? "#f59e0b"
+                    : degraded
                     ? "#f59e0b"
                     : unsure
                       ? "#94a3b8"
@@ -155,7 +174,7 @@ export function ConnectOrb({
                         : "#a78bfa"
               }
             />
-            <stop offset="1" stopColor={degraded ? "#f97316" : unsure ? "#64748b" : "#22d3ee"} />
+            <stop offset="1" stopColor={cautioned ? "#fbbf24" : degraded ? "#f97316" : unsure ? "#64748b" : "#22d3ee"} />
           </linearGradient>
         </defs>
         {/* The track was faint enough to disappear against the wash, so
@@ -203,7 +222,9 @@ export function ConnectOrb({
           // what make it a piece of glass catching light.
           on
             ? "border-success/40 bg-success/12 text-success shadow-[0_0_50px_-12px_var(--success),inset_0_1px_0_rgba(255,255,255,0.14),inset_0_-14px_28px_-14px_rgba(0,0,0,0.55)]"
-            : degraded
+            : cautioned
+              ? "border-warning/40 bg-warning/10 text-warning shadow-[0_0_50px_-14px_var(--warning),inset_0_1px_0_rgba(255,255,255,0.14),inset_0_-14px_28px_-14px_rgba(0,0,0,0.55)]"
+              : degraded
               ? "border-warning/45 bg-warning/12 text-warning shadow-[0_0_50px_-12px_var(--warning),inset_0_1px_0_rgba(255,255,255,0.14),inset_0_-14px_28px_-14px_rgba(0,0,0,0.55)]"
               : unconfirmed
                 ? "border-highlight/40 bg-highlight/10 text-highlight shadow-[0_0_50px_-16px_var(--highlight),inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-14px_28px_-14px_rgba(0,0,0,0.5)]"
@@ -217,7 +238,7 @@ export function ConnectOrb({
         ) : unsure ? (
           <HelpCircle className="size-7" strokeWidth={2.25} />
         ) : (
-          <Power className={cn("size-7 transition-transform duration-300", on && "scale-110")} strokeWidth={2.25} />
+          <Power className={cn("size-7 transition-transform duration-300", (on || cautioned) && "scale-110")} strokeWidth={2.25} />
         )}
         <span className="px-2 text-center text-xs leading-tight font-semibold tracking-wide">{label}</span>
       </button>
