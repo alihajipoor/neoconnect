@@ -14,7 +14,7 @@ import { AsnLookupService } from "../network-identity/asn-lookup.service";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
 import { AlertingService } from "../alerting/alerting.service";
 import { EmailService } from "../email/email.service";
-import type { RelayContext } from "../../common/relay/relay-arrival";
+import { RELAY_REGION_UNKNOWN_MESSAGE, type RelayContext } from "../../common/relay/relay-arrival";
 import {
   BUCKET_MS,
   GLOBAL_DAILY_CAP,
@@ -286,7 +286,9 @@ export class RelayAuthService implements OnModuleInit, OnModuleDestroy {
   /** The cheap refusals, before a caller is asked to spend anything on
    * proof of work: the owner has switched relay sign-up off, or the
    * caller's network is not registered in Iran (R3.1). An unknown network
-   * cannot sign up (F5). */
+   * cannot sign up either (F5), and is told so with its own code,
+   * RELAY_REGION_UNKNOWN: the app switches the relay off for a day on
+   * RELAY_REGION, and an unknown network may still sign in. */
   async assertSignupOpen(ctx: RelayContext, now = Date.now()): Promise<RelayAuthSettings> {
     const settings = await this.settings(now);
     if (settings.mode === RelayAuthMode.OFF) {
@@ -296,11 +298,18 @@ export class RelayAuthService implements OnModuleInit, OnModuleDestroy {
         message: "Signing up through the backup route is not available right now.",
       });
     }
-    if (ctx.region !== "IR" || ctx.asn === null) {
+    if (ctx.region !== null && ctx.region !== "IR") {
       throw new ForbiddenException({
         statusCode: 403,
         code: "RELAY_REGION",
         message: "The backup route is only for connections from inside Iran.",
+      });
+    }
+    if (ctx.region === null || ctx.asn === null) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        code: "RELAY_REGION_UNKNOWN",
+        message: RELAY_REGION_UNKNOWN_MESSAGE,
       });
     }
     return settings;

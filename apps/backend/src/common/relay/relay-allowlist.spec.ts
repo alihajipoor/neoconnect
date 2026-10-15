@@ -41,6 +41,7 @@ describe("the relay allowlist", () => {
         "POST /customer-auth/reset-password-code",
         "POST /customer-auth/reset-password-recovery",
         "POST /customer-auth/change-password",
+        "POST /customer-auth/set-password",
         "POST /customer-auth/unverified-email",
         "POST /customer-auth/recovery-code",
         "GET /customer/me",

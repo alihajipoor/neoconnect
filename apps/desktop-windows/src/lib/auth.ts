@@ -1,12 +1,15 @@
 import {
   apiRequest,
+  everyRouteFailed,
   LEAD_MS,
   mayHaveReachedBackend,
   publicRequest,
+  relayOnly,
   SLOW_ANSWER_MS,
   STOPPED_ANSWERING,
   unreachable,
 } from "./api";
+import { relayInstallHeaders, relaySignupOffered, skipNormalRoutes } from "./last-resort";
 import { apiEndpoints } from "./api-endpoints";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
 import { probeAddendum } from "./control-plane-probe";
@@ -14,7 +17,7 @@ import { newTrace, renderTrace, type EndpointTrace } from "./endpoint-trace";
 import { setTokens } from "./session";
 import { endCustomerSession, type SessionEnd } from "./session-end";
 import { clearGamingProfileCache } from "./customer";
-import { raceChallengeFor, solveQuietly, type Solution } from "./pow";
+import { raceChallengeFor, solveQuietly, type Challenge, type Solution } from "./pow";
 import { currentLanguage } from "./i18n";
 import { deviceHeaders } from "./device-identity";
 import { startSocialSignIn } from "./social-auth";
@@ -294,7 +297,128 @@ export async function register(email: string, password: string, referralCode?: s
     trace,
   );
   reportAuth("REGISTER", result, trace);
+  // Every ordinary route failed as only blocking explains: the backup
+  // route's own sign-up is offered instead (`relayRegister`). Not this
+  // sign-up sent through it -- that one mails a code the customer may
+  // have no way to read. Nothing is sent to the relay to decide this.
+  if (!result.ok && everyRouteFailed(result, trace) && (await relaySignupOffered())) {
+    return { ...result, relaySignup: true as const };
+  }
   return result;
+}
+
+/** A relay sign-up's answer: the session, and the recovery code shown
+ * once (docs/relay-last-resort.md, R3.2). */
+export interface RelaySignup {
+  accessToken: string;
+  refreshToken: string;
+  recoveryCode: string;
+  relayUnverified: true;
+}
+
+/** Signing up through the relay of last resort, without email
+ * verification (R3).
+ *
+ * Only through the relay: the backend answers this path nowhere else. The
+ * address is typed twice, since nothing confirms it (F9); the proof of
+ * work is the relay's own, harder one (`relay-signup`), priced by the
+ * backend for the caller and, advisorily, this install. On success the
+ * session is stored at once -- the account is usable, limited to an
+ * Ultimate voucher until the address is confirmed -- and the recovery
+ * code comes back for the screen to show, once. Consent is asked first
+ * if it never was (last-resort.ts). */
+export async function relayRegister(
+  email: string,
+  emailConfirm: string,
+  password: string,
+): Promise<ApiResult<{ recoveryCode: string }>> {
+  const unavailable: RequestFailure = { ok: false, error: "The backup route can't be used right now.", code: "RELAY_UNAVAILABLE" };
+  const challenge = await relayOnly<Challenge>(
+    "/login-challenge",
+    { method: "POST", body: JSON.stringify({ scope: "relay-signup" }), headers: relayInstallHeaders() },
+    "foreground",
+  );
+  if (challenge === null) return unavailable;
+  if (!challenge.ok) return challenge;
+  const solution = await solveQuietly(challenge.data);
+  const result = await relayOnly<RelaySignup>(
+    "/customer-auth/relay-register",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        email,
+        emailConfirm,
+        password,
+        locale: currentLanguage(),
+        ...(solution ? { challenge: solution } : {}),
+      }),
+      headers: { ...deviceHeaders(), ...relayInstallHeaders() },
+    },
+    "foreground",
+  );
+  if (result === null) return unavailable;
+  if (!result.ok) return result;
+  // As `login()` does: no previous customer's entitlement survives into
+  // this one's session.
+  clearGamingProfileCache();
+  await setTokens({ accessToken: result.data.accessToken, refreshToken: result.data.refreshToken });
+  return { ok: true, data: { recoveryCode: result.data.recoveryCode } };
+}
+
+/** A sign-in through the relay of last resort, after every ordinary route
+ * failed (`everyRouteFailed`) or while relay mode says they will.
+ *
+ * Sent to the relay alone and one step at a time, as a sign-in is
+ * everywhere: the challenge, then the attempt with its solution. An
+ * unverified account signing in from Iran this way is let in on a relay
+ * sign-up's terms (R4.2), which asks for that sign-up's harder proof of
+ * work: the backend says so with `CHALLENGE_REQUIRED` and scope
+ * `relay-signup`, and the attempt is made once more with one. Null when
+ * the relay was not dialled -- no consent, no relay, not Iran -- so the
+ * caller keeps the ordinary routes' own failure. Runs on the relay's own
+ * clock (`RELAY_CALL_MS` a call), which is how the sign-in's deadline
+ * grows by the relay's budget. */
+async function relaySignIn(
+  email: string,
+  password: string,
+  normal?: RequestFailure,
+): Promise<ApiResult<LoginResult> | null> {
+  const challenge = await relayOnly<Challenge>(
+    "/login-challenge",
+    { method: "POST", body: JSON.stringify({ scope: "customer", email }) },
+    "foreground",
+    normal,
+  );
+  if (challenge === null || !challenge.ok) return challenge;
+  const attempt = async (solution: Solution | undefined) =>
+    (await relayOnly<LoginResult>(
+      SIGN_IN_PATH,
+      {
+        method: "POST",
+        body: JSON.stringify({ email, password, ...(solution ? { challenge: solution } : {}) }),
+        headers: deviceHeaders(),
+      },
+      "foreground",
+      normal,
+    )) ?? { ...(normal ?? unreachable()), relayTried: true as const };
+  let result = await attempt(await solveQuietly(challenge.data));
+  if (!result.ok && result.code === "CHALLENGE_REQUIRED" && relayScope(result.body) === "relay-signup") {
+    const harder = await relayOnly<Challenge>(
+      "/login-challenge",
+      { method: "POST", body: JSON.stringify({ scope: "relay-signup" }), headers: relayInstallHeaders() },
+      "foreground",
+      normal,
+    );
+    if (harder === null || !harder.ok) return harder ?? result;
+    result = await attempt(await solveQuietly(harder.data));
+  }
+  return result;
+}
+
+/** The `scope` a CHALLENGE_REQUIRED refusal names, if any. */
+function relayScope(body: unknown): string | undefined {
+  const scope = body !== null && typeof body === "object" ? (body as { scope?: unknown }).scope : undefined;
+  return typeof scope === "string" ? scope : undefined;
 }
 
 /** Only stores a session when the account is actually verified --
@@ -302,21 +426,41 @@ export async function register(email: string, password: string, referralCode?: s
  * account can't end up with stray tokens sitting in the store. */
 export async function login(email: string, password: string) {
   const trace = newTrace();
-  const result = await sendWithChallenge<LoginResult>(
-    "/customer-auth/login",
-    // The email is sent with the challenge request so the server can
-    // price this attempt against that account's own recent failures --
-    // the case per-address rate limiting cannot see.
-    email,
-    (challenge) => ({
-      method: "POST",
-      body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
-      // Names this device to the customer's others ("Neoxify is in use on
-      // a Windows PC"). See device-identity.ts.
-      headers: deviceHeaders(),
-    }),
-    trace,
-  );
+  const ordinary = () =>
+    sendWithChallenge<LoginResult>(
+      "/customer-auth/login",
+      // The email is sent with the challenge request so the server can
+      // price this attempt against that account's own recent failures --
+      // the case per-address rate limiting cannot see.
+      email,
+      (challenge) => ({
+        method: "POST",
+        body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
+        // Names this device to the customer's others ("Neoxify is in use on
+        // a Windows PC"). See device-identity.ts.
+        headers: deviceHeaders(),
+      }),
+      trace,
+    );
+  // The relay of last resort, never raced: after the ordinary routes have
+  // all failed as only blocking explains, or first while relay mode says
+  // they will and they are not due to be asked again (last-resort.ts).
+  let result: ApiResult<LoginResult>;
+  if (skipNormalRoutes()) {
+    const relayed = await relaySignIn(email, password);
+    // Not dialled, unanswered there, or held by a tunnel that may well
+    // carry the ordinary routes: those are asked after all.
+    const fellThrough =
+      relayed === null || (!relayed.ok && (relayed.code === "RELAY_DISCONNECT" || (relayed.relayTried && relayed.noResponse)));
+    if (!fellThrough) result = relayed;
+    else {
+      result = await ordinary();
+      if (!result.ok && relayed !== null && !relayed.ok && relayed.relayTried) result = { ...result, relayTried: true };
+    }
+  } else {
+    result = await ordinary();
+    if (!result.ok && everyRouteFailed(result, trace)) result = (await relaySignIn(email, password, result)) ?? result;
+  }
   if (result.ok && !("requiresVerification" in result.data)) {
     // Before the tokens, not after. From here on any fetch is this
     // customer's, and a cache entry still holding the previous one's
@@ -383,6 +527,7 @@ export async function socialSignIn(
             method: "POST",
             body: JSON.stringify({ provider, token: outcome.token, locale }),
             headers: deviceHeaders(),
+            relay: "foreground",
           },
           trace,
         )
@@ -434,7 +579,7 @@ async function exchangeHandoff(
   const exchange = (body: { code: string; verifier?: string }) =>
     publicRequest<TokenPair>(
       "/customer-auth/social/exchange",
-      { method: "POST", body: JSON.stringify(body) },
+      { method: "POST", body: JSON.stringify(body), relay: "foreground" },
       trace,
     );
   if (!verifier) return exchange({ code });
@@ -449,6 +594,7 @@ export async function verifyEmailByCode(email: string, code: string) {
   return publicRequest<VerifyResult>("/customer-auth/verify-email-code", {
     method: "POST",
     body: JSON.stringify({ email, code }),
+    relay: "foreground",
   });
 }
 
@@ -470,6 +616,7 @@ export async function resendVerification(email: string) {
   return publicRequest<void>("/customer-auth/resend-verification", {
     method: "POST",
     body: JSON.stringify({ email }),
+    relay: "foreground",
   });
 }
 
@@ -487,7 +634,12 @@ export async function logout(): Promise<SessionEnd> {
   // The server call goes first, while the tunnel is still up: on a
   // filtered network the tunnel is the likeliest route to the control
   // plane, and this is what revokes the refresh token there.
-  const told = apiRequest<void>("/customer-auth/logout", { method: "POST" }).catch(() => undefined);
+  // Through the relay too, without asking (F17): an unverified account
+  // holds three sessions, and one that cannot sign out holds one for a
+  // month. The tunnel gate keeps it off the relay while a tunnel is up.
+  const told = apiRequest<void>("/customer-auth/logout", { method: "POST", relay: "background" }).catch(
+    () => undefined,
+  );
   await Promise.race([told, new Promise((r) => setTimeout(r, LOGOUT_SERVER_BUDGET_MS))]);
   // And this runs regardless of what it said: a sign-out the network
   // refused is still a sign-out on this machine, and leaving the tunnel
@@ -536,6 +688,7 @@ export async function changePassword(currentPassword: string, newPassword: strin
   const result = await apiRequest<TokenPair>("/customer-auth/change-password", {
     method: "POST",
     body: JSON.stringify({ currentPassword, newPassword }),
+    relay: "foreground",
   });
   if (result.ok) {
     await setTokens(result.data);
@@ -554,6 +707,7 @@ export async function forgotPassword(email: string) {
   return publicRequest<void>("/customer-auth/forgot-password", {
     method: "POST",
     body: JSON.stringify({ email }),
+    relay: "foreground",
   });
 }
 
@@ -568,5 +722,53 @@ export async function resetPasswordByCode(email: string, code: string, newPasswo
   return publicRequest<void>("/customer-auth/reset-password-code", {
     method: "POST",
     body: JSON.stringify({ email, code, newPassword }),
+    relay: "foreground",
   });
+}
+
+/** Resets the password with the recovery code: the way back in when the
+ * mailbox cannot be reached (docs/relay-last-resort.md, R4.3). The code is
+ * spent, and a new one comes back, to be shown once. */
+export async function resetPasswordByRecoveryCode(email: string, recoveryCode: string, newPassword: string) {
+  return publicRequest<{ recoveryCode: string }>("/customer-auth/reset-password-recovery", {
+    method: "POST",
+    body: JSON.stringify({ email, recoveryCode, newPassword }),
+    relay: "foreground",
+  });
+}
+
+/** Creates or replaces the signed-in customer's recovery code, returned
+ * once (R4.3). The current password re-authenticates; an account without
+ * one passes none, and the backend asks for a sign-in from the last
+ * fifteen minutes instead (`REAUTH_REQUIRED`). */
+export async function createRecoveryCode(currentPassword: string | undefined) {
+  return apiRequest<{ recoveryCode: string }>("/customer-auth/recovery-code", {
+    method: "POST",
+    body: JSON.stringify(currentPassword ? { currentPassword } : {}),
+    relay: "foreground",
+  });
+}
+
+/** Gives a Google, Apple or Facebook account a password, so it can still
+ * sign in when those cannot be reached (R4.4). On a sign-in from the last
+ * fifteen minutes (`REAUTH_REQUIRED` otherwise). */
+export async function setPassword(newPassword: string) {
+  return apiRequest<void>("/customer-auth/set-password", {
+    method: "POST",
+    body: JSON.stringify({ newPassword }),
+    relay: "foreground",
+  });
+}
+
+/** Corrects an address that has not been confirmed (F9): password, the
+ * new address twice, three a day. The backend hands back fresh tokens,
+ * since the old ones carry the old address. */
+export async function changeUnverifiedEmail(email: string, emailConfirm: string, password: string) {
+  const result = await apiRequest<TokenPair>("/customer-auth/unverified-email", {
+    method: "POST",
+    body: JSON.stringify({ email, emailConfirm, password }),
+    relay: "foreground",
+  });
+  if (result.ok) await setTokens(result.data);
+  return result;
 }

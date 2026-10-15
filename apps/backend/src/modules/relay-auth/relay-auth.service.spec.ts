@@ -135,7 +135,11 @@ describe("relay sign-up gate (R3.1)", () => {
   it("wants a network registered in Iran, and a known one", async () => {
     const { service } = world();
     expect(await refusal(service.reserveSignup(ctx({ region: "DE" })))).toBe("RELAY_REGION");
-    expect(await refusal(service.reserveSignup(ctx({ region: null, asn: null })))).toBe("RELAY_REGION");
+    // Unknown is said apart from outside Iran: the app switches the relay
+    // off for a day only on RELAY_REGION.
+    expect(await refusal(service.reserveSignup(ctx({ region: null, asn: null })))).toBe("RELAY_REGION_UNKNOWN");
+    expect(await refusal(service.assertSignupOpen(ctx({ region: null })))).toBe("RELAY_REGION_UNKNOWN");
+    expect(await refusal(service.assertSignupOpen(ctx({ region: "IR", asn: null })))).toBe("RELAY_REGION_UNKNOWN");
     await expect(service.assertSignupOpen(ctx({ region: null }))).rejects.toBeInstanceOf(ForbiddenException);
   });
 });
@@ -227,7 +231,9 @@ describe("an unverified sign-in over the relay (R4.2)", () => {
     expect(await refusal(world({ mode: RelayAuthMode.OFF }).service.admitUnverifiedSignIn(ctx(), "c1", 18))).toBe(
       "RELAY_SIGNUP_OFF",
     );
-    expect(await refusal(world().service.admitUnverifiedSignIn(ctx({ region: null }), "c1", 18))).toBe("RELAY_REGION");
+    expect(await refusal(world().service.admitUnverifiedSignIn(ctx({ region: null }), "c1", 18))).toBe(
+      "RELAY_REGION_UNKNOWN",
+    );
     const full = world();
     full.seed(64999, 200);
     expect(await refusal(full.service.admitUnverifiedSignIn(ctx(), "c1", 18))).toBe("RELAY_SIGNUP_LIMIT");

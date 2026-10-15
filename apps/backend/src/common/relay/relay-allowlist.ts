@@ -49,6 +49,10 @@ export const RELAY_ALLOWLIST: readonly RelayRoute[] = [
   { method: "POST", path: "/customer-auth/reset-password-code" },
   { method: "POST", path: "/customer-auth/reset-password-recovery" },
   { method: "POST", path: "/customer-auth/change-password" },
+  // A password for a Google, Apple or Facebook account, none of which can
+  // be reached during an intranet (R4.4). Refused to an unverified
+  // account by the CustomerJwtAuthGuard like everything not marked.
+  { method: "POST", path: "/customer-auth/set-password" },
   { method: "POST", path: "/customer-auth/unverified-email" },
   { method: "POST", path: "/customer-auth/recovery-code" },
 

@@ -7,7 +7,29 @@ import type { TranslationKey } from "./i18n";
  * and a sign-in sent in English while country detection switched the app
  * to Persian failed in English under a right-to-left Persian screen. */
 export type ShownFailure = Pick<RequestFailure, "error"> &
-  Partial<Pick<RequestFailure, "noResponse" | "status" | "blockPage">>;
+  Partial<Pick<RequestFailure, "noResponse" | "status" | "blockPage" | "code" | "relayTried">>;
+
+/** Refusals worded here rather than in the backend's English, by their
+ * code: the relay of last resort's (docs/relay-last-resort.md), whose
+ * customers are almost all reading Persian. */
+const CODED: Readonly<Record<string, TranslationKey>> = {
+  // A tunnel is up, or being brought up, and the relay is only dialled
+  // with none (R1.5, F13).
+  RELAY_DISCONNECT: "relay.disconnect",
+  RELAY_REGION: "relay.region",
+  // A sign-up on a network the backend's table cannot place: not known to
+  // be outside Iran, so not told it is.
+  RELAY_REGION_UNKNOWN: "relay.regionUnknown",
+  RELAY_SIGNUP_OFF: "relay.signupOff",
+  RELAY_SIGNUP_LIMIT: "relay.signupLimit",
+  RELAY_UNAVAILABLE: "relay.unavailable",
+  EMAIL_MISMATCH: "relay.emailMismatch",
+  DISPOSABLE_EMAIL: "relay.disposableEmail",
+  VOUCHER_NOT_ALLOWED: "voucher.notAllowed",
+  VERIFY_EMAIL: "verify.required",
+  REAUTH_REQUIRED: "recovery.reauth",
+  ADDRESS_CHANGE_LIMIT: "unverified.limit",
+};
 
 /** `t` from `useI18n()`, or anything shaped like it. */
 type Translate = (key: TranslationKey, vars?: Record<string, string | number>) => string;
@@ -44,7 +66,12 @@ type Translate = (key: TranslationKey, vars?: Record<string, string | number>) =
  * from outside the API layer (a store purchase, a provider's refusal)
  * shows its own sentence, as before. */
 export function failureText(failure: ShownFailure, t: Translate): string {
+  const coded = failure.code !== undefined ? CODED[failure.code] : undefined;
+  if (coded !== undefined) return t(coded);
   if (failure.noResponse) {
+    // The backup server too, but only when it was dialled: a relay that was
+    // not asked -- no consent, no relay, not Iran -- is not mentioned.
+    if (failure.relayTried && failure.error !== STOPPED_ANSWERING) return t("api.unreachableWithBackup");
     if (failure.blockPage) return t("api.blockedByNetwork");
     return t(failure.error === STOPPED_ANSWERING ? "api.stoppedAnswering" : "api.unreachable");
   }

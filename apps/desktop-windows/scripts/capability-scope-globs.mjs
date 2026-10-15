@@ -70,10 +70,20 @@ export function inScope(host, knownHosts) {
   });
 }
 
-/** The hosts an endpoint bundle names, skipping anything malformed. */
+/** The hosts an endpoint bundle names for ordinary requests, skipping
+ * anything malformed.
+ *
+ * Panel and mirror entries only. A `lastResort` entry is the relay in
+ * Iran, reached by address through its own pinned command
+ * (src-tauri/src/relay_http.rs), and must never be in the HTTP plugin's
+ * scope: there it would be a base any page could send anything to, and
+ * the one place its address is meant to be dialled from is that command
+ * (docs/relay-last-resort.md, R1.1). Clients keep nothing else from a
+ * bundle anyway (`isEntry` in endpoint-bundle.ts). */
 export function bundleHosts(bundle) {
   const hosts = new Set();
   for (const e of bundle?.endpoints ?? []) {
+    if (e?.kind !== "panel" && e?.kind !== "mirror") continue;
     if (typeof e?.url !== "string") continue;
     try {
       hosts.add(new URL(e.url).hostname);
