@@ -1,5 +1,6 @@
 mod control_plane_probe;
 mod health_ip;
+mod relay_http;
 mod vpn;
 
 use tauri::{Emitter, Manager};
@@ -184,7 +185,11 @@ pub fn run() {
             // address failed at. See control_plane_probe.rs.
             control_plane_probe::probe_control_plane,
             // And its stop, for when a connect starts while it runs.
-            control_plane_probe::cancel_control_plane_probe
+            control_plane_probe::cancel_control_plane_probe,
+            // The relay of last resort: an allowed API call, by address
+            // and SPKI pin, when no ordinary route answers. See
+            // relay_http.rs.
+            relay_http::relay_request
         ])
         // Closing the window is an instruction, and it has to be acted
         // on rather than inferred.

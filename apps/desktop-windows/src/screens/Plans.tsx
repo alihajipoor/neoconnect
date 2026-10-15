@@ -10,6 +10,7 @@ import { RedeemVoucher } from "../components/RedeemVoucher";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { StillTrying } from "../components/StillTrying";
+import { useRelayMode } from "../components/BackupRoute";
 
 type Stage =
   | { name: "choosing" }
@@ -49,6 +50,7 @@ export function Plans({
   onActivated,
   onBack,
   voucherCode,
+  notice,
 }: {
   onActivated: () => void;
   onBack: () => void;
@@ -56,16 +58,34 @@ export function Plans({
    * arrived on a /r/CODE link. Undefined in the desktop and Android
    * clients, which have no link to arrive from. */
   voucherCode?: string;
+  /** A sentence above everything: what brought the customer here. Set
+   * after a sign-up through the relay of last resort, which can take an
+   * Ultimate voucher and nothing else until the address is confirmed. */
+  notice?: string | null;
 }) {
   const { t } = useI18n();
+  // Through the relay of last resort a voucher can be redeemed, and card
+  // or crypto checkout cannot: the checkout page is the provider's, and
+  // the relay does not reach it. Said, and the buttons held, rather than
+  // starting a payment nobody could finish.
+  // TODO(relay checkout): the payment-only path (docs/relay-last-resort.md,
+  // "Not done here") is a later infra item; until then this stays.
+  const { active: viaRelay, status: relayStatus } = useRelayMode();
   const [plans, setPlans] = useState<SubscriptionPlan[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The backend keeps the plan list from an account whose address is not
+  // confirmed -- a relay sign-up's (R3.3) -- with 403 VERIFY_EMAIL. Not a
+  // fault: such an account takes an Ultimate voucher, above, and nothing
+  // else until it confirms. So the calm reminder, never the red error
+  // banner, and no plan list left loading for ever.
+  const [limited, setLimited] = useState(false);
   const [stage, setStage] = useState<Stage>({ name: "choosing" });
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     void getPlans().then((result) => {
       if (result.ok) setPlans(result.data);
+      else if (result.code === "VERIFY_EMAIL") setLimited(true);
       else setError(failureText(result, t));
     });
   }, []);
@@ -216,6 +236,26 @@ export function Plans({
         <p className="text-xs text-muted-foreground">{t("plans.subtitle")}</p>
       </div>
 
+      {notice ? (
+        <p className="rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs text-muted-foreground" data-plans-notice>
+          {notice}
+        </p>
+      ) : null}
+
+      {/* Said once: a sign-up's notice above already says it. */}
+      {limited && !notice ? (
+        <p className="rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs text-muted-foreground" data-plans-limited>
+          {t("verify.reminder")}
+        </p>
+      ) : null}
+
+      {viaRelay ? (
+        <div className="flex flex-col gap-1 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs text-muted-foreground" data-relay-checkout>
+          <p>{t("relay.checkoutUnavailable")}</p>
+          {relayStatus?.intranet ? <p>{t("relay.otherPlansAbroad")}</p> : null}
+        </div>
+      ) : null}
+
       {error ? (
         <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {error}
@@ -234,7 +274,7 @@ export function Plans({
           follows the window rather than being fixed, so this still reads
           correctly at the minimum size. */}
       <div className="grid flex-1 content-start gap-3 overflow-y-auto [grid-template-columns:repeat(auto-fit,minmax(260px,1fr))]">
-        {plans === null ? (
+        {limited ? null : plans === null ? (
           <div>
             <p className="text-sm text-muted-foreground">{t("plans.loading")}</p>
             <StillTrying waiting={error === null} className="mt-2 text-left" />
@@ -316,7 +356,7 @@ export function Plans({
               <div className="flex gap-2">
                 <Button
                   onClick={() => void buy(plan, "NOWPAYMENTS")}
-                  disabled={stage.name === "starting"}
+                  disabled={stage.name === "starting" || viaRelay}
                   className="flex-1 gap-2"
                 >
                   <Wallet className="size-4" />
@@ -325,7 +365,7 @@ export function Plans({
                 <Button
                   variant="ghost"
                   onClick={() => void buy(plan, "STRIPE")}
-                  disabled={stage.name === "starting"}
+                  disabled={stage.name === "starting" || viaRelay}
                   className="flex-1 gap-2 border border-white/10"
                 >
                   <CreditCard className="size-4" />

@@ -156,7 +156,11 @@ describe("relay arrival", () => {
       headers: { "X-Forwarded-For": "198.51.100.7" },
     });
     expect(signup.status).toBe(403);
-    expect(await signup.json()).toMatchObject({ code: "RELAY_REGION" });
+    // Its own code, not RELAY_REGION: a network the table cannot place
+    // is not one it placed outside Iran, and the app switches the relay
+    // off for a day only on the second -- which would lock a caller the
+    // table merely lacks out of the relay sign-in this route still allows.
+    expect(await signup.json()).toMatchObject({ code: "RELAY_REGION_UNKNOWN" });
     const fromIran = await fetch(`${relay}/customer-auth/relay-register`, {
       method: "POST",
       headers: { "X-Forwarded-For": "192.0.2.10" },

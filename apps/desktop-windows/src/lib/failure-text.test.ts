@@ -171,6 +171,17 @@ describe("a request something answered", () => {
     expect(failureText(failure, fa)).toBe("email must be an email");
   });
 
+  it("tells a network the backend could not place from one it placed outside Iran", () => {
+    // An ASN missing from the backend's table, or the table not loaded:
+    // saying "only for connections from inside Iran" to somebody in Iran
+    // would be untrue.
+    const unknown = { error: "...", status: 403, code: "RELAY_REGION_UNKNOWN" };
+    expect(failureText(unknown, en)).toBe(DICTIONARIES.en["relay.regionUnknown"]);
+    expect(failureText(unknown, fa)).toBe(DICTIONARIES.fa["relay.regionUnknown"]);
+    expect(failureText(unknown, en)).not.toBe(DICTIONARIES.en["relay.region"]);
+    expect(failureText({ error: "...", status: 403, code: "RELAY_REGION" }, en)).toBe(DICTIONARIES.en["relay.region"]);
+  });
+
   it("does not take a backend sentence for an unworded answer because of its status", () => {
     // A 503 the backend wrote for the customer keeps its words.
     expect(failureText({ error: "Try again in a minute.", status: 503 }, en)).toBe("Try again in a minute.");

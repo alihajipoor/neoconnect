@@ -6,6 +6,7 @@ import { useI18n } from "../lib/i18n";
 import { failureText, type ShownFailure } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
 import { SocialSignIn } from "../components/SocialSignIn";
+import { useRelayMode } from "../components/BackupRoute";
 
 export function Login({
   onSuccess,
@@ -31,6 +32,9 @@ export function Login({
   // more while a hard proof of work is solved; past eight the button's "Signing in..." gets a
   // line saying it is still trying.
   const pendingLong = useStillTrying(pending);
+  // During a declared intranet, what will not work is said before it is
+  // tried (docs/relay-last-resort.md, R4.4) -- only when declared (I4).
+  const { active: relayActive, status: relayStatus } = useRelayMode();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -65,6 +69,11 @@ export function Login({
         {notice ? (
           <p className="mb-3 rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-success">
             {notice}
+          </p>
+        ) : null}
+        {relayActive && relayStatus?.intranet ? (
+          <p className="mb-3 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs text-muted-foreground" data-intranet-limits>
+            {t("relay.intranetLimits")}
           </p>
         ) : null}
         {/* A social sign-in lands straight on the dashboard: the

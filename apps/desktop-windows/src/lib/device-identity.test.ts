@@ -15,6 +15,9 @@ vi.mock("./api", () => ({
   apiRequest: vi.fn(),
   LEAD_MS: 1_500,
   SLOW_ANSWER_MS: 20_000,
+  // The relay of last resort is not what these are about: never asked.
+  everyRouteFailed: () => false,
+  relayOnly: async () => null,
 }));
 vi.mock("./api-endpoints", () => ({ attemptedEndpoints: async () => undefined }));
 vi.mock("./attempts", async (original) => {

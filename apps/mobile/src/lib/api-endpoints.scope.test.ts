@@ -48,11 +48,22 @@ describe("mobile API endpoints are within the HTTP capability scope", () => {
     // network, and must not fail the suite.
     if (!seed.payload) return;
     const bundle = JSON.parse(Buffer.from(seed.payload, "base64").toString("utf8")) as {
-      endpoints: { url: string }[];
+      endpoints: { url: string; kind?: string }[];
     };
     expect(bundle.endpoints.length).toBeGreaterThan(0);
     bundle.endpoints.forEach((endpoint, index) => {
       const probe = endpoint.url + "/customer/me";
+      // The relay in Iran is dialled by its own pinned command, never
+      // through the HTTP plugin; capability-scope-globs.mjs keeps it out
+      // of the scope on purpose, and it must stay out.
+      if (endpoint.kind === "lastResort") {
+        expect(
+          (allowed ?? []).some((entry) => matchesCapabilityGlob(entry.url, probe)),
+          describeEndpoint(endpoint.url, index) +
+            " is a lastResort entry and must not be in capabilities/default.json",
+        ).toBe(false);
+        return;
+      }
       expect(
         (allowed ?? []).some((entry) => matchesCapabilityGlob(entry.url, probe)),
         // By index and port, never by address: this repository is public

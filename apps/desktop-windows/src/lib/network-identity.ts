@@ -90,6 +90,71 @@ export function rememberNetwork(body: Record<string, unknown>, now = Date.now())
   } catch {
     // Persisting is a convenience; the in-memory value still stands.
   }
+  if (current && typeof body.country === "string" && /^[A-Z]{2}$/.test(body.country)) {
+    stampCountry(`asn:${current.asn}`, body.country, now);
+  }
+}
+
+/** Where each network's answers were last stamped as coming from, by the
+ * server's CDN (`country` on `/health/ip`), keyed as
+ * `networkKeyFromAsn` keys them.
+ *
+ * The relay of last resort's evidence that a network is in Iran
+ * (docs/relay-last-resort.md, R1.3; last-resort.ts). Only from a baseline
+ * reading, as the network itself is: one taken through the tunnel would
+ * stamp the exit's country on the customer's network. A baseline with no
+ * country -- a node mirror answered it, not the CDN -- leaves the last
+ * stamp as it was rather than clearing it: the network has not moved. */
+const COUNTRY_KEY = "neoxify.network.country";
+const MAX_STAMPS = 16;
+
+function readStamps(): Record<string, { country: string; at: number }> {
+  try {
+    const raw = storage()?.getItem(COUNTRY_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    return parsed !== null && typeof parsed === "object" ? (parsed as Record<string, { country: string; at: number }>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function stampCountry(key: string, country: string, now: number): void {
+  try {
+    const stamps = readStamps();
+    stamps[key] = { country, at: now };
+    const kept = Object.entries(stamps)
+      .filter(([, stamp]) => typeof stamp?.country === "string" && typeof stamp.at === "number")
+      .sort((a, b) => b[1].at - a[1].at)
+      .slice(0, MAX_STAMPS);
+    storage()?.setItem(COUNTRY_KEY, JSON.stringify(Object.fromEntries(kept)));
+  } catch {
+    // Unknown is the answer until the next baseline.
+  }
+}
+
+/** The country this network's answers were last stamped with, as an
+ * upper-case ISO code, or null when none has been. */
+export function stampedCountry(key: string | null): string | null {
+  if (key === null) return null;
+  const stamp = readStamps()[key];
+  return typeof stamp?.country === "string" ? stamp.country : null;
+}
+
+/** The country of the latest stamp on any network, or null when nothing
+ * was ever stamped on this install.
+ *
+ * For when this network cannot be named: `networkKeyFromAsn` forgets the
+ * network a day after the last baseline, and with every route blocked no
+ * baseline comes -- so it is unknown for as long as a blackout lasts. Where
+ * the server last placed the device is still the best word there is on
+ * where it is. */
+export function latestStampedCountry(): string | null {
+  let latest: { country: string; at: number } | null = null;
+  for (const stamp of Object.values(readStamps())) {
+    if (typeof stamp?.country !== "string" || typeof stamp.at !== "number") continue;
+    if (latest === null || stamp.at > latest.at) latest = stamp;
+  }
+  return latest?.country ?? null;
 }
 
 /** The network as last read, if that was recent enough to still be
@@ -137,4 +202,9 @@ export function networkKeyFromAsn(now = Date.now()): string | null {
 export function resetNetworkForTests(): void {
   current = null;
   restored = false;
+  try {
+    storage()?.removeItem(COUNTRY_KEY);
+  } catch {
+    // Nothing held.
+  }
 }

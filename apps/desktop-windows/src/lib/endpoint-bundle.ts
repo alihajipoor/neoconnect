@@ -45,6 +45,28 @@ export interface EndpointEntry {
   region?: string;
 }
 
+/** The relay of last resort: a box inside Iran, reached by IPv4 address
+ * with no SNI, whose certificate is accepted by SPKI pin alone
+ * (src-tauri/src/relay_http.rs).
+ *
+ * Its own kind in the signed list (`kind: "lastResort"`), and kept here
+ * in a list of its own, `EndpointBundle.lastResort`, never among
+ * `endpoints`. That separation is the safety property: everything that
+ * sends a normal request -- the race, the walks, `apiEndpoints()`, the
+ * remembered address, the updater, the probes, the egress check, the
+ * build-time HTTP scope -- reads `endpoints` and nothing else, and a
+ * client from before this kind existed drops the entry as unknown. Only
+ * last-resort.ts reads this list, and only through the Rust command. */
+export interface LastResortEntry {
+  /** `https://<dotted IPv4>[:port]/api`, exactly. */
+  url: string;
+  /** One to three `sha256/<base64>` SPKI pins: the box's key and a
+   * standby. */
+  pins: string[];
+  /** ISO 3166-1 alpha-2, lowercase. Informational. */
+  region?: string;
+}
+
 export interface EndpointBundle {
   /** Monotonic. A bundle is only accepted if it is strictly newer than
    * the one already held, so a censor replaying a genuinely-signed older
@@ -53,6 +75,9 @@ export interface EndpointBundle {
   v: number;
   issuedAt: string;
   endpoints: EndpointEntry[];
+  /** The relay entries, apart from `endpoints` (see `LastResortEntry`).
+   * Absent where the bundle was not read by `verifyBundle`. */
+  lastResort?: LastResortEntry[];
 }
 
 /** Envelope as published. The payload is carried as bytes rather than as
@@ -100,6 +125,81 @@ function isEntry(value: unknown): value is EndpointEntry {
   if (e.pin !== undefined && typeof e.pin !== "string") return false;
   if (e.region !== undefined && typeof e.region !== "string") return false;
   return true;
+}
+
+/** A decimal number of one to `maxDigits` digits with no leading zero,
+ * as relay_http.rs reads one (`decimal`). */
+function decimal(text: string, maxDigits: number): number | null {
+  if (text === "" || text.length > maxDigits || !/^[0-9]+$/.test(text)) return null;
+  if (text.length > 1 && text.startsWith("0")) return null;
+  return Number(text);
+}
+
+/** Why `url` cannot be a relay's base, or null. Read off the text rather
+ * than through a URL parser, which accepts an address in octal, hex and
+ * packed spellings and normalises them into a different server than the
+ * text appears to name -- the same rule as `parse_base` in
+ * relay_http.rs and `lastResortProblem` in the backend. */
+function relayBaseProblem(url: unknown): string | null {
+  if (typeof url !== "string") return "url must be a string";
+  if (!url.startsWith("https://") || !url.endsWith("/api")) return "url must be https://<address>/api";
+  const authority = url.slice("https://".length, -"/api".length);
+  const [host, port, extra] = authority.split(":");
+  if (extra !== undefined) return "url has more than one port";
+  if (port !== undefined) {
+    const value = decimal(port, 5);
+    if (value === null || value === 0 || value > 65_535) return "port must be 1 to 65535";
+  }
+  const octets = host.split(".").map((part) => decimal(part, 3));
+  if (octets.length !== 4 || octets.some((o) => o === null || o > 255)) return "host must be a dotted IPv4 address";
+  const [a, b] = octets as number[];
+  // "This network", loopback, link-local, multicast and broadcast cannot
+  // be a relay on the internet.
+  if (a === 0 || a === 127 || (a === 169 && b === 254) || (a >= 224 && a <= 239) || host === "255.255.255.255") {
+    return "address cannot be a relay";
+  }
+  return null;
+}
+
+/** Why `pins` is not one to three distinct canonical SPKI pins, or null. */
+function relayPinsProblem(pins: unknown): string | null {
+  if (!Array.isArray(pins) || pins.length === 0 || pins.length > 3) return "pins must list one to three pins";
+  const seen = new Set<string>();
+  for (const pin of pins) {
+    if (typeof pin !== "string" || !pin.startsWith("sha256/")) return "a pin must start with sha256/";
+    const encoded = pin.slice("sha256/".length);
+    if (encoded.length !== 44 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return "a pin must be 44 base64 characters";
+    let bytes: Uint8Array;
+    try {
+      bytes = fromBase64(encoded);
+    } catch {
+      return "a pin is not base64";
+    }
+    if (bytes.length !== 32) return "a pin must be a SHA-256 digest";
+    // One spelling per digest: no stray trailing bits.
+    let canonical = "";
+    for (const byte of bytes) canonical += String.fromCharCode(byte);
+    if (btoa(canonical) !== encoded) return "a pin is not canonical base64";
+    if (seen.has(encoded)) return "a pin is listed twice";
+    seen.add(encoded);
+  }
+  return null;
+}
+
+/** Why `value` is not a usable lastResort entry, or null. */
+export function lastResortEntryProblem(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) return "not an object";
+  const e = value as Record<string, unknown>;
+  if (e.kind !== "lastResort") return "not a lastResort entry";
+  if (e.pin !== undefined) return "a lastResort entry takes pins, not pin";
+  if (e.region !== undefined && typeof e.region !== "string") return "region must be a string";
+  return relayBaseProblem(e.url) ?? relayPinsProblem(e.pins);
+}
+
+function lastResortEntry(value: unknown): LastResortEntry | null {
+  if (lastResortEntryProblem(value) !== null) return null;
+  const e = value as { url: string; pins: string[]; region?: string };
+  return { url: e.url, pins: [...e.pins], ...(e.region !== undefined ? { region: e.region } : {}) };
 }
 
 /** Verifies an envelope and returns the bundle, or null.
@@ -164,10 +264,14 @@ export async function verifyBundle(
   if (!Array.isArray(bundle.endpoints)) return null;
   const endpoints = bundle.endpoints.filter(isEntry);
   // An empty list would leave the client with nowhere to go while
-  // looking like a successful update.
+  // looking like a successful update. A relay alone does not count: it
+  // carries a few calls, under a budget, and only from Iran.
   if (endpoints.length === 0) return null;
+  const lastResort = (bundle.endpoints as unknown[])
+    .map(lastResortEntry)
+    .filter((entry): entry is LastResortEntry => entry !== null);
 
-  return { v: bundle.v, issuedAt: bundle.issuedAt, endpoints };
+  return { v: bundle.v, issuedAt: bundle.issuedAt, endpoints, lastResort };
 }
 
 /** Whether `candidate` should replace `held`.

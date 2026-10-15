@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   AppWindow,
   ArrowLeft,
@@ -14,6 +14,14 @@ import {
   Wrench,
 } from "lucide-react";
 import { changePassword, deleteAccount } from "../lib/auth";
+import { getMe } from "../lib/customer";
+import type { Customer } from "../lib/types";
+import {
+  BackupRouteSection,
+  RecoveryCodeSection,
+  SetPasswordSection,
+  VerifyEmailReminder,
+} from "../components/AccountRecovery";
 import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { Button, Card, Input, Label } from "../components/ui";
@@ -207,16 +215,53 @@ export function Settings({
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
           {section === "gaming" ? gamingSection : null}
           {section === "custom" ? customSection : null}
-          {section === "general" ? <LanguageSection /> : null}
-          {section === "repair" ? <RepairNetwork /> : null}
-          {section === "account" ? (
+          {section === "general" ? (
             <div className="flex flex-col gap-4">
-              <PasswordSection />
-              <DeleteAccountSection onDeleted={onLoggedOut} />
+              <LanguageSection />
+              {/* The relay of last resort's switch: the consent its prompt
+                  asks for, to give or take back (last-resort.ts). */}
+              <BackupRouteSection />
             </div>
           ) : null}
+          {section === "repair" ? <RepairNetwork /> : null}
+          {section === "account" ? <AccountSection onDeleted={onLoggedOut} /> : null}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The account pane: the password, the ways back in, and deletion.
+ *
+ * Reads the account to know which of them apply (docs/relay-last-resort.md):
+ * a reminder to confirm the address for an account that came in by the
+ * relay and has not (R3.6); a password to set, rather than one to change,
+ * for a Google, Apple or Facebook account that has none (R4.4); and the
+ * recovery code, from a backend new enough to say whether there is one
+ * (R4.3). Until the account has been read -- or if it cannot be -- the
+ * pane is what it always was. */
+function AccountSection({ onDeleted }: { onDeleted: () => void }) {
+  const [customer, setCustomer] = useState<Customer | null>(null);
+  const load = useCallback(() => {
+    void getMe().then((result) => {
+      if (result.ok) setCustomer(result.data);
+    });
+  }, []);
+  useEffect(load, [load]);
+
+  const unconfirmedRelay = customer !== null && !customer.emailVerifiedAt && Boolean(customer.relayUnverifiedSince);
+  return (
+    <div className="flex flex-col gap-4">
+      {unconfirmedRelay ? <VerifyEmailReminder email={customer.email} onChanged={load} /> : null}
+      {customer?.hasPassword === false ? <SetPasswordSection onDone={load} /> : <PasswordSection />}
+      {customer !== null && customer.hasRecoveryCode !== undefined ? (
+        <RecoveryCodeSection
+          hasPassword={customer.hasPassword !== false}
+          hasRecoveryCode={customer.hasRecoveryCode}
+          onCreated={load}
+        />
+      ) : null}
+      <DeleteAccountSection onDeleted={onDeleted} />
     </div>
   );
 }

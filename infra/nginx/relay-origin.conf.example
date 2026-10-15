@@ -53,6 +53,7 @@ map "$request_method $request_uri" $neoxify_relay_allowed {
     "POST /api/customer-auth/reset-password-code" 1;
     "POST /api/customer-auth/reset-password-recovery" 1;
     "POST /api/customer-auth/change-password" 1;
+    "POST /api/customer-auth/set-password" 1;
     "POST /api/customer-auth/unverified-email" 1;
     "POST /api/customer-auth/recovery-code" 1;
     "GET /api/customer/me" 1;
