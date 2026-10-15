@@ -25,6 +25,16 @@ mod control_plane_probe;
 #[path = "../../../desktop-windows/src-tauri/src/health_ip.rs"]
 mod health_ip;
 
+/// The relay of last resort -- the Windows app's file, compiled here by
+/// path like the two above, so both apps hold the one list of calls a
+/// relay may carry and check its pins the same way.
+///
+/// For a customer on a network where every ordinary route to the API is
+/// blocked: an allowed call, sent to a box in Iran by IPv4 address with
+/// no SNI and accepted by SPKI pin. Phones are most of those customers.
+#[path = "../../../desktop-windows/src-tauri/src/relay_http.rs"]
+mod relay_http;
+
 /// The OS this binary was compiled for: "android" or "ios" here, as the
 /// platform on attempt reports.
 ///
@@ -88,7 +98,9 @@ pub fn run() {
             // A tunnel server's name as the engines resolve it, for the
             // same check. Absent, a server named by hostname (IKEv2's)
             // would go unrecognised in `health_ip_v4`'s peer address.
-            health_ip::resolve_ipv4
+            health_ip::resolve_ipv4,
+            // The relay of last resort; see `mod relay_http` above.
+            relay_http::relay_request
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
