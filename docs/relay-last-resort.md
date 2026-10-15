@@ -137,14 +137,70 @@ per address per day, and a daily total equal to the day's sign-up cap.
 - **The cleanup also waits 30 days after an intranet**, like the session
   hold, rather than resuming the day it is lifted.
 
+## Client as built (branch claude/relay-app)
+
+**Where the decision is.** `apps/desktop-windows/src/lib/last-resort.ts`,
+shared by both apps. A request opts in (`relay: "foreground" | "background"`
+on `apiRequest`/`publicRequest`); it goes to the relay only after every
+ordinary attempt failed in transport -- timeout, connection failure, block
+page, never an HTTP answer, a scope or a local refusal (`everyRouteFailed`
+in api.ts) -- or first while relay mode holds and the ordinary routes are
+not due their three-minute probe. Then, in order: the call is on the list
+(`relay-calls.ts`, checked against `relay_http.rs` and `RELAY_ALLOWLIST`
+by its test), the bundle names a `lastResort` entry, the relay is not off
+on this network, Iran evidence, consent, and -- at send time, one call at a
+time -- the tunnel reported down with no connect under way, and the budget.
+Two boxes, twelve seconds, a write never resent once it may have arrived.
+
+**Bundle.** `verifyBundle` keeps `lastResort` entries in their own list,
+checked by `relay_http.rs`'s rules; they never reach `endpoints`,
+`apiEndpoints()`, `lastGood`, the updater (panel only) or the build-time
+HTTP scope (`bundleHosts` now takes panel and mirror entries only).
+
+**Evidence of Iran (R1.3).** The CDN's `country` on the pre-connect
+`/health/ip` baseline, stamped per carrier (`network-identity.ts`); on a
+network never stamped, time zone `Asia/Tehran` or a `-IR` locale. The
+network key is the carrier's ASN, as the endpoint demotions use, so a
+"network change" is a change of carrier reading.
+
+**Relay mode (R1.7).** Starts on the backend's JSON through the relay, 15
+minutes sliding per network; ends on an ordinary-route answer, a tunnel
+being dialled or reported up, two unanswered relay calls, the consent
+withdrawn, or `RELAY_REGION` (which also turns the relay off on that
+network for 24 hours).
+
+**Screens (en, fa).** Consent prompt at each app's root; a neutral "App
+data: backup route" chip above every screen while relay mode lasts, its
+detail "blocked on this network" unless `/relay/status` says an intranet
+is declared; relay sign-up offered after a sign-up that failed as above
+(address twice, recovery code shown once, then the voucher screen);
+sign-in falls through to the relay on its own, paying the
+`relay-signup` proof of work when the backend asks (R4.2); reset by
+recovery code beside the emailed reset code; Settings: the backup-route
+switch, the verify-later reminder with address correction, the recovery
+code, and "set a password" for social-only accounts. Card and crypto
+checkout are held while relay mode lasts, with a TODO for the payment-only
+path below.
+
+**Where the client differs.**
+
+- `POST /customer-auth/set-password` is on all three lists (this branch
+  adds it to the backend's and the nginx template): a social account
+  signed in over the relay outside an intranet can set the password it
+  will need inside one.
+- The client does not carry `POST /client-attempts` (the 40-an-hour
+  budget is for the customer's own calls) or the two checkout writes
+  (nothing could complete them).
+- No relay key (R1.8): the backend proves arrival by port, and the bundle
+  entry carries only `url` and `pins`.
+- The macOS app registers no `relay_request`; there the relay is simply
+  absent, as it is in the web portal, which sets no tunnel reader.
+
 ### Not done here
 
-- **Client (P2).** `relay_http.rs` must add: `relay-register`, `logout`,
-  `reset-password-recovery`, `recovery-code`, `unverified-email`,
-  `change-password`, voucher preview/redeem, `GET /relay/status`, the four
-  checkout calls and `POST /client-attempts`, and forward
-  `X-Neoxify-Install-Id`. `GET /endpoints/bundle2` is on the client's list
-  but is not a backend route yet.
+- **Client, unverified.** None of it has been dialled at a real box. The
+  Rust allowlist change is tested only by CI. The VM proof gate (P2
+  below) is still owed.
 - **Origin nginx.** The live relay block must proxy to `127.0.0.1:4001`,
   set `X-Forwarded-For` from the PROXY header, clear `CF-Connecting-IP`,
   `X-Real-IP` and `X-Neoxify-Via`, and send the box name -- see the
