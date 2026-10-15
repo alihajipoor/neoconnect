@@ -184,23 +184,94 @@ describe("CustomerAuthService over the relay", () => {
       expect(prisma.customerSession.create).not.toHaveBeenCalled();
     });
 
+    /** A place under the sign-up caps, as RelayAuthService holds one. */
+    const heldPlace = () => ({ commit: jest.fn().mockResolvedValue(undefined), release: jest.fn() });
+
     it("lets an unverified account in over the relay from Iran, and marks it relay-unverified (R4.2)", async () => {
       prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      const place = heldPlace();
+      const admitUnverified = jest.fn().mockResolvedValue(place);
       const result = await service.login("customer@example.com", PASSWORD, undefined, {
         channel: "RELAY",
-        allowUnverified: true,
+        admitUnverified,
       });
       expect(result).toEqual({ accessToken: "signed", refreshToken: "signed" });
+      expect(admitUnverified).toHaveBeenCalledWith("customer-1");
       expect(prisma.customer.updateMany).toHaveBeenCalledWith({
         where: { id: "customer-1", relayUnverifiedSince: null },
         data: { relayUnverifiedSince: expect.any(Date) },
       });
+      // The conversion is what took the place.
+      expect(place.commit).toHaveBeenCalledTimes(1);
+      expect(place.release).not.toHaveBeenCalled();
       expect(prisma.customerSession.create).toHaveBeenCalledWith({
         data: { customerId: "customer-1", channel: "RELAY" },
         select: { id: true },
       });
       // No trial for an unverified account.
       expect(subscriptionsService.create).not.toHaveBeenCalled();
+    });
+
+    it("asks nothing of an account that is already relay-unverified: no place, no cap", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ relayUnverifiedSince: new Date() }));
+      const admitUnverified = jest.fn();
+      const result = await service.login("customer@example.com", PASSWORD, undefined, {
+        channel: "RELAY",
+        admitUnverified,
+      });
+      expect(result).toEqual({ accessToken: "signed", refreshToken: "signed" });
+      expect(admitUnverified).not.toHaveBeenCalled();
+      expect(prisma.customer.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("gives the place back when another sign-in converted the account first", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.updateMany.mockResolvedValueOnce({ count: 0 });
+      const place = heldPlace();
+      await service.login("customer@example.com", PASSWORD, undefined, {
+        channel: "RELAY",
+        admitUnverified: jest.fn().mockResolvedValue(place),
+      });
+      expect(place.release).toHaveBeenCalledTimes(1);
+      expect(place.commit).not.toHaveBeenCalled();
+    });
+
+    it("gives the place back when the account cannot be marked", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.updateMany.mockRejectedValueOnce(new Error("database went away"));
+      const place = heldPlace();
+      await expect(
+        service.login("customer@example.com", PASSWORD, undefined, {
+          channel: "RELAY",
+          admitUnverified: jest.fn().mockResolvedValue(place),
+        }),
+      ).rejects.toThrow("database went away");
+      expect(place.release).toHaveBeenCalledTimes(1);
+      expect(place.commit).not.toHaveBeenCalled();
+      expect(prisma.customerSession.create).not.toHaveBeenCalled();
+    });
+
+    it("lets in an account that is charged no place (it holds paid access)", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      const result = await service.login("customer@example.com", PASSWORD, undefined, {
+        channel: "RELAY",
+        admitUnverified: jest.fn().mockResolvedValue(null),
+      });
+      expect(result).toEqual({ accessToken: "signed", refreshToken: "signed" });
+      expect(prisma.customer.updateMany).toHaveBeenCalledTimes(1);
+    });
+
+    it("passes a refusal on as itself, never as 'verify your email'", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      const full = new HttpException({ statusCode: 429, code: "RELAY_SIGNUP_LIMIT", message: "later" }, 429);
+      await expect(
+        service.login("customer@example.com", PASSWORD, undefined, {
+          channel: "RELAY",
+          admitUnverified: jest.fn().mockRejectedValue(full),
+        }),
+      ).rejects.toBe(full);
+      expect(prisma.customer.updateMany).not.toHaveBeenCalled();
+      expect(prisma.customerSession.create).not.toHaveBeenCalled();
     });
 
     it("holds an unverified account to three sessions, signing out the least recently used", async () => {
@@ -210,7 +281,7 @@ describe("CustomerAuthService over the relay", () => {
         { id: "s-middle" },
         { id: "s-oldest" },
       ]);
-      await service.login("customer@example.com", PASSWORD, undefined, { channel: "RELAY", allowUnverified: true });
+      await service.login("customer@example.com", PASSWORD, undefined, { channel: "RELAY", admitUnverified: jest.fn() });
 
       expect(prisma.customerSession.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ orderBy: { lastUsedAt: "desc" } }),
@@ -223,7 +294,9 @@ describe("CustomerAuthService over the relay", () => {
     it("puts no cap on a verified account's sessions, and records the relay as the way in", async () => {
       prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
       prisma.customerSession.findMany.mockResolvedValue([{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }]);
-      await service.login("customer@example.com", PASSWORD, undefined, { channel: "RELAY", allowUnverified: false });
+      const admitUnverified = jest.fn();
+      await service.login("customer@example.com", PASSWORD, undefined, { channel: "RELAY", admitUnverified });
+      expect(admitUnverified).not.toHaveBeenCalled();
       expect(protocolUsersService.revokeSessionCredentials).not.toHaveBeenCalled();
       expect(prisma.customerSession.create).toHaveBeenCalledWith({
         data: { customerId: "customer-1", channel: "RELAY" },

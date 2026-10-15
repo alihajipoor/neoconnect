@@ -199,16 +199,51 @@ describe("relay sign-up caps (R3.5)", () => {
   });
 });
 
+/** Asked only when an unverified account would become relay-unverified;
+ * one that already is signs in without asking (customer-auth.relay.spec). */
 describe("an unverified sign-in over the relay (R4.2)", () => {
-  it("takes a place under the same caps, and is refused quietly when there is none", async () => {
+  it("holds a place under the sign-up caps for the account's first conversion", async () => {
     const { service, seed } = world();
-    expect(await service.admitUnverifiedSignIn(ctx())).toBe(true);
+    seed(64999, 199);
+    const place = await service.admitUnverifiedSignIn(ctx(), "c1", 18);
+    expect(place).not.toBeNull();
+    // The last place is held: a sign-up now is refused.
+    expect(await refusal(service.reserveSignup(ctx({ ipKey: "relay:other" })))).toBe("RELAY_SIGNUP_LIMIT");
+    place!.release();
+    await expect(service.reserveSignup(ctx({ ipKey: "relay:other" }))).resolves.toBeDefined();
+  });
+
+  it("asks at least the sign-up's work before it takes a place (F4)", async () => {
+    const { service, seed } = world();
+    seed(64999, 199);
+    // A sign-in under the login guard's grace proves no work at all.
+    expect(await refusal(service.admitUnverifiedSignIn(ctx(), "c1", 0))).toBe("CHALLENGE_REQUIRED");
+    expect(await refusal(service.admitUnverifiedSignIn(ctx(), "c1", 12))).toBe("CHALLENGE_REQUIRED");
+    // Nothing was held by the refusals.
+    await expect(service.reserveSignup(ctx({ ipKey: "relay:other" }))).resolves.toBeDefined();
+  });
+
+  it("says why it refuses -- never 'verify your email', which an intranet makes impossible", async () => {
+    expect(await refusal(world({ mode: RelayAuthMode.OFF }).service.admitUnverifiedSignIn(ctx(), "c1", 18))).toBe(
+      "RELAY_SIGNUP_OFF",
+    );
+    expect(await refusal(world().service.admitUnverifiedSignIn(ctx({ region: null }), "c1", 18))).toBe("RELAY_REGION");
+    const full = world();
+    full.seed(64999, 200);
+    expect(await refusal(full.service.admitUnverifiedSignIn(ctx(), "c1", 18))).toBe("RELAY_SIGNUP_LIMIT");
+  });
+
+  it("never caps an account holding paid access, whatever the switch says (paying users are never locked out)", async () => {
+    const { service, seed, prisma } = world({ mode: RelayAuthMode.OFF });
     seed(64999, 200);
-    const fresh = world();
-    fresh.seed(64999, 200);
-    expect(await fresh.service.admitUnverifiedSignIn(ctx())).toBe(false);
-    expect(await world({ mode: RelayAuthMode.OFF }).service.admitUnverifiedSignIn(ctx())).toBe(false);
-    expect(await world().service.admitUnverifiedSignIn(ctx({ region: null }))).toBe(false);
+    prisma.subscription.count.mockResolvedValueOnce(1);
+    expect(await service.admitUnverifiedSignIn(ctx(), "c1", 0)).toBeNull();
+    expect(prisma.subscription.count).toHaveBeenCalledWith({
+      where: {
+        customerId: "c1",
+        OR: [{ status: "ACTIVE" }, { status: { not: "PENDING" }, plan: { relayOnly: true } }],
+      },
+    });
   });
 });
 

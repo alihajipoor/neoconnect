@@ -70,7 +70,7 @@ intranet sets `intranet` (I4).
 | Endpoint | What |
 |---|---|
 | `POST /customer-auth/relay-register` | Relay only (404 elsewhere). Address twice, PoW required (>= 18 bits), caps, no throwaway domains. Tokens at once, plus a recovery code shown once. No mail, no trial, referral ignored. |
-| `POST /customer-auth/login` (changed) | Over the relay from IR, an unverified account is let in as relay-unverified under the sign-up caps (R4.2). Normal routes unchanged. |
+| `POST /customer-auth/login` (changed) | Over the relay from IR, an unverified account becomes relay-unverified on a relay sign-up's terms, once: switch, region, a proof of work of at least the sign-up's bits (else 400 `CHALLENGE_REQUIRED`, `scope: "relay-signup"`), and a place under the caps (R4.2). Refusals say why (`RELAY_SIGNUP_OFF`, `RELAY_REGION`, `RELAY_SIGNUP_LIMIT`), never `requiresVerification`, and are not counted as failed guesses. An account already relay-unverified, or holding an active or relay-only subscription, is let in without a place whatever the switch says. Normal routes unchanged. |
 | `POST /customer-auth/reset-password-recovery` | Reset by recovery code; shares the emailed code's guess budget; returns a new code. |
 | `POST /customer-auth/recovery-code` | Create or rotate (current password, or a sign-in in the last 15 min for social-only accounts). |
 | `POST /customer-auth/set-password` | Social-only accounts, sign-in in the last 15 min. |
@@ -123,8 +123,12 @@ per address per day, and a daily total equal to the day's sign-up cap.
   Unverified accounts are refused all four by the guard.
 - **Install id is a PoW step, not a counter alone**: past 3 sign-ups a day
   it adds 2 bits, never refuses.
-- **Unverified sign-in over the relay takes a sign-up place**: otherwise
-  accounts registered on the normal routes would bypass the caps.
+- **An unverified account's first sign-in over the relay takes a sign-up
+  place, and pays the sign-up's proof of work**: otherwise accounts
+  registered on the normal routes would bypass the caps, or drain them for
+  the login guard's cheaper work (F4). Only that first one: later sign-ins
+  of a relay-unverified account, and any of an account holding paid access,
+  are never capped -- paying users are never locked out.
 - **The cleanup also waits 30 days after an intranet**, like the session
   hold, rather than resuming the day it is lifted.
 

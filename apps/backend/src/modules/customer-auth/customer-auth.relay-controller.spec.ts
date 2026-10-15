@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/require-await -- the service stand-ins
    match the real ones' async signatures. */
-import { ConflictException, NotFoundException } from "@nestjs/common";
+import { ConflictException, HttpException, NotFoundException } from "@nestjs/common";
 import type { Request } from "express";
 import { CustomerAuthController } from "./customer-auth.controller";
 import type { CustomerAuthService } from "./customer-auth.service";
@@ -39,10 +39,10 @@ function build() {
       return reservation;
     }),
     recordSignIn: jest.fn(async () => undefined),
-    admitUnverifiedSignIn: jest.fn(async () => true),
+    admitUnverifiedSignIn: jest.fn(async (): Promise<unknown> => null),
   };
   const loginGuard = {
-    enforce: jest.fn(),
+    enforce: jest.fn((): number => 0),
     enforceMinimum: jest.fn(() => order.push("pow")),
     recordSuccess: jest.fn(),
     recordFailure: jest.fn(),
@@ -97,13 +97,33 @@ describe("POST /customer-auth/relay-register", () => {
 describe("POST /customer-auth/login over the relay", () => {
   it("counts the caller by keyed hash, lets the service decide on an unverified account, and records the sign-in", async () => {
     const { controller, auth, loginGuard, relay } = build();
+    loginGuard.enforce.mockReturnValueOnce(18);
     await controller.login({ email: "a@example.com", password: "password1" } as never, "192.0.2.10", {}, relayReq());
     expect(loginGuard.enforce).toHaveBeenCalledWith("customer", undefined, "a@example.com", "relay:k");
-    const options = (auth.login.mock.calls[0] as unknown[])[3] as { channel: string; allowUnverified: () => unknown };
+    const options = (auth.login.mock.calls[0] as unknown[])[3] as {
+      channel: string;
+      admitUnverified: (customerId: string) => unknown;
+    };
     expect(options.channel).toBe("RELAY");
-    await options.allowUnverified();
-    expect(relay.admitUnverifiedSignIn).toHaveBeenCalledWith(RELAY);
+    await options.admitUnverified("customer-1");
+    // The work this attempt proved, for the sign-up's floor (F4).
+    expect(relay.admitUnverifiedSignIn).toHaveBeenCalledWith(RELAY, "customer-1", 18);
     expect(relay.recordSignIn).toHaveBeenCalledWith(RELAY);
+  });
+
+  it("does not count a refusal after the right password as a failed guess", async () => {
+    const { controller, auth, loginGuard, relay } = build();
+    const full = new HttpException({ statusCode: 429, code: "RELAY_SIGNUP_LIMIT", message: "later" }, 429);
+    relay.admitUnverifiedSignIn.mockRejectedValueOnce(full);
+    auth.login.mockImplementationOnce(async (...args: unknown[]) => {
+      await (args[3] as { admitUnverified: (id: string) => Promise<unknown> }).admitUnverified("customer-1");
+      return { accessToken: "a", refreshToken: "r" };
+    });
+    await expect(
+      controller.login({ email: "a@example.com", password: "password1" } as never, "192.0.2.10", {}, relayReq()),
+    ).rejects.toBe(full);
+    expect(loginGuard.recordFailure).not.toHaveBeenCalled();
+    expect(relay.recordSignIn).not.toHaveBeenCalled();
   });
 
   it("puts the relay caller's key, never its address, on a failure", async () => {

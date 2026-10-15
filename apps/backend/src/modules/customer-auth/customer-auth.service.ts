@@ -29,7 +29,7 @@ import { hasDeviceInfo, type DeviceInfo } from "../../common/device-info";
 import { DeviceSlotsService } from "../device-slots/device-slots.service";
 import { KeyedLock } from "../protocol-users/keyed-lock";
 import { GuessBudget, guessKey } from "../../common/guess-budget";
-import { RelayAuthService } from "../relay-auth/relay-auth.service";
+import { RelayAuthService, type SignupReservation } from "../relay-auth/relay-auth.service";
 import { isDisposableEmail } from "../relay-auth/disposable-email";
 import { ADDRESS_CHANGES_PER_DAY, UNVERIFIED_SESSION_CAP } from "../relay-auth/relay-policy";
 import { hashRecoveryCode, newRecoveryCode, recoveryCodeMatches } from "./recovery-code";
@@ -84,11 +84,16 @@ export interface SessionOpening {
 }
 
 /** A sign-in's say on an unverified account (docs/relay-last-resort.md,
- * R4.2): over the relay from Iran it may be let in -- the controller
- * decides, and may still be refused by the caps, hence a function. */
+ * R4.2). Given only for a sign-in the relay delivered; without it an
+ * unverified account is asked to verify (I1).
+ *
+ * `admitUnverified` is asked only when the sign-in would make the account
+ * relay-unverified, which happens once. It returns a place held under the
+ * sign-up caps, or null when none is charged, or throws the refusal
+ * (RelayAuthService.admitUnverifiedSignIn). */
 export interface SignInOptions {
   channel?: AccessChannel;
-  allowUnverified?: boolean | (() => Promise<boolean>);
+  admitUnverified?: (customerId: string) => Promise<SignupReservation | null>;
 }
 
 /** The session columns a device's own description sets -- only those it
@@ -551,18 +556,14 @@ export class CustomerAuthService {
     const customer = await this.validateCredentials(email, password);
     if (!customer.emailVerifiedAt) {
       // Over the normal routes, always this (I1). Over the relay from
-      // Iran, an unverified account is let in on the same terms as a
-      // relay sign-up and is from then on relay-unverified (R4.2):
-      // limited to the capability set, at most three sessions.
-      const allow =
-        typeof options.allowUnverified === "function" ? await options.allowUnverified() : !!options.allowUnverified;
-      if (!allow) return { requiresVerification: true, email: customer.email };
-      if (!customer.relayUnverifiedSince) {
-        await this.prisma.customer.updateMany({
-          where: { id: customer.id, relayUnverifiedSince: null },
-          data: { relayUnverifiedSince: new Date() },
-        });
-      }
+      // Iran, an unverified account is let in and is from then on
+      // relay-unverified (R4.2): limited to the capability set, at most
+      // three sessions. Becoming one is a relay sign-up in all but name,
+      // so it is admitted on the same terms -- once. Every later sign-in
+      // of a relay-unverified account is just a sign-in: a paid account
+      // whose sessions ended during an intranet must get back in.
+      if (!options.admitUnverified) return { requiresVerification: true, email: customer.email };
+      if (!customer.relayUnverifiedSince) await this.convertToRelay(customer.id, options.admitUnverified);
       return this.issueTokenPair(customer, undefined, device, { channel: options.channel, unverified: true });
     }
     // The second chance at a trial whose grant failed at verification, or
@@ -572,6 +573,30 @@ export class CustomerAuthService {
     // customer who already has any subscription costs one count query.
     await this.retryTrial(customer.id, true);
     return this.issueTokenPair(customer, undefined, device, { channel: options.channel });
+  }
+
+  /** Makes an unverified account relay-unverified, under the place
+   * `admit` holds for it. The place is spent only by the sign-in that
+   * actually converted the account: two at once each hold one, and the
+   * one whose write found it already converted gives its place back. */
+  private async convertToRelay(
+    customerId: string,
+    admit: NonNullable<SignInOptions["admitUnverified"]>,
+  ): Promise<void> {
+    const place = await admit(customerId);
+    let converted: boolean;
+    try {
+      const { count } = await this.prisma.customer.updateMany({
+        where: { id: customerId, relayUnverifiedSince: null },
+        data: { relayUnverifiedSince: new Date() },
+      });
+      converted = count > 0;
+    } catch (err) {
+      place?.release();
+      throw err;
+    }
+    if (converted) await place?.commit();
+    else place?.release();
   }
 
   /** Tokens for one signed-in device.

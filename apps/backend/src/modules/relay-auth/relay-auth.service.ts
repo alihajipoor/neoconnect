@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   HttpException,
   HttpStatus,
@@ -305,18 +306,54 @@ export class RelayAuthService implements OnModuleInit, OnModuleDestroy {
     return settings;
   }
 
-  /** Whether an unverified account signing in over the relay may be let
-   * in (R4.2). The same terms as a relay sign-up, and it takes a place
-   * under the same caps -- otherwise accounts made on the normal routes
-   * and signed in here would be a way around them. Never throws. */
-  async admitUnverifiedSignIn(ctx: RelayContext, now = Date.now()): Promise<boolean> {
-    try {
-      const reservation = await this.reserveSignup(ctx, null, now);
-      await reservation.commit();
-      return true;
-    } catch {
-      return false;
+  /** Whether an unverified account signing in over the relay may become
+   * relay-unverified (R4.2). Asked only for that conversion: an account
+   * that already is relay-unverified signs in without asking, charged
+   * nothing, whatever the caps and the switch say.
+   *
+   * An account holding paid access -- an active subscription, or a
+   * relay-only one that was ever paid for -- is let in at once and charged
+   * no place: paying users are never locked out (owner, 2026-10-15).
+   * Anyone else on a relay sign-up's terms, in its order: the switch and
+   * the region, at least the sign-up's proof of work (F4: without it the
+   * caps are a lever any free unverified account could pull for nothing),
+   * then a place under the same caps -- otherwise accounts made on the
+   * normal routes and signed in here would be a way around them.
+   *
+   * Returns the held place, which the caller commits once the account is
+   * converted and releases otherwise, or null when none is charged. A
+   * refusal is thrown and says why -- RELAY_SIGNUP_OFF, RELAY_REGION,
+   * CHALLENGE_REQUIRED, RELAY_SIGNUP_LIMIT -- never "verify your email",
+   * which is untrue and, during an intranet, impossible. */
+  async admitUnverifiedSignIn(
+    ctx: RelayContext,
+    customerId: string,
+    provenBits: number,
+    now = Date.now(),
+  ): Promise<SignupReservation | null> {
+    if (await this.holdsPaidAccess(customerId)) return null;
+    await this.assertSignupOpen(ctx, now);
+    if (provenBits < this.signupPowBits(ctx, null, now)) {
+      // The client fetches a challenge with scope "relay-signup", which is
+      // minted at the caller's relay difficulty, and signs in again.
+      throw new BadRequestException({
+        statusCode: 400,
+        code: "CHALLENGE_REQUIRED",
+        scope: "relay-signup",
+        message: "A security check is required. Please try again.",
+      });
     }
+    return this.reserveSignup(ctx, null, now);
+  }
+
+  private async holdsPaidAccess(customerId: string): Promise<boolean> {
+    const held = await this.prisma.subscription.count({
+      where: {
+        customerId,
+        OR: [{ status: "ACTIVE" }, { status: { not: "PENDING" }, plan: { relayOnly: true } }],
+      },
+    });
+    return held > 0;
   }
 
   async recordSignIn(ctx: RelayContext): Promise<void> {

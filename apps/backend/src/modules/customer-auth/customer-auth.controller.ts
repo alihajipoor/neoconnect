@@ -279,8 +279,11 @@ export class CustomerAuthController {
     // Over the relay, counted per caller by a keyed hash rather than the
     // address, which must not reach the guard's log line (I5).
     const key = callerKey(req, ip);
-    this.loginGuard.enforce("customer", dto.challenge, dto.email, key);
+    const provenBits = this.loginGuard.enforce("customer", dto.challenge, dto.email, key);
     const relay = relayContextOf(req);
+    // Set when the relay turned the sign-in away after the password was
+    // found right: that is not a guess, and must not raise anyone's cost.
+    let refusedByRelay = false;
     try {
       // The device's own name for itself (X-Neoxify-Device-Label/-Platform),
       // shown to the customer's other devices by device slots.
@@ -289,15 +292,27 @@ export class CustomerAuthController {
         dto.password,
         deviceInfoFrom(headers),
         // Over the relay, an unverified account may be let in from Iran
-        // on the relay sign-up's terms (R4.2). Over the normal routes it
-        // is asked to verify, as always (I1).
-        relay ? { channel: "RELAY", allowUnverified: () => this.relay.admitUnverifiedSignIn(relay) } : {},
+        // on the relay sign-up's terms, its proof of work included (R4.2,
+        // F4). Over the normal routes it is asked to verify, as always (I1).
+        relay
+          ? {
+              channel: "RELAY",
+              admitUnverified: async (customerId) => {
+                try {
+                  return await this.relay.admitUnverifiedSignIn(relay, customerId, provenBits);
+                } catch (err) {
+                  refusedByRelay = true;
+                  throw err;
+                }
+              },
+            }
+          : {},
       );
       this.loginGuard.recordSuccess("customer", dto.email);
       if (relay && "accessToken" in result) await this.relay.recordSignIn(relay);
       return result;
     } catch (err) {
-      this.loginGuard.recordFailure("customer", dto.email, key);
+      if (!refusedByRelay) this.loginGuard.recordFailure("customer", dto.email, key);
       throw err;
     }
   }

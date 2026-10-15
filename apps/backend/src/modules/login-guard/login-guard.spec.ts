@@ -91,6 +91,11 @@ describe("LoginGuardService", () => {
     expect(() => guard.enforce("customer", undefined, EMAIL, IP)).toThrow(BadRequestException);
   });
 
+  it("says how much work an accepted attempt proved: none under the grace, else the solution's", () => {
+    expect(guard.enforce("customer", undefined, EMAIL, IP)).toBe(0);
+    expect(guard.enforce("customer", solve(guard.issueAt(13)), EMAIL, IP)).toBe(13);
+  });
+
   it("accepts a solved challenge once one is demanded", () => {
     for (let i = 0; i < 5; i += 1) guard.recordFailure("customer", EMAIL, IP);
     const solution = solve(guard.issue("customer", EMAIL, IP));

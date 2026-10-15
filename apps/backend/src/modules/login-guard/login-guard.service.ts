@@ -213,8 +213,13 @@ export class LoginGuardService {
    * challenge reads as "retry this request", not "your password is
    * wrong" -- the client can transparently fetch a new challenge and
    * resubmit without telling the customer anything happened.
+   *
+   * Returns the work the attempt proved: the solution's difficulty, which
+   * verify() has just authenticated, or 0 when it came in under the grace.
+   * The relay asks more of a sign-in that turns an unverified account into
+   * a relay one (docs/relay-last-resort.md, F4).
    */
-  enforce(scope: LoginScope, solution: Solution | undefined, email: string | undefined, ip: string): void {
+  enforce(scope: LoginScope, solution: Solution | undefined, email: string | undefined, ip: string): number {
     const failures = Math.max(
       email ? this.countFor(this.accountFailures, this.accountKey(scope, email)) : 0,
       this.countFor(this.sourceFailures, `${scope}:${ip}`),
@@ -225,7 +230,7 @@ export class LoginGuardService {
       // clients already in customers' hands keep working. Zero grace
       // means every attempt must carry a solution. See
       // CHALLENGE_GRACE_DEFAULT_FAILURES.
-      if (failures < this.graceFailures) return;
+      if (failures < this.graceFailures) return 0;
       throw new BadRequestException(
         "Too many recent sign-in attempts. Please sign in at neoxify.net, or wait 30 minutes and try again.",
       );
@@ -252,6 +257,7 @@ export class LoginGuardService {
     if (solution.difficulty < this.difficultyFor(failures)) {
       throw new BadRequestException("This security check is out of date. Please try again.");
     }
+    return solution.difficulty;
   }
 
   /** A challenge at exactly `bits`, for a caller whose difficulty is set
