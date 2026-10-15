@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RELAY_CALLS, relayAllows } from "./relay-calls";
 
 /** Three copies of one list -- the Rust command's (the client's
@@ -81,6 +81,22 @@ describe("the relay's list of calls", () => {
       ["get", "/health"],
     ] as const) {
       expect([method, path, relayAllows(method, path)]).toEqual([method, path, false]);
+    }
+  });
+});
+
+describe("a store build", () => {
+  it("carries no voucher path at all, which App Review would read as selling", async () => {
+    vi.stubEnv("VITE_DISTRIBUTION", "store");
+    vi.resetModules();
+    try {
+      const store = await import("./relay-calls");
+      expect(store.RELAY_CALLS.POST.filter((path) => path.includes("voucher"))).toEqual([]);
+      expect(store.relayAllows("POST", "/customer/vouchers/redeem")).toBe(false);
+      expect(store.relayAllows("POST", "/customer-auth/relay-register")).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
     }
   });
 });

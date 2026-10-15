@@ -14,6 +14,18 @@
  * exists (docs/relay-last-resort.md).
  */
 
+import { IS_STORE_BUILD } from "./distribution";
+
+/** Voucher preview and redeem, left out of a store build: it cannot redeem
+ * one (App Store guideline 3.1.1), and the path itself is one of the
+ * purchase markers apps/mobile/scripts/assert-store-bundle.mjs refuses to
+ * find in the bundle. A build-time constant, so the strings are dropped,
+ * not merely unused. The Rust list keeps them; this mirror only decides
+ * what the app offers, and a store build never offers a voucher. */
+const VOUCHER_PATHS: readonly string[] = IS_STORE_BUILD
+  ? []
+  : ["/customer/vouchers/preview", "/customer/vouchers/redeem"];
+
 const POST_PATHS: readonly string[] = [
   "/login-challenge",
   "/customer-auth/login",
@@ -32,8 +44,7 @@ const POST_PATHS: readonly string[] = [
   "/customer-auth/change-password",
   "/customer-auth/set-password",
   "/customer-auth/unverified-email",
-  "/customer/vouchers/preview",
-  "/customer/vouchers/redeem",
+  ...VOUCHER_PATHS,
 ];
 
 const GET_PATHS: readonly string[] = [
