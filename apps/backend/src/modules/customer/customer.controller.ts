@@ -51,10 +51,10 @@ import { CurrentCustomer } from "../../common/decorators/current-customer.decora
 import { GamingService } from "../gaming/gaming.service";
 import { AuthenticatedCustomer } from "../customer-auth/types";
 
-/** Over the relay, or an account whose address is unconfirmed (or not
- * known to be confirmed): only single-use Ultimate codes. */
-function restrictedVoucherCaller(customer: AuthenticatedCustomer, req: Request): boolean {
-  return relayContextOf(req) !== null || customer.emailVerified !== true;
+/** Over the relay, or an account held to the unverified capability set
+ * (or not known not to be): only single-use Ultimate codes. */
+export function restrictedVoucherCaller(customer: AuthenticatedCustomer, req: Request): boolean {
+  return relayContextOf(req) !== null || customer.limited !== false;
 }
 
 // Everything here is scoped to the calling customer only (never another

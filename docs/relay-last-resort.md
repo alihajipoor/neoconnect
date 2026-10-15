@@ -81,14 +81,19 @@ intranet sets `intranet` (I4).
 | `GET /customer/me` (changed) | Adds `signupChannel`, `relayUnverifiedSince`, `recoveryCodeSetAt`, `hasPassword`, `hasRecoveryCode`. |
 | `GET /relay/status` | Public; on the allowlist. |
 | `GET`/`PATCH /relay-auth` | SUPERADMIN: mode, hosting ASNs, today's counts, detector state. |
-| `POST /relay-auth/customers/:id/move-address` | SUPERADMIN: move an account to a new address on its recovery code (R3.9); returns a new code. |
+| `POST /relay-auth/customers/:id/move-address` | SUPERADMIN: move an account to a new address on its recovery code (R3.9); returns a new code. The account is relay-unverified until the new address is confirmed. |
 
-**Default deny (R3.3, F2).** `CustomerJwtAuthGuard` refuses an account whose
-address is unconfirmed on every route not marked `@AllowUnverified`, with
-403 `VERIFY_EMAIL`. Marked: logout, change-password, unverified-email,
-recovery-code, `GET`/`DELETE /customer/me`, subscriptions, protocol-users,
-a subscription's routes and route switch, voucher preview and redeem, and
-the device-slot calls. Its spec enumerates every guarded route.
+**Default deny (R3.3, F2).** `CustomerJwtAuthGuard` refuses a
+relay-unverified account (address unconfirmed, `relayUnverifiedSince` set:
+a relay sign-up, a relay conversion, or a support move) on every route not
+marked `@AllowUnverified`, with 403 `VERIFY_EMAIL`. Marked: logout,
+change-password, unverified-email, recovery-code, `GET`/`DELETE
+/customer/me`, subscriptions, protocol-users, a subscription's routes and
+route switch, voucher preview and redeem, and the device-slot calls. Its
+spec enumerates every guarded route. An unverified account that never came
+in by the relay is not limited: one older than verification (2026-07-24,
+no backfill) may hold a session that has refreshed ever since, and keeps
+what it had; normal sign-in still makes no new one.
 
 **Records (R2.6, I5).** `customers.signupChannel`, `relayUnverifiedSince`,
 `recoveryCodeHash` (SHA-256), `recoveryCodeSetAt`, `relayMailAt`;

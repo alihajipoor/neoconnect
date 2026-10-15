@@ -6,9 +6,9 @@ import type { AuthenticatedCustomer } from "../../modules/customer-auth/types";
 
 export const ALLOW_UNVERIFIED = "neoxify:allow-unverified";
 
-/** Marks a customer route an account with an unconfirmed address may
- * use. Everything not marked is refused to such an account
- * (docs/relay-last-resort.md, R3.3). */
+/** Marks a customer route an account the relay let in with an
+ * unconfirmed address may use. Everything not marked is refused to such
+ * an account (docs/relay-last-resort.md, R3.3). */
 export const AllowUnverified = () => SetMetadata(ALLOW_UNVERIFIED, true);
 
 /** Accounts known to be verified, and until when that answer is reused.
@@ -23,16 +23,24 @@ export function forgetVerified(customerId: string): void {
 }
 
 /** The customer session guard, and the default-deny rule for accounts
- * whose address is unconfirmed.
+ * the relay let in with an unconfirmed address.
  *
- * Normal sign-in refuses an unverified account, so until the relay of
- * last resort no such account held a session. Now one can -- a relay
- * sign-up (R3), or an unverified account signing in over the relay from
- * Iran (R4.2) -- and what it may do is a short list: sign out, read its
- * account, subscriptions, routes and credentials, redeem a single-use
- * Ultimate voucher, change its address or password, and manage its
- * recovery code (I3). That list is the routes marked @AllowUnverified,
- * and this guard refuses every other route with 403 VERIFY_EMAIL.
+ * Such an account holds a session without having proven its mailbox -- a
+ * relay sign-up (R3), an unverified account signing in over the relay
+ * from Iran (R4.2), or one support moved to a new address (R3.9), all of
+ * which set relayUnverifiedSince -- and what it may do is a short list:
+ * sign out, read its account, subscriptions, routes and credentials,
+ * redeem a single-use Ultimate voucher, change its address or password,
+ * and manage its recovery code (I3). That list is the routes marked
+ * @AllowUnverified, and this guard refuses every other route with 403
+ * VERIFY_EMAIL.
+ *
+ * Only those. An account older than verification (2026-07-24, added with
+ * no backfill) can have an unconfirmed address and a session that has
+ * refreshed ever since -- refresh never asked about verification -- and
+ * such a session keeps everything it had before the relay existed. Normal
+ * sign-in still refuses an unverified account, so no new session of that
+ * kind is made.
  *
  * Here rather than in a guard of its own because every customer route
  * already names this one: a second guard is a second thing a new route
@@ -52,10 +60,10 @@ export class CustomerJwtAuthGuard extends AuthGuard("customer-jwt") {
     if (!authenticated) return false;
     const user = context.switchToHttp().getRequest<{ user?: AuthenticatedCustomer }>().user;
     if (!user?.sub) throw new UnauthorizedException();
-    // Recorded for the handlers that narrow what an unconfirmed account
-    // may do inside a route it may use (vouchers).
-    user.emailVerified = await this.isVerified(user.sub);
-    if (user.emailVerified) return true;
+    // Recorded for the handlers that narrow what a limited account may do
+    // inside a route it may use (vouchers).
+    user.limited = await this.isLimited(user.sub);
+    if (!user.limited) return true;
 
     const allowed = this.reflector.getAllAndOverride<boolean | undefined>(ALLOW_UNVERIFIED, [
       context.getHandler(),
@@ -69,18 +77,20 @@ export class CustomerJwtAuthGuard extends AuthGuard("customer-jwt") {
     });
   }
 
-  private async isVerified(customerId: string): Promise<boolean> {
+  /** Only a verified answer is remembered: an unverified account that is
+   * not limited becomes limited the moment it signs in over the relay. */
+  private async isLimited(customerId: string): Promise<boolean> {
     const now = Date.now();
     const until = verified.get(customerId);
-    if (until && until > now) return true;
+    if (until && until > now) return false;
     const customer = await this.prisma.customer.findUnique({
       where: { id: customerId },
-      select: { emailVerifiedAt: true },
+      select: { emailVerifiedAt: true, relayUnverifiedSince: true },
     });
     if (!customer) throw new UnauthorizedException("This account no longer exists");
-    if (!customer.emailVerifiedAt) return false;
+    if (!customer.emailVerifiedAt) return customer.relayUnverifiedSince != null;
     if (verified.size >= VERIFIED_MAX) verified.clear();
     verified.set(customerId, now + VERIFIED_TTL_MS);
-    return true;
+    return false;
   }
 }

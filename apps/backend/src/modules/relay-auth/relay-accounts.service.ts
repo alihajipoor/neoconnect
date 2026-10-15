@@ -11,7 +11,7 @@ export class RelayAccountsService {
   async moveAddress(customerId: string, recoveryCode: string, email: string) {
     const customer = await this.prisma.customer.findUnique({
       where: { id: customerId },
-      select: { id: true, recoveryCodeHash: true },
+      select: { id: true, recoveryCodeHash: true, relayUnverifiedSince: true },
     });
     if (!customer) throw new NotFoundException("Customer not found");
     if (!recoveryCodeMatches(recoveryCode, customer.recoveryCodeHash)) {
@@ -22,12 +22,14 @@ export class RelayAccountsService {
 
     const next = newRecoveryCode();
     // The new address is unproven, so the account is unverified until its
-    // owner confirms it -- whatever it was before.
+    // owner confirms it -- whatever it was before -- and held to the
+    // capability set like any account the relay let in unverified.
     await this.prisma.customer.update({
       where: { id: customerId },
       data: {
         email,
         emailVerifiedAt: null,
+        relayUnverifiedSince: customer.relayUnverifiedSince ?? new Date(),
         emailVerificationCode: null,
         emailVerificationCodeExpiresAt: null,
         passwordResetCode: null,

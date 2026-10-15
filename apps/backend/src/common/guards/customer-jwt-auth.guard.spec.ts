@@ -59,7 +59,7 @@ describe("CustomerJwtAuthGuard", () => {
     jest.restoreAllMocks();
   });
 
-  function guardFor(customer: { emailVerifiedAt: Date | null } | null) {
+  function guardFor(customer: { emailVerifiedAt: Date | null; relayUnverifiedSince?: Date | null } | null) {
     const prisma = { customer: { findUnique: jest.fn().mockResolvedValue(customer) } };
     return { guard: new CustomerJwtAuthGuard(new Reflector(), prisma as any), prisma };
   }
@@ -88,26 +88,48 @@ describe("CustomerJwtAuthGuard", () => {
 
   /** Enumerated from the router: a customer route added later is refused
    * to an unverified account unless someone marks it on purpose. */
-  it("refuses an unverified account every other customer route with VERIFY_EMAIL", async () => {
-    const user = { sub: "c-unverified", email: "u@example.com" };
+  it("refuses a relay-unverified account every other customer route with VERIFY_EMAIL", async () => {
+    const user: { sub: string; email: string; limited?: boolean } = { sub: "c-unverified", email: "u@example.com" };
     forgetVerified(user.sub);
-    const { guard } = guardFor({ emailVerifiedAt: null });
+    const { guard, prisma } = guardFor({ emailVerifiedAt: null, relayUnverifiedSince: new Date() });
     for (const route of guarded) {
       const outcome = await guard.canActivate(contextFor(route, user)).then(
-        () => "allowed",
+        () => (user.limited === true ? "allowed" : "allowed, but not marked limited"),
         (err: unknown) =>
           err instanceof ForbiddenException ? (err.getResponse() as { code?: string }).code : String(err),
       );
       expect([key(route), outcome]).toEqual([key(route), UNVERIFIED_MAY.includes(key(route)) ? "allowed" : "VERIFY_EMAIL"]);
     }
+    expect(prisma.customer.findUnique).toHaveBeenCalledWith({
+      where: { id: user.sub },
+      select: { emailVerifiedAt: true, relayUnverifiedSince: true },
+    });
+  });
+
+  /** The rule is for accounts the relay let in unverified. An address
+   * left unconfirmed by an account older than verification (2026-07-24,
+   * no backfill) may still hold a session that has refreshed ever since;
+   * it keeps everything it had before the relay existed. */
+  it("leaves an unverified account that never came in by the relay as it was", async () => {
+    const user: { sub: string; email: string; limited?: boolean } = { sub: "c-legacy", email: "l@example.com" };
+    forgetVerified(user.sub);
+    const { guard, prisma } = guardFor({ emailVerifiedAt: null, relayUnverifiedSince: null });
+    for (const route of guarded) {
+      await expect(guard.canActivate(contextFor(route, user))).resolves.toBe(true);
+      expect([key(route), user.limited]).toEqual([key(route), false]);
+    }
+    // Not remembered: a sign-in over the relay can make it relay-unverified
+    // at any time, and the next request must see that.
+    expect(prisma.customer.findUnique).toHaveBeenCalledTimes(guarded.length);
   });
 
   it("lets a verified account through everywhere, asking the database once", async () => {
-    const user = { sub: "c-verified", email: "v@example.com" };
+    const user: { sub: string; email: string; limited?: boolean } = { sub: "c-verified", email: "v@example.com" };
     forgetVerified(user.sub);
-    const { guard, prisma } = guardFor({ emailVerifiedAt: new Date() });
+    const { guard, prisma } = guardFor({ emailVerifiedAt: new Date(), relayUnverifiedSince: new Date() });
     for (const route of guarded) {
       await expect(guard.canActivate(contextFor(route, user))).resolves.toBe(true);
+      expect(user.limited).toBe(false);
     }
     expect(prisma.customer.findUnique).toHaveBeenCalledTimes(1);
   });
