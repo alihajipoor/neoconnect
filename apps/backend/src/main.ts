@@ -179,16 +179,22 @@ async function bootstrap() {
   if (relayListen) {
     const trusted = trustedRelayPeers();
     let lastRefusal = 0;
-    await startRelayListener(app.getHttpAdapter().getInstance(), {
-      ...relayListen,
-      trusted,
-      onRefused: (peer) => {
-        if (Date.now() - lastRefusal < 60_000) return;
-        lastRefusal = Date.now();
-        console.warn(`Relay listener refused a connection from ${peer}, which is not a trusted peer`);
-      },
-    });
-    console.log(`Relay listener on ${relayListen.host}:${relayListen.port}, accepting ${[...trusted].join(", ")}`);
+    // A relay listener that cannot start costs the relay, never the API
+    // every other customer is using.
+    try {
+      await startRelayListener(app.getHttpAdapter().getInstance(), {
+        ...relayListen,
+        trusted,
+        onRefused: (peer) => {
+          if (Date.now() - lastRefusal < 60_000) return;
+          lastRefusal = Date.now();
+          console.warn(`Relay listener refused a connection from ${peer}, which is not a trusted peer`);
+        },
+      });
+      console.log(`Relay listener on ${relayListen.host}:${relayListen.port}, accepting ${[...trusted].join(", ")}`);
+    } catch (err) {
+      console.error(`Relay listener could not start on ${relayListen.host}:${relayListen.port}: ${(err as Error).message}`);
+    }
   }
 }
 
