@@ -22,6 +22,8 @@ import { CustomModeCard } from "./components/CustomModeCard";
 import { GamingModeCard } from "./components/GamingModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
+import { setRelayTunnelReader } from "./lib/last-resort";
+import { BackupRouteChip, BackupRouteConsent } from "./components/BackupRoute";
 
 /** How often a queued diagnostic report retries.
  *
@@ -29,6 +31,13 @@ import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/up
  * and goes gets their failures out during the same sitting, and long
  * enough to be nothing on a network that is simply down. */
 const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
+
+// The relay of last resort is dialled only while the service reports no
+// tunnel (docs/relay-last-resort.md, R1.5): asked at send time, every
+// time, here as the Dashboard asks it. An error or no answer keeps the
+// relay closed (last-resort.ts). At module scope, so it is in place
+// before any screen can make a request.
+setRelayTunnelReader(async () => (await invoke<{ connected: boolean }>("vpn_status")).connected);
 
 type Screen =
   | "loading"
@@ -51,6 +60,9 @@ export default function App() {
   // memory for this handoff, never persisted.
   const [pendingAuth, setPendingAuth] = useState<{ email: string; password?: string } | null>(null);
   const [loginNotice, setLoginNotice] = useState<string | null>(null);
+  // What brought the customer to the plans screen, when it was a sign-up
+  // through the relay: "enter an Ultimate voucher code".
+  const [plansNotice, setPlansNotice] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState>({ status: "none" });
   const [restarting, setRestarting] = useState(false);
   const [updateBlocked, setUpdateBlocked] = useState(false);
@@ -323,6 +335,10 @@ export default function App() {
         onNeedsVerification={goToVerify}
         onSuccess={() => setScreen("dashboard")}
         onGoLogin={() => setScreen("login")}
+        onRelaySignedUp={() => {
+          setPlansNotice(t("relay.created"));
+          setScreen("plans");
+        }}
       />;
   }
   if (screen === "verify" && pendingAuth) {
@@ -368,7 +384,11 @@ export default function App() {
     return <Support onBack={() => setScreen("settings")} />;
   }
   if (screen === "plans") {
-    return <Plans onActivated={() => setScreen("dashboard")} onBack={() => setScreen("dashboard")} />;
+    const leavePlans = () => {
+      setPlansNotice(null);
+      setScreen("dashboard");
+    };
+    return <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />;
   }
   // The banner rides above the Dashboard only. It is the screen people
   // sit on, and putting it above every screen would mean it appears
@@ -393,5 +413,17 @@ export default function App() {
   );
   };
 
-  return <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>;
+  // The backup-route chip above every screen while relay mode lasts, and
+  // the consent prompt over them when a request the customer made needs
+  // it: both at the root, so neither touches the Dashboard's orb or
+  // headline (calm UI).
+  return (
+    <div className="flex h-full flex-col">
+      <BackupRouteChip />
+      <div className="min-h-0 flex-1">
+        <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>
+      </div>
+      <BackupRouteConsent />
+    </div>
+  );
 }

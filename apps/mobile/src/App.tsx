@@ -6,7 +6,9 @@ import { endCustomerSession, setTunnelTeardown, type SessionEnd } from "@shared/
 import { autoReconnect } from "@shared/lib/auto-reconnect";
 import { onSessionRevoked } from "@shared/lib/session-revoked";
 import { useI18n } from "@shared/lib/i18n";
-import { tearDownMobileForSignOut } from "./lib/vpn";
+import { tearDownMobileForSignOut, vpnStatus } from "./lib/vpn";
+import { setRelayTunnelReader } from "@shared/lib/last-resort";
+import { BackupRouteChip, BackupRouteConsent } from "@shared/components/BackupRoute";
 import { Login } from "@shared/screens/Login";
 import { Register } from "@shared/screens/Register";
 import { VerifyEmail } from "@shared/screens/VerifyEmail";
@@ -42,6 +44,11 @@ setTunnelTeardown(tearDownMobileForSignOut);
 // reconnected when the app is next opened, and says "Reconnecting..."
 // then. See lib/reconnect-steps.ts and the journal.
 autoReconnect.setRequiresForeground(true);
+
+// The relay of last resort is dialled only while the phone reports no
+// tunnel (docs/relay-last-resort.md, R1.5), asked at send time. An error
+// or no answer keeps it closed (last-resort.ts).
+setRelayTunnelReader(async () => (await vpnStatus()).connected);
 
 /** The Android client.
  *
@@ -82,6 +89,8 @@ export default function App() {
   // can sign in the moment the code is confirmed. Held in memory only.
   const [pendingAuth, setPendingAuth] = useState<{ email: string; password?: string } | null>(null);
   const [loginNotice, setLoginNotice] = useState<string | null>(null);
+  // After a sign-up through the relay: "enter an Ultimate voucher code".
+  const [plansNotice, setPlansNotice] = useState<string | null>(null);
   const endingRef = useRef(false);
   const { t } = useI18n();
 
@@ -238,6 +247,17 @@ export default function App() {
         onNeedsVerification={goToVerify}
         onSuccess={() => setScreen("dashboard")}
         onGoLogin={() => setScreen("login")}
+        // Where the voucher field is. Not in a store build, which cannot
+        // redeem one (guideline 3.1.1): an iPhone customer redeems on
+        // another device, a gap docs/relay-last-resort.md states (R5.4).
+        onRelaySignedUp={() => {
+          if (IS_STORE_BUILD) {
+            setScreen("dashboard");
+            return;
+          }
+          setPlansNotice(t("relay.created"));
+          setScreen("plans");
+        }}
       />;
   }
   if (screen === "forgot") {
@@ -301,7 +321,11 @@ export default function App() {
   // the entrance would still ship the room, which is what a reviewer
   // looks for and what a determined customer finds.
   if (screen === "plans" && !IS_STORE_BUILD) {
-    return <Plans onActivated={() => setScreen("dashboard")} onBack={() => setScreen("dashboard")} />;
+    const leavePlans = () => {
+      setPlansNotice(null);
+      setScreen("dashboard");
+    };
+    return <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />;
   }
   // The App Store counterpart, and the mirror image of the branch above:
   // this one is dropped from every non-store build for the same reason,
@@ -323,5 +347,15 @@ export default function App() {
     );
   }
 
-  return <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>;
+  // As on the desktop: the backup-route chip above every screen while
+  // relay mode lasts, and the consent prompt over them when asked.
+  return (
+    <div className="flex h-full flex-col">
+      <BackupRouteChip />
+      <div className="min-h-0 flex-1">
+        <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>
+      </div>
+      <BackupRouteConsent />
+    </div>
+  );
 }
