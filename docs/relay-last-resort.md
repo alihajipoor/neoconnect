@@ -52,8 +52,12 @@ The listener is inert until the origin's relay block proxies to it
 
 **Region (R2.4).** The ASN table keeps iptoasn's country column;
 `AsnLookupService.regionOf(ip)`. Relay sign-up needs IR; every other relay
-call needs IR or unknown; otherwise 403 `RELAY_REGION`. Registered country,
-not location (F5).
+call needs IR or unknown. A network placed outside Iran gets 403
+`RELAY_REGION`; a sign-up (or a sign-in converting an account on a sign-up's
+terms) from a network the table cannot place -- an ASN it lacks, or a table
+not loaded -- gets 403 `RELAY_REGION_UNKNOWN`, kept apart because the app
+switches the relay off for a day on `RELAY_REGION` alone, and an unknown
+network may still sign in. Registered country, not location (F5).
 
 **Mode (R2.5).** `relay_auth_settings.mode`: `OFF`, `AUTO` (default),
 `INTRANET`; Panel -> Settings -> Relay sign-up. The auto detector counts
@@ -70,7 +74,7 @@ intranet sets `intranet` (I4).
 | Endpoint | What |
 |---|---|
 | `POST /customer-auth/relay-register` | Relay only (404 elsewhere). Address twice, PoW required (>= 18 bits), caps, no throwaway domains. Tokens at once, plus a recovery code shown once. No mail, no trial, referral ignored. |
-| `POST /customer-auth/login` (changed) | Over the relay from IR, an unverified account becomes relay-unverified on a relay sign-up's terms, once: switch, region, a proof of work of at least the sign-up's bits (else 400 `CHALLENGE_REQUIRED`, `scope: "relay-signup"`), and a place under the caps (R4.2). Refusals say why (`RELAY_SIGNUP_OFF`, `RELAY_REGION`, `RELAY_SIGNUP_LIMIT`), never `requiresVerification`, and are not counted as failed guesses. An account already relay-unverified, or holding an active or relay-only subscription, is let in without a place whatever the switch says. Normal routes unchanged. |
+| `POST /customer-auth/login` (changed) | Over the relay from IR, an unverified account becomes relay-unverified on a relay sign-up's terms, once: switch, region, a proof of work of at least the sign-up's bits (else 400 `CHALLENGE_REQUIRED`, `scope: "relay-signup"`), and a place under the caps (R4.2). Refusals say why (`RELAY_SIGNUP_OFF`, `RELAY_REGION_UNKNOWN`, `RELAY_SIGNUP_LIMIT`), never `requiresVerification`, and are not counted as failed guesses. An account already relay-unverified, or holding an active or relay-only subscription, is let in without a place whatever the switch says. Normal routes unchanged. |
 | `POST /customer-auth/reset-password-recovery` | Reset by recovery code; shares the emailed code's guess budget; returns a new code. |
 | `POST /customer-auth/recovery-code` | Create or rotate (current password, or a sign-in in the last 15 min for social-only accounts). |
 | `POST /customer-auth/set-password` | Social-only accounts, sign-in in the last 15 min. |
@@ -158,16 +162,25 @@ checked by `relay_http.rs`'s rules; they never reach `endpoints`,
 HTTP scope (`bundleHosts` now takes panel and mirror entries only).
 
 **Evidence of Iran (R1.3).** The CDN's `country` on the pre-connect
-`/health/ip` baseline, stamped per carrier (`network-identity.ts`); on a
-network never stamped, time zone `Asia/Tehran` or a `-IR` locale. The
-network key is the carrier's ASN, as the endpoint demotions use, so a
-"network change" is a change of carrier reading.
+`/health/ip` baseline, stamped per carrier (`network-identity.ts`). When
+this network is unknown or never stamped, the latest stamp on any network:
+the key is forgotten a day after the last baseline, and with every route
+blocked none comes, so "unknown" lasts as long as a blackout does. Time
+zone `Asia/Tehran` or a `-IR` locale counts only on an install with no
+stamp at all -- otherwise a Persian-language phone abroad, offline or
+behind a captive portal, would be offered the box in Iran. The network
+key is the carrier's ASN, as the endpoint demotions use, so a "network
+change" is a change of carrier reading.
 
 **Relay mode (R1.7).** Starts on the backend's JSON through the relay, 15
 minutes sliding per network; ends on an ordinary-route answer, a tunnel
 being dialled or reported up, two unanswered relay calls, the consent
 withdrawn, or `RELAY_REGION` (which also turns the relay off on that
-network for 24 hours).
+network for 24 hours; `RELAY_REGION_UNKNOWN` does neither). A tunnel is
+looked for as each connect pass ends and, while the chip shows, every 5
+seconds: the phone tells the endpoint order nothing about its tunnel, and
+on either platform one can come up with no pass in the app (a
+quick-settings tile, always-on VPN, a tunnel kept across a restart).
 
 **Screens (en, fa).** Consent prompt at each app's root; a neutral "App
 data: backup route" chip above every screen while relay mode lasts, its
@@ -180,7 +193,10 @@ recovery code beside the emailed reset code; Settings: the backup-route
 switch, the verify-later reminder with address correction, the recovery
 code, and "set a password" for social-only accounts. Card and crypto
 checkout are held while relay mode lasts, with a TODO for the payment-only
-path below.
+path below. The plan list is not in R3.3's capability set, so for an
+unconfirmed account the Plans screen takes its 403 `VERIFY_EMAIL` as the
+calm verify reminder (or the sign-up's own notice) and leaves the voucher
+box, rather than a red error over a list loading for ever.
 
 **Where the client differs.**
 
