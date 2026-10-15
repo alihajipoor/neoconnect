@@ -142,10 +142,11 @@ export class RoutesService {
         exitProtocolConfigId: true,
         uplinkAssertedAt: true,
         entryAssertedAt: true,
-        // Only ever fed to the HMAC below -- never returned. See
-        // exit-handle.ts for why the node's own identity must not leave
-        // this process.
-        exitProtocolConfig: { select: { nodeId: true } },
+        // The node id is only ever fed to the HMAC below -- never
+        // returned. See exit-handle.ts for why the node's own identity
+        // must not leave this process. The region is returned: it is the
+        // country, which is what a customer picking a relay is choosing.
+        exitProtocolConfig: { select: { nodeId: true, node: { select: { region: true } } } },
         entryProtocolConfig: {
           select: {
             protocol: true,
@@ -195,6 +196,22 @@ export class RoutesService {
       // waits on.
       exit: exitHandle(exitProtocolConfig?.nodeId ?? entryProtocolConfig.nodeId),
       location: { region: entryProtocolConfig.node.region, nodeName: entryProtocolConfig.node.name },
+      // Where a relayed route's traffic leaves from, as a country and
+      // nothing finer: the apps show it as "Iran -> Germany" with both
+      // flags. Until this, a relay row named only its entry, so every
+      // route through Iran read "ir2 / ir-iran" whichever exit it used.
+      //
+      // The region only. The exit's name, address and id stay here for
+      // the reasons given on `exit` above and on `endpoint` below.
+      //
+      // Null on a direct route, which leaves from the node in
+      // `location`. Additive: a client that predates it ignores it, and
+      // a client reading an older backend finds it absent and shows the
+      // entry, as before.
+      exitLocation:
+        exitProtocolConfigId !== null && exitProtocolConfig?.node?.region
+          ? { region: exitProtocolConfig.node.region }
+          : null,
       // The address the client dials, so the app can measure its own
       // latency to each option rather than showing a number measured
       // from this server, which is irrelevant to the customer.
