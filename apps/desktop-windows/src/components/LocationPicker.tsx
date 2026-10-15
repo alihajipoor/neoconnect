@@ -9,12 +9,13 @@ import type { RouteOption } from "../lib/types";
 import { cn } from "../lib/utils";
 import { Button } from "./ui";
 import { Latency } from "./Latency";
-import { Flag } from "./Flag";
+import { RouteFlag } from "./Flag";
 import { useI18n } from "../lib/i18n";
 import { failureText, type ShownFailure } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
 import { traceRequests } from "../lib/unanswered-report";
 import { routesToAdopt } from "../lib/picker-routes";
+import { groupByPlace, placeLabel, routePlace } from "../lib/route-place";
 
 // Full-screen overlay, not a floating dialog -- this app's window is a
 // fixed 400x640 (see tauri.conf.json), so "sheet slides over the whole
@@ -106,7 +107,7 @@ export function LocationPicker({
    * difference is that the customer is not made to wait for it. */
   initialRoutes?: RouteOption[];
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [routes, setRoutes] = useState<RouteOption[]>(initialRoutes ?? []);
   // Only a blocking load when there is genuinely nothing to show.
   const [loading, setLoading] = useState((initialRoutes ?? []).length === 0);
@@ -129,8 +130,10 @@ export function LocationPicker({
    * everything else unasked would make the choice for the customer. */
   const [recommendedOnly, setRecommendedOnly] = useState(false);
   // What the list actually shows. Every index below -- focus, selection
-  // -- is into this, not into `routes`.
-  const rows = pickerRows(routes, recommendedOnly);
+  // -- is into this, not into `routes`. Routes to one place sit
+  // together (`groupByPlace`): with relays named by their exit, the
+  // server's name order put Iran → Germany and Iran → France in turns.
+  const rows = groupByPlace(pickerRows(routes, recommendedOnly));
   // With Automatic chosen, no server row is "the current one": the ladder
   // decides at connect time, and every row stays a way to pin a server.
   const pinnedRouteId = automatic ? undefined : currentRouteId;
@@ -450,6 +453,8 @@ export function LocationPicker({
             {rows.map((route, index) => {
               const isCurrent = route.id === pinnedRouteId;
               const isSwitching = switchingId === route.id;
+              const place = routePlace(route);
+              const placeName = placeLabel(route, language);
               return (
                 <button
                   key={route.id}
@@ -471,19 +476,25 @@ export function LocationPicker({
                       same pin, which told the customer nothing they
                       could not already read -- while the one thing they
                       actually scan a server list for, the country, was
-                      buried in a slug like "fr-france". */}
+                      buried in a slug like "fr-france". A relay shows
+                      its exit's flag with Iran's as a badge, since the
+                      exit is the country being chosen. */}
                   <div
                     className={cn(
                       "flex size-9 shrink-0 items-center justify-center rounded-full",
                       isCurrent ? "bg-primary/20" : "bg-highlight/10",
                     )}
                   >
-                    <Flag region={route.location.region} className="h-4 w-[1.35rem]" />
+                    <RouteFlag region={place.entry} exitRegion={place.exit} label={placeName} />
                   </div>
                   <div className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate text-sm font-medium">{route.location.nodeName}</span>
+                    {/* The country -- "Iran → Germany" for a relay --
+                        over the node and protocol, which is where two
+                        routes to one place differ. A relay used to read
+                        "ir2 / ir-iran" whichever country it left from. */}
+                    <span className="truncate text-sm font-medium">{placeName}</span>
                     <span className="truncate text-xs text-muted-foreground">
-                      {route.location.region} &middot; {customerProtocolLabel(route.protocol, route.transport)}
+                      {route.location.nodeName} &middot; {customerProtocolLabel(route.protocol, route.transport)}
                     </span>
                     <IspTagLine tag={route.ispTag} t={t} />
                   </div>

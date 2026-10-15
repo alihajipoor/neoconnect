@@ -147,7 +147,8 @@ import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { GamingStatusPanel } from "../components/GamingStatusPanel";
 import { Logo } from "../components/Logo";
-import { Flag } from "../components/Flag";
+import { RouteFlag } from "../components/Flag";
+import { exitCountryName, placeKey, placeLabel, routePlace } from "../lib/route-place";
 import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { RepairNetwork } from "../components/RepairNetwork";
@@ -3434,12 +3435,16 @@ export function Dashboard({
               // the head alone missed the case this exists for.
               const intended = routes.find((r) => r.id === (shownRouteId ?? candidates[0]?.routeId));
               const landed = routes.find((r) => r.id === candidate.routeId);
-              const from = intended?.location.region ?? null;
-              const to = landed?.location.region ?? null;
+              // Compared as places, not entry regions: a relay that fell
+              // from Iran → Germany to Iran → France crossed a border,
+              // though both are dialled in Iran.
+              const crossed = intended !== undefined && landed !== undefined && placeKey(intended) !== placeKey(landed);
+              const from = intended ? placeLabel(intended, language) : null;
+              const to = landed ? placeLabel(landed, language) : null;
               setFailedOverTo(
                 failoverNotice({
                   label,
-                  fromRegion: from && to && from !== to ? from : null,
+                  fromRegion: crossed ? from : null,
                   toRegion: to,
                   // Only "couldn't reach it" if we actually dialled it.
                   shownRouteId: shownRouteId ?? null,
@@ -4297,13 +4302,30 @@ export function Dashboard({
                     automaticPending ? (
                       <Sparkles className="size-3" />
                     ) : currentRoute ? (
-                      <Flag region={currentRoute.location.region} className="h-3 w-[1rem]" />
+                      <RouteFlag
+                        region={routePlace(currentRoute).entry}
+                        exitRegion={routePlace(currentRoute).exit}
+                        label={placeLabel(currentRoute, language)}
+                        size="sm"
+                      />
                     ) : (
                       <Globe className="size-3" />
                     )
                   }
                   label={t(!chosenRouteId && !automaticPending ? "dash.serverAuto" : "dash.server")}
-                  value={automaticPending ? t("loc.automaticShort") : currentRoute ? currentRoute.location.region : "—"}
+                  // The country the traffic leaves from -- a relay's exit,
+                  // with Iran on the flag's badge. The whole "Iran →
+                  // Germany" does not fit a third of the window; the
+                  // server list spells it out.
+                  value={
+                    automaticPending ? (
+                      t("loc.automaticShort")
+                    ) : currentRoute ? (
+                      <span title={placeLabel(currentRoute, language)}>{exitCountryName(currentRoute, language)}</span>
+                    ) : (
+                      "—"
+                    )
+                  }
                   onClick={() => setShowLocationPicker(true)}
                   actionLabel={t("dash.change")}
                   disabledReason={

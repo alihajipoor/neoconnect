@@ -145,7 +145,10 @@ const ROUTES = [
     exitProtocolConfigId: "cfg-de-exit",
     // The exit leg. Read through a nested select, and the one field in
     // this whole response that decides what the far end sees.
-    exitProtocolConfig: { nodeId: GERMANY.id },
+    // The whole node row is here, as the database holds it, so a select
+    // that named more of it than the exit's country would show up in
+    // the payload checks below.
+    exitProtocolConfig: { nodeId: GERMANY.id, node: { ...GERMANY, status: "ONLINE", lastHeartbeatAt: FRESH } },
     uplinkAssertedAt: FRESH,
     entryAssertedAt: FRESH,
     entryProtocolConfig: {
@@ -165,6 +168,7 @@ type Option = {
   exit: string | null;
   endpoint: { host: string; port: number };
   location: { region: string; nodeName: string };
+  exitLocation?: { region: string } | null;
 };
 
 describe("exit identity delivery", () => {
@@ -303,6 +307,32 @@ describe("exit identity delivery", () => {
     // dialled there, never smuggled through the relay's row.
     const carryingGermanyAddress = options.filter((o) => JSON.stringify(o).includes(GERMANY.publicIp));
     expect(carryingGermanyAddress.map((o) => o.id).sort()).toEqual(["route-de-reality", "route-de-wg"]);
+  });
+
+  it("names the country a relay leaves from, and nothing else about that machine", async () => {
+    const options = await optionsFor("customer-1");
+    const relay = byId(options, "route-ir-relay");
+    // The apps draw Iran and the exit country together. Before, a relay
+    // row carried only its entry, so every relay in the list read
+    // "ir2 / ir-iran" whichever country it actually left from.
+    expect(relay?.exitLocation).toEqual({ region: GERMANY.region });
+    // The entry stays what it was: the place the client dials.
+    expect(relay?.location).toEqual({ region: IRAN_RELAY.region, nodeName: IRAN_RELAY.name });
+    // The country only. The exit's name, address and id stay out of the
+    // relay's row, for the reasons in the test above.
+    const row = JSON.stringify(relay);
+    expect(row).not.toContain(GERMANY.name);
+    expect(row).not.toContain(GERMANY.publicIp);
+    expect(row).not.toContain(GERMANY.id);
+  });
+
+  it("gives a direct route no separate exit location: it leaves where it is dialled", async () => {
+    const options = await optionsFor("customer-1");
+    for (const id of ["route-de-wg", "route-de-reality", "route-fi-reality"]) {
+      // Present and null, so a client can tell "direct" from "a backend
+      // too old to say", which leaves the field out altogether.
+      expect(byId(options, id)).toHaveProperty("exitLocation", null);
+    }
   });
 
   it("gives two customers different handles for the same machine", async () => {
