@@ -13,6 +13,7 @@ import { FreeTrialSettingsModule } from "../free-trial-settings/free-trial-setti
 import { ReferralsModule } from "../referrals/referrals.module";
 import { EmailModule } from "../email/email.module";
 import { DeviceSlotsModule } from "../device-slots/device-slots.module";
+import { RelayAuthModule } from "../relay-auth/relay-auth.module";
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { DeviceSlotsModule } from "../device-slots/device-slots.module";
     EmailModule,
     // Sign-out and password changes give the ended devices' slots back.
     DeviceSlotsModule,
+    RelayAuthModule,
   ],
   controllers: [CustomerAuthController],
   providers: [CustomerAuthService, CustomerJwtStrategy, SocialAuthService, OauthFlowService],

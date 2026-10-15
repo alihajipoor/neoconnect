@@ -90,3 +90,20 @@ export async function changeSubscriptionPlan(
     }),
   );
 }
+
+/** Support moving an account to a new address on its recovery code alone
+ * (docs/relay-last-resort.md, R3.9). Returns the account's new recovery
+ * code, to be handed to the customer: the old one has been read out. */
+export async function moveAddressWithRecoveryCode(
+  customerId: string,
+  recoveryCode: string,
+  email: string,
+): Promise<MutationResult<{ email: string; recoveryCode: string }>> {
+  return done(
+    customerId,
+    await apiMutate<{ email: string; recoveryCode: string }>(`/relay-auth/customers/${customerId}/move-address`, {
+      method: "POST",
+      body: JSON.stringify({ recoveryCode, email }),
+    }),
+  );
+}

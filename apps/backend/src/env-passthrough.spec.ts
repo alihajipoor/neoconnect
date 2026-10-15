@@ -10,7 +10,7 @@ import { concurrencyCutMode, deviceSlotsMode } from "./modules/device-slots/mode
  * and never see take effect). Every tuning knob read by code is listed
  * here, and each must be passed through as `${NAME:-}` -- optional, empty
  * meaning "the default in the code". */
-const OPTIONAL_KNOBS = ["CUSTOMER_DEVICE_CREDENTIAL_LIMIT", "CONCURRENCY_CUT", "DEVICE_SLOTS"];
+const OPTIONAL_KNOBS = ["CUSTOMER_DEVICE_CREDENTIAL_LIMIT", "CONCURRENCY_CUT", "DEVICE_SLOTS", "RELAY_TRUSTED_PEERS"];
 
 const COMPOSE = readFileSync(join(__dirname, "..", "..", "..", "infra", "docker-compose.prod.yml"), "utf8");
 
@@ -23,6 +23,19 @@ describe("infra/docker-compose.prod.yml passes the backend's optional knobs thro
 /** The coordinator's defaults: the backstop watches (shadow) until a week
  * of logs says it can act, and slots are on -- they affect only apps
  * that claim. A typo must land on the default, not on the other mode. */
+/** The relay listener (docs/relay-last-resort.md, R2): on by default in
+ * the container, published on the host's loopback only. */
+describe("the relay listener in infra/docker-compose.prod.yml", () => {
+  it("listens on 4001 unless RELAY_LISTEN says otherwise, and empty turns it off", () => {
+    expect(COMPOSE).toContain("RELAY_LISTEN: ${RELAY_LISTEN-0.0.0.0:4001}");
+  });
+
+  it("is published on loopback only", () => {
+    expect(COMPOSE).toContain('- "127.0.0.1:4001:4001"');
+    expect(COMPOSE).not.toMatch(/- "(0.0.0.0:)?4001:4001"/);
+  });
+});
+
 describe("CONCURRENCY_CUT and DEVICE_SLOTS", () => {
   const saved = { cut: process.env.CONCURRENCY_CUT, slots: process.env.DEVICE_SLOTS };
   afterEach(() => {

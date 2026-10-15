@@ -98,3 +98,15 @@ export async function updatePaymentSettingsAction(input: {
   if (result.ok) revalidatePath("/settings", "layout");
   return result;
 }
+
+export async function updateRelayAuthAction(input: {
+  mode?: "OFF" | "AUTO" | "INTRANET";
+  hostingAsns?: number[];
+}): Promise<MutationResult<void>> {
+  const result = await apiMutate<void>("/relay-auth", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  if (result.ok) revalidatePath("/settings/relay");
+  return result;
+}

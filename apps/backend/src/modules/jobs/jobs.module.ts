@@ -11,6 +11,7 @@ import { ReachabilityModule } from "../reachability/reachability.module";
 import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
 import { ReferralsModule } from "../referrals/referrals.module";
 import { ProtocolUsersModule } from "../protocol-users/protocol-users.module";
+import { RelayAuthModule } from "../relay-auth/relay-auth.module";
 import { SweepsProcessor } from "./sweeps.processor";
 import { SweepsSchedulerService } from "./sweeps-scheduler.service";
 import { AnnouncementsProcessor } from "./announcements.processor";
@@ -51,6 +52,7 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
     // For the device-credential sweep. No cycle: protocol-users pulls in
     // Prisma and the agent gateway only.
     ProtocolUsersModule,
+    RelayAuthModule,
   ],
   providers: [SweepsProcessor, SweepsSchedulerService, AnnouncementsProcessor],
   exports: [announcementsQueue],

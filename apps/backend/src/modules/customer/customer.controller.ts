@@ -44,11 +44,18 @@ import { SupportService } from "../support/support.service";
 import { OpenTicketDto } from "../support/dto/open-ticket.dto";
 import { ReplyTicketDto } from "../support/dto/reply-ticket.dto";
 import { RedeemVoucherDto } from "../vouchers/dto/redeem-voucher.dto";
-import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
+import { AllowUnverified, CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
+import { relayContextOf } from "../../common/relay/relay-arrival";
 import { ThrottleVolumePerSession } from "../../common/guards/client-throttler.guard";
 import { CurrentCustomer } from "../../common/decorators/current-customer.decorator";
 import { GamingService } from "../gaming/gaming.service";
 import { AuthenticatedCustomer } from "../customer-auth/types";
+
+/** Over the relay, or an account held to the unverified capability set
+ * (or not known not to be): only single-use Ultimate codes. */
+export function restrictedVoucherCaller(customer: AuthenticatedCustomer, req: Request): boolean {
+  return relayContextOf(req) !== null || customer.limited !== false;
+}
 
 // Everything here is scoped to the calling customer only (never another
 // customer's data) -- this is the API surface a native client calls to
@@ -78,9 +85,10 @@ export class CustomerController {
     private readonly ispRecommendations: IspRecommendationsService,
   ) {}
 
+  @AllowUnverified()
   @Get("me")
   me(@CurrentCustomer() customer: AuthenticatedCustomer) {
-    return this.customersService.get(customer.sub);
+    return this.customersService.getSelf(customer.sub);
   }
 
   /* Deleting your own account.
@@ -99,6 +107,7 @@ export class CustomerController {
    * be told what they are giving up. A backend flag would only be
    * theatre, since anything that can call this can set it.
    */
+  @AllowUnverified()
   @Delete("me")
   deleteAccount(@CurrentCustomer() customer: AuthenticatedCustomer) {
     return this.customersService.deleteOwnAccount(customer.sub);
@@ -124,11 +133,13 @@ export class CustomerController {
     return this.customersService.setLocale(customer.sub, dto.locale);
   }
 
+  @AllowUnverified()
   @Get("subscriptions")
   subscriptions(@CurrentCustomer() customer: AuthenticatedCustomer) {
     return this.subscriptionsService.listByCustomer(customer.sub);
   }
 
+  @AllowUnverified()
   @Get("protocol-users")
   protocolUsers(@CurrentCustomer() customer: AuthenticatedCustomer) {
     // This device's own credentials when the token names a session --
@@ -231,17 +242,23 @@ export class CustomerController {
    * Separate from redeeming so the app can show the plan and let the
    * customer confirm -- a code that silently converts on the first
    * keystroke is not something anyone should build. */
+  @AllowUnverified()
   @Post("vouchers/preview")
-  previewVoucher(@Body() dto: RedeemVoucherDto) {
-    return this.vouchersService.preview(dto.code);
+  previewVoucher(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: RedeemVoucherDto, @Req() req: Request) {
+    return this.vouchersService.preview(dto.code, { restricted: restrictedVoucherCaller(customer, req) });
   }
 
+  /** Over the relay, or for an account whose address is unconfirmed, only
+   * a single-use code for a relay-only plan (Ultimate) is accepted; any
+   * other is refused before it is spent (docs/relay-last-resort.md, F1). */
+  @AllowUnverified()
   @Post("vouchers/redeem")
   redeemVoucher(
     @CurrentCustomer() customer: AuthenticatedCustomer,
     @Body() dto: RedeemVoucherDto,
+    @Req() req: Request,
   ) {
-    return this.vouchersService.redeem(customer.sub, dto.code);
+    return this.vouchersService.redeem(customer.sub, dto.code, { restricted: restrictedVoucherCaller(customer, req) });
   }
 
   /** Everything the support screen needs in one call: whether new
@@ -331,6 +348,7 @@ export class CustomerController {
   // client was handed at /health/ip before its tunnel came up, because
   // this list is often fetched through the tunnel. Without one, from the
   // request's address unless that is one of our nodes.
+  @AllowUnverified()
   @Get("subscriptions/:id/routes")
   async availableRoutes(
     @CurrentCustomer() customer: AuthenticatedCustomer,
@@ -367,6 +385,7 @@ export class CustomerController {
   // different route -- tears down the old ProtocolUser(s) and provisions
   // a fresh one, so the client should be disconnected first (a stale
   // local tunnel pointed at now-deleted server credentials won't work).
+  @AllowUnverified()
   @Post("subscriptions/:id/route")
   async switchRoute(
     @CurrentCustomer() customer: AuthenticatedCustomer,

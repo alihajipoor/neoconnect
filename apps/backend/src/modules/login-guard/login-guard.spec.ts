@@ -91,6 +91,11 @@ describe("LoginGuardService", () => {
     expect(() => guard.enforce("customer", undefined, EMAIL, IP)).toThrow(BadRequestException);
   });
 
+  it("says how much work an accepted attempt proved: none under the grace, else the solution's", () => {
+    expect(guard.enforce("customer", undefined, EMAIL, IP)).toBe(0);
+    expect(guard.enforce("customer", solve(guard.issueAt(13)), EMAIL, IP)).toBe(13);
+  });
+
   it("accepts a solved challenge once one is demanded", () => {
     for (let i = 0; i < 5; i += 1) guard.recordFailure("customer", EMAIL, IP);
     const solution = solve(guard.issue("customer", EMAIL, IP));
@@ -198,5 +203,41 @@ describe("LoginGuardService with the grace closed", () => {
       expect(() => guard.enforce("admin", undefined, EMAIL, IP)).toThrow(BadRequestException);
       guard.recordFailure("admin", EMAIL, IP);
     }
+  });
+});
+
+/** The relay sign-up's proof of work (docs/relay-last-resort.md, R3.5):
+ * always required, and at least as hard as the caller's pressure says. */
+describe("LoginGuardService.enforceMinimum", () => {
+  const guard = new LoginGuardService();
+
+  const codeOf = (fn: () => void): string | undefined => {
+    try {
+      fn();
+      return undefined;
+    } catch (err) {
+      const body = (err as BadRequestException).getResponse() as { code?: string };
+      return body.code ?? "refused";
+    }
+  };
+
+  it("has no grace: no solution, no sign-up", () => {
+    expect(codeOf(() => guard.enforceMinimum(undefined, 4))).toBe("CHALLENGE_REQUIRED");
+  });
+
+  it("refuses a solution easier than asked, and accepts one that is not", () => {
+    expect(codeOf(() => guard.enforceMinimum(solve(guard.issueAt(3)), 4))).toBe("refused");
+    expect(codeOf(() => guard.enforceMinimum(solve(guard.issueAt(4)), 4))).toBeUndefined();
+  });
+
+  it("takes each solution once", () => {
+    const solution = solve(guard.issueAt(4));
+    expect(codeOf(() => guard.enforceMinimum(solution, 4))).toBeUndefined();
+    expect(codeOf(() => guard.enforceMinimum(solution, 4))).toBe("refused");
+  });
+
+  it("refuses one it did not issue", () => {
+    const forged = { ...solve(guard.issueAt(4)), difficulty: 1 };
+    expect(codeOf(() => guard.enforceMinimum(forged, 1))).toBe("refused");
   });
 });
