@@ -604,16 +604,30 @@ mod tests {
     /// Tests only: in service the stub's port is fixed, because an NRPT
     /// rule cannot name one, and moving it is exactly what `start` must
     /// never do.
+    ///
+    /// Port 0 kept failing on CI's windows-latest runner even with ten
+    /// retries: the OS hands out numbers from the dynamic range
+    /// (49152-65535), and that runner reserves most of it for TCP. So the
+    /// candidates come from 20000-39999 instead, below the dynamic range
+    /// where those reservations do not usually sit, in an order that
+    /// differs per process so parallel test runs do not chase each other.
     pub(super) fn start_on_any_port(
         doh_url: &str,
         namespaces: &[String],
         excludes: &[String],
     ) -> Result<Stub, String> {
+        let seed = std::process::id() as u64
+            ^ std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0);
         let mut last = String::new();
-        for _ in 0..10 {
-            let any_port = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-            match Stub::start(any_port, doh_url, namespaces, excludes) {
-                Err(e) if e.contains("(TCP)") => last = e,
+        for i in 0..200u64 {
+            let port = 20_000 + ((seed + i * 7_919) % 20_000) as u16;
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            match Stub::start(addr, doh_url, namespaces, excludes) {
+                // Taken, reserved or refused on either protocol: next one.
+                Err(e) if e.contains("(TCP)") || e.contains("(UDP)") => last = e,
                 other => return other,
             }
         }
