@@ -146,7 +146,7 @@ describe("a request every ordinary route failed", () => {
   it("goes through the relay when it opted in, and is answered from there", async () => {
     relayReplies = [json(200, ME)];
     expect(await apiRequest("/customer/me", { relay: "background" })).toEqual({ ok: true, data: ME });
-    expect(relayed.map((r) => [r.method, r.path, r.headers.Authorization])).toEqual([
+    expect(relayed.map((r) => [r.method, r.path, r.headers.authorization])).toEqual([
       ["GET", "/customer/me", "Bearer access"],
     ]);
     // The relay is never the address to remember.
@@ -201,7 +201,7 @@ describe("a request every ordinary route failed", () => {
     ];
     expect(await apiRequest("/customer/me", { relay: "background" })).toEqual({ ok: true, data: ME });
     expect(relayed.map((r) => r.path)).toEqual(["/customer/me", "/customer-auth/refresh", "/customer/me"]);
-    expect(relayed[2].headers.Authorization).toBe("Bearer fresh");
+    expect(relayed[2].headers.authorization).toBe("Bearer fresh");
     expect(stored).toEqual({ accessToken: "fresh", refreshToken: "refresh2" });
   });
 
@@ -211,6 +211,15 @@ describe("a request every ordinary route failed", () => {
     expect(result).toMatchObject({ ok: false, sessionExpired: true });
     expect(stored).toBeNull();
     expect(revoked).toBe(1);
+  });
+
+  it("sends each header once, whatever spellings the caller used", async () => {
+    relayReplies = [json(200, ME)];
+    await apiRequest("/customer/me", {
+      headers: { "content-type": "application/json", AUTHORIZATION: "Bearer stale" },
+      relay: "background",
+    });
+    expect(relayed[0].headers).toEqual({ "content-type": "application/json", authorization: "Bearer access" });
   });
 
   it("keeps the backend's refusal and its code", async () => {

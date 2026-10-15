@@ -1432,19 +1432,25 @@ async function withLastResort<T>(
   return leg.dialled ? { ...result, relayTried: true } : result;
 }
 
-/** The headers of a request as a plain record: the app passes records,
- * and a `Headers` or a list of pairs is read the same way. */
-function headerRecord(headers: HeadersInit | undefined): Record<string, string> {
+/** The headers of a request as a plain record with lower-case names, the
+ * later of two spellings winning: the relay command refuses a header given
+ * twice in two casings (`forwarded_headers` in relay_http.rs), and the app
+ * builds its headers from several places. Records, `Headers` and lists of
+ * pairs alike. */
+function headerRecord(...sets: (HeadersInit | undefined)[]): Record<string, string> {
   const out: Record<string, string> = {};
-  if (!headers) return out;
-  if (Array.isArray(headers)) {
-    for (const [name, value] of headers) out[name] = value;
-  } else if (typeof Headers !== "undefined" && headers instanceof Headers) {
-    headers.forEach((value, name) => {
-      out[name] = value;
-    });
-  } else {
-    Object.assign(out, headers);
+  const put = (name: string, value: string) => {
+    out[name.toLowerCase()] = value;
+  };
+  for (const headers of sets) {
+    if (!headers) continue;
+    if (Array.isArray(headers)) {
+      for (const [name, value] of headers) put(name, value);
+    } else if (typeof Headers !== "undefined" && headers instanceof Headers) {
+      headers.forEach((value, name) => put(name, value));
+    } else {
+      for (const [name, value] of Object.entries(headers)) put(name, value);
+    }
   }
   return out;
 }
@@ -1457,7 +1463,7 @@ async function relayExchange(path: string, init: RequestInit, use: RelayUse): Pr
     {
       method,
       path,
-      headers: { "Content-Type": "application/json", ...headerRecord(init.headers) },
+      headers: headerRecord({ "Content-Type": "application/json" }, init.headers),
       body: typeof init.body === "string" ? init.body : undefined,
     },
     use,
@@ -1581,7 +1587,7 @@ async function relayAuthenticated<T>(
   if (tokens === null) return { result: null, dialled: false };
   const withBearer = (accessToken: string): RequestInit => ({
     ...init,
-    headers: { ...headerRecord(init.headers), Authorization: `Bearer ${accessToken}` },
+    headers: headerRecord(init.headers, { Authorization: `Bearer ${accessToken}` }),
   });
   let outcome = await relayExchange(path, withBearer(tokens.accessToken), use);
   if (outcome.kind !== "answered") return legWithout<T>(outcome, use, normal);

@@ -155,6 +155,19 @@ describe("consent (R1.4)", () => {
     expect(outcomes.map((o) => o.kind)).toEqual(["answered", "answered"]);
   });
 
+  it("is not asked while a tunnel holds the gate", async () => {
+    store.delete("neoxify.relay.consent");
+    let asked = 0;
+    lr.onRelayConsentAsked(async () => {
+      asked += 1;
+      return true;
+    });
+    tunnelUp = true;
+    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "gated" });
+    expect(asked).toBe(0);
+    expect(lr.relayConsent()).toBeNull();
+  });
+
   it("can be withdrawn in Settings, which ends relay mode", async () => {
     replies = [json(200, {})];
     await lr.relayRequest(ME, "foreground");

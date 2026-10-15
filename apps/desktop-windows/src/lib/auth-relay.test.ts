@@ -145,7 +145,7 @@ describe("signing in", () => {
       "/customer-auth/login",
     ]);
     expect(body(relayed[2])).toEqual({ scope: "relay-signup" });
-    expect(relayed[2].headers["X-Neoxify-Install-Id"]).toBe(lr.relayInstallId());
+    expect(relayed[2].headers["x-neoxify-install-id"]).toBe(lr.relayInstallId());
     expect(body(relayed[3]).challenge).toMatchObject({ id: "c2" });
   });
 
@@ -214,7 +214,7 @@ describe("signing up", () => {
       locale: "fa",
       challenge: { id: "c" },
     });
-    expect(relayed[1].headers["X-Neoxify-Install-Id"]).toBe(lr.relayInstallId());
+    expect(relayed[1].headers["x-neoxify-install-id"]).toBe(lr.relayInstallId());
   });
 
   it("is not available when the relay cannot be used, and says so", async () => {
@@ -244,6 +244,6 @@ describe("the ways back in", () => {
     stored = TOKENS;
     relayReplies = [{ status: 204, contentType: "", body: "" }];
     expect(await setPassword("password3")).toEqual({ ok: true, data: undefined });
-    expect(relayed[0].headers.Authorization).toBe("Bearer a1");
+    expect(relayed[0].headers.authorization).toBe("Bearer a1");
   });
 });

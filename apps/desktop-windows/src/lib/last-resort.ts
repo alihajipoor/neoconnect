@@ -630,6 +630,11 @@ export async function relayRequest(call: RelayCall, use: RelayUse): Promise<Rela
     const key = networkKey();
     if (relayOff(key)) return { kind: "skipped", reason: "off" };
     if (!iranEvidence()) return { kind: "skipped", reason: "not-iran" };
+    // Not asked while a tunnel holds the gate anyway: the answer would buy
+    // nothing but "disconnect to use the backup route".
+    if (relayConsent() === null && use === "foreground" && asker !== null && (await tunnelState()) !== "down") {
+      return { kind: "gated" };
+    }
     const consent = await consentFor(use);
     if (consent !== "granted") return { kind: "skipped", reason: consent };
     return await serially(() => send(call, entries, key));
