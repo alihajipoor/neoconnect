@@ -10,6 +10,7 @@ import { ReportAttemptDto } from "./dto/report-attempt.dto";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { ThrottleVolumePerSession } from "../../common/guards/client-throttler.guard";
 import { clientIpOf } from "../../common/client-ip";
+import { relayContextOf } from "../../common/relay/relay-arrival";
 import type { CustomerAccessTokenPayload } from "../customer-auth/types";
 
 /** How long after its expiry a customer's access token still files a
@@ -106,10 +107,15 @@ export class ClientAttemptsController {
     // Both taken from the request rather than the body. A client cannot
     // be trusted to say who or where it is, and for most of these
     // reports there is no session to say who.
-    await this.attempts.record(dto, {
-      ip: clientIpOf(req),
-      customerId: this.customerIdFrom(req),
-    });
+    // Over the relay, no address at all: the network and the fact that
+    // it came by relay are kept, the address never is (I5).
+    const relay = relayContextOf(req);
+    await this.attempts.record(
+      dto,
+      relay
+        ? { ip: undefined, via: "relay", asn: relay.asn, customerId: this.customerIdFrom(req) }
+        : { ip: clientIpOf(req), customerId: this.customerIdFrom(req) },
+    );
     // Always 204, whatever happened inside. A client that just failed to
     // connect must not also be told its complaint was rejected.
   }

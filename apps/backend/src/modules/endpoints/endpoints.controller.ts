@@ -5,7 +5,7 @@ import { AdminRole } from "@prisma/client";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { Roles } from "../../common/decorators/roles.decorator";
 import { RolesGuard } from "../../common/guards/roles.guard";
-import { EndpointsService, type EndpointEntry } from "./endpoints.service";
+import { EndpointsService, type ConfiguredBase } from "./endpoints.service";
 
 /** The published bundle, served to anyone.
  *
@@ -52,10 +52,13 @@ export class AdminEndpointsController {
     return this.endpoints.publish(String(body?.signed ?? ""));
   }
 
+  /** Replaces the configured entries. `kind` may be left out and means
+   * "panel", so a body written before lastResort existed still works;
+   * the service validates each entry, since this type is not enforced. */
   @Post("panel-bases")
   @UseGuards(RolesGuard)
   @Roles(AdminRole.SUPERADMIN)
-  async setBases(@Body() body: { entries?: EndpointEntry[] }) {
+  async setBases(@Body() body: { entries?: ConfiguredBase[] }) {
     await this.endpoints.setPanelBases(body?.entries ?? []);
     return { ok: true };
   }

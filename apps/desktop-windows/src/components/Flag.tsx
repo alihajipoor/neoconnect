@@ -1,5 +1,6 @@
 import { Globe } from "lucide-react";
 import { cn } from "../lib/utils";
+import { countryCode } from "../lib/route-place";
 
 /** A country flag for a server location.
  *
@@ -21,19 +22,10 @@ import { cn } from "../lib/utils";
  * glance -- bands, crosses, a crescent.
  */
 
-/** The ISO code out of a region slug.
- *
- * `region` is free text in the database (`fi-finland`, `fr-france`,
- * `sg-singapore`), so this reads the prefix rather than trusting a
- * column that does not exist. Anything that is not two letters before a
- * dash falls through to the globe, which is the honest answer for a
- * region nobody has taught this component about yet.
- */
-export function countryCode(region: string | undefined | null): string | null {
-  if (!region) return null;
-  const head = region.trim().toLowerCase().split(/[-_\s]/)[0];
-  return /^[a-z]{2}$/.test(head) ? head : null;
-}
+// Read from the region slug; lives with the country names now. Anything
+// it cannot read falls through to the globe, which is the honest answer
+// for a region nobody has taught this component about yet.
+export { countryCode };
 
 const FLAGS: Record<string, React.ReactNode> = {
   // Three vertical bands.
@@ -153,5 +145,49 @@ export function Flag({ region, className }: { region?: string | null; className?
     >
       {art}
     </svg>
+  );
+}
+
+const ROUTE_FLAG_SIZES = {
+  // The server list's rows.
+  md: { main: "h-4 w-[1.35rem]", badge: "h-2.5 w-[0.85rem]", at: "-bottom-1 -end-1.5", wrap: "" },
+  // The dashboard's server tile, beside a caption -- spaced so the badge,
+  // which hangs past the flag's edge, does not touch the caption's text.
+  sm: { main: "h-3 w-[1rem]", badge: "h-2 w-[0.65rem]", at: "-bottom-1 -end-1", wrap: "me-1" },
+} as const;
+
+/** A route's flag: one for a direct route, and for a relay the exit
+ * country's flag with the entry's -- Iran's -- as a badge in its corner.
+ *
+ * The exit is the large one because it is the place the customer is
+ * choosing and the one the far end sees; the badge says how the traffic
+ * gets there. Side by side with an arrow was the other way to draw it,
+ * and does not fit the round slot the list gives each row.
+ *
+ * With no `exitRegion` -- a direct route, or a relay from a backend that
+ * names no exit -- this is exactly `Flag`. The ring around the badge is
+ * the page's own background, so it reads as cut out of the larger flag
+ * rather than as a second flag pasted on top. */
+export function RouteFlag({
+  region,
+  exitRegion,
+  label,
+  size = "md",
+}: {
+  region?: string | null;
+  exitRegion?: string | null;
+  /** Read out for the pair, e.g. "Iran → Germany" (`placeLabel`). */
+  label?: string;
+  size?: keyof typeof ROUTE_FLAG_SIZES;
+}) {
+  const s = ROUTE_FLAG_SIZES[size];
+  if (!exitRegion) return <Flag region={region} className={s.main} />;
+  return (
+    <span role="img" aria-label={label ?? `${region ?? "unknown location"} → ${exitRegion}`} className={cn("relative inline-flex shrink-0", s.wrap)}>
+      <Flag region={exitRegion} className={s.main} />
+      <span className={cn("absolute flex rounded-[2px] ring-[1.5px] ring-background", s.at)}>
+        <Flag region={region} className={s.badge} />
+      </span>
+    </span>
   );
 }

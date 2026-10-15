@@ -734,6 +734,31 @@ describe("ProtocolUsersService.sweepDeadSessionCredentials", () => {
     await expect(service.sweepDeadSessionCredentials()).resolves.toEqual({ sessions: 1, revoked: 0, failed: 1 });
     expect(prisma.customerSession.deleteMany).not.toHaveBeenCalled();
   });
+  /** During a declared intranet and the 30 days after, a customer holding
+   * a relay plan may be unreachable for weeks; their idle devices keep
+   * their credentials (docs/relay-last-resort.md, R4.5). Signed-out ones
+   * are still reclaimed. */
+  it("spares idle sessions of relay-plan customers while the intranet hold lasts", async () => {
+    const { service, prisma } = sweepWorld([{ id: "idle", revokedAt: null }]);
+    Object.assign(service, { relay: { intranetHold: jest.fn(async () => true) } });
+    await service.sweepDeadSessionCredentials();
+    const where = (prisma.customerSession.findMany.mock.calls[0] as [{ where: { OR: unknown } }])[0].where;
+    expect(where.OR).toEqual([
+      { revokedAt: { not: null } },
+      {
+        lastUsedAt: { lt: expect.any(Date) },
+        customer: { subscriptions: { none: { status: "ACTIVE", plan: { relayOnly: true } } } },
+      },
+    ]);
+  });
+
+  it("sweeps as before when there is no hold", async () => {
+    const { service, prisma } = sweepWorld([{ id: "idle", revokedAt: null }]);
+    Object.assign(service, { relay: { intranetHold: jest.fn(async () => false) } });
+    await service.sweepDeadSessionCredentials();
+    const where = (prisma.customerSession.findMany.mock.calls[0] as [{ where: { OR: unknown } }])[0].where;
+    expect(where.OR).toEqual([{ revokedAt: { not: null } }, { lastUsedAt: { lt: expect.any(Date) } }]);
+  });
 });
 
 describe("ProtocolUsersService.provisionAll with device credentials", () => {

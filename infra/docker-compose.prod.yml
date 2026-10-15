@@ -180,10 +180,23 @@ services:
       # set to "true" only if you deliberately want the whole control
       # plane's routes and payload shapes published unauthenticated.
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
+      # The relay of last resort (docs/relay-last-resort.md). The second
+      # listener the origin's relay server block proxies to; a request is a
+      # relay request because it arrived here, never because of a header.
+      # Inert until nginx points the relay block at 127.0.0.1:4001. Empty
+      # turns it off. It accepts connections only from loopback and this
+      # container's default gateway (where Docker's port publishing connects
+      # from); RELAY_TRUSTED_PEERS, comma separated, replaces the gateway if
+      # that ever differs.
+      RELAY_LISTEN: ${RELAY_LISTEN-0.0.0.0:4001}
+      RELAY_TRUSTED_PEERS: ${RELAY_TRUSTED_PEERS:-}
     volumes:
       - /etc/neoxify/certs:/etc/neoxify/certs:ro
     ports:
       - "127.0.0.1:4000:4000"
+      # Loopback only, like 4000: host nginx's relay block is the one
+      # caller.
+      - "127.0.0.1:4001:4001"
       - "50051:50051"
 
   panel:

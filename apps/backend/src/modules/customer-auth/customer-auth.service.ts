@@ -1,4 +1,15 @@
-import { BadRequestException, Injectable, Logger, UnauthorizedException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  Optional,
+  UnauthorizedException,
+} from "@nestjs/common";
+import type { AccessChannel, Prisma } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import * as argon2 from "argon2";
@@ -18,6 +29,10 @@ import { hasDeviceInfo, type DeviceInfo } from "../../common/device-info";
 import { DeviceSlotsService } from "../device-slots/device-slots.service";
 import { KeyedLock } from "../protocol-users/keyed-lock";
 import { GuessBudget, guessKey } from "../../common/guess-budget";
+import { RelayAuthService, type SignupReservation } from "../relay-auth/relay-auth.service";
+import { isDisposableEmail } from "../relay-auth/disposable-email";
+import { ADDRESS_CHANGES_PER_DAY, UNVERIFIED_SESSION_CAP } from "../relay-auth/relay-policy";
+import { hashRecoveryCode, newRecoveryCode, recoveryCodeMatches } from "./recovery-code";
 import {
   CustomerAccessTokenPayload,
   CustomerRefreshTokenPayload,
@@ -57,6 +72,30 @@ const PASSWORD_RESET_CODE_TTL_MS = 30 * 60 * 1000;
 const CODE_GUESSES_PER_WINDOW = 10;
 const CODE_GUESS_WINDOW_MS = 60 * 60 * 1000;
 
+/** How recent a sign-in must be to stand in for a password, for an
+ * account that has none (Google, Apple, Facebook). */
+const FRESH_SIGN_IN_MS = 15 * 60 * 1000;
+
+/** How a session is opened: by which door, and whether the account
+ * behind it has an unconfirmed address. */
+export interface SessionOpening {
+  channel?: AccessChannel;
+  unverified?: boolean;
+}
+
+/** A sign-in's say on an unverified account (docs/relay-last-resort.md,
+ * R4.2). Given only for a sign-in the relay delivered; without it an
+ * unverified account is asked to verify (I1).
+ *
+ * `admitUnverified` is asked only when the sign-in would make the account
+ * relay-unverified, which happens once. It returns a place held under the
+ * sign-up caps, or null when none is charged, or throws the refusal
+ * (RelayAuthService.admitUnverifiedSignIn). */
+export interface SignInOptions {
+  channel?: AccessChannel;
+  admitUnverified?: (customerId: string) => Promise<SignupReservation | null>;
+}
+
 /** The session columns a device's own description sets -- only those it
  * actually sent, so a request without the headers never erases a name. */
 function deviceColumns(device: DeviceInfo | undefined): { label?: string; platform?: string } {
@@ -79,6 +118,8 @@ export class CustomerAuthService {
    * guess the code from enough addresses, and once "verified" the account
    * would later swallow the real owner's Google or Apple sign-in. */
   private readonly verifyCodeBudget = new GuessBudget(CODE_GUESSES_PER_WINDOW, CODE_GUESS_WINDOW_MS);
+  /** Changes of an unconfirmed address, per account per day (R3.3). */
+  private readonly addressChangeBudget = new GuessBudget(ADDRESS_CHANGES_PER_DAY, 24 * 60 * 60 * 1000);
 
   /** Serialises trial grants per customer; see grantFreeTrialIfEnabled. */
   private readonly trialLock = new KeyedLock();
@@ -94,6 +135,10 @@ export class CustomerAuthService {
     private readonly referralsService: ReferralsService,
     private readonly emailService: EmailService,
     private readonly deviceSlots: DeviceSlotsService,
+    // Optional so the many specs that build this by hand need not know
+    // about the relay; without it there is no relay mail limit and no
+    // intranet hold, which is the behaviour from before the relay.
+    @Optional() private readonly relay?: RelayAuthService,
   ) {}
 
   /** Creates the Customer via the same service/logic the admin-facing
@@ -118,15 +163,14 @@ export class CustomerAuthService {
     // after: the verification email is the first thing this account ever
     // receives, and it is the one email whose whole purpose is to get
     // somebody to act on it.
-    if (referredByCustomerId || dto.locale) {
-      await this.prisma.customer.update({
-        where: { id: customer.id },
-        data: {
-          ...(referredByCustomerId ? { referredByCustomerId } : {}),
-          ...(dto.locale ? { locale: dto.locale } : {}),
-        },
-      });
-    }
+    await this.prisma.customer.update({
+      where: { id: customer.id },
+      data: {
+        signupChannel: "NORMAL",
+        ...(referredByCustomerId ? { referredByCustomerId } : {}),
+        ...(dto.locale ? { locale: dto.locale } : {}),
+      },
+    });
 
     // One email, not two. The welcome used to be its own send whose
     // entire content was "a separate verification email is on its way" --
@@ -135,6 +179,61 @@ export class CustomerAuthService {
     await this.sendVerificationEmail(customer.id, customer.email, toLocale(dto.locale));
 
     return { requiresVerification: true, email: customer.email };
+  }
+
+  /** Sign-up through the Iranian relay of last resort, without email
+   * verification (docs/relay-last-resort.md, R3).
+   *
+   * Only ever reached from the relay, from a network registered in Iran,
+   * within the caps and after the proof of work -- the controller and
+   * RelayAuthService see to all of that before this runs. What it does:
+   * the account is opened and signed in at once, unverified, and holds
+   * nothing (I3): no trial, no referral credit, no mail. Until the address
+   * is confirmed, CustomerJwtAuthGuard lets it do only the short list a
+   * customer needs to redeem an Ultimate voucher and connect. A recovery
+   * code is issued and shown once, because during an intranet the mailbox
+   * is out of reach and nothing else could reset the password. */
+  async relayRegister(
+    dto: { email: string; emailConfirm: string; password: string; locale?: "en" | "fa" },
+    device?: DeviceInfo,
+  ) {
+    if (dto.email !== dto.emailConfirm) {
+      throw new BadRequestException({
+        statusCode: 400,
+        code: "EMAIL_MISMATCH",
+        message: "The two email addresses do not match.",
+      });
+    }
+    if (isDisposableEmail(dto.email)) {
+      throw new BadRequestException({
+        statusCode: 400,
+        code: "DISPOSABLE_EMAIL",
+        message: "Use an address you can open later, not a temporary one.",
+      });
+    }
+    // The referral code, if the app sent one, is ignored on purpose: a
+    // relay account is not a person yet, and crediting one would make
+    // farmed accounts worth something to somebody.
+    const created = await this.customersService.create({ email: dto.email, password: dto.password });
+    const recoveryCode = newRecoveryCode();
+    const now = new Date();
+    const updated = await this.prisma.customer.update({
+      where: { id: created.id },
+      data: {
+        signupChannel: "RELAY",
+        relayUnverifiedSince: now,
+        recoveryCodeHash: hashRecoveryCode(recoveryCode),
+        recoveryCodeSetAt: now,
+        ...(dto.locale ? { locale: dto.locale } : {}),
+      },
+    });
+    const tokens = await this.issueTokenPair(
+      { id: created.id, email: created.email, tokenVersion: updated.tokenVersion },
+      undefined,
+      device,
+      { channel: "RELAY", unverified: true },
+    );
+    return { ...tokens, recoveryCode, relayUnverified: true as const };
   }
 
   /** Sends both a deep-link token (for "Open in Neoxify") and a short
@@ -176,6 +275,9 @@ export class CustomerAuthService {
   async resendVerification(email: string): Promise<void> {
     const customer = await this.prisma.customer.findUnique({ where: { email } });
     if (!customer || customer.emailVerifiedAt) return;
+    // A relay account's address is unproven, and making one is cheap: one
+    // mail a day to it, and a daily total across all of them (R3.7, F11).
+    if (this.relay && !(await this.relay.takeRelayMail(customer))) return;
     await this.sendVerificationEmail(customer.id, customer.email, toLocale(customer.locale));
   }
 
@@ -449,10 +551,20 @@ export class CustomerAuthService {
     email: string,
     password: string,
     device?: DeviceInfo,
+    options: SignInOptions = {},
   ): Promise<CustomerTokenPair | CustomerRequiresVerification> {
     const customer = await this.validateCredentials(email, password);
     if (!customer.emailVerifiedAt) {
-      return { requiresVerification: true, email: customer.email };
+      // Over the normal routes, always this (I1). Over the relay from
+      // Iran, an unverified account is let in and is from then on
+      // relay-unverified (R4.2): limited to the capability set, at most
+      // three sessions. Becoming one is a relay sign-up in all but name,
+      // so it is admitted on the same terms -- once. Every later sign-in
+      // of a relay-unverified account is just a sign-in: a paid account
+      // whose sessions ended during an intranet must get back in.
+      if (!options.admitUnverified) return { requiresVerification: true, email: customer.email };
+      if (!customer.relayUnverifiedSince) await this.convertToRelay(customer.id, options.admitUnverified);
+      return this.issueTokenPair(customer, undefined, device, { channel: options.channel, unverified: true });
     }
     // The second chance at a trial whose grant failed at verification, or
     // that was never offered because trial mode was off then. Here because
@@ -460,7 +572,31 @@ export class CustomerAuthService {
     // credentials itself once signed in, so nothing is returned. A
     // customer who already has any subscription costs one count query.
     await this.retryTrial(customer.id, true);
-    return this.issueTokenPair(customer, undefined, device);
+    return this.issueTokenPair(customer, undefined, device, { channel: options.channel });
+  }
+
+  /** Makes an unverified account relay-unverified, under the place
+   * `admit` holds for it. The place is spent only by the sign-in that
+   * actually converted the account: two at once each hold one, and the
+   * one whose write found it already converted gives its place back. */
+  private async convertToRelay(
+    customerId: string,
+    admit: NonNullable<SignInOptions["admitUnverified"]>,
+  ): Promise<void> {
+    const place = await admit(customerId);
+    let converted: boolean;
+    try {
+      const { count } = await this.prisma.customer.updateMany({
+        where: { id: customerId, relayUnverifiedSince: null },
+        data: { relayUnverifiedSince: new Date() },
+      });
+      converted = count > 0;
+    } catch (err) {
+      place?.release();
+      throw err;
+    }
+    if (converted) await place?.commit();
+    else place?.release();
   }
 
   /** Tokens for one signed-in device.
@@ -473,8 +609,9 @@ export class CustomerAuthService {
     customer: { id: string; email: string; tokenVersion: number },
     sessionId?: string,
     device?: DeviceInfo,
+    opening?: SessionOpening,
   ): Promise<CustomerTokenPair> {
-    const sid = sessionId ?? (await this.openSession(customer.id, device));
+    const sid = sessionId ?? (await this.openSession(customer.id, device, opening));
     const accessPayload: CustomerAccessTokenPayload = { sub: customer.id, email: customer.email, sid };
     const refreshPayload: CustomerRefreshTokenPayload = {
       sub: customer.id,
@@ -547,17 +684,34 @@ export class CustomerAuthService {
    * row here instead would turn its credentials into shared ones (the
    * foreign key is SET NULL, for the sake of rollback) that sign-out
    * could then never reach. */
-  private async openSession(customerId: string, device?: DeviceInfo): Promise<string> {
+  private async openSession(customerId: string, device?: DeviceInfo, opening?: SessionOpening): Promise<string> {
     const idleCutoff = new Date(Date.now() - SESSION_IDLE_LIFETIME_MS);
+    // During a declared intranet and the 30 days after, an idle session
+    // of someone holding a relay plan is kept: being unreachable is not
+    // being gone (R4.5).
+    const hold = (await this.relay?.holdsSessionsOf(customerId)) ?? false;
     await this.prisma.customerSession.deleteMany({
       where: {
         customerId,
-        OR: [{ revokedAt: { not: null } }, { lastUsedAt: { lt: idleCutoff } }],
+        OR: hold ? [{ revokedAt: { not: null } }] : [{ revokedAt: { not: null } }, { lastUsedAt: { lt: idleCutoff } }],
         protocolUsers: { none: {} },
       },
     });
+    // An unverified account holds at most three sessions; the one used
+    // least recently makes room, signed out the way the device itself
+    // would be (F17).
+    if (opening?.unverified) {
+      const live = await this.prisma.customerSession.findMany({
+        where: { customerId, revokedAt: null, lastUsedAt: { gte: idleCutoff } },
+        orderBy: { lastUsedAt: "desc" },
+        select: { id: true },
+      });
+      for (const extra of live.slice(UNVERIFIED_SESSION_CAP - 1)) {
+        await this.revokeSession(customerId, extra.id);
+      }
+    }
     const session = await this.prisma.customerSession.create({
-      data: { customerId, ...deviceColumns(device) },
+      data: { customerId, ...deviceColumns(device), ...(opening?.channel ? { channel: opening.channel } : {}) },
       select: { id: true },
     });
     return session.id;
@@ -625,6 +779,8 @@ export class CustomerAuthService {
   async forgotPassword(email: string): Promise<void> {
     const customer = await this.prisma.customer.findUnique({ where: { email } });
     if (!customer || customer.status !== "ACTIVE") return;
+    // See resendVerification: the same allowance covers both (R3.7).
+    if (this.relay && !(await this.relay.takeRelayMail(customer))) return;
 
     // A code, not a token. The email used to carry a signed JWT behind
     // an "enter this code" instruction, which is neither typeable nor
@@ -716,7 +872,163 @@ export class CustomerAuthService {
     if (count === 0) throw refuse();
 
     this.resetCodeBudget.clear(key);
+    // The code came from the mailbox, so the mailbox is proven: an
+    // unverified account is verified by this, and what follows a first
+    // verification follows -- the trial rule, the referrer. Proving the
+    // mailbox wins over whoever opened the account without it (R3.8).
+    const verifies = !customer.emailVerifiedAt;
+    await this.applyNewPassword(customer.id, newPassword, verifies ? { emailVerifiedAt: new Date() } : {});
+    if (verifies) await this.afterFirstVerification(customer.id);
+  }
+
+  /** Resets by recovery code: the way back in when the mailbox cannot be
+   * reached (R4.3). The same guess budget as the emailed code, so the two
+   * together give an attacker no more guesses than either alone. Proves
+   * the code, not the mailbox: verification is untouched. The code is
+   * spent and a new one is handed back, to be shown once. */
+  async resetPasswordByRecoveryCode(
+    email: string,
+    code: string,
+    newPassword: string,
+  ): Promise<{ recoveryCode: string }> {
+    const refuse = () => new BadRequestException("Invalid email or recovery code");
+    const key = guessKey(email);
+    if (!this.resetCodeBudget.take(key)) throw refuse();
+
+    const customer = await this.prisma.customer.findUnique({ where: { email } });
+    if (!customer || customer.status !== "ACTIVE" || !customer.recoveryCodeHash) {
+      // Not a guess at anything: there is no code to compare with.
+      this.resetCodeBudget.refund(key);
+      throw refuse();
+    }
+    if (!recoveryCodeMatches(code, customer.recoveryCodeHash)) throw refuse();
+
+    // Spent in one conditional write, so a code works once even when two
+    // requests carry it at the same moment.
+    const next = newRecoveryCode();
+    const { count } = await this.prisma.customer.updateMany({
+      where: { id: customer.id, recoveryCodeHash: customer.recoveryCodeHash },
+      data: { recoveryCodeHash: hashRecoveryCode(next), recoveryCodeSetAt: new Date() },
+    });
+    if (count === 0) throw refuse();
+    this.resetCodeBudget.clear(key);
     await this.applyNewPassword(customer.id, newPassword);
+    return { recoveryCode: next };
+  }
+
+  /** Creates or replaces the signed-in customer's recovery code, shown
+   * once (R4.3). Re-authenticated: the current password, or for an
+   * account without one, a sign-in from the last fifteen minutes. */
+  async createRecoveryCode(
+    customerId: string,
+    sessionId: string | undefined,
+    currentPassword: string | undefined,
+  ): Promise<{ recoveryCode: string }> {
+    const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
+    if (!customer) throw new BadRequestException("Account not found");
+    if (customer.passwordHash !== null) {
+      if (!currentPassword || !(await argon2.verify(customer.passwordHash, currentPassword))) {
+        throw new BadRequestException("Your current password is incorrect");
+      }
+    } else {
+      await this.mustBeFreshSignIn(customerId, sessionId);
+    }
+    const recoveryCode = newRecoveryCode();
+    await this.prisma.customer.update({
+      where: { id: customerId },
+      data: { recoveryCodeHash: hashRecoveryCode(recoveryCode), recoveryCodeSetAt: new Date() },
+    });
+    return { recoveryCode };
+  }
+
+  /** Gives a Google, Apple or Facebook account a password, so it can
+   * still sign in when those cannot be reached -- during an intranet,
+   * none of them can (R4.4). Only where there is none; on a sign-in from
+   * the last fifteen minutes, since there is no password to re-enter. */
+  async setPassword(customerId: string, sessionId: string | undefined, newPassword: string): Promise<void> {
+    const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
+    if (!customer) throw new BadRequestException("Account not found");
+    if (customer.passwordHash !== null) {
+      throw new BadRequestException("This account already has a password. Change it instead.");
+    }
+    await this.mustBeFreshSignIn(customerId, sessionId);
+    await this.prisma.customer.update({
+      where: { id: customerId },
+      data: { passwordHash: await argon2.hash(newPassword) },
+    });
+  }
+
+  /** Corrects the address of an account that has not confirmed it -- a
+   * typo at a relay sign-up is otherwise a paid account nobody can ever
+   * verify (F9). Password and the address twice; three a day. Sends
+   * nothing: the customer asks for a code when ready, through the same
+   * allowance as every other relay mail. */
+  async changeUnverifiedEmail(
+    customerId: string,
+    sessionId: string | undefined,
+    dto: { email: string; emailConfirm: string; password: string },
+  ): Promise<CustomerTokenPair> {
+    const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
+    if (!customer) throw new BadRequestException("Account not found");
+    if (customer.emailVerifiedAt) {
+      throw new BadRequestException("This account's address is already confirmed.");
+    }
+    if (dto.email !== dto.emailConfirm) {
+      throw new BadRequestException({
+        statusCode: 400,
+        code: "EMAIL_MISMATCH",
+        message: "The two email addresses do not match.",
+      });
+    }
+    if (isDisposableEmail(dto.email)) {
+      throw new BadRequestException({
+        statusCode: 400,
+        code: "DISPOSABLE_EMAIL",
+        message: "Use an address you can open later, not a temporary one.",
+      });
+    }
+    if (customer.passwordHash === null || !(await argon2.verify(customer.passwordHash, dto.password))) {
+      throw new BadRequestException("Your current password is incorrect");
+    }
+    if (!this.addressChangeBudget.take(customerId)) {
+      throw new HttpException(
+        { statusCode: 429, code: "ADDRESS_CHANGE_LIMIT", message: "The address can be changed three times a day." },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    const taken = await this.prisma.customer.findUnique({ where: { email: dto.email } });
+    if (taken && taken.id !== customerId) {
+      this.addressChangeBudget.refund(customerId);
+      throw new ConflictException("A customer with this email already exists");
+    }
+    const updated = await this.prisma.customer.update({
+      where: { id: customerId },
+      data: {
+        email: dto.email,
+        emailVerificationCode: null,
+        emailVerificationCodeExpiresAt: null,
+        passwordResetCode: null,
+        passwordResetCodeExpiresAt: null,
+        relayMailAt: null,
+      },
+    });
+    return this.issueTokenPair(updated, sessionId);
+  }
+
+  private async mustBeFreshSignIn(customerId: string, sessionId: string | undefined): Promise<void> {
+    const session = sessionId
+      ? await this.prisma.customerSession.findFirst({
+          where: { id: sessionId, customerId, revokedAt: null },
+          select: { createdAt: true },
+        })
+      : null;
+    if (!session || Date.now() - session.createdAt.getTime() > FRESH_SIGN_IN_MS) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        code: "REAUTH_REQUIRED",
+        message: "Sign in again, then do this within 15 minutes.",
+      });
+    }
   }
 
   async resetPassword(token: string, newPassword: string): Promise<void> {
@@ -743,7 +1055,11 @@ export class CustomerAuthService {
    * much: a used code that still works is a second key left under the
    * mat for thirty minutes.
    */
-  private async applyNewPassword(customerId: string, newPassword: string): Promise<void> {
+  private async applyNewPassword(
+    customerId: string,
+    newPassword: string,
+    extra: Prisma.CustomerUpdateInput = {},
+  ): Promise<void> {
     const passwordHash = await argon2.hash(newPassword);
     // The sessions are revoked in the same transaction as the password,
     // so the two succeed or fail together. They used to be revoked by the
@@ -761,6 +1077,7 @@ export class CustomerAuthService {
           tokenVersion: { increment: 1 },
           passwordResetCode: null,
           passwordResetCodeExpiresAt: null,
+          ...extra,
         },
       }),
       this.prisma.customerSession.updateMany({

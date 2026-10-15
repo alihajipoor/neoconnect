@@ -185,6 +185,7 @@ export class SocialAuthService {
         passwordHash: null,
         locale,
         emailVerifiedAt: new Date(),
+        signupChannel: "SOCIAL",
         identities: { create: { provider, subject: identity.subject, email: identity.email } },
       },
     });

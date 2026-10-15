@@ -7,6 +7,7 @@ import { EmailService } from "../email/email.service";
 import { lowDataWarningEmail, expiringSoonEmail, toLocale } from "../email/templates";
 import { commandTarget } from "../protocol-users/command-target";
 import { DeviceSlotsService } from "../device-slots/device-slots.service";
+import { MAILABLE_CUSTOMER } from "../relay-auth/relay-policy";
 
 export interface UsageDeltaInput {
   externalUserId: string;
@@ -232,6 +233,7 @@ export class UsageService {
             status: "ACTIVE",
             lowDataWarningSentAt: null,
             dataCapBytes: { not: null },
+            customer: MAILABLE_CUSTOMER,
             ...after(afterId),
           },
           // `include: { customer: true }` here meant every candidate's
@@ -285,6 +287,7 @@ export class UsageService {
             status: "ACTIVE",
             expiryWarningSentAt: null,
             expireAt: { gt: now, lte: threshold },
+            customer: MAILABLE_CUSTOMER,
             ...after(afterId),
           },
           // Same narrowing as the low-data sweep above, and for the same

@@ -184,6 +184,8 @@ describe("resolving a customer from a social identity", () => {
     // The provider already proved the address; mailing a confirmation
     // to it would only lose people.
     expect(customer.emailVerifiedAt).toBeInstanceOf(Date);
+    // Recorded as such (docs/relay-last-resort.md, R2.6).
+    expect((customer as { signupChannel?: string }).signupChannel).toBe("SOCIAL");
   });
 
   it("refuses an identity with no email rather than inventing one", async () => {

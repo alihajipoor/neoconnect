@@ -8,6 +8,7 @@ import { Pager, pageWindow } from "@/components/dashboard/pager";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SubscriptionsPanel } from "./subscriptions-panel";
+import { MoveAddressCard } from "./move-address-card";
 
 /** Everything about one customer, in one place.
  *
@@ -85,6 +86,10 @@ export default async function CustomerDetailPage({
           <Badge variant={customer.emailVerifiedAt ? "outline" : "destructive"}>
             {customer.emailVerifiedAt ? "Email verified" : "Email unverified"}
           </Badge>
+          {/* Made through the Iranian relay without verification: limited
+              to Ultimate vouchers until the address is confirmed. */}
+          {customer.signupChannel === "RELAY" && <Badge variant="outline">Relay sign-up</Badge>}
+          {customer.recoveryCodeSetAt && <Badge variant="outline">Recovery code</Badge>}
         </div>
       </div>
 
@@ -108,6 +113,8 @@ export default async function CustomerDetailPage({
       </div>
 
       <SubscriptionsPanel customerId={id} subscriptions={subscriptions} plans={plans} />
+
+      {customer.recoveryCodeSetAt && <MoveAddressCard customerId={id} />}
 
       <Card>
         <CardHeader>

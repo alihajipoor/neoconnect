@@ -8,6 +8,7 @@ import type { Request } from "express";
 import type { AddressInfo, Server } from "node:net";
 import { ClientThrottlerGuard } from "../../common/guards/client-throttler.guard";
 import { ATTRIBUTION_GRACE_MS, ClientAttemptsController } from "./client-attempts.controller";
+import { attachRelayContext } from "../../common/relay/relay-arrival";
 import { ClientAttemptsService } from "./client-attempts.service";
 import type { ReportAttemptDto } from "./dto/report-attempt.dto";
 
@@ -100,6 +101,14 @@ describe("ClientAttemptsController.report customer", () => {
     await controller.report({} as ReportAttemptDto, req);
     return (record.mock.calls[0][1] as { customerId?: string }).customerId;
   };
+
+  it("hands the service no address for a report that came through the relay", async () => {
+    record.mockClear();
+    const req = { headers: { "x-forwarded-for": "192.0.2.10", "cf-connecting-ip": "192.0.2.11" } } as unknown as Request;
+    attachRelayContext(req, { box: "ir-a", asn: 64500, region: "IR", ip: "192.0.2.10", ipKey: "relay:x" });
+    await controller.report({} as ReportAttemptDto, req);
+    expect(record.mock.calls[0][1]).toEqual({ ip: undefined, via: "relay", asn: 64500, customerId: undefined });
+  });
 
   it("files a signed-in customer's report under them", async () => {
     expect(await filedUnder(jwt.sign({ sub: "cust-1", sid: "s1", tokenVersion: 0 }, { secret: SECRET }))).toBe("cust-1");

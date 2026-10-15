@@ -117,6 +117,31 @@ describe("CustomersService", () => {
     });
   });
 
+  /** What the app reads about its own account: whether it has a password
+   * (a social-only account is offered "set a password") and a recovery
+   * code, and its relay state -- never the hashes themselves. */
+  describe("getSelf", () => {
+    it("says whether a password and a recovery code exist, without either", async () => {
+      prisma.customer.findUnique.mockResolvedValue({
+        id: "c1",
+        email: "a@example.com",
+        passwordHash: null,
+        recoveryCodeSetAt: new Date(),
+        relayUnverifiedSince: new Date(),
+        signupChannel: "RELAY",
+      });
+      const me = await service.getSelf("c1");
+      expect(me).toMatchObject({ hasPassword: false, hasRecoveryCode: true, signupChannel: "RELAY" });
+      expect(me).not.toHaveProperty("passwordHash");
+      expect(prisma.customer.findUnique.mock.calls[0][0].select).not.toHaveProperty("recoveryCodeHash");
+    });
+
+    it("throws NotFoundException when the customer doesn't exist", async () => {
+      prisma.customer.findUnique.mockResolvedValue(null);
+      await expect(service.getSelf("missing")).rejects.toThrow(NotFoundException);
+    });
+  });
+
   describe("create", () => {
     it("throws ConflictException when the email is already taken", async () => {
       prisma.customer.findUnique.mockResolvedValue(buildCustomer());

@@ -94,7 +94,15 @@ export class ClientAttemptsService {
    */
   async record(
     dto: ReportAttemptDto,
-    context: { customerId?: string; ip?: string },
+    context: {
+      customerId?: string;
+      ip?: string;
+      /** "relay" for a report that came through the Iranian relay. Such
+       * a report never carries an address; `asn` is the network the
+       * server looked up for it, in memory, from that address. */
+      via?: "relay";
+      asn?: number | null;
+    },
   ): Promise<void> {
     const data = (customerId: string | null) => ({
       kind: dto.kind,
@@ -119,7 +127,10 @@ export class ClientAttemptsService {
       // address is deliberately not looked up as a fallback: most of
       // these arrive through the tunnel, from a node, and the attestation
       // is the one reading taken before that.
-      asn: this.identity.verify(dto.network),
+      // Over the relay the server knows the network itself, from the
+      // address it is not keeping.
+      asn: this.identity.verify(dto.network) ?? context.asn ?? null,
+      via: context.via ?? null,
       sessionSeconds: dto.kind === ClientAttemptKind.SESSION ? (dto.sessionSeconds ?? null) : null,
     });
 
