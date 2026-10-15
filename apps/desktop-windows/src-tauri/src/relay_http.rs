@@ -320,36 +320,66 @@ pub fn parse_pins(pins: &[String]) -> Result<Vec<[u8; 32]>, RelayError> {
 }
 
 /// Calls with no data in the path, relative to `/api`, by method.
+///
+/// The backend's own list (`RELAY_ALLOWLIST` in apps/backend/src/common/
+/// relay/relay-allowlist.ts) is the server's half and this the client's;
+/// `relay-calls.test.ts` checks the two against each other and against
+/// the frontend's mirror (`relay-calls.ts`).
 const POST_PATHS: &[&str] = &[
     "/login-challenge",
     "/customer-auth/login",
     "/customer-auth/register",
+    // Sign-up through the relay, without email verification
+    // (docs/relay-last-resort.md, R3).
+    "/customer-auth/relay-register",
     "/customer-auth/refresh",
+    // Signing out has to work where signing in does: an unverified
+    // account holds at most three sessions (F17).
+    "/customer-auth/logout",
     "/customer-auth/social",
     "/customer-auth/social/exchange",
     "/customer-auth/verify-email-code",
     "/customer-auth/resend-verification",
     "/customer-auth/forgot-password",
     "/customer-auth/reset-password-code",
+    // The ways back in when the mailbox cannot be reached (R4.3, R4.4).
+    "/customer-auth/reset-password-recovery",
+    "/customer-auth/recovery-code",
+    "/customer-auth/change-password",
+    "/customer-auth/set-password",
+    "/customer-auth/unverified-email",
+    // Paying by voucher (R5.1). Card and crypto checkout are not here:
+    // the checkout page itself cannot be reached through the relay until
+    // the payment-only path exists (docs/relay-last-resort.md, "Not done
+    // here"), and creating a payment nobody can complete would only
+    // leave a PENDING subscription behind.
+    "/customer/vouchers/preview",
+    "/customer/vouchers/redeem",
 ];
 const GET_PATHS: &[&str] = &[
     "/customer/me",
     "/customer/subscriptions",
     "/customer/protocol-users",
+    // What a voucher or a plan would grant, so the screens can say it.
+    "/customer/plans",
+    "/customer/billing/providers",
     "/health",
     "/endpoints/bundle",
     "/endpoints/bundle2",
+    // Whether relay sign-up is open, and whether an intranet has been
+    // declared -- the only source of that word (I4).
+    "/relay/status",
 ];
 
 /// Whether the relay may carry `method` to `path` (relative to `/api`).
 ///
 /// The one authoritative copy of the list; the frontend's is a mirror,
 /// for deciding what to offer, and this is what decides. It is what a
-/// customer needs to sign in and get connected when nothing else
-/// answers -- sign-in and its recovery, the account, the subscriptions
-/// and their routes, and the endpoint bundle that may name a better way
-/// in -- and nothing else: no account deletion, no support tickets, no
-/// payments.
+/// customer needs to sign in, sign up and get connected when nothing
+/// else answers -- sign-in and its recovery, the account, the
+/// subscriptions and their routes, a voucher, and the endpoint bundle
+/// that may name a better way in -- and nothing else: no account
+/// deletion, no support tickets, no card or crypto checkout.
 ///
 /// Matched exactly, so a query string, a trailing slash, a doubled or
 /// encoded slash, or a `..` is simply not on the list. None of the app's
@@ -385,8 +415,10 @@ fn is_uuid(text: &str) -> bool {
 /// customer's language -- and the three of the app's own that the
 /// backend reads on them: `X-Neoxify-Device-Platform` and
 /// `X-Neoxify-Device-Label` on sign-in, social sign-in and refresh
-/// (device-identity.ts), and `X-Neoxify-Network` on the route list
-/// (network-identity.ts).
+/// (device-identity.ts), `X-Neoxify-Network` on the route list
+/// (network-identity.ts), and `X-Neoxify-Install-Id` on relay sign-up and
+/// its challenge, which the backend only ever uses to make a sign-up
+/// dearer (`installIdOf` in the backend's caller-key.ts; last-resort.ts).
 const FORWARDED_HEADERS: &[&str] = &[
     "authorization",
     "content-type",
@@ -395,6 +427,7 @@ const FORWARDED_HEADERS: &[&str] = &[
     "x-neoxify-device-platform",
     "x-neoxify-device-label",
     "x-neoxify-network",
+    "x-neoxify-install-id",
 ];
 
 /// The headers that go out, from those the caller gave.
@@ -1093,8 +1126,8 @@ mod tests {
         assert!(!allowed_call("POST", &routes));
         assert!(!allowed_call("GET", &route));
         // The list itself, so a change to it is a change to this test.
-        assert_eq!(POST_PATHS.len(), 10);
-        assert_eq!(GET_PATHS.len(), 6);
+        assert_eq!(POST_PATHS.len(), 19);
+        assert_eq!(GET_PATHS.len(), 9);
     }
 
     #[test]
@@ -1123,11 +1156,17 @@ mod tests {
             ("GET", "/endpoints/bundle3"),
             ("GET", "/customer/gaming-profile"),
             ("GET", "/customer/support/tickets"),
-            ("POST", "/customer-auth/logout"),
+            ("GET", "/customer-auth/logout"),
             ("POST", "/customer-auth/verify-email"),
-            ("POST", "/customer-auth/change-password"),
+            ("GET", "/customer-auth/change-password"),
             ("POST", "/customer/vpn/claim"),
+            // Checkout: not until the payment-only path exists.
             ("POST", "/customer/subscriptions"),
+            ("POST", "/customer/billing/payments"),
+            ("POST", "/customer/billing/apple/redeem"),
+            ("GET", "/customer/vouchers/redeem"),
+            ("POST", "/customer/plans"),
+            ("POST", "/relay/status"),
             ("POST", "/customer-auth/login/"),
             ("POST", "/customer-auth/login?next=x"),
         ] {
@@ -1174,6 +1213,7 @@ mod tests {
             ("X-Neoxify-Device-Platform", "windows"),
             ("x-neoxify-device-label", "Surface%20Pro"),
             ("X-Neoxify-Network", "att.v1.sig"),
+            ("X-Neoxify-Install-Id", "0b7e4f3a-5c2d-4e1f-9a8b-7c6d5e4f3a2b"),
             ("Host", "connect.example.com"),
             ("Cookie", "session=1"),
             ("Origin", "tauri://localhost"),
