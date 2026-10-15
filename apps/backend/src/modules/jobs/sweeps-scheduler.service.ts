@@ -39,6 +39,7 @@ const REACHABILITY_INTERVAL_MS = 30 * 60 * 1000;
 // retries the ones a node could not be told about then, and reclaims
 // those of devices idle for 30 days -- neither is improved by minutes.
 const DEVICE_CREDENTIALS_INTERVAL_MS = 60 * 60 * 1000;
+const RELAY_UNVERIFIED_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /** Registers the two repeatable sweep jobs on startup. Adding a
  * repeatable job with the same jobId+repeat config is idempotent in
@@ -90,6 +91,11 @@ export class SweepsSchedulerService implements OnModuleInit {
       "device-credentials",
       {},
       { repeat: { every: DEVICE_CREDENTIALS_INTERVAL_MS }, jobId: "device-credentials-sweep" },
+    );
+    await this.queue.add(
+      "relay-unverified",
+      {},
+      { repeat: { every: RELAY_UNVERIFIED_INTERVAL_MS }, jobId: "relay-unverified-sweep" },
     );
   }
 }

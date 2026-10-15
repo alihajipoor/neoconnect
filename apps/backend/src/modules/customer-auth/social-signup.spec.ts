@@ -2,6 +2,7 @@ import { CustomerAuthController } from "./customer-auth.controller";
 import type { CustomerAuthService } from "./customer-auth.service";
 import type { SocialAuthService } from "./social/social-auth.service";
 import type { OauthFlowService } from "./social/oauth-flow.service";
+import type { RelayAuthService } from "../relay-auth/relay-auth.service";
 import type { LoginGuardService } from "../login-guard/login-guard.service";
 
 /** A Google or Apple sign-up is created already verified, so it never
@@ -30,6 +31,8 @@ describe("social sign-in grants a new account what verification would", () => {
       {} as unknown as LoginGuardService,
       social as unknown as SocialAuthService,
       oauth as unknown as OauthFlowService,
+      // The relay is not involved: these requests did not come through it.
+      {} as unknown as RelayAuthService,
     );
     return { controller, auth };
   }
@@ -37,7 +40,7 @@ describe("social sign-in grants a new account what verification would", () => {
   it("on the native route, for a new account, before the session is issued", async () => {
     const { controller, auth } = build(true);
 
-    await controller.social({ provider: "google", token: "t" } as never, {});
+    await controller.social({ provider: "google", token: "t" } as never, {}, {} as never);
 
     expect(auth.onSocialSignup).toHaveBeenCalledWith("cust-1");
     expect(auth.onSocialSignup.mock.invocationCallOrder[0]).toBeLessThan(
@@ -58,7 +61,7 @@ describe("social sign-in grants a new account what verification would", () => {
   it("not for an account that already existed", async () => {
     const { controller, auth } = build(false);
 
-    await controller.social({ provider: "apple", token: "t" } as never, {});
+    await controller.social({ provider: "apple", token: "t" } as never, {}, {} as never);
 
     expect(auth.onSocialSignup).not.toHaveBeenCalled();
   });

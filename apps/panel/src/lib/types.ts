@@ -28,6 +28,37 @@ export interface Customer {
   emailVerifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** How the account came to exist; null for older accounts and ones an
+   * operator made (docs/relay-last-resort.md). */
+  signupChannel?: "NORMAL" | "RELAY" | "SOCIAL" | null;
+  /** Set while a relay account has not confirmed its address. */
+  relayUnverifiedSince?: string | null;
+  recoveryCodeSetAt?: string | null;
+}
+
+export type RelayAuthMode = "OFF" | "AUTO" | "INTRANET";
+
+/** GET /relay-auth -- the relay sign-up switch and today's numbers. */
+export interface RelayAuthStatus {
+  settings: {
+    mode: RelayAuthMode;
+    hostingAsns: number[];
+    intranetDeclaredAt: string | null;
+    intranetEndedAt: string | null;
+    suspectedSince: string | null;
+    suspicionAlertedAt: string | null;
+    capsRaisedAt: string | null;
+  };
+  tier: "normal" | "intranet";
+  caps: { global: number; perNetwork: number; hosting: number };
+  hold: boolean;
+  today: {
+    signups: number;
+    signIns: number;
+    refusals: number;
+    rows: { box: string; asn: number; org: string | null; signups: number; signIns: number; refusals: number }[];
+  };
+  detector: { ir: number; other: number; irMedian: number; otherMedian: number; holds: boolean; at: string } | null;
 }
 
 /// Mirrors the `Protocol` enum in prisma/schema.prisma. Hand-maintained,

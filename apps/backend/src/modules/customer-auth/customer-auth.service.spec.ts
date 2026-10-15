@@ -442,6 +442,9 @@ describe("CustomerAuthService", () => {
           tokenVersion: { increment: 1 },
           passwordResetCode: null,
           passwordResetCodeExpiresAt: null,
+          // The customer here had not verified; a code from the mailbox
+          // proves the mailbox (docs/relay-last-resort.md, R3.8).
+          emailVerifiedAt: expect.any(Date),
         },
       });
     });

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException, UnauthorizedException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException, Optional, UnauthorizedException } from "@nestjs/common";
 import { Prisma, Protocol, SubscriptionStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
@@ -14,6 +14,7 @@ import { commandTarget, deleteUserPayload } from "./command-target";
 import { liveOnceActiveWhere } from "./live-credentials";
 import { sharedWireGuardReserve, wireGuardPoolSize } from "./wireguard-subnet";
 import { DeviceSlotsService } from "../device-slots/device-slots.service";
+import { RelayAuthService } from "../relay-auth/relay-auth.service";
 
 /** How many signed-in devices of one customer may hold credentials of
  * their own at once. See `enforceDeviceLimit`.
@@ -161,6 +162,9 @@ export class ProtocolUsersService {
     private readonly prisma: PrismaService,
     private readonly agentGateway: AgentGatewayService,
     private readonly deviceSlots: DeviceSlotsService,
+    // Optional for the specs that build this by hand; without it there is
+    // never an intranet hold.
+    @Optional() private readonly relay?: RelayAuthService,
   ) {}
 
   /** The operator's view of provisioned users -- bounded.
@@ -696,6 +700,17 @@ export class ProtocolUsersService {
    */
   async sweepDeadSessionCredentials(now = new Date()) {
     const cutoff = new Date(now.getTime() - SESSION_IDLE_LIFETIME_MS);
+    // During a declared intranet and the 30 days after, an idle device of
+    // a customer holding a relay plan keeps its credentials: unreachable
+    // is not gone (docs/relay-last-resort.md, R4.5). Signed-out ones are
+    // reclaimed as always.
+    const hold = (await this.relay?.intranetHold(now.getTime())) ?? false;
+    const idle: Prisma.CustomerSessionWhereInput = hold
+      ? {
+          lastUsedAt: { lt: cutoff },
+          customer: { subscriptions: { none: { status: "ACTIVE", plan: { relayOnly: true } } } },
+        }
+      : { lastUsedAt: { lt: cutoff } };
     let sessions = 0;
     let revoked = 0;
     let failed = 0;
@@ -706,7 +721,7 @@ export class ProtocolUsersService {
         this.prisma.customerSession.findMany({
           where: {
             protocolUsers: { some: {} },
-            OR: [{ revokedAt: { not: null } }, { lastUsedAt: { lt: cutoff } }],
+            OR: [{ revokedAt: { not: null } }, idle],
             ...after(afterId),
           },
           select: { id: true, customerId: true, revokedAt: true },

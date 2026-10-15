@@ -65,6 +65,31 @@ describe("ClientAttemptsService.record network", () => {
   });
 });
 
+/** A report that came through the Iranian relay keeps the caller's
+ * network and never its address (docs/relay-last-resort.md, I5). */
+describe("ClientAttemptsService.record over the relay", () => {
+  it("stores no address, the network the server looked up, and that it came by relay", async () => {
+    const { service, create } = build();
+    await service.record(report({}), { via: "relay", asn: 64501 });
+    const data = create.mock.calls[0][0].data;
+    expect(data.ip).toBeNull();
+    expect(data.asn).toBe(64501);
+    expect(data.via).toBe("relay");
+  });
+
+  it("still prefers a network the client carries a signature for", async () => {
+    const { service, create } = build();
+    await service.record(report({ network: "signed-for-64500" }), { via: "relay", asn: 64501 });
+    expect(create.mock.calls[0][0].data.asn).toBe(64500);
+  });
+
+  it("marks nothing as relay that did not come by it", async () => {
+    const { service, create } = build();
+    await service.record(report({}), { ip: "198.51.100.7" });
+    expect(create.mock.calls[0][0].data).toMatchObject({ ip: "198.51.100.7", via: null, asn: null });
+  });
+});
+
 /** Mobile up to 0.2.21 called anything that was not Android "windows".
  * The rows that produced were iOS, and read as a Windows problem. */
 describe("recordedPlatform", () => {

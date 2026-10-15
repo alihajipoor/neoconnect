@@ -4,6 +4,7 @@ import { CustomerAuthService } from "./customer-auth.service";
 import { SocialAuthService } from "./social/social-auth.service";
 import { OauthFlowService } from "./social/oauth-flow.service";
 import { LoginGuardService } from "../login-guard/login-guard.service";
+import type { RelayAuthService } from "../relay-auth/relay-auth.service";
 import { verificationEmail } from "../email/templates";
 
 /** The link in the verification email is the one thing a customer
@@ -33,6 +34,7 @@ describe("email verification link", () => {
           throw new Error("the OAuth flow should not be reached by the verification landing page");
         }),
       } as unknown as OauthFlowService,
+      {} as unknown as RelayAuthService,
     );
   }
 

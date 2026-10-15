@@ -21,6 +21,12 @@ const SAFE_SELECT = {
   emailVerifiedAt: true,
   createdAt: true,
   updatedAt: true,
+  // How the account came to exist, whether it is a relay account still
+  // waiting on its address, and when its recovery code was made -- never
+  // the code's hash (docs/relay-last-resort.md).
+  signupChannel: true,
+  relayUnverifiedSince: true,
+  recoveryCodeSetAt: true,
 } as const;
 
 /** What deleting an account needs of each credential: where it lives,
@@ -79,6 +85,21 @@ export class CustomersService {
       throw new NotFoundException("Customer not found");
     }
     return customer;
+  }
+
+  /** The account as its owner sees it in the app: the safe columns, and
+   * whether it has a password and a recovery code -- the first decides
+   * whether "set a password" is offered (docs/relay-last-resort.md, R4.4). */
+  async getSelf(id: string) {
+    const customer = await this.prisma.customer.findUnique({
+      where: { id },
+      select: { ...SAFE_SELECT, passwordHash: true },
+    });
+    if (!customer) {
+      throw new NotFoundException("Customer not found");
+    }
+    const { passwordHash, ...safe } = customer;
+    return { ...safe, hasPassword: passwordHash !== null, hasRecoveryCode: safe.recoveryCodeSetAt !== null };
   }
 
   async create(dto: CreateCustomerDto) {

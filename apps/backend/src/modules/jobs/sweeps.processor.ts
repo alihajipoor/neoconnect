@@ -8,6 +8,7 @@ import { ReferralsService } from "../referrals/referrals.service";
 import { ClientAttemptsService } from "../client-attempts/client-attempts.service";
 import { ReachabilityService } from "../reachability/reachability.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
+import { RelayAuthService } from "../relay-auth/relay-auth.service";
 import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
@@ -22,6 +23,7 @@ export class SweepsProcessor extends WorkerHost {
     private readonly clientAttemptsService: ClientAttemptsService,
     private readonly reachabilityService: ReachabilityService,
     private readonly protocolUsersService: ProtocolUsersService,
+    private readonly relayAuthService: RelayAuthService,
   ) {
     super();
   }
@@ -101,6 +103,13 @@ export class SweepsProcessor extends WorkerHost {
         // nodes (docs/per-device-credentials.md). Logs its own summary
         // when it did anything.
         await this.protocolUsersService.sweepDeadSessionCredentials();
+        break;
+      }
+      case "relay-unverified": {
+        // Unpaid unverified relay accounts idle 30 days, which frees their
+        // address; paused during a declared intranet and the 30 days
+        // after (docs/relay-last-resort.md, R3.8).
+        await this.relayAuthService.sweepUnverified();
         break;
       }
       default:

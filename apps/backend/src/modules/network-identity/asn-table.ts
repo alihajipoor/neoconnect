@@ -80,29 +80,30 @@ export function normaliseIp(ip: string): string {
  * half a million lines without holding the text.
  */
 export class AsnTableBuilder {
-  private readonly v4: Array<[number, number, number]> = [];
-  private readonly v6: Array<[bigint, bigint, number]> = [];
+  private readonly v4: Array<[number, number, number, number]> = [];
+  private readonly v6: Array<[bigint, bigint, number, number]> = [];
   private readonly orgs = new Map<number, string>();
 
   /** Adds one line. Returns false for anything it could not use --
    * headers, blanks, malformed rows, and AS 0, which is the dataset's
    * own marker for "not routed" and therefore for no network at all. */
   addLine(line: string): boolean {
-    const [start, end, asText, , description] = line.split("\t");
+    const [start, end, asText, countryText, description] = line.split("\t");
     if (!start || !end || !asText) return false;
     const asn = Number.parseInt(asText, 10);
     if (!Number.isInteger(asn) || asn <= 0) return false;
+    const country = packCountry(countryText);
 
     const v4Start = ipv4ToInt(start);
     if (v4Start !== null) {
       const v4End = ipv4ToInt(end);
       if (v4End === null || v4End < v4Start) return false;
-      this.v4.push([v4Start, v4End, asn]);
+      this.v4.push([v4Start, v4End, asn, country]);
     } else {
       const v6Start = ipv6High64(start);
       const v6End = ipv6High64(end);
       if (v6Start === null || v6End === null || v6End < v6Start) return false;
-      this.v6.push([v6Start, v6End, asn]);
+      this.v6.push([v6Start, v6End, asn, country]);
     }
     if (!this.orgs.has(asn)) this.orgs.set(asn, (description ?? "").trim().slice(0, MAX_ORG_LENGTH));
     return true;
@@ -123,6 +124,8 @@ export class AsnTableBuilder {
       BigUint64Array.from(this.v6, (r) => r[1]),
       Uint32Array.from(this.v6, (r) => r[2]),
       new Map(this.orgs),
+      Uint16Array.from(this.v4, (r) => r[3]),
+      Uint16Array.from(this.v6, (r) => r[3]),
     );
   }
 }
@@ -141,6 +144,10 @@ export class AsnTable {
     private readonly v6End: BigUint64Array,
     private readonly v6Asn: Uint32Array,
     private readonly orgs: Map<number, string>,
+    /** Each range's registered country: two ASCII letters packed into one
+     * 16-bit value, 0 where the dataset had none. */
+    private readonly v4Country: Uint16Array = new Uint16Array(v4Start.length),
+    private readonly v6Country: Uint16Array = new Uint16Array(v6Start.length),
   ) {}
 
   static fromLines(lines: Iterable<string>): AsnTable {
@@ -159,31 +166,48 @@ export class AsnTable {
   }
 
   lookup(rawIp: string): AsnInfo | null {
+    const found = this.find(rawIp);
+    if (!found) return null;
+    const asn = found.asns[found.index];
+    return { asn, org: this.orgs.get(asn) ?? "" };
+  }
+
+  /** The country the network announcing `rawIp` is registered in, as an
+   * upper-case ISO alpha-2 code, or null when unknown.
+   *
+   * Registered, not located: iptoasn's country is the AS's registration,
+   * so an Iranian company's server abroad reads IR and an Iranian VPS
+   * passes as Iran. Good enough for its one use -- the relay's region
+   * gate, which is a cost gate and documented as one
+   * (docs/relay-last-resort.md, F5). Nothing finer is wanted here; see
+   * the comment on AsnInfo. */
+  countryOf(rawIp: string): string | null {
+    const found = this.find(rawIp);
+    if (!found) return null;
+    return unpackCountry(found.countries[found.index]);
+  }
+
+  private find(rawIp: string): { index: number; asns: Uint32Array; countries: Uint16Array } | null {
     const ip = normaliseIp(rawIp);
     const v4 = ipv4ToInt(ip);
-    const asn =
-      v4 !== null
-        ? search(this.v4Start, this.v4End, this.v4Asn, v4)
-        : (() => {
-            const v6 = ipv6High64(ip);
-            return v6 === null ? null : search(this.v6Start, this.v6End, this.v6Asn, v6);
-          })();
-    if (asn === null) return null;
-    return { asn, org: this.orgs.get(asn) ?? "" };
+    if (v4 !== null) {
+      const index = search(this.v4Start, this.v4End, v4);
+      return index === null ? null : { index, asns: this.v4Asn, countries: this.v4Country };
+    }
+    const v6 = ipv6High64(ip);
+    if (v6 === null) return null;
+    const index = search(this.v6Start, this.v6End, v6);
+    return index === null ? null : { index, asns: this.v6Asn, countries: this.v6Country };
   }
 }
 
-/** The last range starting at or before `key`, if `key` is inside it.
+/** The index of the last range starting at or before `key`, if `key` is
+ * inside it.
  *
  * Ranges in the dataset do not overlap, so "the last one that starts no
  * later than this address" is the only candidate, and an address in a
  * gap between ranges correctly finds nothing. */
-function search<T extends number | bigint>(
-  starts: ArrayLike<T>,
-  ends: ArrayLike<T>,
-  asns: Uint32Array,
-  key: T,
-): number | null {
+function search<T extends number | bigint>(starts: ArrayLike<T>, ends: ArrayLike<T>, key: T): number | null {
   let lo = 0;
   let hi = starts.length - 1;
   let found = -1;
@@ -197,5 +221,19 @@ function search<T extends number | bigint>(
     }
   }
   if (found < 0 || ends[found] < key) return null;
-  return asns[found];
+  return found;
+}
+
+/** Two ASCII letters as one 16-bit value, or 0 for anything else -- the
+ * dataset writes "None" for unassigned space. Case-folded, so "ir" and
+ * "IR" are one country. */
+function packCountry(text: string | undefined): number {
+  const code = (text ?? "").trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) return 0;
+  return (code.charCodeAt(0) << 8) | code.charCodeAt(1);
+}
+
+function unpackCountry(packed: number): string | null {
+  if (packed === 0) return null;
+  return String.fromCharCode(packed >> 8, packed & 0xff);
 }
