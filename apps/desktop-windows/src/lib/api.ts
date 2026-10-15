@@ -13,7 +13,15 @@ import {
   resetDemotionsForTests,
   resolvesToBlockPage,
 } from "./endpoint-demotion";
-import { beginAttempt, failureOutcome, settleAttempt, type EndpointTrace, type TraceEntry } from "./endpoint-trace";
+import { beginAttempt, failureOutcome, newTrace, settleAttempt, type EndpointTrace, type TraceEntry } from "./endpoint-trace";
+import {
+  noteNormalRouteAnswered,
+  relayRequest,
+  skipNormalRoutes,
+  type RelayAnswer,
+  type RelayOutcome,
+  type RelayUse,
+} from "./last-resort";
 import { clearTokens, getTokens, setTokens } from "./session";
 import { announceSessionRevoked } from "./session-revoked";
 import type { TokenPair } from "./types";
@@ -148,6 +156,9 @@ function noteAnswer(base: string, response: Response, answer: BackendAnswer): vo
   if (servesBackend(response)) {
     servedBackend.add(base);
     notBackend.delete(base);
+    // The usual way reaches the backend again: relay mode, if it held,
+    // is over (last-resort.ts, R1.7).
+    noteNormalRouteAnswered();
   }
   if (servesBackend(response) || bodilessSuccess(response)) announceBackendAnswer(answer);
 }
@@ -758,7 +769,16 @@ function unanswered(walk: Walk, init: RequestInit): Response {
  * the device slot's release sent again after a teardown (`ReleaseHow` in
  * device-slots.ts), whose second and a half the lone lead would otherwise
  * spend on an address the bare line may drop. Never sent. */
-export type ApiInit = RequestInit & { afterPathChange?: boolean };
+export type ApiInit = RequestInit & {
+  afterPathChange?: boolean;
+  /** Whether this request may go through the relay of last resort, and
+   * whether it may ask the customer's consent to (last-resort.ts). Absent:
+   * never. Never sent. */
+  relay?: RelayUse;
+};
+
+/** A public request's options: the fetch's own, and the relay opt-in. */
+export type PublicInit = RequestInit & { relay?: RelayUse };
 
 /** Where a write goes before anything is asked, if anywhere: the address
  * the backend last answered from (`recentWinner`) -- or, for a write with
@@ -1113,6 +1133,15 @@ export type RequestFailure = {
    * the plan's devices, how long until a takeover is allowed again).
    * Untrusted shape: read it defensively. */
   body?: unknown;
+  /** Set when the relay of last resort was dialled for this request and
+   * nothing answered there either -- the one case the screens may say
+   * "including the backup server" (failure-text.ts). Never set when the
+   * relay was not dialled: no consent, not Iran, no relay, the budget. */
+  relayTried?: true;
+  /** Set on a sign-up that failed as `everyRouteFailed` describes, where
+   * the backup route's own sign-up can be offered instead (auth.ts,
+   * Register.tsx). Nothing was sent to the relay to find that out. */
+  relaySignup?: true;
 };
 
 export type ApiResult<T> = { ok: true; data: T } | RequestFailure;
@@ -1266,17 +1295,23 @@ async function failureFrom(res: Response, signal?: AbortSignal | null, foreign =
     return { ok: false, error: requestFailed(res.status), status: res.status, page: true };
   }
   const body: unknown = await readWithin(res.json(), signal).catch(() => null);
+  return refusal(res.status, body);
+}
+
+/** The backend's refusal as a result: its sentence, its status, and its
+ * code with the body when it gave one. */
+function refusal(status: number, body: unknown): RequestFailure {
   const fields = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : null;
   const message = fields?.message;
   const error = Array.isArray(message)
     ? message.join(", ")
     : typeof message === "string"
       ? message
-      : requestFailed(res.status);
+      : requestFailed(status);
   const code = typeof fields?.code === "string" ? fields.code : undefined;
   // The body travels only with a coded refusal, which is the only kind
   // whose fields anyone reads; a plain error is its sentence and status.
-  return { ok: false, error, status: res.status, ...(code !== undefined ? { code, body } : {}) };
+  return { ok: false, error, status, ...(code !== undefined ? { code, body } : {}) };
 }
 
 /** Unauthenticated request -- login/register don't have a token yet.
@@ -1286,7 +1321,25 @@ async function failureFrom(res: Response, signal?: AbortSignal | null, foreign =
  * `fetchAnyEndpoint`. */
 export async function publicRequest<T>(
   path: string,
-  init?: RequestInit,
+  init?: PublicInit,
+  trace?: EndpointTrace,
+  via?: AnsweredBase[],
+): Promise<ApiResult<T>> {
+  const { relay, ...plain } = init ?? {};
+  // A request sent only to addresses a race has just heard from is a
+  // sign-in's attempt, whose relay leg is auth.ts's own.
+  if (relay === undefined || via !== undefined) return await publicDirect<T>(path, plain, trace, via);
+  return await withLastResort<T>(
+    trace ?? newTrace(),
+    (traced) => publicDirect<T>(path, plain, traced),
+    (normal) => viaRelay<T>(path, plain, relay, normal),
+  );
+}
+
+/** `publicRequest` over the ordinary routes alone. */
+async function publicDirect<T>(
+  path: string,
+  init: RequestInit,
   trace?: EndpointTrace,
   via?: AnsweredBase[],
 ): Promise<ApiResult<T>> {
@@ -1296,7 +1349,7 @@ export async function publicRequest<T>(
       path,
       {
         ...init,
-        headers: { "Content-Type": "application/json", ...init?.headers },
+        headers: { "Content-Type": "application/json", ...init.headers },
       },
       trace,
       via,
@@ -1309,14 +1362,251 @@ export async function publicRequest<T>(
   // site answers 200 with HTML.
   const foreign = foreignResponse(res);
   if (!res.ok || foreign) {
-    return await failureFrom(res, init?.signal, foreign);
+    return await failureFrom(res, init.signal, foreign);
   }
   if (res.status === 204) return { ok: true, data: undefined as T };
   try {
-    return { ok: true, data: (await readWithin(res.json(), init?.signal)) as T };
+    return { ok: true, data: (await readWithin(res.json(), init.signal)) as T };
   } catch (err) {
     return bodyFailure(err, res);
   }
+}
+
+// ---------------------------------------------------------------------------
+// The relay of last resort (last-resort.ts; docs/relay-last-resort.md).
+
+/** Whether `failure` is the kind only blocking explains, so the relay of
+ * last resort may be asked (R1.2): nothing answered anywhere, and every
+ * address asked failed in transport -- a timeout, a connection that
+ * failed, or a name on Iran's block page. Never after any answer at all,
+ * however unhelpful (an HTTP status, a page, the backend answering a
+ * challenge moments before), and never after this machine or the scope
+ * refused a request (`local`, `scope`): those are not the network's,
+ * and a relay would not answer them differently. */
+export function everyRouteFailed(failure: RequestFailure, trace: EndpointTrace): boolean {
+  if (!failure.noResponse || failure.error === STOPPED_ANSWERING || failure.code !== undefined) return false;
+  if (failure.blockPage) return true;
+  let failed = 0;
+  for (const entry of trace.entries) {
+    if (entry.outcome === "timeout" || entry.outcome === "net" || entry.outcome === "blockpage") failed += 1;
+    // Still out when the caller's time ran out: no answer, and no verdict.
+    else if (entry.outcome !== "pending") return false;
+  }
+  return failed > 0;
+}
+
+/** What a relay leg came to: the result, if it produced one, and whether
+ * the relay was dialled at all. */
+interface RelayLeg<T> {
+  result: ApiResult<T> | null;
+  dialled: boolean;
+}
+
+/** The sentence for a request the relay would have carried but for a
+ * tunnel being up, or being brought up (R1.5, F13). In English, as every
+ * failure's `error` is; the screens word it by its code. */
+export const RELAY_DISCONNECT = "Disconnect to use the backup route.";
+
+/** Runs a request over the ordinary routes, and over the relay when they
+ * have all failed as only blocking explains -- or the relay first, while
+ * relay mode says they were found blocked minutes ago and they are not
+ * due to be asked again (`skipNormalRoutes`). Never both at once: the
+ * relay is never raced (R1.1). */
+async function withLastResort<T>(
+  trace: EndpointTrace,
+  normal: (trace: EndpointTrace) => Promise<ApiResult<T>>,
+  relayed: (normal: RequestFailure | null) => Promise<RelayLeg<T>>,
+): Promise<ApiResult<T>> {
+  if (skipNormalRoutes()) {
+    const leg = await relayed(null);
+    if (leg.result) return leg.result;
+    // Not sent, or sent and unanswered: the ordinary routes are asked
+    // after all, and the relay is not asked twice.
+    const result = await normal(trace);
+    return leg.dialled && !result.ok ? { ...result, relayTried: true } : result;
+  }
+  const result = await normal(trace);
+  if (result.ok || !everyRouteFailed(result, trace)) return result;
+  const leg = await relayed(result);
+  if (leg.result) return leg.result;
+  return leg.dialled ? { ...result, relayTried: true } : result;
+}
+
+/** The headers of a request as a plain record: the app passes records,
+ * and a `Headers` or a list of pairs is read the same way. */
+function headerRecord(headers: HeadersInit | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!headers) return out;
+  if (Array.isArray(headers)) {
+    for (const [name, value] of headers) out[name] = value;
+  } else if (typeof Headers !== "undefined" && headers instanceof Headers) {
+    headers.forEach((value, name) => {
+      out[name] = value;
+    });
+  } else {
+    Object.assign(out, headers);
+  }
+  return out;
+}
+
+/** Sends one request through the relay, or says why it was not. */
+async function relayExchange(path: string, init: RequestInit, use: RelayUse): Promise<RelayOutcome> {
+  const method = (init.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "POST") return { kind: "skipped", reason: "path" };
+  return await relayRequest(
+    {
+      method,
+      path,
+      headers: { "Content-Type": "application/json", ...headerRecord(init.headers) },
+      body: typeof init.body === "string" ? init.body : undefined,
+    },
+    use,
+  );
+}
+
+/** Whether an answer through the relay is the backend's own. */
+function relayAnswerIsBackend(answer: RelayAnswer): boolean {
+  return answer.contentType.toLowerCase().includes("application/json");
+}
+
+/** An answer through the relay as a result, read as `resultFrom` reads an
+ * ordinary one: the backend's JSON, a bodiless success, or a page from in
+ * front of the backend that is never a success. Nothing about it is noted
+ * against any ordinary address -- it is not one, and must never become
+ * the remembered one (R1.1). */
+export function relayResult<T>(answer: RelayAnswer): ApiResult<T> {
+  const backend = relayAnswerIsBackend(answer);
+  const success = answer.status >= 200 && answer.status < 300;
+  if (success && (answer.status === 204 || (!backend && answer.body === ""))) {
+    return { ok: true, data: undefined as T };
+  }
+  if (!backend) return { ok: false, error: requestFailed(answer.status), status: answer.status, page: true };
+  let body: unknown;
+  try {
+    body = JSON.parse(answer.body);
+  } catch {
+    return { ok: false, error: requestFailed(answer.status), status: answer.status };
+  }
+  if (success) return { ok: true, data: body as T };
+  return refusal(answer.status, body);
+}
+
+/** A relay leg's result for an outcome that is not an answer. */
+function legWithout<T>(
+  outcome: Exclude<RelayOutcome, { kind: "answered" }>,
+  use: RelayUse,
+  normal: RequestFailure | null,
+): RelayLeg<T> {
+  if (outcome.kind === "unanswered") return { result: null, dialled: true };
+  // Only a request the customer just made is told to disconnect, and only
+  // once the ordinary routes have failed: in relay mode they come next,
+  // and a tunnel may well carry them.
+  if (outcome.kind === "gated" && use === "foreground" && normal !== null) {
+    return { result: { ...normal, error: RELAY_DISCONNECT, code: "RELAY_DISCONNECT" }, dialled: false };
+  }
+  return { result: null, dialled: false };
+}
+
+/** A public request through the relay. */
+async function viaRelay<T>(
+  path: string,
+  init: RequestInit,
+  use: RelayUse,
+  normal: RequestFailure | null,
+): Promise<RelayLeg<T>> {
+  const outcome = await relayExchange(path, init, use);
+  if (outcome.kind !== "answered") return legWithout<T>(outcome, use, normal);
+  return { result: relayResult<T>(outcome.answer), dialled: true };
+}
+
+/** A request through the relay alone, never the ordinary routes: a
+ * sign-in's relay leg, or a sign-up that exists only there. Null when the
+ * relay was not dialled (see `RelaySkip` in last-resort.ts); otherwise its
+ * result, which for no answer is `fallback` -- the ordinary routes'
+ * failure, when there was one -- marked `relayTried`. */
+export async function relayOnly<T>(
+  path: string,
+  init: RequestInit,
+  use: RelayUse,
+  fallback?: RequestFailure,
+): Promise<ApiResult<T> | null> {
+  const leg = await viaRelay<T>(path, init, use, fallback ?? unreachable());
+  if (leg.result) return leg.result;
+  if (!leg.dialled) return null;
+  return { ...(fallback ?? unreachable()), relayTried: true };
+}
+
+/** The token refresh through the relay that is under way, if one is. */
+let relayRenewal: Promise<Refresh> | null = null;
+
+/** The token refresh, through the relay: once, however many requests
+ * found the token expired there (`renewSession` does the same on the
+ * ordinary routes). A JSON 401 through the relay is the backend's own --
+ * the relay's TLS is pinned end to end to the origin -- and ends the
+ * session as one on an ordinary route does. */
+async function renewThroughRelay(sentWith: string, use: RelayUse): Promise<Refresh> {
+  if (relayRenewal !== null) return relayRenewal;
+  const stored = await getTokens();
+  if (stored === null) return { kind: "none" };
+  if (stored.accessToken !== sentWith) return { kind: "renewed", tokens: stored };
+  relayRenewal = (async (): Promise<Refresh> => {
+    const outcome = await relayExchange(
+      REFRESH_PATH,
+      { method: "POST", body: JSON.stringify({ refreshToken: stored.refreshToken }), headers: deviceHeaders() },
+      use,
+    );
+    if (outcome.kind !== "answered") return { kind: "unavailable", answered: false };
+    const answer = outcome.answer;
+    if (answer.status === REFRESH_REFUSED && relayAnswerIsBackend(answer)) return { kind: "refused" };
+    const result = relayResult<TokenPair>(answer);
+    if (!result.ok || typeof result.data?.accessToken !== "string") return { kind: "unavailable", answered: true };
+    await setTokens(result.data);
+    return { kind: "renewed", tokens: result.data };
+  })().finally(() => {
+    relayRenewal = null;
+  });
+  return relayRenewal;
+}
+
+/** An authenticated request through the relay, with its own token refresh
+ * on the backend's 401, as `authenticatedAttempt` does on the ordinary
+ * routes. */
+async function relayAuthenticated<T>(
+  path: string,
+  init: RequestInit,
+  use: RelayUse,
+  normal: RequestFailure | null,
+): Promise<RelayLeg<T>> {
+  const tokens = await getTokens();
+  if (tokens === null) return { result: null, dialled: false };
+  const withBearer = (accessToken: string): RequestInit => ({
+    ...init,
+    headers: { ...headerRecord(init.headers), Authorization: `Bearer ${accessToken}` },
+  });
+  let outcome = await relayExchange(path, withBearer(tokens.accessToken), use);
+  if (outcome.kind !== "answered") return legWithout<T>(outcome, use, normal);
+  if (outcome.answer.status === 401 && relayAnswerIsBackend(outcome.answer)) {
+    const renewed = await renewThroughRelay(tokens.accessToken, use);
+    if (renewed.kind === "unavailable") {
+      return {
+        result: { ok: false, error: renewed.answered ? RENEWAL_FAILED : RENEWAL_UNANSWERED },
+        dialled: true,
+      };
+    }
+    if (renewed.kind !== "renewed") {
+      await clearTokens();
+      if (renewed.kind === "refused") announceSessionRevoked();
+      return {
+        result: { ok: false, error: "Your session expired. Please sign in again.", sessionExpired: true },
+        dialled: true,
+      };
+    }
+    outcome = await relayExchange(path, withBearer(renewed.tokens.accessToken), use);
+    if (outcome.kind !== "answered") {
+      return { result: { ok: false, error: STOPPED_ANSWERING, noResponse: true, relayTried: true }, dialled: true };
+    }
+  }
+  return { result: relayResult<T>(outcome.answer), dialled: true };
 }
 
 /** What a race found: the answer, and who else answered. */
@@ -2266,6 +2556,17 @@ async function authenticatedAttempt(path: string, init?: ApiInit, trace?: Endpoi
  * server refused is a sign-out (`sessionExpired`); a 409 is an answer,
  * and the caller decides what it means. */
 export async function apiRequest<T>(path: string, init?: ApiInit, trace?: EndpointTrace): Promise<ApiResult<T>> {
+  const { relay, ...plain } = init ?? {};
+  if (relay === undefined) return await apiDirect<T>(path, plain, trace);
+  return await withLastResort<T>(
+    trace ?? newTrace(),
+    (traced) => apiDirect<T>(path, plain, traced),
+    (normal) => relayAuthenticated<T>(path, plain, relay, normal),
+  );
+}
+
+/** `apiRequest` over the ordinary routes alone. */
+async function apiDirect<T>(path: string, init: ApiInit, trace?: EndpointTrace): Promise<ApiResult<T>> {
   const attempt = await authenticatedAttempt(path, init, trace);
   if (!attempt.answered) return attempt.failure;
   const res = attempt.res;

@@ -15,6 +15,17 @@ export interface Customer {
   emailVerifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** How the account was made. Absent from a backend older than the relay
+   * of last resort (docs/relay-last-resort.md). */
+  signupChannel?: "NORMAL" | "RELAY" | "SOCIAL";
+  /** Set while the account came in through the relay and has not
+   * confirmed its address: it can redeem an Ultimate voucher and little
+   * else until it does (R3.3). */
+  relayUnverifiedSince?: string | null;
+  recoveryCodeSetAt?: string | null;
+  /** False for a Google, Apple or Facebook account with no password. */
+  hasPassword?: boolean;
+  hasRecoveryCode?: boolean;
 }
 
 // PENDING was added backend-side when self-purchase landed (a

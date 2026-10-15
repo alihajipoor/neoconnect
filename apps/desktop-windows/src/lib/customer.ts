@@ -20,14 +20,21 @@ import type {
  * the report made when nothing answered it: the pre-connect refresh's
  * (connection-config.ts), and the dashboard's load and the server list's
  * (unanswered-report.ts). See endpoint-trace.ts. */
-export const getMe = (trace?: EndpointTrace) => apiRequest<Customer>("/customer/me", undefined, trace);
+//
+// The account reads may go through the relay of last resort when every
+// ordinary route has failed, but never ask for it: they run on their own,
+// at launch and on a timer, and a question nobody prompted is not consent
+// (last-resort.ts, R1.4). Once the customer has agreed -- at sign-in, in
+// Settings -- they are how a customer in an intranet sees their account
+// and the routes a voucher bought.
+export const getMe = (trace?: EndpointTrace) => apiRequest<Customer>("/customer/me", { relay: "background" }, trace);
 export const getSubscriptions = (trace?: EndpointTrace) =>
-  apiRequest<Subscription[]>("/customer/subscriptions", undefined, trace);
+  apiRequest<Subscription[]>("/customer/subscriptions", { relay: "background" }, trace);
 export const getProtocolUsers = (trace?: EndpointTrace) =>
-  apiRequest<ProtocolUser[]>("/customer/protocol-users", undefined, trace);
+  apiRequest<ProtocolUser[]>("/customer/protocol-users", { relay: "background" }, trace);
 export const getAppLinks = () => apiRequest<AppLinks>("/customer/links");
 
-export const getPlans = () => apiRequest<SubscriptionPlan[]>("/customer/plans");
+export const getPlans = () => apiRequest<SubscriptionPlan[]>("/customer/plans", { relay: "background" });
 
 /** What a voucher code would grant, without spending it.
  *
@@ -37,13 +44,16 @@ export const getPlans = () => apiRequest<SubscriptionPlan[]>("/customer/plans");
 export const previewVoucher = (code: string) =>
   apiRequest<{ code: string; plan: SubscriptionPlan; expiresAt: string | null }>(
     "/customer/vouchers/preview",
-    { method: "POST", body: JSON.stringify({ code }) },
+    // A voucher is how Ultimate is sold during an intranet (R5.1): the
+    // customer typed it, so the relay may be asked for.
+    { method: "POST", body: JSON.stringify({ code }), relay: "foreground" },
   );
 
 export const redeemVoucher = (code: string) =>
   apiRequest<{ subscription: Subscription }>("/customer/vouchers/redeem", {
     method: "POST",
     body: JSON.stringify({ code }),
+    relay: "foreground",
   });
 export const getReferrals = () => apiRequest<ReferralOverview>("/customer/referrals");
 
@@ -51,14 +61,25 @@ export const getReferrals = () => apiRequest<ReferralOverview>("/customer/referr
 // tagged with what other people on the same network recently got
 // through on. See network-identity.ts.
 export const getAvailableRoutes = (subscriptionId: string, trace?: EndpointTrace) =>
-  apiRequest<RouteOption[]>(`/customer/subscriptions/${subscriptionId}/routes`, { headers: networkHeaders() }, trace);
+  apiRequest<RouteOption[]>(
+    `/customer/subscriptions/${subscriptionId}/routes`,
+    { headers: networkHeaders(), relay: "background" },
+    trace,
+  );
 
 export const switchRoute = (subscriptionId: string, routeId: string, trace?: EndpointTrace) =>
   apiRequest<ProtocolUser>(
     `/customer/subscriptions/${subscriptionId}/route`,
-    { method: "POST", body: JSON.stringify({ routeId }) },
+    { method: "POST", body: JSON.stringify({ routeId }), relay: "background" },
     trace,
   );
+
+// TODO(relay checkout): card and crypto checkout through the relay is a
+// later infra item -- the payment-only path in docs/relay-last-resort.md
+// ("Not done here"). Until it exists these two stay off the relay: the
+// checkout page itself could not be reached, and a payment started there
+// would only leave a PENDING subscription nobody can pay. Plans.tsx says
+// so while relay mode holds, and points to a voucher.
 
 /** Creates the subscription row only. It is not usable until a payment
  * clears -- credentials aren't provisioned until the provider's webhook
