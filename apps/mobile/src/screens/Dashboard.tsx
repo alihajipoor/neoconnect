@@ -56,7 +56,8 @@ import {
   type ConnectionState,
 } from "@shared/components/ConnectOrb";
 import { Logo } from "@shared/components/Logo";
-import { Flag } from "@shared/components/Flag";
+import { RouteFlag } from "@shared/components/Flag";
+import { exitCountryName, placeLabel, routePlace } from "@shared/lib/route-place";
 import { LocationPicker } from "@shared/components/LocationPicker";
 import { Sheet } from "@shared/components/Sheet";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
@@ -349,7 +350,7 @@ export function Dashboard({
   onBrowsePlans: () => void;
   onOpenSettings: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [loading, setLoading] = useState(true);
   // The loading screen waits on three reads, each given up to twenty
   // seconds an address; past eight it says it is still trying.
@@ -2983,9 +2984,12 @@ export function Dashboard({
                     automaticPending ? (
                       <Sparkles className="size-3" />
                     ) : currentRoute ? (
-                      <Flag
-                        region={currentRoute.location.region}
-                        className="h-3 w-[1rem]"
+                      // A relay: its exit's flag, Iran's as a badge.
+                      <RouteFlag
+                        region={routePlace(currentRoute).entry}
+                        exitRegion={routePlace(currentRoute).exit}
+                        label={placeLabel(currentRoute, language)}
+                        size="sm"
                       />
                     ) : (
                       <Globe className="size-3" />
@@ -2999,12 +3003,18 @@ export function Dashboard({
                       ? "dash.serverAuto"
                       : "dash.server",
                   )}
+                  // The country the traffic leaves from; the server list
+                  // spells out "Iran → Germany" for a relay.
                   value={
-                    automaticPending
-                      ? t("loc.automaticShort")
-                      : currentRoute
-                        ? currentRoute.location.region
-                        : "—"
+                    automaticPending ? (
+                      t("loc.automaticShort")
+                    ) : currentRoute ? (
+                      <span title={placeLabel(currentRoute, language)}>
+                        {exitCountryName(currentRoute, language)}
+                      </span>
+                    ) : (
+                      "—"
+                    )
                   }
                   onClick={() => setShowLocationPicker(true)}
                   actionLabel={t("dash.change")}

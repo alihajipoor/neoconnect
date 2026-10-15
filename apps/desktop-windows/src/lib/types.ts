@@ -190,6 +190,12 @@ export interface RouteOption {
   transport?: string;
   isRelay: boolean;
   location: { region: string; nodeName: string };
+  /** The country a relayed route's traffic leaves from, as a region slug
+   * like `location.region`; null on a direct route, which leaves from
+   * `location`. Only the country -- the exit's name and address are not
+   * sent. Absent from a backend that predates it, and then a relay shows
+   * its entry, as before. See `route-place.ts`. */
+  exitLocation?: { region: string } | null;
   /** Entry endpoint the client dials. Used to measure latency locally --
    * a figure measured on the backend would describe the backend's
    * network, not the customer's. Only the entry is exposed; a relay's
