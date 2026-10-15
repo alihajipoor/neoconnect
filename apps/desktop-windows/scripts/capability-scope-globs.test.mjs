@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inScope, parentDomain, scopeGlobs } from "./capability-scope-globs.mjs";
+import { bundleHosts, inScope, parentDomain, scopeGlobs } from "./capability-scope-globs.mjs";
 import { matchesCapabilityGlob } from "../src/lib/capability-glob";
 
 /* Documentation names only (RFC 2606 / RFC 5737): which hosts the real
@@ -48,5 +48,19 @@ describe("the HTTP scope a seed bundle grants", () => {
     expect(parentDomain("[2001:db8::1]")).toBeNull();
     const globs = scopeGlobs(["one.co.uk", "two.co.uk"]);
     expect(globs.some((g) => g.includes("*.co.uk"))).toBe(false);
+  });
+});
+
+describe("the hosts a bundle puts in the HTTP scope", () => {
+  it("are its panels and mirrors, never the relay of last resort", () => {
+    const hosts = bundleHosts({
+      endpoints: [
+        { kind: "panel", url: "https://panel.example.com/api" },
+        { kind: "mirror", url: "https://n1.mirrors.example.net:2053/api" },
+        { kind: "lastResort", url: "https://192.0.2.10/api", pins: ["sha256/" + "A".repeat(43) + "="] },
+        { kind: "somethingNew", url: "https://later.example.org/api" },
+      ],
+    });
+    expect([...hosts].sort()).toEqual(["n1.mirrors.example.net", "panel.example.com"]);
   });
 });

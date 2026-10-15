@@ -1,5 +1,5 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
-import { isNewer, orderedBases, verifyBundle, type EndpointBundle } from "./endpoint-bundle";
+import { isNewer, orderedBases, verifyBundle, type EndpointBundle, type LastResortEntry } from "./endpoint-bundle";
 // Written at build time by scripts/ensure-seed-bundle.mjs. In the repo
 // this is the inert placeholder, so a checkout carries no addresses.
 import seedEnvelope from "./seed-bundle.json";
@@ -113,6 +113,19 @@ export async function refreshFrom(
 export async function bundledBases(preferRegion?: string): Promise<string[]> {
   const bundle = await cachedBundle();
   return bundle ? orderedBases(bundle, preferRegion) : [];
+}
+
+/** The relay entries of the bundle in force, in the operator's order.
+ *
+ * For last-resort.ts alone. Never merged into `bundledBases`: a relay is
+ * not a base any ordinary request is sent to (see `LastResortEntry`).
+ * Never throws; no bundle, or none with a relay, is an empty list. */
+export async function lastResortEntries(): Promise<LastResortEntry[]> {
+  try {
+    return (await cachedBundle())?.lastResort ?? [];
+  } catch {
+    return [];
+  }
 }
 
 /** Iran's DNS block page. A name resolving here is not slow or broken --
