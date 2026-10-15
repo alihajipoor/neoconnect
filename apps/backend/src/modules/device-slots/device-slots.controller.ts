@@ -2,7 +2,7 @@ import { Body, Controller, Headers, HttpCode, HttpStatus, Post, UseGuards } from
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { createHash } from "node:crypto";
-import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
+import { AllowUnverified, CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
 import { CurrentCustomer } from "../../common/decorators/current-customer.decorator";
 import { deviceInfoFrom } from "../../common/device-info";
 import type { AuthenticatedCustomer } from "../customer-auth/types";
@@ -44,7 +44,12 @@ export function slotRequestTracker(req: Record<string, unknown>): string {
 
 /** Device slots -- the HTTP contract is docs/device-slots.md, and that
  * document, not this file, is what the apps are built against. Change
- * the two together. */
+ * the two together.
+ *
+ * Open to an account whose address is unconfirmed: a slot is part of
+ * using the plan it already holds, and the apps claim one before every
+ * connect (docs/relay-last-resort.md). */
+@AllowUnverified()
 @ApiTags("customer")
 @ApiBearerAuth()
 @UseGuards(CustomerJwtAuthGuard)

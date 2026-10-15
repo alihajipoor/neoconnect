@@ -254,6 +254,34 @@ export class LoginGuardService {
     }
   }
 
+  /** A challenge at exactly `bits`, for a caller whose difficulty is set
+   * elsewhere -- the relay sign-up (docs/relay-last-resort.md, R3.5). */
+  issueAt(bits: number): Challenge {
+    return mint(bits);
+  }
+
+  /** The relay sign-up's check: a solution is always required (there is
+   * no grace on the relay), it must be ours, unspent, and at least
+   * `minBits` hard. */
+  enforceMinimum(solution: Solution | undefined, minBits: number): void {
+    if (!solution) {
+      throw new BadRequestException({
+        statusCode: 400,
+        code: "CHALLENGE_REQUIRED",
+        message: "A security check is required. Please try again.",
+      });
+    }
+    const result = verify(solution);
+    if (!result.ok) throw new BadRequestException(result.reason);
+    if (this.spentChallenges.has(solution.id)) {
+      throw new BadRequestException("This security check was already used. Please try again.");
+    }
+    this.spentChallenges.set(solution.id, solution.expiresAt);
+    if (solution.difficulty < minBits) {
+      throw new BadRequestException("This security check is out of date. Please try again.");
+    }
+  }
+
   /** Record a failed sign-in, raising the cost of the next attempt. */
   recordFailure(scope: LoginScope, email: string, ip: string): void {
     this.bump(this.accountFailures, this.accountKey(scope, email));

@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
@@ -160,7 +161,7 @@ export class VouchersService {
   /** What a customer sees before committing: is this code real, and what
    * would it give them. Deliberately does not redeem, so the app can
    * show the plan and let them confirm. */
-  async preview(rawCode: string) {
+  async preview(rawCode: string, options: { restricted?: boolean } = {}) {
     const voucher = await this.prisma.voucher.findUnique({
       where: { code: normalise(rawCode) },
       include: { plan: true },
@@ -174,19 +175,22 @@ export class VouchersService {
     if (!voucher || !this.isRedeemable(voucher) || !voucher.plan.isActive) {
       throw new NotFoundException("That voucher code is not valid");
     }
+    if (options.restricted) this.mustSuitRestricted(voucher);
     return { code: voucher.code, plan: voucher.plan, expiresAt: voucher.expiresAt };
   }
 
   /** Spends a voucher for a customer and provisions what it grants. */
-  async redeem(customerId: string, rawCode: string) {
+  async redeem(customerId: string, rawCode: string, options: { restricted?: boolean } = {}) {
     const code = normalise(rawCode);
     const voucher = await this.prisma.voucher.findUnique({
       where: { code },
-      include: { plan: { select: { isActive: true } } },
+      include: { plan: { select: { isActive: true, relayOnly: true } } },
     });
     if (!voucher || !this.isRedeemable(voucher)) {
       throw new NotFoundException("That voucher code is not valid");
     }
+    // Before anything is counted or written: a refused code stays whole.
+    if (options.restricted) this.mustSuitRestricted(voucher);
 
     const already = await this.prisma.voucherRedemption.findUnique({
       where: { voucherId_customerId: { voucherId: voucher.id, customerId } },
@@ -248,6 +252,24 @@ export class VouchersService {
     });
 
     return { subscription, protocolUsers, protocolUser: protocolUsers[0] ?? null };
+  }
+
+  /** What a restricted caller -- one reaching us through the Iranian
+   * relay, or an account whose address is unconfirmed -- may redeem: a
+   * single-use code for a relay-only plan (docs/relay-last-resort.md, F1).
+   *
+   * An unconfirmed account costs nothing to make, and an operator's code
+   * can be unlimited, so one leaked multi-use Ultimate code would
+   * otherwise be free Ultimate for as many accounts as anyone cares to
+   * make. Single-use codes are what resellers sell, one per buyer. */
+  private mustSuitRestricted(voucher: { maxRedemptions: number | null; plan: { relayOnly: boolean } }) {
+    if (voucher.maxRedemptions === 1 && voucher.plan.relayOnly) return;
+    throw new ForbiddenException({
+      statusCode: 403,
+      code: "VOUCHER_NOT_ALLOWED",
+      message:
+        "Only a single-use Ultimate code can be redeemed through the backup route or before your email is confirmed. This code has not been used.",
+    });
   }
 
   /** Whether a code could be redeemed by somebody right now.

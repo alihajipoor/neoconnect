@@ -5,6 +5,10 @@ import type { NestExpressApplication } from "@nestjs/platform-express";
 import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
 import compression from "compression";
 import { AppModule } from "./app.module";
+import { verifiedClientIpOf } from "./common/client-ip";
+import { parseRelayListen, relayGate, startRelayListener, trustedRelayPeers } from "./common/relay/relay-arrival";
+import { AsnLookupService } from "./modules/network-identity/asn-lookup.service";
+import { RelayAuthService } from "./modules/relay-auth/relay-auth.service";
 
 // Prisma returns BigInt for our byte-counter columns (dataCapBytes,
 // dataUsedBytes, usage deltas); Express's default JSON.stringify throws on
@@ -73,6 +77,25 @@ async function bootstrap() {
   // counts signed-in requests per session instead; see it for what that
   // leaves shared.
   app.set("trust proxy", 1);
+
+  // First, before anything reads a header or a body: which door a request
+  // came in by (docs/relay-last-resort.md, R2). A request on the relay
+  // listener started below is held to the relay allowlist and the region
+  // gate; X-Neoxify-Via and the relay box header are stripped from every
+  // request on both, so nothing a client sends can make it a relay
+  // request. On the normal listener the request is counted, by where its
+  // network is registered, for the relay's auto detector.
+  const asn = app.get(AsnLookupService);
+  const relayAuth = app.get(RelayAuthService);
+  app.use(
+    relayGate({
+      lookup: (ip) => {
+        const info = asn.lookup(ip);
+        return info ? { asn: info.asn, country: asn.regionOf(ip) } : null;
+      },
+      observeNormal: (req) => relayAuth.observe(verifiedClientIpOf(req, req.ip)),
+    }),
+  );
 
   // gzip, because the largest thing this API serves is the game catalogue
   // and a large share of these customers are on censored Iranian networks
@@ -145,6 +168,28 @@ async function bootstrap() {
   const port = process.env.PORT ? Number(process.env.PORT) : 4000;
   await app.listen(port);
   console.log(`Neoxify backend listening on port ${port}`);
+
+  // The second door: the one the origin's relay server block, and nothing
+  // else, proxies to. Off unless RELAY_LISTEN is set. It serves the same
+  // application; relayGate is what limits it. It accepts connections only
+  // from loopback and the container's gateway -- where Docker's port
+  // publishing connects from -- so the panel and the bot, which share the
+  // compose network, cannot dial it (F3).
+  const relayListen = parseRelayListen(process.env.RELAY_LISTEN);
+  if (relayListen) {
+    const trusted = trustedRelayPeers();
+    let lastRefusal = 0;
+    await startRelayListener(app.getHttpAdapter().getInstance(), {
+      ...relayListen,
+      trusted,
+      onRefused: (peer) => {
+        if (Date.now() - lastRefusal < 60_000) return;
+        lastRefusal = Date.now();
+        console.warn(`Relay listener refused a connection from ${peer}, which is not a trusted peer`);
+      },
+    });
+    console.log(`Relay listener on ${relayListen.host}:${relayListen.port}, accepting ${[...trusted].join(", ")}`);
+  }
 }
 
 void bootstrap();

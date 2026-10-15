@@ -4,6 +4,10 @@ export interface AuthenticatedCustomer {
   /** The signed-in device this request came from (a `CustomerSession`
    * id). Absent on access tokens issued before sessions existed. */
   sid?: string;
+  /** Whether the account's address is confirmed, as CustomerJwtAuthGuard
+   * found it for this request. Absent means unknown, and is treated as
+   * not confirmed by everything that reads it. */
+  emailVerified?: boolean;
 }
 
 export interface CustomerAccessTokenPayload {

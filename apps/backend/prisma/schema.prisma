@@ -356,6 +356,28 @@ model Customer {
   createdAt                  DateTime  @default(now())
   updatedAt                  DateTime  @updatedAt
 
+  /// How the account came to exist (docs/relay-last-resort.md): a normal
+  /// sign-up, one through the Iranian relay without email verification,
+  /// or Google/Apple/Facebook. Null for accounts from before this column
+  /// and for accounts an operator created.
+  signupChannel        SignupChannel?
+  /// Set when the account first received a session without a verified
+  /// address -- a relay sign-up, or an unverified account signing in over
+  /// the relay from Iran. Meaningful only while emailVerifiedAt is null:
+  /// such an account can use only the capability set the
+  /// CustomerJwtAuthGuard allows, and is deleted after 30 days idle if it
+  /// never paid.
+  relayUnverifiedSince DateTime?
+  /// SHA-256 of the account's recovery code (16 base32 characters, shown
+  /// once). The only way to reset a password when the mailbox cannot be
+  /// reached. Null when the customer has none.
+  recoveryCodeHash     String?
+  recoveryCodeSetAt    DateTime?
+  /// When this address was last sent a verification or reset code while
+  /// the account was relay-unverified: one such mail per address per day.
+  /// Cleared when the address changes.
+  relayMailAt          DateTime?
+
   // Who invited them, if anyone. Set once at signup from the referral
   // code they typed and never changed afterwards -- a referral is a
   // fact about how an account came to exist, and letting it move later
@@ -377,6 +399,8 @@ model Customer {
   sessions           CustomerSession[]
 
   @@index([referredByCustomerId])
+  // The unverified-account cleanup reads only these.
+  @@index([relayUnverifiedSince])
   // `GET /customers` orders by `createdAt desc` with no filter, so
   // without this the page's `take` bounds the response and not the sort.
   @@index([createdAt(sort: Desc)])
@@ -413,6 +437,10 @@ model CustomerSession {
   label      String?
   /// windows | macos | linux | android | ios, from X-Neoxify-Device-Platform.
   platform   String?
+  /// The route the sign-in that opened this session arrived by: the
+  /// normal API, or the Iranian relay. Never an address. Null for
+  /// sessions from before this column.
+  channel    AccessChannel?
   /// This device's own VPN credentials -- see ProtocolUser.sessionId.
   protocolUsers ProtocolUser[]
 
@@ -1137,6 +1165,10 @@ model ClientAttempt {
   /// by its own health checks, when the report was sent.
   sessionSeconds Int?
 
+  /// "relay" when the report arrived through the Iranian relay. Such a
+  /// row keeps the network (asn) and never the address: `ip` is null.
+  via String?
+
   createdAt DateTime @default(now())
 
   customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
@@ -1787,6 +1819,84 @@ model GamingResolverToken {
 /// The private key is deliberately not here and must never be. This row
 /// is on a rented box; whoever holds that key can redirect every client
 /// the product has, and clients would be right to believe them.
+// ---------------------------------------------------------------------------
+// Relay of last resort: sign-up and sign-in through the Iranian relay
+// (docs/relay-last-resort.md)
+// ---------------------------------------------------------------------------
+
+enum SignupChannel {
+  NORMAL
+  RELAY
+  SOCIAL
+}
+
+enum AccessChannel {
+  NORMAL
+  RELAY
+}
+
+/// OFF: no sign-up or unverified sign-in over the relay. AUTO (default):
+/// allowed at the normal caps; the suspicion detector alerts the owner and
+/// may raise the caps, and changes nothing a customer reads. INTRANET:
+/// declared by the owner -- intranet caps, intranet wording in the apps,
+/// and the account and session sweeps paused.
+enum RelayAuthMode {
+  OFF
+  AUTO
+  INTRANET
+}
+
+/// Singleton, created lazily like FreeTrialSettings.
+model RelayAuthSettings {
+  id                 String        @id @default(uuid())
+  mode               RelayAuthMode @default(AUTO)
+  /// Hosting/IDC networks, which share a small slice of the daily
+  /// sign-up cap between them.
+  hostingAsns        Int[]         @default([])
+  intranetDeclaredAt DateTime?
+  /// When the owner last ended a declared intranet. Sweeps stay paused
+  /// for 30 days after it.
+  intranetEndedAt    DateTime?
+  /// The auto detector's state: when the drop in Iranian traffic was
+  /// first seen, when the owner was alerted, when the caps were raised.
+  suspectedSince     DateTime?
+  suspicionAlertedAt DateTime?
+  capsRaisedAt       DateTime?
+  updatedAt          DateTime      @updatedAt
+
+  @@map("relay_auth_settings")
+}
+
+/// Relay sign-ups and sign-ins per day, per relay box and per network.
+/// Never an address. Read back for the per-network and global caps, so
+/// they survive a restart.
+model RelayDailyStat {
+  day      DateTime @db.Date
+  /// The box's name as the origin's relay server block reports it; ""
+  /// when it reported none.
+  box      String   @default("")
+  /// 0 when the network is unknown.
+  asn      Int      @default(0)
+  signups  Int      @default(0)
+  signIns  Int      @default(0)
+  refusals Int      @default(0)
+
+  @@id([day, box, asn])
+  @@map("relay_daily_stats")
+}
+
+/// Requests on the normal API per ten minutes, split by whether the
+/// caller's network is registered in Iran. The auto detector compares the
+/// last half hour with the same half hour on the previous seven days.
+/// Counts only; kept eight days.
+model RelayTrafficBucket {
+  start DateTime @id
+  ir    Int      @default(0)
+  other Int      @default(0)
+
+  @@map("relay_traffic_buckets")
+}
+
 model EndpointBundleState {
   id String @id @default(uuid())
 

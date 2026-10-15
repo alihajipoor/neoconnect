@@ -1,6 +1,7 @@
 import { Global, Module } from "@nestjs/common";
 import { LoginGuardController } from "./login-guard.controller";
 import { LoginGuardService } from "./login-guard.service";
+import { RelayAuthModule } from "../relay-auth/relay-auth.module";
 
 /**
  * Global because both auth modules need it and a third (the RESELLER
@@ -11,6 +12,7 @@ import { LoginGuardService } from "./login-guard.service";
  */
 @Global()
 @Module({
+  imports: [RelayAuthModule],
   controllers: [LoginGuardController],
   providers: [LoginGuardService],
   exports: [LoginGuardService],

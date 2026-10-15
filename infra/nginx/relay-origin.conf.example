@@ -1,0 +1,110 @@
+# Origin side of the relay of last resort -- the HTTP server block the
+# relay box's traffic ends in (docs/relay-last-resort.md, R2).
+#
+# Sanitized template: no addresses, no key paths that matter. The live copy
+# is on the panel host, next to the stream block that terminates the hop
+# from the box and hands the connection here with a PROXY header. Change the
+# two together, and test with `nginx -t` before reloading.
+#
+# What this block owes the backend:
+#   - Proxy to the backend's RELAY listener (127.0.0.1:4001), never to 4000.
+#     Arriving on 4001 is the backend's only proof that a request came
+#     through the relay; no header is believed.
+#   - X-Forwarded-For set (not appended) to the address from the PROXY
+#     header. The backend trusts exactly one hop, and uses this address in
+#     memory only: it is never logged or stored (I5).
+#   - CF-Connecting-IP, X-Real-IP and X-Neoxify-Via cleared.
+#   - X-Neoxify-Relay-Box: which box this came through, by name.
+#   - The same allowlist as the backend's (apps/backend/src/common/relay/
+#     relay-allowlist.ts) and the client's (relay_http.rs). The backend's is
+#     the authority; this one keeps everything else off the backend at all.
+#   - No access log.
+
+# Which box, by the address the box was dialled on (the PROXY header's
+# destination). Names only in the repo; the addresses live on the host.
+map $proxy_protocol_server_addr $neoxify_relay_box {
+    default "";
+    # <box public IPv4>  ir-a;
+}
+
+# "METHOD URI", query string included, so anything carrying a query is
+# refused here as it is by the backend.
+map "$request_method $request_uri" $neoxify_relay_allowed {
+    default 0;
+    "GET /api/health" 1;
+    "GET /api/endpoints/bundle" 1;
+    "GET /api/relay/status" 1;
+    "POST /api/login-challenge" 1;
+    "POST /api/customer-auth/login" 1;
+    "POST /api/customer-auth/register" 1;
+    "POST /api/customer-auth/relay-register" 1;
+    "POST /api/customer-auth/refresh" 1;
+    "POST /api/customer-auth/logout" 1;
+    "POST /api/customer-auth/social" 1;
+    "POST /api/customer-auth/social/exchange" 1;
+    "POST /api/customer-auth/verify-email-code" 1;
+    "POST /api/customer-auth/resend-verification" 1;
+    "POST /api/customer-auth/forgot-password" 1;
+    "POST /api/customer-auth/reset-password-code" 1;
+    "POST /api/customer-auth/reset-password-recovery" 1;
+    "POST /api/customer-auth/change-password" 1;
+    "POST /api/customer-auth/unverified-email" 1;
+    "POST /api/customer-auth/recovery-code" 1;
+    "GET /api/customer/me" 1;
+    "GET /api/customer/subscriptions" 1;
+    "GET /api/customer/protocol-users" 1;
+    "~^GET /api/customer/subscriptions/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/routes$" 1;
+    "~^POST /api/customer/subscriptions/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/route$" 1;
+    "POST /api/customer/vouchers/preview" 1;
+    "POST /api/customer/vouchers/redeem" 1;
+    "GET /api/customer/plans" 1;
+    "GET /api/customer/billing/providers" 1;
+    "POST /api/customer/subscriptions" 1;
+    "POST /api/customer/billing/payments" 1;
+    "POST /api/client-attempts" 1;
+}
+
+server {
+    # Reached only from the stream block on this host.
+    listen 127.0.0.1:8444 ssl proxy_protocol;
+    http2 on;
+
+    ssl_certificate     /etc/nginx/relay/origin.crt;
+    ssl_certificate_key /etc/nginx/relay/origin.key;
+    ssl_protocols TLSv1.3;
+
+    access_log off;
+    # No realip module here, on purpose: the error log then says
+    # 127.0.0.1, never a customer's address.
+
+    client_max_body_size 16k;
+
+    # Keep the live block's limit_req / limit_conn zones, keyed on
+    # $proxy_protocol_addr.
+
+    location /api/ {
+        if ($neoxify_relay_allowed = 0) {
+            return 404;
+        }
+        proxy_pass http://127.0.0.1:4001/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_set_header X-Forwarded-For $proxy_protocol_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Real-IP "";
+        proxy_set_header CF-Connecting-IP "";
+        proxy_set_header X-Neoxify-Via "";
+        proxy_set_header X-Neoxify-Relay-Box $neoxify_relay_box;
+    }
+
+    location / {
+        return 404;
+    }
+}
+
+# And in every OTHER server block that proxies to the backend, clear the
+# relay headers too (the backend strips them anyway; this keeps them off
+# the wire):
+#     proxy_set_header X-Neoxify-Via "";
+#     proxy_set_header X-Neoxify-Relay-Box "";

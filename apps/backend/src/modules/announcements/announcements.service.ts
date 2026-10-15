@@ -6,6 +6,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { ANNOUNCEMENTS_QUEUE } from "../jobs/jobs.constants";
 import { AnnouncementJobData } from "../jobs/announcements.processor";
 import { SendAnnouncementDto } from "./dto/send-announcement.dto";
+import { MAILABLE_CUSTOMER } from "../relay-auth/relay-policy";
 
 @Injectable()
 export class AnnouncementsService {
@@ -19,7 +20,9 @@ export class AnnouncementsService {
    * worker as a plain string array -- the actual per-recipient sending
    * happens in AnnouncementsProcessor, never in this request handler. */
   async send(dto: SendAnnouncementDto): Promise<{ recipientCount: number }> {
-    const where: Prisma.SubscriptionWhereInput = {};
+    // Never to a relay account whose address is unconfirmed: it gets only
+    // the codes it asks for (docs/relay-last-resort.md, R3.4).
+    const where: Prisma.SubscriptionWhereInput = { customer: MAILABLE_CUSTOMER };
     if (dto.statuses?.length) where.status = { in: dto.statuses };
     if (dto.planIds?.length) where.planId = { in: dto.planIds };
     if (dto.routeIds?.length) where.protocolUsers = { some: { routeId: { in: dto.routeIds } } };

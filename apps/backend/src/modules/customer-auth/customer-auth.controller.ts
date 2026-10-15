@@ -8,19 +8,29 @@ import {
   HttpCode,
   HttpStatus,
   Ip,
+  NotFoundException,
   Param,
   Post,
   Query,
+  Req,
   Res,
   UnauthorizedException,
   UseGuards,
 } from "@nestjs/common";
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import { LoginGuardService } from "../login-guard/login-guard.service";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { CustomerAuthService } from "./customer-auth.service";
-import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
+import { AllowUnverified, CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
+import { relayContextOf } from "../../common/relay/relay-arrival";
+import { callerKey, installIdOf } from "../../common/relay/caller-key";
+import { RelayAuthService } from "../relay-auth/relay-auth.service";
+import { RelayRegisterDto } from "./dto/relay-register.dto";
+import { ResetPasswordRecoveryDto } from "./dto/reset-password-recovery.dto";
+import { RecoveryCodeDto } from "./dto/recovery-code.dto";
+import { SetPasswordDto } from "./dto/set-password.dto";
+import { UnverifiedEmailDto } from "./dto/unverified-email.dto";
 import { CurrentCustomer } from "../../common/decorators/current-customer.decorator";
 import { AuthenticatedCustomer } from "./types";
 import { RegisterCustomerDto } from "./dto/register-customer.dto";
@@ -57,6 +67,7 @@ export class CustomerAuthController {
     private readonly loginGuard: LoginGuardService,
     private readonly socialAuth: SocialAuthService,
     private readonly oauthFlow: OauthFlowService,
+    private readonly relay: RelayAuthService,
   ) {}
 
   // Same brute-force reasoning as admin login. Registration no longer
@@ -66,14 +77,43 @@ export class CustomerAuthController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("register")
   @HttpCode(HttpStatus.OK)
-  register(@Body() dto: RegisterCustomerDto, @Ip() ip: string) {
+  register(@Body() dto: RegisterCustomerDto, @Ip() ip: string, @Req() req: Request) {
     // Challenge enforced, but a failure here is deliberately NOT
     // recorded against the address being registered. Doing so would let
     // anyone raise a real customer's login difficulty just by
     // repeatedly attempting to register their email -- turning a
     // protection into a way to slow down the person it protects.
-    this.loginGuard.enforce("customer", dto.challenge, undefined, ip);
+    this.loginGuard.enforce("customer", dto.challenge, undefined, callerKey(req, ip));
     return this.customerAuthService.register(dto);
+  }
+
+  /** Sign-up through the Iranian relay of last resort, without email
+   * verification (docs/relay-last-resort.md, R3).
+   *
+   * A 404 to anything that did not come in by the relay listener: the
+   * door is the proof, and no header a client sends can open it. From the
+   * relay, in order: the owner's switch and the caller's region (cheap,
+   * before the caller spends anything), the proof of work (always, no
+   * grace, at least 18 bits), the caps, and only then the account. A
+   * place under the caps is given back if the account is not made. */
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("relay-register")
+  @HttpCode(HttpStatus.OK)
+  async relayRegister(@Body() dto: RelayRegisterDto, @Req() req: Request, @Headers() headers: HeaderBag) {
+    const relay = relayContextOf(req);
+    if (!relay) throw new NotFoundException();
+    const installId = installIdOf(headers);
+    await this.relay.assertSignupOpen(relay);
+    this.loginGuard.enforceMinimum(dto.challenge, this.relay.signupPowBits(relay, installId));
+    const reservation = await this.relay.reserveSignup(relay, installId);
+    try {
+      const result = await this.customerAuthService.relayRegister(dto, deviceInfoFrom(headers));
+      await reservation.commit();
+      return result;
+    } catch (err) {
+      reservation.release();
+      throw err;
+    }
   }
 
   /** Sign in with Google, Apple or Facebook.
@@ -91,12 +131,22 @@ export class CustomerAuthController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post("social")
   @HttpCode(HttpStatus.OK)
-  async social(@Body() dto: SocialLoginDto, @Headers() headers: HeaderBag) {
+  async social(@Body() dto: SocialLoginDto, @Headers() headers: HeaderBag, @Req() req: Request) {
     const provider = dto.provider.toUpperCase() as "GOOGLE" | "APPLE" | "FACEBOOK";
     const identity = await this.socialAuth.verify(provider, dto.token);
     const { customer, created } = await this.socialAuth.resolveCustomer(provider, identity, dto.locale ?? "en");
     if (created) await this.customerAuthService.onSocialSignup(customer.id);
-    return this.customerAuthService.issueTokenPair(customer, undefined, deviceInfoFrom(headers));
+    // Over the relay, verified by the provider and on normal terms; only
+    // the session records the way in (R4.4).
+    const relay = relayContextOf(req);
+    const tokens = await this.customerAuthService.issueTokenPair(
+      customer,
+      undefined,
+      deviceInfoFrom(headers),
+      relay ? { channel: "RELAY" } : undefined,
+    );
+    if (relay) await this.relay.recordSignIn(relay);
+    return tokens;
   }
 
   private browserProvider(raw: string): BrowserProvider {
@@ -225,16 +275,29 @@ export class CustomerAuthController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("login")
   @HttpCode(HttpStatus.OK)
-  async login(@Body() dto: LoginDto, @Ip() ip: string, @Headers() headers: HeaderBag) {
-    this.loginGuard.enforce("customer", dto.challenge, dto.email, ip);
+  async login(@Body() dto: LoginDto, @Ip() ip: string, @Headers() headers: HeaderBag, @Req() req: Request) {
+    // Over the relay, counted per caller by a keyed hash rather than the
+    // address, which must not reach the guard's log line (I5).
+    const key = callerKey(req, ip);
+    this.loginGuard.enforce("customer", dto.challenge, dto.email, key);
+    const relay = relayContextOf(req);
     try {
       // The device's own name for itself (X-Neoxify-Device-Label/-Platform),
       // shown to the customer's other devices by device slots.
-      const result = await this.customerAuthService.login(dto.email, dto.password, deviceInfoFrom(headers));
+      const result = await this.customerAuthService.login(
+        dto.email,
+        dto.password,
+        deviceInfoFrom(headers),
+        // Over the relay, an unverified account may be let in from Iran
+        // on the relay sign-up's terms (R4.2). Over the normal routes it
+        // is asked to verify, as always (I1).
+        relay ? { channel: "RELAY", allowUnverified: () => this.relay.admitUnverifiedSignIn(relay) } : {},
+      );
       this.loginGuard.recordSuccess("customer", dto.email);
+      if (relay && "accessToken" in result) await this.relay.recordSignIn(relay);
       return result;
     } catch (err) {
-      this.loginGuard.recordFailure("customer", dto.email, ip);
+      this.loginGuard.recordFailure("customer", dto.email, key);
       throw err;
     }
   }
@@ -254,6 +317,7 @@ export class CustomerAuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiBearerAuth()
   @UseGuards(CustomerJwtAuthGuard)
+  @AllowUnverified()
   async logout(@CurrentCustomer() customer: AuthenticatedCustomer) {
     // This device only. It used to revoke every session the customer
     // had, so signing out on one device signed out all of them -- and,
@@ -272,8 +336,46 @@ export class CustomerAuthController {
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
   @UseGuards(CustomerJwtAuthGuard)
+  @AllowUnverified()
   changePassword(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: ChangePasswordDto) {
     return this.customerAuthService.changePassword(customer.sub, dto, customer.sid);
+  }
+
+  /** Creates or replaces the customer's recovery code, returned once
+   * (docs/relay-last-resort.md, R4.3). Any account may have one; the app
+   * suggests it to customers in Iran, for whom it is the only way back
+   * in when mail abroad is cut off. */
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("recovery-code")
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @UseGuards(CustomerJwtAuthGuard)
+  @AllowUnverified()
+  createRecoveryCode(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: RecoveryCodeDto) {
+    return this.customerAuthService.createRecoveryCode(customer.sub, customer.sid, dto.currentPassword);
+  }
+
+  /** A password for an account that signs in with Google, Apple or
+   * Facebook, none of which can be reached during an intranet. */
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("set-password")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiBearerAuth()
+  @UseGuards(CustomerJwtAuthGuard)
+  async setPassword(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: SetPasswordDto) {
+    await this.customerAuthService.setPassword(customer.sub, customer.sid, dto.newPassword);
+  }
+
+  /** Corrects an unconfirmed address. Returns fresh tokens, since the
+   * old ones carry the old address. */
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("unverified-email")
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @UseGuards(CustomerJwtAuthGuard)
+  @AllowUnverified()
+  changeUnverifiedEmail(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: UnverifiedEmailDto) {
+    return this.customerAuthService.changeUnverifiedEmail(customer.sub, customer.sid, dto);
   }
 
   // No guard -- the token itself is the credential (mirrors admin MFA's
@@ -382,5 +484,16 @@ export class CustomerAuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async resetPasswordByCode(@Body() dto: ResetPasswordCodeDto) {
     await this.customerAuthService.resetPasswordByCode(dto.email, dto.code, dto.newPassword);
+  }
+
+  /** Reset by recovery code, for when the mailbox cannot be reached
+   * (docs/relay-last-resort.md, R4.3). Returns the new recovery code,
+   * which replaces the one just used and is shown once. Throttled like
+   * the emailed code, and shares its per-account guess budget. */
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("reset-password-recovery")
+  @HttpCode(HttpStatus.OK)
+  resetPasswordByRecoveryCode(@Body() dto: ResetPasswordRecoveryDto) {
+    return this.customerAuthService.resetPasswordByRecoveryCode(dto.email, dto.recoveryCode, dto.newPassword);
   }
 }
