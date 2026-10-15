@@ -17,6 +17,9 @@ const CODED: Readonly<Record<string, TranslationKey>> = {
   // with none (R1.5, F13).
   RELAY_DISCONNECT: "relay.disconnect",
   RELAY_REGION: "relay.region",
+  // A sign-up on a network the backend's table cannot place: not known to
+  // be outside Iran, so not told it is.
+  RELAY_REGION_UNKNOWN: "relay.regionUnknown",
   RELAY_SIGNUP_OFF: "relay.signupOff",
   RELAY_SIGNUP_LIMIT: "relay.signupLimit",
   RELAY_UNAVAILABLE: "relay.unavailable",

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { LastResortEntry } from "./endpoint-bundle";
 import { lastResortEntries } from "./endpoint-bundle-store";
 import { ladderPass } from "./ladder-pass";
-import { networkKeyFromAsn, stampedCountry } from "./network-identity";
+import { latestStampedCountry, networkKeyFromAsn, stampedCountry } from "./network-identity";
 import { relayAllows } from "./relay-calls";
 
 /** The relay of last resort: when every ordinary route to the API has
@@ -28,9 +28,9 @@ import { relayAllows } from "./relay-calls";
  *  3. The relay is not switched off for this network after the backend
  *     said the caller is not in Iran (R1.7: 24 hours).
  *  4. Evidence the device is in Iran (R1.3): the server's own country
- *     stamp for this network, or on a network never stamped, the time
- *     zone or the region. A cost and honesty gate, not security -- the
- *     backend checks the region itself.
+ *     stamp for this network, or the latest on any network, and on an
+ *     install never stamped, the time zone or the region. A cost and
+ *     honesty gate, not security -- the backend checks the region itself.
  *  5. Consent, once per install, before any byte is sent (R1.4). A
  *     decline is remembered. Only a foreground request -- one the
  *     customer just asked for -- may ask; a background one never does.
@@ -235,6 +235,18 @@ let tunnelReader: TunnelReader | null = null;
  * has no relay at all (`relaySupported`). */
 export function setRelayTunnelReader(reader: TunnelReader | null): void {
   tunnelReader = reader;
+  watchPassEnds(reader !== null);
+}
+
+/** The unsubscribe from `ladderPass.onEnd`, while there is a tunnel to
+ * read. Each connect pass that ends looks for the tunnel it may have left
+ * up (`checkTunnelForRelayMode`): on the phone nothing else tells this
+ * file a connect landed. */
+let offPassEnd: (() => void) | null = null;
+
+function watchPassEnds(on: boolean): void {
+  offPassEnd?.();
+  offPassEnd = on ? ladderPass.onEnd(() => void checkTunnelForRelayMode()) : null;
 }
 
 /** Whether this build can use the relay of last resort at all: a Tauri
@@ -320,14 +332,20 @@ function networkKey(): string {
 }
 
 /** Whether there is evidence this device is in Iran: the server's last
- * country stamp for this network (network-identity.ts) when there is
- * one -- which overrules the device's own settings either way -- and on a
- * network never stamped, the time zone or the region the device is set
- * to. */
+ * country stamp for this network (network-identity.ts) when there is one;
+ * when this network is not known or never stamped, the latest stamp on any
+ * network; and only on an install with no stamp anywhere -- a fresh one --
+ * the time zone or the region the device is set to (R1.3).
+ *
+ * A stamp overrules the device's settings either way. The network goes
+ * unknown a day after the last baseline, and with every route blocked
+ * there is none, so for a blackout's whole length: falling back to the
+ * settings there would send a Persian-language phone abroad, offline or
+ * behind a captive portal, to the box in Iran. */
 export function iranEvidence(): boolean {
   let stamped: string | null = null;
   try {
-    stamped = stampedCountry(networkKeyFromAsn(clock()));
+    stamped = stampedCountry(networkKeyFromAsn(clock())) ?? latestStampedCountry();
   } catch {
     stamped = null;
   }
@@ -380,7 +398,8 @@ export function onRelayChange(listener: () => void): () => void {
  * ended it. */
 export function relayModeActive(): boolean {
   // A connect under way is a tunnel connect, which ends relay mode; it is
-  // ended for good when the relay is next asked (`send`).
+  // ended for good once the tunnel is found up (`checkTunnelForRelayMode`,
+  // as the pass ends) or the relay is next asked (`send`).
   if (ladderPass.inFlight()) return false;
   const until = load().mode[networkKey()];
   return typeof until === "number" && until > clock();
@@ -397,6 +416,28 @@ export function endRelayMode(): void {
   if (had) {
     save();
     notify();
+  }
+}
+
+/** How often the backup-route chip, while it shows, looks for a tunnel
+ * (`checkTunnelForRelayMode`). */
+export const TUNNEL_WATCH_MS = 5_000;
+
+/** Ends relay mode if a tunnel is up, or being brought up, now (R1.7).
+ *
+ * For the tunnels nothing else here hears of. The Windows dashboard tells
+ * the endpoint order the server it dials (`setTunnelServer`), which ends
+ * relay mode; the phone has no such call, and on either a tunnel can be up
+ * with no pass in this app at all -- a quick-settings tile, always-on VPN,
+ * one kept up across a restart. Asked as each connect pass ends, and by
+ * the chip while it shows. A tunnel that cannot be read leaves relay mode
+ * as it was. Never throws. */
+export async function checkTunnelForRelayMode(): Promise<void> {
+  try {
+    if (Object.keys(load().mode).length === 0) return;
+    if ((await tunnelState()) === "up") endRelayMode();
+  } catch {
+    // Looked at again at the next pass's end, or the chip's next look.
   }
 }
 
@@ -532,6 +573,10 @@ function isBackendJson(answer: RelayAnswer): boolean {
   return answer.contentType.toLowerCase().includes("application/json");
 }
 
+/** Whether the backend placed this network outside Iran. Only
+ * RELAY_REGION says so: RELAY_REGION_UNKNOWN is a sign-up refused on a
+ * network the backend's table cannot place -- one it still lets sign in,
+ * refresh and redeem -- and switches nothing off. */
 function refusedForRegion(answer: RelayAnswer): boolean {
   if (answer.status !== 403 || !isBackendJson(answer)) return false;
   try {
@@ -682,6 +727,7 @@ export function resetLastResortForTests(options: {
   transport = options.transport ?? ((args) => invoke<RelayAnswer>("relay_request", args));
   environment = options.environment ? () => options.environment! : defaultEnvironment;
   tunnelReader = options.tunnelUp === undefined ? null : options.tunnelUp;
+  watchPassEnds(tunnelReader !== null);
   try {
     storage()?.removeItem(STATE_KEY);
     storage()?.removeItem(CONSENT_KEY);

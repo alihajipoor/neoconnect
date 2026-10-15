@@ -140,6 +140,23 @@ export function stampedCountry(key: string | null): string | null {
   return typeof stamp?.country === "string" ? stamp.country : null;
 }
 
+/** The country of the latest stamp on any network, or null when nothing
+ * was ever stamped on this install.
+ *
+ * For when this network cannot be named: `networkKeyFromAsn` forgets the
+ * network a day after the last baseline, and with every route blocked no
+ * baseline comes -- so it is unknown for as long as a blackout lasts. Where
+ * the server last placed the device is still the best word there is on
+ * where it is. */
+export function latestStampedCountry(): string | null {
+  let latest: { country: string; at: number } | null = null;
+  for (const stamp of Object.values(readStamps())) {
+    if (typeof stamp?.country !== "string" || typeof stamp.at !== "number") continue;
+    if (latest === null || stamp.at > latest.at) latest = stamp;
+  }
+  return latest?.country ?? null;
+}
+
 /** The network as last read, if that was recent enough to still be
  * believed. */
 export function currentNetwork(now = Date.now()): NetworkReading | null {

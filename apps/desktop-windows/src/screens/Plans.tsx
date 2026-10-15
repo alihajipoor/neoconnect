@@ -73,12 +73,19 @@ export function Plans({
   const { active: viaRelay, status: relayStatus } = useRelayMode();
   const [plans, setPlans] = useState<SubscriptionPlan[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The backend keeps the plan list from an account whose address is not
+  // confirmed -- a relay sign-up's (R3.3) -- with 403 VERIFY_EMAIL. Not a
+  // fault: such an account takes an Ultimate voucher, above, and nothing
+  // else until it confirms. So the calm reminder, never the red error
+  // banner, and no plan list left loading for ever.
+  const [limited, setLimited] = useState(false);
   const [stage, setStage] = useState<Stage>({ name: "choosing" });
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     void getPlans().then((result) => {
       if (result.ok) setPlans(result.data);
+      else if (result.code === "VERIFY_EMAIL") setLimited(true);
       else setError(failureText(result, t));
     });
   }, []);
@@ -235,6 +242,13 @@ export function Plans({
         </p>
       ) : null}
 
+      {/* Said once: a sign-up's notice above already says it. */}
+      {limited && !notice ? (
+        <p className="rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs text-muted-foreground" data-plans-limited>
+          {t("verify.reminder")}
+        </p>
+      ) : null}
+
       {viaRelay ? (
         <div className="flex flex-col gap-1 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs text-muted-foreground" data-relay-checkout>
           <p>{t("relay.checkoutUnavailable")}</p>
@@ -260,7 +274,7 @@ export function Plans({
           follows the window rather than being fixed, so this still reads
           correctly at the minimum size. */}
       <div className="grid flex-1 content-start gap-3 overflow-y-auto [grid-template-columns:repeat(auto-fit,minmax(260px,1fr))]">
-        {plans === null ? (
+        {limited ? null : plans === null ? (
           <div>
             <p className="text-sm text-muted-foreground">{t("plans.loading")}</p>
             <StillTrying waiting={error === null} className="mt-2 text-left" />

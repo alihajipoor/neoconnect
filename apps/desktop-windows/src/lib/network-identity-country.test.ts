@@ -10,7 +10,9 @@ vi.stubGlobal("localStorage", {
   removeItem: (k: string) => void store.delete(k),
 });
 
-const { networkKeyFromAsn, rememberNetwork, resetNetworkForTests, stampedCountry } = await import("./network-identity");
+const { latestStampedCountry, networkKeyFromAsn, rememberNetwork, resetNetworkForTests, stampedCountry } = await import(
+  "./network-identity"
+);
 
 beforeEach(() => {
   store.clear();
@@ -40,5 +42,19 @@ describe("the country stamp", () => {
     expect(stampedCountry("asn:44244")).toBeNull();
     rememberNetwork({ ip: "192.0.2.1", country: "IR" }, 1_000);
     expect(stampedCountry("unknown")).toBeNull();
+  });
+
+  it("names the latest stamp of any network, for a device that cannot say which network it is on", () => {
+    // Every route blocked means no fresh baseline, and a day later no
+    // network key: the last place the server saw the device is still the
+    // best word on where it is.
+    expect(latestStampedCountry()).toBeNull();
+    rememberNetwork({ ip: "192.0.2.1", asn: 58224, country: "IR" }, 1_000);
+    rememberNetwork({ ip: "192.0.2.2", asn: 3320, country: "DE" }, 2_000);
+    expect(latestStampedCountry()).toBe("DE");
+    expect(networkKeyFromAsn(2_000 + 24 * 3_600_000)).toBeNull();
+    expect(latestStampedCountry()).toBe("DE");
+    rememberNetwork({ ip: "192.0.2.1", asn: 58224, country: "IR" }, 3_000);
+    expect(latestStampedCountry()).toBe("IR");
   });
 });

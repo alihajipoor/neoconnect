@@ -14,6 +14,8 @@ const stamps: Record<string, string> = {};
 vi.mock("./network-identity", () => ({
   networkKeyFromAsn: () => carrier,
   stampedCountry: (key: string | null) => (key === null ? null : (stamps[key] ?? null)),
+  // The one stamped last: in this fake, the last one added.
+  latestStampedCountry: () => Object.values(stamps).slice(-1)[0] ?? null,
 }));
 
 const store = new Map<string, string>();
@@ -237,8 +239,35 @@ describe("Iran evidence (R1.3)", () => {
     expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "not-iran" });
   });
 
-  it("is the time zone or the region on a network never stamped", () => {
+  it("is the latest stamp of any network when this one cannot be named", async () => {
+    // A day without a baseline -- every hour of a blackout -- leaves no
+    // network key. Where the server last placed the device stands over
+    // its settings: a Persian-language phone abroad is abroad.
+    reset({ tehran: true });
+    carrier = null;
     delete stamps["asn:58224"];
+    stamps["asn:3320"] = "DE";
+    expect(lr.iranEvidence()).toBe(false);
+    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "not-iran" });
+    expect(sent).toEqual([]);
+    stamps["asn:58224"] = "IR";
+    expect(lr.iranEvidence()).toBe(true);
+  });
+
+  it("is the latest stamp of any network on a network the server answered without placing", () => {
+    reset({ tehran: true });
+    carrier = "asn:44244";
+    delete stamps["asn:58224"];
+    stamps["asn:3320"] = "DE";
+    expect(lr.iranEvidence()).toBe(false);
+  });
+
+  it("is the time zone or the region only on an install never stamped anywhere", () => {
+    delete stamps["asn:58224"];
+    carrier = null;
+    lr.resetLastResortForTests({ environment: { timeZone: "Asia/Tehran", languages: ["en-US"] } });
+    expect(lr.iranEvidence()).toBe(true);
+    carrier = "asn:58224";
     lr.resetLastResortForTests({ environment: { timeZone: "Asia/Tehran", languages: ["en-US"] } });
     expect(lr.iranEvidence()).toBe(true);
     lr.resetLastResortForTests({ environment: { timeZone: "Europe/London", languages: ["fa-IR"] } });
@@ -406,6 +435,43 @@ describe("relay mode (R1.7)", () => {
     expect(lr.relayModeActive()).toBe(false);
   });
 
+  it("ends when a connect pass ends with a tunnel up -- the phone's, which tells nothing else", async () => {
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "foreground");
+    let told = 0;
+    lr.onRelayChange(() => {
+      told += 1;
+    });
+    ladderPass.running.current = true;
+    ladderPass.startedAt.current = Date.now();
+    tunnelUp = true;
+    ladderPass.running.current = false;
+    ladderPass.ended();
+    await vi.waitFor(() => expect(lr.relayModeActive()).toBe(false));
+    expect(told).toBe(1);
+  });
+
+  it("goes on after a connect pass that left no tunnel up", async () => {
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "foreground");
+    ladderPass.ended();
+    await lr.checkTunnelForRelayMode();
+    expect(lr.relayModeActive()).toBe(true);
+  });
+
+  it("ends when a tunnel is found up that no pass in this app brought up", async () => {
+    // A phone's quick-settings tile or always-on VPN, or a tunnel the
+    // service kept up across a restart of the app.
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "foreground");
+    tunnelUp = null;
+    await lr.checkTunnelForRelayMode();
+    expect(lr.relayModeActive()).toBe(true);
+    tunnelUp = true;
+    await lr.checkTunnelForRelayMode();
+    expect(lr.relayModeActive()).toBe(false);
+  });
+
   it("is turned off for a day on this network by a RELAY_REGION refusal", async () => {
     replies = [json(200, {}), json(403, { code: "RELAY_REGION", message: "..." })];
     await lr.relayRequest(ME, "foreground");
@@ -422,6 +488,19 @@ describe("relay mode (R1.7)", () => {
     now += 24 * 3_600_000 + 1;
     replies = [json(200, {})];
     expect((await lr.relayRequest(ME, "foreground")).kind).toBe("answered");
+  });
+
+  it("stays on after a sign-up the backend refused because it could not place the network", async () => {
+    // An ASN missing from its table, or the table not loaded: sign-up
+    // needs Iran, sign-in, refresh and vouchers do not -- so the refusal
+    // is the sign-up's alone, and switches nothing off.
+    const REGISTER = { method: "POST" as const, path: "/customer-auth/relay-register", body: "{}" };
+    replies = [json(200, {}), json(403, { code: "RELAY_REGION_UNKNOWN", message: "..." })];
+    await lr.relayRequest(ME, "foreground");
+    expect((await lr.relayRequest(REGISTER, "foreground")).kind).toBe("answered");
+    expect(lr.relayModeActive()).toBe(true);
+    replies = [json(200, {})];
+    expect((await lr.relayRequest(LOGIN, "foreground")).kind).toBe("answered");
   });
 });
 

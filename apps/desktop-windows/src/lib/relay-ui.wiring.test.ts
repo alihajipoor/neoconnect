@@ -111,6 +111,17 @@ describe("the calm-UI rules", () => {
     expect(chip).toMatch(/if \(!active\) return null;/);
   });
 
+  it("look for a tunnel while the chip shows, so a tunnel up on either app ends relay mode", () => {
+    // The phone tells the endpoint order nothing about its tunnel, and a
+    // tunnel can come up with no pass in the app at all (a quick-settings
+    // tile, always-on VPN, one kept up across a restart): the chip would
+    // otherwise claim the backup route over a tunnel until the TTL ran out.
+    const chip = component(backupRoute, "BackupRouteChip");
+    expect(chip).toMatch(/if \(!active\) return;\s*void checkTunnelForRelayMode\(\);/);
+    expect(chip).toMatch(/setInterval\(\(\) => void checkTunnelForRelayMode\(\), TUNNEL_WATCH_MS\)/);
+    expect(chip).toMatch(/return \(\) => clearInterval\(watch\);/);
+  });
+
   it("ask consent with two plain answers, and no way to dismiss it as a decline", () => {
     const prompt = component(backupRoute, "BackupRouteConsent");
     expect(prompt).toMatch(/answer\(true\)/);
@@ -134,6 +145,19 @@ describe("the reset and sign-up screens", () => {
     expect(register).toMatch(/relayRegister\(email\.trim\(\), emailAgain\.trim\(\), password\)/);
     expect(register).toMatch(/t\("relay\.signupNote"\)/);
     expect(register).toMatch(/<RecoveryCodeNotice code=\{recoveryCode\}/);
+  });
+
+  it("meet plans an unconfirmed account may not list with the calm reminder, not a red error or an endless load", () => {
+    // A relay sign-up lands on Plans, and the backend's guard refuses the
+    // plan list to an unconfirmed account (403 VERIFY_EMAIL, R3.3).
+    const plans = read("../screens/Plans.tsx");
+    expect(plans).toMatch(/else if \(result\.code === "VERIFY_EMAIL"\) setLimited\(true\);\s*else setError\(failureText\(result, t\)\);/);
+    expect(plans).toMatch(/\{limited \? null : plans === null \?/);
+    const note = /<p\b[^>]*data-plans-limited[^>]*>\s*\{t\("verify\.reminder"\)\}/.exec(plans);
+    expect(note).not.toBeNull();
+    expect(note![0]).not.toMatch(/\b(?:text|bg|border)-(?:warning|destructive|amber|yellow|orange|red)/);
+    // Said once: the sign-up's own notice already says it.
+    expect(plans).toMatch(/\{limited && !notice \? \(/);
   });
 
   it("hold card and crypto checkout through the relay, and say why", () => {

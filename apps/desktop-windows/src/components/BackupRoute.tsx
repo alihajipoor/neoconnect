@@ -2,11 +2,13 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Check, Copy, KeyRound, Route } from "lucide-react";
 import {
+  checkTunnelForRelayMode,
   onRelayChange,
   onRelayConsentAsked,
   refreshRelayStatus,
   relayModeActive,
   relayStatus,
+  TUNNEL_WATCH_MS,
   type RelayStatus,
 } from "../lib/last-resort";
 import { useI18n } from "../lib/i18n";
@@ -124,6 +126,17 @@ export function BackupRouteChip() {
   // "blocked" wording.
   useEffect(() => {
     if (active && relayStatus() === null) void refreshRelayStatus();
+  }, [active]);
+
+  // Not a word about the backup route over a tunnel (R1.7). A tunnel ends
+  // relay mode, and on the phone -- or for one brought up outside the app
+  // -- only a look at the tunnel finds it: once as the chip appears, then
+  // every few seconds while it shows.
+  useEffect(() => {
+    if (!active) return;
+    void checkTunnelForRelayMode();
+    const watch = setInterval(() => void checkTunnelForRelayMode(), TUNNEL_WATCH_MS);
+    return () => clearInterval(watch);
   }, [active]);
 
   if (!active) return null;
