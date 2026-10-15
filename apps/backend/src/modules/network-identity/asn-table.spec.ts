@@ -57,6 +57,36 @@ describe("AsnTable", () => {
   });
 });
 
+/** The country column, kept for the relay's region gate
+ * (docs/relay-last-resort.md R2.4). It is where the network is
+ * registered, not where the caller is -- a cost gate, not security. */
+describe("AsnTable.countryOf", () => {
+  const table = AsnTable.fromLines(ROWS);
+
+  it("answers the registered country of the range an address is in", () => {
+    expect(table.countryOf("192.0.2.1")).toBe("IR");
+    expect(table.countryOf("203.0.113.9")).toBe("DE");
+    expect(table.countryOf("2001:db8:1234::1")).toBe("IR");
+    expect(table.countryOf("::ffff:192.0.2.1")).toBe("IR");
+  });
+
+  it("answers null where the network is unknown", () => {
+    expect(table.countryOf("192.0.2.200")).toBeNull();
+    expect(table.countryOf("198.51.100.1")).toBeNull();
+    expect(table.countryOf("not-an-ip")).toBeNull();
+  });
+
+  it("answers null for a range whose country is not a two-letter code", () => {
+    const odd = AsnTable.fromLines([
+      "198.51.100.0\t198.51.100.127\t64510\tNone\tEXAMPLE-ODD",
+      "198.51.100.128\t198.51.100.255\t64511\tir\tEXAMPLE-LOWER",
+    ]);
+    expect(odd.lookup("198.51.100.1")?.asn).toBe(64510);
+    expect(odd.countryOf("198.51.100.1")).toBeNull();
+    expect(odd.countryOf("198.51.100.200")).toBe("IR");
+  });
+});
+
 describe("address parsing", () => {
   it("reads a dotted quad as an unsigned 32-bit value", () => {
     expect(ipv4ToInt("255.255.255.255")).toBe(0xffffffff);
