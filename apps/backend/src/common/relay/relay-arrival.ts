@@ -31,6 +31,11 @@ import { relayAllows, relayNeedsIran } from "./relay-allowlist";
 export const VIA_HEADER = "x-neoxify-via";
 export const BOX_HEADER = "x-neoxify-relay-box";
 
+/** The refusal of a relay sign-up from a network that cannot be placed
+ * (`RELAY_REGION_UNKNOWN`): not known to be outside Iran, so not told so. */
+export const RELAY_REGION_UNKNOWN_MESSAGE =
+  "This connection could not be confirmed as coming from inside Iran, so signing up through the backup route is not available on it right now.";
+
 /** What the backend knows about a relay request, for the request's life. */
 export interface RelayContext {
   /** The box it came through, as the origin's relay block names it, or
@@ -123,13 +128,21 @@ export function relayGate(deps: RelayGateDeps): RequestHandler {
     const ip = req.ip ?? null;
     const found = ip ? deps.lookup(ip) : null;
     const region = found?.country ?? null;
-    const iranOnly = relayNeedsIran(req.method, req.url);
-    if (iranOnly ? region !== "IR" : region !== null && region !== "IR") {
+    if (region !== null && region !== "IR") {
       refuse(res, 403, {
         statusCode: 403,
         code: "RELAY_REGION",
         message: "The backup route is only for connections from inside Iran.",
       });
+      return;
+    }
+    // A network the table cannot place -- an ASN it lacks, or a table not
+    // loaded -- may sign in, refresh and redeem, and not sign up. Said with
+    // its own code: the app switches the relay off for a day on
+    // RELAY_REGION, which here would lock a caller from Iran out of the
+    // sign-in this very route still allows.
+    if (region === null && relayNeedsIran(req.method, req.url)) {
+      refuse(res, 403, { statusCode: 403, code: "RELAY_REGION_UNKNOWN", message: RELAY_REGION_UNKNOWN_MESSAGE });
       return;
     }
 
