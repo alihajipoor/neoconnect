@@ -20,6 +20,11 @@
 #     the authority; this one keeps everything else off the backend at all.
 #   - No access log.
 
+# The allowlist's longest "METHOD URI" keys do not fit the default map
+# bucket: without this `nginx -t` fails with "could not build map_hash"
+# (seen on the panel host, 2026-10-15). Once per http context.
+map_hash_bucket_size 128;
+
 # Which box, by the address the box was dialled on (the PROXY header's
 # destination). Names only in the repo; the addresses live on the host.
 map $proxy_protocol_server_addr $neoxify_relay_box {
