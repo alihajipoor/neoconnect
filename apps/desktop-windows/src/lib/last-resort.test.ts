@@ -490,6 +490,20 @@ describe("relay mode (R1.7)", () => {
     expect((await lr.relayRequest(ME, "foreground")).kind).toBe("answered");
   });
 
+  it("does not dial a call queued behind the RELAY_REGION refusal", async () => {
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "foreground");
+    sent.length = 0;
+    replies = [json(403, { code: "RELAY_REGION", message: "..." }), json(200, {})];
+    const [first, second] = await Promise.all([
+      lr.relayRequest(LOGIN, "foreground"),
+      lr.relayRequest(ME, "foreground"),
+    ]);
+    expect(first.kind).toBe("answered");
+    expect(second).toEqual({ kind: "skipped", reason: "off" });
+    expect(sent).toHaveLength(1);
+  });
+
   it("stays on after a sign-up the backend refused because it could not place the network", async () => {
     // An ASN missing from its table, or the table not loaded: sign-up
     // needs Iran, sign-in, refresh and vouchers do not -- so the refusal

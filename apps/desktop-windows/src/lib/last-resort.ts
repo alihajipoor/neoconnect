@@ -598,6 +598,10 @@ function noteFailure(): void {
 }
 
 async function send(call: RelayCall, entries: LastResortEntry[], key: string): Promise<RelayOutcome> {
+  // Checked again at its turn: a call queued behind one the backend
+  // refused for its region passed `relayRequest`'s check before that
+  // answer came, and would otherwise still dial.
+  if (relayOff(key)) return { kind: "skipped", reason: "off" };
   const started = clock();
   const deadline = started + RELAY_CALL_MS;
   for (const box of boxOrder(entries)) {
