@@ -361,6 +361,11 @@ export function iranEvidence(): boolean {
 let failures = 0;
 let lastNormalProbe = 0;
 let lastGoodBox: string | null = null;
+/** Answers on the ordinary routes so far (`noteNormalRouteAnswered`). A
+ * relay call made before one does not start or extend relay mode with
+ * its own answer: the ordinary routes were found working while it
+ * waited its turn, or was on its way. */
+let normalAnswers = 0;
 
 export interface RelayStatus {
   /** Whether sign-up through the relay is open. */
@@ -444,6 +449,7 @@ export async function checkTunnelForRelayMode(): Promise<void> {
 /** Called by api.ts whenever the backend answers on an ordinary route:
  * whatever relay mode held, the usual way works again. */
 export function noteNormalRouteAnswered(): void {
+  normalAnswers += 1;
   if (Object.keys(load().mode).length > 0) endRelayMode();
 }
 
@@ -597,7 +603,7 @@ function noteFailure(): void {
   if (failures >= FAILURES_TO_END) endRelayMode();
 }
 
-async function send(call: RelayCall, entries: LastResortEntry[], key: string): Promise<RelayOutcome> {
+async function send(call: RelayCall, entries: LastResortEntry[], key: string, since: number): Promise<RelayOutcome> {
   // Checked again at its turn: a call queued behind one the backend
   // refused for its region passed `relayRequest`'s check before that
   // answer came, and would otherwise still dial.
@@ -605,6 +611,10 @@ async function send(call: RelayCall, entries: LastResortEntry[], key: string): P
   const started = clock();
   const deadline = started + RELAY_CALL_MS;
   for (const box of boxOrder(entries)) {
+    // And the customer's word, before each box: the switch in Settings
+    // turned off while this call waited, or was on its first box.
+    const consent = relayConsent();
+    if (consent !== "granted") return { kind: "skipped", reason: consent ?? "unasked" };
     // Checked at send time, before each box: a connect started while the
     // previous one was being asked closes the gate for the next.
     const tunnel = await tunnelState();
@@ -656,7 +666,10 @@ async function send(call: RelayCall, entries: LastResortEntry[], key: string): P
       held.off[key] = clock() + RELAY_REGION_OFF_MS;
       delete held.mode[key];
       status = null;
-    } else {
+    } else if (normalAnswers === since && relayConsent() === "granted") {
+      // Not after the ordinary routes answered, or the switch was turned
+      // off, while this call was out: either ended relay mode, and an
+      // answer to a call made before must not start it again.
       if (!(typeof held.mode[key] === "number" && held.mode[key] > clock())) lastNormalProbe = clock();
       held.mode[key] = clock() + RELAY_MODE_MS;
     }
@@ -671,6 +684,7 @@ async function send(call: RelayCall, entries: LastResortEntry[], key: string): P
 /** Sends `call` through the relay, if every condition holds; see the top of
  * this file for them, in order. Never throws. */
 export async function relayRequest(call: RelayCall, use: RelayUse): Promise<RelayOutcome> {
+  const since = normalAnswers;
   try {
     if (!relayAllows(call.method, call.path)) return { kind: "skipped", reason: "path" };
     if (!relaySupported()) return { kind: "skipped", reason: "none" };
@@ -686,7 +700,7 @@ export async function relayRequest(call: RelayCall, use: RelayUse): Promise<Rela
     }
     const consent = await consentFor(use);
     if (consent !== "granted") return { kind: "skipped", reason: consent };
-    return await serially(() => send(call, entries, key));
+    return await serially(() => send(call, entries, key, since));
   } catch {
     // Nothing above dials anything, and `send` answers for its own
     // failures: whatever threw, the relay was not asked.
@@ -722,6 +736,7 @@ export function resetLastResortForTests(options: {
   failures = 0;
   lastNormalProbe = 0;
   lastGoodBox = null;
+  normalAnswers = 0;
   status = null;
   asker = null;
   asking = null;
