@@ -64,6 +64,12 @@ export class NetworkIdentityService {
     return info;
   }
 
+  /** Where the network announcing `ip` is registered (ISO alpha-2), or
+   * null when unknown. Registered, not located; see AsnTable.countryOf. */
+  regionOf(ip: string | undefined | null): string | null {
+    return this.asn.regionOf(ip);
+  }
+
   /** A token for `asn` that the client can hand back with its reports. */
   attest(asn: number): string | null {
     return this.attestor.issue(asn);

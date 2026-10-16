@@ -114,6 +114,25 @@ describe("HealthController.ip network", () => {
     expect(answer).not.toHaveProperty("asn");
   });
 
+  /** The names that reach the origin directly carry no CF-IPCountry, which
+   * left the relay of last resort with no evidence on them. */
+  it("gives the network's registered country when the CDN gave none", async () => {
+    const answer = await build().ip(EDGE, from("198.51.100.7"));
+    expect(answer).toMatchObject({ country: "IR", asn: 64500 });
+    expect(answer).not.toHaveProperty("region");
+  });
+
+  it("prefers the CDN's country over the registered one", async () => {
+    const req = { headers: { "cf-connecting-ip": "198.51.100.7", "cf-ipcountry": "tr" } } as unknown as Request;
+    expect(await build().ip(EDGE, req)).toMatchObject({ country: "TR" });
+  });
+
+  /** WARP users egress in Cloudflare's AS, registered in the US. */
+  it("gives no registered country for Cloudflare's own network", async () => {
+    const answer = await build().ip(EDGE, from("104.28.1.1"));
+    expect(answer).toMatchObject({ asn: 13335, country: undefined });
+  });
+
   it("answers the address alone while no table is loaded", async () => {
     const config = new ConfigService({ asn: { enabled: false } });
     const prisma = { node: { findMany: jest.fn().mockResolvedValue([]) } } as unknown as PrismaService;
