@@ -103,8 +103,11 @@ export function rememberNetwork(body: Record<string, unknown>, now = Date.now())
  * (docs/relay-last-resort.md, R1.3; last-resort.ts). Only from a baseline
  * reading, as the network itself is: one taken through the tunnel would
  * stamp the exit's country on the customer's network. A baseline with no
- * country -- a node mirror answered it, not the CDN -- leaves the last
- * stamp as it was rather than clearing it: the network has not moved. */
+ * country leaves the last stamp as it was rather than clearing it: the
+ * network has not moved. Off the CDN -- a node mirror, or the origin
+ * dialled directly -- the server fills in only "IR", from where the
+ * network is registered, so those paths can add Iran evidence but never
+ * stamp another country over it. */
 const COUNTRY_KEY = "neoxify.network.country";
 const MAX_STAMPS = 16;
 

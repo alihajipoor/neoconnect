@@ -64,7 +64,12 @@ export class HealthController {
   async ip(@Ip() ip: string, @Req() req: Request) {
     const address = clientIpOf(req) || ip;
     const { region, ...network } = await this.networkOf(address, verifiedClientIpOf(req, ip));
-    return { ip: address, country: countryOf(req) ?? region, ...network };
+    // Iran only. Both readers of `country` act on "IR" alone, and the
+    // relay's evidence lets a newer stamp of any other country outrank
+    // an Iranian one: a baseline answered through another VPN would
+    // stamp that VPN's exit country and switch the relay off for a whole
+    // shutdown. The CDN's header is passed on as before.
+    return { ip: address, country: countryOf(req) ?? (region === "IR" ? region : undefined), ...network };
   }
 
   /** Which network the caller is on, and a signed note saying so.

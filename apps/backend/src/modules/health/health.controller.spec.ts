@@ -127,6 +127,14 @@ describe("HealthController.ip network", () => {
     expect(await build().ip(EDGE, req)).toMatchObject({ country: "TR" });
   });
 
+  /** A baseline answered through another VPN would name that VPN's
+   * exit, and a non-Iranian stamp outranks an Iranian one in the relay's
+   * evidence. Only "IR" is ever filled in from the table. */
+  it("gives no registered country other than Iran", async () => {
+    const answer = await build().ip(EDGE, from("203.0.113.30"));
+    expect(answer).toMatchObject({ asn: 64501, country: undefined });
+  });
+
   /** WARP users egress in Cloudflare's AS, registered in the US. */
   it("gives no registered country for Cloudflare's own network", async () => {
     const answer = await build().ip(EDGE, from("104.28.1.1"));
