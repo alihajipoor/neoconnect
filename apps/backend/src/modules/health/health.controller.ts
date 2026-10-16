@@ -9,14 +9,15 @@ import { NetworkIdentityService } from "../network-identity/network-identity.ser
 /** The caller's country, as a two-letter code, when the CDN told us.
  *
  * Cloudflare adds this to every proxied request, so it costs nothing --
- * no GeoIP database to ship, license or keep current. It is only used to
- * pick a first-run language, which is why a wrong or missing answer is
- * harmless: the customer sees English and the language switch is right
- * there in Settings.
+ * no GeoIP database to ship, license or keep current. The client uses it
+ * to pick a first-run language, where a wrong or missing answer is
+ * harmless (the language switch is right there in Settings), and as one
+ * piece of the relay of last resort's evidence that a network is in
+ * Iran, which the backend's own region gate checks again.
  *
  * Absent whenever the request did not come through the CDN -- a node's
- * API mirror, or the origin dialled directly -- and callers must treat
- * that as "unknown" rather than as anywhere in particular.
+ * API mirror, or the origin dialled directly -- in which case `ip` falls
+ * back to where the caller's network is registered (see `networkOf`).
  *
  * "XX" is Cloudflare's own value for an address it cannot place, and "T1"
  * is what it reports for Tor. Both are noise here, so both are dropped
@@ -62,7 +63,13 @@ export class HealthController {
   @Get("ip")
   async ip(@Ip() ip: string, @Req() req: Request) {
     const address = clientIpOf(req) || ip;
-    return { ip: address, country: countryOf(req), ...(await this.networkOf(address, verifiedClientIpOf(req, ip))) };
+    const { region, ...network } = await this.networkOf(address, verifiedClientIpOf(req, ip));
+    // Iran only. Both readers of `country` act on "IR" alone, and the
+    // relay's evidence lets a newer stamp of any other country outrank
+    // an Iranian one: a baseline answered through another VPN would
+    // stamp that VPN's exit country and switch the relay off for a whole
+    // shutdown. The CDN's header is passed on as before.
+    return { ip: address, country: countryOf(req) ?? (region === "IR" ? region : undefined), ...network };
   }
 
   /** Which network the caller is on, and a signed note saying so.
@@ -97,8 +104,21 @@ export class HealthController {
    * a token for any carrier, from anywhere. The cost is that a customer
    * whose baseline goes through a node mirror pointed at the origin gets
    * no token -- unknown, which the tags already handle, rather than
-   * forgeable. */
-  private async networkOf(address: string | undefined, vouched: string | undefined) {
+   * forgeable.
+   *
+   * `region` is where that network is registered, for `country` when the
+   * CDN did not say: the names that reach the origin directly were left
+   * with no country at all, and the relay of last resort reads `country`
+   * as its evidence that a network is in Iran (docs/relay-last-resort.md,
+   * R1.3). The same table and the same caveat as the relay's own region
+   * gate -- registered, not located -- so the client's evidence and the
+   * server's gate agree. Never for one of our addresses (nothing is
+   * returned for those) nor for Cloudflare's, which would say "US" about
+   * whoever is behind WARP. */
+  private async networkOf(
+    address: string | undefined,
+    vouched: string | undefined,
+  ): Promise<{ asn?: number; asnOrg?: string; network?: string; region?: string }> {
     try {
       const info = await this.identity.identify(address);
       if (!info) return {};
@@ -108,6 +128,7 @@ export class HealthController {
         asn: info.asn,
         asnOrg: info.org || undefined,
         network: signable ? (this.identity.attest(info.asn) ?? undefined) : undefined,
+        region: info.asn === CLOUDFLARE_ASN ? undefined : (this.identity.regionOf(address) ?? undefined),
       };
     } catch {
       return {};

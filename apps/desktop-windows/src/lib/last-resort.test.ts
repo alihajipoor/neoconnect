@@ -490,6 +490,52 @@ describe("relay mode (R1.7)", () => {
     expect((await lr.relayRequest(ME, "foreground")).kind).toBe("answered");
   });
 
+  it("does not dial a call queued behind the RELAY_REGION refusal", async () => {
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "foreground");
+    sent.length = 0;
+    replies = [json(403, { code: "RELAY_REGION", message: "..." }), json(200, {})];
+    const [first, second] = await Promise.all([
+      lr.relayRequest(LOGIN, "foreground"),
+      lr.relayRequest(ME, "foreground"),
+    ]);
+    expect(first.kind).toBe("answered");
+    expect(second).toEqual({ kind: "skipped", reason: "off" });
+    expect(sent).toHaveLength(1);
+  });
+
+  it("is not started again by a relay answer to a call made before an ordinary route answered", async () => {
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "foreground");
+    let answer!: (reply: RelayAnswer) => void;
+    replies = [() => new Promise<RelayAnswer>((resolve) => (answer = resolve))];
+    const out = lr.relayRequest(ME, "foreground");
+    await vi.waitFor(() => expect(answer).toBeDefined());
+    lr.noteNormalRouteAnswered();
+    expect(lr.relayModeActive()).toBe(false);
+    answer(json(200, {}));
+    expect((await out).kind).toBe("answered");
+    expect(lr.relayModeActive()).toBe(false);
+    // A call made after it starts relay mode as before.
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "foreground");
+    expect(lr.relayModeActive()).toBe(true);
+  });
+
+  it("does not dial a call queued when the backup route is switched off, nor start relay mode", async () => {
+    let answer!: (reply: RelayAnswer) => void;
+    replies = [() => new Promise<RelayAnswer>((resolve) => (answer = resolve)), json(200, {})];
+    const first = lr.relayRequest(ME, "foreground");
+    const second = lr.relayRequest(LOGIN, "foreground");
+    await vi.waitFor(() => expect(answer).toBeDefined());
+    lr.setRelayConsent(false);
+    answer(json(200, {}));
+    expect((await first).kind).toBe("answered");
+    expect(await second).toEqual({ kind: "skipped", reason: "declined" });
+    expect(sent).toHaveLength(1);
+    expect(lr.relayModeActive()).toBe(false);
+  });
+
   it("stays on after a sign-up the backend refused because it could not place the network", async () => {
     // An ASN missing from its table, or the table not loaded: sign-up
     // needs Iran, sign-in, refresh and vouchers do not -- so the refusal
