@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { ArrowLeftRight, CalendarPlus, MoreHorizontal, Pause, Play, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { ArrowLeftRight, CalendarPlus, Gauge, MoreHorizontal, Pause, Play, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { Subscription, SubscriptionPlan, SubscriptionStatus } from "@/lib/types";
 import {
@@ -17,6 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
+import { SetDataCapDialog } from "./set-data-cap-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -156,6 +157,16 @@ export function SubscriptionsPanel({
                           >
                             <RotateCcw /> Reset data usage
                           </DropdownMenuItem>
+                          <SetDataCapDialog
+                            customerId={customerId}
+                            subscription={subscription}
+                            planCapBytes={plan?.dataCapBytes}
+                            trigger={
+                              <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
+                                <Gauge /> Set data limit...
+                              </DropdownMenuItem>
+                            }
+                          />
                           <DeleteConfirm
                             title="Delete this subscription?"
                             description="Its credentials are removed from the nodes too. This cannot be undone."

@@ -217,3 +217,87 @@ describe("SubscriptionsService.setStatus", () => {
     expect(prisma.subscription.update).toHaveBeenCalledWith({ where: { id: "sub-1" }, data: { status: "ACTIVE" } });
   });
 });
+
+/** One customer's allowance changed without the plan: the operator asked
+ * to give a single subscriber 100 GB (or 10, or 22) and nobody else. */
+describe("SubscriptionsService.setDataCap", () => {
+  const GB = 1_073_741_824n;
+
+  function build(current: { dataCapBytes: bigint | null; dataUsedBytes?: bigint }) {
+    const prisma = {
+      subscription: {
+        findUnique: jest.fn().mockResolvedValue({ id: "sub-1", dataUsedBytes: 0n, ...current }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+    };
+    const service = new SubscriptionsService(prisma as unknown as PrismaService, {} as ProtocolUsersService);
+    return { prisma, service };
+  }
+
+  it("raises the cap and re-arms the low-data warning for the new limit", async () => {
+    const { service, prisma } = build({ dataCapBytes: 30n * GB });
+
+    await service.setDataCap("sub-1", String(100n * GB));
+
+    expect(prisma.subscription.update).toHaveBeenCalledWith({
+      where: { id: "sub-1" },
+      data: { dataCapBytes: 100n * GB, lowDataWarningSentAt: null },
+    });
+  });
+
+  it("takes a cap that is not a whole number of gigabytes", async () => {
+    const { service, prisma } = build({ dataCapBytes: 30n * GB });
+    const twentyTwoAndAHalf = (45n * GB) / 2n;
+
+    await service.setDataCap("sub-1", String(twentyTwoAndAHalf));
+
+    expect(prisma.subscription.update.mock.calls[0][0].data.dataCapBytes).toBe(twentyTwoAndAHalf);
+  });
+
+  /** Lowering is not a new period: a customer already warned this period
+   * is not warned a second time for the same allowance getting smaller. */
+  it("lowers the cap without re-arming the warning", async () => {
+    const { service, prisma } = build({ dataCapBytes: 30n * GB });
+
+    await service.setDataCap("sub-1", String(10n * GB));
+
+    expect(prisma.subscription.update).toHaveBeenCalledWith({ where: { id: "sub-1" }, data: { dataCapBytes: 10n * GB } });
+  });
+
+  it("removes the cap when given null", async () => {
+    const { service, prisma } = build({ dataCapBytes: 30n * GB });
+
+    await service.setDataCap("sub-1", null);
+
+    expect(prisma.subscription.update).toHaveBeenCalledWith({
+      where: { id: "sub-1" },
+      data: { dataCapBytes: null, lowDataWarningSentAt: null },
+    });
+  });
+
+  it("caps a subscription that was unlimited", async () => {
+    const { service, prisma } = build({ dataCapBytes: null });
+
+    await service.setDataCap("sub-1", String(50n * GB));
+
+    expect(prisma.subscription.update).toHaveBeenCalledWith({ where: { id: "sub-1" }, data: { dataCapBytes: 50n * GB } });
+  });
+
+  /** A suspension may be about something other than data, so raising the
+   * cap must not quietly put a suspended customer back online. */
+  it("never touches status", async () => {
+    const { service, prisma } = build({ dataCapBytes: 30n * GB, dataUsedBytes: 31n * GB });
+
+    await service.setDataCap("sub-1", String(100n * GB));
+
+    expect(prisma.subscription.update.mock.calls[0][0].data).not.toHaveProperty("status");
+  });
+
+  it("answers 404 for a subscription that does not exist", async () => {
+    const { service, prisma } = build({ dataCapBytes: null });
+    prisma.subscription.findUnique.mockResolvedValue(null);
+
+    await expect(service.setDataCap("missing", null)).rejects.toThrow("Subscription not found");
+    expect(prisma.subscription.update).not.toHaveBeenCalled();
+  });
+});

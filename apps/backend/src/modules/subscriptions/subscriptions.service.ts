@@ -147,6 +147,36 @@ export class SubscriptionsService {
     return this.get(id);
   }
 
+  /** Gives one subscription its own data cap, without touching the plan.
+   *
+   * The cap the quota is enforced against already lives on the
+   * subscription -- it is copied from the plan when the subscription is
+   * made -- so this only changes that copy. It lasts for the current
+   * period: a renewal or a plan change copies the plan's cap back, which
+   * is what an operator granting "100 GB this month" means.
+   *
+   * Status is left alone, for the reason resetUsage leaves it alone: a
+   * suspended subscription may be suspended for something other than its
+   * data, so raising the cap does not by itself put the customer back
+   * online. Lowering it below what has been used suspends them at their
+   * next usage report, the same way running out does.
+   *
+   * The low-data warning is re-armed only when the cap goes up (or away),
+   * so a customer given more room is warned again near the new limit,
+   * while trimming a cap does not send a second warning for the same
+   * period. */
+  async setDataCap(id: string, dataCapBytes: string | null) {
+    const subscription = await this.get(id);
+    const next = dataCapBytes === null ? null : BigInt(dataCapBytes);
+    const previous = subscription.dataCapBytes === null ? null : BigInt(subscription.dataCapBytes);
+    const raised = next === null || (previous !== null && next > previous);
+    await this.prisma.subscription.update({
+      where: { id },
+      data: { dataCapBytes: next, ...(raised ? { lowDataWarningSentAt: null } : {}) },
+    });
+    return this.get(id);
+  }
+
   /** Removes a subscription and the credentials it provisioned.
    *
    * Credentials first, so each one gets its DELETE_USER command to the

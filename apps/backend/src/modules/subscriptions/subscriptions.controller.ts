@@ -7,6 +7,7 @@ import {
   AssignPlanDto,
   ChangePlanDto,
   ExtendSubscriptionDto,
+  SetDataCapDto,
   SetSubscriptionStatusDto,
 } from "./dto/manage-subscription.dto";
 import { AdminRole } from "@prisma/client";
@@ -92,6 +93,13 @@ export class SubscriptionsController {
   @Roles(AdminRole.SUPERADMIN, AdminRole.BILLING)
   resetUsage(@Param("id") id: string) {
     return this.subscriptionsService.resetUsage(id);
+  }
+
+  @Patch(":id/data-cap")
+  @UseGuards(RolesGuard)
+  @Roles(AdminRole.SUPERADMIN, AdminRole.BILLING)
+  setDataCap(@Param("id") id: string, @Body() dto: SetDataCapDto) {
+    return this.subscriptionsService.setDataCap(id, dto.dataCapBytes);
   }
 
   /** Deletes the subscription and the credentials it provisioned.

@@ -49,6 +49,34 @@ export async function resetSubscriptionUsage(
   );
 }
 
+/** `null` is unlimited, sent as an explicit null: the backend reads an
+ * absent field as a mistake, not as "no limit". */
+export async function setSubscriptionDataCap(
+  customerId: string,
+  id: string,
+  dataCapBytes: string | null,
+): Promise<MutationResult<Subscription>> {
+  return done(
+    customerId,
+    await apiMutate<Subscription>(`/subscriptions/${id}/data-cap`, {
+      method: "PATCH",
+      body: JSON.stringify({ dataCapBytes }),
+    }),
+  );
+}
+
+/** Marks the customer's email verified on their behalf, with everything a
+ * real verification brings (the trial if trial mode is on, the referral
+ * notice). */
+export async function markCustomerEmailVerified(
+  customerId: string,
+): Promise<MutationResult<{ alreadyVerified: boolean }>> {
+  return done(
+    customerId,
+    await apiMutate<{ alreadyVerified: boolean }>(`/customers/${customerId}/verify-email`, { method: "POST" }),
+  );
+}
+
 export async function deleteSubscription(
   customerId: string,
   id: string,
