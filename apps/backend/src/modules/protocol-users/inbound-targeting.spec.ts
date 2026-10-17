@@ -58,7 +58,7 @@ describe("commands name the inbound", () => {
           protocolConfig: { transport: "TCP", inboundTag },
         }),
         findMany: jest.fn().mockResolvedValue([]),
-        delete: jest.fn().mockResolvedValue({}),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
         update: jest.fn().mockResolvedValue({ id: "pu-1", credentialsJson: ENCRYPTED }),
       },
     };

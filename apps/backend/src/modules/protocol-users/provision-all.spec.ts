@@ -1,3 +1,4 @@
+import { NotFoundException } from "@nestjs/common";
 import { ProtocolUsersService } from "./protocol-users.service";
 import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
@@ -153,5 +154,35 @@ describe("ProtocolUsersService.provisionAll", () => {
     expect(remove).toHaveBeenCalledWith("pu-old");
     expect(result).toEqual({ created: [], revoked: ["pu-old"], failed: [] });
     expect(create).not.toHaveBeenCalled();
+  });
+
+  /** A retried switchRoute runs this alongside the call it is retrying, and
+   * both walk the same list of credentials to revoke. The one that gets to
+   * a row second used to throw out of here and answer the app with a 500. */
+  it("skips a credential a concurrent call already revoked, and revokes the rest", async () => {
+    const { service, prisma } = build(["route-reality", "route-tls", "route-wg"]);
+    prisma.protocolUser.findMany.mockResolvedValue([
+      { id: "pu-raced", routeId: "route-gone", sessionId: null },
+      { id: "pu-left", routeId: "route-gone", sessionId: null },
+    ]);
+    const remove = jest
+      .spyOn(service, "remove")
+      .mockImplementation((id) =>
+        id === "pu-raced" ? Promise.reject(new NotFoundException("Protocol user not found")) : Promise.resolve(),
+      );
+    jest.spyOn(service["logger"], "warn").mockImplementation(() => undefined);
+
+    const result = await service.provisionAll("sub-1");
+
+    expect(remove).toHaveBeenCalledTimes(2);
+    expect(result.revoked).toEqual(["pu-left"]);
+  });
+
+  it("still fails on anything other than an already-revoked credential", async () => {
+    const { service, prisma } = build(["route-reality", "route-tls", "route-wg"]);
+    prisma.protocolUser.findMany.mockResolvedValue([{ id: "pu-old", routeId: "route-gone", sessionId: null }]);
+    jest.spyOn(service, "remove").mockRejectedValue(new Error("database is down"));
+
+    await expect(service.provisionAll("sub-1")).rejects.toThrow("database is down");
   });
 });

@@ -1024,7 +1024,16 @@ export class ProtocolUsersService {
     const revoked: string[] = [];
     for (const user of existing) {
       if (allowedRouteIds.has(user.routeId)) continue;
-      await this.remove(user.id);
+      try {
+        await this.remove(user.id);
+      } catch (err) {
+        // Gone already: a second call for the same subscription -- the app
+        // retrying a switchRoute the first one was still revoking for --
+        // got there first. That is the outcome this loop wants, and failing
+        // the whole request over it was a 500 on every relay server pick.
+        if (err instanceof NotFoundException) continue;
+        throw err;
+      }
       revoked.push(user.id);
     }
     if (revoked.length > 0) {
@@ -1191,7 +1200,10 @@ export class ProtocolUsersService {
 
     await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
 
-    await this.prisma.protocolUser.delete({ where: { id } });
+    // deleteMany, not delete: a concurrent remove of the same row can land
+    // between the read above and this write, and a row someone else already
+    // deleted is not an error worth a 500.
+    await this.prisma.protocolUser.deleteMany({ where: { id } });
   }
 
   async setEnabled(id: string, enabled: boolean) {
