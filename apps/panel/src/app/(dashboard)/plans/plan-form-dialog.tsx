@@ -264,7 +264,7 @@ export function PlanFormDialog({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={NO_DEFAULT_ROUTE}>None -- purchases won&apos;t get provisioned</SelectItem>
+                <SelectItem value={NO_DEFAULT_ROUTE}>None -- no preferred first server</SelectItem>
                 {routes.map((route) => (
                   <SelectItem key={route.id} value={route.id}>
                     {route.name}
@@ -273,8 +273,8 @@ export function PlanFormDialog({
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              Which server a customer purchasing this plan gets connection credentials on once payment
-              clears. Required for self-service purchases to actually work.
+              Which server a new customer&apos;s app tries first. A purchase is provisioned on every route
+              ticked above whatever this says -- it is a preference, not the list of what they get.
             </p>
           </div>
           {/* Two flags, because one was doing two jobs and broke the

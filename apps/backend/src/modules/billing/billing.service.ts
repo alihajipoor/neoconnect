@@ -341,9 +341,10 @@ export class BillingService {
    * - **First payment** (no ProtocolUser exists yet -- true for every
    *   customer-initiated purchase, since `POST /customer/subscriptions`
    *   only creates the Subscription row, deliberately not a working VPN
-   *   account, until payment actually clears): provisions one now via
-   *   the plan's `defaultRouteId`, the same hot-provisioning path M3/M4
-   *   already proved (`ProtocolUsersService.create()`).
+   *   account, until payment actually clears): provisions a credential on every
+   *   route the plan allows, through `ProtocolUsersService.provisionAll()`.
+   *   The plan's `defaultRouteId` plays no part in that any more -- it
+   *   only tells the client which route to try first.
    * - **Renewal** (a ProtocolUser already exists, possibly `DISABLED` by
    *   a prior quota/expiry suspension): re-enables it -- the exact
    *   reverse of `UsageService.disableProtocolUsers`, reusing
