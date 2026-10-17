@@ -46,13 +46,17 @@ export function RouteFormDialog({
     return `${node?.name ?? pc.nodeId} — ${PROTOCOL_LABELS[pc.protocol]} — :${pc.listenPort}`;
   };
 
-  // Only Xray VLESS+REALITY on an EXIT-role node is a valid exit leg --
-  // see routes.service.ts's SUPPORTED_EXIT_PROTOCOL. Client-side
-  // filtering here is just a usability nicety; the backend re-validates
-  // this regardless.
-  const exitCandidates = protocolConfigs.filter(
-    (pc) => pc.protocol === "XRAY_VLESS_REALITY" && nodeById(pc.nodeId)?.role === "EXIT",
-  );
+  // Only Xray VLESS+REALITY on an EXIT or STANDALONE node is a valid exit
+  // leg -- see routes.service.ts's SUPPORTED_EXIT_PROTOCOL and its role
+  // check, which refuses only a RELAY. This used to offer EXIT nodes
+  // alone, and every exit in the fleet is STANDALONE, so the list was
+  // always empty and relay routes could only be made through the API.
+  // Client-side filtering here is just a usability nicety; the backend
+  // re-validates this regardless.
+  const exitCandidates = protocolConfigs.filter((pc) => {
+    const role = nodeById(pc.nodeId)?.role;
+    return pc.protocol === "XRAY_VLESS_REALITY" && role !== undefined && role !== "RELAY";
+  });
 
   const entryNode = entryId
     ? nodeById(protocolConfigs.find((pc) => pc.id === entryId)?.nodeId ?? "")
