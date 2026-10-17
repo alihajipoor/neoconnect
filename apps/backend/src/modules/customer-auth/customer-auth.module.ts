@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { JwtModule } from "@nestjs/jwt";
 import { PassportModule } from "@nestjs/passport";
 import { CustomerAuthController } from "./customer-auth.controller";
+import { CustomerVerificationAdminController } from "./customer-verification-admin.controller";
 import { CustomerAuthService } from "./customer-auth.service";
 import { SocialAuthService } from "./social/social-auth.service";
 import { OauthFlowService } from "./social/oauth-flow.service";
@@ -29,7 +30,7 @@ import { RelayAuthModule } from "../relay-auth/relay-auth.module";
     DeviceSlotsModule,
     RelayAuthModule,
   ],
-  controllers: [CustomerAuthController],
+  controllers: [CustomerAuthController, CustomerVerificationAdminController],
   providers: [CustomerAuthService, CustomerJwtStrategy, SocialAuthService, OauthFlowService],
   exports: [CustomerAuthService, SocialAuthService, OauthFlowService],
 })

@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Injectable,
   Logger,
+  NotFoundException,
   Optional,
   UnauthorizedException,
 } from "@nestjs/common";
@@ -396,6 +397,37 @@ export class CustomerAuthService {
       this.logger.error(`Trial retry failed for customer ${customerId}: ${reason}`);
       return null;
     }
+  }
+
+  /** An operator vouching for an address the customer could not confirm
+   * themselves -- the code never arrived, or arrived somewhere they could
+   * not read it.
+   *
+   * It is a verification in every sense the rest of the system sees: the
+   * same conditional write the code route makes (so it cannot race a
+   * customer verifying at the same moment into a second trial), then the
+   * same afterFirstVerification -- the trial if trial mode is on, and the
+   * referrer's notice. Doing less would leave an account that reads as
+   * verified but never got what verifying gives.
+   *
+   * It does not re-enable a DISABLED account. That status is an operator
+   * decision of its own, made on the customer row, and vouching for an
+   * email address says nothing about it. */
+  async markVerifiedByAdmin(customerId: string) {
+    const customer = await this.prisma.customer.findUnique({
+      where: { id: customerId },
+      select: { id: true, emailVerifiedAt: true },
+    });
+    if (!customer) throw new NotFoundException("Customer not found");
+    if (customer.emailVerifiedAt) return { alreadyVerified: true, trial: null };
+
+    const { count } = await this.prisma.customer.updateMany({
+      where: { id: customerId, emailVerifiedAt: null },
+      data: { emailVerifiedAt: new Date(), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
+    });
+    if (count === 0) return { alreadyVerified: true, trial: null };
+    this.logger.log(`Customer ${customerId} marked verified by an operator`);
+    return this.afterFirstVerification(customerId);
   }
 
   private async completeVerification(customerId: string, alreadyVerifiedAt: Date | null) {

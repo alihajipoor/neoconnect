@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SubscriptionsPanel } from "./subscriptions-panel";
 import { MoveAddressCard } from "./move-address-card";
+import { MarkVerifiedButton } from "./mark-verified-button";
 
 /** Everything about one customer, in one place.
  *
@@ -29,7 +30,7 @@ export default async function CustomerDetailPage({
   // has more invoices than fit on one card.
   searchParams: Promise<{ take?: string; skip?: string }>;
 }) {
-  await requireStaff();
+  const admin = await requireStaff();
   const { id } = await params;
   const { take: takeParam, skip: skipParam } = await searchParams;
   // 20 rather than the API's default 100: this is a card inside a page,
@@ -86,6 +87,12 @@ export default async function CustomerDetailPage({
           <Badge variant={customer.emailVerifiedAt ? "outline" : "destructive"}>
             {customer.emailVerifiedAt ? "Email verified" : "Email unverified"}
           </Badge>
+          {/* For the customer whose code never arrived. The backend allows
+              SUPERADMIN and SUPPORT, so nobody else is shown a button that
+              would only answer 403. */}
+          {!customer.emailVerifiedAt && (admin.role === "SUPERADMIN" || admin.role === "SUPPORT") && (
+            <MarkVerifiedButton customerId={id} email={customer.email} />
+          )}
           {/* Made through the Iranian relay without verification: limited
               to Ultimate vouchers until the address is confirmed. */}
           {customer.signupChannel === "RELAY" && <Badge variant="outline">Relay sign-up</Badge>}

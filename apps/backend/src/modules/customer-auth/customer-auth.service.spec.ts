@@ -231,6 +231,48 @@ describe("CustomerAuthService", () => {
     });
   });
 
+  /** The panel's "Mark verified", for a customer whose code never came. */
+  describe("markVerifiedByAdmin", () => {
+    it("verifies with the same conditional write and follow-up a code would", async () => {
+      prisma.customer.findUnique.mockResolvedValue({ id: "cust-1", emailVerifiedAt: null, status: "ACTIVE" });
+
+      const result = await service.markVerifiedByAdmin("cust-1");
+
+      expect(prisma.customer.updateMany).toHaveBeenCalledWith({
+        where: { id: "cust-1", emailVerifiedAt: null },
+        data: { emailVerifiedAt: expect.any(Date), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
+      });
+      // afterFirstVerification ran: the referrer hears, and a trial is tried.
+      expect(referralsService.notifyReferrerOfActivation).toHaveBeenCalledWith("cust-1");
+      expect(freeTrialSettingsService.get).toHaveBeenCalled();
+      expect(result).toEqual(expect.objectContaining({ alreadyVerified: false }));
+    });
+
+    it("does nothing to an address that is already verified", async () => {
+      prisma.customer.findUnique.mockResolvedValue({ id: "cust-1", emailVerifiedAt: new Date() });
+
+      await expect(service.markVerifiedByAdmin("cust-1")).resolves.toEqual({ alreadyVerified: true, trial: null });
+      expect(prisma.customer.updateMany).not.toHaveBeenCalled();
+      expect(referralsService.notifyReferrerOfActivation).not.toHaveBeenCalled();
+    });
+
+    /** The customer's own code landing in the same moment must not mean
+     * two verifications -- and two trials. */
+    it("lets a verification that won the race stand", async () => {
+      prisma.customer.findUnique.mockResolvedValue({ id: "cust-1", emailVerifiedAt: null });
+      prisma.customer.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(service.markVerifiedByAdmin("cust-1")).resolves.toEqual({ alreadyVerified: true, trial: null });
+      expect(referralsService.notifyReferrerOfActivation).not.toHaveBeenCalled();
+    });
+
+    it("answers 404 for a customer that does not exist", async () => {
+      prisma.customer.findUnique.mockResolvedValue(null);
+
+      await expect(service.markVerifiedByAdmin("missing")).rejects.toThrow("Customer not found");
+    });
+  });
+
   describe("verifyEmailByCode", () => {
     it("rejects when no customer matches the email", async () => {
       prisma.customer.findUnique.mockResolvedValue(null);
