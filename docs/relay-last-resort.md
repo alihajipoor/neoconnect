@@ -33,6 +33,25 @@ Binding where they differ from the spec below.
 - Pro/Starter users must buy Ultimate for shutdown access. Ultimate's
   device limit is unchanged.
 
+## Owner decisions (2026-10-18)
+
+Binding over the 2026-10-15 ones and the spec below where they differ.
+
+- **Nothing is asked before the backup route is used.** R1.4's consent
+  prompt is gone. The route is on until the customer turns it off in
+  Settings, which now stores its own key -- an answer given to the old
+  prompt no longer counts.
+- **The app does not guess the country.** R1.3's device-side evidence (the
+  last country stamp, the time zone, the region) is gone: the backend's
+  region gate decides, and a `RELAY_REGION` refusal switches the relay
+  off on that network for 24 hours, as before.
+- **Background requests use it like foreground ones.** The server list,
+  the account and the refresh on resume are background requests; under
+  the prompt they never reached the relay, which kept signed-in
+  customers on cached servers that no longer answered.
+
+Why, in docs/reachability.md ("What happened on 2026-10-17").
+
 ## Backend as built (branch claude/relay-auth)
 
 **Arrival proof (R2).** `RELAY_LISTEN` (compose default `0.0.0.0:4001`,
