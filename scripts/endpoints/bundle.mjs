@@ -13,12 +13,28 @@
  * So the panel only ever serves a blob it cannot forge, and the signing
  * happens on a machine the owner controls.
  *
+ * Server-signed lists (2026-10-18). Waiting for the owner on every list
+ * meant the list never followed the servers. A compiled-in key may now
+ * vouch for a server key until a date (`vouch`): the server signs lists
+ * itself under that statement, served at /endpoints/bundle2, and clients
+ * from this change on check the statement before the list
+ * (`ServerKeyStatement` in apps/desktop-windows/src/lib/endpoint-bundle.ts).
+ * The compiled-in keys never leave this machine; a stolen server key is
+ * worth what a stolen list is, until the statement expires.
+ *
  * Usage:
  *   node scripts/endpoints/bundle.mjs keygen --out ./keys
  *   node scripts/endpoints/bundle.mjs sign  --in bundle.json \
  *        --key ./keys/primary.key --key-id primary --out endpoints.signed.json \
  *        [--previous last.signed.json]   (warns about hosts clients will refuse)
  *   node scripts/endpoints/bundle.mjs verify --in endpoints.signed.json --pub <base64>
+ *
+ *   node scripts/endpoints/bundle.mjs server-key --id server-1 --out ./server-keys
+ *   node scripts/endpoints/bundle.mjs vouch --key ./keys/primary.key --key-id primary \
+ *        --id server-1 --server-pub <base64> --days 365 --out server-1.statement.json
+ *   node scripts/endpoints/bundle.mjs sign --in bundle.json --key ./server-keys/server-1.key \
+ *        --key-id server-1 --cert server-1.statement.json --out bundle2.signed.json
+ *   (verify takes the compiled-in key's --pub for a server-signed list too)
  */
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -114,11 +130,64 @@ function warnOutsideShippedScope(bundle, previousPath) {
   }
 }
 
+/** `ServerKeyStatement` in endpoint-bundle.ts and bundle_scope.rs. */
+const STATEMENT_KIND = "neoxify-bundle-key";
+const COMPILED_IN = new Set(["primary", "backup"]);
+
+/** A statement's fields, read off a `vouch` output, or a death. */
+function readStatement(cert) {
+  if (typeof cert?.payload !== "string" || typeof cert?.sig !== "string" || !COMPILED_IN.has(cert?.key)) {
+    die("--cert is not a statement by a compiled-in key (run `vouch`)");
+  }
+  return JSON.parse(Buffer.from(cert.payload, "base64").toString("utf8"));
+}
+
+function cmdServerKey() {
+  const id = arg("id");
+  const out = arg("out", "./server-keys");
+  if (COMPILED_IN.has(id) || !/^[a-z0-9-]{1,32}$/.test(id)) die("--id must be a short lower-case name, not primary or backup");
+  mkdirSync(out, { recursive: true });
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const path = join(out, `${id}.key`);
+  writeFileSync(path, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600, flag: "wx" });
+  console.error(`wrote ${path} (mode 600)`);
+  console.log(rawPublic(publicKey).toString("base64"));
+}
+
+/** A compiled-in key's statement that `--id` (public half `--server-pub`)
+ * may sign lists for `--days`. Signed with the offline key; the output is
+ * public, published inside every list the server signs. */
+function cmdVouch() {
+  const keyPath = arg("key");
+  const keyId = arg("key-id", "primary");
+  const id = arg("id");
+  const serverPub = Buffer.from(arg("server-pub"), "base64");
+  const days = Number(arg("days", "365"));
+  const outPath = arg("out");
+  if (!COMPILED_IN.has(keyId)) die("--key-id must be a compiled-in key: primary or backup");
+  if (COMPILED_IN.has(id)) die("--id may not be a compiled-in key's name");
+  if (serverPub.length !== 32) die("--server-pub must be a 32-byte Ed25519 public key, base64");
+  if (!Number.isFinite(days) || days <= 0 || days > 730) die("--days must be 1 to 730");
+  const statement = {
+    kind: STATEMENT_KIND,
+    id,
+    publicKey: serverPub.toString("base64"),
+    expires: Math.floor(Date.now() / 1000) + Math.round(days * 86_400),
+  };
+  const payload = Buffer.from(JSON.stringify(statement), "utf8");
+  const privateKey = createPrivateKey(readFileSync(keyPath, "utf8"));
+  const signature = sign(null, payload, privateKey);
+  if (!verify(null, payload, createPublicKey(privateKey), signature)) die("self-check failed; not writing");
+  writeFileSync(outPath, JSON.stringify({ payload: payload.toString("base64"), sig: signature.toString("base64"), key: keyId }));
+  console.error(`${keyId} vouches for ${id} until ${new Date(statement.expires * 1000).toISOString()} -> ${outPath}`);
+}
+
 function cmdSign() {
   const inPath = arg("in");
   const keyPath = arg("key");
   const keyId = arg("key-id", "primary");
   const outPath = arg("out", "");
+  const certPath = arg("cert", "");
 
   const bundle = JSON.parse(readFileSync(inPath, "utf8"));
   if (typeof bundle.v !== "number") die("bundle has no numeric `v`");
@@ -140,13 +209,27 @@ function cmdSign() {
     sig: signature.toString("base64"),
     key: keyId,
   };
-  const text = JSON.stringify(envelope);
 
   // Verified before it leaves, against the public half of the key just
   // used. Publishing a bundle nobody can verify is an outage delivered
   // to every client at once.
   const publicKey = createPublicKey(privateKey);
   if (!verify(null, payload, publicKey, signature)) die("self-check failed; not writing");
+
+  // A server key's list carries the statement that lets clients trust it,
+  // and is refused here when clients would refuse it: another key's
+  // statement, or one that has run out.
+  if (certPath) {
+    const cert = JSON.parse(readFileSync(certPath, "utf8"));
+    const statement = readStatement(cert);
+    if (statement.kind !== STATEMENT_KIND || statement.id !== keyId) die(`--cert is not a statement for ${keyId}`);
+    if (statement.publicKey !== rawPublic(publicKey).toString("base64")) die("--cert vouches for another key than --key");
+    if (Date.now() >= statement.expires * 1000) die("--cert has expired; vouch again with the offline key");
+    envelope.cert = { payload: cert.payload, sig: cert.sig, key: cert.key };
+  } else if (!COMPILED_IN.has(keyId)) {
+    die(`${keyId} is not a compiled-in key: pass the --cert that vouches for it`);
+  }
+  const text = JSON.stringify(envelope);
 
   if (outPath) {
     writeFileSync(outPath, text);
@@ -157,22 +240,42 @@ function cmdSign() {
   }
 }
 
+function ed25519(raw) {
+  return createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") }, format: "jwk" });
+}
+
+/** `--pub` is the compiled-in key's public half; a server-signed list is
+ * checked through its statement, as a client checks it. */
 function cmdVerify() {
   const envelope = JSON.parse(readFileSync(arg("in"), "utf8"));
-  const pub = Buffer.from(arg("pub"), "base64");
+  let signer = ed25519(Buffer.from(arg("pub"), "base64"));
+  let via = "";
+  if (envelope.cert && !COMPILED_IN.has(envelope.key)) {
+    const statementBytes = Buffer.from(envelope.cert.payload, "base64");
+    if (!verify(null, statementBytes, signer, Buffer.from(envelope.cert.sig, "base64"))) {
+      console.log(`statement: BAD  by=${envelope.cert.key}`);
+      process.exit(1);
+    }
+    const statement = JSON.parse(statementBytes.toString("utf8"));
+    const live = Date.now() < statement.expires * 1000;
+    if (statement.kind !== STATEMENT_KIND || statement.id !== envelope.key || !live) {
+      console.log(`statement: REFUSED  for=${statement.id} expires=${new Date(statement.expires * 1000).toISOString()}`);
+      process.exit(1);
+    }
+    signer = ed25519(Buffer.from(statement.publicKey, "base64"));
+    via = `  via=${envelope.cert.key} until ${new Date(statement.expires * 1000).toISOString()}`;
+  }
   const payload = Buffer.from(envelope.payload, "base64");
-  const key = createPublicKey({
-    key: { kty: "OKP", crv: "Ed25519", x: pub.toString("base64url") },
-    format: "jwk",
-  });
-  const ok = verify(null, payload, key, Buffer.from(envelope.sig, "base64"));
+  const ok = verify(null, payload, signer, Buffer.from(envelope.sig, "base64"));
   const bundle = JSON.parse(payload.toString("utf8"));
-  console.log(`signature: ${ok ? "OK" : "BAD"}  key=${envelope.key}  v=${bundle.v}  endpoints=${bundle.endpoints.length}`);
+  console.log(`signature: ${ok ? "OK" : "BAD"}  key=${envelope.key}${via}  v=${bundle.v}  endpoints=${bundle.endpoints.length}`);
   process.exit(ok ? 0 : 1);
 }
 
 const command = process.argv[2];
 if (command === "keygen") cmdKeygen();
+else if (command === "server-key") cmdServerKey();
+else if (command === "vouch") cmdVouch();
 else if (command === "sign") cmdSign();
 else if (command === "verify") cmdVerify();
-else die("usage: bundle.mjs <keygen|sign|verify> [...]");
+else die("usage: bundle.mjs <keygen|server-key|vouch|sign|verify> [...]");
