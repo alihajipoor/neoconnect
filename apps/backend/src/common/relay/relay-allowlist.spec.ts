@@ -26,6 +26,7 @@ describe("the relay allowlist", () => {
       [
         "GET /health",
         "GET /endpoints/bundle",
+        "GET /endpoints/bundle2",
         "GET /relay/status",
         "POST /login-challenge",
         "POST /customer-auth/login",

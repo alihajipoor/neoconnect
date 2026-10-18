@@ -40,7 +40,7 @@ function seal(bundle: unknown): string {
 }
 
 function build(state: Record<string, unknown> = {}, nodes: unknown[] = []) {
-  const row = { id: "s1", panelBasesJson: "[]", signed: null, version: 0, ...state };
+  const row = { id: "s1", panelBasesJson: "[]", signed: null, version: 0, serverSigned: null, serverVersion: 0, ...state };
   const updates: Record<string, unknown>[] = [];
   const prisma = {
     endpointBundleState: {
@@ -159,6 +159,56 @@ describe("EndpointsService published", () => {
     const signed = seal({ v: 3, endpoints: [{ kind: "panel", url: "https://a/api" }] });
     const { service } = build({ signed });
     expect(await service.published()).toBe(signed);
+  });
+});
+
+/** A server key's list: the envelope carries the statement it is signed
+ * under. Its shape is all the panel looks at. */
+function sealServer(bundle: unknown): string {
+  return JSON.stringify({
+    ...JSON.parse(seal(bundle)),
+    key: "server-1",
+    cert: { payload: Buffer.from("{}").toString("base64"), sig: "not-checked-here", key: "primary" },
+  });
+}
+
+const LIST = { issuedAt: "x", endpoints: [{ kind: "mirror", url: "https://m.example.org:2096/api" }] };
+
+describe("EndpointsService server-signed list", () => {
+  it("is stored verbatim, apart from the offline list", async () => {
+    const { service, updates } = build({ version: 7 });
+    const signed = sealServer({ v: 100, ...LIST });
+
+    await service.publishServerSigned(signed);
+
+    expect(updates[0]).toEqual({ serverSigned: signed, serverVersion: 100 });
+  });
+
+  // An offline list belongs at /endpoints/bundle, where every client
+  // reads it.
+  it("refuses an envelope without the statement", async () => {
+    const { service } = build();
+    await expect(service.publishServerSigned(seal({ v: 100, ...LIST }))).rejects.toThrow(/no cert/);
+  });
+
+  it("refuses a version below 100, which would share a number with an offline list", async () => {
+    const { service } = build();
+    await expect(service.publishServerSigned(sealServer({ v: 8, ...LIST }))).rejects.toThrow(/100 or higher/);
+  });
+
+  it("refuses a version that is not newer than the server list's own", async () => {
+    const { service } = build({ version: 900, serverVersion: 104 });
+    await expect(service.publishServerSigned(sealServer({ v: 104, ...LIST }))).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    // The offline list's number is not the one it is compared with.
+    await expect(service.publishServerSigned(sealServer({ v: 105, ...LIST }))).resolves.toEqual({ version: 105 });
+  });
+
+  it("404s before one is published, then serves exactly what was stored", async () => {
+    await expect(build().service.publishedServerSigned()).rejects.toBeInstanceOf(NotFoundException);
+    const signed = sealServer({ v: 101, ...LIST });
+    expect(await build({ serverSigned: signed }).service.publishedServerSigned()).toBe(signed);
   });
 });
 

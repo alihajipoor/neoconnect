@@ -249,6 +249,37 @@ function configuredEntry(raw: unknown, stored = false): StandardEntry | LastReso
  * to be stored verbatim -- see EndpointBundleState in the schema for why
  * the key must not live on the panel.
  */
+/** The first version a server-signed list may carry (`publishServerSigned`). */
+export const SERVER_SIGNED_FIRST_VERSION = 100;
+
+/** The version a signed envelope claims, validated only as far as "this
+ * parses, claims a version and lists endpoints" (and, for a server-signed
+ * list, carries its statement), or a 400 that says why. Signatures are
+ * the client's to check: the panel holds no key worth proving anything
+ * to itself with. */
+function envelopeVersion(signed: string, options: { statement?: boolean } = {}): number {
+  try {
+    const envelope = JSON.parse(signed) as { payload?: string; cert?: { payload?: unknown } };
+    if (typeof envelope.payload !== "string") throw new Error("no payload");
+    if (options.statement && typeof envelope.cert?.payload !== "string") {
+      throw new Error("no cert: a server-signed list carries the statement it is signed under");
+    }
+    const payload = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8")) as {
+      v?: unknown;
+      endpoints?: unknown;
+    };
+    if (typeof payload.v !== "number" || !Number.isFinite(payload.v)) {
+      throw new Error("payload has no numeric v");
+    }
+    if (!Array.isArray(payload.endpoints) || payload.endpoints.length === 0) {
+      throw new Error("payload has no endpoints");
+    }
+    return payload.v;
+  } catch (err) {
+    throw new BadRequestException(`Not a usable signed bundle: ${(err as Error).message}`);
+  }
+}
+
 @Injectable()
 export class EndpointsService {
   private readonly logger = new Logger(EndpointsService.name);
@@ -353,25 +384,7 @@ export class EndpointsService {
    * place it counts.
    */
   async publish(signed: string): Promise<{ version: number }> {
-    let version: number;
-    try {
-      const envelope = JSON.parse(signed) as { payload?: string };
-      if (typeof envelope.payload !== "string") throw new Error("no payload");
-      const payload = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8")) as {
-        v?: unknown;
-        endpoints?: unknown;
-      };
-      if (typeof payload.v !== "number" || !Number.isFinite(payload.v)) {
-        throw new Error("payload has no numeric v");
-      }
-      if (!Array.isArray(payload.endpoints) || payload.endpoints.length === 0) {
-        throw new Error("payload has no endpoints");
-      }
-      version = payload.v;
-    } catch (err) {
-      throw new BadRequestException(`Not a usable signed bundle: ${(err as Error).message}`);
-    }
-
+    const version = envelopeVersion(signed);
     const state = await this.state();
     if (version <= state.version) {
       // Refused rather than accepted-and-ignored: publishing a version
@@ -387,6 +400,42 @@ export class EndpointsService {
       data: { signed, version },
     });
     return { version };
+  }
+
+  /** Stores the server-signed list (/endpoints/bundle2), verbatim.
+   *
+   * Held to `publish`'s checks and two more. It carries the statement
+   * clients check it under (`cert`): an offline list belongs at
+   * /endpoints/bundle, which every client reads. And it is version 100 or
+   * higher, so it never shares a number with an offline list -- a client
+   * holding offline v8 would refuse a server list that was also v8.
+   */
+  async publishServerSigned(signed: string): Promise<{ version: number }> {
+    const version = envelopeVersion(signed, { statement: true });
+    if (version < SERVER_SIGNED_FIRST_VERSION) {
+      throw new BadRequestException(
+        `A server-signed list is version ${SERVER_SIGNED_FIRST_VERSION} or higher, never ${version}: below that it shares numbers with the offline list.`,
+      );
+    }
+    const state = await this.state();
+    if (version <= state.serverVersion) {
+      throw new BadRequestException(
+        `Version ${version} is not newer than the published ${state.serverVersion}; clients only accept a strictly higher version.`,
+      );
+    }
+    await this.prisma.endpointBundleState.update({
+      where: { id: state.id },
+      data: { serverSigned: signed, serverVersion: version },
+    });
+    return { version };
+  }
+
+  /** The server-signed envelope, or 404 -- the answer a client takes as
+   * "ask for the offline list instead". */
+  async publishedServerSigned(): Promise<string> {
+    const state = await this.state();
+    if (!state.serverSigned) throw new NotFoundException("No server-signed endpoint list has been published yet");
+    return state.serverSigned;
   }
 
   /** The published envelope, or 404.

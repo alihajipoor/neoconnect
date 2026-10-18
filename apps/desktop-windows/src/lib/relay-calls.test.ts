@@ -37,12 +37,10 @@ describe("the relay's list of calls", () => {
     expect([...RELAY_CALLS.GET].sort()).toEqual(rustList("GET_PATHS").sort());
   });
 
-  it("asks the backend for nothing it would refuse, but the bundle path it does not serve yet", () => {
+  it("asks the backend for nothing it would refuse", () => {
     const served = new Set(backendList());
     const ours = [...RELAY_CALLS.POST.map((p) => key("POST", p)), ...RELAY_CALLS.GET.map((p) => key("GET", p))];
-    // `/endpoints/bundle2` is named ahead of the backend serving it; it is
-    // asked of the relay only as a GET the backend answers 404 to today.
-    expect(ours.filter((call) => !served.has(call))).toEqual(["GET /endpoints/bundle2"]);
+    expect(ours.filter((call) => !served.has(call))).toEqual([]);
   });
 
   it("leaves out only card and crypto checkout from what the backend allows", () => {

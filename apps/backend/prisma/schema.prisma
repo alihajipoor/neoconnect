@@ -1916,6 +1916,17 @@ model EndpointBundleState {
   /// versions without parsing a blob it is not allowed to trust.
   version Int @default(0)
 
+  /// The server-signed list, served at /endpoints/bundle2: signed by a
+  /// server key under a compiled-in key's statement (`cert`), so it can
+  /// follow the servers without waiting for the owner. Apart from
+  /// `signed` because clients from before the statement refuse such a
+  /// list and must keep receiving the offline one. Null until the first.
+  serverSigned String?
+
+  /// Its version, mirrored as `version` is. 100 and up, so it never
+  /// shares a number with an offline list.
+  serverVersion Int @default(0)
+
   updatedAt DateTime @updatedAt
 
   @@map("endpoint_bundle_state")

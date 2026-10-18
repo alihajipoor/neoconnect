@@ -28,6 +28,17 @@ export class PublicEndpointsController {
   async bundle(@Res() res: Response) {
     res.send(await this.endpoints.published());
   }
+
+  /** The list the server signs under a compiled-in key's statement
+   * (scripts/endpoints/bundle.mjs `vouch`), asked for first by clients
+   * that check statements. Its own path, because clients from before the
+   * statement refuse such a list. */
+  @Get("bundle2")
+  @Header("Cache-Control", "no-store")
+  @Header("Content-Type", "application/json")
+  async serverSigned(@Res() res: Response) {
+    res.send(await this.endpoints.publishedServerSigned());
+  }
 }
 
 @ApiExcludeController()
@@ -50,6 +61,14 @@ export class AdminEndpointsController {
   @Roles(AdminRole.SUPERADMIN)
   publish(@Body() body: { signed?: string }) {
     return this.endpoints.publish(String(body?.signed ?? ""));
+  }
+
+  /** Accepts a server-signed list (`sign --cert`), for /endpoints/bundle2. */
+  @Put("bundle2")
+  @UseGuards(RolesGuard)
+  @Roles(AdminRole.SUPERADMIN)
+  publishServerSigned(@Body() body: { signed?: string }) {
+    return this.endpoints.publishServerSigned(String(body?.signed ?? ""));
   }
 
   /** Replaces the configured entries. `kind` may be left out and means

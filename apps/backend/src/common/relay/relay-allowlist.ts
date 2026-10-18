@@ -29,6 +29,7 @@ export const RELAY_ALLOWLIST: readonly RelayRoute[] = [
   // Reachability and the signed endpoint bundle.
   { method: "GET", path: "/health" },
   { method: "GET", path: "/endpoints/bundle" },
+  { method: "GET", path: "/endpoints/bundle2" },
   { method: "GET", path: "/relay/status" },
 
   // Signing in, signing up, and the ways back into an account.

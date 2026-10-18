@@ -38,6 +38,7 @@ map "$request_method $request_uri" $neoxify_relay_allowed {
     default 0;
     "GET /api/health" 1;
     "GET /api/endpoints/bundle" 1;
+    "GET /api/endpoints/bundle2" 1;
     "GET /api/relay/status" 1;
     "POST /api/login-challenge" 1;
     "POST /api/customer-auth/login" 1;
