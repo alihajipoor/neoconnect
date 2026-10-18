@@ -7458,3 +7458,70 @@ on every config the service writes.
   blocked.
 - Against a 26.3.27 node, only the source has been read.
 - XUDP's cost on a lossy line.
+
+## 2026-10-17/18 — fleet changes, the control plane blocked again, and a reachability release (branch `claude/reachability-release`, not merged)
+
+**Status:** server side live; the app side is on the branch for the PC to
+test and release (owner: 2026-10-18 evening). Real names and addresses are
+redacted per docs/node-address-hygiene.md.
+
+**Fleet, 2026-10-17.** `{finland1}` is retired (the VPS is deleted; its
+chain rules on `{ir2}` and `{germany-1}` removed). `{finland-2}` and
+`{uk-1}` were installed (REALITY dests set per country -- the installer
+defaults to an Iranian site), added to every plan, and given UK and
+Finland listeners on `{ir2}` with relay routes. Pro's default route, nulled
+with `{finland1}`, is `{finland-2} / OpenVPN` again. The planned rename of
+the two new nodes to `{mirror-domain}` names was dropped -- see below.
+
+**What broke, and what is live now.** `{mirror-domain}` was DNS-poisoned
+and SNI-reset in Iran (tested from `{ir2}`), taking out every mirror in
+bundle v6; on home and mobile networks the four panel addresses time out
+as well. Full account in docs/reachability.md. Live since:
+- Direct mirrors on all six nodes: `{direct-mirror-domain}` names, DNS-only,
+  port 2096, a certificate per name, nginx site `neoxify-mirror-direct`.
+  Answer from inside Iran on five; `{singapore-1}`'s IP is unreachable from
+  `{ir2}` on every port.
+- Offline bundle **v7** (those mirrors first) and the first server-signed
+  list, **bundle2 v100** (same endpoints), published by writing
+  `endpoint_bundle_state` on the panel host -- the owner was away from the
+  panel login. Row backups in `/root/db-backups/endpoint-bundle-before-*`.
+- The backend serves `/endpoints/bundle2` (on main, deployed 2026-10-18
+  01:15 UTC; DB backup `pre-bundle2-*`), and the live relay allowlist on
+  the panel host has it.
+
+**Keys.** `server-1` exists on the owner's Mac beside the offline keys, with
+`primary`'s statement for it, **expiring 2027-10-18** -- vouch again before
+then or server lists stop being accepted. It is not on the panel host:
+the owner's condition for that is the panel hardening (below).
+
+**On the branch, for the release:** server-signed lists (`cert`), the HTTP
+scope following the signed list (`grant_bundle_scope`), and the backup
+route on with no prompt and no device-side country guess. Tests here:
+desktop 1706 and mobile 238 JS, mobile Rust 81 (with a mock-runtime test
+of the grant against the app's generated ACL), backend 1464. The 5 desktop
+and 1 mobile failures in `api-endpoints.scope.test.ts` are this Mac's stale
+generated seed and capability files, the same on main.
+
+**Unverified:** anything on a device or in the VM -- the release checks in
+docs/reachability.md. The Windows crate was not built here; only the mobile
+crate, which compiles the same `bundle_scope.rs`.
+
+**Next, decided, not built:** the panel signing and publishing bundle2
+itself; panel hardening first (admin access behind an identity check, MFA
+for every admin, login alerts, the signing key in a process the panel
+cannot read); the control plane through the tunnels with a restricted
+guest connection for sign-in and sign-up (owner: a traffic cap, usable
+only for the API); a one-time nudge for social-only accounts to set a
+password, since Google and Apple sign-in cannot work in an intranet.
+
+**Gotchas that cost time:**
+- Never put two of our domains on one certificate: CT logs publish the
+  pair, which is the likely way `{mirror-domain}` was found.
+- The Cloudflare dashboard's own API refuses scripted writes with a bot
+  page; records go through the form, whose proxy switch moves as the
+  header line wraps.
+- `ssh host 'bash -s' < script` with `docker exec -i` inside: the container
+  reads the rest of the script as its stdin. Copy the script over and run
+  it as a file.
+- The bundle draft (`GET /admin/endpoints/draft`) cannot express the direct
+  mirrors (it fixes port 2053 and one mirror host per node): hand-edit it.
