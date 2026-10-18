@@ -9,7 +9,7 @@ import {
 } from "../lib/auth";
 import { failureText } from "../lib/failure-text";
 import { useI18n } from "../lib/i18n";
-import { relayConsent, relaySupported, setRelayConsent } from "../lib/last-resort";
+import { backupRouteOn, relaySupported, setBackupRouteOn } from "../lib/last-resort";
 import { Button, Card, Input, Label } from "./ui";
 import { StillTrying } from "./StillTrying";
 import { RecoveryCodeNotice, relayDetail, useRelayMode } from "./BackupRoute";
@@ -350,17 +350,17 @@ export function SetPasswordSection({ onDone }: { onDone: () => void }) {
   );
 }
 
-/** The backup route's switch: the consent the prompt asks for (R1.4), to
- * give or take back here. While relay mode lasts it says so, and why, in
- * the words the evidence allows (`relayDetail`). */
+/** The backup route's switch: on until the customer turns it off here --
+ * nothing asks first (last-resort.ts). While relay mode lasts it says so,
+ * and why, in the words the evidence allows (`relayDetail`). */
 export function BackupRouteSection() {
   const { t } = useI18n();
   const { active, status } = useRelayMode();
-  const [granted, setGranted] = useState(relayConsent() === "granted");
+  const [granted, setGranted] = useState(backupRouteOn());
 
   function toggle() {
     const next = !granted;
-    setRelayConsent(next);
+    setBackupRouteOn(next);
     setGranted(next);
   }
 

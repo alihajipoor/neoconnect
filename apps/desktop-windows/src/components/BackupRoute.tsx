@@ -1,10 +1,9 @@
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Check, Copy, KeyRound, Route } from "lucide-react";
 import {
   checkTunnelForRelayMode,
   onRelayChange,
-  onRelayConsentAsked,
   refreshRelayStatus,
   relayModeActive,
   relayStatus,
@@ -12,11 +11,12 @@ import {
   type RelayStatus,
 } from "../lib/last-resort";
 import { useI18n } from "../lib/i18n";
-import { Button, Card } from "./ui";
+import { Button } from "./ui";
 
 /** The relay of last resort's screens (docs/relay-last-resort.md, section
- * 8), shared by both clients: the consent prompt, the backup-route chip,
- * and the recovery code shown once.
+ * 8), shared by both clients: the backup-route chip and the recovery code
+ * shown once. There is no consent prompt any more: the backup route is on
+ * until the customer turns it off in Settings (last-resort.ts).
  *
  * Calm, as every state on these screens has to be (ui-state-calm): the
  * chip is neutral and steady for the whole of relay mode and never
@@ -45,72 +45,6 @@ export function useRelayMode(): { active: boolean; status: RelayStatus | null } 
  * usual routes being blocked on this network. */
 export function relayDetail(status: RelayStatus | null): "relay.intranet" | "relay.blocked" {
   return status?.intranet === true ? "relay.intranet" : "relay.blocked";
-}
-
-/** Asks, once per install, whether the backup server may be used, before
- * any byte is sent to it (R1.4). Mounted once, at the root of each app;
- * last-resort.ts asks through it only for a request the customer just
- * made, never for a background one. Two plain answers and no dismissal:
- * a decline is remembered, so it has to be a decision. */
-export function BackupRouteConsent() {
-  const { t } = useI18n();
-  const [asking, setAsking] = useState<{ resolve: (granted: boolean) => void; reject: () => void } | null>(null);
-  const pending = useRef(asking);
-  pending.current = asking;
-
-  useEffect(() => {
-    const off = onRelayConsentAsked(
-      () =>
-        new Promise<boolean>((resolve, reject) => {
-          setAsking({ resolve, reject: () => reject(new Error("closed")) });
-        }),
-    );
-    return () => {
-      off();
-      // Gone without an answer: nobody was asked, which is not a decline.
-      pending.current?.reject();
-    };
-  }, []);
-
-  if (asking === null) return null;
-  const answer = (granted: boolean) => {
-    asking.resolve(granted);
-    setAsking(null);
-  };
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="backup-route-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-    >
-      <Card className="flex w-full max-w-sm flex-col gap-3">
-        <div className="flex items-center gap-2">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
-            <Route className="size-4" />
-          </div>
-          <h2 id="backup-route-title" className="text-sm font-semibold">
-            {t("relay.consentTitle")}
-          </h2>
-        </div>
-        <p className="text-sm text-muted-foreground">{t("relay.consentBody")}</p>
-        <p className="text-xs text-muted-foreground">{t("relay.consentLater")}</p>
-        <div className="flex gap-2">
-          <Button onClick={() => answer(true)} className="flex-1 justify-center">
-            {t("relay.consentAccept")}
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => answer(false)}
-            className="flex-1 justify-center border border-white/10"
-          >
-            {t("relay.consentDecline")}
-          </Button>
-        </div>
-      </Card>
-    </div>
-  );
 }
 
 /** "App data: backup route", for as long as relay mode lasts, and nothing

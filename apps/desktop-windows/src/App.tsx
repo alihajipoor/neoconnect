@@ -23,7 +23,7 @@ import { GamingModeCard } from "./components/GamingModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 import { setRelayTunnelReader } from "./lib/last-resort";
-import { BackupRouteChip, BackupRouteConsent } from "./components/BackupRoute";
+import { BackupRouteChip } from "./components/BackupRoute";
 
 /** How often a queued diagnostic report retries.
  *
@@ -423,7 +423,6 @@ export default function App() {
       <div className="min-h-0 flex-1">
         <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>
       </div>
-      <BackupRouteConsent />
     </div>
   );
 }

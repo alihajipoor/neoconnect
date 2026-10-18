@@ -94,7 +94,6 @@ beforeEach(() => {
   relayReplies = [];
   tunnelUp = false;
   lr.resetLastResortForTests({
-    environment: { timeZone: "Asia/Tehran", languages: ["fa-IR"] },
     tunnelUp: () => Promise.resolve(tunnelUp),
     transport: async (args) => {
       relayed.push(args as Relayed);
@@ -104,7 +103,7 @@ beforeEach(() => {
       return reply;
     },
   });
-  lr.setRelayConsent(true);
+  lr.setBackupRouteOn(true);
 });
 
 const body = (r: Relayed) => JSON.parse(r.body ?? "null") as Record<string, unknown>;
@@ -173,7 +172,7 @@ describe("signing in", () => {
   });
 
   it("does not use the relay when the customer declined it, and says nothing of it", async () => {
-    lr.setRelayConsent(false);
+    lr.setBackupRouteOn(false);
     const result = await login("a@example.com", "password1");
     expect(result).toMatchObject({ ok: false, noResponse: true });
     expect(result).not.toHaveProperty("relayTried");
@@ -218,7 +217,7 @@ describe("signing up", () => {
   });
 
   it("is not available when the relay cannot be used, and says so", async () => {
-    lr.setRelayConsent(false);
+    lr.setBackupRouteOn(false);
     const result = await relayRegister("a@example.com", "a@example.com", "password1");
     expect(result).toMatchObject({ ok: false, code: "RELAY_UNAVAILABLE" });
     expect(relayed).toEqual([]);

@@ -101,7 +101,6 @@ beforeEach(() => {
   stored = { accessToken: "access", refreshToken: "refresh" };
   lr.resetLastResortForTests({
     now: () => now,
-    environment: { timeZone: "Asia/Tehran", languages: ["fa-IR"] },
     tunnelUp: () => Promise.resolve(tunnelUp),
     transport: async (args) => {
       relayed.push(args as Relayed);
@@ -111,7 +110,7 @@ beforeEach(() => {
       return reply;
     },
   });
-  lr.setRelayConsent(true);
+  lr.setBackupRouteOn(true);
 });
 
 const ME = { id: "c1", email: "a@example.com" };
@@ -171,7 +170,7 @@ describe("a request every ordinary route failed", () => {
     relayReplies = ["relay: connect-timeout"];
     const tried = await apiRequest("/customer/me", { relay: "foreground" });
     expect(tried).toMatchObject({ ok: false, noResponse: true, relayTried: true });
-    store.set("neoxify.relay.consent", "declined");
+    store.set("neoxify.relay.switch", "off");
     const declined = await apiRequest("/customer/me", { relay: "foreground" });
     expect(declined).toMatchObject({ ok: false, noResponse: true });
     expect(declined).not.toHaveProperty("relayTried");

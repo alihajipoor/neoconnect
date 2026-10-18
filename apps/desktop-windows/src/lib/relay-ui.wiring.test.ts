@@ -26,12 +26,6 @@ function component(source: string, name: string): string {
 
 describe("the approved strings", () => {
   it("say what the spec says, in both languages", () => {
-    expect(en["relay.consentBody"]).toBe(
-      "Neoxify can't be reached the usual way on this network. Use our backup server inside Iran? Your data stays encrypted; the server's host can see that this device connected, not what it sent.",
-    );
-    expect(fa["relay.consentBody"]).toBe(
-      "در این شبکه دسترسی به نئوکسیفای از راه معمول ممکن نیست. از سرور پشتیبان ما در داخل ایران استفاده شود؟ اطلاعات شما رمزگذاری‌شده می‌ماند؛ میزبان این سرور فقط می‌بیند که این دستگاه وصل شده، نه آنچه فرستاده شده.",
-    );
     expect(en["relay.chip"]).toBe("App data: backup route");
     expect(fa["relay.chip"]).toBe("داده‌های برنامه: مسیر پشتیبان");
     expect(en["relay.disconnect"]).toBe("Disconnect to use the backup route.");
@@ -83,10 +77,9 @@ describe("the approved strings", () => {
 });
 
 describe("the calm-UI rules", () => {
-  it("draw the chip, the prompt and the reminders without a warning colour", () => {
+  it("draw the chip and the reminders without a warning colour", () => {
     for (const source of [
       component(backupRoute, "BackupRouteChip"),
-      component(backupRoute, "BackupRouteConsent"),
       component(recovery, "VerifyEmailReminder").split("function Problem")[0],
     ]) {
       // Errors a form shows are `Problem`, defined apart; the card itself
@@ -95,10 +88,9 @@ describe("the calm-UI rules", () => {
     }
   });
 
-  it("put the chip and the prompt at each app's root, never on a dashboard's orb or headline", () => {
+  it("put the chip at each app's root, never on a dashboard's orb or headline", () => {
     for (const app of [desktopApp, mobileApp]) {
       expect(app).toMatch(/<BackupRouteChip \/>/);
-      expect(app).toMatch(/<BackupRouteConsent \/>/);
       expect(app).toMatch(/setRelayTunnelReader\(/);
     }
     for (const dashboard of [desktopDashboard, mobileDashboard]) {
@@ -122,13 +114,15 @@ describe("the calm-UI rules", () => {
     expect(chip).toMatch(/return \(\) => clearInterval\(watch\);/);
   });
 
-  it("ask consent with two plain answers, and no way to dismiss it as a decline", () => {
-    const prompt = component(backupRoute, "BackupRouteConsent");
-    expect(prompt).toMatch(/answer\(true\)/);
-    expect(prompt).toMatch(/answer\(false\)/);
-    expect(prompt).not.toMatch(/Escape/);
-    // The backdrop is not a button.
-    expect(prompt).not.toMatch(/bg-black\/60[^>]*onClick/);
+  // Owner, 2026-10-18: the backup route asks nothing before it is used.
+  // A prompt only ever reached customers who tapped something; the
+  // server-list refresh of one already signed in never asked, and kept
+  // them on cached servers. It is on until turned off in Settings.
+  it("ask nothing before the backup route is used, and start the Settings switch on", () => {
+    expect(backupRoute).not.toMatch(/BackupRouteConsent|onRelayConsentAsked/);
+    for (const app of [desktopApp, mobileApp]) expect(app).not.toMatch(/BackupRouteConsent/);
+    expect(component(recovery, "BackupRouteSection")).toMatch(/useState\(backupRouteOn\(\)\)/);
+    expect(Object.keys(en).filter((key) => key.startsWith("relay.consent"))).toEqual([]);
   });
 });
 
