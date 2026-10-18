@@ -10,7 +10,7 @@ vi.mock("./endpoint-bundle", async (importOriginal) => {
   return { ...real, verifyBundle: (raw: string) => real.verifyBundle(raw, keys) };
 });
 
-const { isKnownBlockPage, refreshFrom, cachedBundle } = await import("./endpoint-bundle-store");
+const { isKnownBlockPage, refreshFrom, cachedBundle, setScopeGranterForTests } = await import("./endpoint-bundle-store");
 
 function b64(bytes: Uint8Array): string {
   let s = "";
@@ -117,6 +117,123 @@ describe("bundle refresh", () => {
   });
 });
 
+/** A list the server signs, under the operator key's statement for it. */
+async function serverSealed(v: number) {
+  if (!keys.primary) await sealed(0);
+  const serverPriv = utils.randomPrivateKey();
+  const statement = new TextEncoder().encode(
+    JSON.stringify({
+      kind: "neoxify-bundle-key",
+      id: "server-1",
+      publicKey: b64(await getPublicKeyAsync(serverPriv)),
+      expires: Math.floor(Date.now() / 1000) + 3600,
+    }),
+  );
+  const payload = new TextEncoder().encode(
+    JSON.stringify({ v, issuedAt: "x", endpoints: [{ kind: "mirror", url: `https://s${v}.example.org:2096/api` }] }),
+  );
+  return JSON.stringify({
+    payload: b64(payload),
+    sig: b64(await signAsync(payload, serverPriv)),
+    key: "server-1",
+    cert: { payload: b64(statement), sig: b64(await signAsync(statement, OPERATOR_KEY)), key: "primary" },
+  });
+}
+
+/** Answers each path with its own body; anything else is a 404. */
+function byPath(bodies: Record<string, string>) {
+  const asked: string[] = [];
+  const fetcher = (url: string) => {
+    asked.push(url);
+    const path = Object.keys(bodies).find((p) => url.endsWith(p));
+    return Promise.resolve(path ? okResponse(bodies[path]) : { ok: false, text: () => Promise.resolve("") });
+  };
+  return { fetcher, asked };
+}
+
+describe("the server-signed list", () => {
+  it("is asked for first, and adopted when it is the newest", async () => {
+    store.get.mockResolvedValue(await sealed(7));
+    store.set.mockClear();
+    const server = await serverSealed(105);
+    const { fetcher, asked } = byPath({ "/endpoints/bundle2": server, "/endpoints/bundle": await sealed(8) });
+
+    const out = await refreshFrom("https://a.example.net/api", fetcher);
+
+    expect(out?.v).toBe(105);
+    expect(asked[0]).toBe("https://a.example.net/api/endpoints/bundle2");
+    expect(store.set).toHaveBeenCalledWith("bundle", server);
+    expect(store.set).toHaveBeenCalledTimes(1);
+  });
+
+  // Every backend before bundle2, and any with none published yet.
+  it("leaves the offline list to be adopted when there is none", async () => {
+    store.get.mockResolvedValue(await sealed(7));
+    store.set.mockClear();
+    const offline = await sealed(8);
+    const { fetcher } = byPath({ "/endpoints/bundle": offline });
+
+    expect((await refreshFrom("https://a.example.net/api", fetcher))?.v).toBe(8);
+    expect(store.set).toHaveBeenCalledWith("bundle", offline);
+  });
+
+  it("is not adopted over a newer offline list", async () => {
+    store.get.mockResolvedValue(await sealed(7));
+    store.set.mockClear();
+    const offline = await sealed(200);
+    const { fetcher } = byPath({ "/endpoints/bundle2": await serverSealed(105), "/endpoints/bundle": offline });
+
+    expect((await refreshFrom("https://a.example.net/api", fetcher))?.v).toBe(200);
+    expect(store.set).toHaveBeenLastCalledWith("bundle", offline);
+  });
+});
+
+describe("the HTTP scope", () => {
+  it("is widened to the hosts of a list as it is adopted", async () => {
+    const granted: string[] = [];
+    setScopeGranterForTests((envelope) => {
+      granted.push(envelope);
+      return Promise.resolve();
+    });
+    store.get.mockResolvedValue(await sealed(7));
+    const server = await serverSealed(106);
+
+    await refreshFrom("https://a.example.net/api", byPath({ "/endpoints/bundle2": server }).fetcher);
+
+    expect(granted).toContain(server);
+    setScopeGranterForTests(null);
+  });
+
+  // A list adopted in an earlier run names hosts this run has not been
+  // granted: they are granted before the list is handed out.
+  it("is widened to the held list's hosts before anything reads it", async () => {
+    const granted: string[] = [];
+    setScopeGranterForTests((envelope) => {
+      granted.push(envelope);
+      return Promise.resolve();
+    });
+    const held = await sealed(9);
+    store.get.mockResolvedValue(held);
+
+    await cachedBundle();
+    await cachedBundle();
+
+    expect(granted).toEqual([held]);
+    setScopeGranterForTests(null);
+  });
+
+  // The web portal and the macOS app have no such command.
+  it("costs nothing where the command is missing", async () => {
+    setScopeGranterForTests(() => Promise.reject(new Error("command grant_bundle_scope not found")));
+    store.get.mockResolvedValue(await sealed(7));
+    const offline = await sealed(10);
+
+    expect((await refreshFrom("https://a.example.net/api", byPath({ "/endpoints/bundle": offline }).fetcher))?.v).toBe(10);
+    expect((await cachedBundle())?.v).toBe(7);
+    setScopeGranterForTests(null);
+  });
+});
+
 describe("block-page detection", () => {
   it("recognises Iran's sinkhole range", () => {
     expect(isKnownBlockPage("10.10.34.34")).toBe(true);
@@ -180,7 +297,11 @@ describe("refresh trigger", () => {
     await mod.maybeRefreshBundle("https://a.example.net/api");
     await mod.maybeRefreshBundle("https://a.example.net/api");
     await mod.maybeRefreshBundle("https://b.example.net/api");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // One refresh: the server-signed list, then the offline one.
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://a.example.net/api/endpoints/bundle2",
+      "https://a.example.net/api/endpoints/bundle",
+    ]);
     vi.unstubAllGlobals();
   });
 

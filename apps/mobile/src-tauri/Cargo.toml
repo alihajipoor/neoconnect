@@ -74,6 +74,10 @@ tokio-rustls = { version = "0.26", default-features = false }
 http = "1"
 bytes = "1"
 tokio = { version = "1", features = ["net"] }
+# The mock runtime, for the test that a bundle's hosts granted at run
+# time really pass the HTTP plugin's scope (bundle_scope.rs): the same
+# crate with its `test` feature, nothing new in Cargo.lock.
+tauri = { version = "2", features = ["test"] }
 
 # Added for the direct-download APK, which reached 141 MB and is the
 # build Iranian customers use -- Play does not serve them, so this is

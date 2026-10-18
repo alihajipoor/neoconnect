@@ -35,6 +35,14 @@ mod health_ip;
 #[path = "../../../desktop-windows/src-tauri/src/relay_http.rs"]
 mod relay_http;
 
+/// The HTTP scope for the hosts a signed endpoint bundle names -- the
+/// Windows app's file again. The scope written at build time knows only
+/// the seed bundle's hosts; this grants a newer bundle's once its
+/// signature checks out, so moving customers to a new domain or a bare
+/// address needs no release.
+#[path = "../../../desktop-windows/src-tauri/src/bundle_scope.rs"]
+mod bundle_scope;
+
 /// The OS this binary was compiled for: "android" or "ios" here, as the
 /// platform on attempt reports.
 ///
@@ -100,8 +108,75 @@ pub fn run() {
             // would go unrecognised in `health_ip_v4`'s peer address.
             health_ip::resolve_ipv4,
             // The relay of last resort; see `mod relay_http` above.
-            relay_http::relay_request
+            relay_http::relay_request,
+            // A signed bundle's hosts into the HTTP scope; see
+            // `mod bundle_scope` above.
+            bundle_scope::grant_bundle_scope
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod bundle_scope_runtime {
+    use std::collections::BTreeSet;
+
+    use serde_json::json;
+    use tauri::ipc::{CallbackFn, InvokeBody};
+    use tauri::test::{get_ipc_response, mock_builder, INVOKE_KEY};
+    use tauri::webview::InvokeRequest;
+    use tauri::{Manager, WebviewWindowBuilder};
+
+    /// The HTTP plugin's `fetch`, which checks the scope before it builds
+    /// a request: an error naming the scope, or a request id.
+    fn fetch(webview: &tauri::WebviewWindow<tauri::test::MockRuntime>, url: &str) -> Result<String, String> {
+        get_ipc_response(
+            webview,
+            InvokeRequest {
+                cmd: "plugin:http|fetch".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: InvokeBody::Json(json!({
+                    "clientConfig": { "method": "GET", "url": url, "headers": [], "data": null }
+                })),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|body| format!("{:?}", body))
+        .map_err(|err| format!("{:?}", err))
+    }
+
+    /// With this app's own generated ACL -- the one a release carries --
+    /// a host outside the build-time scope is refused, then reached once
+    /// granted, and nothing panics on the way: add_capability unwraps its
+    /// resolution, so a capability it could not resolve would take the
+    /// app down at the first bundle it read.
+    #[test]
+    fn a_granted_host_passes_the_http_scope() {
+        let app = mock_builder()
+            .plugin(tauri_plugin_http::init())
+            .build(tauri::generate_context!(test = true))
+            .expect("app");
+        let webview = match app.get_webview_window("main") {
+            Some(webview) => webview,
+            None => WebviewWindowBuilder::new(&app, "main", Default::default()).build().expect("window"),
+        };
+        let url = "https://198.51.100.250:2096/api/health";
+
+        let before = fetch(&webview, url);
+        assert!(before.as_ref().is_err_and(|e| e.contains("not allowed")), "before: {before:?}");
+
+        let host: BTreeSet<String> = ["198.51.100.250".to_owned()].into();
+        assert_eq!(crate::bundle_scope::grant_hosts(app.handle(), host.clone()), Ok(vec!["198.51.100.250".to_owned()]));
+        // Granted once: asking again adds nothing.
+        assert_eq!(crate::bundle_scope::grant_hosts(app.handle(), host), Ok(vec![]));
+
+        let after = fetch(&webview, url);
+        assert!(after.is_ok(), "after: {after:?}");
+        // And only that host.
+        let other = fetch(&webview, "https://198.51.100.251:2096/api/health");
+        assert!(other.as_ref().is_err_and(|e| e.contains("not allowed")), "other: {other:?}");
+    }
 }

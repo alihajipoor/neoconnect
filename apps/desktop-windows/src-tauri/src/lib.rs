@@ -1,3 +1,4 @@
+mod bundle_scope;
 mod control_plane_probe;
 mod health_ip;
 mod relay_http;
@@ -189,7 +190,10 @@ pub fn run() {
             // The relay of last resort: an allowed API call, by address
             // and SPKI pin, when no ordinary route answers. See
             // relay_http.rs.
-            relay_http::relay_request
+            relay_http::relay_request,
+            // The HTTP scope for the hosts of a signed endpoint bundle,
+            // checked here before it is widened. See bundle_scope.rs.
+            bundle_scope::grant_bundle_scope
         ])
         // Closing the window is an instruction, and it has to be acted
         // on rather than inferred.
