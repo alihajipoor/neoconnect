@@ -3,6 +3,7 @@ import {
   HALF_LIFE_MS,
   KEEP_PER_KEY,
   forgetNetwork,
+  latestAttempt,
   recordAttempt,
   scoreFor,
   type ConnectHistory,
@@ -123,5 +124,22 @@ describe("forgetting a network", () => {
     const after = forgetNetwork(h, "wifi");
     expect(scoreFor(after, "wifi", "de-1", "WIREGUARD", NOW)).toBeNull();
     expect(scoreFor(after, "cellular", "de-1", "WIREGUARD", NOW)).toBe(1);
+  });
+});
+
+describe("latestAttempt", () => {
+  it("is null with nothing recorded for the combination", () => {
+    expect(latestAttempt({}, "wifi", "de-1", "WIREGUARD")).toBeNull();
+  });
+
+  it("returns the newest attempt by its stamp, not by its position", () => {
+    const h: ConnectHistory = {
+      "wifi|de-1|WIREGUARD": [
+        { at: NOW - hours(1), ok: false },
+        { at: NOW - hours(3), ok: true },
+      ],
+    };
+    expect(latestAttempt(h, "wifi", "de-1", "WIREGUARD")).toEqual({ at: NOW - hours(1), ok: false });
+    expect(latestAttempt(h, "cellular", "de-1", "WIREGUARD")).toBeNull();
   });
 });
