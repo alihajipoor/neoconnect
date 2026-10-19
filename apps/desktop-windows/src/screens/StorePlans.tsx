@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Check, HardDrive, Loader2 } from "lucide-react";
+import { Check, HardDrive } from "lucide-react";
 
 import { buyIapPlan, loadIapPlans, type IapPlan } from "../lib/iap";
-import { formatBytes } from "../lib/utils";
-import { Button, Card } from "../components/ui";
-import { Logo } from "../components/Logo";
+import { Card, Message, PillButton } from "../components/ui";
+import { Page } from "../components/shell/Page";
+import { formatNumber, formatSize } from "../lib/locale-format";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { StillTrying } from "../components/StillTrying";
@@ -30,7 +30,7 @@ export function StorePlans({
   onActivated: () => void;
   onBack: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [plans, setPlans] = useState<IapPlan[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [buying, setBuying] = useState<string | null>(null);
@@ -66,89 +66,54 @@ export function StorePlans({
     }
   }
 
+  // The same card language as Plans, with the store's own prices and
+  // nothing else to buy with: no voucher, no card or crypto, no website
+  // (guideline 3.1.1).
   return (
-    <div className="glow-backdrop flex h-full flex-col overflow-y-auto p-6">
-      <button
-        type="button"
-        onClick={onBack}
-        className="press mb-4 flex items-center gap-2 self-start text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="size-4" />
-        {t("plans.back")}
-      </button>
-
-      <div className="animate-rise mb-6 flex flex-col items-center gap-2">
-        <Logo className="scale-90" />
-        <h1 className="text-lg font-semibold">{t("plans.title")}</h1>
-      </div>
-
+    <Page title={t("plans.title")} lede={t("plans.storeLede")} back={onBack} backAlways backLabel={t("plans.back")} data-store-plans>
       {loadError ? (
-        <Card className="animate-rise">
-          <p role="alert" className="text-sm text-destructive">
-            {loadError}
-          </p>
-        </Card>
+        <Message tone="danger">{loadError}</Message>
       ) : plans === null ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3">
-          <Loader2 className="size-6 animate-spin text-muted-foreground" />
+        <div className="flex flex-col gap-2">
+          <p className="nx-wait" role="status">
+            <span className="nx-spin" aria-hidden />
+            {t("plans.loading")}
+          </p>
           <StillTrying waiting />
         </div>
       ) : plans.length === 0 ? (
-        <Card className="animate-rise">
+        <Card>
           {/* Not an error. It is what a customer sees while products are
               still pending review in App Store Connect, and saying
               "something went wrong" would be a lie. */}
-          <p className="text-sm text-muted-foreground">{t("plans.noneAvailable")}</p>
+          <p className="nx-csub">{t("plans.noneAvailable")}</p>
         </Card>
       ) : (
-        <div className="flex flex-col gap-3">
-          {plans.map((plan, i) => (
-            <Card
-              key={plan.productId}
-              className="animate-rise"
-              style={{ animationDelay: `${i * 60}ms` }}
-            >
-              <div className="flex items-baseline justify-between gap-3">
-                <h2 className="text-base font-semibold">{plan.name}</h2>
-                <span className="text-brand-gradient text-xl font-semibold tabular-nums">
-                  {plan.displayPrice}
-                </span>
+        <div className="nx-plans">
+          {plans.map((plan) => (
+            <Card key={plan.productId} className="nx-plan">
+              <h3>{plan.name}</h3>
+              <div className="nx-price">
+                <b>{plan.displayPrice}</b>
+                <span>{t("plans.perDays", { days: formatNumber(plan.durationDays, language) })}</span>
               </div>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                {t("plans.perDays", { days: plan.durationDays })}
-              </p>
-
-              <ul className="mt-3 flex flex-col gap-1.5 text-sm">
-                <li className="flex items-center gap-2">
-                  <HardDrive className="size-4 shrink-0 text-muted-foreground" />
-                  {plan.dataCapBytes === null
-                    ? t("plans.unlimited")
-                    : formatBytes(plan.dataCapBytes)}
+              <ul className="nx-facts">
+                <li>
+                  <HardDrive aria-hidden />
+                  <span>{t("plans.data")}</span>
+                  <b>{plan.dataCapBytes === null ? t("plans.unlimited") : formatSize(plan.dataCapBytes, language)}</b>
                 </li>
               </ul>
-
-              <Button
-                onClick={() => void buy(plan)}
-                disabled={buying !== null}
-                className="mt-4 w-full justify-center gap-2"
-              >
-                {buying === plan.productId ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Check className="size-4" />
-                )}
+              <PillButton size="sm" onClick={() => void buy(plan)} disabled={buying !== null} aria-busy={buying === plan.productId || undefined}>
+                {buying === plan.productId ? <span className="nx-spin" aria-hidden /> : <Check aria-hidden />}
                 {t("plans.buyWithAppStore")}
-              </Button>
+              </PillButton>
             </Card>
           ))}
         </div>
       )}
 
-      {error ? (
-        <p role="alert" className="mt-3 text-xs text-destructive">
-          {error}
-        </p>
-      ) : null}
-    </div>
+      {error ? <Message tone="danger">{error}</Message> : null}
+    </Page>
   );
 }
