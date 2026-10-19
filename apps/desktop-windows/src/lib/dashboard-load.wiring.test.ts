@@ -74,7 +74,7 @@ describe("the Windows dashboard's load that answers after the snapshot went up",
   const load = screen.slice(start, screen.indexOf("\n  }\n", start));
 
   it("does not ask the service again, or capture baselines over a tunnel the screen may have brought up", () => {
-    expect(load).toContain("const adopted = shownWhileWaiting ? null : await adoptServiceState(sub);");
+    expect(load).toContain("const adopted = shownWhileWaiting ? null : await adoptServiceState(sub, usersResult.data);");
     expect(load).toContain('if (adopted === "disconnected") await captureBaselinesWhileDown(usersResult.data);');
   });
 });

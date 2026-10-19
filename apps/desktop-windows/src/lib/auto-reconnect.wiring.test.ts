@@ -17,6 +17,13 @@ const repair = readFileSync(new URL("../components/RepairNetwork.tsx", import.me
 
 /** The body of a function, from its signature to the first line that
  * closes it at the indentation it was declared at. */
+const ADOPT_SERVICE_STATE = [
+  "async function adoptServiceState(",
+  "    sub: Subscription | null,",
+  "    users: readonly ProtocolUser[],",
+  "  ): Promise<ConnectionState | null> {",
+].join("\n");
+
 function body(signature: string, indent = "  "): string {
   const start = dashboard.indexOf(signature);
   expect(start, signature).toBeGreaterThan(0);
@@ -30,7 +37,7 @@ describe("where an episode begins", () => {
     // Both polls unmount with the screen. The one mounted on return asks
     // the service, and a tunnel the app was vouching for that is now
     // verifiably gone is a drop -- through the same rule as the polls.
-    const adopt = body("async function adoptServiceState(sub: Subscription | null): Promise<ConnectionState | null> {");
+    const adopt = body(ADOPT_SERVICE_STATE);
     const vouched = adopt.indexOf("const vouched = vouching(autoReconnect.current(), sessionGeneration());");
     const mark = adopt.indexOf("const mark = statusDisturbances.mark();");
     const asked = adopt.indexOf("const adopted = await syncFromService();");
@@ -179,7 +186,7 @@ describe("what an attempt is", () => {
   });
 
   it("arms a tunnel adopted from the service, unless something overruled the answer while it was asked", () => {
-    const adopt = body("async function adoptServiceState(sub: Subscription | null): Promise<ConnectionState | null> {");
+    const adopt = body(ADOPT_SERVICE_STATE);
     const taken = adopt.indexOf("const reconnectStamp = autoReconnect.stamp();");
     expect(taken).toBeGreaterThan(0);
     expect(taken).toBeLessThan(adopt.indexOf("const adopted = await syncFromService();"));
@@ -401,12 +408,12 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     // choice. The next Connect, landing on the chosen server, was told it
     // had moved off the old one.
     expect(ladder).toContain(
-      "const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);",
+      "const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);",
     );
     expect(ladder).not.toContain("const shownRouteId = protocolUser?.routeId ?? null;");
     // The tile's own rule, with the same arguments.
     expect(dashboard).toContain(
-      "displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId)",
+      "displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed)",
     );
   });
 

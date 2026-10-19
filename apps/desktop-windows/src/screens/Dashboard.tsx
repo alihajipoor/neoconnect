@@ -114,6 +114,7 @@ import {
 } from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
+import { credentialOnTunnel, tunnelCredential } from "../lib/tunnel-credential";
 import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "../lib/api-endpoints";
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
@@ -528,13 +529,23 @@ export function Dashboard({
   /** The server the customer picked from the list, if any. Tried
    * first; deliberately does not disable the others. */
   const [chosenRouteId, setChosenRouteId] = useState<string | null>(null);
+  /** A tunnel this screen found up -- back from Settings, or after a
+   * restart -- whose credential it cannot name: the service reports a
+   * protocol, and the last dial is not the tunnel's
+   * (`credentialOnTunnel`). The tiles then name no route rather than the
+   * pin `protocolUser` holds for the next connect. Cleared by the next dial
+   * this screen makes. */
+  const [tunnelRouteUnknown, setTunnelRouteUnknown] = useState(false);
+  /** The same, as the tiles' rule takes it (`settledKnown` in
+   * displayed-route.ts). */
+  const tunnelNamed = !tunnelRouteUnknown;
   /** Counts a session that keeps passing its health checks, once, for
    * the per-ISP tags. See session-report.ts. */
   const sessionTrackerRef = useRef(createSessionTracker());
   /** The route the tunnel is on, readable from inside the health poll's
    * interval without depending on which render created it. */
   const settledRouteRef = useRef<string | null>(null);
-  settledRouteRef.current = protocolUser?.routeId ?? null;
+  settledRouteRef.current = tunnelRouteUnknown ? null : (protocolUser?.routeId ?? null);
   /** Which network we are on, so "what worked here last time" means
    * here and not somewhere else. Null when it cannot be determined. */
   const [networkId, setNetworkId] = useState<string | null>(null);
@@ -1282,8 +1293,19 @@ export function Dashboard({
    * that unmounted when Settings opened; see `lib/ladder-pass`), the
    * screen adopts it: it says "Connecting...", a press means stop, and
    * when the pass ends the screen asks the service what it left.
+   *
+   * A tunnel found up is named as the route it is on, from the last dial
+   * (`tunnelCredential`), among `users`, the credentials this load put on
+   * screen -- or as no route, when that cannot be said. The screen's own
+   * credential at this point is its load's, the pin, which the ladder may
+   * have walked past: named as the tunnel's, it said the UK and Stealth
+   * Web over a tunnel exiting in Singapore on Stealth, after Settings and
+   * back, on the VM.
    */
-  async function adoptServiceState(sub: Subscription | null): Promise<ConnectionState | null> {
+  async function adoptServiceState(
+    sub: Subscription | null,
+    users: readonly ProtocolUser[],
+  ): Promise<ConnectionState | null> {
     if (ladderInFlight()) {
       if (ladderGenerationRef.current !== ownPassRef.current && adoptedPassIntentRef.current === null) {
         const intent = beginIntent("connect");
@@ -1292,6 +1314,12 @@ export function Dashboard({
       }
       return null;
     }
+    // Which credential the last dial was on, read before anything below
+    // is stamped or the service is asked: the state the service answers
+    // and the route that state is on then land on screen together. A pass
+    // begun meanwhile names its own candidate, and is left to.
+    const passAtStart = ladderGenerationRef.current;
+    const dial = await tunnelCredential.last();
     // A tunnel that ended while no screen was watching -- this one was
     // away in Settings, and both polls with it -- is a drop like any
     // other, if the app was vouching for it and nothing of ours has
@@ -1307,6 +1335,11 @@ export function Dashboard({
     const generation = intentRef.current.generation;
     const mark = statusDisturbances.mark();
     const adopted = await syncFromService();
+    if (isTunnelUp(adopted) && ladderGenerationRef.current === passAtStart && !ladderInFlight()) {
+      const on = credentialOnTunnel(dial, lastStatusRef.current?.protocol, users);
+      if (on !== null) setProtocolUser(on);
+      setTunnelRouteUnknown(on === null);
+    }
     if (
       adopted === "disconnected" &&
       droppedUnseen(vouched, intentRef.current.intent, lastStatusRef.current, statusDisturbances.since(mark))
@@ -1432,7 +1465,7 @@ export function Dashboard({
     // The service, before the screen claims anything. This path is the one
     // that matters most: our API unreachable is the ordinary state of a
     // censored network, tunnel or no tunnel.
-    const adopted = await adoptServiceState(cached.subscription);
+    const adopted = await adoptServiceState(cached.subscription, cached.protocolUsers);
     setLoading(false);
     shownOnceRef.current = true;
     loadRouteMemory();
@@ -1636,7 +1669,7 @@ export function Dashboard({
     // the screen is drawn, not after the route list below has answered.
     // Asked already, with the snapshot on screen, if that went first: the
     // screen has been watching the service since.
-    const adopted = shownWhileWaiting ? null : await adoptServiceState(sub);
+    const adopted = shownWhileWaiting ? null : await adoptServiceState(sub, usersResult.data);
     setLoading(false);
     shownOnceRef.current = true;
     if (!shownWhileWaiting) loadRouteMemory();
@@ -1782,7 +1815,7 @@ export function Dashboard({
         adoptedPassIntentRef.current = null;
         if (!isCurrent(intentRef.current, adopted)) return;
         endIntent(adopted);
-        void adoptServiceState(subscriptionRef.current);
+        void adoptServiceState(subscriptionRef.current, protocolUsersRef.current);
       }),
     [],
   );
@@ -1827,6 +1860,10 @@ export function Dashboard({
   runLadderRef.current = runLadder;
   const protocolUserRef = useRef(protocolUser);
   protocolUserRef.current = protocolUser;
+  /** The credentials on screen, for an adopted pass's end, which is heard
+   * by a listener registered once (`adoptServiceState`). */
+  const protocolUsersRef = useRef(protocolUsers);
+  protocolUsersRef.current = protocolUsers;
   useEffect(() => {
     if (loading || !routeMemoryLoaded || !routeListLoaded) return;
     return autoReconnect.bind(async (attempt) => {
@@ -3035,7 +3072,7 @@ export function Dashboard({
       // Connect -- landing on the very server just chosen -- was told it had
       // moved off the old one: "Your usual protocol didn't get through"
       // about a route it never dialled.
-      const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
+      const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);
 
       // Every rung that failed, with what it did with its route: whether
       // the route on screen was actually dialled before we settled
@@ -3183,6 +3220,10 @@ export function Dashboard({
           // which endpoints it reaches around it.
           ladderPass.tunnelServer.current = tunnelServer;
           setEndpointTunnelServer(tunnelServer);
+          // And which credential it is on, for a screen mounted while it is
+          // up -- back from Settings, or the app opened again -- which the
+          // service cannot tell (`tunnelCredential`).
+          tunnelCredential.dialling(candidate);
           await invoke("vpn_connect", {
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
@@ -3205,6 +3246,7 @@ export function Dashboard({
           // after the loop takes the engine down.
           if (stopped()) break;
           setProtocolUser(candidate);
+          setTunnelRouteUnknown(false);
           setConnectedAt(Date.now());
 
           // Egress first. WireGuard does not handshake until it has
@@ -3759,16 +3801,16 @@ export function Dashboard({
    * `displayedRoute`, which holds the decision so the two clients cannot
    * drift and so it can be tested without an unreachable server. */
   const currentRoute = useMemo(
-    () => displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId),
-    [routes, protocolUser, chosenRouteId, connectionState],
+    () => displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed),
+    [routes, protocolUser, chosenRouteId, connectionState, tunnelNamed],
   );
   /** The same route, by id, for the location picker's "current" row, and
    * its protocol for the PROTOCOL tile. Both used to read the credential
    * the screen holds, which after an automatic switch is the one the
    * session ended on: the idle screen then named a protocol, and marked a
    * row, that Connect does not dial first. See `displayedProtocol`. */
-  const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
-  const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes);
+  const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);
+  const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes, tunnelNamed);
   /** Nothing pinned and no settled tunnel yet: the honest name for the
    * next connect's server is "Automatic", not whichever route happens to
    * be provisioned. */

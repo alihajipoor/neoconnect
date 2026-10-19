@@ -164,14 +164,14 @@ describe("the Dashboard's wiring", () => {
     expect(offline).toContain("await showCached(cached, preferRouteId, load, reason);");
     const start = dashboard.indexOf("async function showCached(");
     const shown = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
-    const asked = shown.indexOf("await adoptServiceState(cached.subscription)");
+    const asked = shown.indexOf("await adoptServiceState(cached.subscription, cached.protocolUsers)");
     expect(asked).toBeGreaterThan(0);
     expect(asked).toBeLessThan(shown.indexOf("setLoading(false)"));
   });
 
   it("asks the service before drawing the online screen, not after the route list", () => {
     const online = loadAll.slice(loadAll.indexOf("setOfflineSince(null);"));
-    const asked = online.indexOf("await adoptServiceState(sub)");
+    const asked = online.indexOf("await adoptServiceState(sub, usersResult.data)");
     expect(asked).toBeGreaterThan(0);
     expect(asked).toBeLessThan(online.indexOf("setLoading(false)"));
     expect(asked).toBeLessThan(online.indexOf("await getAvailableRoutes("));
@@ -186,6 +186,66 @@ describe("the Dashboard's wiring", () => {
     expect(dashboard).toContain("ownPassRef.current = generation;");
     expect(dashboard).toContain("ladderPass.onEnd(() => {");
     expect(dashboard).toContain("if (ladderGenerationRef.current === generation) ladderPass.ended();");
+  });
+
+  // Seen on the VM, 0.9.51 and the redesign alike: connected to Singapore
+  // on Stealth after the ladder walked past the pinned UK on Stealth Web,
+  // then Settings and back -- the tiles named the UK and Stealth Web over a
+  // tunnel the service still reported as Reality, exiting in Singapore.
+  // The credential the tunnel was on was the screen's own state; the screen
+  // mounted on return loaded the pin's, and the tiles took that for the
+  // settled route. The decision is tested in tunnel-credential.test.ts.
+  describe("which route a tunnel found up is on", () => {
+    const start = dashboard.indexOf("async function adoptServiceState(");
+    const adopt = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
+
+    it("records each dial outside the screen, before the engine can come up", () => {
+      const dialled = dashboard.indexOf("tunnelCredential.dialling(candidate);");
+      expect(dialled).toBeGreaterThan(0);
+      expect(dialled).toBeLessThan(dashboard.indexOf('await invoke("vpn_connect", {'));
+    });
+
+    it("names the credential of the last dial when the service's protocol agrees, and no route when it cannot", () => {
+      // Read before the service is asked, so the state and the name land in
+      // one render.
+      const read = adopt.indexOf("const dial = await tunnelCredential.last();");
+      expect(read).toBeGreaterThan(0);
+      expect(read).toBeLessThan(adopt.indexOf("await syncFromService()"));
+      expect(adopt).toContain("const on = credentialOnTunnel(dial, lastStatusRef.current?.protocol, users);");
+      expect(adopt).toContain("if (on !== null) setProtocolUser(on);");
+      expect(adopt).toContain("setTunnelRouteUnknown(on === null);");
+      // Not over a pass begun while the service was asked: that pass names
+      // its own candidate.
+      expect(adopt).toContain("if (isTunnelUp(adopted) && ladderGenerationRef.current === passAtStart && !ladderInFlight()) {");
+    });
+
+    it("is given the credentials each load put on screen, and the current ones when an adopted pass ends", () => {
+      expect(dashboard).toContain("void adoptServiceState(subscriptionRef.current, protocolUsersRef.current);");
+      expect(dashboard).toContain("protocolUsersRef.current = protocolUsers;");
+    });
+
+    it("lets a dial of the screen's own name its route again", () => {
+      const named = dashboard.indexOf("setProtocolUser(candidate);");
+      expect(dashboard.slice(named, named + 120)).toContain("setTunnelRouteUnknown(false);");
+    });
+
+    it("hands the tiles, the picker and the failover notice what is known", () => {
+      expect(dashboard).toContain("const tunnelNamed = !tunnelRouteUnknown;");
+      expect(dashboard).toContain(
+        "displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed)",
+      );
+      expect(dashboard).toContain(
+        "const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);",
+      );
+      expect(dashboard).toContain(
+        "const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes, tunnelNamed);",
+      );
+      expect(dashboard).toContain(
+        "const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);",
+      );
+      // And the per-ISP tags credit no route to a tunnel nobody can name.
+      expect(dashboard).toContain("settledRouteRef.current = tunnelRouteUnknown ? null : (protocolUser?.routeId ?? null);");
+    });
   });
 
   it("does not let a slow baseline land over a connect started meanwhile", () => {
