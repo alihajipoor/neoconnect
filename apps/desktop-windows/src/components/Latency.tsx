@@ -1,4 +1,5 @@
-import type { TranslationKey } from "../lib/i18n";
+import { useI18n, type TranslationKey } from "../lib/i18n";
+import { formatNumber } from "../lib/locale-format";
 import { cn } from "../lib/utils";
 
 /** Signal-strength bars plus the actual number.
@@ -14,6 +15,7 @@ import { cn } from "../lib/utils";
  * pick a server based on it.
  */
 export function Latency({ ms, className, neutral = false }: { ms: number | null; className?: string; neutral?: boolean }) {
+  const { language } = useI18n();
   // Thresholds chosen for how a connection actually feels rather than
   // round numbers: under ~80ms is comfortable for real-time use, under
   // ~180ms is usable, beyond that is noticeable lag.
@@ -46,7 +48,7 @@ export function Latency({ ms, className, neutral = false }: { ms: number | null;
       </span>
       {/* Kept LTR inside an RTL layout: "23 ms" must not render reversed. */}
       <span className="tabular-nums text-[11px] font-medium" data-ltr>
-        {ms === null ? "--" : `${ms} ms`}
+        {ms === null ? "--" : `${formatNumber(ms, language)} ms`}
       </span>
     </span>
   );
@@ -76,6 +78,9 @@ export type LatencyShown =
 type Say = (key: TranslationKey) => string;
 
 export function LatencyValue({ shown, t, bars = true }: { shown: LatencyShown; t: Say; bars?: boolean }) {
+  // The figure in the reader's digits (Persian digits in Persian, as every
+  // other number on the page); the unit stays "ms", short and Latin.
+  const { language } = useI18n();
   switch (shown.kind) {
     case "wait":
       return (
@@ -114,7 +119,7 @@ export function LatencyValue({ shown, t, bars = true }: { shown: LatencyShown; t
             </span>
           ) : null}
           {/* Kept LTR inside an RTL layout: "23 ms" must not render reversed. */}
-          <span data-ltr dir="ltr">{`${shown.ms} ms`}</span>
+          <span data-ltr dir="ltr">{`${formatNumber(shown.ms, language)} ms`}</span>
         </span>
       );
       if (!shown.relay) return figure;

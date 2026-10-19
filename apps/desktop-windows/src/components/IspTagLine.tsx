@@ -1,5 +1,6 @@
 import { Check, CircleAlert, CircleCheck, TriangleAlert } from "lucide-react";
-import type { TranslationKey } from "../lib/i18n";
+import type { Language, TranslationKey } from "../lib/i18n";
+import { formatNumber } from "../lib/locale-format";
 import type { IspTag } from "../lib/types";
 import { cn } from "../lib/utils";
 
@@ -25,12 +26,23 @@ type Translate = (key: TranslationKey, vars?: Record<string, string | number>) =
  * ignored).
  *
  * Takes `t` rather than calling the hook, so it renders -- and is tested
- * -- without the provider. */
-export function IspTagLine({ tag, t, look }: { tag: IspTag | null | undefined; t: Translate; look?: "pearl" | "icon" }) {
+ * -- without the provider; `language` writes the counts in its digits. */
+export function IspTagLine({
+  tag,
+  t,
+  look,
+  language = "en",
+}: {
+  tag: IspTag | null | undefined;
+  t: Translate;
+  look?: "pearl" | "icon";
+  language?: Language;
+}) {
   if (!tag) return null;
   const works = tag.code === "worksOnYourIsp";
   const text = t(works ? "loc.ispWorks" : "loc.ispFailing");
-  const detail = t("loc.ispCount", { customers: tag.customers, outOf: tag.outOf, hours: tag.windowHours });
+  const n = (value: number) => formatNumber(value, language);
+  const detail = t("loc.ispCount", { customers: n(tag.customers), outOf: n(tag.outOf), hours: n(tag.windowHours) });
   const Icon = works ? CircleCheck : CircleAlert;
   if (look === "icon") {
     return (

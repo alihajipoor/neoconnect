@@ -612,7 +612,7 @@ export function LocationPicker({
                     <span className="truncate">{t("loc.ownWorked")}</span>
                   </span>
                 ) : evidence && !evidence.tags ? null : (
-                  <IspTagLine tag={route.ispTag} t={t} />
+                  <IspTagLine tag={route.ispTag} t={t} language={language} />
                 )}
               </div>
               <Latency ms={route.id in latencies ? latencies[route.id] : null} />

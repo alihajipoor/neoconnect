@@ -388,7 +388,7 @@ export function LocationList({
                   <Check aria-hidden />
                 </span>
               ) : tagsShown ? (
-                <IspTagLine tag={route.ispTag} t={t} look="icon" />
+                <IspTagLine tag={route.ispTag} t={t} look="icon" language={language} />
               ) : null
             ) : null}
           </span>
@@ -400,7 +400,7 @@ export function LocationList({
                 <span>{ownTip(route, ownAt)}</span>
               </span>
             ) : tagsShown ? (
-              <IspTagLine tag={route.ispTag} t={t} />
+              <IspTagLine tag={route.ispTag} t={t} language={language} />
             ) : null
           ) : null}
           {here ? <span className={cn("nx-inuse", connectionState === "connected" && "ok")}>{here}</span> : null}

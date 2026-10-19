@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { LocationList } from "../components/LocationList";
@@ -98,6 +98,19 @@ describe("the redesigned server list", () => {
     // A relay's figure is to its entry in Iran only.
     expect(html).toContain("to Iran");
     expect(html).not.toMatch(/\b(down|unreachable|couldn't reach)\b/i);
+  });
+
+  it("writes the figures in Persian digits in Persian, the latency left to right", () => {
+    vi.stubGlobal("navigator", { language: "fa-IR", userAgent: "" });
+    try {
+      const html = render({ variant: "sheet", latencies: { "de-ws": 107 } });
+      expect(html).toContain('dir="ltr">۱۰۷ ms</span>');
+      expect(html).not.toContain("107 ms");
+      // The counts behind "worked for others here" too.
+      expect(html).toContain("۹ نفر از ۱۱ نفر، ۲۴ ساعت گذشته");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("shows no figure while a tunnel is up, and says why", () => {
