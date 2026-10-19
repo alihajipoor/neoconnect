@@ -69,6 +69,14 @@ export function displayedRouteId(
   return pinnedRouteId ?? provisionedRouteId ?? null;
 }
 
+/** Whether the screen may name a route at all: not over a tunnel up whose
+ * credential it cannot name (`settledKnown` above). For a screen that
+ * reads its credential directly -- the phone's PROTOCOL tile and current
+ * row -- rather than through the functions here. */
+export function routeNameable(connectionState: ConnectionState, settledKnown: boolean): boolean {
+  return settledKnown || !TUNNEL_UP.has(connectionState);
+}
+
 /** The same decision, resolved against the route list the screen holds.
  *
  * Falls through rather than returning null when the settled route is not

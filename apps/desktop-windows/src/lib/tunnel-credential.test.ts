@@ -47,7 +47,7 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 }));
 
 const { credentialOnTunnel, tunnelCredential } = await import("./tunnel-credential");
-const { displayedProtocol, displayedRoute } = await import("./displayed-route");
+const { displayedProtocol, displayedRoute, routeNameable } = await import("./displayed-route");
 
 /** Lets a fire-and-forget write land. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -189,6 +189,14 @@ describe("a tunnel the screen cannot name", () => {
     },
   );
 
+  it.each(["connected", "verifying", "unverified", "degraded"] as const)(
+    "is a route the phone, which reads its credential directly, does not name in %s",
+    (state) => {
+      expect(routeNameable(state, false)).toBe(false);
+      expect(routeNameable(state, true)).toBe(true);
+    },
+  );
+
   it.each(["disconnected", "connecting", "disconnecting", "unknown"] as const)(
     "goes back to naming the next connect in %s",
     (state) => {
@@ -198,6 +206,7 @@ describe("a tunnel the screen cannot name", () => {
         protocol: "XRAY_VLESS_TLS",
         transport: "WS",
       });
+      expect(routeNameable(state, false)).toBe(true);
     },
   );
 });
