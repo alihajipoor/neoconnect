@@ -418,3 +418,55 @@ describe("refresh trigger", () => {
     vi.unstubAllGlobals();
   });
 });
+
+/** For a client only the relay of last resort reaches -- every ordinary
+ * address blocked, the 2026-10-17 case -- the lists were never fetched at
+ * all: the refresh ran only after an ordinary address answered. */
+describe("refresh through the relay", () => {
+  it("asks for both lists by path, once a run", async () => {
+    store.get.mockResolvedValue(undefined);
+    const mod = await import("./endpoint-bundle-store");
+    mod.resetBundleRefreshForTests();
+    const { fetcher, asked } = byPath({});
+
+    await mod.maybeRefreshBundleThroughRelay(fetcher);
+    await mod.maybeRefreshBundleThroughRelay(fetcher);
+
+    expect(asked).toEqual(["/endpoints/bundle2", "/endpoints/bundle"]);
+  });
+
+  it("adopts a newer list it brings, as one from any address", async () => {
+    store.get.mockResolvedValue(await sealed(7));
+    store.set.mockClear();
+    const mod = await import("./endpoint-bundle-store");
+    mod.resetBundleRefreshForTests();
+    const server = await serverSealed(107);
+
+    await mod.maybeRefreshBundleThroughRelay(byPath({ "/endpoints/bundle2": server }).fetcher);
+
+    expect(store.set).toHaveBeenCalledWith("bundle", server);
+  });
+
+  // An ordinary address that answered has been asked already, and costs
+  // the relay's budget nothing.
+  it("is not asked once an ordinary address has answered", async () => {
+    store.get.mockResolvedValue(undefined);
+    const mod = await import("./endpoint-bundle-store");
+    mod.resetBundleRefreshForTests();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, text: () => Promise.resolve("") }));
+    await mod.maybeRefreshBundle("https://a.example.net/api");
+    vi.unstubAllGlobals();
+    const { fetcher, asked } = byPath({});
+
+    await mod.maybeRefreshBundleThroughRelay(fetcher);
+
+    expect(asked).toEqual([]);
+  });
+
+  it("never throws", async () => {
+    store.get.mockResolvedValue(undefined);
+    const mod = await import("./endpoint-bundle-store");
+    mod.resetBundleRefreshForTests();
+    await expect(mod.maybeRefreshBundleThroughRelay(() => Promise.reject(new Error("relay")))).resolves.toBeUndefined();
+  });
+});

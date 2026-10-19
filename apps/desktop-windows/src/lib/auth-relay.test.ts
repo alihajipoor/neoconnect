@@ -33,6 +33,7 @@ const RELAY = { url: "https://192.0.2.10/api", pins: [`sha256/${btoa(String.from
 vi.mock("./endpoint-bundle-store", () => ({
   maybeRefreshBundle: () => Promise.resolve(),
   lastResortEntries: () => Promise.resolve([RELAY]),
+  maybeRefreshBundleThroughRelay: () => Promise.resolve(),
 }));
 vi.mock("./network-identity", () => ({
   networkKeyFromAsn: () => "asn:58224",

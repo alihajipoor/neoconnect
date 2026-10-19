@@ -7,7 +7,12 @@ import type { RelayAnswer } from "./last-resort";
  * are relay_http.rs's tests. */
 
 let entries: { url: string; pins: string[] }[] = [];
-vi.mock("./endpoint-bundle-store", () => ({ lastResortEntries: () => Promise.resolve(entries) }));
+type ListFetcher = (path: string) => Promise<{ ok: boolean; text: () => Promise<string> }>;
+const listRefresh = vi.fn<(fetcher: ListFetcher) => Promise<void>>();
+vi.mock("./endpoint-bundle-store", () => ({
+  lastResortEntries: () => Promise.resolve(entries),
+  maybeRefreshBundleThroughRelay: (fetcher: ListFetcher) => listRefresh(fetcher),
+}));
 
 let carrier: string | null = "asn:58224";
 const stamps: Record<string, string> = {};
@@ -55,6 +60,8 @@ function reset() {
   replies = [];
   now = 1_000_000;
   tunnelUp = false;
+  listRefresh.mockReset();
+  listRefresh.mockResolvedValue(undefined);
   ladderPass.running.current = false;
   lr.resetLastResortForTests({
     now: () => now,
@@ -500,6 +507,71 @@ describe("relay status", () => {
     expect(sent[0].path).toBe("/relay/status");
     lr.endRelayMode();
     expect(lr.relayStatus()).toBeNull();
+  });
+});
+
+/** The signed endpoint lists, for a client the backend answers only here
+ * -- which never learnt a new domain, bare IP or rotated relay box, since
+ * the lists were fetched only after an ordinary address answered. */
+describe("the endpoint lists through the relay", () => {
+  const BUNDLE = { payload: "cGF5bG9hZA==", sig: "c2ln", key: "primary" };
+
+  it("are asked for once the backend answers here, through the relay itself", async () => {
+    replies = [json(200, {}), json(200, BUNDLE)];
+    await lr.relayRequest(ME, "background");
+    expect(listRefresh).toHaveBeenCalledTimes(1);
+
+    const response = await listRefresh.mock.calls[0][0]("/endpoints/bundle2");
+
+    expect(sent.map((s) => [s.method, s.path])).toEqual([
+      ["GET", "/customer/me"],
+      ["GET", "/endpoints/bundle2"],
+    ]);
+    expect(response.ok).toBe(true);
+    expect(await response.text()).toBe(JSON.stringify(BUNDLE));
+  });
+
+  it("are not asked for once an ordinary route has answered", async () => {
+    lr.noteNormalRouteAnswered();
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "background");
+    expect(listRefresh).not.toHaveBeenCalled();
+  });
+
+  it("are not asked for on a page from in front of the backend, or a RELAY_REGION refusal", async () => {
+    replies = [{ status: 502, contentType: "text/html", body: "<html>" }, json(403, { code: "RELAY_REGION" })];
+    await lr.relayRequest(ME, "background");
+    await lr.relayRequest(ME, "background");
+    expect(sent).toHaveLength(2);
+    expect(listRefresh).not.toHaveBeenCalled();
+  });
+
+  it("take nothing but the backend's own 200", async () => {
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "background");
+    const fetcher = listRefresh.mock.calls[0][0];
+    replies = [json(404, { message: "No server-signed endpoint list has been published yet" })];
+    expect((await fetcher("/endpoints/bundle2")).ok).toBe(false);
+    replies = [{ status: 200, contentType: "text/html", body: "<html>" }];
+    expect((await fetcher("/endpoints/bundle")).ok).toBe(false);
+    replies = ["relay: connect-timeout", "relay: connect-timeout"];
+    expect((await fetcher("/endpoints/bundle")).ok).toBe(false);
+  });
+
+  // Every rule a call is held to: the switch, the tunnel's gate, the
+  // region and the budget are relayRequest's own.
+  it("are background calls under every rule above", async () => {
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "background");
+    const fetcher = listRefresh.mock.calls[0][0];
+    sent = [];
+    lr.setBackupRouteOn(false);
+    replies = [json(200, BUNDLE)];
+    expect((await fetcher("/endpoints/bundle2")).ok).toBe(false);
+    lr.setBackupRouteOn(true);
+    tunnelUp = true;
+    expect((await fetcher("/endpoints/bundle2")).ok).toBe(false);
+    expect(sent).toEqual([]);
   });
 });
 

@@ -180,6 +180,15 @@ checked by `relay_http.rs`'s rules; they never reach `endpoints`,
 `apiEndpoints()`, `lastGood`, the updater (panel only) or the build-time
 HTTP scope (`bundleHosts` now takes panel and mirror entries only).
 
+**The lists through the relay.** A client no ordinary address has
+answered this run asks for `/endpoints/bundle2`, then `/endpoints/bundle`,
+through the relay once a run, as the backend first answers there: two
+background calls under the same switch, region refusal, gate and budget
+(`maybeRefreshBundleThroughRelay` in endpoint-bundle-store.ts). Before
+this the lists were fetched only after an ordinary address answered, so a
+client the relay alone reaches never learnt a new host or a rotated box
+(R6.2, R9.2). Unverified against a real box.
+
 **Evidence of Iran (R1.3).** The CDN's `country` on the pre-connect
 `/health/ip` baseline, stamped per carrier (`network-identity.ts`). When
 this network is unknown or never stamped, the latest stamp on any network:

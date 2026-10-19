@@ -276,7 +276,34 @@ export async function maybeRefreshBundle(base: string): Promise<void> {
   }
 }
 
-/** Test seam: the once-per-run guard is module state. */
+/** Refreshes the bundle through the relay of last resort, once a run, for
+ * a client no ordinary address has answered. last-resort.ts asks as the
+ * backend answers there, and `fetcher` sends each path through the relay
+ * as a background call -- under the Settings switch, the region refusal,
+ * the tunnel's gate and the budget, like any other.
+ *
+ * Without it the lists reached only clients an ordinary address answered
+ * (`maybeRefreshBundle`). A client the relay alone reaches -- every
+ * ordinary address blocked, the case on 2026-10-17 -- never learnt a new
+ * domain, a bare IP or a relay box rotated through the list, though those
+ * are the clients the list is for.
+ *
+ * Not once the ordinary refresh has run: that address has been asked
+ * already, at no cost to the relay's budget. `fetcher` takes the path
+ * alone, as the relay does, so the base is empty. */
+let relayRefreshAttempted = false;
+export async function maybeRefreshBundleThroughRelay(fetcher: Fetcher): Promise<void> {
+  if (refreshAttempted || relayRefreshAttempted) return;
+  relayRefreshAttempted = true;
+  try {
+    await refreshFrom("", fetcher);
+  } catch {
+    // As `maybeRefreshBundle`: the held list still works.
+  }
+}
+
+/** Test seam: the once-per-run guards are module state. */
 export function resetBundleRefreshForTests(): void {
   refreshAttempted = false;
+  relayRefreshAttempted = false;
 }

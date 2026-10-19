@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { LastResortEntry } from "./endpoint-bundle";
-import { lastResortEntries } from "./endpoint-bundle-store";
+import { lastResortEntries, maybeRefreshBundleThroughRelay } from "./endpoint-bundle-store";
 import { ladderPass } from "./ladder-pass";
 import { networkKeyFromAsn } from "./network-identity";
 import { relayAllows } from "./relay-calls";
@@ -588,7 +588,8 @@ async function send(call: RelayCall, entries: LastResortEntry[], key: string, si
     lastGoodBox = box.url;
     failures = 0;
     const held = load();
-    if (refusedForRegion(answer)) {
+    const outsideRegion = refusedForRegion(answer);
+    if (outsideRegion) {
       // The backend places this network outside Iran: the relay is not
       // for it, and is not tried here again for a day.
       held.off[key] = clock() + RELAY_REGION_OFF_MS;
@@ -603,10 +604,38 @@ async function send(call: RelayCall, entries: LastResortEntry[], key: string, si
     }
     save();
     notify();
+    if (!outsideRegion) listsThroughRelay();
     return { kind: "answered", answer };
   }
   noteFailure();
   return { kind: "unanswered" };
+}
+
+/** One of the endpoint lists, through the relay, as
+ * `maybeRefreshBundleThroughRelay` asks for it: a background call, held to
+ * every rule above. Anything but the backend's own 200 is nothing to
+ * adopt, and the list's signature is checked as it would be from anywhere
+ * else. */
+async function relayListFetch(path: string): Promise<{ ok: boolean; text: () => Promise<string> }> {
+  const outcome = await relayRequest({ method: "GET", path }, "background");
+  if (outcome.kind !== "answered") return { ok: false, text: () => Promise.resolve("") };
+  const answer = outcome.answer;
+  return { ok: answer.status === 200 && isBackendJson(answer), text: () => Promise.resolve(answer.body) };
+}
+
+/** Asks for the endpoint lists through the relay once the backend has
+ * answered here, while no ordinary route has this run: otherwise a client
+ * the relay alone reaches never learns a new host, nor a rotated box
+ * (endpoint-bundle-store.ts says when, and once a run). Not awaited -- its
+ * calls queue behind this one (`serially`), which waiting here would wait
+ * for -- and never throws. */
+function listsThroughRelay(): void {
+  if (normalAnswers > 0) return;
+  try {
+    void maybeRefreshBundleThroughRelay(relayListFetch).catch(() => undefined);
+  } catch {
+    // The answer this follows is delivered whatever happens here.
+  }
 }
 
 /** Sends `call` through the relay, if every condition holds; see the top of
