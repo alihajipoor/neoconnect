@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { LOADER, csp, inlineSceneCss, sha256, transformPortalHtml } from "../portal-html";
+import {
+  LOADER,
+  LOADER_PATIENCE_MS,
+  LOAD_FAILED,
+  LOAD_SLOW,
+  csp,
+  inlineSceneCss,
+  sha256,
+  transformPortalHtml,
+} from "../portal-html";
 import { STYLESHEET_WAIT_MS, stylesheetApplied } from "./stylesheet";
 
 /** The page as Vite writes it, before portal-html.ts. */
@@ -46,6 +55,26 @@ describe("the built page's head", () => {
     // turns it on (stylesheet.ts reads data-app-css).
     expect(LOADER).toContain("media:'print'");
     expect(LOADER).toContain("c.dataset.appCss=''");
+  });
+
+  it("says so when the app script does not come, rather than leave a map with no card", () => {
+    // A script that fails to load says it failed; one that has drawn
+    // nothing after a while says it is still coming, and what to do.
+    expect(LOADER).toContain(`onerror:()=>{e=1;say(['${LOAD_FAILED.en}','${LOAD_FAILED.fa}'])}`);
+    expect(LOADER).toContain(`setTimeout(()=>e||say(['${LOAD_SLOW.en}','${LOAD_SLOW.fa}']),${LOADER_PATIENCE_MS})`);
+    expect(LOADER_PATIENCE_MS).toBeGreaterThanOrEqual(15_000);
+    // Only while the app has drawn nothing (or only this message).
+    expect(LOADER).toContain("if(!r||o&&o.id!=='pa-boot-msg')return;");
+    // Styled by the inline CSS, as the main stylesheet never turns on
+    // without the script; Persian set right to left.
+    expect(LOADER).toContain("className:'pa-noscript'");
+    expect(LOADER).toContain("lang:'fa',dir:'rtl'");
+    for (const text of [LOAD_FAILED.en, LOAD_FAILED.fa, LOAD_SLOW.en, LOAD_SLOW.fa]) {
+      // The loader quotes them in single quotes.
+      expect(text).not.toMatch(/['"\\]/);
+    }
+    expect(LOAD_FAILED.fa).toMatch(/[؀-ۿ]/);
+    expect(LOAD_SLOW.fa).toMatch(/[؀-ۿ]/);
   });
 
   it("keeps the loader the same in every build, so its hash is stable", () => {
