@@ -303,6 +303,11 @@ export class LoginGuardService {
     }
   }
 
+  /** Failed sign-ins for this account within the window. */
+  failureCount(scope: LoginScope, email: string): number {
+    return this.countFor(this.accountFailures, this.accountKey(scope, email));
+  }
+
   /** Clear an account's counter after a genuine sign-in. */
   recordSuccess(scope: LoginScope, email: string): void {
     this.accountFailures.delete(this.accountKey(scope, email));
