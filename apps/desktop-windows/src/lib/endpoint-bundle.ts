@@ -78,6 +78,11 @@ export interface EndpointBundle {
   /** The relay entries, apart from `endpoints` (see `LastResortEntry`).
    * Absent where the bundle was not read by `verifyBundle`. */
   lastResort?: LastResortEntry[];
+  /** Whether a compiled-in key signed it itself, rather than a server key
+   * under its statement (`ServerKeyStatement`). Such a list never expires,
+   * which is why bundle-store keeps the newest one apart. Absent where the
+   * bundle was not read by `verifyBundle`. */
+  offline?: boolean;
 }
 
 /** Envelope as published. The payload is carried as bytes rather than as
@@ -354,7 +359,9 @@ export async function verifyBundle(
     .map(lastResortEntry)
     .filter((entry): entry is LastResortEntry => entry !== null);
 
-  return { v: bundle.v, issuedAt: bundle.issuedAt, endpoints, lastResort };
+  // The first way `envelopeSigner` takes: a compiled-in key by its id.
+  const offline = owns(keys, envelope.key);
+  return { v: bundle.v, issuedAt: bundle.issuedAt, endpoints, lastResort, offline };
 }
 
 /** Whether `candidate` should replace `held`.

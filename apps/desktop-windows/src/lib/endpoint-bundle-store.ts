@@ -15,6 +15,17 @@ import seedEnvelope from "./seed-bundle.json";
  */
 const FILE = "endpoint-bundle.json";
 const KEY = "bundle";
+/** The newest offline-signed list held, apart from the list in force.
+ *
+ * A server list stops verifying when its statement runs out, or when the
+ * device's clock runs ahead of it; an offline list never does. With one
+ * slot, a server list replaced the offline list it superseded, and once
+ * it stopped verifying the client went back to the seed it was built with
+ * -- whose hosts may be the very ones blocked since, leaving it nowhere to
+ * fetch a new list from. Kept whenever a newer genuine one is fetched,
+ * even beneath a server list, so that the fallback is the newest offline
+ * list instead. */
+const OFFLINE_KEY = "offline";
 /** The path the bundle is served on, relative to any API base. Every
  * endpoint in the bundle can serve the next bundle, which is what makes
  * the list self-healing: reach one, learn all. */
@@ -82,38 +93,47 @@ function getStore(): Promise<Store> {
  * refuses to: a customer whose control plane is filtered must still be
  * able to connect, and a list that expired itself would reintroduce the
  * outage it exists to prevent. An old address list is worth far more
- * than none.
+ * than none. A server list is the one exception, and not by this file's
+ * choice: it stops verifying when its statement runs out, and the newest
+ * offline list held takes its place (`OFFLINE_KEY`).
  */
 export async function cachedBundle(): Promise<EndpointBundle | null> {
   const seedRaw = JSON.stringify(seedEnvelope);
   const seed = await seedBundle(seedRaw);
-  let stored: EndpointBundle | null = null;
-  let storedRaw: string | null = null;
-  try {
-    const store = await getStore();
-    const raw = await store.get<string>(KEY);
-    // Re-verified on every read rather than trusted because we wrote it:
-    // the file sits on a disk other software can reach, and the signature
-    // costs a millisecond.
-    if (typeof raw === "string") {
-      stored = await verifyBundle(raw);
-      storedRaw = raw;
-    }
-  } catch {
-    stored = null;
-  }
+  // The offline list kept apart is read only when the stored one does not
+  // verify: every list it takes is stored as the list in force too, unless
+  // that already held a newer one, so a stored list that verifies is at
+  // least as new.
+  const stored = (await storedList(KEY)) ?? (await storedList(OFFLINE_KEY));
   // The newer of the two, not simply the stored one. An install that has
   // never reached us has no stored bundle and would otherwise fall
   // through to the compiled-in bases, every one of which is on the
   // censored domain -- which is precisely the customer this exists for.
   // And after an upgrade the shipped seed can legitimately be the fresher
   // list, so version order decides rather than provenance.
-  const useSeed = !stored || (seed !== null && isNewer(seed, stored));
-  const inForce = useSeed ? seed : stored;
+  const useSeed = !stored || (seed !== null && isNewer(seed, stored.bundle));
+  const inForce = useSeed ? (seed ? { bundle: seed, raw: seedRaw } : null) : stored;
   // Before any request reaches for the list's hosts: a list adopted in an
   // earlier run names hosts this run's scope does not know yet.
-  if (inForce) await grantScope(useSeed ? seedRaw : (storedRaw as string));
-  return inForce;
+  if (inForce) await grantScope(inForce.raw);
+  return inForce?.bundle ?? null;
+}
+
+/** The genuine list stored under `key`, with its envelope, or null.
+ *
+ * Re-verified on every read rather than trusted because we wrote it: the
+ * file sits on a disk other software can reach, and the signature costs a
+ * millisecond. */
+async function storedList(key: string): Promise<{ bundle: EndpointBundle; raw: string } | null> {
+  try {
+    const store = await getStore();
+    const raw = await store.get<string>(key);
+    if (typeof raw !== "string") return null;
+    const bundle = await verifyBundle(raw);
+    return bundle ? { bundle, raw } : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The bundle compiled into this build, or null if it is the placeholder. */
@@ -125,9 +145,9 @@ async function seedBundle(raw: string): Promise<EndpointBundle | null> {
   }
 }
 
-async function persist(raw: string): Promise<void> {
+async function persist(key: string, raw: string): Promise<void> {
   const store = await getStore();
-  await store.set(KEY, raw);
+  await store.set(key, raw);
   await store.save();
 }
 
@@ -159,7 +179,8 @@ async function fetchVerified(url: string, fetcher: Fetcher): Promise<{ bundle: E
 
 /** Fetches the lists from `base`, and adopts the newest if it is genuine
  * and newer than the one held: the server-signed list first, then the
- * offline one (`SERVER_BUNDLE_PATH`).
+ * offline one (`SERVER_BUNDLE_PATH`). The offline one is also kept apart
+ * whenever it is the newest offline list seen (`OFFLINE_KEY`).
  *
  * Returns the bundle now in force, which may be the one already held.
  * Never throws: this runs alongside real work and a failure here must
@@ -167,18 +188,34 @@ async function fetchVerified(url: string, fetcher: Fetcher): Promise<{ bundle: E
  */
 export async function refreshFrom(base: string, fetcher: Fetcher): Promise<EndpointBundle | null> {
   let held = await cachedBundle();
+  let offline = (await storedList(OFFLINE_KEY))?.bundle ?? null;
   for (const path of [SERVER_BUNDLE_PATH, BUNDLE_PATH]) {
     const fresh = await fetchVerified(`${base}${path}`, fetcher);
-    if (!fresh || !isNewer(fresh.bundle, held)) continue;
-    try {
-      await persist(fresh.raw);
-    } catch {
-      // Not adopted: every reader takes the list from the store, which
-      // still holds the old one. The next run fetches it again.
-      continue;
+    if (!fresh) continue;
+    if (isNewer(fresh.bundle, held)) {
+      try {
+        await persist(KEY, fresh.raw);
+      } catch {
+        // Not adopted: every reader takes the list from the store, which
+        // still holds the old one. The next run fetches it again -- and
+        // the offline slot waits for it too, so the list in force stays
+        // the newer of the two (`cachedBundle`).
+        continue;
+      }
+      await grantScope(fresh.raw);
+      held = fresh.bundle;
     }
-    await grantScope(fresh.raw);
-    held = fresh.bundle;
+    // Kept apart even when it is not newer than the list in force: it is
+    // what a server list falls back to once it stops verifying
+    // (`OFFLINE_KEY`).
+    if (fresh.bundle.offline === true && isNewer(fresh.bundle, offline)) {
+      try {
+        await persist(OFFLINE_KEY, fresh.raw);
+        offline = fresh.bundle;
+      } catch {
+        // Kept at the next refresh, which fetches it again.
+      }
+    }
   }
   return held;
 }

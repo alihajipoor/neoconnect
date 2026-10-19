@@ -83,7 +83,8 @@ build. Real domains and addresses never appear here
   publish the offline list with a version above the server list's.
 - **The statement expires** (at most two years). Vouch again with the
   offline key before it does, or server lists stop being accepted and
-  clients fall back to the offline list:
+  clients fall back to the newest offline list they have fetched (kept
+  apart for this), or their build's seed if that is newer:
 
       node scripts/endpoints/bundle.mjs vouch --key {offline-key-path} \
         --key-id primary --id {server-key-id} --server-pub {base64} --days 365 \

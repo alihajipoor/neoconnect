@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { getPublicKeyAsync, signAsync, utils } from "@noble/ed25519";
 
 const store = { get: vi.fn(), set: vi.fn(), save: vi.fn() };
@@ -117,8 +117,9 @@ describe("bundle refresh", () => {
   });
 });
 
-/** A list the server signs, under the operator key's statement for it. */
-async function serverSealed(v: number) {
+/** A list the server signs, under the operator key's statement for it,
+ * which runs out at `expires` (Unix seconds). */
+async function serverSealed(v: number, expires = Math.floor(Date.now() / 1000) + 3600) {
   if (!keys.primary) await sealed(0);
   const serverPriv = utils.randomPrivateKey();
   const statement = new TextEncoder().encode(
@@ -126,7 +127,7 @@ async function serverSealed(v: number) {
       kind: "neoxify-bundle-key",
       id: "server-1",
       publicKey: b64(await getPublicKeyAsync(serverPriv)),
-      expires: Math.floor(Date.now() / 1000) + 3600,
+      expires,
     }),
   );
   const payload = new TextEncoder().encode(
@@ -156,14 +157,15 @@ describe("the server-signed list", () => {
     store.get.mockResolvedValue(await sealed(7));
     store.set.mockClear();
     const server = await serverSealed(105);
-    const { fetcher, asked } = byPath({ "/endpoints/bundle2": server, "/endpoints/bundle": await sealed(8) });
+    const offline = await sealed(8);
+    const { fetcher, asked } = byPath({ "/endpoints/bundle2": server, "/endpoints/bundle": offline });
 
     const out = await refreshFrom("https://a.example.net/api", fetcher);
 
     expect(out?.v).toBe(105);
     expect(asked[0]).toBe("https://a.example.net/api/endpoints/bundle2");
     expect(store.set).toHaveBeenCalledWith("bundle", server);
-    expect(store.set).toHaveBeenCalledTimes(1);
+    expect(store.set).not.toHaveBeenCalledWith("bundle", offline);
   });
 
   // Every backend before bundle2, and any with none published yet.
@@ -184,7 +186,109 @@ describe("the server-signed list", () => {
     const { fetcher } = byPath({ "/endpoints/bundle2": await serverSealed(105), "/endpoints/bundle": offline });
 
     expect((await refreshFrom("https://a.example.net/api", fetcher))?.v).toBe(200);
-    expect(store.set).toHaveBeenLastCalledWith("bundle", offline);
+    expect(store.set.mock.calls.filter(([key]) => key === "bundle").at(-1)).toEqual(["bundle", offline]);
+  });
+});
+
+/** The store key by key, for the tests that read both slots. */
+function slotted(initial: Record<string, string>): Map<string, string> {
+  const slots = new Map(Object.entries(initial));
+  store.get.mockImplementation((key: string) => Promise.resolve(slots.get(key)));
+  store.set.mockImplementation((key: string, value: string) => {
+    slots.set(key, value);
+    return Promise.resolve();
+  });
+  return slots;
+}
+
+/** The store module again, built with a seed of version `v`. */
+async function builtWithSeed(v: number) {
+  const seeded = await sealed(v);
+  vi.resetModules();
+  vi.doMock("./seed-bundle.json", () => ({ default: JSON.parse(seeded) }));
+  return await import("./endpoint-bundle-store");
+}
+
+describe("a server list whose statement has run out", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    store.get.mockReset();
+    store.set.mockReset();
+  });
+
+  // Seed v7's hosts blocked, offline v8 published to move clients off
+  // them, then a server list. A year on its statement runs out -- or the
+  // device's clock runs ahead of it -- and the client went back to v7,
+  // the seed it was built with: the blocked hosts, with nowhere left to
+  // fetch a new list from.
+  it("falls back to the newest offline list held, not the seed", async () => {
+    const mod = await builtWithSeed(7);
+    const offline = await sealed(8);
+    const slots = slotted({ bundle: offline });
+    const expires = Math.floor(Date.now() / 1000) + 3600;
+    const server = await serverSealed(105, expires);
+
+    await mod.refreshFrom(
+      "https://a.example.net/api",
+      byPath({ "/endpoints/bundle2": server, "/endpoints/bundle": offline }).fetcher,
+    );
+    expect(slots.get("bundle")).toBe(server);
+    expect((await mod.cachedBundle())?.v).toBe(105);
+
+    vi.spyOn(Date, "now").mockReturnValue(expires * 1000);
+    const granted: string[] = [];
+    mod.setScopeGranterForTests((envelope) => {
+      granted.push(envelope);
+      return Promise.resolve();
+    });
+    expect((await mod.cachedBundle())?.v).toBe(8);
+    // And the scope is the hosts of the list in force.
+    expect(granted).toEqual([offline]);
+  });
+
+  // The offline list is fetched on every refresh, and was dropped
+  // whenever it was not newer than the server list held.
+  it("keeps a newer offline list fetched beneath the server list in force", async () => {
+    const mod = await builtWithSeed(7);
+    const server = await serverSealed(105);
+    const slots = slotted({ bundle: server });
+    const offline = await sealed(9);
+
+    const out = await mod.refreshFrom(
+      "https://a.example.net/api",
+      byPath({ "/endpoints/bundle2": server, "/endpoints/bundle": offline }).fetcher,
+    );
+
+    expect(out?.v).toBe(105);
+    expect(slots.get("bundle")).toBe(server);
+    expect(slots.get("offline")).toBe(offline);
+  });
+
+  it("is not the offline list's to fall back to while it verifies", async () => {
+    const mod = await builtWithSeed(7);
+    slotted({ bundle: await serverSealed(105), offline: await sealed(9) });
+    expect((await mod.cachedBundle())?.v).toBe(105);
+  });
+
+  it("falls back to the seed when the seed is the newer", async () => {
+    const mod = await builtWithSeed(7);
+    const expires = Math.floor(Date.now() / 1000) + 3600;
+    slotted({ bundle: await serverSealed(105, expires), offline: await sealed(6) });
+    vi.spyOn(Date, "now").mockReturnValue(expires * 1000);
+    expect((await mod.cachedBundle())?.v).toBe(7);
+  });
+
+  // A source serving a server list at the offline path: it expires like
+  // any other, so it is no fallback.
+  it("never keeps a server-signed list as the offline one", async () => {
+    const mod = await builtWithSeed(7);
+    const slots = slotted({ bundle: await sealed(8) });
+    const server = await serverSealed(105);
+
+    await mod.refreshFrom("https://a.example.net/api", byPath({ "/endpoints/bundle": server }).fetcher);
+
+    expect(slots.get("bundle")).toBe(server);
+    expect(slots.has("offline")).toBe(false);
   });
 });
 
