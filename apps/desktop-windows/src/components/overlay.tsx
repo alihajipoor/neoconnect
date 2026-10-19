@@ -257,6 +257,9 @@ export function Menu({
  *
  * Escape is the list's own (`LocationPicker`): it is ignored while a switch
  * is in flight, because closing would not recall a request already sent.
+ * The sheet's own ways out -- the scrim, the handle, the close button -- go
+ * by the same rule (`dismissible`): closed mid-switch, the list was gone
+ * when its answer came, and a switch that failed was never said.
  *
  * Drawn into the app root, which holds fixed-position children to its own
  * box and carries the safe areas; found from where the sheet is placed. */
@@ -265,12 +268,15 @@ export function LocationSheet({
   title,
   closeLabel,
   onClose,
+  dismissible = true,
   children,
 }: {
   open: boolean;
   title: ReactNode;
   closeLabel: string;
   onClose: () => void;
+  /** False while a switch is in flight: nothing closes the sheet. */
+  dismissible?: boolean;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -286,7 +292,7 @@ export function LocationSheet({
 
   function onDown(event: React.PointerEvent<HTMLElement>) {
     const sheet = ref.current;
-    if (!sheet || event.button !== 0) return;
+    if (!sheet || event.button !== 0 || !dismissible) return;
     drag.current = { y0: event.clientY, t0: performance.now(), dy: 0, id: event.pointerId };
     event.currentTarget.setPointerCapture?.(event.pointerId);
     sheet.style.transition = "none";
@@ -326,7 +332,7 @@ export function LocationSheet({
       {open && container
         ? createPortal(
             <>
-              <div className="nx-scrim" aria-hidden onClick={onClose} />
+              <div className="nx-scrim" aria-hidden onClick={dismissible ? onClose : undefined} />
               <div
                 ref={ref}
                 role="dialog"
@@ -343,6 +349,7 @@ export function LocationSheet({
                     className="nx-ibtn"
                     onClick={onClose}
                     onPointerDown={(event) => event.stopPropagation()}
+                    disabled={!dismissible}
                     aria-label={closeLabel}
                     title={closeLabel}
                   >

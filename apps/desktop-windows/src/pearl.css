@@ -1345,8 +1345,12 @@
     color: var(--ink);
     transition: transform var(--dur-press) var(--spring-press);
   }
-  .nx-ibtn:active {
+  .nx-ibtn:active:not(:disabled) {
     transform: scale(0.94);
+  }
+  .nx-ibtn:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
   }
   .nx-ibtn svg {
     width: 18px;

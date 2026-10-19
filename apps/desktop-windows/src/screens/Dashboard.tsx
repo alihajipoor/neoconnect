@@ -732,6 +732,10 @@ export function Dashboard({
     errorKind: null,
   });
   const [showLocationPicker, setShowLocationPicker] = useState(false);
+  /** A server's switch request is out, from the pick until it is answered
+   * (`onPicking` to `onSwitched` or `onPickFailed`): the phone's sheet does
+   * not close meanwhile (`LocationSheet`'s `dismissible`). */
+  const [switchInFlight, setSwitchInFlight] = useState(false);
   /** Which of the three layouts the window is in: where the one location
    * list lives -- the panel, or a sheet on a phone-sized window. */
   const layout = useWindowLayout();
@@ -4407,10 +4411,14 @@ export function Dashboard({
       automatic={!chosenRouteId}
       // The pick, as it is made: a reconnect under way ends there, not
       // once a server's switch request has answered.
-      onPicking={pickingLocation}
+      onPicking={(routeId) => {
+        if (routeId !== null) setSwitchInFlight(true);
+        pickingLocation(routeId);
+      }}
       // A switch that failed chose nothing: the reconnect leads with what
       // it led with before the pick.
       onPickFailed={() => {
+        setSwitchInFlight(false);
         autoReconnect.pickFailed();
         switchLoadSettled();
         connectAfterSwitch();
@@ -4432,6 +4440,7 @@ export function Dashboard({
       // Re-reads the provisioned connection rather than adopting the
       // switch response directly: that payload carries no `connection`.
       onSwitched={(routeId) => {
+        setSwitchInFlight(false);
         // As for Automatic, above.
         const shown = chooseLocation(routeId ?? null);
         // Their choice leads the order; it does not disable failover.
@@ -4640,6 +4649,7 @@ export function Dashboard({
           title={t("loc.panelTitle")}
           closeLabel={t("loc.close")}
           onClose={() => setShowLocationPicker(false)}
+          dismissible={!switchInFlight}
         >
           {picker}
         </LocationSheet>
