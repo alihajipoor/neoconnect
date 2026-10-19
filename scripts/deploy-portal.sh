@@ -65,7 +65,11 @@
 #
 # Environment
 #   NEOXIFY_WEB_USER         required (not for --dry-run). The neoxify.net site's
-#                            SSH/SFTP user. root is refused.
+#                            SSH/SFTP user. root is refused unless
+#                            NEOXIFY_WEB_ALLOW_ROOT=1: the owner granted root on
+#                            2026-10-19. Every other guard still holds -- the
+#                            document root check, nothing outside account/, no
+#                            service reloads.
 #   NEOXIFY_WEB_HOST         default neoxify.net (the address may be given instead).
 #   NEOXIFY_WEB_PORT         default 22.
 #   NEOXIFY_WEB_KEY          default ~/.ssh/neoxify_web. Key only: never a password.
@@ -234,7 +238,8 @@ fi
 
 # --- 4. Connect --------------------------------------------------------------
 [ -n "$WEB_USER" ] || die "set NEOXIFY_WEB_USER to the neoxify.net site's own SSH user"
-[ "$WEB_USER" != root ] || die "refusing to deploy as root: the host is shared, use the neoxify.net site's own user"
+[ "$WEB_USER" != root ] || [ "${NEOXIFY_WEB_ALLOW_ROOT:-}" = 1 ] \
+  || die "refusing to deploy as root: the host is shared, use the neoxify.net site's own user (or NEOXIFY_WEB_ALLOW_ROOT=1, which the owner granted)"
 [ -f "$WEB_KEY" ] || die "no SSH key at $WEB_KEY"
 
 # The host's key, as the owner confirmed it -- never whatever answers first.
