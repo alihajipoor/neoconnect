@@ -6,6 +6,7 @@ import { StillTrying } from "@shared/components/StillTrying";
 import { RecoveryCodeNotice } from "@shared/components/BackupRoute";
 import { CardHead } from "./AuthShell";
 import { Message, PasswordField, PrimaryButton, TextButton, TextField } from "./controls";
+import { toLatinDigits } from "./digits";
 
 /**
  * Getting back in after forgetting the password, as the portal draws it.
@@ -191,7 +192,7 @@ export function PortalForgotPassword({ onDone, onCancel }: { onDone: (notice: st
             dir="ltr"
             className="pa-code"
             value={code}
-            onChange={(e) => setCode(e.target.value)}
+            onChange={(e) => setCode(toLatinDigits(e.target.value))}
           />
           {newPasswordFields}
           {error ? <Message tone="danger">{error}</Message> : null}

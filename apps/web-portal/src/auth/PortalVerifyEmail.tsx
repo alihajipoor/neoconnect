@@ -6,6 +6,7 @@ import { StillTrying } from "@shared/components/StillTrying";
 import { CardHead } from "./AuthShell";
 import { Message, PrimaryButton, TextButton, TextField } from "./controls";
 import { useCopy } from "./copy";
+import { toLatinDigits } from "./digits";
 
 /** Login is throttled at 5 requests per 60s, so this stays well clear of
  * it while still noticing a phone-side verification within seconds. The
@@ -136,7 +137,8 @@ export function PortalVerifyEmail({
           dir="ltr"
           className="pa-code"
           value={code}
-          onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+          // Persian digits typed as the ASCII the code is (./digits.ts).
+          onChange={(e) => setCode(toLatinDigits(e.target.value).replace(/\D/g, ""))}
         />
         {error ? <Message tone="danger">{error}</Message> : null}
         {notice ? <Message tone="ok">{notice}</Message> : null}

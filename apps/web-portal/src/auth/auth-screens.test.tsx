@@ -25,6 +25,7 @@ import { PortalRegister } from "./PortalRegister";
 import { PortalVerifyEmail } from "./PortalVerifyEmail";
 import { PortalForgotPassword } from "./PortalForgotPassword";
 import { COPY } from "./copy";
+import { toLatinDigits } from "./digits";
 
 /**
  * The portal draws its own sign-in screens (the Pearl Glass redesign) but
@@ -206,6 +207,19 @@ describe("the screens as rendered", () => {
     // The map is not drawn here (it is static in index.html), and there are
     // no lights before sign-in.
     expect(html).not.toMatch(/pa-map|lamp/);
+  });
+});
+
+describe("codes typed on a Persian keyboard", () => {
+  it("arrive as the ASCII digits the server compares", () => {
+    expect(toLatinDigits("۱۲۳۴۵۶")).toBe("123456");
+    expect(toLatinDigits("٠١٢٣٤٥٦٧٨٩")).toBe("0123456789");
+    expect(toLatinDigits("۰9۸a")).toBe("098a");
+  });
+
+  it("are read that way in both emailed-code fields", () => {
+    expect(portal("PortalVerifyEmail")).toContain('setCode(toLatinDigits(e.target.value).replace(/\\D/g, ""))');
+    expect(portal("PortalForgotPassword")).toContain("setCode(toLatinDigits(e.target.value))");
   });
 });
 
