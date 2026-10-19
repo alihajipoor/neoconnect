@@ -1,7 +1,8 @@
 <?php
 /**
- * Not-found page, wired up by error_page in the nginx config, ErrorDocument
- * in .htaccess, and the dev router.
+ * Not-found page. On the live host it is reached through the router at the
+ * top of index.php, which the shared nginx falls back to for any path it
+ * cannot match to a file; ErrorDocument in .htaccess wires it up on Apache.
  *
  * Renders in whichever locale the missing URL was under, so someone who
  * mistypes a Persian address does not suddenly get an English page.

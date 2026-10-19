@@ -29,6 +29,29 @@ $NX_CFG = require NX_INC . '/config.php';
 require_once NX_INC . '/headers.php';
 nx_security_headers();
 
+// One host. www.neoxify.net reaches this same folder on the live host and
+// used to serve a full duplicate of every page with a 200; the server
+// config that would redirect it is not ours to change (the box is shared),
+// so PHP does it. Only a www. host that is not the configured one, so a
+// site_url that itself starts with www. can never loop.
+$nx_host = isset($_SERVER['HTTP_HOST']) ? strtolower((string) $_SERVER['HTTP_HOST']) : '';
+$nx_host = preg_replace('/:\d+$/', '', $nx_host);
+if (strpos($nx_host, 'www.') === 0) {
+    $nx_canon = strtolower((string) parse_url((string) $NX_CFG['site_url'], PHP_URL_HOST));
+    if ($nx_canon !== '' && $nx_canon !== $nx_host) {
+        $nx_target = isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '/';
+        // Keep only path and query: an absolute-form request target must
+        // not choose the host we send people to.
+        $nx_target = preg_replace('#^[a-z][a-z0-9+.-]*://[^/]*#i', '', $nx_target);
+        if ($nx_target === '' || $nx_target[0] !== '/') {
+            $nx_target = '/' . $nx_target;
+        }
+        header('Location: ' . rtrim((string) $NX_CFG['site_url'], '/') . $nx_target, true, 301);
+        exit;
+    }
+}
+unset($nx_host);
+
 /** Locales the site is actually translated into, and which of them are RTL. */
 $NX_LOCALES = array('en', 'fa');
 $NX_RTL_LOCALES = array('fa');

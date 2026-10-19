@@ -8,13 +8,12 @@
  * here: if neoxify.net is ever blocked outright, the site goes up on a
  * mirror domain and everything must follow from one config value.
  *
- * IMPORTANT -- /sitemap.xml MUST REWRITE HERE. Measured on the live site
- * 2026-08-24: https://neoxify.net/sitemap.xml returned 200 with
- * Content-Type: text/html and the *home page* as its body, because nginx
- * never reads the .htaccess rule that was supposed to do the rewrite. A
- * crawler asking for the conventional path got a marketing page and no
- * sitemap at all. See nginx-website.conf.example, which has the rule; it
- * has to actually be deployed.
+ * /sitemap.xml REACHES THIS FILE THROUGH index.php. Measured on the live
+ * site 2026-08-24 and again 2026-10-19: /sitemap.xml returned 200 with
+ * Content-Type: text/html and the *home page* as its body, because the
+ * shared nginx never reads .htaccess and sends anything it cannot find to
+ * /index.php. The router at the top of index.php now recognises the path
+ * and requires this file, so it works with no server configuration.
  */
 
 $NX_LOCALE = 'en';
