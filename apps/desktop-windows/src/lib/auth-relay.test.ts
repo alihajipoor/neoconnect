@@ -33,6 +33,7 @@ const RELAY = { url: "https://192.0.2.10/api", pins: [`sha256/${btoa(String.from
 vi.mock("./endpoint-bundle-store", () => ({
   maybeRefreshBundle: () => Promise.resolve(),
   lastResortEntries: () => Promise.resolve([RELAY]),
+  maybeRefreshBundleThroughRelay: () => Promise.resolve(),
 }));
 vi.mock("./network-identity", () => ({
   networkKeyFromAsn: () => "asn:58224",
@@ -94,7 +95,6 @@ beforeEach(() => {
   relayReplies = [];
   tunnelUp = false;
   lr.resetLastResortForTests({
-    environment: { timeZone: "Asia/Tehran", languages: ["fa-IR"] },
     tunnelUp: () => Promise.resolve(tunnelUp),
     transport: async (args) => {
       relayed.push(args as Relayed);
@@ -104,7 +104,7 @@ beforeEach(() => {
       return reply;
     },
   });
-  lr.setRelayConsent(true);
+  lr.setBackupRouteOn(true);
 });
 
 const body = (r: Relayed) => JSON.parse(r.body ?? "null") as Record<string, unknown>;
@@ -149,15 +149,52 @@ describe("signing in", () => {
     expect(body(relayed[3]).challenge).toMatchObject({ id: "c2" });
   });
 
-  it("keeps the backend's reason when the relay refuses, worded by its code", async () => {
-    relayReplies = [json(200, CHALLENGE), json(403, { statusCode: 403, code: "RELAY_REGION", message: "..." })];
+  it("keeps the backend's own refusal through the relay", async () => {
+    relayReplies = [json(200, CHALLENGE), json(401, { statusCode: 401, message: "Invalid email or password" })];
+    const result = await login("a@example.com", "wrong");
+    expect(result).toMatchObject({ ok: false, status: 401, error: "Invalid email or password" });
+  });
+
+  // Nothing asks before the relay is tried, and the device does not guess
+  // its country: abroad, a sign-in the network blocks reaches the box, and
+  // the backend refuses it for its region. The customer never chose a
+  // backup route; what failed is Neoxify's ordinary routes, and that is
+  // what they are told.
+  it("says Neoxify could not be reached when the backend refuses this network, and keeps the relay off", async () => {
+    relayReplies = [json(403, { statusCode: 403, code: "RELAY_REGION", message: "..." })];
     const result = await login("a@example.com", "password1");
-    expect(result).toMatchObject({ ok: false, status: 403, code: "RELAY_REGION" });
+    expect(result).toMatchObject({ ok: false, noResponse: true });
+    expect(result).not.toHaveProperty("code");
+    expect(result).not.toHaveProperty("relayTried");
+    expect(relayed.map((r) => r.path)).toEqual(["/login-challenge"]);
     // And the relay is off on this network now.
     expect(await lr.relayRequest({ method: "GET", path: "/health" }, "foreground")).toEqual({
       kind: "skipped",
       reason: "off",
     });
+  });
+
+  it("says the same when the refusal comes at the attempt rather than the challenge", async () => {
+    relayReplies = [json(200, CHALLENGE), json(403, { statusCode: 403, code: "RELAY_REGION", message: "..." })];
+    const result = await login("a@example.com", "password1");
+    expect(result).toMatchObject({ ok: false, noResponse: true });
+    expect(result).not.toHaveProperty("code");
+  });
+
+  it("asks the ordinary routes after all when relay mode sent it there first", async () => {
+    // Relay mode: the backend answered through the relay a moment ago.
+    relayReplies = [json(200, {})];
+    await lr.relayRequest({ method: "GET", path: "/health" }, "background");
+    expect(lr.skipNormalRoutes()).toBe(true);
+    relayed = [];
+    fetched.length = 0;
+    relayReplies = [json(403, { statusCode: 403, code: "RELAY_REGION", message: "..." })];
+    replies["/login-challenge"] = [{ status: 200, body: CHALLENGE }];
+    replies["/customer-auth/login"] = [{ status: 200, body: TOKENS }];
+    const result = await login("a@example.com", "password1");
+    expect(result).toEqual({ ok: true, data: TOKENS });
+    expect(relayed.map((r) => r.path)).toEqual(["/login-challenge"]);
+    expect(fetched).toEqual(["/login-challenge", "/customer-auth/login"]);
   });
 
   it("says the backup server was tried when it did not answer", async () => {
@@ -173,7 +210,7 @@ describe("signing in", () => {
   });
 
   it("does not use the relay when the customer declined it, and says nothing of it", async () => {
-    lr.setRelayConsent(false);
+    lr.setBackupRouteOn(false);
     const result = await login("a@example.com", "password1");
     expect(result).toMatchObject({ ok: false, noResponse: true });
     expect(result).not.toHaveProperty("relayTried");
@@ -218,10 +255,18 @@ describe("signing up", () => {
   });
 
   it("is not available when the relay cannot be used, and says so", async () => {
-    lr.setRelayConsent(false);
+    lr.setBackupRouteOn(false);
     const result = await relayRegister("a@example.com", "a@example.com", "password1");
     expect(result).toMatchObject({ ok: false, code: "RELAY_UNAVAILABLE" });
     expect(relayed).toEqual([]);
+  });
+
+  // This sign-up exists only on the relay, and the customer chose it: the
+  // region is the reason it failed, and it is said.
+  it("says the backup route is only for Iran when the backend refuses this network", async () => {
+    relayReplies = [json(403, { statusCode: 403, code: "RELAY_REGION", message: "..." })];
+    const result = await relayRegister("a@example.com", "a@example.com", "password1");
+    expect(result).toMatchObject({ ok: false, code: "RELAY_REGION" });
   });
 
   it("passes on the backend's refusal", async () => {

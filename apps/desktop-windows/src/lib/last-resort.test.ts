@@ -7,7 +7,12 @@ import type { RelayAnswer } from "./last-resort";
  * are relay_http.rs's tests. */
 
 let entries: { url: string; pins: string[] }[] = [];
-vi.mock("./endpoint-bundle-store", () => ({ lastResortEntries: () => Promise.resolve(entries) }));
+type ListFetcher = (path: string) => Promise<{ ok: boolean; text: () => Promise<string> }>;
+const listRefresh = vi.fn<(fetcher: ListFetcher) => Promise<void>>();
+vi.mock("./endpoint-bundle-store", () => ({
+  lastResortEntries: () => Promise.resolve(entries),
+  maybeRefreshBundleThroughRelay: (fetcher: ListFetcher) => listRefresh(fetcher),
+}));
 
 let carrier: string | null = "asn:58224";
 const stamps: Record<string, string> = {};
@@ -45,7 +50,7 @@ const json = (status: number, body: unknown): RelayAnswer => ({
   body: JSON.stringify(body),
 });
 
-function reset(options: { tehran?: boolean } = {}) {
+function reset() {
   store.clear();
   entries = [BOX_A, BOX_B, BOX_C];
   carrier = "asn:58224";
@@ -55,10 +60,11 @@ function reset(options: { tehran?: boolean } = {}) {
   replies = [];
   now = 1_000_000;
   tunnelUp = false;
+  listRefresh.mockReset();
+  listRefresh.mockResolvedValue(undefined);
   ladderPass.running.current = false;
   lr.resetLastResortForTests({
     now: () => now,
-    environment: { timeZone: options.tehran ? "Asia/Tehran" : "Europe/Berlin", languages: ["en-US"] },
     tunnelUp: () => Promise.resolve(tunnelUp),
     transport: async (args) => {
       sent.push(args as Sent);
@@ -69,7 +75,6 @@ function reset(options: { tehran?: boolean } = {}) {
       return reply;
     },
   });
-  lr.setRelayConsent(true);
 }
 
 beforeEach(() => reset());
@@ -103,80 +108,50 @@ describe("what the relay carries", () => {
   });
 });
 
-describe("consent (R1.4)", () => {
-  it("is asked once, before any byte is sent, and a decline is remembered", async () => {
-    lr.resetLastResortForTests({ now: () => now, tunnelUp: () => Promise.resolve(false), transport: async () => json(200, {}) });
-    let asked = 0;
-    lr.onRelayConsentAsked(async () => {
-      asked += 1;
-      return false;
-    });
-    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "declined" });
-    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "declined" });
-    expect(asked).toBe(1);
-    expect(lr.relayConsent()).toBe("declined");
-  });
-
-  it("is never asked by a background request, and nothing is sent without it", async () => {
-    store.delete("neoxify.relay.consent");
-    let asked = 0;
-    lr.onRelayConsentAsked(async () => {
-      asked += 1;
-      return true;
-    });
+describe("the Settings switch", () => {
+  // Owner, 2026-10-18: nothing is asked before the backup route is used.
+  it("is on on a fresh install, and nothing is asked before a call goes", async () => {
+    store.clear();
     replies = [json(200, {})];
-    expect(await lr.relayRequest(ME, "background")).toEqual({ kind: "skipped", reason: "unasked" });
-    expect(asked).toBe(0);
+    expect(lr.backupRouteOn()).toBe(true);
+    expect((await lr.relayRequest(ME, "foreground")).kind).toBe("answered");
+    expect(sent).toHaveLength(1);
+  });
+
+  // The signed-in customer's server list is a background request; before,
+  // it waited for a consent only a tap could give, and the customer kept
+  // looking at cached servers that no longer answered.
+  it("carries background requests as it does foreground ones", async () => {
+    replies = [json(200, {})];
+    expect((await lr.relayRequest({ method: "GET", path: "/customer/protocol-users" }, "background")).kind).toBe("answered");
+  });
+
+  it("sends nothing once turned off, and remembers it", async () => {
+    lr.setBackupRouteOn(false);
+    replies = [json(200, {})];
+    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "declined" });
+    expect(await lr.relayRequest(ME, "background")).toEqual({ kind: "skipped", reason: "declined" });
+    expect(lr.backupRouteOn()).toBe(false);
     expect(sent).toEqual([]);
+    lr.setBackupRouteOn(true);
+    expect((await lr.relayRequest(ME, "foreground")).kind).toBe("answered");
   });
 
-  it("is not assumed when there is no screen to ask on", async () => {
-    store.delete("neoxify.relay.consent");
-    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "unasked" });
-    expect(sent).toEqual([]);
+  // A "no" given to the old prompt, often before the customer knew what
+  // it was for, does not keep the relay shut on that install.
+  it("does not read the old prompt's answer", async () => {
+    store.set("neoxify.relay.consent", "declined");
+    replies = [json(200, {})];
+    expect(lr.backupRouteOn()).toBe(true);
+    expect((await lr.relayRequest(ME, "foreground")).kind).toBe("answered");
   });
 
-  it("asks one question for requests that need it at once", async () => {
-    store.delete("neoxify.relay.consent");
-    let answer: (granted: boolean) => void = () => undefined;
-    let asked = 0;
-    lr.onRelayConsentAsked(
-      () =>
-        new Promise<boolean>((resolve) => {
-          asked += 1;
-          answer = resolve;
-        }),
-    );
-    replies = [json(200, {}), json(200, {})];
-    const both = Promise.all([lr.relayRequest(ME, "foreground"), lr.relayRequest(ME, "foreground")]);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(sent).toEqual([]);
-    answer(true);
-    const outcomes = await both;
-    expect(asked).toBe(1);
-    expect(outcomes.map((o) => o.kind)).toEqual(["answered", "answered"]);
-  });
-
-  it("is not asked while a tunnel holds the gate", async () => {
-    store.delete("neoxify.relay.consent");
-    let asked = 0;
-    lr.onRelayConsentAsked(async () => {
-      asked += 1;
-      return true;
-    });
-    tunnelUp = true;
-    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "gated" });
-    expect(asked).toBe(0);
-    expect(lr.relayConsent()).toBeNull();
-  });
-
-  it("can be withdrawn in Settings, which ends relay mode", async () => {
+  it("ends relay mode when turned off", async () => {
     replies = [json(200, {})];
     await lr.relayRequest(ME, "foreground");
     expect(lr.relayModeActive()).toBe(true);
-    lr.setRelayConsent(false);
+    lr.setBackupRouteOn(false);
     expect(lr.relayModeActive()).toBe(false);
-    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "declined" });
   });
 });
 
@@ -209,7 +184,6 @@ describe("the tunnel gate (R1.5)", () => {
 
   it("is not there at all in a build with no tunnel to read -- the web portal", async () => {
     lr.resetLastResortForTests({ now: () => now, transport: async () => json(200, {}) });
-    lr.setRelayConsent(true);
     expect(lr.relaySupported()).toBe(false);
     expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "none" });
     expect(await lr.relaySignupOffered()).toBe(false);
@@ -230,50 +204,25 @@ describe("the tunnel gate (R1.5)", () => {
   });
 });
 
-describe("Iran evidence (R1.3)", () => {
-  it("is the server's stamp for this network when there is one", async () => {
+describe("where the device is (R1.3)", () => {
+  // The backend's region gate is the only word on it. The app's own
+  // evidence -- the last country stamp, the time zone -- kept the relay
+  // shut for a customer whose last stamp came through another VPN.
+  it("is not guessed on the device: a stamp from elsewhere holds nothing back", async () => {
     stamps["asn:58224"] = "DE";
-    reset({ tehran: true });
-    stamps["asn:58224"] = "DE";
-    expect(lr.iranEvidence()).toBe(false);
-    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "not-iran" });
-  });
-
-  it("is the latest stamp of any network when this one cannot be named", async () => {
-    // A day without a baseline -- every hour of a blackout -- leaves no
-    // network key. Where the server last placed the device stands over
-    // its settings: a Persian-language phone abroad is abroad.
-    reset({ tehran: true });
     carrier = null;
-    delete stamps["asn:58224"];
-    stamps["asn:3320"] = "DE";
-    expect(lr.iranEvidence()).toBe(false);
-    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "not-iran" });
-    expect(sent).toEqual([]);
-    stamps["asn:58224"] = "IR";
-    expect(lr.iranEvidence()).toBe(true);
+    replies = [json(200, {})];
+    expect((await lr.relayRequest(ME, "foreground")).kind).toBe("answered");
   });
 
-  it("is the latest stamp of any network on a network the server answered without placing", () => {
-    reset({ tehran: true });
-    carrier = "asn:44244";
-    delete stamps["asn:58224"];
-    stamps["asn:3320"] = "DE";
-    expect(lr.iranEvidence()).toBe(false);
-  });
-
-  it("is the time zone or the region only on an install never stamped anywhere", () => {
-    delete stamps["asn:58224"];
-    carrier = null;
-    lr.resetLastResortForTests({ environment: { timeZone: "Asia/Tehran", languages: ["en-US"] } });
-    expect(lr.iranEvidence()).toBe(true);
-    carrier = "asn:58224";
-    lr.resetLastResortForTests({ environment: { timeZone: "Asia/Tehran", languages: ["en-US"] } });
-    expect(lr.iranEvidence()).toBe(true);
-    lr.resetLastResortForTests({ environment: { timeZone: "Europe/London", languages: ["fa-IR"] } });
-    expect(lr.iranEvidence()).toBe(true);
-    lr.resetLastResortForTests({ environment: { timeZone: "Europe/London", languages: ["fa", "en-GB"] } });
-    expect(lr.iranEvidence()).toBe(false);
+  it("is the backend's to say, and a refusal switches the relay off on this network for a day", async () => {
+    replies = [json(403, { code: "RELAY_REGION" })];
+    expect((await lr.relayRequest(ME, "foreground")).kind).toBe("answered");
+    replies = [json(200, {})];
+    expect(await lr.relayRequest(ME, "foreground")).toEqual({ kind: "skipped", reason: "off" });
+    expect(sent).toHaveLength(1);
+    now += 24 * 3_600_000;
+    expect((await lr.relayRequest(ME, "foreground")).kind).toBe("answered");
   });
 });
 
@@ -528,7 +477,7 @@ describe("relay mode (R1.7)", () => {
     const first = lr.relayRequest(ME, "foreground");
     const second = lr.relayRequest(LOGIN, "foreground");
     await vi.waitFor(() => expect(answer).toBeDefined());
-    lr.setRelayConsent(false);
+    lr.setBackupRouteOn(false);
     answer(json(200, {}));
     expect((await first).kind).toBe("answered");
     expect(await second).toEqual({ kind: "skipped", reason: "declined" });
@@ -561,17 +510,83 @@ describe("relay status", () => {
   });
 });
 
+/** The signed endpoint lists, for a client the backend answers only here
+ * -- which never learnt a new domain, bare IP or rotated relay box, since
+ * the lists were fetched only after an ordinary address answered. */
+describe("the endpoint lists through the relay", () => {
+  const BUNDLE = { payload: "cGF5bG9hZA==", sig: "c2ln", key: "primary" };
+
+  it("are asked for once the backend answers here, through the relay itself", async () => {
+    replies = [json(200, {}), json(200, BUNDLE)];
+    await lr.relayRequest(ME, "background");
+    expect(listRefresh).toHaveBeenCalledTimes(1);
+
+    const response = await listRefresh.mock.calls[0][0]("/endpoints/bundle2");
+
+    expect(sent.map((s) => [s.method, s.path])).toEqual([
+      ["GET", "/customer/me"],
+      ["GET", "/endpoints/bundle2"],
+    ]);
+    expect(response.ok).toBe(true);
+    expect(await response.text()).toBe(JSON.stringify(BUNDLE));
+  });
+
+  it("are not asked for once an ordinary route has answered", async () => {
+    lr.noteNormalRouteAnswered();
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "background");
+    expect(listRefresh).not.toHaveBeenCalled();
+  });
+
+  it("are not asked for on a page from in front of the backend, or a RELAY_REGION refusal", async () => {
+    replies = [{ status: 502, contentType: "text/html", body: "<html>" }, json(403, { code: "RELAY_REGION" })];
+    await lr.relayRequest(ME, "background");
+    await lr.relayRequest(ME, "background");
+    expect(sent).toHaveLength(2);
+    expect(listRefresh).not.toHaveBeenCalled();
+  });
+
+  it("take nothing but the backend's own 200", async () => {
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "background");
+    const fetcher = listRefresh.mock.calls[0][0];
+    replies = [json(404, { message: "No server-signed endpoint list has been published yet" })];
+    expect((await fetcher("/endpoints/bundle2")).ok).toBe(false);
+    replies = [{ status: 200, contentType: "text/html", body: "<html>" }];
+    expect((await fetcher("/endpoints/bundle")).ok).toBe(false);
+    replies = ["relay: connect-timeout", "relay: connect-timeout"];
+    expect((await fetcher("/endpoints/bundle")).ok).toBe(false);
+  });
+
+  // Every rule a call is held to: the switch, the tunnel's gate, the
+  // region and the budget are relayRequest's own.
+  it("are background calls under every rule above", async () => {
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "background");
+    const fetcher = listRefresh.mock.calls[0][0];
+    sent = [];
+    lr.setBackupRouteOn(false);
+    replies = [json(200, BUNDLE)];
+    expect((await fetcher("/endpoints/bundle2")).ok).toBe(false);
+    lr.setBackupRouteOn(true);
+    tunnelUp = true;
+    expect((await fetcher("/endpoints/bundle2")).ok).toBe(false);
+    expect(sent).toEqual([]);
+  });
+});
+
 describe("relay sign-up on offer", () => {
-  it("needs a relay, Iran evidence and no decline, and sends nothing to find out", async () => {
+  it("needs a relay and the switch on, and sends nothing to find out", async () => {
     expect(await lr.relaySignupOffered()).toBe(true);
-    lr.setRelayConsent(false);
+    lr.setBackupRouteOn(false);
     expect(await lr.relaySignupOffered()).toBe(false);
-    lr.setRelayConsent(true);
+    lr.setBackupRouteOn(true);
     entries = [];
     expect(await lr.relaySignupOffered()).toBe(false);
     entries = [BOX_A];
+    // Where the server last placed the device is not consulted.
     stamps["asn:58224"] = "TR";
-    expect(await lr.relaySignupOffered()).toBe(false);
+    expect(await lr.relaySignupOffered()).toBe(true);
     expect(sent).toEqual([]);
   });
 });

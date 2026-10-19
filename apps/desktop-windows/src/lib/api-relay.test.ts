@@ -39,6 +39,7 @@ const RELAY = { url: "https://192.0.2.10/api", pins: [`sha256/${btoa(String.from
 vi.mock("./endpoint-bundle-store", () => ({
   maybeRefreshBundle: () => Promise.resolve(),
   lastResortEntries: () => Promise.resolve([RELAY]),
+  maybeRefreshBundleThroughRelay: () => Promise.resolve(),
 }));
 vi.mock("./network-identity", () => ({
   networkKeyFromAsn: () => "asn:58224",
@@ -101,7 +102,6 @@ beforeEach(() => {
   stored = { accessToken: "access", refreshToken: "refresh" };
   lr.resetLastResortForTests({
     now: () => now,
-    environment: { timeZone: "Asia/Tehran", languages: ["fa-IR"] },
     tunnelUp: () => Promise.resolve(tunnelUp),
     transport: async (args) => {
       relayed.push(args as Relayed);
@@ -111,7 +111,7 @@ beforeEach(() => {
       return reply;
     },
   });
-  lr.setRelayConsent(true);
+  lr.setBackupRouteOn(true);
 });
 
 const ME = { id: "c1", email: "a@example.com" };
@@ -171,7 +171,7 @@ describe("a request every ordinary route failed", () => {
     relayReplies = ["relay: connect-timeout"];
     const tried = await apiRequest("/customer/me", { relay: "foreground" });
     expect(tried).toMatchObject({ ok: false, noResponse: true, relayTried: true });
-    store.set("neoxify.relay.consent", "declined");
+    store.set("neoxify.relay.switch", "off");
     const declined = await apiRequest("/customer/me", { relay: "foreground" });
     expect(declined).toMatchObject({ ok: false, noResponse: true });
     expect(declined).not.toHaveProperty("relayTried");
@@ -231,9 +231,58 @@ describe("a request every ordinary route failed", () => {
     });
     expect(result).toMatchObject({ ok: false, status: 403, code: "VOUCHER_NOT_ALLOWED" });
   });
+
+  // Nothing asks before the relay is used, and the device does not guess
+  // its country: abroad, the backend's region refusal is the first word
+  // of the relay this customer ever hears. What failed is still the
+  // ordinary routes, and that is what they are told.
+  it("says Neoxify could not be reached, not where the relay is for, when the backend refuses this network", async () => {
+    relayReplies = [json(403, { statusCode: 403, code: "RELAY_REGION", message: "..." })];
+    const redeem = await apiRequest("/customer/vouchers/redeem", {
+      method: "POST",
+      body: JSON.stringify({ code: "X" }),
+      relay: "foreground",
+    });
+    expect(redeem).toMatchObject({ ok: false, noResponse: true });
+    expect(redeem).not.toHaveProperty("code");
+    expect(redeem).not.toHaveProperty("relayTried");
+    const t = (key: keyof (typeof DICTIONARIES)["en"]) => DICTIONARIES.en[key];
+    expect(failureText(redeem as never, t)).toBe(DICTIONARIES.en["api.unreachable"]);
+    // Still off on this network for a day.
+    expect(await lr.relayRequest({ method: "GET", path: "/health" }, "foreground")).toEqual({
+      kind: "skipped",
+      reason: "off",
+    });
+  });
+
+  it("says the same of a public request", async () => {
+    relayReplies = [json(403, { statusCode: 403, code: "RELAY_REGION", message: "..." })];
+    const result = await publicRequest("/customer-auth/forgot-password", {
+      method: "POST",
+      body: "{}",
+      relay: "foreground",
+    });
+    expect(result).toMatchObject({ ok: false, noResponse: true });
+    expect(result).not.toHaveProperty("code");
+  });
 });
 
 describe("relay mode", () => {
+  it("asks the ordinary routes after all when the backend refuses this network", async () => {
+    relayReplies = [json(200, ME)];
+    await apiRequest("/customer/me", { relay: "background" });
+    relayReplies = [json(403, { statusCode: 403, code: "RELAY_REGION", message: "..." })];
+    fetched.length = 0;
+    replies["/customer/me"] = [{ status: 200, body: ME }];
+    expect(await apiRequest("/customer/me", { relay: "background" })).toEqual({ ok: true, data: ME });
+    expect(fetched).toEqual(["/customer/me"]);
+    fetched.length = 0;
+    const unreached = await apiRequest("/customer/me", { relay: "background" });
+    expect(unreached).toMatchObject({ ok: false, noResponse: true });
+    expect(unreached).not.toHaveProperty("code");
+    expect(unreached).not.toHaveProperty("relayTried");
+  });
+
   it("sends a request straight to the relay, and asks the ordinary routes again after three minutes", async () => {
     relayReplies = [json(200, ME)];
     await apiRequest("/customer/me", { relay: "background" });

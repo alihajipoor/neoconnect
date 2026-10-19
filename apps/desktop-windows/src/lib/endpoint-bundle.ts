@@ -78,6 +78,11 @@ export interface EndpointBundle {
   /** The relay entries, apart from `endpoints` (see `LastResortEntry`).
    * Absent where the bundle was not read by `verifyBundle`. */
   lastResort?: LastResortEntry[];
+  /** Whether a compiled-in key signed it itself, rather than a server key
+   * under its statement (`ServerKeyStatement`). Such a list never expires,
+   * which is why bundle-store keeps the newest one apart. Absent where the
+   * bundle was not read by `verifyBundle`. */
+  offline?: boolean;
 }
 
 /** Envelope as published. The payload is carried as bytes rather than as
@@ -87,8 +92,38 @@ export interface EndpointBundle {
 interface SignedEnvelope {
   payload: string; // base64
   sig: string; // base64
-  key: string; // which compiled-in public key signed it
+  key: string; // which public key signed it: a compiled-in one, or `cert`'s
+  /** Present when `key` is a server key rather than a compiled-in one:
+   * the compiled-in key's signed statement that `key` may sign lists, and
+   * until when (`ServerKeyStatement`). */
+  cert?: { payload: string; sig: string; key: string };
 }
+
+/** What a compiled-in key signs to let a server key sign lists.
+ *
+ * The compiled-in keys live offline with the owner, so every list used to
+ * wait for the owner to sign it by hand -- and a list that cannot be
+ * published while the owner is away is a list that does not follow the
+ * servers it describes. The server signs instead, under this statement:
+ * one offline signature, renewed when it expires, rather than one per
+ * change. A list it signs is otherwise held to every rule an offline one
+ * is, so the worst a stolen server key can do is what a stolen list
+ * could, and only until `expires`.
+ *
+ * Published as `/endpoints/bundle2` (bundle-store), apart from the
+ * offline list: a client from before this existed knows no `cert` and
+ * would refuse such a list, and must keep receiving the offline one. */
+interface ServerKeyStatement {
+  kind: "neoxify-bundle-key";
+  /** The envelope's `key`. Never a compiled-in key's id. */
+  id: string;
+  /** The server's Ed25519 public key, 32 bytes, base64. */
+  publicKey: string;
+  /** Unix seconds after which lists signed with it are refused. */
+  expires: number;
+}
+
+export const SERVER_KEY_STATEMENT_KIND = "neoxify-bundle-key";
 
 /** Compiled-in verification keys, by id.
  *
@@ -107,8 +142,19 @@ export const BUNDLE_KEYS: Readonly<Record<string, string>> = {
   backup: "BJ3ROKfvxHbec/Zq7jGdUweQEUr2K6VspEPRlEveYsI=",
 };
 
+/** The bytes `value` spells in canonical base64, or a throw.
+ *
+ * As strict as src-tauri/src/bundle_scope.rs, which reads the same fields
+ * with base64's STANDARD engine: padded, nothing but the alphabet, and no
+ * stray bits after the data. `atob` alone forgives whitespace, missing
+ * padding and those bits, so a list any source re-spelled that way was
+ * taken here and kept, then refused by the scope grant on every run --
+ * and the correctly spelled copy of the same version was never adopted
+ * over it, since only a higher version is. */
 function fromBase64(value: string): Uint8Array {
+  if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) throw new Error("not canonical base64");
   const binary = atob(value);
+  if (btoa(binary) !== value) throw new Error("not canonical base64");
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
   return out;
@@ -171,15 +217,12 @@ function relayPinsProblem(pins: unknown): string | null {
     if (encoded.length !== 44 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return "a pin must be 44 base64 characters";
     let bytes: Uint8Array;
     try {
+      // Canonical, so one spelling per digest: no stray trailing bits.
       bytes = fromBase64(encoded);
     } catch {
-      return "a pin is not base64";
+      return "a pin is not canonical base64";
     }
     if (bytes.length !== 32) return "a pin must be a SHA-256 digest";
-    // One spelling per digest: no stray trailing bits.
-    let canonical = "";
-    for (const byte of bytes) canonical += String.fromCharCode(byte);
-    if (btoa(canonical) !== encoded) return "a pin is not canonical base64";
     if (seen.has(encoded)) return "a pin is listed twice";
     seen.add(encoded);
   }
@@ -202,16 +245,78 @@ function lastResortEntry(value: unknown): LastResortEntry | null {
   return { url: e.url, pins: [...e.pins], ...(e.region !== undefined ? { region: e.region } : {}) };
 }
 
+/** Whether `keys` itself names `id` -- not an inherited property, which a
+ * plain lookup would hand back for "constructor". */
+function owns(keys: Readonly<Record<string, string>>, id: string): boolean {
+  return Object.prototype.hasOwnProperty.call(keys, id);
+}
+
+/** The payload's bytes if `sig` is `key`'s signature over `payload`, all
+ * base64; null for anything that does not decode, never a throw. */
+async function signedBy(payload: string, sig: string, key: string): Promise<Uint8Array | null> {
+  let payloadBytes: Uint8Array;
+  try {
+    payloadBytes = fromBase64(payload);
+    const ok = await verifyAsync(fromBase64(sig), payloadBytes, fromBase64(key));
+    return ok ? payloadBytes : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The public key, base64, that signs `envelope`: a compiled-in one by
+ * id, or a server key a compiled-in one vouches for (`ServerKeyStatement`)
+ * that has not expired at `now`. Null if neither. */
+async function envelopeSigner(
+  envelope: SignedEnvelope,
+  keys: Readonly<Record<string, string>>,
+  now: number,
+): Promise<string | null> {
+  if (owns(keys, envelope.key)) return keys[envelope.key];
+  const cert = envelope.cert;
+  if (typeof cert !== "object" || cert === null) return null;
+  if (typeof cert.payload !== "string" || typeof cert.sig !== "string" || typeof cert.key !== "string") return null;
+  // Vouched for by a compiled-in key, and only by one: a statement signed
+  // by another server key would let one leaked key mint the next.
+  if (!owns(keys, cert.key)) return null;
+  const statementBytes = await signedBy(cert.payload, cert.sig, keys[cert.key]);
+  if (!statementBytes) return null;
+  let statement: ServerKeyStatement;
+  try {
+    statement = JSON.parse(new TextDecoder().decode(statementBytes)) as ServerKeyStatement;
+  } catch {
+    return null;
+  }
+  if (statement?.kind !== SERVER_KEY_STATEMENT_KIND) return null;
+  // The statement names the key the envelope says signed it, and that is
+  // not a compiled-in key's id, which the first branch would have taken.
+  if (statement.id !== envelope.key || owns(keys, statement.id)) return null;
+  if (typeof statement.expires !== "number" || !Number.isFinite(statement.expires)) return null;
+  if (now >= statement.expires * 1000) return null;
+  if (typeof statement.publicKey !== "string") return null;
+  try {
+    if (fromBase64(statement.publicKey).length !== 32) return null;
+  } catch {
+    return null;
+  }
+  return statement.publicKey;
+}
+
 /** Verifies an envelope and returns the bundle, or null.
  *
  * Null for every failure, deliberately: the caller's only correct
  * response to a bad bundle is to keep the one it already trusts, and
  * distinguishing "forged" from "corrupt" would invite treating one of
  * them as recoverable.
+ *
+ * Signed by a compiled-in key, or by a server key one of them vouches for
+ * until it expires (`ServerKeyStatement`); src-tauri/src/bundle_scope.rs
+ * checks the same two ways before it widens the HTTP scope.
  */
 export async function verifyBundle(
   raw: string,
   keys: Readonly<Record<string, string>> = BUNDLE_KEYS,
+  now: number = Date.now(),
 ): Promise<EndpointBundle | null> {
   let envelope: SignedEnvelope;
   try {
@@ -227,27 +332,10 @@ export async function verifyBundle(
     return null;
   }
 
-  const publicKey = keys[envelope.key];
+  const publicKey = await envelopeSigner(envelope, keys, now);
   if (!publicKey) return null;
-
-  let payloadBytes: Uint8Array;
-  let signature: Uint8Array;
-  let keyBytes: Uint8Array;
-  try {
-    payloadBytes = fromBase64(envelope.payload);
-    signature = fromBase64(envelope.sig);
-    keyBytes = fromBase64(publicKey);
-  } catch {
-    return null;
-  }
-
-  let ok = false;
-  try {
-    ok = await verifyAsync(signature, payloadBytes, keyBytes);
-  } catch {
-    return null;
-  }
-  if (!ok) return null;
+  const payloadBytes = await signedBy(envelope.payload, envelope.sig, publicKey);
+  if (!payloadBytes) return null;
 
   let bundle: EndpointBundle;
   try {
@@ -271,7 +359,9 @@ export async function verifyBundle(
     .map(lastResortEntry)
     .filter((entry): entry is LastResortEntry => entry !== null);
 
-  return { v: bundle.v, issuedAt: bundle.issuedAt, endpoints, lastResort };
+  // The first way `envelopeSigner` takes: a compiled-in key by its id.
+  const offline = owns(keys, envelope.key);
+  return { v: bundle.v, issuedAt: bundle.issuedAt, endpoints, lastResort, offline };
 }
 
 /** Whether `candidate` should replace `held`.

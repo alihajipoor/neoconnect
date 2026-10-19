@@ -8,7 +8,7 @@ import { onSessionRevoked } from "@shared/lib/session-revoked";
 import { useI18n } from "@shared/lib/i18n";
 import { tearDownMobileForSignOut, vpnStatus } from "./lib/vpn";
 import { setRelayTunnelReader } from "@shared/lib/last-resort";
-import { BackupRouteChip, BackupRouteConsent } from "@shared/components/BackupRoute";
+import { BackupRouteChip } from "@shared/components/BackupRoute";
 import { Login } from "@shared/screens/Login";
 import { Register } from "@shared/screens/Register";
 import { VerifyEmail } from "@shared/screens/VerifyEmail";
@@ -355,7 +355,6 @@ export default function App() {
       <div className="min-h-0 flex-1">
         <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>
       </div>
-      <BackupRouteConsent />
     </div>
   );
 }

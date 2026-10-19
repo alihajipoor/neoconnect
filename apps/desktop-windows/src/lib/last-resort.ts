@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { LastResortEntry } from "./endpoint-bundle";
-import { lastResortEntries } from "./endpoint-bundle-store";
+import { lastResortEntries, maybeRefreshBundleThroughRelay } from "./endpoint-bundle-store";
 import { ladderPass } from "./ladder-pass";
-import { latestStampedCountry, networkKeyFromAsn, stampedCountry } from "./network-identity";
+import { networkKeyFromAsn } from "./network-identity";
 import { relayAllows } from "./relay-calls";
 
 /** The relay of last resort: when every ordinary route to the API has
@@ -26,16 +26,24 @@ import { relayAllows } from "./relay-calls";
  *     it never reaches `apiEndpoints()`, the HTTP scope, the remembered
  *     address, the updater or the probes (endpoint-bundle.ts).
  *  3. The relay is not switched off for this network after the backend
- *     said the caller is not in Iran (R1.7: 24 hours).
- *  4. Evidence the device is in Iran (R1.3): the server's own country
- *     stamp for this network, or the latest on any network, and on an
- *     install never stamped, the time zone or the region. A cost and
- *     honesty gate, not security -- the backend checks the region itself.
- *  5. Consent, once per install, before any byte is sent (R1.4). A
- *     decline is remembered. Only a foreground request -- one the
- *     customer just asked for -- may ask; a background one never does.
- *  6. At send time, one call at a time: the tunnel is down and no connect
+ *     said the caller is not in Iran (R1.7: 24 hours). That answer is the
+ *     only word on where the device is: the backend checks the region of
+ *     every relay call itself.
+ *  4. The customer has not turned the backup route off in Settings. It is
+ *     on until they do, and nothing is asked first.
+ *  5. At send time, one call at a time: the tunnel is down and no connect
  *     is under way (R1.5), and the device budget has room (R1.6).
+ *
+ * Until 2026-10-18 the app also asked consent before the first call
+ * (R1.4) and looked for its own evidence of Iran (R1.3) -- the server's
+ * last country stamp, or the phone's time zone. Both kept the relay from
+ * the customers it is for. A stamp taken while another VPN was on named
+ * that VPN's country, and with every route blocked on the customer's own
+ * network no new stamp could come, so the relay stayed shut for them; a
+ * background refresh never asked consent, so a customer who had not
+ * tapped anything yet got nothing. The owner dropped both: the backend's
+ * region gate decides, and a refusal switches the relay off here for a
+ * day, which is the whole cost of a wrong guess abroad.
  *
  * Nothing is raced. Two boxes at most per call, twelve seconds in all,
  * each given what is left of that (the command's own connect timeout is
@@ -65,12 +73,8 @@ export type RelaySkip =
   | "path"
   /** The bundle names no relay. */
   | "none"
-  /** No evidence this device is in Iran. */
-  | "not-iran"
-  /** The customer said no, now or before. */
+  /** The customer turned the backup route off in Settings. */
   | "declined"
-  /** Nobody was asked: a background request, or no screen to ask on. */
-  | "unasked"
   /** Switched off on this network after the backend said it is not Iran. */
   | "off"
   /** The device's hourly or daily allowance is spent. */
@@ -115,7 +119,12 @@ const DAY_MS = 24 * HOUR_MS;
  * known -- which closes the gate. */
 const TUNNEL_READ_MS = 3_000;
 
-const CONSENT_KEY = "neoxify.relay.consent";
+/** The Settings switch: "off" when the customer turned the backup route
+ * off, absent otherwise. A new key, not the old consent's
+ * ("neoxify.relay.consent"): a "no" given to the prompt -- often before
+ * the customer knew what it was for -- would otherwise keep the relay
+ * shut on that install for good. */
+const SWITCH_KEY = "neoxify.relay.switch";
 const STATE_KEY = "neoxify.relay";
 const INSTALL_KEY = "neoxify.relay.install";
 
@@ -141,8 +150,8 @@ const REFUSED_LOCALLY = new Set(["relay: bad-base", "relay: bad-pins", "relay: r
 
 // ---------------------------------------------------------------------------
 // Storage. Per device and best-effort, as endpoint-demotion.ts keeps its
-// own: a private window or cleared storage forgets the consent (it is
-// asked again) and the budget (which the backend's caps back up).
+// own: a private window or cleared storage forgets the Settings switch
+// (back on) and the budget (which the backend's caps back up).
 
 function storage(): Storage | null {
   try {
@@ -189,8 +198,8 @@ function save(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Seams: the clock, the transport, the environment and the tunnel's state
-// are set by the app (App.tsx in each client) and by tests.
+// Seams: the clock, the transport and the tunnel's state are set by the
+// app (App.tsx in each client) and by tests.
 
 let clock: () => number = () => Date.now();
 
@@ -205,25 +214,6 @@ type Transport = (args: {
 }) => Promise<RelayAnswer>;
 
 let transport: Transport = (args) => invoke<RelayAnswer>("relay_request", args);
-
-interface Environment {
-  timeZone: string | undefined;
-  languages: readonly string[];
-}
-
-function defaultEnvironment(): Environment {
-  let timeZone: string | undefined;
-  try {
-    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  } catch {
-    timeZone = undefined;
-  }
-  const languages =
-    typeof navigator === "undefined" ? [] : navigator.languages?.length ? navigator.languages : [navigator.language ?? ""];
-  return { timeZone, languages };
-}
-
-let environment: () => Environment = defaultEnvironment;
 
 /** Whether a tunnel is up: true, false, or null when it cannot be told. */
 type TunnelReader = () => Promise<boolean | null>;
@@ -257,69 +247,32 @@ export function relaySupported(): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Consent (R1.4).
+// The customer's switch.
 
-export type RelayConsent = "granted" | "declined" | null;
-
-/** What the customer said about the backup route on this install, or null
- * if they were never asked. */
-export function relayConsent(): RelayConsent {
+/** Whether the backup route is on: true unless the customer turned it
+ * off in Settings. Nothing asks first (see the top of this file). */
+export function backupRouteOn(): boolean {
   try {
-    const value = storage()?.getItem(CONSENT_KEY);
-    return value === "granted" || value === "declined" ? value : null;
+    return storage()?.getItem(SWITCH_KEY) !== "off";
   } catch {
-    return null;
+    return true;
   }
 }
 
-/** Records the customer's answer -- from the prompt, or from the switch in
- * Settings. Turning it off ends relay mode at once. */
-export function setRelayConsent(granted: boolean): void {
+/** The Settings switch. Turning it off ends relay mode at once. */
+export function setBackupRouteOn(on: boolean): void {
   try {
-    storage()?.setItem(CONSENT_KEY, granted ? "granted" : "declined");
+    if (on) storage()?.removeItem(SWITCH_KEY);
+    else storage()?.setItem(SWITCH_KEY, "off");
   } catch {
-    // Asked again next time; nothing was sent meanwhile.
+    // Held as it was; nothing is sent differently until it can be stored.
   }
-  if (!granted) endRelayMode();
+  if (!on) endRelayMode();
   notify();
 }
 
-type ConsentAsker = () => Promise<boolean>;
-let asker: ConsentAsker | null = null;
-let asking: Promise<boolean | null> | null = null;
-
-/** Registers the screen that asks for consent (BackupRouteConsent). One at
- * a time; returns the unregister. Without one, nothing is asked and a
- * foreground request goes without the relay. */
-export function onRelayConsentAsked(ask: ConsentAsker): () => void {
-  asker = ask;
-  return () => {
-    if (asker === ask) asker = null;
-  };
-}
-
-async function consentFor(use: RelayUse): Promise<"granted" | "declined" | "unasked"> {
-  const held = relayConsent();
-  if (held !== null) return held;
-  if (use === "background" || asker === null) return "unasked";
-  // Requests that find the question already on screen wait for its
-  // answer: one prompt, however many requests needed the relay.
-  asking ??= asker()
-    .then((granted) => {
-      setRelayConsent(granted);
-      return granted;
-    })
-    .catch(() => null)
-    .finally(() => {
-      asking = null;
-    });
-  const answer = await asking;
-  if (answer === null) return "unasked";
-  return answer ? "granted" : "declined";
-}
-
 // ---------------------------------------------------------------------------
-// Where the device is (R1.3), and which network it is on.
+// Which network the device is on.
 
 /** The key the relay's per-network memories use. The carrier, as the
  * endpoint demotions key it, or one shared bucket when unknown. */
@@ -329,30 +282,6 @@ function networkKey(): string {
   } catch {
     return "unknown";
   }
-}
-
-/** Whether there is evidence this device is in Iran: the server's last
- * country stamp for this network (network-identity.ts) when there is one;
- * when this network is not known or never stamped, the latest stamp on any
- * network; and only on an install with no stamp anywhere -- a fresh one --
- * the time zone or the region the device is set to (R1.3).
- *
- * A stamp overrules the device's settings either way. The network goes
- * unknown a day after the last baseline, and with every route blocked
- * there is none, so for a blackout's whole length: falling back to the
- * settings there would send a Persian-language phone abroad, offline or
- * behind a captive portal, to the box in Iran. */
-export function iranEvidence(): boolean {
-  let stamped: string | null = null;
-  try {
-    stamped = stampedCountry(networkKeyFromAsn(clock())) ?? latestStampedCountry();
-  } catch {
-    stamped = null;
-  }
-  if (stamped !== null) return stamped === "IR";
-  const env = environment();
-  if (env.timeZone === "Asia/Tehran") return true;
-  return env.languages.some((tag) => /^[a-z]{2,3}(-[A-Za-z]{4})?-IR\b/i.test(tag));
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +318,7 @@ function notify(): void {
   }
 }
 
-/** Calls `listener` whenever relay mode, the consent or the relay's status
+/** Calls `listener` whenever relay mode, the Settings switch or the relay's status
  * changes. Returns the unsubscribe. */
 export function onRelayChange(listener: () => void): () => void {
   listeners.add(listener);
@@ -613,8 +542,7 @@ async function send(call: RelayCall, entries: LastResortEntry[], key: string, si
   for (const box of boxOrder(entries)) {
     // And the customer's word, before each box: the switch in Settings
     // turned off while this call waited, or was on its first box.
-    const consent = relayConsent();
-    if (consent !== "granted") return { kind: "skipped", reason: consent ?? "unasked" };
+    if (!backupRouteOn()) return { kind: "skipped", reason: "declined" };
     // Checked at send time, before each box: a connect started while the
     // previous one was being asked closes the gate for the next.
     const tunnel = await tunnelState();
@@ -660,13 +588,14 @@ async function send(call: RelayCall, entries: LastResortEntry[], key: string, si
     lastGoodBox = box.url;
     failures = 0;
     const held = load();
-    if (refusedForRegion(answer)) {
+    const outsideRegion = refusedForRegion(answer);
+    if (outsideRegion) {
       // The backend places this network outside Iran: the relay is not
       // for it, and is not tried here again for a day.
       held.off[key] = clock() + RELAY_REGION_OFF_MS;
       delete held.mode[key];
       status = null;
-    } else if (normalAnswers === since && relayConsent() === "granted") {
+    } else if (normalAnswers === since && backupRouteOn()) {
       // Not after the ordinary routes answered, or the switch was turned
       // off, while this call was out: either ended relay mode, and an
       // answer to a call made before must not start it again.
@@ -675,15 +604,49 @@ async function send(call: RelayCall, entries: LastResortEntry[], key: string, si
     }
     save();
     notify();
+    if (!outsideRegion) listsThroughRelay();
     return { kind: "answered", answer };
   }
   noteFailure();
   return { kind: "unanswered" };
 }
 
+/** One of the endpoint lists, through the relay, as
+ * `maybeRefreshBundleThroughRelay` asks for it: a background call, held to
+ * every rule above. Anything but the backend's own 200 is nothing to
+ * adopt, and the list's signature is checked as it would be from anywhere
+ * else. */
+async function relayListFetch(path: string): Promise<{ ok: boolean; text: () => Promise<string> }> {
+  const outcome = await relayRequest({ method: "GET", path }, "background");
+  if (outcome.kind !== "answered") return { ok: false, text: () => Promise.resolve("") };
+  const answer = outcome.answer;
+  return { ok: answer.status === 200 && isBackendJson(answer), text: () => Promise.resolve(answer.body) };
+}
+
+/** Asks for the endpoint lists through the relay once the backend has
+ * answered here, while no ordinary route has this run: otherwise a client
+ * the relay alone reaches never learns a new host, nor a rotated box
+ * (endpoint-bundle-store.ts says when, and once a run). Not awaited -- its
+ * calls queue behind this one (`serially`), which waiting here would wait
+ * for -- and never throws. */
+function listsThroughRelay(): void {
+  if (normalAnswers > 0) return;
+  try {
+    void maybeRefreshBundleThroughRelay(relayListFetch).catch(() => undefined);
+  } catch {
+    // The answer this follows is delivered whatever happens here.
+  }
+}
+
 /** Sends `call` through the relay, if every condition holds; see the top of
- * this file for them, in order. Never throws. */
-export async function relayRequest(call: RelayCall, use: RelayUse): Promise<RelayOutcome> {
+ * this file for them, in order. Never throws.
+ *
+ * `_use` is how a request opts in (api.ts) and says what kind it is. It
+ * no longer changes anything here: a background request -- the server
+ * list, the account, a refresh on resume -- goes the same way as one the
+ * customer just asked for, which is what kept signed-in customers on
+ * their cached servers while the prompt waited for a tap that never came. */
+export async function relayRequest(call: RelayCall, _use: RelayUse): Promise<RelayOutcome> {
   const since = normalAnswers;
   try {
     if (!relayAllows(call.method, call.path)) return { kind: "skipped", reason: "path" };
@@ -692,14 +655,7 @@ export async function relayRequest(call: RelayCall, use: RelayUse): Promise<Rela
     if (entries.length === 0) return { kind: "skipped", reason: "none" };
     const key = networkKey();
     if (relayOff(key)) return { kind: "skipped", reason: "off" };
-    if (!iranEvidence()) return { kind: "skipped", reason: "not-iran" };
-    // Not asked while a tunnel holds the gate anyway: the answer would buy
-    // nothing but "disconnect to use the backup route".
-    if (relayConsent() === null && use === "foreground" && asker !== null && (await tunnelState()) !== "down") {
-      return { kind: "gated" };
-    }
-    const consent = await consentFor(use);
-    if (consent !== "granted") return { kind: "skipped", reason: consent };
+    if (!backupRouteOn()) return { kind: "skipped", reason: "declined" };
     return await serially(() => send(call, entries, key, since));
   } catch {
     // Nothing above dials anything, and `send` answers for its own
@@ -709,27 +665,24 @@ export async function relayRequest(call: RelayCall, use: RelayUse): Promise<Rela
 }
 
 /** Whether a relay sign-up can be offered on this device now, before any
- * byte is sent: the bundle names a relay, the device looks to be in Iran,
- * the customer has not said no, and the relay is not off here. Consent is
- * still asked when the sign-up is sent. */
+ * byte is sent: the bundle names a relay, the backup route is on, and the
+ * backend has not refused this network for its region. */
 export async function relaySignupOffered(): Promise<boolean> {
   try {
     if (!relaySupported()) return false;
     if ((await lastResortEntries()).length === 0) return false;
     if (relayOff(networkKey())) return false;
-    if (relayConsent() === "declined") return false;
-    return iranEvidence();
+    return backupRouteOn();
   } catch {
     return false;
   }
 }
 
 /** For tests: a fresh run with an empty store, a fixed clock and a fake
- * transport, environment and tunnel. */
+ * transport and tunnel. */
 export function resetLastResortForTests(options: {
   now?: () => number;
   transport?: Transport;
-  environment?: Environment;
   tunnelUp?: TunnelReader | null;
 } = {}): void {
   state = null;
@@ -738,18 +691,15 @@ export function resetLastResortForTests(options: {
   lastGoodBox = null;
   normalAnswers = 0;
   status = null;
-  asker = null;
-  asking = null;
   chain = Promise.resolve();
   listeners.clear();
   clock = options.now ?? (() => Date.now());
   transport = options.transport ?? ((args) => invoke<RelayAnswer>("relay_request", args));
-  environment = options.environment ? () => options.environment! : defaultEnvironment;
   tunnelReader = options.tunnelUp === undefined ? null : options.tunnelUp;
   watchPassEnds(tunnelReader !== null);
   try {
     storage()?.removeItem(STATE_KEY);
-    storage()?.removeItem(CONSENT_KEY);
+    storage()?.removeItem(SWITCH_KEY);
   } catch {
     // Nothing held.
   }

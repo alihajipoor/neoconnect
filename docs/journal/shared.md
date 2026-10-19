@@ -347,3 +347,22 @@ yet merged. What stands, so it is not re-litigated:
   protected.
 - **The server's own address is not routed through the tunnel** for now
   (design Phase 4: not wanted now).
+
+---
+
+## 2026-10-18 — Reachability rules (owner decisions)
+
+**Status:** standing
+
+- **The backup route asks nothing.** On until the customer turns it off in
+  Settings, for background requests too; the backend's region gate is the
+  only judge of where a device is (docs/relay-last-resort.md, owner
+  decisions 2026-10-18).
+- **Two lists, two version ranges.** Offline-signed at `/endpoints/bundle`,
+  below 100, for every client; server-signed at `/endpoints/bundle2`, 100
+  and up, for clients that check statements. A change of addresses goes
+  into both until the older clients are gone.
+- **One of our domains per certificate**, reserve domains dormant until
+  used, and no piling of names onto one known IP (docs/reachability.md).
+- **The server key goes on the panel host only after the panel is
+  hardened.** Until then lists are signed on the owner's Mac.

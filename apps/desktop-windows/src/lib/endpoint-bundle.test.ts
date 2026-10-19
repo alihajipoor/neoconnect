@@ -101,6 +101,182 @@ describe("endpoint bundle verification", () => {
   });
 });
 
+/** A list signed by a server key, with the statement a compiled-in key
+ * (`rootId`) signs to vouch for it. Each override replaces one field of
+ * the statement before it is signed, to forge one thing at a time. */
+async function delegated(
+  bundle: unknown,
+  options: { rootId?: string; serverId?: string; expires?: number; statement?: Record<string, unknown> } = {},
+) {
+  const rootId = options.rootId ?? "primary";
+  const serverId = options.serverId ?? "server-1";
+  const rootPriv = utils.randomPrivateKey();
+  const rootPub = await getPublicKeyAsync(rootPriv);
+  const serverPriv = utils.randomPrivateKey();
+  const serverPub = await getPublicKeyAsync(serverPriv);
+  const statement = {
+    kind: "neoxify-bundle-key",
+    id: serverId,
+    publicKey: toBase64(serverPub),
+    expires: options.expires ?? Date.UTC(2027, 0, 1) / 1000,
+    ...options.statement,
+  };
+  const statementBytes = new TextEncoder().encode(JSON.stringify(statement));
+  const payload = new TextEncoder().encode(JSON.stringify(bundle));
+  const envelope = {
+    payload: toBase64(payload),
+    sig: toBase64(await signAsync(payload, serverPriv)),
+    key: serverId,
+    cert: { payload: toBase64(statementBytes), sig: toBase64(await signAsync(statementBytes, rootPriv)), key: rootId },
+  };
+  return { envelope, keys: { [rootId]: toBase64(rootPub) }, serverPriv, rootPriv };
+}
+
+const NOW = Date.UTC(2026, 9, 18);
+
+describe("lists signed by a server key", () => {
+  it("accepts one a compiled-in key vouches for", async () => {
+    const { envelope, keys } = await delegated(GOOD);
+    expect((await verifyBundle(JSON.stringify(envelope), keys, NOW))?.endpoints).toHaveLength(3);
+  });
+
+  it("accepts the backup key's word as well as the primary's", async () => {
+    const { envelope, keys } = await delegated(GOOD, { rootId: "backup" });
+    expect((await verifyBundle(JSON.stringify(envelope), keys, NOW))?.v).toBe(4);
+  });
+
+  // The statement is what limits a stolen server key to a window.
+  it("refuses one whose statement has expired", async () => {
+    const { envelope, keys } = await delegated(GOOD, { expires: NOW / 1000 });
+    expect(await verifyBundle(JSON.stringify(envelope), keys, NOW)).toBeNull();
+    expect(await verifyBundle(JSON.stringify(envelope), keys, NOW - 1000)).not.toBeNull();
+  });
+
+  it("refuses one whose statement no compiled-in key signed", async () => {
+    const { envelope } = await delegated(GOOD);
+    const other = await delegated(GOOD);
+    expect(await verifyBundle(JSON.stringify(envelope), other.keys, NOW)).toBeNull();
+  });
+
+  // Otherwise one leaked server key could vouch for the next.
+  it("refuses a statement signed by a server key rather than a compiled-in one", async () => {
+    const { envelope, keys } = await delegated(GOOD);
+    const forged = { ...envelope, cert: { ...envelope.cert, key: "server-1" } };
+    expect(await verifyBundle(JSON.stringify(forged), { ...keys, "server-1": keys.primary }, NOW)).toBeNull();
+  });
+
+  it("refuses one whose list was altered after the server signed it", async () => {
+    const { envelope, keys } = await delegated(GOOD);
+    const forged = { ...GOOD, endpoints: [{ kind: "panel", url: "https://attacker.example/api" }] };
+    const altered = { ...envelope, payload: toBase64(new TextEncoder().encode(JSON.stringify(forged))) };
+    expect(await verifyBundle(JSON.stringify(altered), keys, NOW)).toBeNull();
+  });
+
+  it("refuses a statement altered after the compiled-in key signed it", async () => {
+    const { envelope, keys } = await delegated(GOOD);
+    const statement = JSON.parse(atob(envelope.cert.payload));
+    statement.expires = Date.UTC(2099, 0, 1) / 1000;
+    const altered = { ...envelope, cert: { ...envelope.cert, payload: btoa(JSON.stringify(statement)) } };
+    expect(await verifyBundle(JSON.stringify(altered), keys, NOW)).toBeNull();
+  });
+
+  it("refuses a statement for a different key than the one that signed", async () => {
+    const { envelope, keys } = await delegated(GOOD, { statement: { id: "server-2" } });
+    expect(await verifyBundle(JSON.stringify(envelope), keys, NOW)).toBeNull();
+  });
+
+  it("refuses a statement of any other kind", async () => {
+    const { envelope, keys } = await delegated(GOOD, { statement: { kind: "something-else" } });
+    expect(await verifyBundle(JSON.stringify(envelope), keys, NOW)).toBeNull();
+  });
+
+  // A server key may not take a compiled-in key's name: the envelope is
+  // then checked against the compiled-in key, which did not sign it.
+  it("refuses a server key that calls itself by a compiled-in key's name", async () => {
+    const { envelope, keys } = await delegated(GOOD, { serverId: "primary", rootId: "backup" });
+    const both = { ...keys, primary: keys.backup };
+    expect(await verifyBundle(JSON.stringify(envelope), both, NOW)).toBeNull();
+  });
+
+  it("refuses a statement whose public key is not 32 bytes", async () => {
+    const { envelope, keys } = await delegated(GOOD, { statement: { publicKey: btoa("short") } });
+    expect(await verifyBundle(JSON.stringify(envelope), keys, NOW)).toBeNull();
+  });
+
+  it("ignores a statement on a list a compiled-in key signed itself", async () => {
+    const { raw, keys } = await sealed(GOOD);
+    const withCert = { ...JSON.parse(raw), cert: { payload: "!!", sig: "!!", key: "nobody" } };
+    expect((await verifyBundle(JSON.stringify(withCert), keys, NOW))?.v).toBe(4);
+  });
+});
+
+/** The same bytes in a spelling `atob` forgives and the Rust side's
+ * base64 (STANDARD, in bundle_scope.rs) refuses: whitespace, padding
+ * left off, and trailing bits that are not zero. */
+const respellings: [string, (b64: string) => string][] = [
+  ["a newline inside", (b64) => `${b64.slice(0, 8)}\n${b64.slice(8)}`],
+  ["a space inside", (b64) => `${b64.slice(0, 8)} ${b64.slice(8)}`],
+  ["its padding left off", (b64) => b64.replace(/=+$/, "")],
+  [
+    "a trailing bit set",
+    (b64) => {
+      // The last character before the padding carries bits past the end
+      // of the data; setting one changes nothing `atob` returns.
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      const at = b64.replace(/=+$/, "").length - 1;
+      return b64.slice(0, at) + alphabet[alphabet.indexOf(b64[at]) ^ 1] + b64.slice(at + 1);
+    },
+  ],
+];
+
+describe("base64 the scope grant would refuse", () => {
+  // A source that serves the list -- untrusted by design -- could
+  // re-spell a genuine newest list this way. Taken, it was kept: the
+  // scope grant then refused it on every run, and the correctly spelled
+  // copy of the same version was never adopted over it.
+  it("is refused in the envelope's payload and signature", async () => {
+    // A length that leaves padding, so there is some to leave off.
+    const { raw, keys } = await sealed({ ...GOOD, issuedAt: "2026-09-02T00:00:00.000Z" });
+    const envelope = JSON.parse(raw);
+    expect(envelope.payload).toMatch(/=$/);
+    expect(envelope.sig).toMatch(/==$/);
+    for (const [how, respell] of respellings) {
+      for (const field of ["payload", "sig"]) {
+        const altered = { ...envelope, [field]: respell(envelope[field]) };
+        expect(altered[field]).not.toBe(envelope[field]);
+        expect([field, how, await verifyBundle(JSON.stringify(altered), keys)]).toEqual([field, how, null]);
+      }
+    }
+    expect((await verifyBundle(raw, keys))?.v).toBe(4);
+  });
+
+  it("is refused in the statement and its signature", async () => {
+    const { envelope, keys } = await delegated(GOOD);
+    expect(envelope.cert.payload).toMatch(/=$/);
+    for (const [how, respell] of respellings) {
+      for (const field of ["payload", "sig"] as const) {
+        const altered = { ...envelope, cert: { ...envelope.cert, [field]: respell(envelope.cert[field]) } };
+        expect([field, how, await verifyBundle(JSON.stringify(altered), keys, NOW)]).toEqual([field, how, null]);
+      }
+    }
+    expect((await verifyBundle(JSON.stringify(envelope), keys, NOW))?.v).toBe(4);
+  });
+
+  it("is refused in the server key the statement names", async () => {
+    const serverPriv = utils.randomPrivateKey();
+    const publicKey = toBase64(await getPublicKeyAsync(serverPriv));
+    expect(publicKey).toMatch(/=$/);
+    for (const [how, respell] of respellings) {
+      const { envelope, keys } = await delegated(GOOD, { statement: { publicKey: respell(publicKey) } });
+      // Re-signed with the key the statement names, so only its spelling
+      // is wrong.
+      const payload = new TextEncoder().encode(JSON.stringify(GOOD));
+      const signed = { ...envelope, sig: toBase64(await signAsync(payload, serverPriv)) };
+      expect([how, await verifyBundle(JSON.stringify(signed), keys, NOW)]).toEqual([how, null]);
+    }
+  });
+});
+
 describe("bundle replacement", () => {
   // A genuinely-signed OLD bundle is the subtle attack: replaying it
   // walks a client back onto addresses that have since been retired.

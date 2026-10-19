@@ -197,12 +197,23 @@ describe("EndpointsService server-signed list", () => {
   });
 
   it("refuses a version that is not newer than the server list's own", async () => {
-    const { service } = build({ version: 900, serverVersion: 104 });
+    const { service } = build({ version: 7, serverVersion: 104 });
     await expect(service.publishServerSigned(sealServer({ v: 104, ...LIST }))).rejects.toBeInstanceOf(
       BadRequestException,
     );
-    // The offline list's number is not the one it is compared with.
     await expect(service.publishServerSigned(sealServer({ v: 105, ...LIST }))).resolves.toEqual({ version: 105 });
+  });
+
+  // Clients keep one version number for both lists. After an offline list
+  // published above the server list to move clients back to it
+  // (docs/reachability.md), a server list beneath it is one no client
+  // holding the offline list will take: accepted, it was a silent no-op.
+  it("refuses a version that is not above the offline list's", async () => {
+    const { service, updates } = build({ version: 150, serverVersion: 120 });
+    await expect(service.publishServerSigned(sealServer({ v: 130, ...LIST }))).rejects.toThrow(/offline list/);
+    await expect(service.publishServerSigned(sealServer({ v: 150, ...LIST }))).rejects.toThrow(/offline list/);
+    expect(updates).toEqual([]);
+    await expect(service.publishServerSigned(sealServer({ v: 151, ...LIST }))).resolves.toEqual({ version: 151 });
   });
 
   it("404s before one is published, then serves exactly what was stored", async () => {
