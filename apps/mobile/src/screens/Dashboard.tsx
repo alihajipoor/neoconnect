@@ -80,7 +80,7 @@ import {
 import { orbCaution, orbHold, orbTone } from "@shared/lib/orb-caution";
 import { mapCountries, mapLights, ownWorkedAt, placesEvidence, type EvidenceContext } from "@shared/lib/map-lights";
 import { withoutTags } from "@shared/lib/map-network";
-import { useWindowLayout } from "@shared/lib/layout-mode";
+import { useAppLayout } from "../lib/app-layout";
 import { planLineText, rememberShellProfile, takeLocationsRequest, type ShellPlan } from "@shared/lib/shell-nav";
 import { formatDateTime, formatNumber, formatSize, sizeParts } from "@shared/lib/locale-format";
 import { describeSlotNotice, slotNoticeShown } from "@shared/lib/device-slot-notice";
@@ -697,9 +697,12 @@ export function Dashboard({
    * holds through a brief gap as the chip's colour does. */
   const verifiedRouteRef = useRef<RouteOption | null>(null);
 
-  /** The layout the window is in -- the panel beside the hero on a tablet,
-   * the sheet on a phone -- by the same breakpoints as the stylesheet. */
-  const layout = useWindowLayout();
+  /** The layout the app root is in -- the panel beside the hero on a
+   * tablet, the sheet on a phone -- measured as the stylesheet measures
+   * it: the app root's width, not the window's, which on a phone on its
+   * side is wider by the notch's insets (lib/app-layout.ts). */
+  const appRootRef = useRef<HTMLDivElement>(null);
+  const layout = useAppLayout(appRootRef);
   /** The main page, or the Locations page the nav opens. */
   const [view, setView] = useState<"overview" | "locations">("overview");
   const [locSection, setLocSection] = useState<"explain" | undefined>(undefined);
@@ -3333,6 +3336,7 @@ export function Dashboard({
 
   return (
     <AppShell
+      rootRef={appRootRef}
       active={view === "locations" ? "locations" : "overview"}
       shown={calmTone}
       busy={pill.progress}

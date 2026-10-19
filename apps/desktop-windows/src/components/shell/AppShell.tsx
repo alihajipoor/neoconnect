@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { BarChart3, CreditCard, Gift, Home, LifeBuoy, LogOut, MapPin, Settings as SettingsIcon } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
@@ -52,6 +52,10 @@ export interface ShellProps {
   update?: ReactNode;
   /** The full-bleed scene behind everything (HeroArt). */
   scene?: ReactNode;
+  /** The app root (.nx-app), whose width the container queries lay the
+   * shell out by: for a screen that has to make the same choice in script
+   * (the phone's main page, apps/mobile/src/lib/app-layout.ts). */
+  rootRef?: Ref<HTMLDivElement>;
   children: ReactNode;
 }
 
@@ -113,6 +117,7 @@ export function AppShell(props: ShellProps) {
 
   return (
     <div
+      ref={props.rootRef}
       className="nx-app"
       data-shown={props.shown}
       data-busy={props.busy ? "1" : undefined}
