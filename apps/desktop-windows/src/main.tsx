@@ -17,6 +17,10 @@ setHealthIpTransport(ipv4OnlyHealthIp);
 // (lib/effects.ts).
 startEffects();
 
+// The window draws its own title strip over the app (TitleBar): the pages
+// that are their own root -- sign-in and its steps -- keep its 32px clear.
+document.documentElement.dataset.titlebar = "1";
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <I18nProvider>

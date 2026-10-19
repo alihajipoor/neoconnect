@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { forgotPassword, resetPasswordByCode, resetPasswordByRecoveryCode } from "../lib/auth";
-import { Button, Card, Input, Label } from "../components/ui";
-import { LogoMark } from "../components/Logo";
+import { Message, PasswordField, PillButton, TextField, TextLink } from "../components/ui";
+import { AuthFrame, AuthHead } from "../components/auth/AuthFrame";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { StillTrying } from "../components/StillTrying";
@@ -82,202 +82,147 @@ export function ForgotPassword({ onDone, onCancel }: { onDone: (notice: string) 
 
   if (nextRecoveryCode !== null) {
     return (
-      <div className="flex min-h-screen items-center justify-center p-6">
-        <Card className="w-full max-w-sm p-7">
+      <AuthFrame step="forgot-recovered">
+        <div className="nx-auth-recovery">
           <RecoveryCodeNotice
             code={nextRecoveryCode}
             lead={t("forgot.recoveryDone")}
             onSaved={() => onDone(t("forgot.done"))}
           />
-        </Card>
-      </div>
+        </div>
+      </AuthFrame>
     );
   }
 
   const switchWay = (
-    <p className="text-center text-xs">
-      <button
-        type="button"
-        onClick={() => {
-          setError(null);
-          setByRecovery(!byRecovery);
-        }}
-        className="text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
-      >
-        {byRecovery ? t("forgot.useEmail") : t("forgot.useRecovery")}
-      </button>
-    </p>
+    <TextLink
+      onClick={() => {
+        setError(null);
+        setByRecovery(!byRecovery);
+      }}
+    >
+      {byRecovery ? t("forgot.useEmail") : t("forgot.useRecovery")}
+    </TextLink>
+  );
+
+  const passwords = (
+    <>
+      <PasswordField
+        id="fp-new"
+        label={t("forgot.newPassword")}
+        hint={t("forgot.tooShort")}
+        autoComplete="new-password"
+        required
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+      />
+      <PasswordField
+        id="fp-confirm"
+        label={t("forgot.confirmPassword")}
+        autoComplete="new-password"
+        required
+        value={confirm}
+        onChange={(e) => setConfirm(e.target.value)}
+      />
+    </>
   );
 
   return (
-    <div className="flex min-h-screen items-center justify-center p-6">
-      <Card className="w-full max-w-sm p-7">
-        <div className="mb-6 flex flex-col items-center gap-3 text-center">
-          <LogoMark className="h-10 w-10" />
-          <div>
-            <h1 className="text-lg font-semibold">{t("forgot.title")}</h1>
-            <p className="mt-1 text-xs text-muted-foreground">{t("forgot.subtitle")}</p>
-          </div>
-        </div>
+    <AuthFrame step={byRecovery ? "forgot-recovery" : sent ? "forgot-code" : "forgot"}>
+      <AuthHead title={t("forgot.title")} lead={t("forgot.subtitle")} />
 
-        {byRecovery ? (
-          <form onSubmit={handleRecovery} className="flex flex-col gap-4" data-recovery-reset>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="fp-email">{t("auth.email")}</Label>
-              <Input
-                id="fp-email"
-                type="email"
-                autoComplete="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="fp-recovery">{t("forgot.recoveryCode")}</Label>
-              <Input
-                id="fp-recovery"
-                autoComplete="off"
-                autoCapitalize="characters"
-                spellCheck={false}
-                required
-                value={recoveryCode}
-                onChange={(e) => setRecoveryCode(e.target.value.toUpperCase())}
-                className="font-mono tracking-wider"
-                dir="ltr"
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="fp-new">{t("forgot.newPassword")}</Label>
-              <Input
-                id="fp-new"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="fp-confirm">{t("forgot.confirmPassword")}</Label>
-              <Input
-                id="fp-confirm"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-              />
-            </div>
-            {error ? (
-              <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                {error}
-              </p>
-            ) : null}
-            <Button type="submit" disabled={pending} className="mt-1 w-full">
-              {pending ? t("forgot.submitting") : t("forgot.submit")}
-            </Button>
-            <StillTrying waiting={pending} />
-            {switchWay}
-          </form>
-        ) : !sent ? (
-          <form onSubmit={handleSend} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="fp-email">{t("auth.email")}</Label>
-              <Input
-                id="fp-email"
-                type="email"
-                autoComplete="email"
-                required
-                autoFocus
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            {error ? (
-              <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                {error}
-              </p>
-            ) : null}
-            <Button type="submit" disabled={pending} className="mt-1 w-full">
-              {pending ? t("forgot.sending") : t("forgot.sendCode")}
-            </Button>
-            <StillTrying waiting={pending} />
-            {/* "The reset code is sent by email" -- and the way round it.
-                Never "reset code" for the recovery code, or the other way
-                about (docs/relay-last-resort.md, section 8). */}
-            <p className="text-xs text-muted-foreground">{t("forgot.relayHint")}</p>
-            {switchWay}
-          </form>
-        ) : (
-          <form onSubmit={handleReset} className="flex flex-col gap-4">
-            {/* Worded as a conditional, because it is one -- the server
-                will not say whether this address has an account, and the
-                UI must not imply it did. */}
-            <p className="rounded-md border border-primary/25 bg-primary/10 px-3 py-2 text-xs text-muted-foreground">
-              {t("forgot.sent")}
-            </p>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="fp-code">{t("forgot.code")}</Label>
-              <Input
-                id="fp-code"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                maxLength={6}
-                required
-                autoFocus
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                className="text-center text-lg tracking-[0.4em] tabular-nums"
-                data-ltr
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="fp-new">{t("forgot.newPassword")}</Label>
-              <Input
-                id="fp-new"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="fp-confirm">{t("forgot.confirmPassword")}</Label>
-              <Input
-                id="fp-confirm"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-              />
-            </div>
-            {error ? (
-              <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                {error}
-              </p>
-            ) : null}
-            <Button type="submit" disabled={pending} className="mt-1 w-full">
-              {pending ? t("forgot.submitting") : t("forgot.submit")}
-            </Button>
-            <StillTrying waiting={pending} />
-            <p className="text-xs text-muted-foreground">{t("forgot.relayHint")}</p>
-            {switchWay}
-          </form>
-        )}
+      {byRecovery ? (
+        <form onSubmit={handleRecovery} className="nx-form" data-recovery-reset>
+          <TextField
+            id="fp-email"
+            label={t("auth.email")}
+            type="email"
+            autoComplete="email"
+            required
+            dir="ltr"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <TextField
+            id="fp-recovery"
+            label={t("forgot.recoveryCode")}
+            autoComplete="off"
+            autoCapitalize="characters"
+            spellCheck={false}
+            required
+            value={recoveryCode}
+            onChange={(e) => setRecoveryCode(e.target.value.toUpperCase())}
+            className="nx-code"
+            dir="ltr"
+          />
+          {passwords}
+          {error ? <Message tone="danger">{error}</Message> : null}
+          <PillButton type="submit" disabled={pending} aria-busy={pending || undefined} className="nx-auth-submit">
+            {pending ? t("forgot.submitting") : t("forgot.submit")}
+          </PillButton>
+          <StillTrying waiting={pending} />
+          <div className="nx-auth-after">{switchWay}</div>
+        </form>
+      ) : !sent ? (
+        <form onSubmit={handleSend} className="nx-form">
+          <TextField
+            id="fp-email"
+            label={t("auth.email")}
+            type="email"
+            autoComplete="email"
+            required
+            autoFocus
+            dir="ltr"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          {error ? <Message tone="danger">{error}</Message> : null}
+          <PillButton type="submit" disabled={pending} aria-busy={pending || undefined} className="nx-auth-submit">
+            {pending ? t("forgot.sending") : t("forgot.sendCode")}
+          </PillButton>
+          <StillTrying waiting={pending} />
+          {/* "The reset code is sent by email" -- and the way round it.
+              Never "reset code" for the recovery code, or the other way
+              about (docs/relay-last-resort.md, section 8). */}
+          <p className="nx-auth-fine">{t("forgot.relayHint")}</p>
+          <div className="nx-auth-after">{switchWay}</div>
+        </form>
+      ) : (
+        <form onSubmit={handleReset} className="nx-form">
+          {/* Worded as a conditional, because it is one -- the server
+              will not say whether this address has an account, and the
+              UI must not imply it did. */}
+          <Message tone="neutral">{t("forgot.sent")}</Message>
+          <TextField
+            id="fp-code"
+            label={t("forgot.code")}
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={6}
+            required
+            autoFocus
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            className="nx-code"
+            dir="ltr"
+            data-ltr
+          />
+          {passwords}
+          {error ? <Message tone="danger">{error}</Message> : null}
+          <PillButton type="submit" disabled={pending} aria-busy={pending || undefined} className="nx-auth-submit">
+            {pending ? t("forgot.submitting") : t("forgot.submit")}
+          </PillButton>
+          <StillTrying waiting={pending} />
+          <p className="nx-auth-fine">{t("forgot.relayHint")}</p>
+          <div className="nx-auth-after">{switchWay}</div>
+        </form>
+      )}
 
-        <p className="mt-4 text-center text-xs">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="font-medium text-primary underline-offset-2 transition-colors hover:text-highlight hover:underline"
-          >
-            {t("forgot.backToSignIn")}
-          </button>
-        </p>
-      </Card>
-    </div>
+      <div className="nx-auth-after">
+        <TextLink strong onClick={onCancel}>
+          {t("forgot.backToSignIn")}
+        </TextLink>
+      </div>
+    </AuthFrame>
   );
 }

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { register, relayRegister } from "../lib/auth";
-import { Button, Card, Input, Label } from "../components/ui";
-import { Logo } from "../components/Logo";
+import { Message, PasswordField, PillButton, TextField, TextLink } from "../components/ui";
+import { AuthFrame, AuthHead } from "../components/auth/AuthFrame";
 import { useI18n } from "../lib/i18n";
 import { failureText, type ShownFailure } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
@@ -52,7 +52,8 @@ export function Register({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (password.length < 8) {
-      setError({ error: "Password must be at least 8 characters." });
+      // In the app's language: it was hard-coded English.
+      setError({ error: t("forgot.tooShort") });
       return;
     }
     setError(null);
@@ -88,170 +89,140 @@ export function Register({
     else setError(result);
   }
 
+  const toSignIn = (
+    <div className="nx-auth-after">
+      <p>
+        {t("auth.haveAccount")}{" "}
+        <TextLink strong onClick={onGoLogin}>
+          {t("auth.signIn")}
+        </TextLink>
+      </p>
+    </div>
+  );
+
   if (recoveryCode !== null) {
     return (
-      <div className="glow-backdrop flex h-full flex-col items-center justify-center gap-8 overflow-hidden p-6">
-        <Logo className="scale-110" />
-        <Card className="w-full max-w-xs">
+      <AuthFrame step="register-recovery">
+        <div className="nx-auth-recovery">
           <RecoveryCodeNotice code={recoveryCode} onSaved={() => (onRelaySignedUp ?? onSuccess)()} />
-        </Card>
-      </div>
+        </div>
+      </AuthFrame>
     );
   }
 
   if (viaRelay) {
     return (
-      <div className="glow-backdrop flex h-full flex-col items-center justify-center gap-8 overflow-hidden p-6">
-        <Logo className="scale-110" />
-        <Card className="w-full max-w-xs">
-          <h1 className="mb-1 text-lg font-semibold">{t("relay.signupTitle")}</h1>
-          {/* Neutral, not a warning: nothing is wrong with the customer's
-              account, only with the network between us. */}
-          <p className="mb-4 text-sm text-muted-foreground" data-relay-signup-note>
-            {t("relay.signupNote")}
-          </p>
-          <form onSubmit={handleRelaySubmit} className="flex flex-col gap-3">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="relay-email">{t("auth.email")}</Label>
-              <Input
-                id="relay-email"
-                type="email"
-                autoComplete="email"
-                required
-                autoFocus
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="relay-email-again">{t("relay.confirmEmail")}</Label>
-              <Input
-                id="relay-email-again"
-                type="email"
-                autoComplete="off"
-                required
-                value={emailAgain}
-                onChange={(e) => setEmailAgain(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="relay-password">{t("auth.password")}</Label>
-              <Input
-                id="relay-password"
-                type="password"
-                autoComplete="new-password"
-                minLength={8}
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-            {error ? (
-              <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                {failureText(error, t)}
-              </p>
-            ) : null}
-            <Button type="submit" disabled={pending} className="mt-1 w-full">
-              {pending ? t("auth.registering") : t("auth.createAccount")}
-            </Button>
-            {pendingLong ? <p className="text-center text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
-          </form>
-          <button
-            type="button"
-            onClick={onGoLogin}
-            className="mt-4 w-full text-center text-xs text-muted-foreground hover:text-foreground"
-          >
-            {t("auth.haveAccount")} {t("auth.signIn")}
-          </button>
-        </Card>
-      </div>
+      <AuthFrame step="register-relay">
+        {/* Neutral, not a warning: nothing is wrong with the customer's
+            account, only with the network between us. */}
+        <AuthHead title={t("relay.signupTitle")} lead={<span data-relay-signup-note>{t("relay.signupNote")}</span>} />
+        <form onSubmit={handleRelaySubmit} className="nx-form">
+          <TextField
+            id="relay-email"
+            label={t("auth.email")}
+            type="email"
+            autoComplete="email"
+            required
+            autoFocus
+            dir="ltr"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <TextField
+            id="relay-email-again"
+            label={t("relay.confirmEmail")}
+            type="email"
+            autoComplete="off"
+            required
+            dir="ltr"
+            value={emailAgain}
+            onChange={(e) => setEmailAgain(e.target.value)}
+          />
+          <PasswordField
+            id="relay-password"
+            label={t("auth.password")}
+            hint={t("forgot.tooShort")}
+            autoComplete="new-password"
+            minLength={8}
+            required
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          {error ? <Message tone="danger">{failureText(error, t)}</Message> : null}
+          <PillButton type="submit" disabled={pending} aria-busy={pending || undefined} className="nx-auth-submit">
+            {pending ? t("auth.registering") : t("auth.createAccount")}
+          </PillButton>
+          {pendingLong ? <p className="text-center text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
+        </form>
+        {toSignIn}
+      </AuthFrame>
     );
   }
 
   return (
-    <div className="glow-backdrop flex h-full flex-col items-center justify-center gap-8 overflow-hidden p-6">
-      <Logo className="scale-110" />
-      <Card className="w-full max-w-xs">
-        <h1 className="mb-1 text-lg font-semibold">{t("auth.createAccount")}</h1>
-        <p className="mb-4 text-sm text-muted-foreground">{t("auth.noCardRequired")}</p>
-        <SocialSignIn onSuccess={onSuccess} disabled={pending} />
-        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="email">{t("auth.email")}</Label>
-            <Input
-              id="email"
-              type="email"
-              autoComplete="email"
-              required
-              autoFocus
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="password">{t("auth.password")}</Label>
-            <Input
-              id="password"
-              type="password"
-              autoComplete="new-password"
-              minLength={8}
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </div>
-          {/* Optional, and labelled as such. It is the only field here
-              somebody can get wrong without knowing -- a mistyped code
-              is refused by the server rather than silently ignored,
-              because losing a friend their reward invisibly is worse
-              than one more thing to correct. */}
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="referralCode">{t("auth.referralCode")}</Label>
-            <Input
-              id="referralCode"
-              autoComplete="off"
-              autoCapitalize="off"
-              spellCheck={false}
-              dir="ltr"
-              placeholder={t("auth.referralCodeHint")}
-              value={referralCode}
-              onChange={(e) => setReferralCode(e.target.value)}
-            />
-          </div>
-          {error ? (
-            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {failureText(error, t)}
-            </p>
-          ) : null}
-          <Button type="submit" disabled={pending} className="mt-1 w-full">
-            {pending ? t("auth.registering") : t("auth.createAccount")}
-          </Button>
-          {pendingLong ? <p className="text-center text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
-          {/* Only after a sign-up that failed as only blocking explains, on
-              a device with evidence it is in Iran -- and nothing has been
-              sent to the relay to know that. */}
-          {relayOffered ? (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => {
-                setError(null);
-                setViaRelay(true);
-              }}
-              className="w-full justify-center border border-white/10"
-            >
-              {t("relay.offerSignup")}
-            </Button>
-          ) : null}
-        </form>
-        <button
-          type="button"
-          onClick={onGoLogin}
-          className="mt-4 w-full text-center text-xs text-muted-foreground hover:text-foreground"
-        >
-          Already have an account? Sign in
-        </button>
-      </Card>
-    </div>
+    <AuthFrame step="register">
+      <AuthHead title={t("auth.createAccount")} lead={t("auth.noCardRequired")} />
+      <SocialSignIn onSuccess={onSuccess} disabled={pending} />
+      <form onSubmit={handleSubmit} className="nx-form">
+        <TextField
+          id="email"
+          label={t("auth.email")}
+          type="email"
+          autoComplete="email"
+          required
+          autoFocus
+          dir="ltr"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <PasswordField
+          id="password"
+          label={t("auth.password")}
+          hint={t("forgot.tooShort")}
+          autoComplete="new-password"
+          minLength={8}
+          required
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        {/* Optional, and labelled as such. It is the only field here
+            somebody can get wrong without knowing -- a mistyped code
+            is refused by the server rather than silently ignored,
+            because losing a friend their reward invisibly is worse
+            than one more thing to correct. */}
+        <TextField
+          id="referralCode"
+          label={t("auth.referralCode")}
+          autoComplete="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          dir="ltr"
+          placeholder={t("auth.referralCodeHint")}
+          value={referralCode}
+          onChange={(e) => setReferralCode(e.target.value)}
+        />
+        {error ? <Message tone="danger">{failureText(error, t)}</Message> : null}
+        <PillButton type="submit" disabled={pending} aria-busy={pending || undefined} className="nx-auth-submit">
+          {pending ? t("auth.registering") : t("auth.createAccount")}
+        </PillButton>
+        {pendingLong ? <p className="text-center text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
+        {/* Only after a sign-up that failed as only blocking explains, on
+            a device with evidence it is in Iran -- and nothing has been
+            sent to the relay to know that. */}
+        {relayOffered ? (
+          <PillButton
+            variant="ghost"
+            onClick={() => {
+              setError(null);
+              setViaRelay(true);
+            }}
+            className="nx-auth-submit"
+          >
+            {t("relay.offerSignup")}
+          </PillButton>
+        ) : null}
+      </form>
+      {toSignIn}
+    </AuthFrame>
   );
 }
