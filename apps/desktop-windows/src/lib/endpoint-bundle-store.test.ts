@@ -186,7 +186,7 @@ describe("the server-signed list", () => {
     const { fetcher } = byPath({ "/endpoints/bundle2": await serverSealed(105), "/endpoints/bundle": offline });
 
     expect((await refreshFrom("https://a.example.net/api", fetcher))?.v).toBe(200);
-    expect(store.set.mock.calls.filter(([key]) => key === "bundle").at(-1)).toEqual(["bundle", offline]);
+    expect(store.set.mock.calls.filter(([key]) => key === "bundle").slice(-1)).toEqual([["bundle", offline]]);
   });
 });
 
