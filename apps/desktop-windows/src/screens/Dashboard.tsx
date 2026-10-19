@@ -4588,7 +4588,6 @@ export function Dashboard({
                  connected: where Neoxify is in use, and the one press that
                  moves it here. "Disconnected:" waits for the service. */
               <DeviceSlotCard
-                look="pearl"
                 notice={slotNotice}
                 tunnelDown={connectionState === "disconnected"}
                 onUseHere={(takeover) => void connectNow(takeover)}

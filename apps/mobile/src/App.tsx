@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ScreenTransition } from "@shared/components/ScreenTransition";
 import { getTokens } from "@shared/lib/session";
 import { flushAttempts } from "@shared/lib/attempts";
@@ -9,6 +9,9 @@ import { useI18n } from "@shared/lib/i18n";
 import { tearDownMobileForSignOut, vpnStatus } from "./lib/vpn";
 import { setRelayTunnelReader } from "@shared/lib/last-resort";
 import { BackupRouteChip } from "@shared/components/BackupRoute";
+import { AppShell, type NavId } from "@shared/components/shell/AppShell";
+import { PageScene } from "@shared/components/shell/Page";
+import { forgetShellProfile, planLineText, requestLocations, shellProfile } from "@shared/lib/shell-nav";
 import { Login } from "@shared/screens/Login";
 import { Register } from "@shared/screens/Register";
 import { VerifyEmail } from "@shared/screens/VerifyEmail";
@@ -87,10 +90,6 @@ type Screen =
   | "support"
   | "activity";
 
-/** The phone's own screens, not redesigned yet: they keep the old look
- * (legacy-theme.css) while they show. */
-const LEGACY_SCREENS: ReadonlySet<Screen> = new Set(["loading", "signingOut", "disclosure", "dashboard"]);
-
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
   // Carries the just-submitted credentials into the verify screen so it
@@ -100,14 +99,9 @@ export default function App() {
   // After a sign-up through the relay: "enter an Ultimate voucher code".
   const [plansNotice, setPlansNotice] = useState<string | null>(null);
   const endingRef = useRef(false);
-  const { t } = useI18n();
-
-  // Before paint, so a screen never shows a frame in the other look.
-  useLayoutEffect(() => {
-    const root = document.documentElement;
-    if (LEGACY_SCREENS.has(screen)) root.dataset.legacy = "1";
-    else delete root.dataset.legacy;
-  }, [screen]);
+  // A sign-out from one of the shell's pages, from its profile menu.
+  const [pageSigningOut, setPageSigningOut] = useState(false);
+  const { t, language } = useI18n();
 
   // The disclosure gates everything, including a session that is already
   // signed in. Play wants it shown before the data collection begins,
@@ -201,6 +195,8 @@ export default function App() {
     if (endingRef.current) return;
     endingRef.current = true;
     setScreen("signingOut");
+    // The avatar line belongs to the account that just left.
+    forgetShellProfile();
     try {
       let ended: SessionEnd;
       try {
@@ -227,10 +223,13 @@ export default function App() {
    * `logout()` takes the tunnel down (setTunnelTeardown above) before it
    * deletes anything, then the session ends as every other way does. */
   async function signOutFromSettings() {
+    if (pageSigningOut) return;
+    setPageSigningOut(true);
     autoReconnect.cancel("signedOut");
     try {
       await logout();
     } finally {
+      setPageSigningOut(false);
       await handleLoggedOut();
     }
   }
@@ -240,6 +239,37 @@ export default function App() {
   const handleLoggedOutRef = useRef(handleLoggedOut);
   handleLoggedOutRef.current = handleLoggedOut;
   useEffect(() => onSessionRevoked(() => void handleLoggedOutRef.current("revoked")), []);
+
+  /** One of the signed-in pages in the same shell as the main page -- the
+   * bottom nav on a phone, the tabs or the sidebar on a tablet -- as on
+   * Windows. `active` is the nav item it belongs to. The avatar line is
+   * the one the main page last showed (`shellProfile`). */
+  const inShell = (active: NavId, content: ReactNode) => {
+    const profile = shellProfile();
+    return (
+      <AppShell
+        active={active}
+        shown="idle"
+        email={profile.email}
+        planLine={planLineText(profile.plan, t, language)}
+        onOverview={() => setScreen("dashboard")}
+        onLocations={() => {
+          requestLocations();
+          setScreen("dashboard");
+        }}
+        onOpenActivity={() => setScreen("activity")}
+        onOpenSettings={() => setScreen("settings")}
+        onBrowsePlans={() => setScreen("plans")}
+        onOpenReferrals={() => setScreen("referrals")}
+        onOpenSupport={() => setScreen("support")}
+        onSignOut={() => void signOutFromSettings()}
+        signingOut={pageSigningOut}
+        scene={<PageScene />}
+      >
+        {content}
+      </AppShell>
+    );
+  };
 
   function renderScreen() {
   if (screen === "loading") {
@@ -316,7 +346,8 @@ export default function App() {
     );
   }
   if (screen === "settings") {
-    return (
+    return inShell(
+      "settings",
       <Settings
         onBack={() => setScreen("dashboard")}
         onOpenReferrals={() => setScreen("referrals")}
@@ -334,28 +365,29 @@ export default function App() {
         onOpenActivity={() => setScreen("activity")}
         onSignOut={() => void signOutFromSettings()}
         platform={isAndroid() ? "android" : isIOS() ? "ios" : "web"}
-      />
+      />,
     );
   }
   if (screen === "activity") {
-    return (
+    return inShell(
+      "activity",
       <Activity
         // The network the phone's connect history is filed under: the
         // address block the control plane last reported for it.
         readNetwork={async () => networkKeyFromAsn()}
         onOpenPlans={() => setScreen("plans")}
         onBack={() => setScreen("settings")}
-      />
+      />,
     );
   }
   if (screen === "referrals") {
     // Back to Settings rather than the Dashboard: that is where they came
     // from, and landing somewhere else is how a detour starts feeling
     // like getting lost.
-    return <Referrals onBack={() => setScreen("settings")} />;
+    return inShell("none", <Referrals onBack={() => setScreen("settings")} />);
   }
   if (screen === "support") {
-    return <Support onBack={() => setScreen("settings")} />;
+    return inShell("none", <Support onBack={() => setScreen("settings")} />);
   }
   // Unreachable in a store build, and unreachable rather than merely
   // unlinked: the condition is a build-time constant, so the bundler
@@ -368,17 +400,18 @@ export default function App() {
       setPlansNotice(null);
       setScreen("dashboard");
     };
-    return <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />;
+    return inShell("none", <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />);
   }
   // The App Store counterpart, and the mirror image of the branch above:
   // this one is dropped from every non-store build for the same reason,
   // so neither artifact carries the other's purchase path.
   if (screen === "plans" && IS_STORE_BUILD) {
-    return (
+    return inShell(
+      "none",
       <StorePlans
         onActivated={() => setScreen("dashboard")}
         onBack={() => setScreen("dashboard")}
-      />
+      />,
     );
   }
     return (
@@ -386,16 +419,22 @@ export default function App() {
         onLoggedOut={() => void handleLoggedOut()}
         onBrowsePlans={() => setScreen("plans")}
         onOpenSettings={() => setScreen("settings")}
+        onOpenActivity={() => setScreen("activity")}
+        onOpenReferrals={() => setScreen("referrals")}
+        onOpenSupport={() => setScreen("support")}
       />
     );
   }
 
   // As on the desktop: the backup-route chip above every screen while
-  // relay mode lasts, and the consent prompt over them when asked.
+  // relay mode lasts. Its row takes the status bar's inset while it shows,
+  // and the screen beneath then takes none (globals.css).
   return (
     <div className="flex h-full flex-col">
-      <BackupRouteChip />
-      <div className="min-h-0 flex-1">
+      <div className="nx-relayrow">
+        <BackupRouteChip />
+      </div>
+      <div className="nx-screen min-h-0 flex-1">
         <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>
       </div>
     </div>

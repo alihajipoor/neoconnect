@@ -614,7 +614,7 @@ function Composed({
           }
           slot={
             sc.slot ? (
-              <DeviceSlotCard look="pearl" notice={SLOT} tunnelDown onUseHere={() => undefined} onDismiss={() => undefined} />
+              <DeviceSlotCard notice={SLOT} tunnelDown onUseHere={() => undefined} onDismiss={() => undefined} />
             ) : undefined
           }
           subline={

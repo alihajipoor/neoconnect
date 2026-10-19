@@ -1,21 +1,12 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import {
-  ChevronRight,
-  Clock,
-  Globe,
-  MapPin,
-  Settings as SettingsIcon,
-  Shield,
-  Sparkles,
-  Tag,
-} from "lucide-react";
-import { displayedRoute, showsAutomatic } from "@shared/lib/displayed-route";
+import { Globe, Repeat, Sparkles } from "lucide-react";
+import { displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "@shared/lib/displayed-route";
 import {
   ispTagsOf,
   lastGoodFor,
   rememberLastGood,
 } from "@shared/lib/failover";
-import { recordAttempt } from "@shared/lib/connect-history";
+import { recordAttempt, type ConnectHistory } from "@shared/lib/connect-history";
 import {
   loadConnectHistory,
   loadLastGood,
@@ -23,7 +14,7 @@ import {
   saveLastGood,
 } from "@shared/lib/failover-store";
 import { probeCandidates } from "@shared/lib/reachability";
-import { networkKeyFromAsn } from "@shared/lib/network-identity";
+import { currentNetwork, networkKeyFromAsn } from "@shared/lib/network-identity";
 import { createSessionTracker } from "@shared/lib/session-report";
 import {
   getAvailableRoutes,
@@ -38,7 +29,6 @@ import type {
   RouteOption,
   Subscription,
 } from "@shared/lib/types";
-import { formatBytes } from "@shared/lib/utils";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { iapAvailable } from "@shared/lib/iap";
 import { endedNotice } from "@shared/lib/subscription-state";
@@ -50,19 +40,51 @@ import {
   type ClassifiedError,
 } from "@shared/lib/connection-errors";
 import { orderCandidates } from "@shared/lib/failover";
-import { Button, Card, Stat } from "@shared/components/ui";
+import { Banner, Note, PillButton } from "@shared/components/ui";
+import { Dialog, LocationSheet } from "@shared/components/overlay";
 import {
   ConnectOrb,
   type ConnectionState,
 } from "@shared/components/ConnectOrb";
 import { Logo } from "@shared/components/Logo";
 import { RouteFlag } from "@shared/components/Flag";
-import { exitCountryName, placeLabel, routePlace } from "@shared/lib/route-place";
+import { placeLabel, routePlace } from "@shared/lib/route-place";
 import { LocationPicker } from "@shared/components/LocationPicker";
 import { SLOT, Slotted } from "@shared/components/Slotted";
-import { Sheet } from "@shared/components/Sheet";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
-import { useI18n } from "@shared/lib/i18n";
+import { AppShell } from "@shared/components/shell/AppShell";
+import { Page, PageScene } from "@shared/components/shell/Page";
+import { MainView } from "@shared/components/main/MainView";
+import { Decor, Hint, StateAnnouncer, StateLine, StatusChip, WayOut } from "@shared/components/main/Hero";
+import {
+  LocationCard,
+  MetricCards,
+  SessionTray,
+  SummaryLine,
+  type TrayLocation,
+  type TrayPlan,
+} from "@shared/components/main/SessionTray";
+import { HeroArt } from "@shared/components/main/HeroArt";
+import { MapLegend } from "@shared/components/main/MapLegend";
+import { WorldMap } from "@shared/components/main/WorldMap";
+import {
+  chipFor,
+  hintTone,
+  ipFor,
+  lineFor,
+  pillFor,
+  planCaution,
+  secondaryFor,
+  shownTone,
+} from "@shared/lib/hero-model";
+import { orbCaution, orbHold, orbTone } from "@shared/lib/orb-caution";
+import { mapCountries, mapLights, ownWorkedAt, placesEvidence, type EvidenceContext } from "@shared/lib/map-lights";
+import { withoutTags } from "@shared/lib/map-network";
+import { useWindowLayout } from "@shared/lib/layout-mode";
+import { planLineText, rememberShellProfile, takeLocationsRequest, type ShellPlan } from "@shared/lib/shell-nav";
+import { formatDateTime, formatNumber, formatSize, sizeParts } from "@shared/lib/locale-format";
+import { describeSlotNotice, slotNoticeShown } from "@shared/lib/device-slot-notice";
+import { useI18n, type TranslationKey } from "@shared/lib/i18n";
 import {
   failureText,
   offlineReason as reasonFor,
@@ -130,7 +152,7 @@ import {
   type ReconnectAttempt,
   type ReconnectStop,
 } from "@shared/lib/auto-reconnect";
-import { headlineFor, type HeadlineTone } from "@shared/lib/connection-evidence";
+import { HEADLINE_HINTS, headlineFor } from "@shared/lib/connection-evidence";
 import { pressFor } from "@shared/lib/connect-intent";
 import { ladderPass } from "@shared/lib/ladder-pass";
 import { withTimeout } from "@shared/lib/service-call";
@@ -235,16 +257,23 @@ type LadderOptions = {
   rungAccess?: () => Promise<VpnAccess>;
 };
 
-/** The headline's colour for each tone `headlineFor` asks for. Full class
- * names, so the stylesheet build can see them. */
-const HEADLINE_TONE: Record<HeadlineTone, string> = {
-  success: "text-success",
-  highlight: "text-highlight",
-  warning: "text-warning",
-  muted: "text-muted-foreground",
-  plain: "text-foreground",
-  destructive: "text-destructive",
+/** The headline sentences whose shared words are about a computer and a
+ * click, said here as the phone has them: "this device", "Tap to stop"
+ * (design-system.md 3.3). Every other sentence is the shared one. */
+const PHONE_HINT: Partial<Record<TranslationKey, TranslationKey>> = {
+  "dash.verifyingHint": "dash.verifyingHintPhone",
+  "dash.waitingForNetworkHint": "dash.waitingForNetworkHintPhone",
 };
+const phoneHint = (key: TranslationKey): TranslationKey => PHONE_HINT[key] ?? key;
+/** Every sentence the line can say, in the phone's words: the sentence's
+ * cell keeps the height of the longest (`Hint`'s `reserve`). */
+const PHONE_HEADLINE_HINTS: readonly TranslationKey[] = HEADLINE_HINTS.map(phoneHint);
+
+/** How long the app has to have been in the background before the network
+ * it read last is no longer taken to be the one it is on (the map's
+ * evidence, `mapNetworkId` below). A phone moves between Wi-Fi and mobile
+ * data while nobody is looking at it. */
+const ROAM_AWAY_MS = 60_000;
 
 /** How long to wait for the device to stop being routed through a VPN
  * before telling the customer the disconnect did not finish.
@@ -307,15 +336,6 @@ function usableSubscription(all: Subscription[]): Subscription | null {
   return real.find((s) => s.status === "ACTIVE") ?? real[0] ?? null;
 }
 
-function formatDuration(totalSeconds: number) {
-  const seconds = Math.max(0, totalSeconds);
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
-}
-
 /** Which credentials this build can actually connect with.
  *
  * Four of the five the platform sells. Offering a customer a protocol
@@ -346,10 +366,18 @@ export function Dashboard({
   onLoggedOut,
   onBrowsePlans,
   onOpenSettings,
+  onOpenActivity,
+  onOpenReferrals,
+  onOpenSupport,
 }: {
   onLoggedOut: () => void;
   onBrowsePlans: () => void;
   onOpenSettings: () => void;
+  /** The shell's other pages: the nav's Activity, and the profile menu's
+   * Invite friends and Support. */
+  onOpenActivity: () => void;
+  onOpenReferrals?: () => void;
+  onOpenSupport?: () => void;
 }) {
   const { t, language } = useI18n();
   const [loading, setLoading] = useState(true);
@@ -565,6 +593,125 @@ export function Dashboard({
   const protocolUserRef = useRef<ProtocolUser | null>(null);
   protocolUserRef.current = protocolUser;
 
+  // --- What the Pearl Glass main page draws beside the state ---------------
+  //
+  // Presentation only: nothing below decides what the tunnel does or what
+  // the screen may claim. The words still come from `headlineFor` and
+  // `pressFor`, at once; these hold the colour, place the lights and keep
+  // the layout's own state.
+
+  /** A press of the customer's is in flight -- Connect, Disconnect, Stop --
+   * from the press until the state settles. Nothing is held over one
+   * (`orbHold`), and a busy it started wears the quiet glass fill rather
+   * than the held cobalt (`pillFor`). As on Windows. */
+  const [pressed, setPressed] = useState(false);
+  useEffect(() => {
+    if (connectionState !== "connecting" && connectionState !== "verifying" && connectionState !== "disconnecting") setPressed(false);
+  }, [connectionState]);
+  /** The state the button and the chip's colour are drawn as: a settled
+   * session's look, held over a short gap -- a health check that missed
+   * once, a reconnect nobody pressed for (`orbHold`; the owner's rules of
+   * 2026-10-12 and 2026-10-19). This screen used to hand the raw state to
+   * the dial, so every gap flashed it. The words follow `connectionState`
+   * at once. A phone has no "not fully protected" condition (its tunnel is
+   * the system's own), so the warning colour never shows here. */
+  const [orbState, setOrbState] = useState<ConnectionState>(() => orbHold.current());
+  const [cautionShown, setCautionShown] = useState(() => orbHold.caution());
+  const reconnectRunning = reconnecting !== null;
+  useEffect(() => {
+    const look = () => {
+      const caution = orbCaution.observe({ state: connectionState, unconfined: false, byChoice: false });
+      setOrbState(
+        orbHold.observe(connectionState, {
+          // Read from the store as it is now, as on Windows: a drop
+          // publishes "disconnected" and starts its reconnect in one go,
+          // and the hold has to see both.
+          reconnecting: reconnectingView(autoReconnect.current(), sessionGeneration()) !== null,
+          pressed,
+          caution,
+        }),
+      );
+      setCautionShown(orbHold.caution());
+    };
+    look();
+    // Looked at every second while a tunnel is up, or while a look is held
+    // over a gap, so a hold ends on time whether or not anything renders.
+    if (!tunnelUp(connectionState) && !orbHold.holding() && !reconnectRunning) return;
+    const id = setInterval(look, 1_000);
+    return () => clearInterval(id);
+  }, [connectionState, pressed, reconnectRunning]);
+
+  /** This phone's own connect history, for the world map's lights
+   * (`lib/map-lights.ts`): only its verified connects light anything. Read
+   * once, and again whenever the state moves -- a pass that lands or fails
+   * writes it (`remember` in the ladder). */
+  const [history, setHistory] = useState<ConnectHistory>({});
+  useEffect(() => {
+    let alive = true;
+    void loadConnectHistory().then((read) => {
+      if (alive) setHistory(read);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [connectionState]);
+  /** Since when the phone may be on another network than the one it last
+   * read (`currentNetwork`): its own evidence, and the route list's tags,
+   * describe the network they were read on, and the map's legend says "the
+   * network you're on now". Set when the screen mounts, when Android says
+   * the connection changed, when the network comes back, and when the app
+   * returns after a minute away; the evidence is shown again once a reading
+   * newer than that has been taken -- every baseline takes one. Nothing here
+   * dials or asks anything. */
+  const [roamedAt, setRoamedAt] = useState(() => Date.now());
+  useEffect(() => {
+    let hiddenAt: number | null = null;
+    const moved = () => setRoamedAt(Date.now());
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        return;
+      }
+      if (hiddenAt !== null && Date.now() - hiddenAt > ROAM_AWAY_MS) moved();
+      hiddenAt = null;
+    };
+    // Android's WebView reports a change of connection type; WKWebView has
+    // no such object, and the iPhone relies on the other signals.
+    const connection = (navigator as Navigator & { connection?: EventTarget }).connection;
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", moved);
+    connection?.addEventListener?.("change", moved);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", moved);
+      connection?.removeEventListener?.("change", moved);
+    };
+  }, []);
+  /** Which network the route list on screen was tagged for: the network the
+   * request named (`networkKeyFromAsn` when it was asked), or none -- the
+   * server then tagged the request's own address -- with when it was asked.
+   * Null for a list whose tags are of no known network: the cached one. */
+  const [tagsFor, setTagsFor] = useState<{ network: string | null; at: number } | null>(null);
+  /** The route the tunnel was on the last time traffic was verified, for
+   * the map's connected light: drawn only under the verified tone, so it
+   * holds through a brief gap as the chip's colour does. */
+  const verifiedRouteRef = useRef<RouteOption | null>(null);
+
+  /** The layout the window is in -- the panel beside the hero on a tablet,
+   * the sheet on a phone -- by the same breakpoints as the stylesheet. */
+  const layout = useWindowLayout();
+  /** The main page, or the Locations page the nav opens. */
+  const [view, setView] = useState<"overview" | "locations">("overview");
+  const [locSection, setLocSection] = useState<"explain" | undefined>(undefined);
+  /** Flashes the tablet's locations panel when a press asks for the list. */
+  const [panelFlash, setPanelFlash] = useState(0);
+  /** A server's switch request is out: the sheet stays open until it
+   * answers, so its progress and any failure are seen. */
+  const [switchInFlight, setSwitchInFlight] = useState(false);
+  /** A location picked while something is up: said, not done. */
+  const [askDisconnect, setAskDisconnect] = useState(false);
+  const askDisconnectRef = useRef<HTMLButtonElement>(null);
+
   useEffect(() => {
     // The remembered route is read first and handed straight to
     // loadAll, rather than set and left for a later render: loadAll
@@ -613,11 +760,20 @@ export function Dashboard({
     setProtocolUser((current) => fresh.find((u) => u.id === current?.id) ?? current);
   }
 
+  // The days left and the age of the map's evidence. The session timer
+  // keeps its own second (`SessionTimer`), so the whole screen no longer
+  // renders every second for it.
   useEffect(() => {
     setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(id);
   }, []);
+
+  // "Locations" pressed on another page of the shell: the Locations page,
+  // once this one has loaded.
+  useEffect(() => {
+    if (!loading && takeLocationsRequest()) openLocationsPage();
+  }, [loading]);
 
   /** Loads the screen, and says when an attempt can run on it (`loaded`):
    * once the platform's state is on screen (`adoptPlatform`), or else when
@@ -664,6 +820,8 @@ export function Dashboard({
     const sub = subscriptionRef.current;
     if (!sub || sub.id !== subscriptionId) return;
     setRoutes(list);
+    // Asked a moment ago, with the network read now (the map's tags).
+    setTagsFor({ network: networkKeyFromAsn(), at: Date.now() });
     routesShownRef.current = { plan: planOf(sub), load: loadRef.current, routes: list, answered: true };
     const sessionAtStart = sessionGeneration();
     void updateSnapshotRoutes(sub, list, () => sessionGeneration() === sessionAtStart);
@@ -684,6 +842,8 @@ export function Dashboard({
     setSubscription(cached.subscription);
     setProtocolUsers(cached.protocolUsers);
     setRoutes(cached.routes);
+    // The cached list's tags are about whichever network asked for it.
+    setTagsFor(null);
     routesShownRef.current = {
       plan: cached.subscription ? planOf(cached.subscription) : null,
       load,
@@ -875,6 +1035,10 @@ export function Dashboard({
       // wait can outlast: a Disconnect pressed meanwhile breaks the
       // request, and its report must not say nothing was being dialled.
       const routeList = traceRequests("dashboard route list", () => connectionStateRef.current);
+      // Which network the list's per-network tags will be about: the one
+      // the request names, or without one the request's own address, now
+      // (the map's lights).
+      const tagsAsked = { network: networkKeyFromAsn(), at: Date.now() };
       const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));
       const routesUnanswered = routeList.settle({ routes: routesResult });
       if (routesResult.ok) {
@@ -883,6 +1047,7 @@ export function Dashboard({
         // its own (`takesRouteList`).
         if (takesRouteList(routesShownRef.current, load)) {
           setRoutes(currentRoutes);
+          setTagsFor(tagsAsked);
           routesShownRef.current = { plan: planOf(sub), load, routes: currentRoutes, answered: true };
         }
       } else {
@@ -901,6 +1066,7 @@ export function Dashboard({
         currentRoutes = routesForSnapshot(standIn, shown, planOf(sub), cachedRoutes);
         if (standIn !== null) {
           setRoutes(standIn);
+          setTagsFor(null);
           routesShownRef.current = { plan: planOf(sub), load, routes: standIn, answered: false };
         }
         routesUnanswered?.(
@@ -1563,6 +1729,8 @@ export function Dashboard({
     const choice = autoReconnect.choosing({ routeId, tunnelShown: connectionStateRef.current !== "disconnected" });
     if (choice === "stopPass") void stopPass();
     if (routeId !== null) expectSwitchLoad();
+    // The sheet stays open until the switch has answered.
+    if (routeId !== null) setSwitchInFlight(true);
   }
 
   /** A server's switch request is going out, and its answer starts a load
@@ -1583,6 +1751,7 @@ export function Dashboard({
   async function handleConnectToggle() {
     if (!protocolUser) return;
     pressRef.current += 1;
+    setPressed(true);
     // Every press takes over from an automatic reconnect, and does what
     // it says -- including a stop pressed during one of its passes.
     autoReconnect.cancel("customer");
@@ -1652,6 +1821,7 @@ export function Dashboard({
   async function connectNow(takeover?: string[]) {
     if (!protocolUser) return;
     const press = ++pressRef.current;
+    setPressed(true);
     // The customer session this press was made in. A sign-out from
     // Settings -- an account deleted there, a refused refresh -- reaches no
     // press count, and the waits below run to twenty seconds: a press that
@@ -2670,6 +2840,44 @@ export function Dashboard({
     onLoggedOut();
   }
 
+  /** "Change location", "Try another location": the list -- a sheet on a
+   * phone, the panel beside the hero on a tablet, flashed and with its
+   * current row focused. */
+  function showLocations() {
+    if (view !== "overview") setView("overview");
+    if (layout === "narrow") {
+      setShowLocationPicker(true);
+      return;
+    }
+    setPanelFlash((n) => n + 1);
+    requestAnimationFrame(() => {
+      const row =
+        document.querySelector<HTMLElement>('.nx-panel .nx-row[tabindex="0"]') ??
+        document.querySelector<HTMLElement>(".nx-panel .nx-row");
+      row?.focus();
+    });
+  }
+
+  /** "Locations" in the nav, and "Open the full list" in the panel's
+   * menu: the Locations page. */
+  function openLocationsPage(section?: "explain") {
+    setShowLocationPicker(false);
+    setLocSection(section);
+    setView("locations");
+  }
+
+  /** Asked by the list before a pick goes ahead. The phone changes
+   * location only with nothing up -- the old Change button was disabled
+   * otherwise, and nothing here takes a tunnel down to switch it -- so a
+   * pick over a tunnel, a connect or a disconnect is refused, and the
+   * reason said. Between a reconnect's attempts nothing is up, and the
+   * pick goes ahead, ending the reconnect as it always has. */
+  async function confirmPick(): Promise<boolean> {
+    if (connectionStateRef.current === "disconnected") return true;
+    setAskDisconnect(true);
+    return false;
+  }
+
   /** The route this screen should name.
    *
    * While nothing is up this is the pinned choice, which is what a
@@ -2723,7 +2931,7 @@ export function Dashboard({
     return Math.max(0, Math.ceil(ms / 86_400_000));
   }, [subscription, now]);
 
-  // The orb's label and the headline from the Windows client's tables,
+  // The pill's label and the headline from the Windows client's tables,
   // which this screen used to restate as two chains of ternaries. They
   // agreed state for state; what the tables add is the automatic
   // reconnect -- "Reconnect now" between attempts, "Reconnecting..." and
@@ -2731,8 +2939,17 @@ export function Dashboard({
   // lost" after a drop -- and a single place for it. The press itself is
   // still this screen's own (`handleConnectToggle`), because what it
   // does to a phone's tunnel differs; only the words are shared.
-  const connectLabel = t(pressFor(connectionState, { reconnectWaiting: reconnecting?.waiting === true }).labelKey);
+  const press = pressFor(connectionState, { reconnectWaiting: reconnecting?.waiting === true });
   const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: false, reconnecting });
+  /** The route the list marks as current: the pin while nothing is up, the
+   * route the tunnel is on once one is -- the one the location card names
+   * (`displayedRouteId`), so the two never disagree. */
+  const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
+  /** And the protocol the card names: the credential a connect dials first
+   * while nothing is up, the one the tunnel is on once one is
+   * (`displayedProtocol`) -- not whichever credential the screen holds,
+   * which after a failover is the one the last session ended on. */
+  const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes);
 
   if (loading) {
     return (
@@ -2748,526 +2965,489 @@ export function Dashboard({
     );
   }
 
-  return (
-    <div className="relative mx-auto flex h-full w-full max-w-xl flex-col gap-3 p-4 sm:max-w-2xl sm:gap-4 sm:p-6 md:h-auto md:max-h-[46rem] lg:max-w-3xl lg:gap-5 lg:p-8">
-      <header className="flex items-center justify-between">
-        <Logo />
-        <div className="flex items-center gap-1">
-          <CommunityLinks />
-          <Button
-            variant="ghost"
-            onClick={onOpenSettings}
-            aria-label={t("nav.settings")}
-            className="size-9 justify-center px-0"
-          >
-            <SettingsIcon className="size-4 sm:size-5" />
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => void handleLogout()}
-            disabled={signingOut}
-            className="h-9 px-2 text-xs"
-          >
-            {signingOut ? t("nav.signingOut") : t("nav.signOut")}
-          </Button>
-        </div>
-      </header>
+  // --- The Pearl Glass main page (design-system.md, sections 3 and 4) ---
+  //
+  // The same parts as the Windows client's phone-sized window, wired to
+  // this screen's own state: the words from `headlineFor` and `pressFor`
+  // through lib/hero-model.ts, the colour from the held look (`orbState`).
+  // One screen on a phone, nothing scrolls (owner, 2026-10-19): the plan
+  // and the address fold into the summary line, the list into a sheet.
+  const dropped = tunnelDropped || reconnectLost(reconnect, sessionGeneration());
+  /** The colour the chip, the ambient glow and the sentence wear: the held
+   * look's, and the two the button has no colour for -- a reconnect past
+   * its hold, and a drop. */
+  const calmTone = shownTone(orbTone(orbState, cautionShown), { reconnecting: reconnecting !== null, dropped });
+  const failed = connectionError !== null;
+  // A teardown, the device limit's or the customer's own, while it runs:
+  // the platform has not said the tunnel is down, so "You're not
+  // protected" is not what the screen says -- still disconnecting is
+  // (`teardownShowing`, which the chip, the line and the pill all take).
+  const chip = chipFor(connectionState, headline, { teardownShowing });
+  const line = lineFor(connectionState, headline, { connectedAt, teardownShowing });
+  const lineWords = t(line.kind === "words" ? line.key : headline.title);
+  const pill = pillFor(connectionState, press, { pressed, teardownShowing, failed });
+  const secondary = secondaryFor(press, { reconnecting: reconnecting !== null, failed, teardownShowing });
+  const hintText = teardownShowing ? "" : connectionError ? t(connectionError.messageKey) : t(phoneHint(headline.hint));
+  const slotShowing = slotNotice !== null && slotNoticeShown(slotNotice, connectionState === "disconnected");
+  /** The device limit's card carries its own primary press ("Use on this
+   * device instead") and its way out: with nothing up, the button steps
+   * aside for it rather than offering a second Connect beside it. */
+  const slotChoice =
+    slotShowing &&
+    slotNotice !== null &&
+    connectionState === "disconnected" &&
+    (() => {
+      const copy = describeSlotNotice(slotNotice, { t, language, tunnelDown: true });
+      return copy.useHere !== null || copy.dismiss !== null;
+    })();
+  /** Whether this build can sell anything: not a store build without the
+   * App Store's own purchase (guideline 3.1.1; Google Play's build sells
+   * nothing). */
+  const canBuy = !IS_STORE_BUILD || iapAvailable();
 
-      {error ? (
-        <Card className="animate-rise">
-          <p className="text-sm text-destructive">{error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}</p>
-          <Button onClick={() => void loadAll()} className="mt-3">
-            {t("dash.retry")}
-          </Button>
-        </Card>
-      ) : (
-        <>
-          {offlineSince !== null ? (
-            <div className="animate-rise rounded-lg border border-warning/30 bg-warning/10 px-3 py-2">
-              {offlineText(offlineReason, t).title !== null ? (
-                <p className="text-xs font-medium text-warning">
-                  {offlineText(offlineReason, t).title}
-                </p>
-              ) : null}
-              {offlineText(offlineReason, t).detail !== null ? (
-                <p className="mt-0.5 text-[11px] text-muted-foreground">{offlineText(offlineReason, t).detail}</p>
-              ) : null}
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                {t("dash.offlineHint", {
-                  when: new Date(offlineSince).toLocaleString(),
-                })}
-              </p>
-            </div>
-          ) : null}
+  // The location card. A pinned server's place, Automatic until a tunnel
+  // has settled with nothing pinned, and the protocol the next connect
+  // dials -- or, once one is up, the one it is on.
+  const protocolName = shownProtocol ? customerProtocolLabel(shownProtocol.protocol, shownProtocol.transport) : null;
+  const landedAutomatically = !chosenRouteId && !automaticPending;
+  const trayLocation: TrayLocation = {
+    flag: automaticPending ? (
+      <span className="nx-flagbox auto">
+        <Sparkles aria-hidden />
+      </span>
+    ) : currentRoute ? (
+      // A relay: its exit's flag, Iran's as a badge.
+      <RouteFlag
+        region={routePlace(currentRoute).entry}
+        exitRegion={routePlace(currentRoute).exit}
+        label={placeLabel(currentRoute, language)}
+        size="lg"
+      />
+    ) : (
+      <Globe className="size-5 text-ink-2" aria-hidden />
+    ),
+    name: automaticPending ? t("loc.automaticShort") : currentRoute ? placeLabel(currentRoute, language) : "—",
+    sub: automaticPending
+      ? null
+      : landedAutomatically && protocolName
+        ? `${t("loc.automaticShort")} · ${protocolName}`
+        : protocolName,
+    // The card is the control: it opens the list. A pick while something
+    // is up is refused there, with the reason (`confirmPick`).
+    onChange: subscription ? showLocations : undefined,
+  };
 
-          <div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">
-            <span
-              className={
-                connectionState === "connected"
-                  ? "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]"
-                  : connectionState === "unverified"
-                    ? "size-1.5 shrink-0 rounded-full bg-highlight shadow-[0_0_8px_var(--highlight)]"
-                  : connectionState === "degraded"
-                    ? "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]"
-                    : "size-1.5 shrink-0 rounded-full bg-muted-foreground/50"
+  const usedFraction = usage && usage.cap !== null ? usage.used / usage.cap : null;
+  const caution = planCaution(usedFraction, daysLeft);
+  const used = sizeParts(usage ? usage.used : Number(subscription?.dataUsedBytes ?? 0), language);
+  const trayPlan: TrayPlan | null = subscription
+    ? {
+        label: usage && usage.cap === null ? t("tr.planUnl") : t("dash.dataUsed"),
+        value: (
+          <>
+            {used.value}
+            <small>
+              {usage && usage.cap !== null
+                ? `${used.unit} ${t("tr.ofCap", { cap: formatSize(usage.cap, language) })}`
+                : t("tr.used", { size: used.unit })}
+            </small>
+          </>
+        ),
+        meter: usedFraction !== null ? { fraction: usedFraction, caution: caution.meter } : null,
+        days:
+          daysLeft !== null
+            ? {
+                text: t(daysLeft === 1 ? "tr.dayLeft" : "tr.daysLeft", { n: formatNumber(daysLeft, language) }),
+                caution: caution.days,
               }
-            />
-            <span className="truncate">{me?.email}</span>
-          </div>
+            : null,
+        // A way to buy while a plan is still running, only where buying
+        // works: the App Store's own purchase on an iPhone ("Plans"), the
+        // plans screen on a build we distribute ourselves -- never a
+        // checkout or a voucher in a store build (3.1.1), and nothing in
+        // Google Play's, which sells nothing. None while Neoxify cannot be
+        // reached.
+        renew:
+          offlineSince === null && canBuy
+            ? { label: IS_STORE_BUILD ? t("nav.plansStore") : t("tr.renew"), onClick: onBrowsePlans }
+            : null,
+      }
+    : null;
+  // The address only for a verified tunnel whose check returned it.
+  const ip = ipFor(connectionState, exitIp, { gaming: false });
 
-          {subscription ? (
-            <>
-              <div className="flex flex-1 flex-col items-center justify-center gap-4">
-                {!protocolUser ? (
-                  <Card className="w-full text-center">
-                    <p className="text-sm text-muted-foreground">
-                      No connection provisioned on your subscription yet.
-                    </p>
-                  </Card>
-                ) : (
-                  <>
-                    <ConnectOrb
-                      state={connectionState}
-                      onToggle={() => void handleConnectToggle()}
-                      label={connectLabel}
-                    />
+  // The world map's lights (lib/map-lights.ts): one per country in the
+  // list, twinkling only on evidence that traffic was carried on this
+  // network lately -- this phone's own verified connects, or the server's
+  // per-network tags -- never on a latency number; and the connected light
+  // only under the verified tone.
+  if (connectionState === "connected" && currentRoute) verifiedRouteRef.current = currentRoute;
+  const settledNow = tunnelUp(connectionState);
+  const chosenRoute = chosenRouteId ? (routes.find((r) => r.id === chosenRouteId) ?? null) : null;
+  // The arc's route: the pin while nothing has settled, the route the
+  // tunnel settled on once one has. And the verified place only while the
+  // tunnel is still on it.
+  const arcRoute = settledNow ? currentRoute : chosenRoute;
+  const verifiedShown = settledNow && verifiedRouteRef.current?.id !== currentRoute?.id ? null : verifiedRouteRef.current;
+  // Read on this network only: the reading the phone took last, unless it
+  // may have moved since (`roamedAt`). Until a newer reading, its own
+  // history and the list's tags light nothing.
+  const reading = currentNetwork(now);
+  const mapNetworkId = reading !== null && reading.at >= roamedAt ? networkKeyFromAsn(now) : null;
+  const tagsNow =
+    tagsFor !== null &&
+    (tagsFor.network !== null ? mapNetworkId !== null && tagsFor.network === mapNetworkId : tagsFor.at >= roamedAt);
+  const mapRoutes = tagsNow ? routes : withoutTags(routes);
+  const evidenceCtx: EvidenceContext = { history, network: mapNetworkId, now: Math.floor(now / 60_000) * 60_000 };
+  const mapScene = mapLights({
+    routes: mapRoutes,
+    ...evidenceCtx,
+    verified: verifiedShown,
+    tone: calmTone,
+    shown: arcRoute,
+    up: settledNow ? currentRoute : null,
+  });
+  const mapPlaces = mapCountries(routes);
+  // What the list says beside each place, from the same evidence.
+  const placeEvidence = placesEvidence(mapRoutes, evidenceCtx);
+  const workedPlaces = new Set<string>();
+  for (const [key, evidence] of placeEvidence) if (evidence.look === "live") workedPlaces.add(key);
+  const listEvidence = {
+    places: placeEvidence,
+    worked: workedPlaces,
+    ownAt: (route: RouteOption) => ownWorkedAt(route, evidenceCtx),
+    tags: tagsNow,
+  };
 
-                    <div className="px-4 text-center">
-                      <p
-                        className={`text-sm font-semibold ${HEADLINE_TONE[teardownShowing ? "plain" : headline.tone]}`}
-                      >
-                        {/* A teardown, the device limit's or the
-                            customer's own, while it runs: the platform
-                            has not said the tunnel is down, so "You're
-                            not protected" is not the headline -- still
-                            disconnecting is. */}
-                        {teardownShowing ? t("dash.disconnecting") : t(headline.title)}
-                      </p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {teardownShowing ? null : t(headline.hint)}
-                      </p>
-                      {/* The way out of an automatic reconnect that is
-                          not the orb: between attempts the orb connects
-                          now, and during one stops only that pass. This
-                          stops the reconnecting itself; the headline then
-                          says the connection was lost. */}
-                      {reconnecting !== null && !teardownShowing ? (
-                        <Button
-                          variant="ghost"
-                          onClick={() => void stopReconnecting()}
-                          className="mt-1 h-8 px-2 text-xs text-muted-foreground"
-                        >
-                          {t("dash.reconnectStop")}
-                        </Button>
-                      ) : null}
-                      {/* Never move the customer without saying so. The
-                          Windows client learned this the expensive way:
-                          five releases of "it always connects as Fast"
-                          were a working failover that told nobody. */}
-                      {(connectionState === "connected" || connectionState === "unverified") &&
-                      failedOverTo ? (
-                        <p className="mt-1 text-xs text-amber-400/90">
-                          <Slotted text={t("dash.switchedTo", { protocol: SLOT })}>
-                            <bdi className="font-medium">{failedOverTo}</bdi>
-                          </Slotted>
-                        </p>
-                      ) : null}
+  // The line under the email in the shell's menu and sidebar.
+  const shellPlan: ShellPlan | null = subscription ? { daysLeft, unlimited: Boolean(usage && usage.cap === null) } : null;
+  const planLine = planLineText(shellPlan, t, language);
+  rememberShellProfile({ email: me?.email ?? null, plan: shellPlan });
 
-                      {unsupportedChoice ? (
-                        <p className="mt-1 text-xs text-amber-400/90">
-                          {t("dash.androidWireguardOnly", {
-                            protocol: unsupportedChoice,
-                          })}
-                        </p>
-                      ) : null}
+  // What must be read while it is true, always in the column.
+  const notes = (
+    <div className="nx-notes">
+      {/* The device limit ended this session and the tunnel is not
+          confirmed down yet. Kept while the retry keeps trying; a
+          refusal's card waits for the tunnel to be down. */}
+      {slotTeardownState === "stuck" ? (
+        <Note tone="danger">{t("slots.teardownStuck")}</Note>
+      ) : customerTeardownState === "stuck" ? (
+        // The customer's own Disconnect has not been confirmed: said, kept
+        // while the retry keeps trying, and gone once the platform says
+        // the tunnel is down.
+        <Note tone="danger">{t("err.teardownStuck")}</Note>
+      ) : null}
+      {/* The consent dialog was declined. Said rather than swallowed: a
+          refusal looks exactly like a failed connect from the outside. */}
+      {permissionDenied ? <Note tone="caution">{t("dash.vpnPermissionDenied")}</Note> : null}
+      {/* A missing feature, not a blocked network. */}
+      {unsupportedChoice ? <Note>{t("dash.androidWireguardOnly", { protocol: unsupportedChoice })}</Note> : null}
+    </div>
+  );
 
-                      {connectionState === "connected" && exitIp ? (
-                        <p className="mt-1.5 text-xs text-muted-foreground">
-                          {t("dash.yourIp")}{" "}
-                          <span className="tabular-nums font-medium text-foreground">
-                            {exitIp}
-                          </span>
-                        </p>
-                      ) : null}
-                    </div>
+  // The raw engine text, out of the way, for a failed connect.
+  const errorBlock = connectionError ? (
+    <details className="nx-errdetail">
+      <summary>{t("err.showDetail")}</summary>
+      <p data-ltr>{connectionError.detail}</p>
+    </details>
+  ) : null;
 
-                    {/* The plan's device limit, when it is why this phone
-                        is not connected: where Neoxify is in use, and the
-                        one press that moves it here. */}
-                    {slotNotice ? (
-                      <DeviceSlotCard
-                        notice={slotNotice}
-                        // "Disconnected:" is a claim about the tunnel, so
-                        // it waits for the platform to have said so.
-                        tunnelDown={connectionState === "disconnected"}
-                        onUseHere={(takeover) => void connectNow(takeover)}
-                        onDismiss={() => setSlotNotice(null)}
-                      />
-                    ) : null}
+  // Never move the customer without saying so. The Windows client learned
+  // this the expensive way: five releases of "it always connects as Fast"
+  // were a working failover that told nobody. On a phone it stays in the
+  // column when the exit is in another country than the one chosen; a
+  // protocol change in the same country folds into the summary's sheet,
+  // and the location card names the protocol.
+  const subline =
+    (connectionState === "connected" || connectionState === "unverified") && failedOverTo ? (
+      <p className="nx-subline">
+        <Repeat aria-hidden />
+        <span>
+          <Slotted text={t("dash.switchedTo", { protocol: SLOT })}>
+            <bdi className="font-medium text-ink">{failedOverTo}</bdi>
+          </Slotted>
+        </span>
+      </p>
+    ) : null;
+  const exitOf = (route: RouteOption) => routePlace(route).exit ?? routePlace(route).entry;
+  const crossedBorder = subline !== null && chosenRoute !== null && currentRoute !== null && exitOf(chosenRoute) !== exitOf(currentRoute);
 
-                    <div className="min-h-4 px-2 text-center">
-                      {/* The device limit ended this session and the
-                          tunnel is not confirmed down yet. Kept while the
-                          retry keeps trying; a refusal's card waits for
-                          the tunnel to be down. */}
-                      {slotTeardownState === "stuck" ? (
-                        <p className="text-xs text-destructive">
-                          {t("slots.teardownStuck")}
-                        </p>
-                      ) : customerTeardownState === "stuck" ? (
-                        // The customer's own Disconnect has not been
-                        // confirmed: said, kept while the retry keeps
-                        // trying, and gone once the platform says the
-                        // tunnel is down.
-                        <p className="text-xs text-destructive">
-                          {t("err.teardownStuck")}
-                        </p>
-                      ) : null}
-                      {permissionDenied ? (
-                        <p className="text-xs text-destructive">
-                          Android needs your permission to create a VPN
-                          connection. Tap Connect again and choose OK.
-                        </p>
-                      ) : connectionError ? (
-                        <>
-                          <p className="text-xs text-destructive">
-                            {t(connectionError.messageKey)}
-                          </p>
-                          <details className="mt-1">
-                            <summary className="cursor-pointer text-[10px] text-muted-foreground select-none">
-                              {t("err.showDetail")}
-                            </summary>
-                            <p
-                              className="mt-1 font-mono text-[10px] break-words text-muted-foreground"
-                              data-ltr
-                            >
-                              {connectionError.detail}
-                            </p>
-                          </details>
-                        </>
-                      ) : null}
-                    </div>
-                  </>
-                )}
-              </div>
+  // The banner at the top of the column: the load failed with nothing
+  // saved, the numbers are old, the plan has stopped working, or there is
+  // none. Each neutral: the customer can still act.
+  const banner = (
+    <>
+      {error ? (
+        <Banner title={error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}>
+          <PillButton variant="ghost" size="sm" className="mt-2 self-start" onClick={() => void loadAll()}>
+            {t("dash.retry")}
+          </PillButton>
+        </Banner>
+      ) : null}
+      {/* The numbers on screen are old, and connecting still works. */}
+      {!error && offlineSince !== null ? (
+        <Banner>
+          {offlineText(offlineReason, t).title !== null ? (
+            <b>{offlineText(offlineReason, t).title}</b>
+          ) : null}
+          {offlineText(offlineReason, t).detail !== null ? <span>{offlineText(offlineReason, t).detail}</span> : null}
+          <span>{t("dash.offlineHint", { when: formatDateTime(offlineSince, language) })}</span>
+        </Banner>
+      ) : null}
+      {/* The plan has stopped working: said here, not only in the error a
+          connect attempt produced, with the one thing to do about it. */}
+      {!error && endedState ? (
+        <Banner title={t(endedState.titleKey)}>
+          <span>{t(endedState.bodyKey)}</span>
+          {endedState.showPlansButton ? (
+            <PillButton size="sm" className="mt-2 self-start" onClick={onBrowsePlans}>
+              {t("dash.renewCta")}
+            </PillButton>
+          ) : null}
+        </Banner>
+      ) : null}
+      {/* No plan. A store build cannot sell, and cannot point at where to
+          buy either; what it must not do is leave the customer on a
+          screen that explains nothing, so it says what state the account
+          is in and what will happen when that changes. */}
+      {!error && !subscription ? (
+        <Banner title={t("dash.noSubscription")}>
+          <span>{IS_STORE_BUILD && !iapAvailable() ? t("dash.noPlanStore") : t("dash.noPlanHint")}</span>
+        </Banner>
+      ) : null}
+    </>
+  );
+  const bannerShowing = Boolean(error || offlineSince !== null || endedState || !subscription);
+  /** A message to read is on screen -- a banner, the device limit, a failed
+   * connect, or one of the notes above -- and the phone's map gives way to
+   * it: the stage keeps its place and draws nothing. */
+  const notesShowing =
+    slotTeardownState === "stuck" || customerTeardownState === "stuck" || permissionDenied || unsupportedChoice !== null;
+  const mapAlert = bannerShowing || slotShowing || connectionError !== null || notesShowing;
 
-              {/* The plan has stopped working. Until now this said so
-                  only in the error a connect attempt produced -- text
-                  that told the customer to "upgrade or wait for it to
-                  renew" on a screen with nothing to press. */}
-              {endedState ? (
-                <Card className="ring-brand animate-rise flex flex-col gap-2 text-center">
-                  <p className="text-sm font-semibold">
-                    {t(endedState.titleKey)}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {t(endedState.bodyKey)}
-                  </p>
-                  {endedState.showPlansButton ? (
-                    <Button
-                      onClick={onBrowsePlans}
-                      className="mt-2 w-full justify-center gap-2"
-                    >
-                      <Tag className="size-4" />
-                      {t("dash.renewCta")}
-                    </Button>
-                  ) : null}
-                </Card>
-              ) : null}
-              <div className="animate-rise grid grid-cols-3 gap-2">
-                {/* Both open the picker. Customers tapped these tiles
-                    -- which highlight on touch and show the very value
-                    they wanted to change -- and reported the app broken
-                    when nothing happened, because the working control
-                    was a separate button further down showing the same
-                    text. The tile is the control now. */}
-                <Stat
-                  icon={
-                    automaticPending ? (
-                      <Sparkles className="size-3" />
-                    ) : currentRoute ? (
-                      // A relay: its exit's flag, Iran's as a badge.
-                      <RouteFlag
-                        region={routePlace(currentRoute).entry}
-                        exitRegion={routePlace(currentRoute).exit}
-                        label={placeLabel(currentRoute, language)}
-                        size="sm"
-                      />
-                    ) : (
-                      <Globe className="size-3" />
-                    )
-                  }
-                  // With nothing pinned: "Automatic" until a tunnel has
-                  // settled, then where it landed, captioned as the app's
-                  // pick. See `showsAutomatic`.
-                  label={t(
-                    !chosenRouteId && !automaticPending
-                      ? "dash.serverAuto"
-                      : "dash.server",
-                  )}
-                  // The country the traffic leaves from; the server list
-                  // spells out "Iran → Germany" for a relay.
-                  value={
-                    automaticPending ? (
-                      t("loc.automaticShort")
-                    ) : currentRoute ? (
-                      <span title={placeLabel(currentRoute, language)}>
-                        {exitCountryName(currentRoute, language)}
-                      </span>
-                    ) : (
-                      "—"
-                    )
-                  }
-                  onClick={() => setShowLocationPicker(true)}
-                  actionLabel={t("dash.change")}
-                  disabledReason={
-                    connectionState === "disconnected"
-                      ? undefined
-                      : t("dash.disconnectToChange")
-                  }
-                />
-                <Stat
-                  icon={<Shield className="size-3" />}
-                  label={t("dash.protocol")}
-                  value={
-                    automaticPending
-                      ? t("loc.automaticShort")
-                      : protocolUser
-                      ? customerProtocolLabel(
-                          protocolUser.protocol,
-                          protocolUser.connection?.transport,
-                        )
-                      : "—"
-                  }
-                  onClick={() => setShowLocationPicker(true)}
-                  actionLabel={t("dash.change")}
-                  disabledReason={
-                    connectionState === "disconnected"
-                      ? undefined
-                      : t("dash.disconnectToChange")
-                  }
-                />
-                <Stat
-                  icon={<Clock className="size-3" />}
-                  label={t("dash.session")}
-                  value={
-                    connectedAt !== null ? (
-                      <span className="tabular-nums">
-                        {formatDuration(Math.floor((now - connectedAt) / 1000))}
-                      </span>
-                    ) : (
-                      "—"
-                    )
-                  }
-                />
-              </div>
+  /** The one location list: the panel beside the hero on a tablet, a sheet
+   * on a phone, or the Locations page. One element either way. */
+  const picker = subscription ? (
+    <LocationPicker
+      subscriptionId={subscription.id}
+      currentRouteId={screenRouteId ?? undefined}
+      // Latency cannot be measured from inside the tunnel; see the prop's
+      // own note. Anything but "disconnected" means routes are installed.
+      tunnelActive={connectionState !== "disconnected"}
+      // As it changes, for the report on a list nothing answered: its
+      // probe must not run across a connect or a disconnect.
+      connectionState={connectionState}
+      // Already loaded here -- from Neoxify, or from the cache when it
+      // cannot be reached -- so the list opens on the servers and
+      // refreshes behind them, never "Could not reach Neoxify" over
+      // servers the screen is holding.
+      initialRoutes={routes}
+      // And what its own request is answered with comes back here.
+      onRoutes={adoptPickerRoutes}
+      // Nothing pinned is Automatic; choosing it clears the pin on this
+      // device, with no server call.
+      automatic={!chosenRouteId}
+      // The pick, as it is made: counted as a press there, and a
+      // reconnect under way ends there.
+      onPicking={pickingLocation}
+      // A switch that failed chose nothing: the reconnect leads with what
+      // it led with before the pick.
+      onPickFailed={() => {
+        setSwitchInFlight(false);
+        autoReconnect.pickFailed();
+        switchLoadSettled();
+      }}
+      onChooseAutomatic={() => {
+        // A new choice while a reconnect waits ends the reconnect: its
+        // next attempt would lead with the old route regardless.
+        chooseLocation(null);
+        setChosenRouteId(null);
+        void saveChosenRoute(null);
+      }}
+      onClose={() => {
+        setShowLocationPicker(false);
+        // A pick on the Locations page lands on the main page, where the
+        // connection's state is said.
+        setView("overview");
+      }}
+      onSwitched={(routeId) => {
+        setSwitchInFlight(false);
+        // As for Automatic, above.
+        const shown = chooseLocation(routeId ?? null);
+        setChosenRouteId(routeId ?? null);
+        // Best-effort and deliberately not awaited: losing the preference
+        // costs one re-pick rather than a connection.
+        void saveChosenRoute(routeId ?? null);
+        // Over a tunnel that stays up, the route it is on.
+        void loadAll(shown ?? undefined);
+        // Begun: the wait for it is over, and nothing in the background
+        // starts beside it.
+        switchLoadSettled();
+      }}
+      evidence={listEvidence}
+      variant={view === "locations" ? "page" : layout === "narrow" ? "sheet" : "panel"}
+      confirmPick={confirmPick}
+      onOpenFull={openLocationsPage}
+      focusSection={view === "locations" ? locSection : undefined}
+    />
+  ) : null;
 
-              <Card className="animate-rise flex flex-col gap-2.5 py-3">
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    {t("dash.dataUsed")}
-                  </span>
-                  <span className="tabular-nums text-xs font-semibold">
-                    {usage ? (
-                      <>
-                        {formatBytes(usage.used)}{" "}
-                        <span className="font-normal text-muted-foreground">
-                          /{" "}
-                          {usage.cap === null
-                            ? t("dash.unlimited")
-                            : formatBytes(usage.cap)}
-                        </span>
-                      </>
-                    ) : (
-                      formatBytes(Number(subscription.dataUsedBytes))
-                    )}
-                  </span>
-                </div>
+  const actions = protocolUser ? (
+    <div className="nx-actions">
+      <ConnectOrb
+        state={orbState}
+        caution={cautionShown}
+        onToggle={() => void handleConnectToggle()}
+        label={t(pill.labelKey)}
+        // "Connecting..." stops the connect when pressed: said so to
+        // assistive technology, which would otherwise hear only the label.
+        pressLabel={press.action === "cancelConnect" ? t("btn.stop") : undefined}
+        look="pill"
+        pill={pill}
+      />
+      {/* The way out of an automatic reconnect that is not the button:
+          between attempts the button connects now, and during one stops
+          only that pass. This stops the reconnecting itself; the line
+          then says the connection was lost. */}
+      {secondary === "stopReconnecting" ? (
+        <WayOut label={t("dash.reconnectStop")} short={t("btn.stopShort")} onClick={() => void stopReconnecting()} />
+      ) : secondary === "stopConnecting" ? (
+        <WayOut label={t("btn.stop")} short={t("btn.stopShort")} onClick={() => void handleConnectToggle()} />
+      ) : secondary === "tryAnother" && subscription ? (
+        <WayOut label={t("btn.tryAnother")} short={t("btn.tryAnotherShort")} onClick={showLocations} />
+      ) : null}
+    </div>
+  ) : subscription ? (
+    <p className="nx-hint">{t("dash.noProvision")}</p>
+  ) : canBuy ? (
+    // No plan: the way to get one, where this build may offer it.
+    <div className="nx-actions">
+      <PillButton onClick={onBrowsePlans}>{t("dash.viewPlans")}</PillButton>
+    </div>
+  ) : null;
 
-                {usage && usage.cap !== null ? (
-                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/8">
-                    <div
-                      className="h-full rounded-full transition-[width] duration-700"
-                      style={{
-                        width: `${Math.max(usage.percent, 1.5)}%`,
-                        background:
-                          usage.percent >= 80
-                            ? "linear-gradient(90deg, #f59e0b, #ef4444)"
-                            : "linear-gradient(90deg, var(--primary), var(--highlight))",
-                      }}
-                    />
-                  </div>
-                ) : null}
+  // The state in words for a screen reader, once it has settled.
+  const announcement = `${lineWords}. ${hintText}`;
 
-                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                  <span>
-                    {t("dash.expires")}{" "}
-                    <span className="tabular-nums text-foreground">
-                      {new Date(subscription.expireAt).toLocaleDateString()}
-                    </span>
-                  </span>
-                  {daysLeft !== null ? (
-                    <span
-                      className={
-                        daysLeft <= 3
-                          ? "rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-semibold text-destructive"
-                          : "rounded-full bg-white/6 px-2 py-0.5 text-[10px] font-semibold text-muted-foreground"
-                      }
-                    >
-                      <span className="tabular-nums">{daysLeft}</span>{" "}
-                      {t("dash.daysLeft")}
-                    </span>
-                  ) : null}
-                </div>
-
-                {/* A way to buy while a plan is still running.
-                    endedNotice only offers one once the plan has ENDED,
-                    which left an App Store build with no route to its
-                    own purchase screen for anybody currently subscribed
-                    -- including a reviewer on the free trial, who would
-                    have had no way to reach the in-app purchase at all.
-                    Only shown where buying actually works: the Play
-                    build sells nothing. */}
-                {iapAvailable() ? (
-                  <Button
-                    variant="outline"
-                    onClick={onBrowsePlans}
-                    className="mt-3 w-full justify-center gap-2"
-                  >
-                    <Tag className="size-4" />
-                    {t("dash.viewPlans")}
-                  </Button>
-                ) : null}
-              </Card>
-
-              <Button
-                variant="outline"
-                onClick={() => setShowLocationPicker(true)}
-                disabled={connectionState !== "disconnected"}
-                className="w-full justify-between px-3 py-3"
-              >
-                <span className="flex items-center gap-2">
-                  <MapPin className="size-4 text-primary" />
-                  {t("dash.changeLocation")}
-                </span>
-                {/* Points the way the language reads. This screen is
-                    mobile's own copy, so the shared fix did not reach
-                    it. */}
-                <ChevronRight className="size-4 text-muted-foreground rtl:rotate-180" />
-              </Button>
-              {connectionState !== "disconnected" ? (
-                <p className="-mt-1 text-center text-xs text-muted-foreground">
-                  {t("dash.disconnectToChange")}
-                </p>
-              ) : null}
-            </>
-          ) : (
-            <div className="flex flex-1 flex-col items-center justify-center gap-4">
-              <Card className="ring-brand w-full text-center">
-                <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-full bg-primary/15 text-primary">
-                  <Tag className="size-5" />
-                </div>
-                <p className="text-sm font-semibold">
-                  {t("dash.noSubscription")}
-                </p>
-                {/* A store build cannot sell, and cannot point at where
-                    to buy either -- both stores restrict steering a
-                    customer to an outside payment. What it must not do
-                    is leave them on a screen that explains nothing,
-                    which is what hiding the button alone would have
-                    done. So it says plainly what state the account is
-                    in and what will happen when that changes. */}
-                {IS_STORE_BUILD && !iapAvailable() ? (
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {t("dash.noPlanStore")}
-                  </p>
-                ) : (
-                  <>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {t("dash.noPlanHint")}
-                    </p>
-                    <Button
-                      onClick={onBrowsePlans}
-                      className="mt-4 w-full justify-center gap-2"
-                    >
-                      <Tag className="size-4" />
-                      {t("dash.viewPlans")}
-                    </Button>
-                  </>
-                )}
-              </Card>
-            </div>
-          )}
-        </>
+  return (
+    <AppShell
+      active={view === "locations" ? "locations" : "overview"}
+      shown={calmTone}
+      busy={pill.progress}
+      banner={bannerShowing}
+      email={me?.email ?? null}
+      planLine={planLine}
+      onOverview={() => {
+        if (view !== "overview") setView("overview");
+        else document.querySelector<HTMLElement>(".nx-hero")?.scrollTo({ top: 0 });
+      }}
+      onLocations={() => openLocationsPage()}
+      onOpenActivity={onOpenActivity}
+      onOpenSettings={onOpenSettings}
+      onBrowsePlans={onBrowsePlans}
+      onOpenReferrals={onOpenReferrals}
+      onOpenSupport={onOpenSupport}
+      onSignOut={() => void handleLogout()}
+      signingOut={signingOut}
+      // A tablet wide enough for the sidebar keeps the community links
+      // there; a phone has them in Settings › About.
+      update={<CommunityLinks />}
+      scene={
+        // A page speaks for no route: no lights behind the Locations page.
+        view === "locations" ? (
+          <PageScene />
+        ) : (
+          <HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} alert={mapAlert} />
+        )
+      }
+    >
+      {view === "locations" ? (
+        <Page title={t("loc.panelTitle")} lede={t("loc.pageLede")} className="nx-locpg">
+          {picker ?? <p className="nx-csub">{t(canBuy ? "dash.noPlanHint" : "dash.noPlanStore")}</p>}
+        </Page>
+      ) : (
+        <MainView
+          banner={banner}
+          chip={error ? null : <StatusChip glyph={chip.glyph} label={t(chip.labelKey)} />}
+          line={
+            error ? null : (
+              <StateLine
+                line={line}
+                words={lineWords}
+                decor={<Decor keys={["decor.browse", "decor.stream", "decor.work", "decor.anywhere"]} />}
+              />
+            )
+          }
+          hint={
+            error ? null : (
+              <Hint tone={hintTone(calmTone, { failed })} reserve={PHONE_HEADLINE_HINTS}>
+                {hintText}
+              </Hint>
+            )
+          }
+          slot={
+            slotShowing && slotNotice ? (
+              /* The plan's device limit, when it is why this phone is not
+                 connected: where Neoxify is in use, and the one press that
+                 moves it here. "Disconnected:" is a claim about the
+                 tunnel, so it waits for the platform to have said so. */
+              <DeviceSlotCard
+                notice={slotNotice}
+                tunnelDown={connectionState === "disconnected"}
+                onUseHere={(takeover) => void connectNow(takeover)}
+                onDismiss={() => setSlotNotice(null)}
+              />
+            ) : undefined
+          }
+          subline={subline}
+          sublineStays={crossedBorder}
+          actions={error || slotChoice ? null : actions}
+          error={errorBlock}
+          notes={notes}
+          locationCard={subscription ? <LocationCard location={trayLocation} /> : null}
+          metrics={subscription ? <MetricCards plan={trayPlan} ip={ip} /> : null}
+          summary={subscription ? <SummaryLine plan={trayPlan} ip={ip} /> : null}
+          panel={layout !== "narrow" ? picker : null}
+          panelLabel={t("loc.panelTitle")}
+          panelFlash={panelFlash}
+          legend={routes.length > 0 ? <MapLegend /> : null}
+          mapStage={
+            layout !== "wide" ? (
+              <WorldMap host="stage" lights={mapScene.lights} arc={mapScene.arc} countries={mapPlaces} alert={mapAlert} />
+            ) : null
+          }
+          tray={<SessionTray label={t("tr.location")} location={trayLocation} plan={trayPlan} ip={ip} />}
+          announcer={<StateAnnouncer text={announcement} />}
+        />
       )}
 
-      <Sheet open={showLocationPicker && subscription !== null}>
-        {subscription ? (
-          <LocationPicker
-            subscriptionId={subscription.id}
-            currentRouteId={protocolUser?.routeId}
-            // Latency cannot be measured from inside the tunnel; see
-            // the prop's own note. Anything but "disconnected" means
-            // routes are installed, including the verifying and
-            // degraded states where a tunnel exists but is not
-            // trusted yet.
-            tunnelActive={connectionState !== "disconnected"}
-            // As it changes, for the report on a list nothing answered: its
-            // probe must not run across a connect or a disconnect.
-            connectionState={connectionState}
-            // Already loaded here -- from Neoxify, or from the cache when
-            // it cannot be reached -- so the picker opens on the servers
-            // and refreshes behind them. Without it the list opened empty
-            // and asked again, and with Neoxify out of reach it said
-            // "Could not reach Neoxify" over servers the screen was holding.
-            initialRoutes={routes}
-            // And what its own request is answered with comes back here.
-            onRoutes={adoptPickerRoutes}
-            // Nothing pinned is Automatic, which is what a new install
-            // starts on; choosing it clears the pin on this device. Every
-            // route is already provisioned, so there is no server call.
-            automatic={!chosenRouteId}
-            // The pick, as it is made: counted as a press there, and a
-            // reconnect under way ends there -- not once a server's switch
-            // request has answered.
-            onPicking={pickingLocation}
-            // A switch that failed chose nothing: the reconnect leads with
-            // what it led with before the pick.
-            onPickFailed={() => {
-              autoReconnect.pickFailed();
-              switchLoadSettled();
-            }}
-            onChooseAutomatic={() => {
-              // A new choice while a reconnect waits ends the reconnect:
-              // its next attempt would lead with the old route regardless.
-              // A pass of its still running is stopped, and so is a
-              // connect pressed here that is still waiting to dial; a
-              // tunnel already back is left as it is.
-              chooseLocation(null);
-              setChosenRouteId(null);
-              void saveChosenRoute(null);
-            }}
-            onClose={() => setShowLocationPicker(false)}
-            onSwitched={(routeId) => {
-              // As for Automatic, above.
-              const shown = chooseLocation(routeId ?? null);
-              setChosenRouteId(routeId ?? null);
-              // Best-effort and deliberately not awaited: the customer's
-              // connection should not wait on a disk write, and losing
-              // the preference costs them one re-pick rather than a
-              // connection.
-              void saveChosenRoute(routeId ?? null);
-              // Over a tunnel that stays up, the route it is on: naming
-              // the choice there would name a server the traffic is not
-              // leaving from.
-              void loadAll(shown ?? undefined);
-              // Begun: the wait for it is over, and nothing in the background
-              // starts beside it.
-              switchLoadSettled();
-            }}
-          />
-        ) : null}
-      </Sheet>
-    </div>
+      {layout === "narrow" && view === "overview" ? (
+        <LocationSheet
+          open={showLocationPicker && subscription !== null}
+          title={t("loc.panelTitle")}
+          closeLabel={t("loc.close")}
+          onClose={() => setShowLocationPicker(false)}
+          dismissible={!switchInFlight}
+        >
+          {picker}
+        </LocationSheet>
+      ) : null}
+
+      {/* A location picked while something is up. The phone changes
+          location only with nothing up, as it always has: said, not done. */}
+      <Dialog
+        open={askDisconnect}
+        title={t("dash.disconnectToChange")}
+        onClose={() => setAskDisconnect(false)}
+        initialFocus={askDisconnectRef}
+        actions={
+          <PillButton ref={askDisconnectRef} size="sm" onClick={() => setAskDisconnect(false)}>
+            {t("sum.close")}
+          </PillButton>
+        }
+      />
+    </AppShell>
   );
 }

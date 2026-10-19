@@ -649,6 +649,14 @@ const en = {
     "Custom mode is running and the tunnel is up, but Neoxify couldn't confirm your chosen apps' traffic is reaching the server. Reconnect if you need to be sure.",
   "dash.verifying": "Checking connection...",
   "dash.verifyingHint": "Setting up your tunnel — trying each protocol until one works. Click to stop.",
+  // The phone's words for the two sentences that speak of a computer and
+  // a click (design-system.md 3.3).
+  "dash.verifyingHintPhone": "Setting up your tunnel — trying each protocol until one works. Tap to stop.",
+  "dash.waitingForNetworkHintPhone":
+    "This device isn't connected to a network. Neoxify will connect as soon as it is. Until then, your traffic is not protected.",
+  // The phone's VPN consent dialog was declined. Said rather than
+  // swallowed: a refusal looks exactly like a failed connect.
+  "dash.vpnPermissionDenied": "Android needs your permission to create a VPN connection. Tap Connect again and choose OK.",
   // Said when the helper service cannot be reached, which is a different
   // thing from the tunnel being down and must not borrow its words. The
   // screen used to answer this case with "You're not protected", over a
@@ -1736,6 +1744,11 @@ const fa: Record<TranslationKey, string> = {
     "حالت سفارشی در حال اجراست و تونل برقرار است، اما نئوکسیفای نتوانست تأیید کند که ترافیک برنامه‌های انتخابی شما به سرور می‌رسد. اگر می‌خواهید مطمئن شوید، دوباره وصل شوید.",
   "dash.verifying": "در حال بررسی اتصال...",
   "dash.verifyingHint": "در حال برقراری تونل — هر پروتکل امتحان می‌شود. برای توقف کلیک کنید.",
+  "dash.verifyingHintPhone": "در حال برقراری تونل — هر پروتکل امتحان می‌شود. برای توقف ضربه بزنید.",
+  "dash.waitingForNetworkHintPhone":
+    "این دستگاه به شبکه‌ای وصل نیست. نئوکسیفای به محض وصل شدن شبکه وصل می‌شود. تا آن زمان، ترافیک شما محافظت نمی‌شود.",
+  "dash.vpnPermissionDenied":
+    "اندروید برای ساختن اتصال VPN به اجازه شما نیاز دارد. دوباره روی «اتصال» بزنید و در پنجره‌ای که باز می‌شود اجازه دهید.",
   "dash.unknown": "در حال حاضر مشخص نیست",
   "dash.unknownHint":
     "سرویس نئوکسیفای پاسخ نمی‌دهد، بنابراین برنامه نمی‌تواند بگوید محافظت شده‌اید یا نه. تلاش ادامه دارد — تا پاسخ نیامده، هیچ‌کدام را فرض نکنید.",
