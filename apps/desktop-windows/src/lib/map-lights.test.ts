@@ -79,16 +79,19 @@ describe("placeEvidence", () => {
     expect(placeEvidence([DE_REALITY], ctx(unknown, null))).toEqual({ look: "idle", why: "none" });
   });
 
-  it("counts an unverified landing as no proof: a failure, never a blink", () => {
-    // Dashboard records `verdict === "connected"`; an engine that started and
-    // proved nothing arrives here as ok: false.
+  it("counts an unverified landing as no evidence either way: never a blink, never a hollow ring", () => {
+    // The desktop records a rung only when it lands, as `verdict ===
+    // "connected"`: its ok: false is a tunnel that came up and could not be
+    // confirmed -- Custom mode, a filtered egress check -- which may well have
+    // been carrying traffic. Saying "failing" about it would be a claim the
+    // app has no evidence for.
     const ev = placeEvidence([DE_REALITY], ctx(history(["de-r", "XRAY_VLESS_REALITY", false, HOUR])));
-    expect(ev).toEqual({ look: "down", why: "failed", protocol: "XRAY_VLESS_REALITY", at: NOW - HOUR });
+    expect(ev).toEqual({ look: "idle", why: "none" });
   });
 
-  it("takes the newest attempt: a success then a failure is a failure", () => {
+  it("takes the newest attempt: a success then an unconfirmed landing no longer shows as worked", () => {
     const h = history(["de-r", "XRAY_VLESS_REALITY", true, 3 * HOUR], ["de-r", "XRAY_VLESS_REALITY", false, HOUR]);
-    expect(placeEvidence([DE_REALITY], ctx(h)).look).toBe("down");
+    expect(placeEvidence([DE_REALITY], ctx(h))).toEqual({ look: "idle", why: "none" });
     const back = history(["de-r", "XRAY_VLESS_REALITY", false, 3 * HOUR], ["de-r", "XRAY_VLESS_REALITY", true, HOUR]);
     expect(placeEvidence([DE_REALITY], ctx(back)).look).toBe("live");
   });
@@ -103,12 +106,20 @@ describe("placeEvidence", () => {
     expect(placeEvidence([{ ...FI, ispTag: failing }], ctx({}))).toEqual({ look: "down", why: "ispFail", protocol: "XRAY_VLESS_REALITY" });
   });
 
-  it("puts this device's own word over other people's for the same protocol", () => {
-    const mine = history(["fi-r", "XRAY_VLESS_REALITY", false, HOUR]);
-    expect(placeEvidence([{ ...FI, ispTag: works }], ctx(mine))).toMatchObject({ look: "down", why: "failed" });
-    // ...but other people's word still counts for a protocol it has not tried.
-    const fiWg = route("fi-wg", "fi-finland", "WIREGUARD", { ispTag: works });
-    expect(placeEvidence([FI, fiWg], ctx(mine))).toEqual({ look: "live", why: "isp", protocol: "WIREGUARD" });
+  it("puts this device's own verified connect over other people's reports", () => {
+    const mine = history(["fi-r", "XRAY_VLESS_REALITY", true, HOUR]);
+    expect(placeEvidence([{ ...FI, ispTag: failing }], ctx(mine))).toEqual({
+      look: "live",
+      why: "own",
+      protocol: "XRAY_VLESS_REALITY",
+      at: NOW - HOUR,
+    });
+  });
+
+  it("lets other people's reports stand over this device's unconfirmed landing", () => {
+    const unconfirmed = history(["fi-r", "XRAY_VLESS_REALITY", false, HOUR]);
+    expect(placeEvidence([{ ...FI, ispTag: works }], ctx(unconfirmed))).toEqual({ look: "live", why: "isp", protocol: "XRAY_VLESS_REALITY" });
+    expect(placeEvidence([{ ...FI, ispTag: failing }], ctx(unconfirmed))).toEqual({ look: "down", why: "ispFail", protocol: "XRAY_VLESS_REALITY" });
   });
 
   it("is hollow when the control plane reports every route there down, whatever worked before", () => {
@@ -153,6 +164,27 @@ describe("mapLights", () => {
     expect(light(s, "ir")).toMatchObject({ look: "live", why: "own", protocol: "XRAY_VLESS_REALITY" });
   });
 
+  it("does not let one place that is down mark its whole country down", () => {
+    // Iran → Finland offline, Iran → Germany online with nothing known: Iran
+    // is not "offline or failing" -- Germany has simply not been tried.
+    const routes = [relay("ir-fi", "fi-finland", "XRAY_VLESS_REALITY", { nodeStatus: "OFFLINE" }), relay("ir-de", "de-germany")];
+    expect(light(scene({ routes }), "ir")).toMatchObject({ look: "idle", why: "none" });
+    const tagged = [relay("ir-fi", "fi-finland", "XRAY_VLESS_REALITY", { ispTag: failing }), relay("ir-de", "de-germany")];
+    expect(light(scene({ routes: tagged }), "ir")).toMatchObject({ look: "idle" });
+    // Every place there down is down.
+    const allDown = [relay("ir-fi", "fi-finland", "XRAY_VLESS_REALITY", { nodeStatus: "OFFLINE" }), relay("ir-de", "de-germany", "XRAY_VLESS_TLS", { ispTag: failing })];
+    expect(light(scene({ routes: allDown }), "ir")).toMatchObject({ look: "down" });
+  });
+
+  it("never draws the place a tunnel is up on as down", () => {
+    const routes = [{ ...DE_REALITY, ispTag: failing }, FI];
+    expect(light(scene({ routes }), "de")).toMatchObject({ look: "down", why: "ispFail" });
+    for (const tone of ["hl", "ok", "idle"] as ShownTone[]) {
+      const s = scene({ routes, up: routes[0], shown: routes[0], tone, verified: tone === "ok" ? routes[0] : null });
+      expect(light(s, "de"), tone).toMatchObject({ look: "idle", why: "none" });
+    }
+  });
+
   it("does not draw a country the map has no anchor for; the list stays the truth", () => {
     const s = scene({ routes: [...ROUTES, route("jp", "jp-japan", "WIREGUARD", { ispTag: works }), route("odd", "frankfurt", "WIREGUARD")] });
     expect(light(s, "jp")).toBeUndefined();
@@ -195,6 +227,14 @@ describe("mapLights", () => {
       expect(light(s, "de")).toMatchObject({ exit: true });
       expect(light(s, "ir")).toMatchObject({ exit: false });
       expect(s.arc).toEqual({ from: "ir", to: "de", solid: true });
+    });
+
+    it("is not drawn for a relay whose exit the backend does not name -- never on Iran", () => {
+      const unnamed = { ...IR_DE, exitLocation: null };
+      const s = scene({ routes: [DE_REALITY, unnamed], verified: unnamed, tone: "ok", shown: unnamed });
+      expect(s.lights.some((l) => l.exit)).toBe(false);
+      expect(light(s, "ir")).toMatchObject({ exit: false });
+      expect(s.arc).toBeNull();
     });
 
     it("is drawn for a relay exit with no direct place of its own, and only then", () => {
