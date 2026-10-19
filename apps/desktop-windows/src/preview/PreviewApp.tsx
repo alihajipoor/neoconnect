@@ -31,6 +31,8 @@ import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
 import { mapCountries, mapLights, ownWorkedAt, placesEvidence } from "../lib/map-lights";
 import type { SlotNotice } from "../lib/device-slot-notice";
 import type { RouteOption } from "../lib/types";
+import { PAGE_SCREENS, PreviewPage } from "./PreviewPages";
+import { SAMPLE_SUBSCRIPTION } from "./mocks/customer";
 
 /** DEV ONLY: the scenarios the state switcher offers. Each is the inputs the
  * Dashboard would have -- the service's state, the look `orbHold` holds,
@@ -210,6 +212,7 @@ const SLOT: SlotNotice = {
 export function PreviewApp() {
   const { t, language, setLanguage } = useI18n();
   const [key, setKey] = useState("connected");
+  const [screen, setScreen] = useState("main");
   const [size, setSize] = useState("1180 × 760 (first launch)");
   const [theme, setTheme] = useState<ThemeChoice>("system");
   const [glass, setGlass] = useState<GlassChoice>("auto");
@@ -228,10 +231,22 @@ export function PreviewApp() {
   window.__NX_PREVIEW_GAMING__ = sc.gaming;
 
   const connectedAt = useMemo(() => (sc.timed ? Date.now() - 6_128_000 : null), [sc]);
+  const pageRoutes = useMemo(() => (EVIDENCE[evidence] ?? EVIDENCE.mixed).routes(ROUTES), [evidence]);
+  const pageHistory = useMemo(() => sampleHistory(pageRoutes, (EVIDENCE[evidence] ?? EVIDENCE.mixed).own), [pageRoutes, evidence]);
 
   const controls = (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", padding: "10px 16px", fontSize: 13, color: "#1a1f2b", fontFamily: "system-ui, sans-serif" }} lang="en" dir="ltr">
-      <strong>Main page preview (dev only)</strong>
+      <strong>App preview (dev only)</strong>
+      <label>
+        Screen{" "}
+        <select value={screen} onChange={(e) => setScreen(e.target.value)} data-testid="screen">
+          {Object.entries(PAGE_SCREENS).map(([k, label]) => (
+            <option key={k} value={k}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
       <label>
         State{" "}
         <select value={key} onChange={(e) => setKey(e.target.value)} data-testid="scenario">
@@ -321,7 +336,19 @@ export function PreviewApp() {
       >
         {/* The device's safe areas, which env() cannot report here. */}
         <style>{`[data-testid="frame"] .nx-app { --safe-t: var(--pv-safe-t); --safe-b: var(--pv-safe-b); }`}</style>
-        <Composed sc={sc} t={t} language={language} connectedAt={connectedAt} askOpen={askOpen} onAsk={setAskOpen} width={w} evidence={evidence} logo={logo} logoTone={logoTone} />
+        {screen === "main" ? (
+          <Composed sc={sc} t={t} language={language} connectedAt={connectedAt} askOpen={askOpen} onAsk={setAskOpen} width={w} evidence={evidence} logo={logo} logoTone={logoTone} />
+        ) : (
+          <PreviewPage
+            key={screen}
+            screen={screen}
+            width={w}
+            routes={pageRoutes}
+            history={pageHistory}
+            network={PREVIEW_NET}
+            subscription={SAMPLE_SUBSCRIPTION}
+          />
+        )}
       </div>
     </div>
   );

@@ -100,6 +100,9 @@ const ALERT = new Set(["failed", "slot", "blocked", "ended"]);
 const OTHER_FOOT = new Set(["none", "slot"]);
 /** The failover line that names a country: compared among themselves. */
 const CROSSED = new Set(["crossed", "crossedDegraded"]);
+/** Sign-in and its steps (the preview's "Screen"), which the owner asked to
+ * fit one screen too: no scrolling, and the primary button on screen. */
+const AUTH = ["signin", "signinNotice", "register", "forgot", "verify"];
 
 function chromePath() {
   if (opt("chrome")) return opt("chrome");
@@ -227,6 +230,29 @@ const MEASURE = `(() => {
   };
 })()`;
 
+/** A sign-in screen: how far anything scrolls, and whether the card's
+ * primary button lies inside the safe area. */
+const AUTH_MEASURE = `(() => {
+  const frame = document.querySelector('[data-testid=frame]');
+  const fb = frame.getBoundingClientRect();
+  const [safeT, safeB] = (frame.dataset.safe || '0,0').split(',').map(Number);
+  let overflow = 0;
+  for (const el of frame.querySelectorAll('*')) {
+    if (!/(auto|scroll)/.test(getComputedStyle(el).overflowY) || !el.getClientRects().length) continue;
+    overflow = Math.max(overflow, el.scrollHeight - el.clientHeight);
+  }
+  const missing = [];
+  const card = frame.querySelector('.nx-auth-card');
+  const submit = frame.querySelector('.nx-auth-submit');
+  if (!card) missing.push('card missing');
+  if (!submit) missing.push('button missing');
+  else {
+    const b = submit.getBoundingClientRect();
+    if (b.top - fb.top < safeT - 0.5 || b.bottom - fb.top > fb.height - safeB + 0.5) missing.push('button off screen');
+  }
+  return { overflow: Math.round(overflow), missing };
+})()`;
+
 /** Where two measures of the same part differ by more than half a pixel. */
 function differs(a, b) {
   if (a === null || b === null) return a !== b;
@@ -271,6 +297,7 @@ const chrome = spawn(chromePath(), ["--headless=new", `--remote-debugging-port=$
 
 let ws;
 const results = [];
+const authResults = [];
 try {
   let targets = [];
   for (let i = 0; i < 80 && !targets.some((t) => t.type === "page"); i++) {
@@ -343,6 +370,25 @@ try {
       }
     }
   }
+  // Sign-in and its steps.
+  for (const size of SIZES) {
+    await choose("size", size);
+    for (const lang of LANGS) {
+      await choose("language", lang);
+      for (const screen of AUTH) {
+        if (!(await choose("screen", screen))) throw new Error(`The preview has no screen "${screen}".`);
+        await sleep(450);
+        await ev("document.fonts.ready.then(() => true)");
+        if (textScale !== 1) {
+          await ev(SCALE_TEXT(textScale));
+          await sleep(200);
+        }
+        const m = await ev(AUTH_MEASURE);
+        authResults.push({ size: size.split(" (")[0], lang, screen, ...m });
+      }
+    }
+  }
+  await choose("screen", "main");
 } finally {
   ws?.close();
   chrome.kill();
@@ -379,7 +425,18 @@ for (const size of [...new Set(results.map((r) => r.size))]) {
   }
 }
 
-if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify(results, null, 1));
+if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify({ main: results, auth: authResults }, null, 1));
+const authFailed = authResults.filter((r) => r.overflow > 0 || r.missing.length > 0);
+for (const size of [...new Set(authResults.map((r) => r.size))]) {
+  for (const lang of LANGS) {
+    const rows = authResults.filter((r) => r.size === size && r.lang === lang);
+    const bad = rows.filter((r) => r.overflow > 0 || r.missing.length);
+    console.log(
+      `${size} ${lang} sign-in: ${rows.length} screens, largest overflow ${Math.max(...rows.map((r) => r.overflow))}px` +
+        (bad.length ? `; ${bad.map((r) => `${r.screen} ${r.overflow}px ${r.missing.join(" ")}`.trim()).join(", ")}` : ""),
+    );
+  }
+}
 const failed = results.filter((r) => !r.windowsOnly && (r.overflow > 0 || r.missing.length > 0 || r.cut.length > 0));
 for (const size of [...new Set(results.map((r) => r.size))]) {
   for (const lang of LANGS) {
@@ -404,9 +461,10 @@ if (textScale !== 1) {
   );
   process.exit(0);
 }
-if (failed.length || moved.length) {
+if (failed.length || moved.length || authFailed.length) {
   if (failed.length) console.error(`${failed.length} main-page state(s) do not fit, or cut their text.`);
+  if (authFailed.length) console.error(`${authFailed.length} sign-in screen(s) do not fit one screen.`);
   if (moved.length) console.error(`${moved.length} part(s) move or resize with the state.`);
   process.exit(1);
 }
-console.log("Every main-page state fits one screen, cuts no text, and the foot, the stage and the mark keep still.");
+console.log("Every main-page state fits one screen, cuts no text, and the foot, the stage and the mark keep still; every sign-in screen fits one screen.");

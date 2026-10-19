@@ -49,6 +49,8 @@ window.__TAURI_INTERNALS__ = {
 };
 
 startEffects();
+// The preview frames stand in for the Windows window, title strip and all.
+document.documentElement.dataset.titlebar = "1";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
