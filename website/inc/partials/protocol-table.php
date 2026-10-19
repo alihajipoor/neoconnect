@@ -19,7 +19,7 @@ if (!$nx_protocols) {
     return;
 }
 ?>
-<div class="table-wrap">
+<div class="table-wrap"><div class="table-scroll">
   <table class="proto-table">
     <caption class="sr-only"><?php echo nx_e('features.protocols.title'); ?></caption>
     <thead>
@@ -55,7 +55,7 @@ if (!$nx_protocols) {
               $nx_ok = !empty($nx_p[$nx_key]);
           ?>
             <td data-label="<?php echo nx_e($nx_label_key); ?>">
-              <span class="<?php echo $nx_ok ? 'proto__yes' : 'proto__no'; ?>">
+              <span class="<?php echo $nx_ok ? 'yes' : 'no'; ?>">
                 <?php echo $nx_ok ? nx_icon('check') : nx_icon('minus'); ?>
               </span>
               <?php /* The glyph alone is not an accessible answer -- a
@@ -69,4 +69,4 @@ if (!$nx_protocols) {
       <?php endforeach; ?>
     </tbody>
   </table>
-</div>
+</div></div>

@@ -223,7 +223,7 @@ return array(
     'home.assure.noconfig' => 'No config files',
     'home.assure.switch' => 'Switch location anytime',
 
-    'home.mockup.alt' => 'The Neoxify app running on Windows, connected, showing the current server and the data left on the plan.',
+    'home.mockup.alt' => 'Illustration: the Neoxify app connected to Germany over Stealth, in front of a dotted world map with a light on every country that has Neoxify servers.',
     'home.mockup.windows' => 'Windows',
     'home.mockup.mobile' => 'Mobile',
     'home.mockup.macos' => 'macOS',
@@ -800,7 +800,7 @@ return array(
     'home.hero.chip_noconfig' => 'No config files, no subscription links',
     'home.hero.chip_locations' => 'Servers in Europe and Asia, plus a relay inside Iran',
     'home.mockup.disconnect' => 'Disconnect',
-    'home.mockup.note' => 'Drawn from the actual Windows app',
+    'home.mockup.note' => 'Illustration of the app. The time shown is an example.',
     'home.inst.eyebrow' => 'Network simulator',
     'home.inst.title' => 'Close the network. Watch what the connection does.',
     'home.inst.body' => 'These are the connection methods in the app, in the order it tries them on an open network. Beside them are things the filter in Iran actually does. Switch them on.',
@@ -875,4 +875,18 @@ return array(
     'home.close.point3.rest' => 'We do not claim no logs.',
     'home.close.warn' => 'You do not need to pay to start. Every new account begins on a trial.',
 
+    // 2026-10 pearl-glass redesign. The tagline is the app's own (owner-approved 2026-10-18).
+    'nav.main_label' => 'Main',
+    'home.hero.kicker' => 'A VPN for networks that fight back',
+    'home.hero.tagline_1' => 'Your internet.',
+    'home.hero.tagline_2' => 'Without limits.',
+    'home.mockup.using' => 'Now using :method',
+    'home.mockup.method' => 'Method',
+    'home.mockup.transport' => 'Transport',
+    'home.locations.legend_exit' => 'Server location',
+    'home.locations.legend_entry' => 'Relay entry, inside Iran',
+    'home.security.diagram.alt' => 'Your device connects to our servers through an encrypted tunnel. From our servers on, your traffic travels the internet as ordinary traffic.',
+
+    'delete.or' => 'or',
+    'download.platforms_heading' => 'Choose your platform',
 );

@@ -22,7 +22,7 @@ if (!$nx_locs) {
 $nx_show_relay = !isset($NX_SHOW_RELAY) || $NX_SHOW_RELAY;
 $nx_relay = $nx_show_relay ? nx_relay_location() : null;
 ?>
-<ul class="grid grid--auto u-list-reset">
+<ul class="locs u-list-reset">
   <?php foreach ($nx_locs as $nx_loc): ?>
     <li class="loc">
       <?php /* aria-hidden: the flag repeats the country name that follows

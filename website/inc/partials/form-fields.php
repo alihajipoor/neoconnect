@@ -144,7 +144,7 @@ function nx_form_status($state, $titleKey, $bodyKey)
 {
     if (!empty($state['sent'])) {
         echo '<div class="alert alert--success" role="status">'
-            . '<h3>' . nx_e($titleKey) . '</h3>'
+            . '<h2>' . nx_e($titleKey) . '</h2>'
             . '<p>' . nx_e($bodyKey) . '</p></div>';
         return;
     }

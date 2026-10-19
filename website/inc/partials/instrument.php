@@ -80,125 +80,92 @@ $nx_inst_strings = array(
 
 $nx_first = $nx_protocols[0];
 ?>
-<div class="inst reveal reveal--d2" id="nx-inst" data-instrument data-relay="0"
+<div class="inst" id="nx-inst" data-instrument data-relay="0"
   <?php foreach ($nx_inst_strings as $nx_k => $nx_v): ?>
   data-t-<?php echo $nx_k; ?>="<?php echo nx_esc($nx_v); ?>"
   <?php endforeach; ?>
   >
 
-  <?php /* ── the conditions ─────────────────────────────────────────── */ ?>
-  <div class="inst__conds">
-    <p class="inst__ttl"><?php echo nx_e('home.inst.conditions'); ?></p>
+  <?php /* -- the conditions, as a settings group of switches ---------- */ ?>
+  <div class="inst__conds card">
+    <p class="inst__ttl" id="inst-conds"><?php echo nx_e('home.inst.conditions'); ?></p>
 
-    <div class="inst__list">
+    <div class="inst__list" role="group" aria-labelledby="inst-conds">
       <?php foreach ($nx_conditions as $nx_c):
         $nx_cid = $nx_c['id'];
         $nx_total = !empty($nx_c['total']);
       ?>
         <label class="sw<?php echo $nx_total ? ' sw--total' : ''; ?>">
-          <input type="checkbox" data-condition="<?php echo nx_esc($nx_cid); ?>"
+          <input type="checkbox" role="switch" data-condition="<?php echo nx_esc($nx_cid); ?>"
                  <?php echo !empty($nx_c['relay']) ? 'data-relay-condition' : ''; ?>
                  <?php echo $nx_total ? 'data-total-condition' : ''; ?>>
-          <span class="sw__track" aria-hidden="true"></span>
           <span class="sw__lb">
             <b><?php echo nx_e('cond.' . $nx_cid . '.label'); ?></b>
             <i><?php echo nx_e('cond.' . $nx_cid . '.sub'); ?></i>
           </span>
+          <span class="sw__track" aria-hidden="true"></span>
         </label>
       <?php endforeach; ?>
     </div>
 
-    <?php /* Both buttons are type=button and do nothing without JS. They are
-             controls for an enhancement, not for content, so hiding them
-             when the script is absent is correct -- see .no-js in the CSS. */ ?>
+    <?php /* Controls for an enhancement, not for content: hidden without
+             JavaScript (see .no-js in home.css). */ ?>
     <div class="inst__condfoot" data-enhanced-only>
-      <button type="button" class="btn btn--ghost btn--sm" data-inst-random>
-        <?php echo nx_e('home.inst.random'); ?>
-      </button>
-      <button type="button" class="btn btn--ghost btn--sm" data-inst-clear>
-        <?php echo nx_e('home.inst.clear'); ?>
-      </button>
+      <button type="button" class="btn btn--ghost btn--sm" data-inst-random><?php echo nx_e('home.inst.random'); ?></button>
+      <button type="button" class="btn btn--quiet btn--sm" data-inst-clear><?php echo nx_e('home.inst.clear'); ?></button>
     </div>
   </div>
 
-  <?php /* ── the lanes ──────────────────────────────────────────────── */ ?>
-  <div class="inst__lanes-wrap">
+  <?php /* -- the methods, as the app's glass list ---------------------- */ ?>
+  <div class="inst__lanes-wrap glass">
     <div class="inst__readout">
       <span class="ro ro--carry">
         <i><?php echo nx_e('home.inst.carrying'); ?></i>
-        <b data-carry><span class="g"><?php
-          echo nx_e_pick($nx_first['label']) . ' &middot; ';
-          echo '<span data-ltr>' . nx_esc($nx_first['tech']) . '</span>';
-        ?></span></b>
+        <b data-carry><?php echo nx_e_pick($nx_first['label']); ?> &middot; <span data-ltr><?php echo nx_esc($nx_first['tech']); ?></span></b>
       </span>
       <span class="ro">
         <i><?php echo nx_e('home.inst.handovers'); ?></i>
         <b data-handovers data-ltr>0</b>
       </span>
-      <span class="ro-live" data-live>
+      <span class="ro-live">
         <span class="d" aria-hidden="true"></span>
         <span data-live-text><?php echo nx_e('home.inst.flowing'); ?></span>
       </span>
     </div>
 
-    <div class="lanes" data-lanes>
-      <?php /* The carrier beam. Decorative; the path is set by the script and
-               is empty until then, so nothing is drawn without JS. */ ?>
-      <svg class="beam" data-beam aria-hidden="true" focusable="false" preserveAspectRatio="none">
-        <path class="glow" data-beam-glow d=""/>
-        <path class="core" data-beam-core d=""/>
-      </svg>
-
+    <ol class="lanes" data-lanes>
       <?php $nx_i = 0; foreach ($nx_protocols as $nx_p): $nx_i++;
         $nx_blocked = isset($nx_p['blocked_by']) ? $nx_p['blocked_by'] : array();
       ?>
-        <div class="lane is-live<?php echo $nx_i === 1 ? ' is-active' : ''; ?>"
+        <li class="lane<?php echo $nx_i === 1 ? ' is-active' : ''; ?>"
              data-lane="<?php echo nx_esc($nx_p['id']); ?>"
              data-blocked-by="<?php echo nx_esc(implode(' ', $nx_blocked)); ?>">
-
-          <span class="rk" data-ltr><?php echo sprintf('%02d', $nx_i); ?></span>
-
+          <span class="rk" data-ltr aria-hidden="true"><?php echo sprintf('%02d', $nx_i); ?></span>
           <span class="nm">
             <b><?php echo nx_e_pick($nx_p['label']); ?></b>
             <i data-ltr><?php echo nx_esc($nx_p['tech']); ?></i>
           </span>
-
-          <span class="sig" aria-hidden="true">
-            <svg viewBox="0 0 120 24" preserveAspectRatio="none" focusable="false">
-              <path d="<?php echo nx_esc(nx_signal_path($nx_i * 977 + 13, 120, 24, $nx_p['kind'])); ?>"
-                    fill="none" stroke="url(#nx-beam)" stroke-width="1.4" stroke-linejoin="round"/>
-            </svg>
-          </span>
-
-          <?php /* The transport, NOT a latency figure. See the note in
-                   inc/content/protocols.php for why there is no "ms" here. */ ?>
+          <?php /* The transport, NOT a latency figure: no ms anywhere. */ ?>
           <span class="ms" data-ltr><?php echo nx_esc($nx_p['transport']); ?></span>
-
           <span class="st">
-            <b data-lane-status><?php
-              echo nx_e($nx_i === 1 ? 'home.inst.lane.carrying' : 'home.inst.lane.standby');
-            ?></b>
+            <b data-lane-status><?php echo nx_e($nx_i === 1 ? 'home.inst.lane.carrying' : 'home.inst.lane.standby'); ?></b>
             <u><?php echo nx_e('home.inst.lane.via_relay'); ?></u>
           </span>
-
-          <span class="pin" aria-hidden="true"><span class="dot"></span></span>
-        </div>
+        </li>
       <?php endforeach; ?>
-    </div>
+    </ol>
   </div>
 
-  <?php /* ── the console ────────────────────────────────────────────── */ ?>
-  <div class="inst__console">
+  <?php /* -- the console --------------------------------------------- */ ?>
+  <div class="inst__console card">
     <p class="inst__ttl">
       <span><?php echo nx_e('home.inst.log'); ?></span>
       <span data-log-count></span>
     </p>
-
-    <?php /* aria-live="off": this is an ambient readout, and announcing every
-             line would make the page unusable with a screen reader. The
-             verdict below carries the same information as static text. */ ?>
+    <?php /* aria-live off: an ambient readout. The verdict below carries
+             the same information as plain text, and is a polite live
+             region so a change of switch is announced once. */ ?>
     <div class="log" data-log aria-live="off"></div>
-
-    <p class="verdict" data-verdict><?php echo nx_e('home.inst.verdict.open'); ?></p>
+    <p class="verdict" data-verdict aria-live="polite"><?php echo nx_e('home.inst.verdict.open'); ?></p>
   </div>
 </div>

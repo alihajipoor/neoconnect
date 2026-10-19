@@ -1,0 +1,41 @@
+/* ==========================================================================
+   Forms: contact, reseller, account deletion. The form sits in a strong
+   glass card, as the app's sign-in card does; the asides are solid.
+   ========================================================================== */
+.form-layout{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:clamp(16px,2.4vw,32px);align-items:start}
+@media (max-width:900px){.form-layout{grid-template-columns:1fr}}
+.form-card{padding:clamp(22px,3vw,36px);border-radius:28px}
+.form-card__title{font-size:20px;font-weight:600;letter-spacing:-.01em;margin-bottom:6px}
+html[lang="fa"] .form-card__title{letter-spacing:0}
+.form-card__lead{color:var(--ink-2);margin-bottom:20px}
+.form-card form{display:grid;gap:18px}
+.asides{display:grid;gap:clamp(14px,1.6vw,20px)}
+.aside h2,.aside h3{font-size:17px;font-weight:600;margin-bottom:6px}
+.aside p{color:var(--ink-2);font-size:15px}
+.aside a{color:var(--cobalt-ink)}
+.aside .ico{margin-bottom:12px}
+
+.field{display:grid;gap:7px}
+.field__label{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:14.5px;font-weight:600}
+.field__flag{font-size:12.5px;font-weight:500;color:var(--ink-2)}
+.input,.textarea,.select{width:100%;min-height:50px;padding:12px 16px;border:0;border-radius:var(--r-field);background:var(--field);box-shadow:inset 0 0 0 1px var(--hairline-2);color:var(--ink);font-size:16px;line-height:1.45;
+  transition:box-shadow .2s var(--ease),background-color .2s var(--ease)}
+.textarea{resize:vertical;min-height:140px}
+.input::placeholder,.textarea::placeholder{color:var(--ink-2);opacity:.8}
+.input:hover,.textarea:hover,.select:hover{box-shadow:inset 0 0 0 1px var(--ink-3)}
+.input:focus,.textarea:focus,.select:focus{outline:none;background:var(--select-row);box-shadow:inset 0 0 0 2px var(--cobalt),0 0 0 4px var(--select)}
+.select-wrap{position:relative}
+.select{appearance:none;-webkit-appearance:none;padding-inline-end:44px;cursor:pointer}
+.select-wrap::after{content:"";position:absolute;inset-inline-end:18px;top:50%;width:8px;height:8px;margin-top:-6px;border-inline-end:2px solid var(--ink-2);border-bottom:2px solid var(--ink-2);transform:rotate(45deg);pointer-events:none}
+.field--error .input,.field--error .textarea,.field--error .select{box-shadow:inset 0 0 0 2px var(--danger)}
+.field__hint{font-size:13px;color:var(--ink-2)}
+.field__error{font-size:13.5px;font-weight:500;color:var(--danger-ink)}
+.honeypot{position:absolute!important;inset-inline-start:-10000px;width:1px;height:1px;overflow:hidden}
+
+.alert{padding:16px 18px;border-radius:16px;margin-bottom:18px;font-size:15px}
+.alert h2,.alert h3{font-size:17px;font-weight:600;margin-bottom:4px}
+.alert--success{background:var(--ok-tint);color:var(--ink)}
+.alert--success h2,.alert--success h3{color:var(--ok-ink)}
+.alert--error{background:var(--danger-tint);color:var(--ink)}
+.divider{display:flex;align-items:center;gap:12px;margin:22px 0;color:var(--ink-2);font-size:13px}
+.divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--hairline-2)}

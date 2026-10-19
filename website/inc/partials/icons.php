@@ -215,6 +215,35 @@ function nx_icon($name, $class = '')
 }
 
 
+
+/**
+ * The brand mark as a large, quiet glass ring -- decoration for the closing
+ * call to action. The same geometry as nx_logo_mark() (a broken ring, the
+ * gap up and to the right, a bead at the centre), drawn translucent with a
+ * highlight along the top so it reads as glass on pearl and on smoke.
+ * Always aria-hidden by the caller.
+ *
+ * @return string
+ */
+function nx_glass_ring()
+{
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="520" height="520" fill="none" focusable="false">'
+        . '<defs>'
+        . '<linearGradient id="nx-ring-a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#22d3ee"/></linearGradient>'
+        . '<linearGradient id="nx-ring-h" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></linearGradient>'
+        . '<radialGradient id="nx-ring-b" cx=".38" cy=".34" r=".75"><stop offset="0" stop-color="#fff"/><stop offset=".35" stop-color="#93B0FF"/><stop offset="1" stop-color="#1045FF"/></radialGradient>'
+        . '</defs>'
+        // r=66: circumference ~415, so 302 on / 113 off keeps the mark's
+        // proportions (96/36 on r=21).
+        . '<g transform="rotate(-58 100 100)" stroke-linecap="round" stroke-dasharray="302 113">'
+        . '<circle cx="100" cy="100" r="66" stroke="url(#nx-ring-a)" stroke-width="28" opacity=".38"/>'
+        . '<circle cx="100" cy="100" r="66" stroke="#1045FF" stroke-width="5" opacity=".5"/>'
+        . '<circle cx="100" cy="100" r="74" stroke="url(#nx-ring-h)" stroke-width="6" opacity=".9"/>'
+        . '</g>'
+        . '<circle cx="100" cy="100" r="19" fill="url(#nx-ring-b)" opacity=".9"/>'
+        . '</svg>';
+}
+
 // ---------------------------------------------------------------------
 // Flags
 // ---------------------------------------------------------------------
@@ -333,33 +362,6 @@ function nx_signal_path($seed, $w, $h, $kind)
 
     return 'M' . implode(' L', $points);
 }
-
-/**
- * The gradient definitions every decorative SVG on the page refers to.
- *
- * Emitted ONCE near the top of <body> by head.php, in a zero-size SVG, so
- * that `stroke="url(#nx-beam)"` resolves anywhere in the document. Defining
- * them inside the component that happens to be first would make every other
- * component depend on that one rendering -- which is how the specimen cards
- * lost their traces the first time round.
- *
- * @return string
- */
-function nx_svg_defs()
-{
-    return '<svg width="0" height="0" class="sr-only" aria-hidden="true" focusable="false"><defs>'
-        . '<linearGradient id="nx-brand-grad" x1="0" y1="0" x2="1" y2="1">'
-        . '<stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#22d3ee"/>'
-        . '</linearGradient>'
-        . '<linearGradient id="nx-beam" x1="0" y1="0" x2="1" y2="0">'
-        . '<stop offset="0" stop-color="#6D3AE8"/><stop offset="1" stop-color="#0A6E82"/>'
-        . '</linearGradient>'
-        . '<linearGradient id="nx-orb" x1="0" y1="0" x2="1" y2="1">'
-        . '<stop offset="0" stop-color="#10b981"/><stop offset="1" stop-color="#22d3ee"/>'
-        . '</linearGradient>'
-        . '</defs></svg>';
-}
-
 
 // ---------------------------------------------------------------------
 // Language switch

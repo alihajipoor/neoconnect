@@ -23,6 +23,12 @@ define('NX_DATA', NX_ROOT . '/data');
 
 $NX_CFG = require NX_INC . '/config.php';
 
+// Security headers go out first, on every response -- a redirect, the
+// sitemap and a 404 included. head.php replaces the CSP with the page's
+// own once it knows what it will inline. See inc/headers.php.
+require_once NX_INC . '/headers.php';
+nx_security_headers();
+
 /** Locales the site is actually translated into, and which of them are RTL. */
 $NX_LOCALES = array('en', 'fa');
 $NX_RTL_LOCALES = array('fa');
@@ -250,6 +256,44 @@ function nx_asset($relative)
     return $url;
 }
 
+
+
+/**
+ * The page's stylesheet, ready to inline.
+ *
+ * Reads assets/css/<module>.css in order, drops comments and collapses
+ * whitespace (the source files are written to be read, and the comments
+ * never need to reach a visitor), and points the absolute /assets/ URLs at
+ * base_path. The result is hashed into the CSP by head.php, so it must be
+ * echoed byte for byte as returned.
+ *
+ * No build step: this runs per request, on a few tens of kilobytes, in well
+ * under a millisecond.
+ *
+ * @param array $modules e.g. array('base', 'blocks', 'home')
+ * @return string
+ */
+function nx_css_bundle($modules)
+{
+    $css = '';
+    foreach ($modules as $module) {
+        $file = NX_ROOT . '/assets/css/' . basename($module) . '.css';
+        if (is_file($file)) {
+            $css .= file_get_contents($file) . "\n";
+        }
+    }
+
+    $css = preg_replace('#/\*.*?\*/#s', '', $css);
+    $css = preg_replace('/\s+/', ' ', $css);
+    $css = preg_replace('/\s*([{};,>])\s*/', '$1', $css);
+    $css = str_replace(';}', '}', $css);
+
+    $base = nx_cfg('base_path', '/');
+    if ($base !== '/') {
+        $css = str_replace('url(/assets/', 'url(' . $base . 'assets/', $css);
+    }
+    return trim($css);
+}
 
 
 // ---------------------------------------------------------------------

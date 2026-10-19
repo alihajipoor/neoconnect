@@ -14,31 +14,31 @@ $nx_updated = isset($nx_privacy['updated']) ? $nx_privacy['updated'] : '';
 require NX_INC . '/partials/head.php';
 ?>
 
-<section class="section">
-  <div class="container">
-
-    <div class="section-head">
-      <h1><?php echo nx_e('privacy.title'); ?></h1>
-      <p class="lead"><?php echo nx_e('privacy.subtitle'); ?></p>
+<section class="page-hero">
+  <div class="wrap">
+    <div class="page-hero__inner">
+      <span class="eyebrow"><?php echo nx_e('nav.privacy'); ?></span>
+      <h1 class="h1"><?php echo nx_e('privacy.title'); ?></h1>
+      <p class="lede"><?php echo nx_e('privacy.subtitle'); ?></p>
       <?php if ($nx_updated !== ''): ?>
-        <p class="privacy__updated">
-          <?php echo nx_e('privacy.updated', array(
-              // Rendered from the ISO date in the content file so the two can
-              // never drift apart, in the locale's own format.
-              'date' => date(nx_t('privacy.date_format'), strtotime($nx_updated)),
-          )); ?>
-        </p>
+        <p class="updated"><?php echo nx_e('privacy.updated', array(
+            // Rendered from the ISO date in the content file, in the
+            // locale's own format, so the two can never drift apart.
+            'date' => nx_num(date(nx_t('privacy.date_format'), strtotime($nx_updated))),
+        )); ?></p>
       <?php endif; ?>
     </div>
+  </div>
+</section>
 
-    <div class="prose">
+<section class="section section--tight section--flush-top">
+  <div class="wrap">
+    <article class="card prose">
       <?php foreach ($nx_privacy['sections'] as $nx_section): ?>
         <h2><?php echo nx_esc(nx_pick($nx_section['title'])); ?></h2>
-
         <?php foreach (nx_pick_list($nx_section, 'body') as $nx_para): ?>
           <p><?php echo nx_esc($nx_para); ?></p>
         <?php endforeach; ?>
-
         <?php $nx_bullets = nx_pick_list($nx_section, 'bullets'); ?>
         <?php if ($nx_bullets): ?>
           <ul>
@@ -52,12 +52,9 @@ require NX_INC . '/partials/head.php';
       <h2><?php echo nx_e('privacy.contact.title'); ?></h2>
       <p><?php
         $nx_email = (string) nx_cfg('contact_email');
-        echo nx_t('privacy.contact.body', array(
-            'email' => '<a href="mailto:' . nx_esc($nx_email) . '">' . nx_esc($nx_email) . '</a>',
-        ));
+        echo str_replace(':email', '<a href="mailto:' . nx_esc($nx_email) . '" data-ltr>' . nx_esc($nx_email) . '</a>', nx_e('privacy.contact.body'));
       ?></p>
-    </div>
-
+    </article>
   </div>
 </section>
 

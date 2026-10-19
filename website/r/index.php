@@ -25,6 +25,11 @@
 // No bootstrap: this file must not depend on locale resolution or the
 // translation layer. It renders no UI and must survive being hit before
 // anything else on the site is warm.
+// The same security headers as every page, without loading the whole site.
+define('NX', 1);
+require dirname(__DIR__) . '/inc/headers.php';
+nx_security_headers();
+
 $code = '';
 
 // The rewrite passes it as ?c=; the fallback path parses PATH_INFO so

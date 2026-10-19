@@ -1,6 +1,7 @@
 <?php
 /**
- * Not-found page, wired up by ErrorDocument in .htaccess.
+ * Not-found page, wired up by error_page in the nginx config, ErrorDocument
+ * in .htaccess, and the dev router.
  *
  * Renders in whichever locale the missing URL was under, so someone who
  * mistypes a Persian address does not suddenly get an English page.
@@ -16,9 +17,8 @@ $NX_LOCALE = (strpos($nx_path, '/fa/') !== false || substr($nx_path, -3) === '/f
 // overridden below.
 $NX_PAGE = 'home';
 
-// Borrowing the home page's key would otherwise make a missing English URL
-// redirect an Iranian visitor to the Persian home page, losing the 404 and
-// the address they actually mistyped.
+// Otherwise a missing English URL would redirect an Iranian visitor to the
+// Persian home page, losing the 404 and the address they mistyped.
 $NX_SKIP_LOCALE_REDIRECT = true;
 
 require __DIR__ . '/inc/bootstrap.php';
@@ -28,32 +28,23 @@ $NX_DESCRIPTION = nx_t('meta.404.description');
 $NX_NOINDEX = true;
 
 // Without this the page would be served as a perfectly good 200, and search
-// engines would happily index every mistyped URL on the site.
+// engines would index every mistyped URL on the site.
 http_response_code(404);
 
 require NX_INC . '/partials/head.php';
 ?>
 
-<section class="section">
-  <div class="container u-center u-narrow">
-    <p class="eyebrow u-center-actions">
-      <?php echo nx_e('error.404.code'); ?>
-    </p>
-    <h1><?php echo nx_e('error.404.title'); ?></h1>
-    <p class="lead u-narrow u-my-lead">
-      <?php echo nx_e('error.404.body'); ?>
-    </p>
-
-    <div class="hero__actions u-center-actions">
-      <a class="btn btn--primary" href="<?php echo nx_esc(nx_url('home')); ?>">
-        <?php echo nx_e('error.404.home'); ?>
-      </a>
-      <a class="btn btn--ghost" href="<?php echo nx_esc(nx_url('download')); ?>">
-        <?php echo nx_e('nav.download'); ?>
-      </a>
-      <a class="btn btn--ghost" href="<?php echo nx_esc(nx_url('contact')); ?>">
-        <?php echo nx_e('nav.contact'); ?>
-      </a>
+<section class="lost">
+  <div class="wrap">
+    <div class="page-hero__inner lost__inner">
+      <p class="lost__code" data-ltr><?php echo nx_esc(nx_num('404')); ?></p>
+      <h1 class="h1"><?php echo nx_e('error.404.title'); ?></h1>
+      <p class="lede"><?php echo nx_e('error.404.body'); ?></p>
+      <div class="u-row u-row--center u-mt-sm">
+        <a class="btn btn--primary" href="<?php echo nx_esc(nx_url('home')); ?>"><?php echo nx_e('error.404.home'); ?></a>
+        <a class="btn btn--ghost" href="<?php echo nx_esc(nx_url('download')); ?>"><?php echo nx_e('nav.download'); ?></a>
+        <a class="btn btn--ghost" href="<?php echo nx_esc(nx_url('contact')); ?>"><?php echo nx_e('nav.contact'); ?></a>
+      </div>
     </div>
   </div>
 </section>

@@ -197,7 +197,7 @@ return array(
     'home.assure.noconfig' => 'بدون فایل کانفیگ',
     'home.assure.switch' => 'تعویض موقعیت در هر زمان',
 
-    'home.mockup.alt' => 'برنامه نئوکسیفای روی ویندوز، در حالت متصل، همراه با سرور فعلی و حجم باقی‌مانده اشتراک.',
+    'home.mockup.alt' => 'تصویرسازی: برنامه نئوکسیفای که با روش مخفی به آلمان وصل است، روی نقشه‌ای نقطه‌ای از جهان که روی هر کشوری که سرور نئوکسیفای دارد چراغی روشن است.',
     'home.mockup.windows' => 'ویندوز',
     'home.mockup.mobile' => 'موبایل',
     'home.mockup.macos' => 'مک',
@@ -707,7 +707,7 @@ return array(
     'home.hero.chip_noconfig' => 'بدون کانفیگ و لینک اشتراک',
     'home.hero.chip_locations' => 'سرور در اروپا و آسیا، به‌علاوه رله داخل ایران',
     'home.mockup.disconnect' => 'قطع اتصال',
-    'home.mockup.note' => 'برگرفته از برنامه واقعی ویندوز',
+    'home.mockup.note' => 'تصویرسازی از برنامه. زمانِ نشان‌داده‌شده نمونه است.',
     'home.inst.eyebrow' => 'شبیه‌ساز شبکه',
     'home.inst.title' => 'شبکه را ببندید. ببینید اتصال چه می‌کند.',
     'home.inst.body' => 'این‌ها روش‌های اتصالی هستند که در برنامه وجود دارند، به همان ترتیبی که روی یک شبکه باز امتحان می‌شوند. کنارشان، کارهایی است که فیلترینگ در ایران واقعاً انجام می‌دهد. آن‌ها را روشن کنید.',
@@ -782,4 +782,18 @@ return array(
     'home.close.point3.rest' => 'ادعای «بدون لاگ» نمی‌کنیم.',
     'home.close.warn' => 'برای شروع لازم نیست پولی بدهید؛ هر حساب جدید با یک دوره آزمایشی شروع می‌شود.',
 
+    // 2026-10 pearl-glass redesign. The tagline is the app's own (owner-approved 2026-10-18).
+    'nav.main_label' => 'ناوبری اصلی',
+    'home.hero.kicker' => 'فیلترشکن برای شبکه‌هایی که مقاومت می‌کنند',
+    'home.hero.tagline_1' => 'اینترنت شما.',
+    'home.hero.tagline_2' => 'بدون محدودیت.',
+    'home.mockup.using' => 'در حال استفاده از :method',
+    'home.mockup.method' => 'روش',
+    'home.mockup.transport' => 'لایه انتقال',
+    'home.locations.legend_exit' => 'موقعیت سرور',
+    'home.locations.legend_entry' => 'ورودی رله، داخل ایران',
+    'home.security.diagram.alt' => 'دستگاه شما از راه یک تونل رمزنگاری‌شده به سرورهای ما وصل می‌شود. از سرورهای ما به بعد، ترافیک شما مثل ترافیک معمولی در اینترنت جابه‌جا می‌شود.',
+
+    'delete.or' => 'یا',
+    'download.platforms_heading' => 'پلتفرم خود را انتخاب کنید',
 );
