@@ -19,7 +19,7 @@ vi.hoisted(() => {
 
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@shared/lib/i18n";
-import { AuthShell } from "./AuthShell";
+import { AuthShell, LANGUAGE_STORE } from "./AuthShell";
 import { PortalLogin } from "./PortalLogin";
 import { PortalRegister } from "./PortalRegister";
 import { PortalVerifyEmail } from "./PortalVerifyEmail";
@@ -206,6 +206,14 @@ describe("the screens as rendered", () => {
     // The map is not drawn here (it is static in index.html), and there are
     // no lights before sign-in.
     expect(html).not.toMatch(/pa-map|lamp/);
+  });
+});
+
+describe("the first draw", () => {
+  it("waits for the language where the shared provider really keeps it", () => {
+    const i18n = read(new URL("../../../desktop-windows/src/lib/i18n.tsx", import.meta.url));
+    expect(i18n).toContain(`const STORE_FILE = "${LANGUAGE_STORE[0]}";`);
+    expect(i18n).toContain(`const STORE_KEY = "${LANGUAGE_STORE[1]}";`);
   });
 });
 

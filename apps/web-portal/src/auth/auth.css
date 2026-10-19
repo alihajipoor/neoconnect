@@ -56,8 +56,6 @@
 /* --- Tokens: Pearl ----------------------------------------------------- */
 html[data-surface="auth"] {
   color-scheme: light;
-  --pa-bg-top: #f7f9fc;
-  --pa-bg: #edf1f6;
   --pa-pearl: #f8f9fc;
   --pa-ink: #090b10;
   --pa-ink-2: #4a5264;
@@ -90,8 +88,6 @@ html[data-surface="auth"] {
   --pa-danger-ink: #a8231a;
   --pa-danger-tint: rgba(208, 44, 31, 0.1);
   --pa-muted-tint: rgba(80, 90, 110, 0.1);
-  --pa-amb: rgba(16, 69, 255, 0.09);
-  --pa-map-opacity: 0.9;
   --pa-gm-glass-a: rgba(255, 255, 255, 0.72);
   --pa-gm-glass-b: rgba(206, 217, 235, 0.34);
   --pa-gm-dot: #9aabc8;
@@ -125,8 +121,6 @@ html[data-surface="auth"] {
 @media (prefers-color-scheme: dark) {
   html[data-surface="auth"] {
     color-scheme: dark;
-    --pa-bg-top: #070a11;
-    --pa-bg: #0d1320;
     --pa-pearl: #121620;
     --pa-ink: #eef1f7;
     --pa-ink-2: #a9b2c4;
@@ -156,8 +150,6 @@ html[data-surface="auth"] {
     --pa-danger-ink: #f79a90;
     --pa-danger-tint: rgba(242, 107, 94, 0.14);
     --pa-muted-tint: rgba(150, 160, 180, 0.13);
-    --pa-amb: rgba(47, 94, 255, 0.16);
-    --pa-map-opacity: 1;
     --pa-gm-glass-a: rgba(214, 226, 255, 0.24);
     --pa-gm-glass-b: rgba(110, 130, 180, 0.08);
     --pa-gm-dot: #46557a;
@@ -169,8 +161,8 @@ html[data-surface="auth"] {
 }
 
 /* --- The page ----------------------------------------------------------- */
+/* The canvas itself is scene.css, inlined into the page. */
 html[data-surface="auth"] body {
-  background: var(--pa-bg);
   color: var(--pa-ink);
   /* The apps' theme turns selection off for a native window; a web page
      should let someone copy an error to send to support. */
@@ -182,38 +174,6 @@ html[data-surface="auth"] body::before {
   content: none;
 }
 
-/* The canvas and the map: static markup in index.html, painted before any
-   script runs, and shown only on this surface. */
-.pa-scene {
-  display: none;
-}
-html[data-surface="auth"] .pa-scene {
-  display: block;
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  overflow: hidden;
-  pointer-events: none;
-  background:
-    radial-gradient(56rem 34rem at 70% 34%, var(--pa-amb), transparent 70%),
-    linear-gradient(var(--pa-bg-top), var(--pa-bg));
-}
-/* The whole world, centred, quiet (design-system.md 5.2: "any other
-   page, signed out"). Never mirrored in RTL: geography has no reading
-   direction. The SVG keeps its own 200:82 ratio, so its round dots stay
-   round. */
-.pa-map {
-  position: absolute;
-  display: block;
-  max-width: none;
-  width: max(116vw, 1180px);
-  height: auto;
-  aspect-ratio: 200 / 82;
-  left: 50%;
-  top: 54%;
-  transform: translate(-50%, -50%);
-  opacity: var(--pa-map-opacity);
-}
 
 .pa {
   position: relative;
@@ -307,6 +267,7 @@ html[dir="rtl"] .pa-input[dir="ltr"]:placeholder-shown {
   line-height: 1;
   letter-spacing: 0.42em;
   margin-inline-end: -0.42em;
+  text-transform: uppercase;
 }
 
 .pa-lang {
@@ -891,12 +852,6 @@ html[lang="fa"] .pa-fine {
 
 /* --- Phones: the card is the page, and it fits one screen ------------------- */
 @media (max-width: 899px) {
-  .pa-map {
-    /* Zoomed in on Europe and the Middle East, behind the card. */
-    width: max(250vw, 900px);
-    top: 34%;
-    transform: translate(-58%, -50%);
-  }
   .pa-top {
     padding-block: 12px;
   }
@@ -991,28 +946,4 @@ html[lang="fa"] .pa-fine {
   .pa :is(a, button, input):focus-visible {
     outline: 2px solid Highlight;
   }
-}
-
-/* --- Without JavaScript -------------------------------------------------------
-   The account area needs it; this says so, in the same look. Styled from
-   this stylesheet rather than inline, so a strict CSP does not drop it. */
-.pa-noscript {
-  position: relative;
-  z-index: 1;
-  max-width: 34rem;
-  margin: 18vh auto 0;
-  padding: 0 1.5rem;
-  font-family: var(--pa-font);
-  color: var(--pa-ink);
-}
-.pa-noscript h1 {
-  font-size: 1.3rem;
-  margin: 0 0 0.5rem;
-}
-.pa-noscript p {
-  line-height: 1.6;
-  color: var(--pa-ink-2);
-}
-.pa-noscript a {
-  color: var(--pa-cobalt-ink);
 }

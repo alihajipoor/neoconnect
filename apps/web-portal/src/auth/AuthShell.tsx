@@ -1,7 +1,9 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { LANGUAGES, useI18n, type Language } from "@shared/lib/i18n";
+import { peek } from "../shims/plugin-store";
 import { BrandMark, GlassMark } from "./marks";
 import { sitePath, useCopy, type CopyKey } from "./copy";
+import "./scene.css";
 import "./auth.css";
 
 export type AuthScreen = "loading" | "login" | "register" | "forgot" | "verify";
@@ -12,6 +14,66 @@ const TITLE: Record<Exclude<AuthScreen, "loading">, CopyKey> = {
   forgot: "titleForgot",
   verify: "titleVerify",
 };
+
+/** Where the shared I18nProvider keeps the visitor's chosen language
+ * (STORE_FILE and STORE_KEY in lib/i18n.tsx; pinned by the test). */
+export const LANGUAGE_STORE = ["settings.json", "language"] as const;
+
+/** The longest the page waits, after the script runs, for the chosen
+ * language and its typeface before drawing anyway. */
+export const READY_CAP_MS = 1200;
+
+/** The faces each language draws the card and the tagline in. */
+const FACES: Record<Language, string[]> = {
+  en: ['400 16px "Inter"', '700 16px "Inter"', '700 40px "Inter Tight"'],
+  fa: ['400 16px "Vazirmatn"', '800 16px "Vazirmatn"'],
+};
+
+/**
+ * Whether the page can be drawn without redrawing it a moment later.
+ *
+ * Two things would otherwise move it under the visitor: the provider
+ * restores a saved language after its first render, so a Persian reader
+ * got a frame of English that then reflowed into Persian; and text drawn
+ * in a fallback face reflows when the real one arrives. So the card waits
+ * -- over the canvas and map, which are already on screen -- until the
+ * saved language is the one showing and its face is loaded, or until
+ * READY_CAP_MS has passed, whichever is first. Once drawn it never hides
+ * again: a language the visitor switches to is drawn at once.
+ */
+function useReadyToDraw(): boolean {
+  const { language } = useI18n();
+  // Without a document (rendered on a server or in a test) there is
+  // nothing to wait for.
+  const [ready, setReady] = useState(() => typeof document === "undefined");
+  const [saved] = useState(() => {
+    const value = peek<string>(...LANGUAGE_STORE);
+    return value && value in LANGUAGES ? (value as Language) : null;
+  });
+  const settled = saved === null || saved === language;
+
+  useEffect(() => {
+    if (ready) return;
+    const timer = setTimeout(() => setReady(true), READY_CAP_MS);
+    return () => clearTimeout(timer);
+  }, [ready]);
+
+  useEffect(() => {
+    if (ready || !settled) return;
+    const fonts = typeof document !== "undefined" ? document.fonts : undefined;
+    if (!fonts) return setReady(true);
+    let live = true;
+    Promise.all(FACES[language].map((face) => fonts.load(face))).then(
+      () => live && setReady(true),
+      () => live && setReady(true),
+    );
+    return () => {
+      live = false;
+    };
+  }, [ready, settled, language]);
+
+  return ready;
+}
 
 /**
  * The page around the sign-in screens: the Pearl Glass look the owner
@@ -32,6 +94,7 @@ const TITLE: Record<Exclude<AuthScreen, "loading">, CopyKey> = {
 export function AuthShell({ screen, children }: { screen: AuthScreen; children: ReactNode }) {
   const { language } = useI18n();
   const copy = useCopy();
+  const ready = useReadyToDraw();
 
   // A title that says which step this is, in the reader's language: it is
   // what a screen reader announces first and what a tab is labelled with.
@@ -39,13 +102,25 @@ export function AuthShell({ screen, children }: { screen: AuthScreen; children: 
     document.title = screen === "loading" ? "Neoxify" : `${copy[TITLE[screen]]} — Neoxify`;
   }, [screen, copy]);
 
+  if (!ready) {
+    return (
+      <div className="pa" data-screen="loading">
+        <p className="pa-sr" role="status">
+          {copy.loading}
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="pa" data-screen={screen}>
       <header className="pa-top">
-        <a className="pa-brand" href={sitePath(language, "")} aria-label={copy.homeLabel}>
+        {/* The wordmark is the link's name: "Neoxify", drawn in capitals
+            by CSS, so what a reader hears is what everyone sees. */}
+        <a className="pa-brand" href={sitePath(language, "")}>
           <BrandMark className="pa-brand-mark" />
-          <span className="pa-word" dir="ltr" aria-hidden="true">
-            NEOXIFY
+          <span className="pa-word" dir="ltr" lang="en">
+            Neoxify
           </span>
         </a>
         <LanguageSwitch />
