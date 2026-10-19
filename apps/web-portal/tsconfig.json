@@ -38,5 +38,5 @@
       "@tauri-apps/plugin-updater": ["./src/shims/misc.ts"]
     }
   },
-  "include": ["src", "vite.config.ts", "../desktop-windows/src"]
+  "include": ["src", "vite.config.ts", "portal-html.ts", "../desktop-windows/src"]
 }

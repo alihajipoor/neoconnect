@@ -2,6 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { portalHtml } from "./portal-html";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const shared = resolve(here, "../desktop-windows/src");
@@ -28,7 +29,7 @@ const shim = (file: string) => resolve(here, "src/shims", file);
  * shared hosting.
  */
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), portalHtml()],
 
   // Served from /account/ rather than the domain root, so asset URLs
   // must be relative to it. Getting this wrong produces a blank page
