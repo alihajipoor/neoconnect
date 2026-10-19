@@ -533,8 +533,8 @@ export function Dashboard({
    * restart -- whose credential it cannot name: the service reports a
    * protocol, and the last dial is not the tunnel's
    * (`credentialOnTunnel`). The tiles then name no route rather than the
-   * pin `protocolUser` holds for the next connect. Cleared by the next dial
-   * this screen makes. */
+   * pin `protocolUser` holds for the next connect. Cleared once a pass of
+   * this screen has an engine up, which it names itself. */
   const [tunnelRouteUnknown, setTunnelRouteUnknown] = useState(false);
   /** The same, as the tiles' rule takes it (`settledKnown` in
    * displayed-route.ts). */
