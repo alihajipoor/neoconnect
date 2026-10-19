@@ -1,17 +1,28 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import {
   AppWindow,
-  ArrowLeft,
-  Check,
-  ChevronRight,
+  BarChart3,
+  Bell,
+  CreditCard,
+  Eye,
   Gamepad2,
   Gift,
   KeyRound,
   Languages,
   LifeBuoy,
-  Loader2,
+  LogOut,
+  Mail,
+  Palette,
+  Play,
+  Power,
+  ShieldCheck,
+  Sparkles,
   Trash2,
+  Info,
+  WifiOff,
   Wrench,
+  Check,
 } from "lucide-react";
 import { changePassword, deleteAccount } from "../lib/auth";
 import { getMe } from "../lib/customer";
@@ -24,24 +35,51 @@ import {
 } from "../components/AccountRecovery";
 import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
-import { Button, Card, Input, Label } from "../components/ui";
+import { IS_STORE_BUILD } from "../lib/distribution";
+import { effects, type GlassChoice, type GlassTier, type ThemeChoice } from "../lib/effects";
+import {
+  Card,
+  CardHead,
+  ListGroup,
+  Message,
+  PasswordField,
+  PillButton,
+  Row,
+  Segmented,
+  SwitchRow,
+  TextField,
+} from "../components/ui";
+import { Dialog } from "../components/overlay";
+import { Page } from "../components/shell/Page";
 import { RepairNetwork } from "../components/RepairNetwork";
+import { CommunityLinks } from "../components/CommunityLinks";
 import { StillTrying } from "../components/StillTrying";
-import { cn } from "../lib/utils";
 
-/** The app's settings surface.
+/** Which device this is: decides the rows that only exist on one of them
+ * (gaming mode, Custom mode, Repair and leak protection are Windows's; the
+ * web portal has none of them). */
+export type SettingsPlatform = "windows" | "android" | "ios" | "web";
+
+/** The app's settings, as grouped lists (design-system.md 4.10), ordered
+ * from everyday to rare: Connection, Modes, Appearance, Notifications,
+ * Account, Troubleshoot, About.
  *
- * A section rail with one pane, not a scrolling stack of cards. The
- * stack was the original shape and it did not survive contact with a
- * third section: Custom mode's app list is tall, so the password form
- * sat below the fold behind an inner scrollbar, and nothing on screen
- * suggested there was more to find.
+ * A setting the app cannot honour yet is shown disabled and tagged "Not
+ * built yet" -- never as a control that looks like it works. A value the
+ * operating system decides (reduced transparency, reduced motion) is shown
+ * as set by it, and its control is disabled.
  *
- * Same structure the admin panel settled on for its own settings, for
- * the same reason -- and worth keeping the two consistent, since they
- * are the same product.
- */
-type SectionId = "gaming" | "custom" | "general" | "repair" | "account";
+ * Gaming mode, Custom mode, the password, the recovery code and Repair open
+ * their existing cards in a sub-view of this page, unchanged; deleting the
+ * account and signing out ask first, in a dialog. */
+type SubView = "gaming" | "custom" | "password" | "recovery" | "repair";
+
+const OS_NAME: Record<SettingsPlatform, "set.osWin" | "set.osAndroid" | "set.osIos" | null> = {
+  windows: "set.osWin",
+  android: "set.osAndroid",
+  ios: "set.osIos",
+  web: null,
+};
 
 export function Settings({
   onBack,
@@ -50,6 +88,10 @@ export function Settings({
   onLoggedOut,
   customSection,
   gamingSection,
+  onOpenPlans,
+  onOpenActivity,
+  onSignOut,
+  platform = "web",
 }: {
   onBack: () => void;
   onOpenReferrals: () => void;
@@ -74,174 +116,38 @@ export function Settings({
    * This screen is compiled by the mobile app as well as by Windows, and
    * gaming mode is a Windows feature today: it installs namespace-scoped
    * DNS rules through the helper service, which has no counterpart on
-   * Android or iOS. Optional rather than required means the mobile app
-   * needs no edit at all to keep building, and the rail row simply does
-   * not appear where there is nothing behind it -- which is better than
-   * a section that opens onto an apology.
+   * Android or iOS. Optional rather than required means the row simply
+   * does not appear where there is nothing behind it -- which is better
+   * than a section that opens onto an apology.
    *
    * That is a platform gap and worth stating plainly rather than
    * quietly: the mode is not offered on mobile yet. */
   gamingSection?: ReactNode;
+  /** Plans (the store's on an iPhone build: guideline 3.1.1). */
+  onOpenPlans?: () => void;
+  onOpenActivity?: () => void;
+  /** Signing out, after the dialog here has asked. The app's own sign-out:
+   * it stops an automatic reconnect and takes the tunnel down first. */
+  onSignOut?: () => void;
+  platform?: SettingsPlatform;
 }) {
-  const { t } = useI18n();
-  // Custom stays the landing pane where it exists. Gaming sits above it
-  // in the rail because it is the coarser choice, but moving where this
-  // screen opens is a change to a habit people already have.
-  //
-  // Null until something is chosen, rather than defaulting to "custom"
-  // outright: iOS has no Custom pane, so a hardcoded default opened this
-  // screen on a section with no tab and no content -- a blank page with
-  // nothing selected. The landing pane is now whichever section is
-  // actually first, which is Custom wherever Custom exists.
-  const [chosen, setChosen] = useState<SectionId | null>(null);
-
-  const sections: { id: SectionId; label: string; icon: typeof AppWindow }[] = [
-    // Gaming above Custom: it is the coarser choice of the two -- it
-    // decides what the whole app is doing, where Custom refines how one
-    // tunnel behaves.
-    ...(gamingSection
-      ? [{ id: "gaming" as const, label: t("settings.gaming"), icon: Gamepad2 }]
-      : []),
-    // Custom mode leads the rest: it is the only one that changes how the
-    // VPN behaves, and the only one anybody opens this screen twice for.
-    //
-    // Conditional on the pane existing, like gaming above it. iOS
-    // passes null -- per-app routing there belongs to the system --
-    // and without this the tab rendered anyway and opened an empty
-    // pane. It also sat first, so the strip scrolled the selected
-    // tab half out of view to reach it, which is most of what
-    // "the settings page looks weird" was.
-    ...(customSection
-      ? [{ id: "custom" as const, label: t("settings.custom"), icon: AppWindow }]
-      : []),
-    { id: "general", label: t("settings.general"), icon: Languages },
-    // Between the everyday settings and the account ones, because that
-    // is what it is: something you reach for when the product has gone
-    // wrong, not something you configure and not something that touches
-    // your account.
-    { id: "repair", label: t("settings.repair"), icon: Wrench },
-    { id: "account", label: t("settings.account"), icon: KeyRound },
-  ];
-
-  const section = chosen ?? sections[0]?.id ?? "general";
-
-  return (
-    <div className="mx-auto flex h-full w-full max-w-3xl flex-col gap-5 p-5">
-      <header className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <h1 className="text-base font-semibold">{t("settings.title")}</h1>
-          <p className="text-xs text-muted-foreground">{t("settings.subtitle")}</p>
-        </div>
-        {/* Up here rather than a full-width button pinned to the bottom.
-            The old one cost a whole row of vertical space on every
-            section to serve the one moment somebody wants to leave. */}
-        <Button variant="ghost" onClick={onBack} className="shrink-0 gap-2 border border-white/10">
-          <ArrowLeft className="size-4" />
-          {t("nav.back")}
-        </Button>
-      </header>
-
-      <div className="flex min-h-0 flex-1 flex-col gap-4 sm:flex-row sm:gap-5">
-        {/* A column when there is room, a wrapping row when there is
-            not -- the window is resizable, and a phone is narrower
-            than either.
-        
-            Wrapping rather than scrolling. A scrolling strip clipped
-            its own tabs at both edges with nothing to say it could
-            be scrolled, and the browser scrolled the selected tab
-            partway out of view to bring it on screen. The labels are
-            short enough to fit two rows at phone width, and all of
-            them visible at once is the point of a tab strip. */}
-        <nav
-          aria-label={t("settings.sections")}
-          className="flex shrink-0 flex-wrap gap-1 sm:w-44 sm:flex-col sm:flex-nowrap"
-        >
-          {sections.map(({ id, label, icon: Icon }) => {
-            const active = id === section;
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setChosen(id)}
-                aria-current={active ? "page" : undefined}
-                className={cn(
-                  "press relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors",
-                  // A flat tint was the only thing marking the current
-                  // pane, and against a dark violet background a tint is
-                  // nearly nothing -- the rail read as five identical
-                  // rows. The bar is drawn as a pseudo-element pinned to
-                  // the inline start so it costs no width and lands on
-                  // the correct edge in Persian, where a real border
-                  // would have shifted every label by two pixels and sat
-                  // on the wrong side.
-                  active
-                    ? "bg-primary/15 text-foreground before:absolute before:inset-y-1.5 before:start-0 before:w-0.5 before:rounded-full before:bg-primary"
-                    : "text-muted-foreground hover:bg-white/6 hover:text-foreground",
-                )}
-              >
-                <Icon className={cn("size-4", active && "text-primary")} />
-                {label}
-              </button>
-            );
-          })}
-
-          <div className="mx-1 hidden h-px bg-white/8 sm:my-1 sm:block" />
-
-          {/* Below the divider because it leaves this screen rather than
-              switching the pane -- a different kind of thing, and the
-              chevron says so. */}
-          <button
-            type="button"
-            onClick={onOpenReferrals}
-            className="press flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors hover:bg-white/6 hover:text-foreground"
-          >
-            <Gift className="size-4" />
-            <span className="flex-1 text-start">{t("referrals.title")}</span>
-            <ChevronRight className="hidden size-3.5 shrink-0 sm:block rtl:rotate-180" />
-          </button>
-          <button
-            type="button"
-            onClick={onOpenSupport}
-            className="press flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors hover:bg-white/6 hover:text-foreground"
-          >
-            <LifeBuoy className="size-4" />
-            <span className="flex-1 text-start">{t("support.title")}</span>
-            <ChevronRight className="hidden size-3.5 shrink-0 sm:block rtl:rotate-180" />
-          </button>
-        </nav>
-
-        {/* Only the pane scrolls, and only when its own content is tall
-            -- which in practice is Custom mode with a long app list. */}
-        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
-          {section === "gaming" ? gamingSection : null}
-          {section === "custom" ? customSection : null}
-          {section === "general" ? (
-            <div className="flex flex-col gap-4">
-              <LanguageSection />
-              {/* The relay of last resort's switch: the consent its prompt
-                  asks for, to give or take back (last-resort.ts). */}
-              <BackupRouteSection />
-            </div>
-          ) : null}
-          {section === "repair" ? <RepairNetwork /> : null}
-          {section === "account" ? <AccountSection onDeleted={onLoggedOut} /> : null}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** The account pane: the password, the ways back in, and deletion.
- *
- * Reads the account to know which of them apply (docs/relay-last-resort.md):
- * a reminder to confirm the address for an account that came in by the
- * relay and has not (R3.6); a password to set, rather than one to change,
- * for a Google, Apple or Facebook account that has none (R4.4); and the
- * recovery code, from a backend new enough to say whether there is one
- * (R4.3). Until the account has been read -- or if it cannot be -- the
- * pane is what it always was. */
-function AccountSection({ onDeleted }: { onDeleted: () => void }) {
+  const { t, language, setLanguage } = useI18n();
+  const [sub, setSub] = useState<SubView | null>(null);
   const [customer, setCustomer] = useState<Customer | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
+  const [askSignOut, setAskSignOut] = useState(false);
+  const [askDelete, setAskDelete] = useState(false);
+  const [askLeak, setAskLeak] = useState(false);
+  const stayRef = useRef<HTMLButtonElement>(null);
+  const fx = useSyncExternalStore(effects.subscribe, effects.current, effects.current);
+
+  // The account decides which of the ways back in apply
+  // (docs/relay-last-resort.md): a reminder to confirm the address for an
+  // account that came in by the relay and has not (R3.6); a password to
+  // set, rather than one to change, for a Google, Apple or Facebook
+  // account that has none (R4.4); and the recovery code, from a backend
+  // new enough to say whether there is one (R4.3). Until the account has
+  // been read -- or if it cannot be -- the rows are what they always were.
   const load = useCallback(() => {
     void getMe().then((result) => {
       if (result.ok) setCustomer(result.data);
@@ -249,55 +155,308 @@ function AccountSection({ onDeleted }: { onDeleted: () => void }) {
   }, []);
   useEffect(load, [load]);
 
+  useEffect(() => {
+    let alive = true;
+    void getVersion().then(
+      (v) => alive && setVersion(v),
+      () => undefined,
+    );
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const windows = platform === "windows";
+  const osName = OS_NAME[platform] ? t(OS_NAME[platform]!) : null;
   const unconfirmedRelay = customer !== null && !customer.emailVerifiedAt && Boolean(customer.relayUnverifiedSince);
+  const socialOnly = customer?.hasPassword === false;
+
+  if (sub !== null) {
+    const titles: Record<SubView, string> = {
+      gaming: t("set.gaming"),
+      custom: platform === "android" ? t("set.perApp") : t("set.custom"),
+      password: socialOnly ? t("setpw.title") : t("settings.changePassword"),
+      recovery: t("recovery.settingsTitle"),
+      repair: t("repair.title"),
+    };
+    return (
+      <Page title={titles[sub]} back={() => setSub(null)} backAlways backLabel={t("settings.title")} data-settings-sub={sub}>
+        <div className="nx-sub">
+          <div className="nx-stack">
+            {sub === "gaming" ? gamingSection : null}
+            {sub === "custom" ? customSection : null}
+            {sub === "password" ? socialOnly ? <SetPasswordSection onDone={load} /> : <PasswordSection /> : null}
+            {sub === "recovery" && customer !== null && customer.hasRecoveryCode !== undefined ? (
+              <RecoveryCodeSection
+                hasPassword={customer.hasPassword !== false}
+                hasRecoveryCode={customer.hasRecoveryCode}
+                onCreated={load}
+              />
+            ) : null}
+            {sub === "repair" ? <RepairNetwork /> : null}
+          </div>
+        </div>
+      </Page>
+    );
+  }
+
+  const themeOptions: { value: ThemeChoice; label: string }[] = [
+    { value: "system", label: t("set.system") },
+    { value: "light", label: t("set.light") },
+    { value: "dark", label: t("set.dark") },
+  ];
+  const glassOptions: { value: GlassTier; label: string }[] = [
+    { value: "full", label: t("set.full") },
+    { value: "lite", label: t("set.lite") },
+    { value: "flat", label: t("set.off") },
+  ];
+  // "auto" shows as the tier it chose on this device.
+  const glassShown: GlassTier = fx.glassOsSet ? "flat" : fx.glassChoice === "auto" ? fx.glass : fx.glassChoice;
+
   return (
-    <div className="flex flex-col gap-4">
+    <Page title={t("settings.title")} lede={t("set.lede")} back={onBack} data-settings>
       {unconfirmedRelay ? <VerifyEmailReminder email={customer.email} onChanged={load} /> : null}
-      {customer?.hasPassword === false ? <SetPasswordSection onDone={load} /> : <PasswordSection />}
-      {customer !== null && customer.hasRecoveryCode !== undefined ? (
-        <RecoveryCodeSection
-          hasPassword={customer.hasPassword !== false}
-          hasRecoveryCode={customer.hasRecoveryCode}
-          onCreated={load}
-        />
-      ) : null}
-      <DeleteAccountSection onDeleted={onDeleted} />
-    </div>
+
+      <div className="nx-cols">
+        <ListGroup title={t("set.connection")}>
+          {windows ? (
+            <Row
+              icon={<ShieldCheck />}
+              label={t("set.leak")}
+              value={t("set.leakVal")}
+              onClick={() => setAskLeak(true)}
+            />
+          ) : null}
+          {/* The relay of last resort's switch: on until turned off here
+              (last-resort.ts). Nothing where there is no relay. */}
+          <BackupRouteSection />
+          {windows ? <SwitchRow icon={<Power />} label={t("set.autoStart")} checked={false} notBuilt /> : null}
+          {platform !== "web" ? <SwitchRow icon={<Play />} label={t("set.autoConnect")} checked={false} notBuilt /> : null}
+          {windows ? (
+            <SwitchRow icon={<WifiOff />} label={t("set.blockRecon")} hint={t("set.killHint")} checked={false} notBuilt />
+          ) : null}
+        </ListGroup>
+
+        {gamingSection || customSection || platform === "ios" ? (
+          <ListGroup title={t("set.modes")}>
+            {gamingSection ? (
+              <Row
+                icon={<Gamepad2 />}
+                label={t("set.gaming")}
+                tag={<span className="nx-ntag">{t("set.beta")}</span>}
+                hint={t("set.gamingHint")}
+                onClick={() => setSub("gaming")}
+              />
+            ) : null}
+            {customSection ? (
+              <Row
+                icon={<AppWindow />}
+                label={platform === "android" ? t("set.perApp") : t("set.custom")}
+                tag={windows ? <span className="nx-ntag">{t("set.beta")}</span> : undefined}
+                hint={t("set.customHint")}
+                onClick={() => setSub("custom")}
+              />
+            ) : platform === "ios" ? (
+              // Said plainly, not hidden: the system decides this on iPhone.
+              <Row icon={<Info />} label={t("set.perApp")} hint={t("set.perAppIos")} />
+            ) : null}
+          </ListGroup>
+        ) : null}
+
+        <ListGroup title={t("set.appearance")}>
+          <Row
+            icon={<Languages />}
+            label={t("settings.language")}
+            hint={t("set.languageHint")}
+            wrap
+            control={
+              <Segmented
+                size="sm"
+                label={t("settings.language")}
+                value={language}
+                onChange={(next: Language) => setLanguage(next)}
+                options={(Object.keys(LANGUAGES) as Language[]).map((code) => ({ value: code, label: LANGUAGES[code].nativeLabel }))}
+              />
+            }
+          />
+          <Row
+            icon={<Palette />}
+            label={t("set.appearance")}
+            wrap
+            control={
+              <Segmented size="sm" label={t("set.appearance")} value={fx.theme} onChange={(next) => effects.setTheme(next)} options={themeOptions} />
+            }
+          />
+          <Row
+            icon={<Sparkles />}
+            label={t("set.effects")}
+            hint={
+              fx.glassOsSet && osName ? (
+                <span className="nx-osset">{t("set.osSet", { v: t("set.off"), os: osName })}</span>
+              ) : (
+                t("set.effectsHint")
+              )
+            }
+            wrap
+            control={
+              <Segmented
+                size="sm"
+                label={t("set.effects")}
+                value={glassShown}
+                locked={fx.glassOsSet}
+                lockedReason={osName ? t("set.osSet", { v: t("set.off"), os: osName }) : undefined}
+                onChange={(next: GlassChoice) => effects.setGlass(next)}
+                options={glassOptions}
+              />
+            }
+          />
+          <SwitchRow
+            icon={<Eye />}
+            label={t("set.motion")}
+            hint={
+              fx.motionOsSet && osName ? (
+                <span className="nx-osset">{t("set.osSet", { v: t("set.on"), os: osName })}</span>
+              ) : (
+                t("set.motionHint")
+              )
+            }
+            checked={fx.reduceMotion}
+            disabled={fx.motionOsSet}
+            onChange={(next) => effects.setMotion(next ? true : null)}
+          />
+        </ListGroup>
+
+        {platform !== "web" ? (
+          <ListGroup title={t("set.notifs")}>
+            <SwitchRow icon={<Bell />} label={t("set.notifications")} checked={false} notBuilt />
+          </ListGroup>
+        ) : null}
+
+        <ListGroup title={t("settings.account")}>
+          {customer ? (
+            <Row
+              icon={<Mail />}
+              label={t("auth.email")}
+              hint={
+                <bdi dir="ltr" className="nx-strong">
+                  {customer.email}
+                </bdi>
+              }
+            />
+          ) : null}
+          <Row
+            icon={<KeyRound />}
+            label={socialOnly ? t("setpw.title") : t("set.password")}
+            value={socialOnly ? undefined : t("set.change")}
+            onClick={() => setSub("password")}
+          />
+          {customer !== null && customer.hasRecoveryCode !== undefined ? (
+            <Row
+              icon={<KeyRound />}
+              label={t("set.recovery")}
+              hint={customer.hasRecoveryCode ? t("recovery.has") : t("recovery.none")}
+              value={customer.hasRecoveryCode ? undefined : t("set.create")}
+              onClick={() => setSub("recovery")}
+            />
+          ) : null}
+          {onOpenPlans ? (
+            <Row icon={<CreditCard />} label={t(IS_STORE_BUILD ? "nav.plansStore" : "nav.plans")} onClick={onOpenPlans} />
+          ) : null}
+          {onOpenActivity ? <Row icon={<BarChart3 />} label={t("nav.activity")} onClick={onOpenActivity} /> : null}
+          <Row icon={<Gift />} label={t("referrals.title")} onClick={onOpenReferrals} />
+          {onSignOut ? (
+            <Row icon={<LogOut />} label={t("nav.signOut")} value={t("set.signOutHint")} onClick={() => setAskSignOut(true)} />
+          ) : null}
+          <Row
+            icon={<Trash2 />}
+            label={t("settings.deleteAccount")}
+            hint={t("settings.deleteAccountHint")}
+            danger
+            onClick={() => setAskDelete(true)}
+          />
+        </ListGroup>
+
+        <ListGroup title={t("set.troubleshoot")}>
+          {windows ? <Row icon={<Wrench />} label={t("set.repair")} hint={t("set.repairHint")} onClick={() => setSub("repair")} /> : null}
+          <Row icon={<LifeBuoy />} label={t("support.title")} hint={t("set.supportHint")} onClick={onOpenSupport} />
+        </ListGroup>
+
+        <ListGroup title={t("set.about")}>
+          <Row label={t("set.version")} value={version ? <bdi dir="ltr">{version}</bdi> : "—"} />
+          <CommunityRow />
+        </ListGroup>
+      </div>
+
+      <DeleteAccountDialog open={askDelete} onClose={() => setAskDelete(false)} onDeleted={onLoggedOut} />
+
+      <Dialog
+        open={askSignOut}
+        title={t("so.title")}
+        description={t("so.body")}
+        onClose={() => setAskSignOut(false)}
+        initialFocus={stayRef}
+        actions={
+          <>
+            <PillButton ref={stayRef} variant="ghost" size="sm" onClick={() => setAskSignOut(false)}>
+              {t("btn.cancel")}
+            </PillButton>
+            <PillButton
+              size="sm"
+              onClick={() => {
+                setAskSignOut(false);
+                onSignOut?.();
+              }}
+            >
+              {t("so.go")}
+            </PillButton>
+          </>
+        }
+      />
+
+      {/* Read-only: a description of what the tunnel holds, not a switch. */}
+      <Dialog
+        open={askLeak}
+        title={t("set.leak")}
+        description={t("leak.lede")}
+        onClose={() => setAskLeak(false)}
+        actions={
+          <PillButton size="sm" onClick={() => setAskLeak(false)}>
+            {t("dlg.close")}
+          </PillButton>
+        }
+      >
+        <ul className="nx-leak">
+          <li className="ok">
+            <Check aria-hidden />
+            <span>
+              <b>{t("leak.heldLead")}</b> {t("leak.held")}
+            </span>
+          </li>
+          <li>
+            <Info aria-hidden />
+            <span>
+              <b>{t("leak.notHeldLead")}</b> {t("leak.notHeld")}
+            </span>
+          </li>
+          <li>
+            <Info aria-hidden />
+            <span>
+              <b>{t("leak.reconLead")}</b> {t("leak.recon")}
+            </span>
+          </li>
+        </ul>
+      </Dialog>
+    </Page>
   );
 }
 
-function LanguageSection() {
-  const { t, language, setLanguage } = useI18n();
-
-  return (
-    <Card className="flex flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-highlight/15 text-highlight">
-          <Languages className="size-4" />
-        </div>
-        <div>
-          <p className="text-sm font-semibold">{t("settings.language")}</p>
-          <p className="text-xs text-muted-foreground">{t("settings.languageHint")}</p>
-        </div>
-      </div>
-      <div className="flex gap-2">
-        {(Object.keys(LANGUAGES) as Language[]).map((code) => (
-          <Button
-            key={code}
-            variant={code === language ? "default" : "ghost"}
-            onClick={() => setLanguage(code)}
-            className={
-              code === language
-                ? "flex-1 justify-center"
-                : "flex-1 justify-center border border-white/10"
-            }
-          >
-            {LANGUAGES[code].nativeLabel}
-          </Button>
-        ))}
-      </div>
-    </Card>
-  );
+/** Website, Discord, Instagram, Telegram -- whichever exist (CommunityLinks
+ * decides, and drops the website from a store build). */
+function CommunityRow() {
+  const { t } = useI18n();
+  const [shown, setShown] = useState(true);
+  if (!shown) return null;
+  return <Row label={t("set.community")} wrap control={<CommunityLinks look="chips" onNone={() => setShown(false)} />} />;
 }
 
 function PasswordSection() {
@@ -336,72 +495,37 @@ function PasswordSection() {
   }
 
   return (
-    <Card className="flex flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
-          <KeyRound className="size-4" />
-        </div>
-        <div>
-          <p className="text-sm font-semibold">{t("settings.changePassword")}</p>
-          <p className="text-xs text-muted-foreground">{t("settings.changePasswordHint")}</p>
-        </div>
-      </div>
-
-      <form onSubmit={submit} className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="current">{t("settings.currentPassword")}</Label>
-          <Input
-            id="current"
-            type="password"
-            autoComplete="current-password"
-            value={current}
-            onChange={(e) => setCurrent(e.target.value)}
-          />
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="next">{t("settings.newPassword")}</Label>
-          <Input
-            id="next"
-            type="password"
-            autoComplete="new-password"
-            value={next}
-            onChange={(e) => setNext(e.target.value)}
-          />
-          {tooShort ? (
-            <p className="text-xs text-muted-foreground">{t("settings.tooShort")}</p>
-          ) : null}
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="confirm">{t("settings.confirmPassword")}</Label>
-          <Input
-            id="confirm"
-            type="password"
-            autoComplete="new-password"
-            value={confirm}
-            onChange={(e) => setConfirm(e.target.value)}
-          />
-          {mismatch ? <p className="text-xs text-destructive">{t("settings.mismatch")}</p> : null}
-        </div>
-
-        {error ? (
-          <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-            {error}
-          </p>
-        ) : null}
-
-        {done ? (
-          <p className="flex items-center gap-1.5 rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-success">
-            <Check className="size-3.5" />
-            {t("settings.passwordChanged")}
-          </p>
-        ) : null}
-
-        <Button type="submit" disabled={!canSubmit} className="justify-center gap-2">
-          {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+    <Card className="flex flex-col gap-4">
+      <CardHead icon={<KeyRound />} title={t("settings.changePassword")} hint={t("settings.changePasswordHint")} />
+      <form onSubmit={submit} className="nx-form">
+        <PasswordField
+          id="current"
+          label={t("settings.currentPassword")}
+          autoComplete="current-password"
+          value={current}
+          onChange={(e) => setCurrent(e.target.value)}
+        />
+        <PasswordField
+          id="next"
+          label={t("settings.newPassword")}
+          hint={tooShort ? t("settings.tooShort") : undefined}
+          autoComplete="new-password"
+          value={next}
+          onChange={(e) => setNext(e.target.value)}
+        />
+        <PasswordField
+          id="confirm"
+          label={t("settings.confirmPassword")}
+          hint={mismatch ? t("settings.mismatch") : undefined}
+          autoComplete="new-password"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+        />
+        {error ? <Message tone="danger">{error}</Message> : null}
+        {done ? <Message tone="ok">{t("settings.passwordChanged")}</Message> : null}
+        <PillButton type="submit" size="sm" disabled={!canSubmit} aria-busy={busy || undefined}>
           {busy ? t("settings.changing") : t("settings.changePassword")}
-        </Button>
+        </PillButton>
         {/* A write asks who answers first, so this can take half a minute
             where only a slow route answers. */}
         <StillTrying waiting={busy} />
@@ -417,18 +541,18 @@ function PasswordSection() {
  * from neither build, since it is not a transaction and no store
  * objects to it.
  *
- * Two-step, and the second step asks for the word rather than another
- * button. A second button is a reflex; typing something is a decision.
- * This is the one action in the app that cannot be undone, and the
- * confirmation names what actually goes rather than asking "are you
- * sure" about an unspecified thing.
+ * A dialog that asks for the word rather than another button. A second
+ * button is a reflex; typing something is a decision. This is the one
+ * action in the app that cannot be undone, and the dialog names what
+ * actually goes rather than asking "are you sure" about an unspecified
+ * thing. Its first focus is the field, never the destructive button.
  */
-function DeleteAccountSection({ onDeleted }: { onDeleted: () => void }) {
+function DeleteAccountDialog({ open, onClose, onDeleted }: { open: boolean; onClose: () => void; onDeleted: () => void }) {
   const { t } = useI18n();
-  const [confirming, setConfirming] = useState(false);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const field = useRef<HTMLInputElement>(null);
 
   // Matched case-insensitively and trimmed: the point is deliberateness,
   // not typing accuracy, and failing someone on a capital letter after
@@ -436,8 +560,15 @@ function DeleteAccountSection({ onDeleted }: { onDeleted: () => void }) {
   const phrase = t("settings.deleteConfirmWord");
   const matches = typed.trim().toLowerCase() === phrase.toLowerCase();
 
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
+  function close() {
+    if (busy) return;
+    setTyped("");
+    setError(null);
+    onClose();
+  }
+
+  async function submit() {
+    if (!matches || busy) return;
     setError(null);
     setBusy(true);
 
@@ -454,72 +585,44 @@ function DeleteAccountSection({ onDeleted }: { onDeleted: () => void }) {
   }
 
   return (
-    <Card className="flex flex-col gap-3 border-destructive/30">
-      <div className="flex items-center gap-2">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-destructive/15 text-destructive">
-          <Trash2 className="size-4" />
-        </div>
-        <div>
-          <p className="text-sm font-semibold">{t("settings.deleteAccount")}</p>
-          <p className="text-xs text-muted-foreground">{t("settings.deleteAccountHint")}</p>
-        </div>
-      </div>
-
-      {confirming ? (
-        <form onSubmit={submit} className="flex flex-col gap-3">
-          {/* Named, not vague. Someone deleting an account with paid time
-              left should learn that here and not afterwards. */}
-          <p className="text-xs text-muted-foreground">{t("settings.deleteWarning")}</p>
-
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="delete-confirm">{t("settings.deleteTypeToConfirm", { word: phrase })}</Label>
-            <Input
-              id="delete-confirm"
-              value={typed}
-              onChange={(event) => setTyped(event.target.value)}
-              autoComplete="off"
-              autoFocus
-            />
-          </div>
-
-          {error ? <p className="text-xs text-destructive">{error}</p> : null}
-
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              className="flex-1 justify-center border border-white/10"
-              onClick={() => {
-                setConfirming(false);
-                setTyped("");
-                setError(null);
-              }}
-              disabled={busy}
-            >
-              {t("settings.deleteCancel")}
-            </Button>
-            <Button
-              type="submit"
-              variant="destructive"
-              className="flex-1 justify-center gap-2"
-              disabled={!matches || busy}
-            >
-              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-              {busy ? t("settings.deleting") : t("settings.deleteConfirm")}
-            </Button>
-          </div>
-          <StillTrying waiting={busy} />
-        </form>
-      ) : (
-        <Button
-          variant="ghost"
-          className="justify-center gap-2 border border-destructive/40 text-destructive"
-          onClick={() => setConfirming(true)}
-        >
-          <Trash2 className="size-4" />
-          {t("settings.deleteAccount")}
-        </Button>
-      )}
-    </Card>
+    <Dialog
+      open={open}
+      alert
+      title={t("settings.deleteAccount")}
+      // Named, not vague. Someone deleting an account with paid time left
+      // should learn that here and not afterwards.
+      description={t("settings.deleteWarning")}
+      onClose={close}
+      initialFocus={field}
+      actions={
+        <>
+          <PillButton variant="ghost" size="sm" onClick={close} disabled={busy}>
+            {t("settings.deleteCancel")}
+          </PillButton>
+          <PillButton size="sm" className="danger" disabled={!matches || busy} aria-busy={busy || undefined} onClick={() => void submit()}>
+            {busy ? t("settings.deleting") : t("settings.deleteConfirm")}
+          </PillButton>
+        </>
+      }
+    >
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
+      >
+        <TextField
+          ref={field}
+          id="delete-confirm"
+          label={t("settings.deleteTypeToConfirm", { word: phrase })}
+          value={typed}
+          onChange={(event) => setTyped(event.target.value)}
+          autoComplete="off"
+          dir="ltr"
+        />
+        {error ? <Message tone="danger">{error}</Message> : null}
+        <StillTrying waiting={busy} />
+      </form>
+    </Dialog>
   );
 }

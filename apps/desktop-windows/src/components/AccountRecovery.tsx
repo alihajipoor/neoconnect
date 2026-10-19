@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, KeyRound, Loader2, Mail, Route } from "lucide-react";
+import { Loader2, KeyRound, Mail, Route } from "lucide-react";
 import {
   changeUnverifiedEmail,
   createRecoveryCode,
@@ -10,7 +10,7 @@ import {
 import { failureText } from "../lib/failure-text";
 import { useI18n } from "../lib/i18n";
 import { backupRouteOn, relaySupported, setBackupRouteOn } from "../lib/last-resort";
-import { Button, Card, Input, Label } from "./ui";
+import { Button, Card, CardHead, Input, Label, Message, SwitchRow } from "./ui";
 import { StillTrying } from "./StillTrying";
 import { RecoveryCodeNotice, relayDetail, useRelayMode } from "./BackupRoute";
 
@@ -21,34 +21,17 @@ import { RecoveryCodeNotice, relayDetail, useRelayMode } from "./BackupRoute";
  * backup route itself. Shared by both clients' Settings. */
 
 function Header({ icon: Icon, title, hint }: { icon: typeof Mail; title: string; hint: string }) {
-  return (
-    <div className="flex items-center gap-2">
-      <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
-        <Icon className="size-4" />
-      </div>
-      <div>
-        <p className="text-sm font-semibold">{title}</p>
-        <p className="text-xs text-muted-foreground">{hint}</p>
-      </div>
-    </div>
-  );
+  return <CardHead icon={<Icon />} title={title} hint={hint} />;
 }
 
 function Problem({ text }: { text: string | null }) {
   if (!text) return null;
-  return (
-    <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{text}</p>
-  );
+  return <Message tone="danger">{text}</Message>;
 }
 
 function Done({ text }: { text: string | null }) {
   if (!text) return null;
-  return (
-    <p className="flex items-center gap-1.5 rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-success">
-      <Check className="size-3.5" />
-      {text}
-    </p>
-  );
+  return <Message tone="ok">{text}</Message>;
 }
 
 /** "Confirm your email to unlock all plans and payments." For an account
@@ -367,42 +350,30 @@ export function BackupRouteSection() {
   // The web portal shares this screen and has no relay.
   if (!relaySupported()) return null;
 
+  // A row of the Connection group in Settings: the switch is named by the
+  // row's label, and while relay mode lasts the hint says so, and why, in
+  // the words the evidence allows. Neutral throughout.
   return (
-    <Card className="flex flex-col gap-3" data-backup-route>
-      <div className="flex items-start gap-3">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
-          <Route className="size-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold">{t("settings.backupRoute")}</p>
-          <p className="text-xs text-muted-foreground">{t("settings.backupRouteHint")}</p>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={granted}
-          aria-label={t("settings.backupRouteToggle")}
-          onClick={toggle}
-          className={[
-            "press relative h-6 w-11 shrink-0 rounded-full border transition-colors",
-            granted
-              ? "border-transparent bg-[linear-gradient(120deg,var(--primary),var(--brand-2))]"
-              : "border-white/12 bg-white/8",
-          ].join(" ")}
-        >
-          <span
-            className={[
-              "absolute top-0.5 size-4 rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.5)] transition-[inset-inline-start] duration-200",
-              granted ? "start-[1.375rem]" : "start-0.5",
-            ].join(" ")}
-          />
-        </button>
-      </div>
-      {active ? (
-        <p className="text-xs text-muted-foreground">
-          {t("settings.backupRouteInUse")} {t(relayDetail(status))}
-        </p>
-      ) : null}
-    </Card>
+    <div data-backup-route>
+      <SwitchRow
+        icon={<Route />}
+        label={t("settings.backupRoute")}
+        hint={
+          <>
+            {t("settings.backupRouteHint")}
+            {active ? (
+              <>
+                {" "}
+                <span className="nx-osset">
+                  {t("settings.backupRouteInUse")} {t(relayDetail(status))}
+                </span>
+              </>
+            ) : null}
+          </>
+        }
+        checked={granted}
+        onChange={toggle}
+      />
+    </div>
   );
 }
