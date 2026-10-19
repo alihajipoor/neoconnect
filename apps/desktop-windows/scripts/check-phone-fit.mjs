@@ -461,6 +461,11 @@ try {
   await choose("theme", "light");
   for (const size of SIZES) {
     if (!(await choose("size", size))) throw new Error(`The preview has no size "${size}".`);
+    // What is measured is the layout a size settles on, not the moment after
+    // the frame jumped to it: the map re-places its lights and mark a frame
+    // or two after a resize (WorldMap's ResizeObserver), and the first state
+    // measured at a new size once caught the previous size's mark there.
+    await sleep(800);
     for (const lang of LANGS) {
       await choose("language", lang);
       for (const state of states) {
