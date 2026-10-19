@@ -44,6 +44,11 @@ describe("account activity over HTTP", () => {
           where.id === SUB && where.customerId === "customer-1" ? { id: SUB, createdAt: new Date("2025-01-01T00:00:00Z") } : null,
         ),
       },
+      customer: {
+        findUnique: jest.fn(async ({ where }: { where: { id: string } }) =>
+          where.id === "customer-1" ? { createdAt: new Date("2025-01-01T00:00:00Z") } : null,
+        ),
+      },
       $queryRaw: jest.fn(async () => [
         { bucket: BigInt(Math.floor(now / 1000 / 900) * 900), up: "1024", down: "4096" },
       ]),
@@ -131,6 +136,22 @@ describe("account activity over HTTP", () => {
       });
       expect(res.status).toBe(404);
       expect(auth.revokeSession).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("GET /customer/usage", () => {
+    it("answers the account's days in the caller's zone", async () => {
+      const res = await call("GET", "/customer/usage?days=31&tz=Asia/Tehran");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { subscriptionId: string | null; days: { bytesUp: string; bytesDown: string }[] };
+      expect(body.subscriptionId).toBeNull();
+      expect(body.days).toHaveLength(31);
+      expect(body.days.at(-1)).toMatchObject({ bytesUp: "1024", bytesDown: "4096" });
+    });
+
+    it.each(["days=0", "days=32", "tz=Mars/Olympus_Mons", "since=2026-01-01"])("answers 400 to %s", async (query) => {
+      const res = await call("GET", `/customer/usage?${query}`);
+      expect(res.status).toBe(400);
     });
   });
 

@@ -108,8 +108,8 @@ import { AccountActivityModule } from "./modules/account-activity/account-activi
     RelayAuthModule,
     // Every change an admin makes, logged; GET /admin/audit for the owner.
     AdminAuditModule,
-    // The Activity screen: GET/DELETE /customer/devices, and
-    // GET /customer/subscriptions/:id/usage.
+    // The Activity screen: GET/DELETE /customer/devices, GET
+    // /customer/usage and GET /customer/subscriptions/:id/usage.
     AccountActivityModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ClientThrottlerGuard }],

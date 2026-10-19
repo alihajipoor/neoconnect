@@ -19,7 +19,7 @@ const enabled = process.env.NEOXIFY_DB_SPECS === "1";
   let prisma: PrismaClient;
   let service: DailyUsageService;
   const tag = randomUUID().slice(0, 8);
-  const ids = { customer: "", plan: "", node: "", subscription: "", otherSubscription: "" };
+  const ids = { customer: "", stranger: "", plan: "", node: "", subscription: "", otherSubscription: "", strangerSubscription: "" };
 
   // Tehran is UTC+03:30 all year: its midnights are 20:30 UTC, half way
   // through an hour, which an hourly bucket would get wrong.
@@ -31,7 +31,15 @@ const enabled = process.env.NEOXIFY_DB_SPECS === "1";
   beforeAll(async () => {
     prisma = new PrismaClient();
     service = new DailyUsageService(prisma as never);
-    const customer = await prisma.customer.create({ data: { email: `db-spec-${tag}@example.test` }, select: { id: true } });
+    const longAgo = new Date(Date.now() - 40 * 86_400_000);
+    const customer = await prisma.customer.create({
+      data: { email: `db-spec-${tag}@example.test`, createdAt: longAgo },
+      select: { id: true },
+    });
+    const stranger = await prisma.customer.create({
+      data: { email: `db-spec-${tag}-other@example.test`, createdAt: longAgo },
+      select: { id: true },
+    });
     const plan = await prisma.subscriptionPlan.create({
       data: { name: `db-spec-${tag}`, durationDays: 30, priceUsd: "1.00", protocolsAllowed: [], isPurchasable: false, isActive: false },
       select: { id: true },
@@ -40,14 +48,23 @@ const enabled = process.env.NEOXIFY_DB_SPECS === "1";
       data: { name: `db-spec-${tag}`, region: "test", publicIp: "192.0.2.10" },
       select: { id: true },
     });
-    const subscription = (createdAt: Date) =>
+    const subscription = (customerId: string) =>
       prisma.subscription.create({
-        data: { customerId: customer.id, planId: plan.id, expireAt: new Date(Date.now() + 86_400_000), createdAt },
+        data: { customerId, planId: plan.id, expireAt: new Date(Date.now() + 86_400_000), createdAt: longAgo },
         select: { id: true },
       });
-    const mine = await subscription(new Date(Date.now() - 40 * 86_400_000));
-    const other = await subscription(new Date(Date.now() - 40 * 86_400_000));
-    Object.assign(ids, { customer: customer.id, plan: plan.id, node: node.id, subscription: mine.id, otherSubscription: other.id });
+    const mine = await subscription(customer.id);
+    const other = await subscription(customer.id);
+    const strangers = await subscription(stranger.id);
+    Object.assign(ids, {
+      customer: customer.id,
+      stranger: stranger.id,
+      plan: plan.id,
+      node: node.id,
+      subscription: mine.id,
+      otherSubscription: other.id,
+      strangerSubscription: strangers.id,
+    });
 
     const record = (subscriptionId: string, reportedAt: number, bytesUp: bigint, bytesDown: bigint) => ({
       subscriptionId,
@@ -68,17 +85,20 @@ const enabled = process.env.NEOXIFY_DB_SPECS === "1";
         record(ids.subscription, midnightYesterday + 90_000, 200n, 1n),
         // Another subscription of the same customer: not this one's.
         record(ids.otherSubscription, midnightYesterday + 60_000, 5_000n, 5_000n),
+        // Another customer's: never this customer's.
+        record(ids.strangerSubscription, midnightYesterday + 60_000, 70_000n, 70_000n),
       ],
     });
   }, 60_000);
 
   afterAll(async () => {
-    const subscriptions = [ids.subscription, ids.otherSubscription].filter(Boolean);
+    const subscriptions = [ids.subscription, ids.otherSubscription, ids.strangerSubscription].filter(Boolean);
     await prisma.usageRecord.deleteMany({ where: { subscriptionId: { in: subscriptions } } });
     await prisma.subscription.deleteMany({ where: { id: { in: subscriptions } } });
     if (ids.plan) await prisma.subscriptionPlan.delete({ where: { id: ids.plan } });
     if (ids.node) await prisma.node.delete({ where: { id: ids.node } });
-    if (ids.customer) await prisma.customer.delete({ where: { id: ids.customer } });
+    const customers = [ids.customer, ids.stranger].filter(Boolean);
+    await prisma.customer.deleteMany({ where: { id: { in: customers } } });
     await prisma?.$disconnect();
   });
 
@@ -108,5 +128,15 @@ const enabled = process.env.NEOXIFY_DB_SPECS === "1";
     const nonEmpty = usage.days.filter((d) => d.bytesUp !== "0");
     expect(nonEmpty).toHaveLength(1);
     expect(nonEmpty[0]).toMatchObject({ bytesUp: "303", bytesDown: "9007199254741024" });
+  });
+
+  it("sums every subscription of the account, and no other account's", async () => {
+    const usage = await service.forCustomer(ids.customer, { days: 3, timeZone: tz });
+    expect(usage.subscriptionId).toBeNull();
+    expect(usage.days).toEqual([
+      { date: addDays(today, -2), bytesUp: "3", bytesDown: "30" },
+      { date: yesterday, bytesUp: "5300", bytesDown: "9007199254745994" },
+      { date: today, bytesUp: "0", bytesDown: "0" },
+    ]);
   });
 });

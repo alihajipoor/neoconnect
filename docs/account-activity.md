@@ -94,10 +94,14 @@ its app signs out. A tunnel on the subscription's *shared* credentials
 this device" on a row). The endpoint exists so that decision needs no
 backend release; no client may expose it until it is made.
 
+## `GET /customer/usage?days=30&tz=Asia/Tehran`
 ## `GET /customer/subscriptions/:id/usage?days=30&tz=Asia/Tehran`
 
-Data used per day on one of the customer's subscriptions, every device
-together.
+Data used per day, every device together: on the whole account (every
+subscription it has had), or on one of its subscriptions. **The Activity
+card uses `/customer/usage`**: a purchase is a new subscription, so a
+history per subscription starts again at every purchase. The two answer
+in the same shape; `subscriptionId` is `null` for the account.
 
 | Query | |
 |---|---|
@@ -125,7 +129,8 @@ together.
   (20:30 UTC for Tehran), Gregorian `YYYY-MM-DD`. Render them in the
   reader's calendar (Solar Hijri in Persian). The last day is today so
   far.
-- `from` is never before the day the subscription was created.
+- `from` is never before the day the subscription (or the account) was
+  created.
 - Byte counts are **decimal strings** (a day can pass 2^53). `0` means
   nothing was recorded that day.
 - Read from what the nodes reported against this subscription's
@@ -141,6 +146,8 @@ together.
   listed here; **400** `{"code": "UNKNOWN_TIME_ZONE"}` for a zone the
   server does not know. **404** for a subscription that is not the
   caller's.
+- Records an admin deleted with a subscription are gone from both
+  (`SubscriptionsService.remove`).
 - 30 requests a minute per signed-in device.
 
 ## `GET /updates/android/:arch/:currentVersion`

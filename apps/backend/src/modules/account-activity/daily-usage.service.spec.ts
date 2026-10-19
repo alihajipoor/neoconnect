@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/require-await -- the stand-ins below
    match the async signatures of the Prisma client they replace. */
 import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { DailyUsageService } from "./daily-usage.service";
 
 /** The daily usage history over a stand-in Prisma: ownership, the time
@@ -20,8 +21,16 @@ function build(opts: { createdAt?: Date; rows?: { bucket: bigint | number | stri
           : null,
       ),
     },
+    customer: {
+      findUnique: jest.fn(async ({ where }: { where: { id: string } }) =>
+        where.id === CUSTOMER ? { createdAt: opts.createdAt ?? new Date("2025-01-01T00:00:00Z") } : null,
+      ),
+    },
+    // Flattened as Prisma flattens it: nested fragments inline, their
+    // values in order.
     $queryRaw: jest.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      queries.push({ sql: strings.join("?"), values });
+      const sql = Prisma.sql(strings, ...(values as Prisma.Sql[]));
+      queries.push({ sql: sql.sql, values: sql.values });
       return opts.rows ?? [];
     }),
   };
@@ -113,5 +122,39 @@ describe("DailyUsageService", () => {
     expect(err).toBeInstanceOf(BadRequestException);
     expect((err as BadRequestException).getResponse()).toMatchObject({ code: "UNKNOWN_TIME_ZONE" });
     expect(prisma.subscription.findFirst).not.toHaveBeenCalled();
+  });
+
+  describe("for the whole account", () => {
+    it("reads every subscription of this customer, and only this customer's", async () => {
+      const { service, queries } = build({
+        rows: [{ bucket: BigInt(Date.parse("2026-10-19T20:30:00Z") / 1000), up: "5", down: "50" }],
+      });
+
+      const usage = await service.forCustomer(CUSTOMER, { days: 2, timeZone: "Asia/Tehran" });
+
+      expect(usage).toMatchObject({
+        subscriptionId: null,
+        from: "2026-10-19",
+        to: "2026-10-20",
+        days: [
+          { date: "2026-10-19", bytesUp: "0", bytesDown: "0" },
+          { date: "2026-10-20", bytesUp: "5", bytesDown: "50" },
+        ],
+      });
+      expect(queries[0].sql).toContain('"subscriptionId" IN (SELECT "id" FROM "subscriptions" WHERE "customerId" = ?)');
+      expect(queries[0].values[0]).toBe(CUSTOMER);
+    });
+
+    it("starts no earlier than the day the account was created", async () => {
+      const { service } = build({ createdAt: new Date("2026-10-19T08:00:00Z") });
+      const usage = await service.forCustomer(CUSTOMER, { days: 30, timeZone: "Asia/Tehran" });
+      expect(usage.days.map((d) => d.date)).toEqual(["2026-10-19", "2026-10-20"]);
+    });
+
+    it("answers 404 for an account that is gone", async () => {
+      const { service, prisma } = build();
+      await expect(service.forCustomer("customer-gone")).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
+    });
   });
 });

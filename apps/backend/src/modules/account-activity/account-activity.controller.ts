@@ -10,7 +10,7 @@ import { DailyUsageService } from "./daily-usage.service";
 import { DailyUsageQueryDto } from "./dto/daily-usage-query.dto";
 
 /** The Activity screen's account data: the devices signed in to the
- * account, and a subscription's data use per day. The contract is
+ * account, and data use per day. The contract is
  * docs/account-activity.md.
  *
  * Scoped to the calling customer by the token alone. Not open to an
@@ -49,6 +49,17 @@ export class AccountActivityController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async signOut(@CurrentCustomer() customer: AuthenticatedCustomer, @Param("id") id: string) {
     await this.devices.signOut({ customerId: customer.sub, sessionId: customer.sid }, id);
+  }
+
+  /** Data used per day on the whole account -- every subscription it has
+   * had, every device -- in the caller's time zone. What the Activity
+   * card shows: a purchase is a new subscription, so a history per
+   * subscription would start again at each one. */
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @ThrottleVolumePerSession()
+  @Get("usage")
+  accountUsage(@CurrentCustomer() customer: AuthenticatedCustomer, @Query() query: DailyUsageQueryDto) {
+    return this.usage.forCustomer(customer.sub, { days: query.days, timeZone: query.tz });
   }
 
   /** Data used per day on one of this customer's subscriptions, every
