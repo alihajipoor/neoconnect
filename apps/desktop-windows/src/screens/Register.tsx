@@ -102,7 +102,7 @@ export function Register({
 
   if (recoveryCode !== null) {
     return (
-      <AuthFrame step="register-recovery">
+      <AuthFrame step="register-recovery" label={t("recovery.title")}>
         <div className="nx-auth-recovery">
           <RecoveryCodeNotice code={recoveryCode} onSaved={() => (onRelaySignedUp ?? onSuccess)()} />
         </div>

@@ -63,7 +63,9 @@ export function Latency({ ms, className, neutral = false }: { ms: number | null;
  *   to its entry in Iran only, and says so.
  * - `cant`: the test got no answer -- "Can't measure", with the reason. It
  *   never says the server is down or unreachable: networks drop pings, and
- *   a UDP port can only be pinged.
+ *   a UDP port can only be pinged. The reason is a tooltip and the screen
+ *   reader's words; where the list says it on the row itself (the sheet and
+ *   the page: a touch has no hover), `explained` leaves it to the row.
  * - `wait`: being measured now.
  * - `not`: never measured on this list. Distinct from `cant`.
  * - `offline`: the control plane reports the server down, so it was not
@@ -77,7 +79,7 @@ export type LatencyShown =
 
 type Say = (key: TranslationKey) => string;
 
-export function LatencyValue({ shown, t, bars = true }: { shown: LatencyShown; t: Say; bars?: boolean }) {
+export function LatencyValue({ shown, t, bars = true, explained = false }: { shown: LatencyShown; t: Say; bars?: boolean; explained?: boolean }) {
   // The figure in the reader's digits (Persian digits in Persian, as every
   // other number on the page); the unit stays "ms", short and Latin.
   const { language } = useI18n();
@@ -101,9 +103,9 @@ export function LatencyValue({ shown, t, bars = true }: { shown: LatencyShown; t
     case "cant": {
       const tip = t(shown.udp ? "loc.cantTipUdp" : "loc.cantTipTcp");
       return (
-        <span className="nx-cant" title={tip}>
+        <span className={explained ? "nx-cant said" : "nx-cant"} title={explained ? undefined : tip}>
           {t("loc.cant")}
-          <span className="nx-sr">. {tip}</span>
+          {explained ? null : <span className="nx-sr">. {tip}</span>}
         </span>
       );
     }

@@ -100,6 +100,20 @@ describe("the redesigned server list", () => {
     expect(html).not.toMatch(/\b(down|unreachable|couldn't reach)\b/i);
   });
 
+  it("says why it can't measure on the row where a touch has no hover: the sheet and the page", () => {
+    // The sheet: the short reason, shown; the tooltip and the screen
+    // reader's copy would only repeat it.
+    const sheet = render({ variant: "sheet", latencies: { "de-wg": null, "tr-ike": null } });
+    expect(text(sheet)).toContain("No answer to the ping. Many networks block pings; it may still connect.");
+    expect(sheet).not.toMatch(/class="nx-cant"[^>]*title=/);
+    // The page: the whole reason.
+    expect(text(render({ variant: "page", latencies: { "de-ws": null } }))).toContain("The timing test got no answer.");
+    // The panel, a desktop with a pointer: a tooltip and the screen reader's words.
+    const panel = render({ variant: "panel", latencies: { "de-wg": null } });
+    expect(panel).toMatch(/class="nx-cant" title="Only a ping can time this protocol/);
+    expect(text(panel)).not.toContain("No answer to the ping.");
+  });
+
   it("writes the figures in Persian digits in Persian, the latency left to right", () => {
     vi.stubGlobal("navigator", { language: "fa-IR", userAgent: "" });
     try {

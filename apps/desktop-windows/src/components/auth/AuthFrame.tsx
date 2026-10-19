@@ -20,8 +20,12 @@ import { PearlScope } from "../ui";
  *
  * The page's own column scrolls only as a last resort, for text scaled
  * past what the screen can hold; at every phone size the preview offers,
- * in both languages, each screen fits (`pnpm check:phone-fit`). */
-export function AuthFrame({ step, children }: { step: string; children: ReactNode }) {
+ * in both languages, each screen fits (`pnpm check:phone-fit`).
+ *
+ * The card is named by its step's heading (`AuthHead`). A step drawn
+ * without one -- the recovery code shown once after a sign-up or a reset --
+ * passes `label` instead, so the card's name never points at nothing. */
+export function AuthFrame({ step, label, children }: { step: string; label?: string; children: ReactNode }) {
   const { t } = useI18n();
   return (
     <PearlScope>
@@ -52,7 +56,7 @@ export function AuthFrame({ step, children }: { step: string; children: ReactNod
                 <span>{t("tagline.mobile2")}</span>
               </p>
             </div>
-            <section className="nx-glass strong nx-auth-card" aria-labelledby="nx-auth-title">
+            <section className="nx-glass strong nx-auth-card" aria-labelledby={label ? undefined : "nx-auth-title"} aria-label={label}>
               {/* Keyed, so each step rises in on its own. */}
               <div className="nx-auth-step" key={step}>
                 {children}

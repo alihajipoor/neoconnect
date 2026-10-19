@@ -3424,9 +3424,18 @@
     border-bottom: 1px dotted var(--ink-2);
     cursor: help;
   }
-  .nx-cant.off {
+  .nx-cant.off,
+  .nx-cant.said {
     border-bottom: 0;
     cursor: default;
+  }
+  .nx-row .nx-cantwhy {
+    margin-top: 1px;
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  html[lang="fa"] .nx-row .nx-cantwhy {
+    line-height: 1.75;
   }
   .nx-msr {
     display: flex;

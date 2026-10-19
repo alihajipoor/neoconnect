@@ -448,20 +448,29 @@ type FieldInputProps = InputHTMLAttributes<HTMLInputElement> & {
   label: ReactNode;
   /** A line under the field, tied to it with aria-describedby. */
   hint?: ReactNode;
+  /** "danger" when the hint says what is wrong with the value: drawn in
+   * the danger ink, and the field marked invalid. */
+  hintTone?: "danger";
   ref?: Ref<HTMLInputElement>;
 };
 
 /** A labelled text field: the label above, a hint below. Native semantics
  * left alone -- `required`, `type`, `autocomplete` stay the browser's. */
-export function TextField({ id, label, hint, className, ...input }: FieldInputProps) {
+export function TextField({ id, label, hint, hintTone, className, ...input }: FieldInputProps) {
   return (
     <div className="nx-field">
       <label htmlFor={id} className="nx-label">
         {label}
       </label>
-      <input id={id} className={cn("nx-input", className)} aria-describedby={hint ? `${id}-hint` : undefined} {...input} />
+      <input
+        id={id}
+        className={cn("nx-input", className)}
+        aria-describedby={hint ? `${id}-hint` : undefined}
+        aria-invalid={hint && hintTone === "danger" ? true : undefined}
+        {...input}
+      />
       {hint ? (
-        <p id={`${id}-hint`} className="nx-fhint">
+        <p id={`${id}-hint`} className="nx-fhint" data-tone={hintTone}>
           {hint}
         </p>
       ) : null}
@@ -478,7 +487,7 @@ export function TextField({ id, label, hint, className, ...input }: FieldInputPr
  * something nobody typed. Hidden again the moment its form is submitted,
  * before the request goes out, so it is never remembered as ordinary form
  * history. */
-export function PasswordField({ id, label, hint, ...input }: Omit<FieldInputProps, "type">) {
+export function PasswordField({ id, label, hint, hintTone, ...input }: Omit<FieldInputProps, "type">) {
   const { t } = useI18n();
   const [shown, setShown] = useState(false);
   const field = useRef<HTMLInputElement>(null);
@@ -502,6 +511,7 @@ export function PasswordField({ id, label, hint, ...input }: Omit<FieldInputProp
           type={shown ? "text" : "password"}
           className="nx-input"
           aria-describedby={hint ? `${id}-hint` : undefined}
+          aria-invalid={hint && hintTone === "danger" ? true : undefined}
           autoCapitalize="off"
           autoCorrect="off"
           spellCheck={false}
@@ -519,7 +529,7 @@ export function PasswordField({ id, label, hint, ...input }: Omit<FieldInputProp
         </button>
       </div>
       {hint ? (
-        <p id={`${id}-hint`} className="nx-fhint">
+        <p id={`${id}-hint`} className="nx-fhint" data-tone={hintTone}>
           {hint}
         </p>
       ) : null}

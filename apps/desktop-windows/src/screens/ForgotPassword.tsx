@@ -82,7 +82,7 @@ export function ForgotPassword({ onDone, onCancel }: { onDone: (notice: string) 
 
   if (nextRecoveryCode !== null) {
     return (
-      <AuthFrame step="forgot-recovered">
+      <AuthFrame step="forgot-recovered" label={t("recovery.title")}>
         <div className="nx-auth-recovery">
           <RecoveryCodeNotice
             code={nextRecoveryCode}

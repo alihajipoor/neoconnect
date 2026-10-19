@@ -154,6 +154,8 @@ describe.each([
       expect(ratio(c("field-line"), card)).toBeGreaterThanOrEqual(3);
       expect(ratio(c("placeholder"), fill)).toBeGreaterThanOrEqual(4.5);
       expect(ratio(c("ink"), fill)).toBeGreaterThanOrEqual(4.5);
+      // A field's hint that says what is wrong (`hintTone="danger"`).
+      expect(ratio(c("danger-ink"), card)).toBeGreaterThanOrEqual(4.5);
     }
   });
 });

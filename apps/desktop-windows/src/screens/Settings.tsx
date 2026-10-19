@@ -516,6 +516,7 @@ function PasswordSection() {
           id="next"
           label={t("settings.newPassword")}
           hint={tooShort ? t("settings.tooShort") : undefined}
+          hintTone="danger"
           autoComplete="new-password"
           value={next}
           onChange={(e) => setNext(e.target.value)}
@@ -524,6 +525,7 @@ function PasswordSection() {
           id="confirm"
           label={t("settings.confirmPassword")}
           hint={mismatch ? t("settings.mismatch") : undefined}
+          hintTone="danger"
           autoComplete="new-password"
           value={confirm}
           onChange={(e) => setConfirm(e.target.value)}

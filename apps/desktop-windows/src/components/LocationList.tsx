@@ -134,6 +134,8 @@ export function LocationList({
   const { t, language } = useI18n();
   const page = variant === "page";
   const quick = !page;
+  /** Whether a protocol's "Can't measure" says why on its row (above). */
+  const cantSaid = variant !== "panel";
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ListFilter>("all");
   /** Opened or closed by the customer; otherwise a place is open only when a
@@ -404,9 +406,17 @@ export function LocationList({
             ) : null
           ) : null}
           {here ? <span className={cn("nx-inuse", connectionState === "connected" && "ok")}>{here}</span> : null}
+          {/* Why it could not be timed, on the row where a touch has no
+              hover to find it: the whole reason on the page, the short one
+              in the phone's sheet. The panel keeps it as a tooltip. */}
+          {cantSaid && latency?.kind === "cant" ? (
+            <span className="s wrap nx-cantwhy">
+              {t(page ? (latency.udp ? "loc.cantTipUdp" : "loc.cantTipTcp") : latency.udp ? "loc.cantWhyUdp" : "loc.cantWhyTcp")}
+            </span>
+          ) : null}
         </span>
         <span className="end">
-          {latency ? <LatencyValue shown={latency} t={t} /> : null}
+          {latency ? <LatencyValue shown={latency} t={t} explained={cantSaid} /> : null}
           {switchingId === route.id ? (
             <Loader2 className="nx-spinning size-4" aria-hidden />
           ) : selected ? (
