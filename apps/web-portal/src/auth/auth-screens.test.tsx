@@ -255,6 +255,22 @@ describe("the portal's own words", () => {
   });
 });
 
+describe("the sign-in page", () => {
+  const app = read(new URL("../App.tsx", import.meta.url));
+
+  it("does not wait on the screens behind sign-in", () => {
+    // None of them is imported up front; each is its own file, asked for
+    // when it is opened or once the sign-in card is drawn.
+    expect(app).not.toMatch(/^import [^;]*(screens\/(Plans|Settings|Referrals|Support|Account))/m);
+    for (const name of ["Account", "Plans", "Settings", "Referrals", "Support"]) {
+      expect(app).toMatch(new RegExp(`const ${name} = lazy\\(`));
+    }
+    expect(app).toContain("<Suspense fallback={<ScreenLoading />}>");
+    expect(app).toContain("<ScreenLoadBoundary key={screen}>");
+    expect(app).toContain("setTimeout(prefetchSignedInScreens, PREFETCH_DELAY_MS)");
+  });
+});
+
 describe("everything on the page is served from this site", () => {
   const html = read(new URL("../../index.html", import.meta.url));
   const css = read(new URL("./auth.css", import.meta.url));

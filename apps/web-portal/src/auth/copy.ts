@@ -37,6 +37,9 @@ export const COPY = {
     titleRegister: "Create account",
     titleForgot: "Reset your password",
     titleVerify: "Confirm your email",
+    // A signed-in screen whose file did not arrive (App.tsx).
+    loadFailed: "Could not load this page. Reload to try again.",
+    reload: "Reload",
   },
   fa: {
     taglineWide1: "اینترنت شما.",
@@ -57,6 +60,8 @@ export const COPY = {
     titleRegister: "ساخت حساب",
     titleForgot: "بازنشانی رمز عبور",
     titleVerify: "تأیید ایمیل",
+    loadFailed: "این صفحه بارگذاری نشد. برای تلاش دوباره، صفحه را دوباره بارگذاری کنید.",
+    reload: "بارگذاری دوباره",
   },
 } satisfies Record<Language, Record<string, string>>;
 

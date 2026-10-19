@@ -1,15 +1,43 @@
-import { useEffect, useState } from "react";
+import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from "react";
 import { getTokens } from "@shared/lib/session";
-import { Plans } from "@shared/screens/Plans";
-import { Referrals } from "@shared/screens/Referrals";
-import { Support } from "@shared/screens/Support";
-import { Settings } from "@shared/screens/Settings";
-import { Account } from "./screens/Account";
 import { AuthShell, type AuthScreen } from "./auth/AuthShell";
 import { PortalLogin } from "./auth/PortalLogin";
 import { PortalRegister } from "./auth/PortalRegister";
 import { PortalVerifyEmail } from "./auth/PortalVerifyEmail";
 import { PortalForgotPassword } from "./auth/PortalForgotPassword";
+import { useCopy } from "./auth/copy";
+
+/**
+ * The screens behind sign-in, each in its own file the page asks for only
+ * when it needs it. The sign-in page is what everyone loads, often over a
+ * slow or filtered link, and it should not wait on the account, plans,
+ * settings, referrals and support screens too -- together most of the
+ * script. Once the sign-in card is drawn they are fetched in the
+ * background (prefetchSignedInScreens), so signing in rarely waits for
+ * them either.
+ */
+const SIGNED_IN = {
+  account: () => import("./screens/Account"),
+  plans: () => import("@shared/screens/Plans"),
+  settings: () => import("@shared/screens/Settings"),
+  referrals: () => import("@shared/screens/Referrals"),
+  support: () => import("@shared/screens/Support"),
+};
+const Account = lazy(() => SIGNED_IN.account().then((m) => ({ default: m.Account })));
+const Plans = lazy(() => SIGNED_IN.plans().then((m) => ({ default: m.Plans })));
+const Settings = lazy(() => SIGNED_IN.settings().then((m) => ({ default: m.Settings })));
+const Referrals = lazy(() => SIGNED_IN.referrals().then((m) => ({ default: m.Referrals })));
+const Support = lazy(() => SIGNED_IN.support().then((m) => ({ default: m.Support })));
+
+/** How long after the sign-in card is drawn the signed-in screens start
+ * downloading: after the page's own first requests, while the visitor is
+ * still typing. */
+const PREFETCH_DELAY_MS = 1500;
+
+function prefetchSignedInScreens() {
+  // A failure here is said, if it matters, when the screen is opened.
+  for (const load of Object.values(SIGNED_IN)) load().catch(() => {});
+}
 
 /**
  * The web customer portal.
@@ -110,6 +138,14 @@ export default function App() {
     document.documentElement.dataset.surface = authScreen ? "auth" : "app";
   }, [authScreen]);
 
+  // Once a sign-in step is on screen, fetch what comes after it.
+  const signingIn = authScreen !== null && authScreen !== "loading";
+  useEffect(() => {
+    if (!signingIn) return;
+    const timer = setTimeout(prefetchSignedInScreens, PREFETCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [signingIn]);
+
   if (screen === "loading") {
     content = null;
   } else if (screen === "login") {
@@ -200,5 +236,53 @@ export default function App() {
   }
 
   if (authScreen) return <AuthShell screen={authScreen}>{content}</AuthShell>;
-  return <div className="portal-frame">{content}</div>;
+  return (
+    <div className="portal-frame">
+      {/* Keyed, so a screen that failed to arrive does not stand in for
+          the next one opened. */}
+      <ScreenLoadBoundary key={screen}>
+        <Suspense fallback={<ScreenLoading />}>{content}</Suspense>
+      </ScreenLoadBoundary>
+    </div>
+  );
+}
+
+/** While a signed-in screen's file is still on its way. */
+function ScreenLoading() {
+  const copy = useCopy();
+  return (
+    <p className="py-16 text-center text-sm text-muted-foreground" role="status">
+      {copy.loading}
+    </p>
+  );
+}
+
+/** A signed-in screen whose file did not arrive -- the connection dropped,
+ * or a filter cut it. Said plainly, with the one thing that helps. */
+function LoadFailed() {
+  const copy = useCopy();
+  return (
+    <div className="flex flex-col items-center gap-4 py-16 text-center" role="alert">
+      <p className="text-sm">{copy.loadFailed}</p>
+      <button
+        type="button"
+        className="rounded-lg border border-white/15 px-4 py-2 text-sm font-medium hover:bg-white/5"
+        onClick={() => window.location.reload()}
+      >
+        {copy.reload}
+      </button>
+    </div>
+  );
+}
+
+class ScreenLoadBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    return this.state.failed ? <LoadFailed /> : this.props.children;
+  }
 }
