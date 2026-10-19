@@ -1136,7 +1136,8 @@ export type RequestFailure = {
   /** Set when the relay of last resort was dialled for this request and
    * nothing answered there either -- the one case the screens may say
    * "including the backup server" (failure-text.ts). Never set when the
-   * relay was not dialled: no consent, not Iran, no relay, the budget. */
+   * relay was not dialled -- switched off, no relay, the budget -- nor when
+   * the backend refused it for this network's region (`notForThisNetwork`). */
   relayTried?: true;
   /** Set on a sign-up that failed as `everyRouteFailed` describes, where
    * the backup route's own sign-up can be offered instead (auth.ts,
@@ -1418,7 +1419,7 @@ async function withLastResort<T>(
   relayed: (normal: RequestFailure | null) => Promise<RelayLeg<T>>,
 ): Promise<ApiResult<T>> {
   if (skipNormalRoutes()) {
-    const leg = await relayed(null);
+    const leg = notForThisNetwork(await relayed(null));
     if (leg.result) return leg.result;
     // Not sent, or sent and unanswered: the ordinary routes are asked
     // after all, and the relay is not asked twice.
@@ -1427,9 +1428,30 @@ async function withLastResort<T>(
   }
   const result = await normal(trace);
   if (result.ok || !everyRouteFailed(result, trace)) return result;
-  const leg = await relayed(result);
+  const leg = notForThisNetwork(await relayed(result));
   if (leg.result) return leg.result;
   return leg.dialled ? { ...result, relayTried: true } : result;
+}
+
+/** Whether `result` is the backend refusing a relay call for the network's
+ * region (`RELAY_REGION`): the relay is not for this network, and
+ * last-resort.ts has switched it off here for a day. */
+export function refusedForRegion(result: ApiResult<unknown>): boolean {
+  return !result.ok && result.code === "RELAY_REGION";
+}
+
+/** A relay leg the backend refused for the network's region, as one that
+ * was never dialled: what failed is still the ordinary routes, and that is
+ * what the caller says.
+ *
+ * Nothing asks before the relay is tried, and the device does not guess
+ * its country (docs/relay-last-resort.md, 2026-10-18), so abroad this
+ * refusal is the first the customer would hear of the relay. Said as
+ * itself, it put "the backup route is only for connections from inside
+ * Iran" where "could not reach Neoxify" belonged -- on a request they
+ * never chose to send that way. */
+function notForThisNetwork<T>(leg: RelayLeg<T>): RelayLeg<T> {
+  return leg.result !== null && refusedForRegion(leg.result) ? { result: null, dialled: false } : leg;
 }
 
 /** The headers of a request as a plain record with lower-case names, the

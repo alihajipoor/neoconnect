@@ -4,6 +4,7 @@ import {
   LEAD_MS,
   mayHaveReachedBackend,
   publicRequest,
+  refusedForRegion,
   relayOnly,
   SLOW_ANSWER_MS,
   STOPPED_ANSWERING,
@@ -374,10 +375,13 @@ export async function relayRegister(
  * sign-up's terms (R4.2), which asks for that sign-up's harder proof of
  * work: the backend says so with `CHALLENGE_REQUIRED` and scope
  * `relay-signup`, and the attempt is made once more with one. Null when
- * the relay was not dialled -- no consent, no relay, not Iran -- so the
- * caller keeps the ordinary routes' own failure. Runs on the relay's own
- * clock (`RELAY_CALL_MS` a call), which is how the sign-in's deadline
- * grows by the relay's budget. */
+ * the relay was not dialled -- switched off, no relay, the budget -- so the
+ * caller keeps the ordinary routes' own failure, or asks them. Null too
+ * when the backend refused the relay for this network's region
+ * (`refusedForRegion` in api.ts): the customer did not choose the relay,
+ * and what failed is the ordinary routes. Runs on the relay's own clock
+ * (`RELAY_CALL_MS` a call), which is how the sign-in's deadline grows by
+ * the relay's budget. */
 async function relaySignIn(
   email: string,
   password: string,
@@ -389,7 +393,8 @@ async function relaySignIn(
     "foreground",
     normal,
   );
-  if (challenge === null || !challenge.ok) return challenge;
+  if (challenge === null || refusedForRegion(challenge)) return null;
+  if (!challenge.ok) return challenge;
   const attempt = async (solution: Solution | undefined) =>
     (await relayOnly<LoginResult>(
       SIGN_IN_PATH,
@@ -409,10 +414,11 @@ async function relaySignIn(
       "foreground",
       normal,
     );
+    if (harder !== null && refusedForRegion(harder)) return null;
     if (harder === null || !harder.ok) return harder ?? result;
     result = await attempt(await solveQuietly(harder.data));
   }
-  return result;
+  return refusedForRegion(result) ? null : result;
 }
 
 /** The `scope` a CHALLENGE_REQUIRED refusal names, if any. */
