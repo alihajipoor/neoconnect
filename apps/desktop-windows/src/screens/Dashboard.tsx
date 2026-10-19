@@ -2269,6 +2269,25 @@ export function Dashboard({
   // runs: the probe is started by the health poll after its own status
   // returns, so one can begin while this look is already waiting on the
   // service -- and the answer is then discarded, by the mark taken here.
+  //
+  // A page timer, so it stops when the page's timers do -- seen on the VM
+  // (2026-10-19, 0.9.51 and the redesign alike): 5 to 21 s at a time,
+  // every two or three minutes, idle and connected, this poll and the
+  // health poll with it, while the page stayed visible and focused. No
+  // visibilitychange, no freeze, no long task, the same with every CSS
+  // animation off, and a separate process on the guest ran on throughout.
+  // So not Chromium's background, occlusion or freezing throttling, each
+  // of which hides or freezes the page first; what is left is the
+  // renderer not running at all, most likely on the VM's software-drawn
+  // display (VBoxSVGA, 3D off, the DevTools port open). Not seen on real
+  // hardware, and unverified there. It stays here anyway: what it changes
+  // is this page, so a poll driven from Rust would wait on the same
+  // renderer, and Tauri cannot turn throttling off on Windows (wry:
+  // unsupported). What keeps traffic in the tunnel -- the confinement, the
+  // IPv6 block, the DNS rule -- is the service's own and needs no page. A
+  // stall delays what the screen says, a dead tunnel's "You're protected"
+  // included, and the reconnect, by its length; the first look after it
+  // catches up.
   useEffect(() => {
     if (!isTunnelUp(connectionState)) return;
 
