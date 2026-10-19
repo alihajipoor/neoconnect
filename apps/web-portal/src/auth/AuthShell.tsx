@@ -192,6 +192,21 @@ function LanguageSwitch() {
   );
 }
 
+/** The step that shows a recovery code once: the card's heading, then the
+ * apps' own RecoveryCodeNotice as `children`. That component draws its own
+ * title as well; here the heading says it, so auth.css leaves the
+ * component's title row out (`.pa-recovery`) and a screen reader hears
+ * the title once, as the heading. */
+export function RecoveryStep({ children }: { children: ReactNode }) {
+  const { t } = useI18n();
+  return (
+    <div className="pa-recovery">
+      <CardHead title={t("recovery.title")} />
+      {children}
+    </div>
+  );
+}
+
 /** The card's heading and the sentence under it, shared by every step. */
 export function CardHead({ title, lead }: { title: string; lead?: ReactNode }) {
   return (

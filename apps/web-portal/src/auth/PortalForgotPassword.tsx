@@ -4,7 +4,7 @@ import { useI18n } from "@shared/lib/i18n";
 import { failureText } from "@shared/lib/failure-text";
 import { StillTrying } from "@shared/components/StillTrying";
 import { RecoveryCodeNotice } from "@shared/components/BackupRoute";
-import { CardHead } from "./AuthShell";
+import { CardHead, RecoveryStep } from "./AuthShell";
 import { Message, PasswordField, PrimaryButton, TextButton, TextField } from "./controls";
 import { toLatinDigits } from "./digits";
 
@@ -70,16 +70,13 @@ export function PortalForgotPassword({ onDone, onCancel }: { onDone: (notice: st
 
   if (nextRecoveryCode !== null) {
     return (
-      <div className="pa-recovery">
-        <h1 id="pa-title" className="pa-sr">
-          {t("recovery.title")}
-        </h1>
+      <RecoveryStep>
         <RecoveryCodeNotice
           code={nextRecoveryCode}
           lead={t("forgot.recoveryDone")}
           onSaved={() => onDone(t("forgot.done"))}
         />
-      </div>
+      </RecoveryStep>
     );
   }
 

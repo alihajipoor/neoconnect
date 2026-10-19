@@ -1,4 +1,5 @@
-import { useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { AlertCircle, CheckCircle2, Eye, EyeOff, Info } from "lucide-react";
 import { useCopy } from "./copy";
 
@@ -37,24 +38,46 @@ export function TextField({ id, label, hint, className, ...input }: InputProps) 
   );
 }
 
+/** Calls `fn` when `form` is submitted, ahead of the form's own submit
+ * handler (React's runs as the event bubbles to its root). Returns the
+ * cleanup. */
+export function beforeSubmit(form: EventTarget | null | undefined, fn: () => void): () => void {
+  if (!form) return () => {};
+  form.addEventListener("submit", fn, { capture: true });
+  return () => form.removeEventListener("submit", fn, { capture: true });
+}
+
 /** A password field with a Show toggle.
  *
  * The toggle only changes how the field draws what is typed: the value,
  * the autocomplete hint and the form it submits with are the same either
  * way. It is a real button after the input in the tab order, labelled
  * once and marked pressed while the password shows, which is how a
- * screen reader expects a toggle to speak. */
+ * screen reader expects a toggle to speak.
+ *
+ * Left to right in both languages, like the address and the codes: a
+ * password is typed as characters, not words, and in a right-to-left
+ * field the bidi algorithm reorders a shown "abc123!" into something the
+ * visitor never typed. The toggle sits at the end of that line.
+ *
+ * Hidden again the moment its form is submitted, before the request goes
+ * out: a field that is type="text" when the form submits is remembered
+ * by some browsers as ordinary form history rather than as a password. */
 export function PasswordField({ id, label, hint, ...input }: Omit<InputProps, "type">) {
   const copy = useCopy();
   const [shown, setShown] = useState(false);
+  const field = useRef<HTMLInputElement>(null);
+  useEffect(() => beforeSubmit(field.current?.form, () => flushSync(() => setShown(false))), []);
   return (
     <div className="pa-field">
       <label htmlFor={id} className="pa-label">
         {label}
       </label>
-      <div className="pa-pw">
+      <div className="pa-pw" dir="ltr">
         <input
+          ref={field}
           id={id}
+          dir="ltr"
           type={shown ? "text" : "password"}
           className="pa-input"
           aria-describedby={hint ? `${id}-hint` : undefined}

@@ -6,7 +6,7 @@ import { useStillTrying } from "@shared/lib/still-trying";
 import { relayModeActive } from "@shared/lib/last-resort";
 import { SocialSignIn } from "@shared/components/SocialSignIn";
 import { RecoveryCodeNotice } from "@shared/components/BackupRoute";
-import { CardHead } from "./AuthShell";
+import { CardHead, RecoveryStep } from "./AuthShell";
 import { Message, PasswordField, PrimaryButton, SecondaryButton, TextButton, TextField } from "./controls";
 import { useCopy } from "./copy";
 
@@ -106,12 +106,9 @@ export function PortalRegister({
 
   if (recoveryCode !== null) {
     return (
-      <div className="pa-recovery">
-        <h1 id="pa-title" className="pa-sr">
-          {t("recovery.title")}
-        </h1>
+      <RecoveryStep>
         <RecoveryCodeNotice code={recoveryCode} onSaved={() => (onRelaySignedUp ?? onSuccess)()} />
-      </div>
+      </RecoveryStep>
     );
   }
 

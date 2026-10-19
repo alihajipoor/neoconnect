@@ -787,6 +787,19 @@ html[lang="fa"] .pa-fine {
 .pa-card .border-t-white\/80 {
   border-top-color: var(--pa-ink-2);
 }
+/* RecoveryCodeNotice draws its own title (icon and "Your recovery code")
+   as its first row. On the portal the card's heading says it
+   (RecoveryStep), so that row is left out -- display:none keeps it from
+   being read out a second time, too. The shape this relies on is pinned
+   by auth-screens.test.tsx. */
+.pa-recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.pa-recovery > .flex-col > :first-child {
+  display: none;
+}
 
 /* --- Footer -------------------------------------------------------------- */
 .pa-foot {

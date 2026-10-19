@@ -19,7 +19,9 @@ vi.hoisted(() => {
 
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@shared/lib/i18n";
-import { AuthShell, LANGUAGE_STORE } from "./AuthShell";
+import { RecoveryCodeNotice } from "@shared/components/BackupRoute";
+import { AuthShell, LANGUAGE_STORE, RecoveryStep } from "./AuthShell";
+import { beforeSubmit } from "./controls";
 import { PortalLogin } from "./PortalLogin";
 import { PortalRegister } from "./PortalRegister";
 import { PortalVerifyEmail } from "./PortalVerifyEmail";
@@ -178,6 +180,61 @@ describe("the screens as rendered", () => {
     // the field it is about.
     expect(html).toMatch(/aria-describedby="password-hint"/);
     expect(html).toContain('id="password-hint"');
+  });
+
+  it("keep a password left to right in either language, toggle included", () => {
+    const html = render(
+      <PortalLogin onSuccess={noop} onNeedsVerification={noop} onGoRegister={noop} onGoForgotPassword={noop} />,
+    );
+    expect(html).toContain('<div class="pa-pw" dir="ltr">');
+    expect(html).toMatch(/<input[^>]*id="password"[^>]*dir="ltr"[^>]*type="password"/);
+  });
+
+  it("hide a shown password again before its form's own submit handler runs", () => {
+    // On the form itself, so it runs before the event reaches React's
+    // handler at the root; and synchronously (flushSync), so the field is
+    // type="password" again before that handler sends anything.
+    const form = new EventTarget();
+    let hidden = 0;
+    const stop = beforeSubmit(form, () => hidden++);
+    form.dispatchEvent(new Event("submit"));
+    expect(hidden).toBe(1);
+    stop();
+    form.dispatchEvent(new Event("submit"));
+    expect(hidden).toBe(1);
+    expect(beforeSubmit(null, noop)).toBeTypeOf("function");
+    const source = read(new URL("./controls.tsx", import.meta.url));
+    expect(source).toContain("beforeSubmit(field.current?.form, () => flushSync(() => setShown(false)))");
+  });
+
+  it("give the recovery code one heading, read out once", () => {
+    const html = render(
+      <RecoveryStep>
+        <RecoveryCodeNotice code="ABCD-EFGH" onSaved={noop} />
+      </RecoveryStep>,
+    );
+    const title = html.match(/<h1 id="pa-title" class="pa-title">([^<]+)<\/h1>/)?.[1] ?? "";
+    expect(title).not.toBe("");
+    // The apps' component sits straight inside .pa-recovery, and draws the
+    // same title in its FIRST row -- the row auth.css leaves out.
+    expect(html).toMatch(/<\/h1><\/div><div class="flex flex-col/);
+    const rootAt = html.indexOf('<div class="flex flex-col', html.indexOf("</h1>"));
+    const titleAt = html.indexOf(title, rootAt);
+    expect(titleAt).toBeGreaterThan(rootAt);
+    // Depth 1 is the component's root, 2 its first row: from that row's
+    // opening to the title, nothing may close back to the root.
+    const [, ...inside] = html.slice(rootAt, titleAt).match(/<div\b|<\/div>/g) ?? [];
+    let depth = 1;
+    for (const tag of inside) {
+      depth += tag === "</div>" ? -1 : 1;
+      expect(depth, "a row of the component closed before its title").toBeGreaterThanOrEqual(2);
+    }
+    expect(html.indexOf("ABCD-EFGH")).toBeGreaterThan(titleAt);
+    expect(read(new URL("./auth.css", import.meta.url))).toContain(".pa-recovery > .flex-col > :first-child {\n  display: none;");
+    for (const ours of ["PortalRegister", "PortalForgotPassword"]) {
+      expect(portal(ours)).toContain("<RecoveryStep>");
+      expect(portal(ours)).not.toContain('className="pa-sr"');
+    }
   });
 
   it("show the address it sent a code to, isolated left to right", () => {
