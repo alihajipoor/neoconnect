@@ -13,7 +13,7 @@ import { MapLegend } from "../components/main/MapLegend";
 import { WorldMap } from "../components/main/WorldMap";
 import { MainView } from "../components/main/MainView";
 import { LocationCard, MetricCards, SessionTray, SummaryLine, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
-import { Dialog } from "../components/overlay";
+import { Dialog, LocationSheet } from "../components/overlay";
 import { AppShell } from "../components/shell/AppShell";
 import { Banner, Note, PillButton, Segmented } from "../components/ui";
 import { MARK_TONE, type LogoTone } from "../lib/logo-geometry";
@@ -129,7 +129,9 @@ const SIZES: Record<string, [number, number, number?, number?]> = {
   "430 × 932 (large iPhone)": [430, 932, 59, 34],
 };
 
+let sampleHost = 10;
 function route(id: string, region: string, node: string, protocol: RouteOption["protocol"], transport: string | undefined, extra: Partial<RouteOption> = {}): RouteOption {
+  sampleHost += 1;
   return {
     id,
     name: id,
@@ -137,7 +139,8 @@ function route(id: string, region: string, node: string, protocol: RouteOption["
     transport,
     isRelay: false,
     location: { region, nodeName: node },
-    endpoint: { host: "203.0.113.10", port: 443 },
+    // Documentation addresses (RFC 5737), never a node's.
+    endpoint: { host: `203.0.113.${sampleHost}`, port: protocol === "WIREGUARD" ? 51820 : protocol === "IKEV2" ? 500 : 443 },
     nodeStatus: "ONLINE",
     ...extra,
   };
@@ -223,6 +226,7 @@ export function PreviewApp() {
   const sc = SCENARIOS[key];
   const [w, h, safeT = 0, safeB = 0] = SIZES[size];
   const [askOpen, setAskOpen] = useState(false);
+  const [sheet, setSheet] = useState(false);
 
   useEffect(() => effects.setTheme(theme), [theme]);
   useEffect(() => effects.setGlass(glass), [glass]);
@@ -306,6 +310,9 @@ export function PreviewApp() {
         <input type="checkbox" checked={logo} onChange={(e) => setLogo(e.target.checked)} data-testid="logo" /> Logo
       </label>
       <label>
+        <input type="checkbox" checked={sheet} onChange={(e) => setSheet(e.target.checked)} data-testid="sheet" /> Locations sheet (phone)
+      </label>
+      <label>
         Logo tone{" "}
         <select value={logoTone} onChange={(e) => setLogoTone(e.target.value as LogoTone)} data-testid="logotone">
           <option value="brand">Brand (violet to cyan)</option>
@@ -337,7 +344,20 @@ export function PreviewApp() {
         {/* The device's safe areas, which env() cannot report here. */}
         <style>{`[data-testid="frame"] .nx-app { --safe-t: var(--pv-safe-t); --safe-b: var(--pv-safe-b); }`}</style>
         {screen === "main" ? (
-          <Composed sc={sc} t={t} language={language} connectedAt={connectedAt} askOpen={askOpen} onAsk={setAskOpen} width={w} evidence={evidence} logo={logo} logoTone={logoTone} />
+          <Composed
+            sc={sc}
+            t={t}
+            language={language}
+            connectedAt={connectedAt}
+            askOpen={askOpen}
+            onAsk={setAskOpen}
+            width={w}
+            evidence={evidence}
+            logo={logo}
+            logoTone={logoTone}
+            sheet={sheet}
+            onSheet={setSheet}
+          />
         ) : (
           <PreviewPage
             key={screen}
@@ -347,6 +367,7 @@ export function PreviewApp() {
             history={pageHistory}
             network={PREVIEW_NET}
             subscription={SAMPLE_SUBSCRIPTION}
+            tunnel={sc.state}
           />
         )}
       </div>
@@ -367,7 +388,11 @@ function Composed({
   evidence,
   logo,
   logoTone,
+  sheet,
+  onSheet,
 }: {
+  sheet: boolean;
+  onSheet: (open: boolean) => void;
   sc: Scenario;
   t: T;
   language: Language;
@@ -429,12 +454,12 @@ function Composed({
   const location: TrayLocation = gaming
     ? { flag: <span className="nx-flagbox auto"><Gamepad2 aria-hidden /></span>, name: t("gaming.games"), sub: t("tr.gamesChosen", { n: formatNumber(2, language) }) }
     : sc.state === "disconnected" && !sc.timed
-      ? { flag: <span className="nx-flagbox auto"><Sparkles aria-hidden /></span>, name: t("loc.automaticShort"), sub: null, onChange: () => undefined }
+      ? { flag: <span className="nx-flagbox auto"><Sparkles aria-hidden /></span>, name: t("loc.automaticShort"), sub: null, onChange: () => onSheet(true) }
       : {
           flag: <RouteFlag region={routePlace(current).entry} exitRegion={routePlace(current).exit} label={placeLabel(current, language)} size="lg" />,
           name: placeLabel(current, language),
           sub: `${t("loc.automaticShort")} · ${protocol}`,
-          onChange: () => undefined,
+          onChange: () => onSheet(true),
         };
   const ip = ipFor(sc.state, "198.51.100.42", { gaming });
 
@@ -526,17 +551,18 @@ function Composed({
 
   const panel = (
     <LocationPicker
-      variant={layout === "narrow" ? "overlay" : "panel"}
+      variant={layout === "narrow" ? "sheet" : "panel"}
       subscriptionId="preview"
       currentRouteId={isTunnelUp(sc.state) ? current.id : undefined}
       tunnelActive={sc.state !== "disconnected"}
       connectionState={sc.state}
       initialRoutes={routes}
-      evidence={{ worked: workedPlaces, ownAt: (route) => ownWorkedAt(route, evidenceCtx), tags: true }}
+      evidence={{ places: placesEvidence(routes, evidenceCtx), worked: workedPlaces, ownAt: (route) => ownWorkedAt(route, evidenceCtx), tags: true }}
       automatic={!isTunnelUp(sc.state)}
       onChooseAutomatic={() => undefined}
-      onClose={() => undefined}
+      onClose={() => onSheet(false)}
       onSwitched={() => undefined}
+      onOpenFull={() => undefined}
       confirmPick={async () => {
         if (isTunnelUp(sc.state)) onAsk(true);
         return false;
@@ -639,6 +665,11 @@ function Composed({
           announcer={<StateAnnouncer text={`${lineWords}. ${hintText}`} />}
         />
       )}
+      {layout === "narrow" ? (
+        <LocationSheet open={sheet} title={t("loc.panelTitle")} closeLabel={t("loc.close")} onClose={() => onSheet(false)}>
+          {panel}
+        </LocationSheet>
+      ) : null}
       <Dialog
         open={askOpen}
         title={t("sw.title", { place: `${placeLabel(ROUTES[2], language)} · ${customerProtocolLabel(ROUTES[2].protocol, ROUTES[2].transport)}` })}

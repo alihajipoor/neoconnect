@@ -14,6 +14,11 @@ import { AppShell, type NavId } from "../components/shell/AppShell";
 import { PageScene } from "../components/shell/Page";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
+import { LocationPicker } from "../components/LocationPicker";
+import { Page } from "../components/shell/Page";
+import { ownWorkedAt, placesEvidence } from "../lib/map-lights";
+import { isTunnelUp } from "../lib/connection-evidence";
+import { useI18n } from "../lib/i18n";
 import type { RouteOption, Subscription } from "../lib/types";
 
 /** DEV ONLY: the screens of phase 2 in the preview -- sign-in and its steps,
@@ -25,6 +30,7 @@ import type { RouteOption, Subscription } from "../lib/types";
 
 export const PAGE_SCREENS: Record<string, string> = {
   main: "Main page",
+  locations: "Locations page",
   signin: "Sign in",
   signinNotice: "Sign in, with a notice",
   register: "Create account",
@@ -39,6 +45,7 @@ export const PAGE_SCREENS: Record<string, string> = {
 };
 
 const NAV: Record<string, NavId> = {
+  locations: "locations",
   settings: "settings",
   activity: "activity",
   activityEmpty: "activity",
@@ -56,7 +63,10 @@ export function PreviewPage({
   history,
   network,
   subscription,
+  tunnel = "disconnected",
 }: {
+  /** The tunnel state the scenario switcher has chosen, for the list. */
+  tunnel?: string;
   screen: string;
   width: number;
   routes: RouteOption[];
@@ -65,6 +75,7 @@ export function PreviewPage({
   subscription: Subscription;
 }) {
   const phone = width < 640;
+  const { t } = useI18n();
   const activity = useMemo<ActivityData>(
     () => ({
       history: withMoreTries(history, network, routes),
@@ -97,8 +108,32 @@ export function PreviewPage({
       return <VerifyEmail email="you@example.com" onVerified={noop} onGoLogin={noop} />;
   }
 
+  const ctx = { history, network, now: Date.now() };
+  const up = isTunnelUp(tunnel as never);
   const page =
-    screen === "settings" ? (
+    screen === "locations" ? (
+      <Page title={t("loc.panelTitle")} lede={t("loc.pageLede")} className="nx-locpg">
+        <LocationPicker
+          variant="page"
+          subscriptionId={subscription.id}
+          currentRouteId={up ? routes[0]?.id : undefined}
+          tunnelActive={tunnel !== "disconnected"}
+          connectionState={tunnel}
+          initialRoutes={routes}
+          automatic={!up}
+          onChooseAutomatic={noop}
+          onClose={noop}
+          onSwitched={noop}
+          confirmPick={async () => false}
+          evidence={{
+            places: placesEvidence(routes, ctx),
+            worked: new Set([...placesEvidence(routes, ctx)].filter(([, e]) => e.look === "live").map(([k]) => k)),
+            ownAt: (route) => ownWorkedAt(route, ctx),
+            tags: true,
+          }}
+        />
+      </Page>
+    ) : screen === "settings" ? (
       <Settings
         onBack={noop}
         onOpenReferrals={noop}

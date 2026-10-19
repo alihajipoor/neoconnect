@@ -27,12 +27,18 @@ if (!import.meta.env.DEV) {
 
 let callbackId = 0;
 window.__TAURI_INTERNALS__ = {
-  async invoke(cmd: string) {
+  async invoke(cmd: string, args?: { host?: string; port?: number }) {
     switch (cmd) {
       case "plugin:app|version":
         return "0.9.51-preview";
-      case "measure_latency":
-        return 40 + Math.round(Math.random() * 150);
+      case "measure_latency": {
+        // Fixed per sample host, so screenshots repeat; the UDP-only
+        // samples get no answer, as a network that drops pings gives.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        if (args?.port === 51820 || args?.port === 500) return null;
+        const octet = Number(args?.host?.split(".").pop() ?? 0);
+        return 34 + ((octet * 53) % 170);
+      }
       case "gaming_status":
         return { state: window.__NX_PREVIEW_GAMING__ ?? "off", detail: null };
       default:
