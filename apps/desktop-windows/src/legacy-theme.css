@@ -80,3 +80,33 @@
     z-index: 0;
   }
 }
+
+@layer utilities {
+  /* The two soft glows behind the sign-in screens. The shared theme dropped
+     them for the desktop, where nothing visible sat behind their blur; the
+     phone keeps its look until its own phase. */
+  .glow-backdrop::before,
+  .glow-backdrop::after {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    border-radius: 9999px;
+    filter: blur(120px);
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .glow-backdrop::before {
+    width: 20rem;
+    height: 20rem;
+    background: var(--primary);
+    top: -6rem;
+    left: -6rem;
+  }
+  .glow-backdrop::after {
+    width: 18rem;
+    height: 18rem;
+    background: var(--highlight);
+    bottom: -6rem;
+    right: -6rem;
+  }
+}
