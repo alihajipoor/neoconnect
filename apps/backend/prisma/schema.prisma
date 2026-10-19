@@ -1897,6 +1897,30 @@ model RelayTrafficBucket {
   @@map("relay_traffic_buckets")
 }
 
+/// One change an admin made through the API: who, what, when, from
+/// where (AdminAuditInterceptor). Bodies are never stored -- they carry
+/// passwords, keys and codes -- so this says that something changed and
+/// where to look, not what it became. Kept for 400 days.
+model AdminAuditEntry {
+  id      String    @id @default(uuid())
+  /// Null once the admin is deleted; `email` still says who it was.
+  adminId String?
+  email   String
+  role    AdminRole
+  method  String
+  /// The path without its query string.
+  path    String
+  status  Int
+  /// As the request reported it (clientIpOf): reported, not proven.
+  ip      String?
+
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([adminId, createdAt])
+  @@map("admin_audit_entries")
+}
+
 model EndpointBundleState {
   id String @id @default(uuid())
 

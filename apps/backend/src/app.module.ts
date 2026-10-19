@@ -44,6 +44,7 @@ import { NetworkIdentityModule } from "./modules/network-identity/network-identi
 import { IspRecommendationsModule } from "./modules/isp-recommendations/isp-recommendations.module";
 import { DeviceSlotsModule } from "./modules/device-slots/device-slots.module";
 import { RelayAuthModule } from "./modules/relay-auth/relay-auth.module";
+import { AdminAuditModule } from "./modules/admin-audit/admin-audit.module";
 
 @Module({
   imports: [
@@ -104,6 +105,8 @@ import { RelayAuthModule } from "./modules/relay-auth/relay-auth.module";
     // controller does not depend on one of them pulling it in.
     DeviceSlotsModule,
     RelayAuthModule,
+    // Every change an admin makes, logged; GET /admin/audit for the owner.
+    AdminAuditModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ClientThrottlerGuard }],
 })
