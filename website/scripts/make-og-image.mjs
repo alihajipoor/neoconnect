@@ -4,8 +4,14 @@
  *
  *   node website/scripts/make-og-image.mjs [--chrome <path to chrome>]
  *
- * Writes assets/img/og-en-v2.png and og-fa-v2.png (1200x630, the size
- * Telegram, WhatsApp, Facebook, LinkedIn and X all crop from). Needs
+ * Writes assets/img/og-en-v3.jpg and og-fa-v3.jpg (1200x630, the size
+ * Telegram, WhatsApp, Facebook, LinkedIn and X all crop from).
+ *
+ * JPEG at quality 85, not PNG. The truecolor PNGs (v2) were 260-300 KB,
+ * right at WhatsApp's commonly cited ~300 KB preview limit and heavy for a
+ * Telegram preview on a slow, filtered connection, which is where links
+ * to this site mostly get shared. The card is a soft gradient with text,
+ * which JPEG holds well at a fraction of the size. Needs
  * `puppeteer-core` (no browser download -- it drives the Chrome already
  * installed); install it in a scratch directory and set NODE_PATH, as for
  * make-fonts.mjs.
@@ -121,8 +127,8 @@ try {
     fs.writeFileSync(tmp, html(c));
     await page.goto(pathToFileURL(tmp).href, { waitUntil: 'networkidle0' });
     await page.evaluate(() => document.fonts.ready);
-    const out = path.join(site, 'assets', 'img', `og-${lang}-v2.png`);
-    await page.screenshot({ path: out, type: 'png' });
+    const out = path.join(site, 'assets', 'img', `og-${lang}-v3.jpg`);
+    await page.screenshot({ path: out, type: 'jpeg', quality: 85 });
     fs.unlinkSync(tmp);
     console.log(out, fs.statSync(out).size, 'bytes');
   }

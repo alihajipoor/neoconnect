@@ -156,7 +156,7 @@ foreach ($locales as $locale) {
                 $failures[] = $label . ' missing hreflang="' . $alt . '"';
             }
         }
-        if (!preg_match('#<meta property="og:image" content="https://[^"]+/og-' . $locale . '-v\d+\.png">#', $html)) {
+        if (!preg_match('#<meta property="og:image" content="https://[^"]+/og-' . $locale . '-v\d+\.(?:png|jpg)">#', $html)) {
             $failures[] = $label . ' og:image is not this locale\'s social card';
         }
 

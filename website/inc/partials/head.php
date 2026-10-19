@@ -97,7 +97,7 @@ $nx_preload_fonts = nx_locale() === 'fa'
 // by exact URL more or less forever; if the art changes, rename the file.
 $nx_og_image = isset($NX_OG_IMAGE)
     ? $NX_OG_IMAGE
-    : $nx_base . 'assets/img/og-' . (nx_locale() === 'fa' ? 'fa' : 'en') . '-v2.png';
+    : $nx_base . 'assets/img/og-' . (nx_locale() === 'fa' ? 'fa' : 'en') . '-v3.jpg';
 $nx_og_image_abs = rtrim(nx_cfg('site_url', ''), '/') . $nx_og_image;
 ?>
 <!doctype html>
@@ -138,7 +138,7 @@ foreach (array('en', 'fa') as $nx_alt): ?>
 <meta property="og:image" content="<?php echo nx_esc($nx_og_image_abs); ?>">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:type" content="image/png">
+<meta property="og:image:type" content="image/jpeg">
 <meta property="og:image:alt" content="<?php echo nx_e('meta.og.image_alt'); ?>">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="<?php echo nx_esc($nx_title); ?>">
