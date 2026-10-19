@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppWindow, Check, Loader2, Search } from "lucide-react";
 import { useI18n } from "@shared/lib/i18n";
-import { Button, Card, Input } from "@shared/components/ui";
+import { CardHead, Message, PillButton, Switch } from "@shared/components/ui";
 import {
   listInstalledApps,
   loadPerApp,
@@ -101,89 +101,54 @@ export function PerAppCard() {
   }
 
   return (
-    <Card className="flex flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-highlight/15 text-highlight">
-          <AppWindow className="size-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <p className="text-sm font-semibold">{t("settings.custom")}</p>
-          </div>
-          {/* Not the Windows hint: that one ends with "still new, tell us
-              if something looks wrong", which was earned by five releases
-              of a hand-built redirector. This is Android's own API doing
-              the routing, and borrowing the caveat would be theatre. */}
-          <p className="text-xs text-muted-foreground">{t("settings.customHintNative")}</p>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={settings.enabled}
-          aria-label={t("settings.custom")}
-          onClick={() => void apply({ ...settings, enabled: !settings.enabled })}
-          className={[
-            "press relative h-6 w-11 shrink-0 rounded-full border transition-colors",
-            settings.enabled
-              ? "border-transparent bg-[linear-gradient(120deg,var(--primary),var(--brand-2))]"
-              : "border-white/12 bg-white/8",
-          ].join(" ")}
-        >
-          {/* Positioned from the inline start, not from the left. Under
-              Persian the whole card mirrors, and a knob pinned to a
-              physical edge slid the wrong way: "on" sat where the eye
-              reads "off". The Windows client had the same bug in its own
-              copy of this card; both are fixed, separately, because this
-              card is Android's own -- it lists installed packages where
-              Windows browses for a .exe. */}
-          <span
-            className={[
-              "absolute top-0.5 size-4 rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.5)] transition-[inset-inline-start] duration-200",
-              settings.enabled ? "start-[1.375rem]" : "start-0.5",
-            ].join(" ")}
-          />
-        </button>
+    <div className="nx-card nx-pcard nx-perapp">
+      <div className="nx-perapp-head">
+        {/* Not the Windows hint: that one ends with "still new, tell us if
+            something looks wrong", which was earned by five releases of a
+            hand-built redirector. This is Android's own API doing the
+            routing, and borrowing the caveat would be theatre. */}
+        <CardHead icon={<AppWindow />} title={t("settings.custom")} hint={t("settings.customHintNative")} />
+        {/* The shared switch: its thumb runs from the inline start, so under
+            Persian "on" sits where the eye reads "on". */}
+        <Switch
+          checked={settings.enabled}
+          onChange={(enabled) => void apply({ ...settings, enabled })}
+          label={t("settings.custom")}
+        />
       </div>
 
       {settings.enabled ? (
-        <div className="flex flex-col gap-2">
-          {settings.packages.length === 0 ? (
-            <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-              {t("settings.customAllApps")}
-            </p>
-          ) : null}
+        <div className="nx-perapp-body">
+          {/* On with nothing chosen routes everything, and says so: an
+              empty allow-list would route nothing, which looks identical
+              to a broken tunnel. Information, not a fault. */}
+          {settings.packages.length === 0 ? <Message tone="neutral">{t("settings.customAllApps")}</Message> : null}
 
-          {error ? (
-            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {error}
-            </p>
-          ) : null}
+          {error ? <Message tone="danger">{error}</Message> : null}
 
           {apps === null && !error ? (
-            <div className="flex items-center gap-2 px-1 py-3 text-xs text-muted-foreground">
-              <Loader2 className="size-3.5 animate-spin" />
+            <p className="nx-perapp-wait" role="status">
+              <Loader2 className="animate-spin" aria-hidden />
               {t("common.loading")}
-            </div>
+            </p>
           ) : null}
 
           {apps !== null ? (
             <>
-              <div className="relative">
-                {/* Logical inset, so the glyph sits at the edge the text
-                    starts from -- under Persian a physical `left` put it
-                    on top of the first characters typed, and the padding
-                    that was meant to clear it opened a gap on the empty
-                    side instead. */}
-                <Search className="pointer-events-none absolute top-1/2 start-3 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input
+              <div className="nx-perapp-search">
+                {/* At the edge the text starts from, in either language. */}
+                <Search aria-hidden />
+                <input
+                  className="nx-input"
+                  type="search"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder={t("settings.customSearch")}
-                  className="ps-9"
+                  aria-label={t("settings.customSearch")}
                 />
               </div>
 
-              <ul className="flex max-h-80 flex-col gap-1 overflow-y-auto">
+              <ul className="nx-perapp-list">
                 {visible.map((app) => {
                   const on = selected.has(app.packageName);
                   return (
@@ -193,53 +158,44 @@ export function PerAppCard() {
                         role="checkbox"
                         aria-checked={on}
                         onClick={() => toggleApp(app.packageName)}
-                        className={[
-                          "press flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-start transition-colors",
-                          on
-                            ? "border-primary/40 bg-primary/10"
-                            : "border-white/8 bg-white/[0.025] hover:bg-white/[0.05]",
-                        ].join(" ")}
+                        className="nx-perapp-row"
                       >
                         {app.icon ? (
-                          <img src={app.icon} alt="" className="size-8 shrink-0 rounded-lg" />
+                          <img src={app.icon} alt="" className="ico" />
                         ) : (
-                          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-white/8 text-muted-foreground">
-                            <AppWindow className="size-4" />
-                          </div>
+                          <span className="ico none" aria-hidden>
+                            <AppWindow />
+                          </span>
                         )}
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-xs font-semibold">{app.label}</p>
-                          <p className="truncate text-[10px] text-muted-foreground" dir="ltr">
+                        <span className="t">
+                          <span className="n">{app.label}</span>
+                          <span className="s" dir="ltr">
                             {app.packageName}
-                          </p>
-                        </div>
-                        {on ? <Check className="size-4 shrink-0 text-primary" /> : null}
+                          </span>
+                        </span>
+                        <span className="box" aria-hidden>
+                          {on ? <Check /> : null}
+                        </span>
                       </button>
                     </li>
                   );
                 })}
-                {visible.length === 0 ? (
-                  <li className="px-1 py-3 text-xs text-muted-foreground">
-                    {t("settings.customNoMatches")}
-                  </li>
-                ) : null}
+                {visible.length === 0 ? <li className="nx-perapp-none">{t("settings.customNoMatches")}</li> : null}
               </ul>
 
               {settings.packages.length > 0 ? (
-                <Button
-                  variant="ghost"
-                  onClick={() => void apply({ ...settings, packages: [] })}
-                  className="w-full justify-center border border-white/10 text-xs"
-                >
+                <PillButton variant="ghost" size="sm" className="nx-perapp-clear" onClick={() => void apply({ ...settings, packages: [] })}>
                   {t("settings.customClear")}
-                </Button>
+                </PillButton>
               ) : null}
             </>
           ) : null}
 
-          <p className="text-[11px] text-muted-foreground">{t("settings.customApplies")}</p>
+          {/* The allow-list is fixed when the tunnel is made: it applies
+              from the next connection. */}
+          <p className="nx-perapp-note">{t("settings.customApplies")}</p>
         </div>
       ) : null}
-    </Card>
+    </div>
   );
 }

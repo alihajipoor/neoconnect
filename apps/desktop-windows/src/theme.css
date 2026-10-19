@@ -6,10 +6,9 @@
    file cannot import Tailwind twice, and because each app needs its own
    @source paths and its own idea of whether the page scrolls.
 
-   The phone client keeps its previous look until its own phase of the
-   redesign: it imports legacy-theme.css after this file, which puts the
-   old violet values back under the old token names. Nothing here may
-   assume the Pearl values are what a shared screen sees. */
+   Both clients draw every screen in it: the phone's own main page and
+   first-run disclosure moved over last, and the old violet set they kept
+   until then (legacy-theme.css) is gone. */
 
 /* --- Fonts ------------------------------------------------------------
    Bundled, never fetched: a font request at runtime fails on a censored

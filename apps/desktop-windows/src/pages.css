@@ -1770,7 +1770,7 @@
    sign-in card they take the Pearl tokens instead: text in the state's
    ink, which meets AA where the dot colour does not, and the hairlines and
    fills of the system. Unlayered, so they win over the utilities they
-   re-colour; scoped, so the phone's dashboard keeps its look. */
+   re-colour; scoped to the pages, where they are drawn. */
 :is(.nx-page, .nx-auth, .nx-dlg) {
   --warning: var(--warn-ink);
   --destructive: var(--danger-ink);

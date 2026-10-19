@@ -2,8 +2,7 @@
 @import "tw-animate-css";
 @import "./theme.css";
 /* The Pearl Glass components: the app shell, the main page and the
-   primitives in ui.tsx and overlay.tsx. Desktop only for now; the phone
-   imports it when its own phase of the redesign begins. */
+   primitives in ui.tsx and overlay.tsx. The phone imports the same file. */
 @import "./pearl.css";
 /* Sign-in, Settings and the other pages, in the same system. */
 @import "./pages.css";

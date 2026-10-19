@@ -4,11 +4,10 @@
 // Two generations live here. `Button`, `Input`, `Label`, `Card` and `Stat`
 // are the ones the screens were first written with; the Pearl Glass
 // primitives further down are the redesign's (design-system.md, section 4).
-// Inside a `PearlScope` -- every redesigned page and sign-in screen -- the
-// old four draw in the Pearl look, so the shared cards drawn inside those
-// pages (Custom mode, Gaming mode, the recovery code, Repair) match them
-// without being rewritten. Outside one -- the phone's own dashboard, which
-// keeps its look until its phase of the redesign -- they draw as before.
+// Inside a `PearlScope` -- every page and sign-in screen -- the old four draw
+// in the Pearl look, so the shared cards drawn inside those pages (Custom
+// mode, Gaming mode, the recovery code, Repair) match them without being
+// rewritten. Outside one they draw as they were first written.
 import {
   createContext,
   useContext,

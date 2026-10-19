@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Button, Card } from "@shared/components/ui";
-import { LogoMark } from "@shared/components/Logo";
-import { LANGUAGES, useI18n, type Language } from "@shared/lib/i18n";
+import { PillButton, TextLink } from "@shared/components/ui";
+import { AuthFrame, AuthHead } from "@shared/components/auth/AuthFrame";
+import { useI18n } from "@shared/lib/i18n";
 
 /** The in-app prominent disclosure Google Play requires of a VPN app.
  *
@@ -86,7 +86,7 @@ const PRIVACY_URL = "https://neoxify.net/privacy";
 const PRIVACY_URL_FA = "https://neoxify.net/fa/privacy";
 
 export function ProminentDisclosure({ onAccept }: { onAccept: () => void }) {
-  const { t, language, setLanguage } = useI18n();
+  const { t, language } = useI18n();
   const [pending, setPending] = useState(false);
 
   async function accept() {
@@ -95,54 +95,36 @@ export function ProminentDisclosure({ onAccept }: { onAccept: () => void }) {
     onAccept();
   }
 
+  // Drawn in the sign-in screens' frame (AuthFrame), which comes straight
+  // after it: the wordmark and the language switch at the top, the card
+  // below. The words, their order and when this shows are unchanged.
+  //
+  // The language switch is the frame's, above the text it governs rather
+  // than buried in Settings -- Settings does not exist yet at this point,
+  // and consenting to a document you cannot read is not consent. The
+  // language is detected here (OS locale, then the country the CDN
+  // reports), so a customer can land on the wrong one through no choice of
+  // their own; this is the only screen where that is unrecoverable.
+  // Choosing here also persists, so the country default stops overriding
+  // on later launches.
+  //
+  // The page scrolls, as it always has: the whole disclosure is read
+  // before the button that accepts it.
   return (
-    <div className="glow-backdrop flex h-full flex-col items-center overflow-y-auto p-6">
-      <div className="animate-rise flex flex-col items-center gap-3 pt-4 pb-6">
-        <LogoMark className="size-12" />
-        <span className="text-brand-gradient text-xl font-semibold tracking-tight">Neoxify</span>
-      </div>
+    <AuthFrame step="disclosure">
+      <AuthHead title={t("disclosure.title")} lead={t("disclosure.subtitle")} />
 
-      <Card className="animate-rise w-full max-w-sm" style={{ animationDelay: "90ms" }}>
-        {/* Above the text it governs, not buried in Settings -- Settings
-            does not exist yet at this point, and consenting to a document
-            you cannot read is not consent. The language is detected here
-            (OS locale, then the country the CDN reports), so a customer
-            can land on the wrong one through no choice of their own; this
-            is the only screen where that is unrecoverable. Choosing here
-            also persists, so the country default stops overriding on
-            later launches. */}
-        <div className="mb-5 flex gap-2">
-          {(Object.keys(LANGUAGES) as Language[]).map((code) => (
-            <Button
-              key={code}
-              variant={code === language ? "default" : "ghost"}
-              onClick={() => setLanguage(code)}
-              className={
-                code === language
-                  ? "h-8 flex-1 justify-center"
-                  : "h-8 flex-1 justify-center border border-white/10"
-              }
-            >
-              {LANGUAGES[code].nativeLabel}
-            </Button>
-          ))}
-        </div>
+      <section className="nx-dsc-sec">
+        <h2>{t("disclosure.vpnHeading")}</h2>
+        <p>{t("disclosure.vpnBody")}</p>
+        <p>{t("disclosure.vpnBody2")}</p>
+      </section>
 
-        <h1 className="mb-1 text-lg font-semibold">{t("disclosure.title")}</h1>
-        <p className="mb-5 text-sm text-muted-foreground">{t("disclosure.subtitle")}</p>
-
-        <h2 className="mb-2 text-sm font-medium">{t("disclosure.vpnHeading")}</h2>
-        <p className="mb-2 text-sm leading-relaxed text-muted-foreground">
-          {t("disclosure.vpnBody")}
-        </p>
-        <p className="mb-5 text-sm leading-relaxed text-muted-foreground">
-          {t("disclosure.vpnBody2")}
-        </p>
-
-        <h2 className="mb-2 text-sm font-medium">{t("disclosure.dataHeading")}</h2>
+      <section className="nx-dsc-sec">
+        <h2>{t("disclosure.dataHeading")}</h2>
         {/* A list rather than a paragraph: a reviewer checks that each
             declared data type is named here, and so can a customer. */}
-        <ul className="mb-4 flex flex-col gap-2">
+        <ul className="nx-dsc-list">
           {(
             [
               "disclosure.dataEmail",
@@ -151,31 +133,21 @@ export function ProminentDisclosure({ onAccept }: { onAccept: () => void }) {
               "disclosure.dataServerLogs",
             ] as const
           ).map((key) => (
-            <li key={key} className="flex gap-2 text-sm leading-relaxed text-muted-foreground">
-              <span aria-hidden className="mt-[7px] size-1.5 shrink-0 rounded-full bg-primary" />
-              <span>{t(key)}</span>
-            </li>
+            <li key={key}>{t(key)}</li>
           ))}
         </ul>
+        <p>{t("disclosure.dataNotSold")}</p>
+      </section>
 
-        <p className="mb-5 text-sm leading-relaxed text-muted-foreground">
-          {t("disclosure.dataNotSold")}
-        </p>
+      <TextLink strong className="nx-dsc-link" onClick={() => void openUrl(language === "fa" ? PRIVACY_URL_FA : PRIVACY_URL)}>
+        {t("disclosure.privacyLink")}
+      </TextLink>
 
-        <button
-          type="button"
-          onClick={() => void openUrl(language === "fa" ? PRIVACY_URL_FA : PRIVACY_URL)}
-          className="mb-5 text-sm font-medium text-primary underline underline-offset-4"
-        >
-          {t("disclosure.privacyLink")}
-        </button>
-
-        {/* The affirmative action Play asks for. Nothing proceeds on a
-            scroll or a back press -- only this. */}
-        <Button className="w-full" disabled={pending} onClick={() => void accept()}>
-          {t("disclosure.accept")}
-        </Button>
-      </Card>
-    </div>
+      {/* The affirmative action Play asks for. Nothing proceeds on a
+          scroll or a back press -- only this. */}
+      <PillButton className="nx-auth-submit" disabled={pending} onClick={() => void accept()}>
+        {t("disclosure.accept")}
+      </PillButton>
+    </AuthFrame>
   );
 }

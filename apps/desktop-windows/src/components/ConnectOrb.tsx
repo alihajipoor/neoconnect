@@ -82,8 +82,9 @@ export function ConnectOrb({
   disabled?: boolean;
   onToggle: () => void;
   label: string;
-  /** "pill" is the Pearl Glass connect control (the desktop main page);
-   * "orb" the dial the phone keeps until its own phase of the redesign. */
+  /** "pill" is the Pearl Glass connect control, which both clients' main
+   * pages draw; "orb" the dial they drew before it, which nothing draws any
+   * more. */
   look?: "orb" | "pill";
   /** The pill's fill and furniture (`pillFor` in lib/hero-model.ts). */
   pill?: { variant: PillVariant; arrow: boolean; progress: boolean };

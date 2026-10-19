@@ -13,15 +13,13 @@
    file, shared by reference, so the two clients cannot drift into looking
    like different products. */
 @import "../../desktop-windows/src/theme.css";
-/* The Pearl Glass components and pages: sign-in, Settings and the other
-   screens the phone shares with the desktop are drawn in them. */
+/* The Pearl Glass components and pages: every screen of the phone is
+   drawn in them -- the main page, sign-in, Settings and the rest it shares
+   with the desktop. */
 @import "../../desktop-windows/src/pearl.css";
 @import "../../desktop-windows/src/pages.css";
-/* Until the phone's own phase of the Pearl Glass redesign, its own screens
-   (the Dashboard, the disclosure) keep the colours they were drawn for:
-   the old violet set over the old token names, while App.tsx marks one of
-   them as showing (data-legacy). */
-@import "../../desktop-windows/src/legacy-theme.css";
+/* The phone's own: the first-run disclosure and the per-app card. */
+@import "./phone.css";
 
 @layer base {
   body {
@@ -57,48 +55,33 @@
     text-size-adjust: 100%;
   }
 
-  /* The root below already keeps the safe areas clear, so the Pearl
-     screens inside it add none of their own. */
-  .nx-app {
-    --safe-t: 0px;
-    --safe-b: 0px;
-  }
+  /* Edge to edge, as the screens are drawn (design-system.md 3.3): each
+     Pearl screen keeps the notch, the status bar and the gesture handle
+     clear itself, from the safe-area insets (`--safe-t` and `--safe-b`
+     on .nx-app, pearl.css) -- so the bottom nav is docked to the very
+     bottom and its glass runs under the gesture handle, and the header
+     sits under the clock's row rather than under the clock. Tauri draws
+     into the full window on Android, so nothing else does this. The sides
+     stay padded here: a phone on its side keeps its notch out of the way.
 
-  /* Keeps content clear of the notch, the status bar and the gesture
-     handle. Tauri draws into the full window on Android, so nothing does
-     this for us -- without it the header sits under the clock. */
+     A tablet needs nothing of its own any more: the shell, the sign-in
+     card and the pages lay themselves out for its width (the medium
+     layout), where the old screens were a phone column pulled out of
+     shape and had to be centred. */
   #root {
-    padding-top: env(safe-area-inset-top);
-    padding-bottom: env(safe-area-inset-bottom);
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
     box-sizing: border-box;
   }
 
-  /* Tablets. The screens are laid out for a phone and stretch to fill
-     whatever they are given, so on a 13" iPad the connect control ended
-     up floating in roughly 900px of empty space -- correct, and reading
-     as a phone app that had been pulled out of shape.
-
-     Centring the app column instead of stretching it turns that into a
-     deliberate composition: the same screen, sized to itself, sitting in
-     the middle of the display. Done here rather than per screen so
-     Settings, Support and the rest inherit it, and gated at the tablet
-     breakpoint so phones are untouched -- there the column filling the
-     screen is exactly right.
-
-     The safe-area padding above still applies; this only changes how the
-     remaining space is distributed. */
-  @media (min-width: 768px) {
-    #root {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    #root > * {
-      max-height: 100%;
-    }
+  /* The plain waits (loading, signing out) and the backup-route chip's row
+     have no .nx-app of their own: the chip's row takes the status bar's
+     inset while it shows, and the screen under it then takes none. */
+  .nx-relayrow:not(:empty) {
+    padding-top: env(safe-area-inset-top);
+  }
+  .nx-relayrow:not(:empty) + .nx-screen .nx-app {
+    --safe-t: 0px;
   }
 
   /* A tap on Android otherwise flashes a grey box over the tapped
@@ -117,4 +100,18 @@
   [role="button"] {
     -webkit-touch-callout: none;
   }
+}
+
+/* The backup-route chip in the Pearl tokens, as the desktop's title strip
+   draws it (pearl.css, .nx-tbchip): neutral, never a warning colour.
+   Unlayered, so it wins over the utilities the chip was written with. */
+.nx-relayrow {
+  background: var(--base);
+}
+.nx-relayrow span[title] {
+  border: 0;
+  background: var(--chip-bg);
+  box-shadow: inset 0 0 0 1px var(--hairline-2);
+  color: var(--ink-2);
+  font-weight: 500;
 }
