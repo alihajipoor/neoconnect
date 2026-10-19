@@ -5,10 +5,14 @@ import type { Protocol, RouteOption } from "./types";
 /** What the Activity page may say about "what works on this network".
  *
  * Read from this device's own connect history (connect-history.ts) and
- * nothing else: it never leaves the device, and nothing new is recorded to
- * draw it -- the owner's rule is that a session log stays off (2026-10-19),
- * so this shows only the per-route results the connect ladder already
- * keeps for itself.
+ * nothing else, and nothing new is recorded to draw it -- the owner's rule
+ * is that a session log stays off (2026-10-19), so this shows only the
+ * per-route results the connect ladder already keeps for itself. The file
+ * itself is not uploaded, but the same facts are not private to the
+ * device: each connect attempt is reported to the panel with its route,
+ * whether it carried traffic and the network's attestation (attempts.ts,
+ * `Dial`, `withNetwork`), which is what the per-network tags are made
+ * from. The page's lede (`act.lede`) says so.
  *
  * The same honesty rules as the map's lights (map-lights.ts):
  *  - an attempt is "worked" only when it carried verified traffic; an

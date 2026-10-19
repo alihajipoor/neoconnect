@@ -288,6 +288,17 @@ describe("what the strings are allowed to claim", () => {
     expect(fa["dash.droppedHint"]).not.toContain("خودکار");
   });
 
+  /** The Activity page shows what this device's connect history holds. The
+   * file is not uploaded, but each connect attempt is reported to the panel
+   * (attempts.ts) -- the route, whether it carried traffic, the network's
+   * attestation -- so the page may not say its facts stay on the device.
+   * Someone in Iran deciding what is safe to keep on a phone reads this. */
+  it("never says the Activity page's facts stay on the device", () => {
+    for (const lang of [en, fa]) expect(lang["act.lede"]).not.toMatch(/goes nowhere|stays on|never leaves|فرستاده نمی‌شود|می‌ماند/);
+    expect(en["act.lede"]).toMatch(/reported to Neoxify/);
+    expect(fa["act.lede"]).toContain("گزارش می‌شود");
+  });
+
   it("keeps Persian in the formal register", () => {
     // A sample of unambiguous informal (dovom-shakhs mofrad) verb endings.
     // «شما» takes «-ید»; these are the «تو» forms that have been rejected
