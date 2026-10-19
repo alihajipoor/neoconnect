@@ -156,6 +156,7 @@ html[dir="rtl"] .sw input:checked ~ .sw__track::after{transform:translateX(-20px
 @media (min-width:600px){.lane{grid-template-columns:26px minmax(0,1fr) auto auto}.lane .ms{display:block;font-size:12.5px;color:var(--ink-2);font-variant-numeric:tabular-nums}}
 
 .log{display:grid;gap:6px;max-height:248px;min-height:120px;overflow:auto;padding:12px;border-radius:12px;background:var(--field);font-size:12.5px;line-height:1.45}
+.log:focus-visible{border-radius:12px}
 .log .ln{display:grid;grid-template-columns:auto 1fr;gap:8px}
 .log time{color:var(--ink-2);font-variant-numeric:tabular-nums}
 .log .is-warn span{color:var(--warn-ink)}

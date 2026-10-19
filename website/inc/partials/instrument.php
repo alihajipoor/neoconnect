@@ -164,8 +164,12 @@ $nx_first = $nx_protocols[0];
     </p>
     <?php /* aria-live off: an ambient readout. The verdict below carries
              the same information as plain text, and is a polite live
-             region so a change of switch is announced once. */ ?>
-    <div class="log" data-log aria-live="off"></div>
+             region so a change of switch is announced once.
+             tabindex="0": once the lines pass max-height the box scrolls,
+             and a scrolling region the keyboard cannot reach fails WCAG
+             2.1.1. role="log" names what it is; the explicit aria-live
+             overrides the polite default that role carries. */ ?>
+    <div class="log" data-log role="log" tabindex="0" aria-live="off" aria-label="<?php echo nx_e('home.inst.log_label'); ?>"></div>
     <p class="verdict" data-verdict aria-live="polite"><?php echo nx_e('home.inst.verdict.open'); ?></p>
   </div>
 </div>

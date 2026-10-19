@@ -721,6 +721,7 @@ return array(
     'home.inst.flowing_relay' => 'در حال عبور، از مسیر رله',
     'home.inst.no_route' => 'راهی نمانده',
     'home.inst.log' => 'گزارش برنامه',
+    'home.inst.log_label' => 'گزارش شبیه‌سازی‌شده برنامه',
     'home.inst.log.lines' => ':n خط',
     'home.inst.log.handover' => 'جابه‌جایی :n — اکنون روی :p. اتصال قطع نشد.',
     'home.inst.log.lost' => ':p دیگر جواب نمی‌دهد:r.',

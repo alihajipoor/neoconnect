@@ -814,6 +814,7 @@ return array(
     'home.inst.flowing_relay' => 'Moving, via the relay',
     'home.inst.no_route' => 'Nothing left',
     'home.inst.log' => 'App log',
+    'home.inst.log_label' => 'Simulated app log',
     'home.inst.log.lines' => ':n lines',
     'home.inst.log.handover' => 'Handover :n — now on :p. Session held.',
     'home.inst.log.lost' => ':p stopped answering:r.',
