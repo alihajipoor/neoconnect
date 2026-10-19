@@ -923,6 +923,18 @@ html[lang="fa"] .pa-fine {
     transform: none;
   }
 }
+/* The same for less motion chosen in the portal's Settings, which the
+   effects put on <html> as data-motion (lib/effects.ts) with the system's
+   own: the sign-in honours it as the screens behind it do. */
+html[data-motion="reduce"] :is(.pa-step, .pa-hero, .pa-spin) {
+  animation: none;
+}
+html[data-motion="reduce"] :is(.pa-btn, .pa-input) {
+  transition: none;
+}
+html[data-motion="reduce"] .pa-btn:active:not(:disabled) {
+  transform: none;
+}
 @media (prefers-reduced-transparency: reduce) {
   .pa-card {
     -webkit-backdrop-filter: none !important;

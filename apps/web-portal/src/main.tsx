@@ -7,6 +7,7 @@ import { startEffects } from "@shared/lib/effects";
 import App from "./App";
 import { isFramed, showOwnTabLink } from "./frame-guard";
 import { stylesheetApplied } from "./stylesheet";
+import { keepThemeOffSignIn } from "./surface";
 import "./index.css";
 
 const root = document.getElementById("root") as HTMLElement;
@@ -20,7 +21,10 @@ if (isFramed()) {
   // before the app's first paint, and kept in step with the OS
   // (lib/effects.ts): without it a choice made in Settings was lost on
   // reload, and the OS's reduced motion reached only part of the page.
+  // The stored theme is the shared screens' alone: the sign-in follows the
+  // system (surface.ts).
   startEffects();
+  keepThemeOffSignIn();
 
   // The built page paints its canvas from inline CSS and loads the main
   // stylesheet without blocking that paint (vite.config.ts, portalHtml);

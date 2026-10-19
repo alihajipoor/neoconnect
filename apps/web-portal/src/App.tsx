@@ -1,4 +1,4 @@
-import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from "react";
+import { Component, Suspense, lazy, useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 import { getTokens } from "@shared/lib/session";
 import { AuthShell, type AuthScreen } from "./auth/AuthShell";
 import { PortalLogin } from "./auth/PortalLogin";
@@ -6,6 +6,7 @@ import { PortalRegister } from "./auth/PortalRegister";
 import { PortalVerifyEmail } from "./auth/PortalVerifyEmail";
 import { PortalForgotPassword } from "./auth/PortalForgotPassword";
 import { useCopy } from "./auth/copy";
+import { setSurface } from "./surface";
 
 /**
  * The screens behind sign-in, each in its own file the page asks for only
@@ -133,9 +134,11 @@ export default function App() {
         : null;
 
   // The canvas and map in index.html, and this surface's colours, follow
-  // the same switch.
-  useEffect(() => {
-    document.documentElement.dataset.surface = authScreen ? "auth" : "app";
+  // the same switch; so does the theme chosen in Settings, which is the
+  // shared screens' alone (surface.ts). Before the paint, so neither look
+  // is drawn for a frame in the other's colours.
+  useLayoutEffect(() => {
+    setSurface(authScreen ? "auth" : "app");
   }, [authScreen]);
 
   // Once a sign-in step is on screen, fetch what comes after it.

@@ -18,4 +18,19 @@ describe("the portal's entry", () => {
     // the app runs inside another site's frame.
     expect(started).toBeGreaterThan(main.indexOf("} else {", main.indexOf("if (isFramed())")));
   });
+
+  it("keeps the stored theme off the sign-in, which follows the system (surface.ts)", () => {
+    expect(main).toMatch(/^\s*startEffects\(\);\n\s*keepThemeOffSignIn\(\);$/m);
+    const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    // Before the paint, so neither look shows a frame in the other's colours.
+    expect(app).toMatch(/useLayoutEffect\(\(\) => \{\s*setSurface\(authScreen \? "auth" : "app"\);\s*\}, \[authScreen\]\);/);
+    expect(app).not.toContain("dataset.surface =");
+  });
+
+  it("honours less motion chosen in Settings on the sign-in too", () => {
+    const css = readFileSync(new URL("./auth/auth.css", import.meta.url), "utf8");
+    expect(css).toContain('html[data-motion="reduce"] :is(.pa-step, .pa-hero, .pa-spin) {');
+    expect(css).toContain('html[data-motion="reduce"] :is(.pa-btn, .pa-input) {');
+  });
 });
+
