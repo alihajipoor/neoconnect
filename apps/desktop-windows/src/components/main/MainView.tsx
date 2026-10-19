@@ -37,8 +37,13 @@ export interface MainSlots {
   panelLabel?: string;
   panelFlash?: number;
   tray?: ReactNode;
-  /** The art in the hero's own grid area (the ribbon), clear of every blur. */
+  /** The art in the hero's own grid area, clear of every blur. */
   art?: ReactNode;
+  /** Medium and phone layouts: the world map's stage in the hero's column,
+   * where its lights scroll with the copy (`WorldMap` host "stage"). */
+  mapStage?: ReactNode;
+  /** What the map's lights mean, in words, at the foot of the panel. */
+  legend?: ReactNode;
   announcer?: ReactNode;
 }
 
@@ -98,6 +103,7 @@ export function MainView(slots: MainSlots) {
               {slots.notes}
             </>
           )}
+          {slots.mapStage}
           {slots.modeBar}
           {slots.metrics}
         </div>
@@ -106,6 +112,7 @@ export function MainView(slots: MainSlots) {
       {slots.panel ? (
         <Glass as="aside" strong className={flash ? "nx-panel flash" : "nx-panel"} aria-label={slots.panelLabel}>
           {slots.panel}
+          {slots.legend}
         </Glass>
       ) : null}
       {slots.tray}

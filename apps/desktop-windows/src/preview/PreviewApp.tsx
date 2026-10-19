@@ -8,6 +8,8 @@ import { GamingStatusPanel } from "../components/GamingStatusPanel";
 import { LocationPicker } from "../components/LocationPicker";
 import { Decor, Hint, StateAnnouncer, StateLine, StatusChip } from "../components/main/Hero";
 import { HeroArt } from "../components/main/HeroArt";
+import { MapLegend } from "../components/main/MapLegend";
+import { WorldMap } from "../components/main/WorldMap";
 import { MainView } from "../components/main/MainView";
 import { LocationCard, MetricCards, SessionTray, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
 import { Dialog } from "../components/overlay";
@@ -22,6 +24,8 @@ import { formatDateTime, formatNumber, formatSize, sizeParts } from "../lib/loca
 import { orbTone } from "../lib/orb-caution";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import { placeLabel, routePlace } from "../lib/route-place";
+import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
+import { mapCountries, mapLights } from "../lib/map-lights";
 import type { SlotNotice } from "../lib/device-slot-notice";
 import type { RouteOption } from "../lib/types";
 
@@ -50,6 +54,10 @@ interface Scenario {
   leak?: boolean;
   gaming?: "off" | "active" | "partial" | "unknown";
   switchDialog?: boolean;
+  /** On the relay through Iran rather than the German route. */
+  relay?: boolean;
+  /** The relay is pinned, nothing is up: the quiet dashed arc. */
+  relayPinned?: boolean;
 }
 
 const SCENARIOS: Record<string, Scenario> = {
@@ -85,6 +93,9 @@ const SCENARIOS: Record<string, Scenario> = {
   ended: { label: "Plan ended", state: "disconnected", plan: "ended" },
   none: { label: "No subscription", state: "disconnected", plan: "none" },
   switch: { label: "Switch location while connected", state: "connected", timed: true, switchDialog: true },
+  relayConnected: { label: "Connected via Iran (relay), verified", state: "connected", timed: true, relay: true },
+  relayUnverified: { label: "Via Iran (relay), not confirmed", state: "unverified", relay: true },
+  relayPinned: { label: "Via Iran (relay) pinned, not connected", state: "disconnected", relayPinned: true },
   gamingOff: { label: "Gaming mode off", state: "disconnected", gaming: "off" },
   gamingOn: { label: "Gaming mode on", state: "disconnected", gaming: "active" },
   gamingUnknown: { label: "Gaming mode, status unknown", state: "disconnected", gaming: "unknown" },
@@ -118,11 +129,61 @@ const ROUTES: RouteOption[] = [
   route("de-wg", "de-germany", "node-de-1", "WIREGUARD", undefined),
   route("fi-reality", "fi-finland", "node-fi-1", "XRAY_VLESS_REALITY", undefined),
   route("fr-ss", "fr-france", "node-fr-1", "SHADOWSOCKS", undefined),
+  route("gb-reality", "gb-united-kingdom", "node-gb-1", "XRAY_VLESS_REALITY", undefined),
+  route("sg-reality", "sg-singapore", "node-sg-1", "XRAY_VLESS_REALITY", undefined),
   route("tr-ikev2", "tr-turkey", "node-tr-1", "IKEV2", undefined, {
     ispTag: { code: "failingOnYourIsp", customers: 9, outOf: 11, windowHours: 24 },
   }),
   route("ir-de", "ir-iran", "node-ir-1", "XRAY_VLESS_TLS", "WS", { isRelay: true, exitLocation: { region: "de-germany" } }),
+  route("ir-fi", "ir-iran", "node-ir-1", "XRAY_VLESS_REALITY", undefined, { isRelay: true, exitLocation: { region: "fi-finland" } }),
 ];
+
+/** DEV ONLY: what this device and other people on its network have seen,
+ * for the map's lights. The real screen reads connect-history and the
+ * route list's tags; these are samples of each. */
+const PREVIEW_NET = "preview-network";
+const EVIDENCE: Record<string, { label: string; routes: (r: RouteOption[]) => RouteOption[]; own: [string, boolean, number][] }> = {
+  mixed: {
+    label: "Mixed",
+    routes: (r) => r,
+    own: [
+      ["fi-reality", true, 2 * 60],
+      ["sg-reality", true, 5 * 60],
+      ["fr-ss", false, 60],
+    ],
+  },
+  fresh: { label: "New install", routes: (r) => r.map((x) => ({ ...x, ispTag: null })), own: [] },
+  censored: {
+    label: "Censored network",
+    routes: (r) =>
+      r.map((x) =>
+        x.id === "gb-reality"
+          ? { ...x, nodeStatus: "PENDING" as const }
+          : x.id === "ir-fi"
+            ? { ...x, ispTag: { code: "worksOnYourIsp" as const, customers: 6, outOf: 8, windowHours: 24 } }
+            : { ...x, ispTag: null },
+      ),
+    own: [
+      ["de-stealth", false, 20],
+      ["de-wg", false, 21],
+      ["fi-reality", false, 22],
+      ["fr-ss", false, 23],
+      ["tr-ikev2", false, 24],
+      ["sg-reality", false, 25],
+      ["ir-de", true, 8],
+    ],
+  },
+};
+
+function sampleHistory(routes: RouteOption[], own: [string, boolean, number][]): ConnectHistory {
+  let h: ConnectHistory = {};
+  const now = Date.now();
+  for (const [id, ok, minutesAgo] of own) {
+    const r = routes.find((x) => x.id === id);
+    if (r) h = recordAttempt(h, PREVIEW_NET, r.id, r.protocol, ok, now - minutesAgo * 60_000);
+  }
+  return h;
+}
 
 const SLOT: SlotNotice = {
   kind: "refused",
@@ -136,6 +197,8 @@ export function PreviewApp() {
   const [theme, setTheme] = useState<ThemeChoice>("system");
   const [glass, setGlass] = useState<GlassChoice>("auto");
   const [motion, setMotion] = useState<boolean>(false);
+  const [evidence, setEvidence] = useState("mixed");
+  const [ribbon, setRibbon] = useState(true);
   const sc = SCENARIOS[key];
   const [w, h] = SIZES[size];
   const [askOpen, setAskOpen] = useState(false);
@@ -196,6 +259,19 @@ export function PreviewApp() {
       <label>
         <input type="checkbox" checked={motion} onChange={(e) => setMotion(e.target.checked)} /> Reduce motion
       </label>
+      <label>
+        Map lights{" "}
+        <select value={evidence} onChange={(e) => setEvidence(e.target.value)} data-testid="evidence">
+          {Object.entries(EVIDENCE).map(([k, v]) => (
+            <option key={k} value={k}>
+              {v.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <input type="checkbox" checked={ribbon} onChange={(e) => setRibbon(e.target.checked)} data-testid="ribbon" /> Ribbon
+      </label>
     </div>
   );
 
@@ -216,7 +292,7 @@ export function PreviewApp() {
         }}
         data-testid="frame"
       >
-        <Composed sc={sc} t={t} language={language} connectedAt={connectedAt} askOpen={askOpen} onAsk={setAskOpen} width={w} />
+        <Composed sc={sc} t={t} language={language} connectedAt={connectedAt} askOpen={askOpen} onAsk={setAskOpen} width={w} evidence={evidence} ribbon={ribbon} />
       </div>
     </div>
   );
@@ -232,6 +308,8 @@ function Composed({
   askOpen,
   onAsk,
   width,
+  evidence,
+  ribbon,
 }: {
   sc: Scenario;
   t: T;
@@ -240,6 +318,8 @@ function Composed({
   askOpen: boolean;
   onAsk: (open: boolean) => void;
   width: number;
+  evidence: string;
+  ribbon: boolean;
 }) {
   const layout = width >= 900 ? "wide" : width >= 640 ? "medium" : "narrow";
   const [gamingTone, setGamingTone] = useState<ShownTone>("idle");
@@ -261,7 +341,10 @@ function Composed({
   const pill = pillFor(sc.state, press, { pressed: sc.pressed ?? false, waitingForNetwork: sc.waitingForNetwork, failed: sc.failed });
   const secondary = secondaryFor(press, { reconnecting: reconnecting !== null, failed: sc.failed ?? false });
   const hintText = sc.failed ? t("err.allProtocolsFailed") : t(headline.hint);
-  const current = ROUTES[0];
+  const sample = EVIDENCE[evidence] ?? EVIDENCE.mixed;
+  const routes = useMemo(() => sample.routes(ROUTES), [sample]);
+  const history = useMemo(() => sampleHistory(routes, sample.own), [routes, sample]);
+  const current = sc.relay || sc.relayPinned ? routes.find((r) => r.id === "ir-de")! : routes[0];
   const protocol = customerProtocolLabel(current.protocol, current.transport);
 
   const plan = sc.plan ?? "unlimited";
@@ -296,6 +379,23 @@ function Composed({
           onChange: () => undefined,
         };
   const ip = ipFor(sc.state, "198.51.100.42", { gaming });
+
+  // The map, from the same function the Dashboard uses.
+  const verified = !gaming && (sc.state === "connected" || held === "connected") ? current : null;
+  const settled = sc.state === "connected" || sc.state === "unverified" || sc.state === "degraded";
+  const mapScene = mapLights({
+    routes,
+    history,
+    network: PREVIEW_NET,
+    now: Date.now(),
+    verified,
+    tone: calmTone,
+    shown: gaming ? null : settled || sc.relayPinned ? current : null,
+  });
+  const mapPlaces = mapCountries(routes);
+  const mapAlert = Boolean(sc.offline || plan === "ended" || sc.slot || sc.failed);
+  const mapStage =
+    layout !== "wide" ? <WorldMap host="stage" lights={mapScene.lights} arc={mapScene.arc} countries={mapPlaces} ribbon={ribbon} alert={mapAlert} /> : null;
 
   const modeBar =
     plan === "none" ? null : (
@@ -376,7 +476,7 @@ function Composed({
       currentRouteId={isTunnelUp(sc.state) ? current.id : undefined}
       tunnelActive={sc.state !== "disconnected"}
       connectionState={sc.state}
-      initialRoutes={ROUTES}
+      initialRoutes={routes}
       automatic={!isTunnelUp(sc.state)}
       onChooseAutomatic={() => undefined}
       onClose={() => undefined}
@@ -405,7 +505,7 @@ function Composed({
       onOpenSupport={() => undefined}
       onSignOut={() => undefined}
       signingOut={false}
-      scene={<HeroArt tone={calmTone} busy={pill.progress} places={[]} layout={layout} />}
+      scene={<HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} ribbon={ribbon} alert={mapAlert} />}
     >
       {gaming ? (
         <MainView
@@ -414,6 +514,7 @@ function Composed({
           modeBar={modeBar}
           locationCard={<LocationCard location={location} />}
           metrics={<MetricCards plan={trayPlan} ip={ip} />}
+          mapStage={mapStage}
           tray={<SessionTray label={t("tr.location")} location={location} plan={trayPlan} ip={ip} />}
         />
       ) : (
@@ -452,6 +553,8 @@ function Composed({
           metrics={<MetricCards plan={trayPlan} ip={ip} />}
           panel={layout !== "narrow" ? panel : null}
           panelLabel={t("loc.panelTitle")}
+          legend={<MapLegend />}
+          mapStage={mapStage}
           tray={<SessionTray label={t("tr.location")} location={location} plan={trayPlan} ip={ip} />}
           announcer={<StateAnnouncer text={`${lineWords}. ${hintText}`} />}
         />

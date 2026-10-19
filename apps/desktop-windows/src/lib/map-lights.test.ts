@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { recordAttempt, type ConnectHistory } from "./connect-history";
-import { LAMP_FRESH_MS, LAMP_MAX_ANIM, mapLights, placeEvidence, verifiedTone, type MapLightsInput } from "./map-lights";
+import { LAMP_FRESH_MS, LAMP_MAX_ANIM, mapCountries, mapLights, placeEvidence, verifiedTone, type MapLightsInput } from "./map-lights";
 import type { ShownTone } from "./hero-model";
 import type { RouteOption } from "./types";
 
@@ -236,5 +236,12 @@ describe("mapLights", () => {
     expect(s.lights.filter((l) => l.look === "live")).toHaveLength(12);
     expect(s.lights.filter((l) => l.anim)).toHaveLength(LAMP_MAX_ANIM);
     expect(light(s, "gb")).toMatchObject({ exit: true, anim: true });
+  });
+});
+
+describe("mapCountries", () => {
+  it("names every country the list can light or leave from, once, in list order", () => {
+    const routes = [DE_REALITY, relay("ir-fr", "fr-france"), FI, DE_WG, route("jp", "jp-japan", "WIREGUARD")];
+    expect(mapCountries(routes)).toEqual(["de", "ir", "fr", "fi"]);
   });
 });

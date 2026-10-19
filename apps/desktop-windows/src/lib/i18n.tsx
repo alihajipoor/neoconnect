@@ -1210,6 +1210,14 @@ const en = {
   "decor.stream": "Stream",
   "decor.work": "Work",
   "decor.anywhere": "Anywhere",
+  "map.legend": "Map lights, for the network you're on now",
+  "map.live": "Worked here",
+  "map.idle": "Not proven yet",
+  "map.down": "Offline or failing",
+  "map.liveTip": "Carried traffic on this network lately: on this device, or for most people on this network.",
+  "map.idleTip": "Listed, but nothing shows yet whether it works on this network. A latency number does not count.",
+  "map.downTip": "Neoxify reports it offline, or everything tried there lately failed on this network.",
+  "map.hereTip": "Where your verified connection leaves from.",
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -1933,6 +1941,14 @@ const fa: Record<TranslationKey, string> = {
   "decor.stream": "تماشا",
   "decor.work": "کار",
   "decor.anywhere": "هر جا",
+  "map.legend": "چراغ‌های نقشه، برای شبکه‌ای که اکنون در آن هستید",
+  "map.live": "اینجا کار کرده",
+  "map.idle": "هنوز تأیید نشده",
+  "map.down": "خاموش یا ناموفق",
+  "map.liveTip": "اخیراً در این شبکه ترافیک را رسانده است: در این دستگاه، یا برای بیشتر کاربران این شبکه.",
+  "map.idleTip": "در فهرست هست، اما هنوز چیزی نشان نمی‌دهد که در این شبکه کار می‌کند یا نه. عدد تأخیر به حساب نمی‌آید.",
+  "map.downTip": "نئوکسیفای آن را خاموش گزارش می‌کند، یا هرچه اخیراً آنجا امتحان شد در این شبکه ناموفق بود.",
+  "map.hereTip": "جایی که اتصالِ تأییدشده‌ی شما از آن خارج می‌شود.",
 };
 
 /** Exported for the honesty tests in `i18n.test.ts`, which assert things

@@ -147,7 +147,10 @@ import { AppShell } from "../components/shell/AppShell";
 import { MainView } from "../components/main/MainView";
 import { Decor, Hint, StateAnnouncer, StateLine, StatusChip } from "../components/main/Hero";
 import { LocationCard, MetricCards, SessionTray, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
-import { HeroArt, type HeroPlace } from "../components/main/HeroArt";
+import { HeroArt } from "../components/main/HeroArt";
+import { MapLegend } from "../components/main/MapLegend";
+import { WorldMap } from "../components/main/WorldMap";
+import { mapCountries, mapLights } from "../lib/map-lights";
 import { Sheet } from "../components/Sheet";
 import {
   chipFor,
@@ -167,7 +170,7 @@ import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { GamingStatusPanel } from "../components/GamingStatusPanel";
 import { Logo } from "../components/Logo";
 import { RouteFlag } from "../components/Flag";
-import { groupByPlace, placeKey, placeLabel, routePlace } from "../lib/route-place";
+import { placeKey, placeLabel, routePlace } from "../lib/route-place";
 import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { RepairNetwork } from "../components/RepairNetwork";
@@ -520,6 +523,11 @@ export function Dashboard({
    * interval without depending on which render created it. */
   const settledRouteRef = useRef<string | null>(null);
   settledRouteRef.current = protocolUser?.routeId ?? null;
+  /** The route the tunnel was on the last time traffic was verified, for
+   * the world map's connected light. Drawn only while the screen wears the
+   * verified tone (`mapLights`), so it holds through a brief gap exactly as
+   * the chip's colour does and never stands for an unconfirmed tunnel. */
+  const verifiedRouteRef = useRef<RouteOption | null>(null);
   /** Which network we are on, so "what worked here last time" means
    * here and not somewhere else. Null when it cannot be determined. */
   const [networkId, setNetworkId] = useState<string | null>(null);
@@ -4053,31 +4061,28 @@ export function Dashboard({
     : null;
   const ip = ipFor(connectionState, exitIp, { gaming });
 
-  // One light per place in the list, with what is known about each: a
-  // verified tunnel there, a tunnel there not yet verified, or a real
-  // reason to say it works on this network (this device's last success
-  // here, or most people on this network succeeding). Nothing guessed.
-  const goodHere = lastGoodFor(lastGood, networkId);
-  const heroPlaces: HeroPlace[] = [];
-  for (const route of groupByPlace(routes)) {
-    const key = placeKey(route);
-    const place = routePlace(route);
-    const here = currentRoute !== undefined && currentRoute !== null && placeKey(currentRoute) === key;
-    const known = heroPlaces.find((p) => p.key === key);
-    const worked = route.id === goodHere || route.ispTag?.code === "worksOnYourIsp";
-    if (known) {
-      known.workedHere ||= worked;
-      continue;
-    }
-    heroPlaces.push({
-      key,
-      exit: place.exit ?? place.entry,
-      via: place.exit ? place.entry : undefined,
-      connected: here && !gaming && connectionState === "connected",
-      inUse: here && !gaming && isTunnelUp(connectionState) && connectionState !== "connected",
-      workedHere: worked,
-    });
-  }
+  // The world map's lights (lib/map-lights.ts): one per country in the
+  // list, twinkling only on evidence that traffic was carried on this
+  // network lately -- this device's own verified connects, or the server's
+  // per-network tags -- and never on a latency number. Recomputed from the
+  // route list, the connect history and the network, which change only
+  // when evidence settles (a pass ends, the list arrives), and from the
+  // minute, so evidence expires; never per rung of the ladder.
+  if (!gaming && connectionState === "connected" && currentRoute) verifiedRouteRef.current = currentRoute;
+  // The arc's route: the pin while nothing has settled, the route the
+  // tunnel settled on once one has.
+  const settledNow = connectionState === "connected" || connectionState === "unverified" || connectionState === "degraded";
+  const arcRoute = gaming ? null : settledNow ? currentRoute : chosenRouteId ? (routes.find((r) => r.id === chosenRouteId) ?? null) : null;
+  const mapScene = mapLights({
+    routes,
+    history,
+    network: networkId,
+    now: Math.floor(now / 60_000) * 60_000,
+    verified: gaming ? null : verifiedRouteRef.current,
+    tone: calmTone,
+    shown: arcRoute,
+  });
+  const mapPlaces = mapCountries(routes);
 
   const planName = usage && usage.cap === null ? t("tr.planUnl") : subscription ? t("tr.plan") : null;
   const planLine =
@@ -4225,6 +4230,14 @@ export function Dashboard({
     </>
   );
   const bannerShowing = Boolean(error || offlineSince !== null || endedState);
+  /** A message the customer must read: the compact window's band of lights,
+   * and a phone's map, give way to it. */
+  const mapAlert = bannerShowing || slotShowing || connectionError !== null;
+  /** Medium and phone windows: the map in the hero's column. */
+  const mapStage =
+    layout !== "wide" ? (
+      <WorldMap host="stage" lights={mapScene.lights} arc={mapScene.arc} countries={mapPlaces} alert={mapAlert} />
+    ) : null;
 
   // The one location list: the panel beside the hero, or a sheet on a
   // phone-sized window. One element either way.
@@ -4352,7 +4365,7 @@ export function Dashboard({
           <CommunityLinks />
         </>
       }
-      scene={<HeroArt tone={calmTone} busy={busy} places={heroPlaces} layout={layout} />}
+      scene={<HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} alert={mapAlert} />}
     >
       {gaming && subscription && !error ? (
         <MainView
@@ -4366,6 +4379,7 @@ export function Dashboard({
           modeBar={modeBar}
           locationCard={<LocationCard location={trayLocation} />}
           metrics={<MetricCards plan={trayPlan} ip={ip} />}
+          mapStage={mapStage}
           tray={<SessionTray label={t("tr.location")} location={trayLocation} plan={trayPlan} ip={ip} />}
         />
       ) : (
@@ -4430,6 +4444,8 @@ export function Dashboard({
           panel={layout !== "narrow" ? picker : null}
           panelLabel={t("loc.panelTitle")}
           panelFlash={panelFlash}
+          legend={routes.length > 0 ? <MapLegend /> : null}
+          mapStage={mapStage}
           tray={<SessionTray label={t("tr.location")} location={trayLocation} plan={trayPlan} ip={ip} />}
           announcer={<StateAnnouncer text={announcement} />}
         />

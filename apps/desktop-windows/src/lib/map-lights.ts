@@ -241,3 +241,15 @@ export function mapLights(input: MapLightsInput): MapScene {
   for (const light of movers.slice(0, LAMP_MAX_ANIM)) light.anim = true;
   return { lights, arc };
 }
+
+/** Every country this list can light or leave from, in list order: the
+ * light's country of each place, and each relay's exit. The map fits its
+ * box around these and keeps the ribbon clear of them, so the placement
+ * follows the route list alone and nothing moves on a connect. */
+export function mapCountries(routes: readonly Placed[], drawable: (cc: string) => boolean = anchored): string[] {
+  const out = new Set<string>();
+  for (const route of routes) {
+    for (const cc of [lightCountry(route), exitCountry(route)]) if (cc && drawable(cc)) out.add(cc);
+  }
+  return [...out];
+}
