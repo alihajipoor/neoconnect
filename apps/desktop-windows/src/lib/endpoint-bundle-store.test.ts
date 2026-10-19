@@ -470,3 +470,55 @@ describe("refresh through the relay", () => {
     await expect(mod.maybeRefreshBundleThroughRelay(() => Promise.reject(new Error("relay")))).resolves.toBeUndefined();
   });
 });
+
+/** The relay's refresh waits on relay calls queued ahead of it, and an
+ * ordinary address can answer meanwhile, which starts the other. Side by
+ * side, each compared what it fetched with the lists held when it began,
+ * and the later to finish stored its list over the newer one. */
+describe("two refreshes at once", () => {
+  afterEach(() => {
+    store.get.mockReset();
+    store.set.mockReset();
+  });
+
+  it("never store an older list over the one the other just adopted", async () => {
+    const mod = await builtWithSeed(7);
+    const held = await sealed(100);
+    const slots = slotted({ bundle: held, offline: held });
+    const newer = await sealed(120);
+    const older = await sealed(110);
+
+    /** Answers the offline path once `open` is called; anything else is
+     * a 404. */
+    function gated(body: string) {
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => (open = () => resolve()));
+      const asked: string[] = [];
+      const fetcher = async (url: string) => {
+        asked.push(url);
+        if (!url.endsWith("/endpoints/bundle")) return { ok: false, text: () => Promise.resolve("") };
+        await opened;
+        return okResponse(body);
+      };
+      return { fetcher, asked, open };
+    }
+    const relay = gated(newer);
+    const ordinary = gated(older);
+
+    const throughRelay = mod.refreshFrom("", relay.fetcher);
+    const direct = mod.refreshFrom("https://a.example.net/api", ordinary.fetcher);
+    await vi.waitFor(() => expect(relay.asked).toContain("/endpoints/bundle"));
+    // Time for a second refresh not made to wait to read the store and
+    // ask; it then holds v100 as the list to beat.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    relay.open();
+    expect((await throughRelay)?.v).toBe(120);
+    ordinary.open();
+    expect((await direct)?.v).toBe(120);
+
+    expect(slots.get("bundle")).toBe(newer);
+    expect(slots.get("offline")).toBe(newer);
+    expect((await mod.cachedBundle())?.v).toBe(120);
+  });
+});

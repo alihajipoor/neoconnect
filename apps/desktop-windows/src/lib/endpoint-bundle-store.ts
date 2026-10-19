@@ -185,8 +185,28 @@ async function fetchVerified(url: string, fetcher: Fetcher): Promise<{ bundle: E
  * Returns the bundle now in force, which may be the one already held.
  * Never throws: this runs alongside real work and a failure here must
  * never be the reason a request did not happen.
+ *
+ * One at a time (`refreshing`).
  */
-export async function refreshFrom(base: string, fetcher: Fetcher): Promise<EndpointBundle | null> {
+export function refreshFrom(base: string, fetcher: Fetcher): Promise<EndpointBundle | null> {
+  const turn = refreshing.then(() => refreshOnce(base, fetcher));
+  refreshing = turn.catch(() => undefined);
+  return turn;
+}
+
+/** The refresh under way, which the next one waits for.
+ *
+ * Two can be asked for at once: the relay's, whose calls queue behind
+ * other relay calls at up to twelve seconds each, and the ordinary one,
+ * when an ordinary address answers meanwhile. Each compares what it
+ * fetches with the lists held when it began, so side by side the later to
+ * finish stored a genuine but older list over the newer one the other had
+ * just adopted -- in either slot, and exactly the walk-back `isNewer`
+ * exists to refuse. One after the other, each begins from what the last
+ * one stored. */
+let refreshing: Promise<unknown> = Promise.resolve();
+
+async function refreshOnce(base: string, fetcher: Fetcher): Promise<EndpointBundle | null> {
   let held = await cachedBundle();
   let offline = (await storedList(OFFLINE_KEY))?.bundle ?? null;
   for (const path of [SERVER_BUNDLE_PATH, BUNDLE_PATH]) {
