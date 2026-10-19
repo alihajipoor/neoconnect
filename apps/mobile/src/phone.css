@@ -272,7 +272,10 @@
     text-align: right;
   }
   /* The box the check sits in: its outline says "can be chosen" without
-     colour, the cobalt fill and the check say "chosen". */
+     colour, the cobalt fill and the check say "chosen". The outline is a
+     control's edge, so it takes the fields' outline (pages.css), at least
+     3:1 against the list in both themes (WCAG 1.4.11); --ink-3 was about
+     2.8:1 on the light list. */
   .nx-perapp-row .box {
     width: 22px;
     height: 22px;
@@ -280,7 +283,7 @@
     display: grid;
     place-items: center;
     border-radius: 7px;
-    box-shadow: inset 0 0 0 1.5px var(--ink-3);
+    box-shadow: inset 0 0 0 1.5px var(--field-line);
     color: var(--on-cobalt);
   }
   .nx-perapp-row[aria-checked="true"] .box {
