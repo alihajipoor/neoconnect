@@ -49,39 +49,93 @@ Two honesty notes that come with it:
 - **No raster image on any page.** The art is HTML, CSS and one SVG (the
   map, used as a CSS mask, one cached request for the whole site).
 
-Lighthouse on a local preview, mobile and desktop, English and Persian,
-scored 100 in all four categories on the main pages -- the numbers and
-reports are in the branch's write-up, not here, because they go stale.
+Lighthouse scores for this branch were measured on a **local preview**,
+mobile and desktop, English and Persian -- not on the live host. Since
+2026-10-19 that preview imitates the live shared host as measured (its
+fallback to `/index.php`, gzip only, its four headers, and static files
+with only an ETag and Last-Modified); before that it imitated
+`nginx-website.conf.example`, with brotli and a year's cache, which the
+host does not have. The numbers and reports are in the branch's write-up,
+not here, because they go stale. **After deploying, run PageSpeed
+Insights on the live URLs** -- that is the measurement that counts.
+
+**Caching on the live host.** The shared nginx sends fonts, `site.js`,
+the map and the images with an ETag and Last-Modified but no
+`Cache-Control` or `Expires`, so browsers fall back to heuristic
+caching and revalidate sooner than they need to. The files are already
+safe to cache for a year (their names or a `?v=` stamp change when they
+do). Ask the host operator whether the hosting panel allows **per-site**
+directives -- `Cache-Control: public, max-age=31536000, immutable` on
+`/assets/` -- and if it does not, accept heuristic caching. Nothing
+server-wide.
 
 ### Security headers
 
-`inc/headers.php` sends the full set from PHP on **every** response,
-including redirects, the sitemap and the 404: HSTS (two years,
-`includeSubDomains`, preload-ready -- actually submitting to the preload
-list is a separate, near-irreversible decision for the owner),
-`X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options: DENY`,
-`Permissions-Policy`, `Cross-Origin-Opener-Policy` and
-`Cross-Origin-Resource-Policy`, and a Content-Security-Policy with **no**
-`'unsafe-inline'` and **no** `'unsafe-eval'`: the inline stylesheet and the
-loader are each allowed by their SHA-256, computed from the exact bytes the
-page emits, plus `'strict-dynamic'`, `object-src 'none'`,
-`base-uri 'none'`, `frame-ancestors 'none'`.
+The live host is a **shared box** (owner, 2026-10-19): it serves other
+sites and a hosting panel, and its nginx is not ours to configure. So the
+headers come from PHP, `inc/headers.php`, on **every** response it makes
+-- pages, redirects, the sitemap and the 404 -- with one rule: **never a
+header twice.**
 
-Because PHP sends them, a missed server-config install no longer leaves
-the pages bare (which is what happened for months). The nginx example adds
-the same fixed set to static files and hides PHP's copies so nothing is
-sent twice; the CSP stays PHP's alone (a second, static CSP would be
-enforced too and block the page's own CSS). `.htaccess` does the same for
-Apache.
+That nginx already adds four headers to every response, PHP's included
+(measured 2026-10-19): `Strict-Transport-Security: max-age=31536000;
+includeSubDomains`, `X-Frame-Options: SAMEORIGIN`,
+`X-Content-Type-Options: nosniff` and `Referrer-Policy:
+strict-origin-when-cross-origin`. `inc/config.php` lists them as
+`headers_sent_by_server` and PHP skips exactly those. PHP sends the rest:
+`Permissions-Policy`, `Cross-Origin-Opener-Policy`,
+`Cross-Origin-Resource-Policy`, and a Content-Security-Policy with **no**
+`'unsafe-inline'` and **no** `'unsafe-eval'`: the inline stylesheet and
+the loader are each allowed by their SHA-256, computed from the exact
+bytes the page emits, plus `'strict-dynamic'`, `object-src 'none'`,
+`base-uri 'none'`, `frame-ancestors 'none'`. (`frame-ancestors` is what
+current browsers obey, so the host's SAMEORIGIN does not weaken framing
+protection.) On a host that sends none of the four, empty the list and
+PHP sends the full set, its own HSTS being two years with
+`includeSubDomains`.
+
+**HSTS is not preload-ready, on purpose.** The `preload` token is the
+signal hstspreload.org acts on, and its form does not check who owns the
+domain; inclusion locks HTTPS onto neoxify.net and every name under it in
+shipped browsers and takes months to undo. It goes back in (`headers.php`,
+`.htaccess`, the nginx example) only when the owner decides to submit,
+after confirming every neoxify.net name serves HTTPS -- and the host's own
+HSTS header would then need the same change.
+
+**After every deploy, look at the headers of a real response** (a page
+and a static file). `headers_sent_by_server` describes a server we do
+not control; if the host changes, so must the list.
+
+`.htaccess` unsets PHP's copies and sets the fixed set once, for Apache.
+`nginx-website.conf.example` is kept for the day the site has a server of
+its own; it is **not** for today's host.
+
+### Structured data
+
+`inc/partials/schema.php` describes only what can be checked against the
+product. Two consequences worth knowing before opening Search Console:
+
+- **The two SoftwareApplication nodes will be listed as invalid** in the
+  "Software apps" report. Google shows that rich result only with an
+  `aggregateRating` or a `review`, and there are no reviews. That stays
+  true until real ones exist. Never add a rating to clear the report.
+- The Organization and the WebSite are one entity each, on every page in
+  both languages: named "Neoxify" with the Persian name as
+  `alternateName`. The Product and the apps are described in the page's
+  language, under a per-locale `@id`.
 
 ## Before it goes live
 
-Four things need a decision from you. The site runs without them, but it will
-say the wrong thing until they are done.
+These need a decision or an action from you. The site runs without them,
+but it will say the wrong thing, or less than it could, until they are
+done.
 
 | What | Where | Why |
 |---|---|---|
-| **The nginx config** | `nginx-website.conf.example` | Not optional and not deployed. Without it there is no 404 handler, `/sitemap.xml` serves the home page, the voucher short links do nothing and `www.` serves a duplicate site. See the deploy note below. |
+| **Check the live responses** | -- | Routing (real 404s, `/sitemap.xml`, `/r/CODE`, `www.` to the apex) is done in PHP and was tested on a preview that imitates the shared host, not on the host. After deploying, check each of those URLs and the headers of a page and a static file. |
+| **Download links from Iran** | `inc/config.php` | `windows_installer_url` and `android_installer_url` point at connect.neoxify.site, and neoxify.site is recorded as blocked as a whole in Iran (DNS injection and SNI resets). A visitor there without a VPN reaches the page and the download fails. Serving the installers from neoxify.net itself, or from a domain not blocked there, is your call; either way it stays unverified until testers inside Iran confirm it. |
+| **"Without limits." beside capped plans** | `inc/lang/*.php` | The app's tagline, approved 2026-10-18, is the h1 and is on the social cards. On a sales page whose plans are capped (one device, two devices, 30 GB), a reader can take it as a promise. Keep it, or qualify it in the hero lede; the plan copy states the limits plainly either way. |
+| **Static caching** | the host | See *Caching on the live host* above: ask whether per-site `Cache-Control` on `/assets/` is allowed. |
 | **Real prices** | `inc/content/plans.php` | Reconciled against the panel's `subscription_plans` table on 2026-08-24 — Ultimate was live at the wrong price with a dead button. Nothing enforces the match, so change this file in the same sitting you change a plan in the panel. |
 | **Persian review** | `inc/lang/fa.php` | The translation was drafted, not written by a native speaker. Any line you delete falls back to English automatically, so it is safe to remove one you don't like. |
 | **Send a real test message** | — | Submit the contact form once on the live host and confirm it reaches `info@neoxify.com` — including checking the spam folder. See the domain-split note below for why this needs verifying rather than assuming. |
@@ -208,17 +262,35 @@ The script uses `zip` when it exists, then Python's zipfile, then Node
 (`scripts/make-zip.mjs`) -- the owner's Windows PC has only the last. All
 three write forward-slash entry names and exclude the same files.
 
+### Routing, and why it is in PHP
+
+The shared nginx sends any path it cannot match to a file to
+`/index.php`, and never reads `.htaccess`. Measured 2026-10-19: unknown
+URLs, `/sitemap.xml` and `/r/CODE` all returned the home page with a
+200, and `www.neoxify.net` served a full copy. So the top of
+`index.php` routes, before anything else: `/` and `/index.php` render
+the home page, `/sitemap.xml` requires `sitemap.php`, `/r/CODE` hands
+the code to `r/index.php`, and **anything else renders `404.php` with a
+404** (in Persian under `/fa/`). `inc/bootstrap.php` 301s any `www.`
+host to `site_url`. None of it needs server configuration, and on Apache
+`.htaccess` does the same in front of it.
+
 ### Previewing on a machine with no PHP
 
 The owner's PC has no PHP binary, and Smart App Control may block a freshly
 downloaded native one. PHP compiled to WebAssembly runs fine: install
 `@php-wasm/node` and `@php-wasm/universal` (npm, 3.x) in a scratch folder
 and serve the site through a small Node HTTP server that runs each `.php`
-request in the PHP 7.4 runtime (the host's minimum) and mirrors the nginx
-routing -- real 404s, `/sitemap.xml`, `/r/CODE`, trailing-slash 301s. Two
-quirks of that runtime, neither a site bug: `flock()` fails on a
-host-mounted folder (mount `data/` in memory or the forms report a storage
-failure), and `mail()` does nothing.
+request in the PHP 7.4 runtime (the host's minimum) and **imitates the
+live host, not an ideal one**: real files as themselves, trailing-slash
+301s, everything else to `/index.php`, the host's four headers added to
+every response, gzip only, and no cache headers on static files.
+`scripts/dev-router.php` does the same for `php -S`. A preview that does
+more than the host -- the routing, say -- passes checks production fails;
+that is how the soft-404s went unnoticed. Two quirks of the WebAssembly
+runtime, neither a site bug: `flock()` fails on a host-mounted folder
+(mount `data/` in memory or the forms report a storage failure), and
+`mail()` does nothing.
 
 ## Where form submissions go
 
@@ -232,17 +304,11 @@ browser request executes it and returns nothing, and `data/.htaccess` denies
 access outright — two independent layers, because a shared host that quietly
 ignores `.htaccess` should not be able to leak anyone's message.
 
-> **The live host is one of those, and it is not shared hosting.**
-> (Since the 2026-10 redesign PHP sends the security headers itself --
-> see *Security headers* above -- but the rest of this stands.)
-> neoxify.net is served by nginx, which never reads `.htaccess` at all —
-> so on the live site the guard line is the *only* layer, and the CSP,
-> the other security headers, `ErrorDocument 404` and the `/r/CODE`
-> rewrite are all inert. Measured 2026-08-14 against the running site,
-> not assumed: no CSP header on any response, `GET /r/ABCD2345` returns
-> the home page with a 200 instead of redirecting, and so does any
-> mistyped URL. `nginx-website.conf.example` in this directory is the
-> same posture written for nginx; it has to be installed by hand.
+> **The live host is one of those.** It is a shared nginx box (owner,
+> 2026-10-19) that never reads `.htaccess`, so on the live site the
+> guard line is the *only* layer protecting `data/`. The routing and the
+> security headers no longer depend on the server -- see *Routing* and
+> *Security headers* above.
 
 ### The domain split, and why it affects mail
 
@@ -291,11 +357,12 @@ are stored only as salted hashes.
 ## Structure
 
 ```
-index.php  features/  pricing/  faq/  download/
+index.php                                         home page, and the router
+features/  pricing/  faq/  download/
 contact/  reseller/  privacy/  delete-account/    English pages
 fa/                                               Persian mirror of all nine
-404.php                                           real 404, needs the server config
-sitemap.php  robots.txt                           /sitemap.xml rewrites to the first
+404.php                                           real 404, routed to by index.php
+sitemap.php  robots.txt                           /sitemap.xml is routed to the first
 inc/bootstrap.php                                 config, locale, helpers
 inc/config.php                                    the file you edit
 inc/lang/{en,fa}.php                              every string on the site
@@ -316,7 +383,6 @@ scripts/make-fonts.mjs                            rebuilds the font subsets
 scripts/make-og-image.mjs                         renders the social cards (Chrome)
 scripts/make-icons.py                             the raster icons, from brand/
 scripts/make-zip.{py,mjs}                         zip fallbacks for make-zip.sh
-data/                                             runtime only, never committed
 data/                                             runtime only, never committed
 ```
 
