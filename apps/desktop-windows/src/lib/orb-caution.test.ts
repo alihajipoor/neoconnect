@@ -9,6 +9,7 @@ import {
   nextOrbLook,
   orbTone,
   type CautionState,
+  type HoldContext,
   type OrbLook,
   type OrbTone,
 } from "./orb-caution";
@@ -284,9 +285,106 @@ describe("the orb's look over a short gap in a confirmed session", () => {
   it("never holds a look the session has not had: a first look, or one after a connect, is shown as it is", () => {
     expect(held(["unverified", "unverified"])).toEqual(["unverified", "unverified"]);
     expect(held(["connecting", "verifying", "degraded"])).toEqual(["connecting", "verifying", "degraded"]);
-    // A drop is not a gap to hold over: disconnected, and the reconnect's
-    // busy look ("Reconnecting..."), show at once.
+    // A drop with no reconnect to follow is not a gap to hold over: "VPN
+    // connection lost" is said, and coloured, at once.
     expect(held(["connected", "disconnected", "connecting"])).toEqual(["connected", "disconnected", "connecting"]);
+  });
+});
+
+/** Decision 2 of the redesign (owner, 2026-10-19): the calm hold covers
+ * reconnect episodes too, the connect control's fill included. A reconnect
+ * nobody pressed for keeps the session's settled look -- cobalt from a
+ * verified session, teal from a "not confirmed" one -- for up to
+ * CAUTION_AFTER_MS, and then shows its own. Anything the customer presses
+ * shows at once. The words are not this file's and change at once. */
+describe("the look over a reconnect nobody pressed for", () => {
+  type Step = [ConnectionState, HoldContext?];
+  /** The looks drawn, one second apart, and the tone the chip would take. */
+  function playHold(steps: Step[], from: OrbLook = NO_ORB_LOOK, at = 1_000_000) {
+    let look = from;
+    const states: ConnectionState[] = [];
+    const tones: OrbTone[] = [];
+    steps.forEach(([state, context], i) => {
+      look = nextOrbLook(look, state, at + i * 1_000, context);
+      states.push(look.state);
+      tones.push(orbTone(look.state, look.caution));
+    });
+    return { states, tones, look };
+  }
+  const n = (count: number, step: Step): Step[] => Array.from({ length: count }, () => step);
+  const RECONNECTING: HoldContext = { reconnecting: true };
+  const threshold = CAUTION_AFTER_MS / 1_000;
+
+  it("keeps a verified session's cobalt through a five-second reconnect", () => {
+    const { tones } = playHold([
+      ...n(5, ["connected"]),
+      ["disconnected", RECONNECTING],
+      ...n(3, ["connecting", RECONNECTING]),
+      ["verifying", RECONNECTING],
+      ...n(5, ["connected"]),
+    ]);
+    expect(tones).toEqual(Array(tones.length).fill("success"));
+  });
+
+  it("keeps a not-confirmed session's teal through one, not promoting it to cobalt", () => {
+    const { tones } = playHold([
+      ...n(4, ["unverified"]),
+      ["disconnected", RECONNECTING],
+      ...n(3, ["connecting", RECONNECTING]),
+      ...n(2, ["unverified"]),
+    ]);
+    expect(tones).toEqual(Array(tones.length).fill("highlight"));
+  });
+
+  it("shows the reconnect's own look once it has held, unbroken, for the threshold", () => {
+    const { states } = playHold([
+      ...n(3, ["connected"]),
+      ["disconnected", RECONNECTING],
+      ...n(threshold + 3, ["connecting", RECONNECTING]),
+      ["connected"],
+    ]);
+    // Held for the looks at 0 to threshold-1 seconds into the episode.
+    expect(states.slice(0, 3 + threshold)).toEqual(Array(3 + threshold).fill("connected"));
+    expect(states.slice(3 + threshold, -1)).toEqual(Array(4).fill("connecting"));
+    expect(states[states.length - 1]).toBe("connected");
+  });
+
+  it("holds through the health poll's own failover, which nobody pressed for either", () => {
+    const { states } = playHold([...n(3, ["connected"]), ...n(2, ["degraded"]), ...n(4, ["connecting"]), ["connected"]]);
+    expect(states).toEqual(Array(states.length).fill("connected"));
+  });
+
+  it("shows anything the customer presses at once", () => {
+    const pressed: HoldContext = { pressed: true };
+    expect(playHold([...n(3, ["connected"]), ["disconnecting", pressed], ["disconnected", pressed]]).states).toEqual([
+      "connected",
+      "connected",
+      "connected",
+      "disconnecting",
+      "disconnected",
+    ]);
+    // "Reconnect now" in the middle of an episode is the customer's own
+    // connect: its busy look at once.
+    const { states } = playHold([...n(3, ["connected"]), ["disconnected", RECONNECTING], ["connecting", pressed]]);
+    expect(states.slice(-2)).toEqual(["connected", "connecting"]);
+    expect(orbTone("connecting", false)).toBe("busy");
+  });
+
+  it("keeps the warning colour of a session that was not fully protected, rather than showing it cobalt", () => {
+    const amber: HoldContext = { caution: true };
+    const { tones } = playHold([
+      ...n(4, ["connected", amber]),
+      ["disconnected", { ...RECONNECTING, caution: false }],
+      ...n(3, ["connecting", { ...RECONNECTING, caution: false }]),
+    ]);
+    expect(tones).toEqual(Array(tones.length).fill("caution"));
+  });
+
+  it("starts at the idle look, so nothing is drawn cobalt before a verified state arrives", () => {
+    expect(NO_ORB_LOOK.state).toBe("disconnected");
+    expect(orbTone(NO_ORB_LOOK.state, NO_ORB_LOOK.caution)).toBe("idle");
+    // And a pass on a fresh screen is not held as anything.
+    expect(playHold([["connecting"], ["verifying"]]).states).toEqual(["connecting", "verifying"]);
   });
 });
 
