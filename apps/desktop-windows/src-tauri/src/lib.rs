@@ -3,6 +3,7 @@ mod control_plane_probe;
 mod health_ip;
 mod relay_http;
 mod vpn;
+mod window_fit;
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -108,6 +109,11 @@ pub fn run() {
             // this app is Windows-only for now.
             #[cfg(desktop)]
             app.deep_link().register("neoconnect")?;
+
+            // Wide on the redesign's first launch, as it was left after
+            // that, and never larger than the screen. At runtime rather than
+            // in tauri.conf.json; see window_fit.rs.
+            window_fit::fit_main_window(app);
 
             // Tells the service this app is still here.
             //
@@ -217,7 +223,11 @@ pub fn run() {
         // -- so closing the app would leave a window where the game
         // simply will not resolve, with nothing on screen to explain
         // it. Rules must not outlive the app.
-        .on_window_event(|_window, event| {
+        .on_window_event(|window, event| {
+            // The size it is closed at is the size it opens at next time.
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                window_fit::remember_size(window);
+            }
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let _ = tauri::async_runtime::block_on(vpn::vpn_disconnect());
                 let _ = tauri::async_runtime::block_on(vpn::gaming_disarm());
