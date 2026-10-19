@@ -32,6 +32,26 @@ return array(
     // it in a subfolder, set '/subfolder/' -- with both slashes.
     'base_path' => '/',
 
+    // Security headers the WEB SERVER already adds to every response, so
+    // PHP must not send its own copy (inc/headers.php). Two copies of HSTS
+    // fail hstspreload.org's checks, and two X-Frame-Options that disagree
+    // are flagged by every header scanner.
+    //
+    // Set for today's host, a shared nginx box whose config is not ours:
+    // measured 2026-10-19, it sends exactly these four on every response,
+    // PHP pages included. PHP still sends the rest (the CSP, COOP, CORP
+    // and Permissions-Policy), which that host does not.
+    //
+    // Moving to a host that sends none of them: make this array() and PHP
+    // sends the full set. After any deploy, look at the headers of a real
+    // response -- this list describes a server we do not control.
+    'headers_sent_by_server' => array(
+        'Strict-Transport-Security',
+        'X-Frame-Options',
+        'X-Content-Type-Options',
+        'Referrer-Policy',
+    ),
+
     // ---------------------------------------------------------------
     // Contact
     // ---------------------------------------------------------------

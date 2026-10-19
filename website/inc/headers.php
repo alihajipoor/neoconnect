@@ -2,13 +2,21 @@
 /**
  * Security headers, sent by PHP on every response it makes.
  *
- * WHY PHP AND NOT ONLY THE SERVER. The server config that carries these
- * (nginx-website.conf.example) has to be installed by hand, and on the live
- * host it sat uninstalled for months -- measured 2026-08-14 and again on
- * 2026-08-24: no CSP, no HSTS, nothing. A header PHP sends cannot be left
- * behind by a missed deploy step. nginx then adds the same set to static
- * files, and hides PHP's copies of everything EXCEPT the CSP, so no header
- * is ever sent twice (see the conf).
+ * WHY PHP. The live host is a shared box (owner, 2026-10-19): its nginx is
+ * not ours to configure, so nothing in nginx-website.conf.example will ever
+ * be installed there. What the site needs beyond the host's defaults has to
+ * come from PHP.
+ *
+ * NEVER TWICE. That shared nginx already adds four of these to every
+ * response, PHP's included: HSTS (one year, includeSubDomains),
+ * X-Frame-Options SAMEORIGIN, nosniff and Referrer-Policy (measured
+ * 2026-10-19). PHP sending its own copies would put two HSTS headers on
+ * every page -- hstspreload.org rejects that -- and two X-Frame-Options
+ * that disagree. So config.php lists what the server already sends
+ * ('headers_sent_by_server') and this file skips exactly those. On a host
+ * that sends none of them, empty the list and PHP sends the full set.
+ * Check a real response after every deploy: the list describes a server
+ * we do not control, and it can change under us.
  *
  * THE CSP IS PHP'S ALONE, because it is per page: the page's stylesheet is
  * inlined (no render-blocking request) and allowed by its SHA-256, and the
@@ -75,7 +83,30 @@ function nx_csp_for_page($scriptHashes, $styleHashes)
 }
 
 /**
- * Send the full set. Safe to call more than once: header() replaces.
+ * The fixed headers the web server already adds itself, lower-cased, from
+ * 'headers_sent_by_server' in config.php. Reads the config on its own when
+ * the bootstrap has not (r/index.php).
+ *
+ * @return array
+ */
+function nx_server_header_names()
+{
+    static $names = null;
+    if ($names === null) {
+        $cfg = (isset($GLOBALS['NX_CFG']) && is_array($GLOBALS['NX_CFG']))
+            ? $GLOBALS['NX_CFG']
+            : (require __DIR__ . '/config.php');
+        $list = (isset($cfg['headers_sent_by_server']) && is_array($cfg['headers_sent_by_server']))
+            ? $cfg['headers_sent_by_server']
+            : array();
+        $names = array_map('strtolower', $list);
+    }
+    return $names;
+}
+
+/**
+ * Send the set, minus what the server already sends. Safe to call more
+ * than once: header() replaces.
  *
  * @param string|null $csp a page policy, or null for NX_CSP_NONE
  */
@@ -91,18 +122,32 @@ function nx_security_headers($csp = null)
         header_remove('X-Powered-By');
     }
 
-    // Two years, every subdomain, and preload-ready. Adding the domain to
-    // the browsers' preload list is a separate, deliberate submission at
-    // hstspreload.org and is close to irreversible -- the owner's call,
-    // not this file's. Browsers ignore the header over plain http.
-    header('Strict-Transport-Security: max-age=63072000; includeSubDomains; preload');
-    header('X-Content-Type-Options: nosniff');
-    header('Referrer-Policy: strict-origin-when-cross-origin');
-    // frame-ancestors 'none' says the same to every current browser; this
-    // is for the ones that predate it.
-    header('X-Frame-Options: DENY');
-    header('Cross-Origin-Opener-Policy: same-origin');
-    header('Cross-Origin-Resource-Policy: same-origin');
-    header('Permissions-Policy: ' . NX_PERMISSIONS_POLICY);
+    $fixed = array(
+        // Two years and every subdomain. NOT 'preload': that token is the
+        // signal hstspreload.org acts on, its form does not check who owns
+        // the domain, and inclusion is close to irreversible for
+        // neoxify.net and every name under it. Add the word only when the
+        // owner decides to submit, after confirming every neoxify.net name
+        // serves HTTPS. Browsers ignore the header over plain http.
+        'Strict-Transport-Security' => 'max-age=63072000; includeSubDomains',
+        'X-Content-Type-Options' => 'nosniff',
+        'Referrer-Policy' => 'strict-origin-when-cross-origin',
+        // frame-ancestors 'none' in the CSP says the same to every current
+        // browser and wins over this; this is for the ones that predate it.
+        'X-Frame-Options' => 'DENY',
+        'Cross-Origin-Opener-Policy' => 'same-origin',
+        'Cross-Origin-Resource-Policy' => 'same-origin',
+        'Permissions-Policy' => NX_PERMISSIONS_POLICY,
+    );
+    $skip = nx_server_header_names();
+    foreach ($fixed as $name => $value) {
+        if (in_array(strtolower($name), $skip, true)) {
+            continue;
+        }
+        header($name . ': ' . $value);
+    }
+
+    // Never skipped, whatever the config says: it is per page and no
+    // server can write it.
     header('Content-Security-Policy: ' . ($csp !== null ? $csp : NX_CSP_NONE));
 }

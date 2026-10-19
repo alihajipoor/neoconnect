@@ -31,9 +31,11 @@ ErrorDocument 404 /404.php
 # ---------------------------------------------------------------------
 
 <IfModule mod_headers.c>
-    # PHP sends these on every page itself (inc/headers.php). Each fixed
-    # header is unset from PHP's set first and then added once here, so it
-    # covers static files too and is never sent twice.
+    # PHP sends these on every page itself (inc/headers.php), minus any
+    # listed in config.php's headers_sent_by_server. Each fixed header is
+    # unset from PHP's set first and then added once here, so it covers
+    # static files too and is never sent twice. HSTS without 'preload' on
+    # purpose: see inc/headers.php.
     Header unset Strict-Transport-Security
     Header unset X-Content-Type-Options
     Header unset Referrer-Policy
@@ -42,7 +44,7 @@ ErrorDocument 404 /404.php
     Header unset Cross-Origin-Resource-Policy
     Header unset Permissions-Policy
     Header unset X-Powered-By
-    Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+    Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains"
     Header always set X-Content-Type-Options "nosniff"
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
     Header always set X-Frame-Options "DENY"

@@ -1,20 +1,23 @@
 # Neoxify website -- nginx server block.
 #
 # ============================================================================
-# READ THIS FIRST. THIS FILE IS NOT DEPLOYED BY ANYTHING IN THE REPO.
+# READ THIS FIRST. NOT FOR TODAY'S HOST -- DO NOT INSTALL IT THERE.
 # ============================================================================
 #
-# neoxify.net is served by nginx, which never reads .htaccess. Measured
-# 2026-08-14 and again 2026-08-24 against the live host, with this file not
-# installed: every unknown URL returned the home page with a 200 (unlimited
-# soft-404 duplicates), /sitemap.xml returned the home page, there were no
-# security headers, no compression and no caching headers, voucher short
-# links did nothing, and www. served a full duplicate site.
+# neoxify.net is on a SHARED box (owner, 2026-10-19) that also serves other
+# sites and a hosting panel. Its nginx is not ours: no server-wide changes,
+# no reloads. The site therefore works without this file:
+#   - routing (real 404s, /sitemap.xml, /r/CODE) is done by the router at
+#     the top of index.php, which the shared nginx falls back to;
+#   - www. is redirected to the apex by inc/bootstrap.php;
+#   - security headers come from PHP (inc/headers.php), minus the four the
+#     shared nginx already sends (config.php, headers_sent_by_server).
+# What that host does NOT give, and only a server config can: long-lived
+# Cache-Control on static files (it sends only ETag/Last-Modified) and
+# brotli. Ask the host operator for PER-SITE directives if those matter.
 #
-# Since the 2026-10 redesign PHP sends the security headers itself on every
-# page (inc/headers.php), so a missed install no longer leaves the HTML
-# naked. This file is still what gives the STATIC files their headers,
-# compression and caching, the real 404s, the sitemap and the short links.
+# This file is kept for the day the site has a server of its own. It is
+# written for that case and has never been installed anywhere.
 #
 # HOW THE HEADERS ARE SPLIT, so none is ever sent twice:
 #   - nginx sends the fixed set (HSTS, nosniff, Referrer-Policy, XFO,
@@ -27,9 +30,13 @@
 #     static files, and the /account/ portal, which is a static build.
 #   Two CSP headers on one response would BOTH be enforced -- a static one
 #   here would block the page's own inline CSS. That is why the map exists.
+#   With this file installed, config.php's headers_sent_by_server does not
+#   matter: whatever PHP sends of the fixed set is hidden here.
 #
-# TO DEPLOY: copy onto the web host, fix the paths marked CHECK, `nginx -t`,
-# then `systemctl reload nginx`. Set expose_php = Off in php.ini as well.
+# TO DEPLOY (own server only): copy onto the web host, fix the paths marked
+# CHECK, `nginx -t`, then `systemctl reload nginx`. Set expose_php = Off in
+# php.ini as well. The rewrites below duplicate the router in index.php and
+# are harmless alongside it.
 
 # ---------------------------------------------------------------------
 # 0. Static CSP, only where PHP did not send one (http context)
@@ -81,7 +88,7 @@ server {
     # ssl_certificate     /etc/letsencrypt/live/neoxify.net/fullchain.pem;
     # ssl_certificate_key /etc/letsencrypt/live/neoxify.net/privkey.pem;
 
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
     return 301 https://neoxify.net$request_uri;
 }
 
@@ -114,12 +121,13 @@ server {
     # the whole set (`include`-ing a snippet is the tidier way on a host
     # where you can add files to /etc/nginx/snippets/).
     #
-    # HSTS: two years, every subdomain, and preload-READY. The header alone
-    # does nothing irreversible; submitting the domain at hstspreload.org
-    # is a separate step, close to irreversible (removal takes months to
-    # reach shipped browsers), and the owner's decision. Confirm every
-    # neoxify.net name serves HTTPS before reloading with includeSubDomains.
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    # HSTS: two years and every subdomain, and deliberately NOT 'preload'.
+    # That token is what hstspreload.org acts on, its form does not check
+    # who owns the domain, and inclusion is close to irreversible (removal
+    # takes months to reach shipped browsers). Add it only when the owner
+    # decides to submit. Confirm every neoxify.net name serves HTTPS before
+    # reloading with includeSubDomains.
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header X-Frame-Options "DENY" always;
@@ -167,26 +175,38 @@ server {
     # cards carry a version IN THE FILE NAME (-v1, -v2) -- change the file,
     # change the name. The fonts deliberately have no ?v=, so the preload
     # in the page and the @font-face request the same URL.
+    #
+    # An add_header inside a location replaces EVERY inherited one, so both
+    # locations below repeat the server block's whole set.
     location ~* \.(css|js|woff2|svg|png|jpg|jpeg|webp|avif|ico)$ {
         expires 1y;
         add_header Cache-Control "public, max-age=31536000, immutable" always;
-        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
         add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()" always;
         add_header Content-Security-Policy $nx_static_csp always;
         access_log off;
         try_files $uri =404;
     }
 
     # The social cards and the logo are meant to be shown by other sites
-    # and apps, so they may be embedded cross-origin.
+    # and apps, so they may be embedded cross-origin -- the one difference
+    # from the set above.
     location ^~ /assets/img/ {
         expires 1y;
         add_header Cache-Control "public, max-age=31536000, immutable" always;
-        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
         add_header Cross-Origin-Resource-Policy "cross-origin" always;
+        add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()" always;
+        add_header Content-Security-Policy $nx_static_csp always;
         access_log off;
         try_files $uri =404;
     }
@@ -229,7 +249,7 @@ server {
         fastcgi_hide_header Permissions-Policy;
         fastcgi_hide_header X-Powered-By;
 
-        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header X-Frame-Options "DENY" always;
