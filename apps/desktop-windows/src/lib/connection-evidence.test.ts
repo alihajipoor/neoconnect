@@ -7,6 +7,7 @@ import {
   fullTunnelPollState,
   handshakeEvidence,
   droppedUnseen,
+  HEADLINE_HINTS,
   headlineFor,
   isTunnelUp,
   LIVENESS_POLL_MS,
@@ -608,6 +609,24 @@ describe("the headline", () => {
       hint: "dash.notProtectedHint",
       tone: "plain",
     });
+  });
+
+  it("lists every sentence it can say, for the phone's reserved height", () => {
+    const said = new Set<string>();
+    for (const state of EVERY) {
+      for (const dropped of [false, true]) {
+        for (const customMode of [false, true]) {
+          for (const unconfined of [false, true]) {
+            for (const waitingForNetwork of [false, true]) {
+              for (const reconnecting of [null, { offline: false, waiting: true }, { offline: true, waiting: true }]) {
+                said.add(headlineFor(state, { dropped, customMode, unconfined, waitingForNetwork, reconnecting }).hint);
+              }
+            }
+          }
+        }
+      }
+    }
+    expect([...said].sort()).toEqual([...HEADLINE_HINTS].sort());
   });
 
   it("gives Custom mode its narrower unconfirmed sentence", () => {

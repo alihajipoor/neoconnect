@@ -505,6 +505,26 @@ export interface Headline {
   tone: HeadlineTone;
 }
 
+/** Every sentence `headlineFor` can put under the line. A phone keeps the
+ * height of the longest of them in its language and width under the line
+ * (`Hint`'s `reserve`), so a longer sentence never moves what is below it:
+ * the height follows the screen, never the state. The test holds this list
+ * to what `headlineFor` returns. */
+export const HEADLINE_HINTS: readonly TranslationKey[] = [
+  "dash.connectedNotConfinedHint",
+  "dash.reconnectingHint",
+  "dash.reconnectingOfflineHint",
+  "dash.waitingForNetworkHint",
+  "dash.protectedHint",
+  "dash.unverifiedHint",
+  "dash.unverifiedCustomHint",
+  "dash.degradedHint",
+  "dash.verifyingHint",
+  "dash.unknownHint",
+  "dash.droppedHint",
+  "dash.notProtectedHint",
+];
+
 /** The headline and the sentence under it, for every state the screen
  * can be in.
  *
