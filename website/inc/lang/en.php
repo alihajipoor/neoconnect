@@ -64,11 +64,11 @@ return array(
     'meta.home.title' => 'Neoxify — a VPN that keeps working on filtered networks',
     'meta.home.description' => 'WireGuard, OpenVPN, Shadowsocks, VLESS REALITY and more, in one app. Servers across Europe and Asia, an Iran relay path, and nothing to import.',
 
-    'meta.download.title' => 'Download Neoxify for Windows and Android — direct installer and APK',
+    'meta.download.title' => 'Download Neoxify VPN for Windows and Android',
     'meta.download.description' => 'Get the Neoxify app for Windows or Android. Direct download, always the current release. No macOS or iOS app yet.',
 
     'meta.contact.title' => 'Contact Neoxify — questions before you buy, and support',
-    'meta.contact.description' => 'Ask about plans, payment, or whether a connection method will work on your network. Write to us and a person answers. Existing customers get faster help in the app.',
+    'meta.contact.description' => 'Ask about plans, payment, or whether a connection method will work on your network. A person answers. Existing customers get faster help in the app.',
 
     'meta.privacy.title' => 'Privacy — what Neoxify records, and what it does not',
     'meta.privacy.description' => 'What we hold for your account, what our servers log, what payment providers see, how long it is kept and how to have it deleted. We make no no-logs claim.',
@@ -100,7 +100,7 @@ return array(
     'privacy.contact.title' => 'Contact',
     'privacy.contact.body' => 'Questions about any of this, or a request about your own data, go to :email. Write from the address on your account and we will deal with it.',
 
-    'meta.reseller.title' => 'Become a Neoxify reseller — sell VPN accounts to your own audience',
+    'meta.reseller.title' => 'Become a Neoxify reseller — sell VPN accounts',
     'meta.reseller.description' => 'For Telegram channels, gaming communities, local shops and network admins. Terms are agreed individually with every partner, not from a published price list.',
 
     // -----------------------------------------------------------------

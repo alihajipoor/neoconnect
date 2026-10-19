@@ -124,8 +124,8 @@ foreach ($locales as $locale) {
             $failures[] = $label . ' empty or missing <title>';
         } else {
             $t = trim($m[1]);
-            if (nxc_len($t) > 70) {
-                $failures[] = $label . ' <title> is ' . nxc_len($t) . ' chars, over the ~70 that render in a result';
+            if (nxc_len($t) > 60) {
+                $failures[] = $label . ' <title> is ' . nxc_len($t) . ' chars, over the ~60 a search result shows before cutting it';
             }
             if (isset($titles[$t])) {
                 $failures[] = $label . ' duplicate <title>, same as ' . $titles[$t];
@@ -136,8 +136,8 @@ foreach ($locales as $locale) {
         // 5. Meta description.
         if (!preg_match('/<meta name="description" content="(.*?)"/s', $html, $m) || trim($m[1]) === '') {
             $failures[] = $label . ' empty or missing meta description';
-        } elseif (nxc_len(trim($m[1])) > 165) {
-            $failures[] = $label . ' meta description is ' . nxc_len(trim($m[1])) . ' chars, over the ~165 that render';
+        } elseif (nxc_len(trim($m[1])) > 160) {
+            $failures[] = $label . ' meta description is ' . nxc_len(trim($m[1])) . ' chars, over the ~160 a search result shows';
         }
 
         // 6. Exactly one h1.
