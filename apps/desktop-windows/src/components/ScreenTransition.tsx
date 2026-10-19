@@ -34,6 +34,7 @@ const DEPTH: Record<string, number> = {
   verify: 2,
   dashboard: 0,
   settings: 1,
+  activity: 1,
   plans: 1,
   referrals: 2,
   support: 2,

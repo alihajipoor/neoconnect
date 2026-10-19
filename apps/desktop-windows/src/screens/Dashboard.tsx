@@ -145,6 +145,7 @@ import {
 import { Banner, Note, PillButton, Segmented } from "../components/ui";
 import { Dialog } from "../components/overlay";
 import { AppShell } from "../components/shell/AppShell";
+import { rememberShellProfile, takeLocationsRequest } from "../lib/shell-nav";
 import { MainView } from "../components/main/MainView";
 import { Decor, Hint, StateAnnouncer, StateLine, StatusChip, WayOut } from "../components/main/Hero";
 import { LocationCard, MetricCards, SessionTray, SummaryLine, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
@@ -496,6 +497,7 @@ export function Dashboard({
   onOpenSettings,
   onOpenReferrals,
   onOpenSupport,
+  onOpenActivity,
   update,
 }: {
   onLoggedOut: () => void;
@@ -503,6 +505,8 @@ export function Dashboard({
   onOpenSettings: () => void;
   onOpenReferrals?: () => void;
   onOpenSupport?: () => void;
+  /** The Activity page, in the shell's nav. */
+  onOpenActivity?: () => void;
   /** The update notice, which the shell places. */
   update?: ReactNode;
 }) {
@@ -511,6 +515,14 @@ export function Dashboard({
   // The loading screen waits on three reads, each given up to twenty
   // seconds an address; past eight it says it is still trying.
   const loadingLong = useStillTrying(loading);
+  // "Locations" pressed on another page of the shell: once this screen has
+  // loaded, the panel (or the phone's sheet) is shown as if it had been
+  // pressed here.
+  useEffect(() => {
+    if (!loading && takeLocationsRequest()) showLocations();
+    // Once per load; showLocations is this render's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
   // Kept as it came, and worded as the screen renders (`ShownFailure`):
   // worded when it came in, it was in the language the app was in when the
   // load began, which country detection may have changed since.
@@ -4462,6 +4474,9 @@ export function Dashboard({
   // The state in words for a screen reader, once it has settled.
   const announcement = gaming ? "" : `${lineWords}. ${hintText}`;
 
+  // What the other pages of the shell show under the avatar.
+  rememberShellProfile({ email: me?.email ?? null, planLine, network: evidenceCtx.network });
+
   return (
     <AppShell
       active="overview"
@@ -4473,6 +4488,7 @@ export function Dashboard({
       planLine={planLine}
       onOverview={() => document.querySelector<HTMLElement>(".nx-hero")?.scrollTo({ top: 0 })}
       onLocations={showLocations}
+      onOpenActivity={onOpenActivity ?? onOpenSettings}
       onOpenSettings={onOpenSettings}
       onBrowsePlans={onBrowsePlans}
       onOpenReferrals={onOpenReferrals}

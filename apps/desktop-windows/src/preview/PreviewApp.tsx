@@ -528,6 +528,7 @@ function Composed({
       planLine={plan === "none" ? null : `${t("tr.daysLeft", { n: formatNumber(daysLeft, language) })}${cap === null ? ` · ${t("dash.unlimited")}` : ""}`}
       onOverview={() => undefined}
       onLocations={() => undefined}
+      onOpenActivity={() => undefined}
       onOpenSettings={() => undefined}
       onBrowsePlans={() => undefined}
       onOpenReferrals={() => undefined}

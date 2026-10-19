@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { invoke } from "@tauri-apps/api/core";
 import { getTokens } from "./lib/session";
-import { verifyEmailByToken } from "./lib/auth";
+import { logout, verifyEmailByToken } from "./lib/auth";
+import { autoReconnect } from "./lib/auto-reconnect";
 import { flushAttempts } from "./lib/attempts";
 import { endCustomerSession, type SessionEnd } from "./lib/session-end";
 import { onSessionRevoked } from "./lib/session-revoked";
@@ -18,13 +19,17 @@ import { Plans } from "./screens/Plans";
 import { Settings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
 import { Support } from "./screens/Support";
+import { Activity } from "./screens/Activity";
+import { AppShell, type NavId } from "./components/shell/AppShell";
+import { PageScene } from "./components/shell/Page";
+import { CommunityLinks } from "./components/CommunityLinks";
+import { forgetShellProfile, requestLocations, shellProfile } from "./lib/shell-nav";
 import { CustomModeCard } from "./components/CustomModeCard";
 import { GamingModeCard } from "./components/GamingModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 import { setRelayTunnelReader } from "./lib/last-resort";
 import { BackupRouteChip } from "./components/BackupRoute";
-import { VersionStamp } from "./components/VersionStamp";
 
 /** How often a queued diagnostic report retries.
  *
@@ -51,7 +56,8 @@ type Screen =
   | "plans"
   | "settings"
   | "referrals"
-  | "support";
+  | "support"
+  | "activity";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
@@ -67,6 +73,8 @@ export default function App() {
   const [updateState, setUpdateState] = useState<UpdateState>({ status: "none" });
   const [restarting, setRestarting] = useState(false);
   const [updateBlocked, setUpdateBlocked] = useState(false);
+  // A sign-out pressed on one of the shell's pages, under way.
+  const [pageSigningOut, setPageSigningOut] = useState(false);
   // Guards against processing the same deep-link URL twice -- the launch
   // URL can plausibly reach handleDeepLinkUrl via both the Rust-side
   // get_launch_deep_link command and the plugin's own onOpenUrl forwarding
@@ -260,6 +268,8 @@ export default function App() {
     if (endingRef.current) return;
     endingRef.current = true;
     setScreen("signingOut");
+    // The avatar line belongs to the account that just left.
+    forgetShellProfile();
     try {
       let ended: SessionEnd;
       try {
@@ -283,6 +293,25 @@ export default function App() {
     }
   }
 
+  /** Signing out from one of the shell's pages (the profile menu, Settings).
+   *
+   * The Dashboard's own sign-out, less the half only it can reach: an
+   * automatic reconnect waiting between attempts is cancelled, then
+   * `logout()` takes the tunnel down before it deletes anything, then the
+   * session ends as every other way does. A connect pass still walking its
+   * protocols is caught by the session generation `logout()` moves. */
+  async function signOutFromPage() {
+    if (pageSigningOut) return;
+    setPageSigningOut(true);
+    try {
+      autoReconnect.cancel("signedOut");
+      await logout();
+    } finally {
+      setPageSigningOut(false);
+    }
+    await handleLoggedOut();
+  }
+
   // Read through a ref so the listener, registered once, always calls
   // the current render's handler -- and with it the current language.
   const handleLoggedOutRef = useRef(handleLoggedOut);
@@ -295,6 +324,43 @@ export default function App() {
   // in scope, which is why this build cuts between screens while
   // the mobile one animates -- the component lived here and only
   // mobile was ever wired into it.
+  /** One of the signed-in pages, in the same shell as the main page: the
+   * sidebar on a wide window, the tabs on a medium one, the bottom nav on
+   * a phone-sized one. `active` is the nav item it belongs to. */
+  const inShell = (active: NavId, content: ReactNode) => {
+    const profile = shellProfile();
+    return (
+      <AppShell
+        active={active}
+        shown="idle"
+        titlebar
+        email={profile.email}
+        planLine={profile.planLine}
+        onOverview={() => setScreen("dashboard")}
+        onLocations={() => {
+          requestLocations();
+          setScreen("dashboard");
+        }}
+        onOpenActivity={() => setScreen("activity")}
+        onOpenSettings={() => setScreen("settings")}
+        onBrowsePlans={() => setScreen("plans")}
+        onOpenReferrals={() => setScreen("referrals")}
+        onOpenSupport={() => setScreen("support")}
+        onSignOut={() => void signOutFromPage()}
+        signingOut={pageSigningOut}
+        update={
+          <>
+            <UpdateBanner state={updateState} onRestart={() => void restartForUpdate()} busy={restarting} blocked={updateBlocked} />
+            <CommunityLinks />
+          </>
+        }
+        scene={<PageScene />}
+      >
+        {content}
+      </AppShell>
+    );
+  };
+
   const renderScreen = () => {
   if (screen === "loading") {
     return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t("common.loading")}</div>;
@@ -359,7 +425,8 @@ export default function App() {
     );
   }
   if (screen === "settings") {
-    return (
+    return inShell(
+      "settings",
       <Settings
         onBack={() => setScreen("dashboard")}
         onOpenReferrals={() => setScreen("referrals")}
@@ -369,27 +436,42 @@ export default function App() {
         // Supplied here rather than imported by the screen, the same way
         // Custom mode is: gaming mode drives the Windows helper service
         // and has no counterpart on the mobile build that shares this
-        // screen. Passing it is what makes the rail row exist.
+        // screen. Passing it is what makes its row exist.
         gamingSection={<GamingModeCard />}
-      />
+        onOpenPlans={() => setScreen("plans")}
+        onOpenActivity={() => setScreen("activity")}
+        onSignOut={() => void signOutFromPage()}
+        platform="windows"
+      />,
+    );
+  }
+  if (screen === "activity") {
+    return inShell(
+      "activity",
+      <Activity
+        // The Windows helper's fingerprint of the network, when the main
+        // page has not said which network its map is reading.
+        readNetwork={() => invoke<string | null>("network_fingerprint")}
+        onOpenPlans={() => setScreen("plans")}
+      />,
     );
   }
   if (screen === "referrals") {
     // Back to Settings rather than the Dashboard: that is where the
     // customer came from, and dropping them somewhere else is how a
     // two-tap detour starts feeling like getting lost.
-    return <Referrals onBack={() => setScreen("settings")} />;
+    return inShell("none", <Referrals onBack={() => setScreen("settings")} />);
   }
   if (screen === "support") {
     // Same reasoning as Referrals: back where they came from.
-    return <Support onBack={() => setScreen("settings")} />;
+    return inShell("none", <Support onBack={() => setScreen("settings")} />);
   }
   if (screen === "plans") {
     const leavePlans = () => {
       setPlansNotice(null);
       setScreen("dashboard");
     };
-    return <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />;
+    return inShell("none", <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />);
   }
   // The update notice rides on the Dashboard only -- in its sidebar, or
   // at the top of the hero on a narrower window. It is the screen people
@@ -403,6 +485,7 @@ export default function App() {
       onOpenSettings={() => setScreen("settings")}
       onOpenReferrals={() => setScreen("referrals")}
       onOpenSupport={() => setScreen("support")}
+      onOpenActivity={() => setScreen("activity")}
       update={
         <UpdateBanner
           state={updateState}
@@ -415,18 +498,13 @@ export default function App() {
   );
   };
 
-  // The Dashboard is the redesigned shell and keeps the title strip in its
-  // own padding; every other screen is given the strip's 32px here, and
-  // the version stamp in its corner.
+  // The redesigned screens keep the title strip in their own padding: the
+  // shell's pages and the Dashboard through the shell, sign-in and the
+  // rest of its steps through AuthFrame. Only the two plain waits are
+  // given the strip's 32px here. The version moved to Settings › About
+  // and the profile menu's foot.
   const framed = (content: ReactNode) =>
-    screen === "dashboard" ? (
-      content
-    ) : (
-      <div className="relative h-full pt-8">
-        {content}
-        <VersionStamp />
-      </div>
-    );
+    screen === "loading" || screen === "signingOut" ? <div className="relative h-full pt-8">{content}</div> : content;
 
   // The backup-route chip above every screen while relay mode lasts, and
   // the consent prompt over them when a request the customer made needs

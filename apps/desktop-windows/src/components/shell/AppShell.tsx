@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { CreditCard, Gift, Home, LifeBuoy, LogOut, MapPin, Settings as SettingsIcon } from "lucide-react";
+import { BarChart3, CreditCard, Gift, Home, LifeBuoy, LogOut, MapPin, Settings as SettingsIcon } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { IS_STORE_BUILD } from "../../lib/distribution";
 import { probeFrames } from "../../lib/effects";
 import type { ShownTone } from "../../lib/hero-model";
-import { Glass } from "../ui";
-import { Menu } from "../overlay";
+import { Glass, PillButton } from "../ui";
+import { Dialog, Menu } from "../overlay";
+import { ShellContext } from "./Page";
 
 /** The signed-in window's frame: a sidebar on wide windows, a compact
  * header with tabs on medium ones, a docked bottom nav on phones -- all
@@ -18,9 +19,14 @@ import { Menu } from "../overlay";
  *
  * Sign-out is the screen's own (`onSignOut`): on the Dashboard it is the
  * one that also stops an automatic reconnect and a pass in flight before
- * the session ends. */
+ * the session ends. It asks first (design-system.md 4.13): it disconnects,
+ * and on a blocked network signing back in may need the backup route.
+ *
+ * The same shell frames the other signed-in pages -- Activity, Settings,
+ * Plans, Support, Invite friends -- with `active` naming the nav item they
+ * belong to ("none" for the pages reached from the profile menu). */
 
-export type NavId = "overview" | "locations" | "settings";
+export type NavId = "overview" | "locations" | "activity" | "settings" | "none";
 
 export interface ShellProps {
   active: NavId;
@@ -35,6 +41,7 @@ export interface ShellProps {
   planLine?: string | null;
   onOverview: () => void;
   onLocations: () => void;
+  onOpenActivity: () => void;
   onOpenSettings: () => void;
   onBrowsePlans: () => void;
   onOpenReferrals?: () => void;
@@ -61,6 +68,8 @@ export function AppShell(props: ShellProps) {
   const sideProfile = useRef<HTMLButtonElement>(null);
   const headAvatar = useRef<HTMLButtonElement>(null);
   const [anchor, setAnchor] = useState<"side" | "head">("side");
+  const [askSignOut, setAskSignOut] = useState(false);
+  const stayRef = useRef<HTMLButtonElement>(null);
 
   // Once the glass has painted and the first load has settled: a device
   // whose frames are slow drops a tier (lib/effects.ts). Never during the
@@ -84,12 +93,10 @@ export function AppShell(props: ShellProps) {
   const items: { id: NavId; label: string; icon: ReactNode; go: () => void }[] = [
     { id: "overview", label: t("nav.overview"), icon: <Home className="nx-i" aria-hidden />, go: props.onOverview },
     { id: "locations", label: t("nav.locations"), icon: <MapPin className="nx-i" aria-hidden />, go: props.onLocations },
+    { id: "activity", label: t("nav.activity"), icon: <BarChart3 className="nx-i" aria-hidden />, go: props.onOpenActivity },
     { id: "settings", label: t("nav.settings"), icon: <SettingsIcon className="nx-i" aria-hidden />, go: props.onOpenSettings },
   ];
-  const index = Math.max(
-    0,
-    items.findIndex((item) => item.id === active),
-  );
+  const index = items.findIndex((item) => item.id === active);
 
   const openMenu = (from: "side" | "head") => {
     if (menuOpen && anchor === from) {
@@ -119,8 +126,8 @@ export function AppShell(props: ShellProps) {
           <p className="nx-wm" lang="en" dir="ltr">
             NEOXIFY
           </p>
-          <div className="nx-nav" style={{ "--ni": index } as React.CSSProperties}>
-            <span className="nx-nav-pill" aria-hidden />
+          <div className="nx-nav" style={{ "--ni": Math.max(0, index) } as React.CSSProperties}>
+            {index >= 0 ? <span className="nx-nav-pill" aria-hidden /> : null}
             {items.map((item) => (
               <button key={item.id} type="button" aria-current={item.id === active ? "page" : undefined} onClick={item.go}>
                 {item.icon}
@@ -182,20 +189,16 @@ export function AppShell(props: ShellProps) {
               </span>
             </button>
           </header>
-          <div className="nx-view">{props.children}</div>
+          <div className="nx-view">
+            <ShellContext.Provider value>{props.children}</ShellContext.Provider>
+          </div>
           <Glass as="nav" strong className="nx-mnav" aria-label={t("nav.main")}>
-            <button type="button" aria-current={active === "overview" ? "page" : undefined} onClick={props.onOverview}>
-              <Home className="nx-i" aria-hidden />
-              {t("nav.home")}
-            </button>
-            <button type="button" aria-current={active === "locations" ? "page" : undefined} onClick={props.onLocations}>
-              <MapPin className="nx-i" aria-hidden />
-              {t("nav.locations")}
-            </button>
-            <button type="button" aria-current={active === "settings" ? "page" : undefined} onClick={props.onOpenSettings}>
-              <SettingsIcon className="nx-i" aria-hidden />
-              {t("nav.settings")}
-            </button>
+            {items.map((item) => (
+              <button key={item.id} type="button" aria-current={item.id === active ? "page" : undefined} onClick={item.go}>
+                {item.icon}
+                {item.id === "overview" ? t("nav.home") : item.label}
+              </button>
+            ))}
           </Glass>
         </div>
       </div>
@@ -243,7 +246,7 @@ export function AppShell(props: ShellProps) {
           onClick={() => {
             if (props.signingOut) return;
             setMenuOpen(false);
-            props.onSignOut();
+            setAskSignOut(true);
           }}
         >
           <LogOut aria-hidden />
@@ -255,6 +258,30 @@ export function AppShell(props: ShellProps) {
           </p>
         ) : null}
       </Menu>
+
+      <Dialog
+        open={askSignOut}
+        title={t("so.title")}
+        description={t("so.body")}
+        onClose={() => setAskSignOut(false)}
+        initialFocus={stayRef}
+        actions={
+          <>
+            <PillButton ref={stayRef} variant="ghost" size="sm" onClick={() => setAskSignOut(false)}>
+              {t("btn.cancel")}
+            </PillButton>
+            <PillButton
+              size="sm"
+              onClick={() => {
+                setAskSignOut(false);
+                props.onSignOut();
+              }}
+            >
+              {t("so.go")}
+            </PillButton>
+          </>
+        }
+      />
     </div>
   );
 }
