@@ -3124,6 +3124,16 @@ export function Dashboard({
       // When this rung was first refused for want of a network, while it
       // waits for one (`network-wait.ts`). Cleared once the ladder moves on.
       let noNetworkSince: number | null = null;
+      // And how many times it has waited, each wait ended by a dial the
+      // service refused again: each puts the next dial further off
+      // (`nextLookIn`), so a hint it keeps refusing is never hammered.
+      let noNetworkRounds = 0;
+      // The rung about to be dialled is one dialled again after a wait for
+      // a network: nothing of ours is up -- the service refused the dial
+      // before starting anything, and any earlier rung's routes were proven
+      // gone by this rung's own settle before that -- so its IPv6 baseline
+      // can be taken beside the settle rather than after it.
+      let redialAfterWait = false;
       // Over an index, not an iterator: a rung the service refused for want
       // of a network is dialled again, on the same server, once there is one.
       for (let index = 0; index < candidates.length; index += 1) {
@@ -3163,6 +3173,12 @@ export function Dashboard({
         // before then could go into it -- and just before this one is
         // dialled, as the engine is about to.
         const settleServer = literalTunnelServer(candidate, "windows");
+        // Beside the settle after a wait for a network (`redialAfterWait`).
+        // After it, on the VM, the probe waited out its timeout on a
+        // network with IPv6 addresses and no IPv6 route: two seconds more
+        // between the network coming back and the dial.
+        const ipv6Beside = redialAfterWait && ipv6BaselineRef.current === null ? captureIpv6Baseline() : null;
+        redialAfterWait = false;
         // Fresh every attempt, and taken only once plain networking is
         // confirmed working. See settleAndCaptureBaseline.
         baselineIpRef.current = await settleAndCaptureBaseline(
@@ -3181,7 +3197,7 @@ export function Dashboard({
         // information. Taken here rather than before the loop so it
         // still lands after the previous engine's routes are gone.
         if (ipv6BaselineRef.current === null) {
-          ipv6BaselineRef.current = await captureIpv6Baseline();
+          ipv6BaselineRef.current = await (ipv6Beside ?? captureIpv6Baseline());
         }
 
         try {
@@ -3618,13 +3634,16 @@ export function Dashboard({
                 now: () => Date.now(),
               },
               noNetworkSince,
+              noNetworkRounds,
             );
+            noNetworkRounds += 1;
             if (waited === "back" || waited === "retry") {
               // The same rung again, from its settle: the baseline is taken
               // afresh on the network that is back -- the IPv6 one too,
               // which a pass begun with no network took on none at all.
               // Still said on screen until the service takes the dial.
               ipv6BaselineRef.current = null;
+              redialAfterWait = true;
               // Rungs this pass dialled before the network went may have
               // failed for that, not for their servers: fi timed out as
               // Wi-Fi left, sg waited, and the pass went on to sg once the
@@ -3660,6 +3679,7 @@ export function Dashboard({
         }
 
         noNetworkSince = null;
+        noNetworkRounds = 0;
         // Always tear down before moving on, or the next engine inherits
         // this one's routes and fails for a reason that has nothing to
         // do with it.

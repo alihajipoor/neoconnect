@@ -390,7 +390,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     const rung = ladder.slice(ladder.indexOf("for (let index = 0; index < candidates.length; index += 1) {"));
     const settled = rung.indexOf("baselineIpRef.current = await settleAndCaptureBaseline(");
     const named = rung.indexOf('const tunnelServer = await tunnelServerOf(candidate, "windows");');
-    const ipv6 = rung.indexOf("ipv6BaselineRef.current = await captureIpv6Baseline();");
+    const ipv6 = rung.indexOf("ipv6BaselineRef.current = await (ipv6Beside ?? captureIpv6Baseline());");
     const check = rung.indexOf(
       "if (stopped() || sessionGeneration() !== sessionAtStart || ladderGenerationRef.current !== generation) break;",
     );
