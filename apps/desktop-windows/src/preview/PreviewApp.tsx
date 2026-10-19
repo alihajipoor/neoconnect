@@ -1,0 +1,477 @@
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Gamepad2, Repeat, Shield, Sparkles } from "lucide-react";
+import type { ConnectionState } from "../components/ConnectOrb";
+import { ConnectOrb } from "../components/ConnectOrb";
+import { DeviceSlotCard } from "../components/DeviceSlotCard";
+import { RouteFlag } from "../components/Flag";
+import { GamingStatusPanel } from "../components/GamingStatusPanel";
+import { LocationPicker } from "../components/LocationPicker";
+import { Decor, Hint, StateAnnouncer, StateLine, StatusChip } from "../components/main/Hero";
+import { HeroArt } from "../components/main/HeroArt";
+import { MainView } from "../components/main/MainView";
+import { LocationCard, MetricCards, SessionTray, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
+import { Dialog } from "../components/overlay";
+import { AppShell } from "../components/shell/AppShell";
+import { Banner, Disclosure, Note, PillButton, Segmented } from "../components/ui";
+import { headlineFor, isTunnelUp } from "../lib/connection-evidence";
+import { pressFor } from "../lib/connect-intent";
+import { effects, type GlassChoice, type ThemeChoice } from "../lib/effects";
+import { chipFor, hintTone, ipFor, lineFor, pillFor, planCaution, secondaryFor, shownTone, type ShownTone } from "../lib/hero-model";
+import { useI18n, type Language, type TranslationKey } from "../lib/i18n";
+import { formatDateTime, formatNumber, formatSize, sizeParts } from "../lib/locale-format";
+import { orbTone } from "../lib/orb-caution";
+import { customerProtocolLabel } from "../lib/protocol-labels";
+import { placeLabel, routePlace } from "../lib/route-place";
+import type { SlotNotice } from "../lib/device-slot-notice";
+import type { RouteOption } from "../lib/types";
+
+/** DEV ONLY: the scenarios the state switcher offers. Each is the inputs the
+ * Dashboard would have -- the service's state, the look `orbHold` holds,
+ * the reconnect, the plan -- and the page is drawn from them through the
+ * same tables the Dashboard uses (lib/hero-model.ts). */
+interface Scenario {
+  label: string;
+  state: ConnectionState;
+  /** The held look (`orbHold`); the state itself when nothing is held. */
+  held?: ConnectionState;
+  caution?: boolean;
+  pressed?: boolean;
+  reconnecting?: { waiting: boolean; offline: boolean };
+  dropped?: boolean;
+  unconfined?: boolean;
+  waitingForNetwork?: boolean;
+  timed?: boolean;
+  failed?: boolean;
+  slot?: boolean;
+  offline?: boolean;
+  plan?: "unlimited" | "capped" | "low" | "none" | "ended";
+  failover?: boolean;
+  details?: boolean;
+  leak?: boolean;
+  gaming?: "off" | "active" | "partial" | "unknown";
+  switchDialog?: boolean;
+}
+
+const SCENARIOS: Record<string, Scenario> = {
+  idle: { label: "Not connected", state: "disconnected" },
+  connecting: { label: "Connecting (pressed)", state: "connecting", pressed: true },
+  verifying: { label: "Checking (pressed)", state: "verifying", pressed: true },
+  connected: { label: "Connected, verified", state: "connected", timed: true, failover: true, details: true },
+  adopted: { label: "Connected, adopted at launch", state: "connected" },
+  unconfined: { label: "Connected, not confined", state: "connected", unconfined: true, caution: true, timed: true, leak: true },
+  unverified: { label: "Connected, not confirmed", state: "unverified" },
+  degraded: { label: "Not carrying traffic", state: "degraded" },
+  reconnectHeld: {
+    label: "Reconnecting, inside the 10 s hold",
+    state: "connecting",
+    held: "connected",
+    dropped: true,
+    reconnecting: { waiting: false, offline: false },
+  },
+  reconnectLong: {
+    label: "Reconnecting, past the hold",
+    state: "disconnected",
+    dropped: true,
+    reconnecting: { waiting: true, offline: false },
+  },
+  noNetwork: { label: "Waiting for a network", state: "connecting", pressed: true, waitingForNetwork: true },
+  unknown: { label: "Status unknown", state: "unknown" },
+  disconnecting: { label: "Disconnecting", state: "disconnecting", pressed: true },
+  dropped: { label: "Connection lost", state: "disconnected", dropped: true },
+  failed: { label: "Connect failed", state: "disconnected", failed: true },
+  slot: { label: "Device limit", state: "disconnected", slot: true },
+  blocked: { label: "Blocked network (offline banner)", state: "disconnected", offline: true },
+  capped: { label: "Capped plan, running low", state: "disconnected", plan: "low" },
+  ended: { label: "Plan ended", state: "disconnected", plan: "ended" },
+  none: { label: "No subscription", state: "disconnected", plan: "none" },
+  switch: { label: "Switch location while connected", state: "connected", timed: true, switchDialog: true },
+  gamingOff: { label: "Gaming mode off", state: "disconnected", gaming: "off" },
+  gamingOn: { label: "Gaming mode on", state: "disconnected", gaming: "active" },
+  gamingUnknown: { label: "Gaming mode, status unknown", state: "disconnected", gaming: "unknown" },
+};
+
+const SIZES: Record<string, [number, number]> = {
+  "1180 × 760 (first launch)": [1180, 760],
+  "940 × 700 (old default)": [940, 700],
+  "1440 × 900": [1440, 900],
+  "720 × 600 (minimum)": [720, 600],
+  "834 × 1112 (tablet)": [834, 1112],
+  "390 × 844 (phone)": [390, 844],
+};
+
+function route(id: string, region: string, node: string, protocol: RouteOption["protocol"], transport: string | undefined, extra: Partial<RouteOption> = {}): RouteOption {
+  return {
+    id,
+    name: id,
+    protocol,
+    transport,
+    isRelay: false,
+    location: { region, nodeName: node },
+    endpoint: { host: "203.0.113.10", port: 443 },
+    nodeStatus: "ONLINE",
+    ...extra,
+  };
+}
+
+const ROUTES: RouteOption[] = [
+  route("de-stealth", "de-germany", "node-de-1", "XRAY_VLESS_TLS", "WS", { ispTag: { code: "worksOnYourIsp", customers: 14, outOf: 17, windowHours: 24 } }),
+  route("de-wg", "de-germany", "node-de-1", "WIREGUARD", undefined),
+  route("fi-reality", "fi-finland", "node-fi-1", "XRAY_VLESS_REALITY", undefined),
+  route("fr-ss", "fr-france", "node-fr-1", "SHADOWSOCKS", undefined),
+  route("tr-ikev2", "tr-turkey", "node-tr-1", "IKEV2", undefined, {
+    ispTag: { code: "failingOnYourIsp", customers: 9, outOf: 11, windowHours: 24 },
+  }),
+  route("ir-de", "ir-iran", "node-ir-1", "XRAY_VLESS_TLS", "WS", { isRelay: true, exitLocation: { region: "de-germany" } }),
+];
+
+const SLOT: SlotNotice = {
+  kind: "refused",
+  refusal: { limit: 2, holders: [{ handle: "h1", label: "Pixel 7", platform: "android", since: new Date(Date.now() - 3_600_000).toISOString() }] },
+} as SlotNotice;
+
+export function PreviewApp() {
+  const { t, language, setLanguage } = useI18n();
+  const [key, setKey] = useState("connected");
+  const [size, setSize] = useState("1180 × 760 (first launch)");
+  const [theme, setTheme] = useState<ThemeChoice>("system");
+  const [glass, setGlass] = useState<GlassChoice>("auto");
+  const [motion, setMotion] = useState<boolean>(false);
+  const sc = SCENARIOS[key];
+  const [w, h] = SIZES[size];
+  const [askOpen, setAskOpen] = useState(false);
+
+  useEffect(() => effects.setTheme(theme), [theme]);
+  useEffect(() => effects.setGlass(glass), [glass]);
+  useEffect(() => effects.setMotion(motion ? true : null), [motion]);
+  useEffect(() => setAskOpen(Boolean(sc.switchDialog)), [sc]);
+  window.__NX_PREVIEW_GAMING__ = sc.gaming;
+
+  const connectedAt = useMemo(() => (sc.timed ? Date.now() - 6_128_000 : null), [sc]);
+
+  const controls = (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", padding: "10px 16px", fontSize: 13, color: "#1a1f2b", fontFamily: "system-ui, sans-serif" }} lang="en" dir="ltr">
+      <strong>Main page preview (dev only)</strong>
+      <label>
+        State{" "}
+        <select value={key} onChange={(e) => setKey(e.target.value)} data-testid="scenario">
+          {Object.entries(SCENARIOS).map(([k, s]) => (
+            <option key={k} value={k}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Window{" "}
+        <select value={size} onChange={(e) => setSize(e.target.value)} data-testid="size">
+          {Object.keys(SIZES).map((s) => (
+            <option key={s}>{s}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Language{" "}
+        <select value={language} onChange={(e) => setLanguage(e.target.value as Language)} data-testid="language">
+          <option value="en">English</option>
+          <option value="fa">فارسی</option>
+        </select>
+      </label>
+      <label>
+        Theme{" "}
+        <select value={theme} onChange={(e) => setTheme(e.target.value as ThemeChoice)} data-testid="theme">
+          <option value="system">System</option>
+          <option value="light">Pearl</option>
+          <option value="dark">Smoked</option>
+        </select>
+      </label>
+      <label>
+        Glass{" "}
+        <select value={glass} onChange={(e) => setGlass(e.target.value as GlassChoice)} data-testid="glass">
+          <option value="auto">Auto</option>
+          <option value="full">Full</option>
+          <option value="lite">Lite</option>
+          <option value="flat">Off</option>
+        </select>
+      </label>
+      <label>
+        <input type="checkbox" checked={motion} onChange={(e) => setMotion(e.target.checked)} /> Reduce motion
+      </label>
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#d9dde5", overflow: "auto", userSelect: "text" }}>
+      {controls}
+      <div
+        style={{
+          width: w,
+          height: h,
+          margin: "0 16px 24px",
+          position: "relative",
+          borderRadius: 12,
+          overflow: "hidden",
+          boxShadow: "0 30px 80px -30px rgba(20,30,60,.45), 0 0 0 1px rgba(20,30,60,.12)",
+          // A containing block for the app's fixed overlays.
+          transform: "translateZ(0)",
+        }}
+        data-testid="frame"
+      >
+        <Composed sc={sc} t={t} language={language} connectedAt={connectedAt} askOpen={askOpen} onAsk={setAskOpen} width={w} />
+      </div>
+    </div>
+  );
+}
+
+type T = (key: TranslationKey, vars?: Record<string, string | number>) => string;
+
+function Composed({
+  sc,
+  t,
+  language,
+  connectedAt,
+  askOpen,
+  onAsk,
+  width,
+}: {
+  sc: Scenario;
+  t: T;
+  language: Language;
+  connectedAt: number | null;
+  askOpen: boolean;
+  onAsk: (open: boolean) => void;
+  width: number;
+}) {
+  const layout = width >= 900 ? "wide" : width >= 640 ? "medium" : "narrow";
+  const [gamingTone, setGamingTone] = useState<ShownTone>("idle");
+  const gaming = sc.gaming !== undefined;
+  const reconnecting = sc.reconnecting ?? null;
+  const headline = headlineFor(sc.state, {
+    dropped: sc.dropped ?? false,
+    customMode: false,
+    reconnecting,
+    unconfined: sc.unconfined ?? false,
+    waitingForNetwork: sc.waitingForNetwork ?? false,
+  });
+  const press = pressFor(sc.state, { reconnectWaiting: reconnecting?.waiting === true });
+  const held = sc.held ?? sc.state;
+  const calmTone = gaming ? gamingTone : shownTone(orbTone(held, sc.caution ?? false), { reconnecting: reconnecting !== null, dropped: sc.dropped ?? false });
+  const chip = chipFor(sc.state, headline);
+  const line = lineFor(sc.state, headline, { connectedAt });
+  const lineWords = t(line.kind === "words" ? line.key : headline.title);
+  const pill = pillFor(sc.state, press, { pressed: sc.pressed ?? false, waitingForNetwork: sc.waitingForNetwork, failed: sc.failed });
+  const secondary = secondaryFor(press, { reconnecting: reconnecting !== null, failed: sc.failed ?? false });
+  const hintText = sc.failed ? t("err.allProtocolsFailed") : t(headline.hint);
+  const current = ROUTES[0];
+  const protocol = customerProtocolLabel(current.protocol, current.transport);
+
+  const plan = sc.plan ?? "unlimited";
+  const cap = plan === "capped" || plan === "low" ? 30 * 1024 ** 3 : null;
+  const usedBytes = plan === "low" ? 28.4 * 1024 ** 3 : 7.2 * 1024 ** 3;
+  const daysLeft = plan === "low" ? 2 : 6;
+  const caution = planCaution(cap ? usedBytes / cap : null, daysLeft);
+  const used = sizeParts(usedBytes, language);
+  const trayPlan: TrayPlan | null =
+    plan === "none"
+      ? null
+      : {
+          label: cap === null ? t("tr.planUnl") : t("dash.dataUsed"),
+          value: (
+            <>
+              {used.value}
+              <small>{cap !== null ? `${used.unit} ${t("tr.ofCap", { cap: formatSize(cap, language) })}` : t("tr.used", { size: used.unit })}</small>
+            </>
+          ),
+          meter: cap !== null ? { fraction: usedBytes / cap, caution: caution.meter } : null,
+          days: { text: t("tr.daysLeft", { n: formatNumber(daysLeft, language) }), caution: caution.days },
+          renew: sc.offline ? null : { label: t("tr.renew"), onClick: () => undefined },
+        };
+  const location: TrayLocation = gaming
+    ? { flag: <span className="nx-flagbox auto"><Gamepad2 aria-hidden /></span>, name: t("gaming.games"), sub: t("tr.gamesChosen", { n: formatNumber(2, language) }) }
+    : sc.state === "disconnected" && !sc.timed
+      ? { flag: <span className="nx-flagbox auto"><Sparkles aria-hidden /></span>, name: t("loc.automaticShort"), sub: null, onChange: () => undefined }
+      : {
+          flag: <RouteFlag region={routePlace(current).entry} exitRegion={routePlace(current).exit} label={placeLabel(current, language)} size="lg" />,
+          name: placeLabel(current, language),
+          sub: `${t("loc.automaticShort")} · ${protocol}`,
+          onChange: () => undefined,
+        };
+  const ip = ipFor(sc.state, "198.51.100.42", { gaming });
+
+  const modeBar =
+    plan === "none" ? null : (
+      <div className="nx-modebar">
+        <Segmented
+          label={t("mode.label")}
+          value={gaming ? "gaming" : "vpn"}
+          onChange={() => undefined}
+          locked={sc.state !== "disconnected"}
+          lockedReason={t("mode.locked")}
+          options={[
+            { value: "vpn", label: t("dash.modeVpn"), icon: <Shield aria-hidden /> },
+            { value: "gaming", label: t("dash.modeGaming"), icon: <Gamepad2 aria-hidden /> },
+          ]}
+        />
+        <p className="nx-modehint">
+          {gaming
+            ? t("mode.gamingHintShort")
+            : !isTunnelUp(sc.state)
+              ? t("mode.vpnHintIdle")
+              : t(sc.unconfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint")}
+        </p>
+      </div>
+    );
+
+  const banner: ReactNode = (
+    <>
+      {sc.offline ? (
+        <Banner>
+          <b>{t("dash.offlineTitle")}</b>
+          <span>{t("dash.offlineHint", { when: formatDateTime(Date.now() - 86_400_000 * 2, language) })}</span>
+        </Banner>
+      ) : null}
+      {plan === "ended" ? (
+        <Banner title={t("dash.planExpired")}>
+          <span>{t("dash.renewHint")}</span>
+          <PillButton size="sm" className="mt-2 self-start">
+            {t("dash.renewCta")}
+          </PillButton>
+        </Banner>
+      ) : null}
+    </>
+  );
+
+  const actions =
+    plan === "none" ? (
+      <div className="nx-actions">
+        <PillButton>{t("dash.viewPlans")}</PillButton>
+      </div>
+    ) : (
+      <div className="nx-actions">
+        <ConnectOrb state={held} caution={sc.caution} onToggle={() => undefined} label={t(pill.labelKey)} look="pill" pill={pill} />
+        {secondary === "stopReconnecting" ? (
+          <PillButton variant="ghost">{t("dash.reconnectStop")}</PillButton>
+        ) : secondary === "stopConnecting" ? (
+          <PillButton variant="ghost">{t("btn.stop")}</PillButton>
+        ) : secondary === "tryAnother" ? (
+          <PillButton variant="ghost">{t("btn.tryAnother")}</PillButton>
+        ) : null}
+      </div>
+    );
+
+  const notes = (
+    <div className="nx-notes">
+      {sc.leak ? <Note tone="danger">{t("dash.ipv4NotConfined")}</Note> : null}
+      {sc.details ? (
+        <Disclosure label={t("notes.details")} count={1}>
+          <Note tone="info">{t("dash.fullTunnelIpv6Blocked")}</Note>
+        </Disclosure>
+      ) : null}
+    </div>
+  );
+
+  const panel = (
+    <LocationPicker
+      variant={layout === "narrow" ? "overlay" : "panel"}
+      subscriptionId="preview"
+      currentRouteId={isTunnelUp(sc.state) ? current.id : undefined}
+      tunnelActive={sc.state !== "disconnected"}
+      connectionState={sc.state}
+      initialRoutes={ROUTES}
+      automatic={!isTunnelUp(sc.state)}
+      onChooseAutomatic={() => undefined}
+      onClose={() => undefined}
+      onSwitched={() => undefined}
+      confirmPick={async () => {
+        if (isTunnelUp(sc.state)) onAsk(true);
+        return false;
+      }}
+    />
+  );
+
+  return (
+    <AppShell
+      active="overview"
+      shown={calmTone}
+      busy={pill.progress}
+      banner={Boolean(sc.offline || plan === "ended")}
+      titlebar
+      email="you@example.com"
+      planLine={plan === "none" ? null : `${cap === null ? t("tr.planUnl") : t("tr.plan")} · ${t("tr.daysLeft", { n: formatNumber(daysLeft, language) })}`}
+      onOverview={() => undefined}
+      onLocations={() => undefined}
+      onOpenSettings={() => undefined}
+      onBrowsePlans={() => undefined}
+      onOpenReferrals={() => undefined}
+      onOpenSupport={() => undefined}
+      onSignOut={() => undefined}
+      signingOut={false}
+      scene={<HeroArt tone={calmTone} busy={pill.progress} places={[]} layout={layout} />}
+    >
+      {gaming ? (
+        <MainView
+          banner={banner}
+          gaming={<GamingStatusPanel onOpenSettings={() => undefined} onTone={setGamingTone} />}
+          modeBar={modeBar}
+          locationCard={<LocationCard location={location} />}
+          metrics={<MetricCards plan={trayPlan} ip={ip} />}
+          tray={<SessionTray label={t("tr.location")} location={location} plan={trayPlan} ip={ip} />}
+        />
+      ) : (
+        <MainView
+          banner={banner}
+          chip={<StatusChip glyph={chip.glyph} label={t(chip.labelKey)} />}
+          line={<StateLine line={line} words={lineWords} decor={<Decor keys={["decor.browse", "decor.stream", "decor.work", "decor.anywhere"]} />} />}
+          hint={<Hint tone={hintTone(calmTone, { failed: sc.failed })}>{hintText}</Hint>}
+          slot={
+            sc.slot ? (
+              <DeviceSlotCard look="pearl" notice={SLOT} tunnelDown onUseHere={() => undefined} onDismiss={() => undefined} />
+            ) : undefined
+          }
+          subline={
+            sc.failover ? (
+              <p className="nx-subline">
+                <Repeat aria-hidden />
+                <span>
+                  {t("dash.nowUsing")} <span className="font-medium text-ink">{protocol}</span>
+                </span>
+              </p>
+            ) : null
+          }
+          actions={sc.slot ? null : actions}
+          error={
+            sc.failed ? (
+              <details className="nx-errdetail">
+                <summary>{t("err.showDetail")}</summary>
+                <p data-ltr>tried 4 of 4 available{"\n"}Stealth: timed out</p>
+              </details>
+            ) : null
+          }
+          notes={notes}
+          modeBar={modeBar}
+          locationCard={<LocationCard location={location} />}
+          metrics={<MetricCards plan={trayPlan} ip={ip} />}
+          panel={layout !== "narrow" ? panel : null}
+          panelLabel={t("loc.panelTitle")}
+          tray={<SessionTray label={t("tr.location")} location={location} plan={trayPlan} ip={ip} />}
+          announcer={<StateAnnouncer text={`${lineWords}. ${hintText}`} />}
+        />
+      )}
+      <Dialog
+        open={askOpen}
+        title={t("sw.title", { place: `${placeLabel(ROUTES[2], language)} · ${customerProtocolLabel(ROUTES[2].protocol, ROUTES[2].transport)}` })}
+        description={t("sw.body")}
+        onClose={() => onAsk(false)}
+        actions={
+          <>
+            <PillButton variant="ghost" size="sm" onClick={() => onAsk(false)}>
+              {t("sw.stay")}
+            </PillButton>
+            <PillButton size="sm" onClick={() => onAsk(false)}>
+              {t("sw.go")}
+            </PillButton>
+          </>
+        }
+      />
+    </AppShell>
+  );
+}
