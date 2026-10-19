@@ -193,7 +193,12 @@
     white-space: nowrap;
     color: var(--ink-2);
     font-size: 12px;
-    text-align: start;
+    text-align: left;
+  }
+  /* The package name is Latin and left to right; under Persian it lines up
+     with the label above it, on the right. */
+  html[dir="rtl"] .nx-perapp-row .s {
+    text-align: right;
   }
   /* The box the check sits in: its outline says "can be chosen" without
      colour, the cobalt fill and the check say "chosen". */
