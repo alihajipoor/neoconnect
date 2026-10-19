@@ -3142,8 +3142,10 @@ export function Dashboard({
         <Note tone="danger">{t("err.teardownStuck")}</Note>
       ) : null}
       {/* The consent dialog was declined. Said rather than swallowed: a
-          refusal looks exactly like a failed connect from the outside. */}
-      {permissionDenied ? <Note tone="caution">{t("dash.vpnPermissionDenied")}</Note> : null}
+          refusal looks exactly like a failed connect from the outside. In
+          the platform's own words: iOS asks to add a VPN configuration and
+          its button is "Allow"; Android's is "OK". */}
+      {permissionDenied ? <Note tone="caution">{t(isIOS() ? "dash.vpnPermissionDeniedIos" : "dash.vpnPermissionDenied")}</Note> : null}
       {/* A missing feature, not a blocked network. */}
       {unsupportedChoice ? <Note>{t("dash.androidWireguardOnly", { protocol: unsupportedChoice })}</Note> : null}
     </div>

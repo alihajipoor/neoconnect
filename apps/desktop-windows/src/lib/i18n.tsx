@@ -657,6 +657,9 @@ const en = {
   // The phone's VPN consent dialog was declined. Said rather than
   // swallowed: a refusal looks exactly like a failed connect.
   "dash.vpnPermissionDenied": "Android needs your permission to create a VPN connection. Tap Connect again and choose OK.",
+  // The same on an iPhone or iPad, whose prompt adds a VPN configuration
+  // and whose button is "Allow".
+  "dash.vpnPermissionDeniedIos": "iOS needs your permission to add a VPN configuration. Tap Connect again and choose Allow.",
   // Said when the helper service cannot be reached, which is a different
   // thing from the tunnel being down and must not borrow its words. The
   // screen used to answer this case with "You're not protected", over a
@@ -1749,6 +1752,8 @@ const fa: Record<TranslationKey, string> = {
     "این دستگاه به شبکه‌ای وصل نیست. نئوکسیفای به محض وصل شدن شبکه وصل می‌شود. تا آن زمان، ترافیک شما محافظت نمی‌شود.",
   "dash.vpnPermissionDenied":
     "اندروید برای ساختن اتصال VPN به اجازه شما نیاز دارد. دوباره روی «اتصال» بزنید و در پنجره‌ای که باز می‌شود اجازه دهید.",
+  "dash.vpnPermissionDeniedIos":
+    "iOS برای افزودن پیکربندی VPN به اجازه شما نیاز دارد. دوباره روی «اتصال» بزنید و در پنجره‌ای که باز می‌شود «Allow» را انتخاب کنید.",
   "dash.unknown": "در حال حاضر مشخص نیست",
   "dash.unknownHint":
     "سرویس نئوکسیفای پاسخ نمی‌دهد، بنابراین برنامه نمی‌تواند بگوید محافظت شده‌اید یا نه. تلاش ادامه دارد — تا پاسخ نیامده، هیچ‌کدام را فرض نکنید.",
