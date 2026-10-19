@@ -262,6 +262,13 @@ The script uses `zip` when it exists, then Python's zipfile, then Node
 (`scripts/make-zip.mjs`) -- the owner's Windows PC has only the last. All
 three write forward-slash entry names and exclude the same files.
 
+**The zip never contains `account/`.** The customer portal at `/account/`
+is a separate build (`apps/web-portal`) and ships only through
+`scripts/deploy-portal.sh` at the repository root, which backs up the live
+portal, swaps the new one in atomically, checks it from outside and rolls
+back on a failed check. Unzipping the site leaves the live portal alone;
+a portal build sitting in `website/account/` is never shipped by accident.
+
 ### Routing, and why it is in PHP
 
 The shared nginx sends any path it cannot match to a file to
