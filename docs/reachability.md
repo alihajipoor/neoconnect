@@ -120,10 +120,12 @@ On the VM and a phone, with the release build:
   bundle2 as nodes change. Needs the server key on the panel host --
   only after the panel is hardened (below). Until then lists are signed
   with the server key on the owner's Mac and published by hand.
-- **Panel hardening** (owner's condition for the server key): admin
-  access only through an identity-aware proxy or the VPN, MFA required
-  for every admin, login alerts, short sessions, the signing key in a
-  separate process the panel can ask but not read.
+- **Panel hardening** (owner's condition for the server key). Live:
+  admin sign-in alerts and an admin audit log; fail2ban on sshd on the
+  panel host and every node. Owner decisions (2026-10-18): SSH password
+  login stays, no identity-aware proxy in front of the panel, MFA turned
+  on by the owner later. Still to do: short sessions, and the signing key
+  in a separate process the panel can ask but not read.
 - **The control plane through the tunnels** (Psiphon's model): the app
   reaches the API through whatever VPN connection works -- the
   customer's own credentials, or for sign-in and sign-up a built-in

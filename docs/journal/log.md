@@ -7507,9 +7507,12 @@ docs/reachability.md. The Windows crate was not built here; only the mobile
 crate, which compiles the same `bundle_scope.rs`.
 
 **Next, decided, not built:** the panel signing and publishing bundle2
-itself; panel hardening first (admin access behind an identity check, MFA
-for every admin, login alerts, the signing key in a process the panel
-cannot read); the control plane through the tunnels with a restricted
+itself; panel hardening first (sign-in alerts and an admin audit log are
+live since 2026-10-19; the owner decided on 2026-10-18 to keep SSH
+password login, put no Cloudflare Access or other identity proxy in front
+of the panel, and turn on MFA himself later; fail2ban guards sshd on the
+panel host and every node; still to do: the signing key in a process the
+panel cannot read); the control plane through the tunnels with a restricted
 guest connection for sign-in and sign-up (owner: a traffic cap, usable
 only for the API); a one-time nudge for social-only accounts to set a
 password, since Google and Apple sign-in cannot work in an intranet.
