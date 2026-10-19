@@ -276,7 +276,8 @@ describe("which screen runs an attempt", () => {
     // placeholders: led by protocols already refused here, and its landing
     // saved its one entry over every network's remembered route and history.
     const memory = body("function loadRouteMemory(): void {");
-    expect(memory).toContain('invoke<string | null>("network_fingerprint")');
+    expect(memory).toContain("readNetworkId(),");
+    expect(body("function readNetworkId(keepOnNull = false): Promise<void> {")).toContain('invoke<string | null>("network_fingerprint")');
     expect(memory).toContain("loadLastGood().then(setLastGood),");
     expect(memory).toContain("loadConnectHistory().then(setHistory),");
     expect(memory).toContain(".finally(() => setRouteMemoryLoaded(true));");
@@ -425,7 +426,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     expect(choose).toContain('choice === "keepTunnel" ? (protocolUserRef.current?.routeId ?? routeId) : routeId');
     const picker = dashboard.slice(dashboard.indexOf("<LocationPicker"));
     expect(picker).toContain("const shown = chooseLocation(routeId ?? null);");
-    expect(picker).toContain("void loadAll(shown ?? undefined);");
+    expect(picker).toContain("void loadAll(shown ?? undefined).finally(connectAfterSwitch);");
     expect(picker).toContain("chooseLocation(null);");
     // Nothing in the list ends the episode any other way.
     expect(picker).not.toContain("autoReconnect.cancel(");

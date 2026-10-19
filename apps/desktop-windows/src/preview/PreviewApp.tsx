@@ -8,6 +8,7 @@ import { GamingStatusPanel } from "../components/GamingStatusPanel";
 import { LocationPicker } from "../components/LocationPicker";
 import { Decor, Hint, StateAnnouncer, StateLine, StatusChip } from "../components/main/Hero";
 import { HeroArt } from "../components/main/HeroArt";
+import { SLOT as PROTOCOL_SLOT, Slotted } from "../components/Slotted";
 import { MapLegend } from "../components/main/MapLegend";
 import { WorldMap } from "../components/main/WorldMap";
 import { MainView } from "../components/main/MainView";
@@ -25,7 +26,7 @@ import { orbTone } from "../lib/orb-caution";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import { placeLabel, routePlace } from "../lib/route-place";
 import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
-import { mapCountries, mapLights } from "../lib/map-lights";
+import { mapCountries, mapLights, ownWorkedAt, placesEvidence } from "../lib/map-lights";
 import type { SlotNotice } from "../lib/device-slot-notice";
 import type { RouteOption } from "../lib/types";
 
@@ -383,15 +384,17 @@ function Composed({
   // The map, from the same function the Dashboard uses.
   const verified = !gaming && (sc.state === "connected" || held === "connected") ? current : null;
   const settled = sc.state === "connected" || sc.state === "unverified" || sc.state === "degraded";
+  const evidenceCtx = { history, network: PREVIEW_NET, now: Date.now() };
   const mapScene = mapLights({
     routes,
-    history,
-    network: PREVIEW_NET,
-    now: Date.now(),
+    ...evidenceCtx,
     verified,
     tone: calmTone,
     shown: gaming ? null : settled || sc.relayPinned ? current : null,
+    up: gaming || !settled ? null : current,
   });
+  const workedPlaces = new Set<string>();
+  for (const [key, evidence] of placesEvidence(routes, evidenceCtx)) if (evidence.look === "live") workedPlaces.add(key);
   const mapPlaces = mapCountries(routes);
   const mapAlert = Boolean(sc.offline || plan === "ended" || sc.slot || sc.failed);
   const mapStage =
@@ -477,6 +480,7 @@ function Composed({
       tunnelActive={sc.state !== "disconnected"}
       connectionState={sc.state}
       initialRoutes={routes}
+      evidence={{ worked: workedPlaces, ownAt: (route) => ownWorkedAt(route, evidenceCtx), tags: true }}
       automatic={!isTunnelUp(sc.state)}
       onChooseAutomatic={() => undefined}
       onClose={() => undefined}
@@ -496,7 +500,7 @@ function Composed({
       banner={Boolean(sc.offline || plan === "ended")}
       titlebar
       email="you@example.com"
-      planLine={plan === "none" ? null : `${cap === null ? t("tr.planUnl") : t("tr.plan")} · ${t("tr.daysLeft", { n: formatNumber(daysLeft, language) })}`}
+      planLine={plan === "none" ? null : `${t("tr.daysLeft", { n: formatNumber(daysLeft, language) })}${cap === null ? ` · ${t("dash.unlimited")}` : ""}`}
       onOverview={() => undefined}
       onLocations={() => undefined}
       onOpenSettings={() => undefined}
@@ -533,7 +537,9 @@ function Composed({
               <p className="nx-subline">
                 <Repeat aria-hidden />
                 <span>
-                  {t("dash.nowUsing")} <span className="font-medium text-ink">{protocol}</span>
+                  <Slotted text={t("dash.nowUsing", { protocol: PROTOCOL_SLOT })}>
+                    <bdi className="font-medium text-ink">{protocol}</bdi>
+                  </Slotted>
                 </span>
               </p>
             ) : null

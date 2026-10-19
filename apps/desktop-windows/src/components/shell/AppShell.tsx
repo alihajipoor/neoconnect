@@ -143,10 +143,14 @@ export function AppShell(props: ShellProps) {
               {initial(email)}
             </span>
             <span className="t">
-              <span className="n" dir="ltr">
+              <span className="n" dir="ltr" title={email ?? undefined}>
                 {email ?? "—"}
               </span>
-              {props.planLine ? <span className="s">{props.planLine}</span> : null}
+              {props.planLine ? (
+                <span className="s" title={props.planLine}>
+                  {props.planLine}
+                </span>
+              ) : null}
             </span>
           </button>
         </nav>

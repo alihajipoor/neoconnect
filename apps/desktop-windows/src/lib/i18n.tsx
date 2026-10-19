@@ -657,7 +657,7 @@ const en = {
   "dash.unknownHint":
     "The Neoxify service isn't answering, so the app can't say whether you're protected. It keeps asking — until it answers, don't assume either way.",
   "dash.recheck": "Check status",
-  "dash.switchedTo": "Your usual protocol didn't get through. Now using",
+  "dash.switchedTo": "Your usual protocol didn't get through. Now using {protocol}",
   // Used instead of the line above when failover crossed to a different
   // country. Naming only the protocol was accurate and still misleading:
   // a customer who chose Singapore deliberately was told "now using
@@ -679,13 +679,13 @@ const en = {
   // mid-connect: "Couldn't reach fi-finland" about a server nothing had
   // asked (failover-notice.ts).
   "dash.switchedNoNetwork": "No network connection at first, so {from} wasn't tried. Now on {to} over {protocol}",
-  "dash.switchedToNoNetwork": "No network connection at first. Now using",
+  "dash.switchedToNoNetwork": "No network connection at first. Now using {protocol}",
   // The pass stayed in the country and nothing it tried was dialled and
   // failed -- it landed at once on a route other than the one on screen,
   // or every failure came before anything was dialled. Only where the
   // connection is: "didn't get through" would be a claim nothing made
   // true (failover-notice.ts).
-  "dash.nowUsing": "Now using",
+  "dash.nowUsing": "Now using {protocol}",
   "dash.yourIp": "Your IP:",
   "err.serviceUnavailable": "The Neoxify background service isn't running. Restarting the app usually fixes this; reinstalling will if it doesn't.",
   "err.engineMissing": "Part of the installation is missing. Please reinstall Neoxify.",
@@ -1216,8 +1216,15 @@ const en = {
   "map.down": "Offline or failing",
   "map.liveTip": "Carried traffic on this network lately: on this device, or for most people on this network.",
   "map.idleTip": "Listed, but nothing shows yet whether it works on this network. A latency number does not count.",
-  "map.downTip": "Neoxify reports it offline, or everything tried there lately failed on this network.",
+  "map.downTip": "Neoxify reports it offline, or it has been failing for most people on this network lately.",
   "map.hereTip": "Where your verified connection leaves from.",
+  "loc.ispWorksShort": "Works for others here",
+  "loc.ispFailingShort": "Failing for others here",
+  "loc.automaticHintShort": "Tries what works here first",
+  "loc.ownWorked": "Worked on this device",
+  "loc.ownWorkedTip": "Carried traffic from this device lately, on this network.",
+  "sw.notSwitched": "Couldn't confirm the old connection had closed, so the location wasn't switched.",
+  "tr.ipChecked": "Checked through the tunnel",
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -1572,12 +1579,12 @@ const fa: Record<TranslationKey, string> = {
   "dash.unknownHint":
     "سرویس نئوکسیفای پاسخ نمی‌دهد، بنابراین برنامه نمی‌تواند بگوید محافظت شده‌اید یا نه. تلاش ادامه دارد — تا پاسخ نیامده، هیچ‌کدام را فرض نکنید.",
   "dash.recheck": "بررسی وضعیت",
-  "dash.switchedTo": "پروتکل همیشگی شما عبور نکرد. اکنون از این استفاده می‌شود:",
+  "dash.switchedTo": "پروتکل همیشگی شما عبور نکرد. اکنون از {protocol} استفاده می‌شود",
   "dash.switchedServer": "دسترسی به {from} ممکن نشد. اکنون {to} با {protocol}",
   "dash.usedInstead": "به‌جای {from}، {to} با {protocol} استفاده شد. برای ثابت‌ماندن، یک سرور انتخاب کنید.",
   "dash.switchedNoNetwork": "ابتدا اتصال شبکه برقرار نبود، پس {from} امتحان نشد. اکنون {to} با {protocol}",
-  "dash.switchedToNoNetwork": "ابتدا اتصال شبکه برقرار نبود. اکنون از این استفاده می‌شود:",
-  "dash.nowUsing": "اکنون از این استفاده می‌شود:",
+  "dash.switchedToNoNetwork": "ابتدا اتصال شبکه برقرار نبود. اکنون از {protocol} استفاده می‌شود",
+  "dash.nowUsing": "اکنون از {protocol} استفاده می‌شود",
   "dash.yourIp": "آی‌پی شما:",
   "err.serviceUnavailable": "سرویس پس‌زمینه نئوکسیفای اجرا نمی‌شود. معمولاً راه‌اندازی دوباره برنامه مشکل را حل می‌کند.",
   "err.engineMissing": "بخشی از نصب ناقص است. لطفاً دوباره نصب کنید.",
@@ -1947,8 +1954,15 @@ const fa: Record<TranslationKey, string> = {
   "map.down": "خاموش یا ناموفق",
   "map.liveTip": "اخیراً در این شبکه ترافیک را رسانده است: در این دستگاه، یا برای بیشتر کاربران این شبکه.",
   "map.idleTip": "در فهرست هست، اما هنوز چیزی نشان نمی‌دهد که در این شبکه کار می‌کند یا نه. عدد تأخیر به حساب نمی‌آید.",
-  "map.downTip": "نئوکسیفای آن را خاموش گزارش می‌کند، یا هرچه اخیراً آنجا امتحان شد در این شبکه ناموفق بود.",
+  "map.downTip": "نئوکسیفای آن را خاموش گزارش می‌کند، یا اخیراً برای بیشتر کاربران این شبکه کار نکرده است.",
   "map.hereTip": "جایی که اتصالِ تأییدشده‌ی شما از آن خارج می‌شود.",
+  "loc.ispWorksShort": "برای دیگران اینجا کار می‌کند",
+  "loc.ispFailingShort": "برای دیگران اینجا کار نمی‌کند",
+  "loc.automaticHintShort": "اول آنچه اینجا کار می‌کند",
+  "loc.ownWorked": "در این دستگاه کار کرده",
+  "loc.ownWorkedTip": "اخیراً در همین شبکه، از این دستگاه ترافیک را رسانده است.",
+  "sw.notSwitched": "بسته شدن اتصال قبلی تأیید نشد، بنابراین مکان عوض نشد.",
+  "tr.ipChecked": "از طریق تونل بررسی شد",
 };
 
 /** Exported for the honesty tests in `i18n.test.ts`, which assert things

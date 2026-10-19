@@ -148,9 +148,21 @@ import { MainView } from "../components/main/MainView";
 import { Decor, Hint, StateAnnouncer, StateLine, StatusChip } from "../components/main/Hero";
 import { LocationCard, MetricCards, SessionTray, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
 import { HeroArt } from "../components/main/HeroArt";
+import { SLOT, Slotted } from "../components/Slotted";
 import { MapLegend } from "../components/main/MapLegend";
 import { WorldMap } from "../components/main/WorldMap";
-import { mapCountries, mapLights } from "../lib/map-lights";
+import { mapCountries, mapLights, ownWorkedAt, placesEvidence, type EvidenceContext } from "../lib/map-lights";
+import {
+  IDLE_WAY_OUT_POLL_MS,
+  NO_ROAM,
+  idleWayOut,
+  mapNetwork,
+  tagsCurrent,
+  tunnelWayOut,
+  withoutTags,
+  type NetworkFreshness,
+} from "../lib/map-network";
+import { currentNetwork } from "../lib/network-identity";
 import { Sheet } from "../components/Sheet";
 import {
   chipFor,
@@ -531,6 +543,11 @@ export function Dashboard({
   /** Which network we are on, so "what worked here last time" means
    * here and not somewhere else. Null when it cannot be determined. */
   const [networkId, setNetworkId] = useState<string | null>(null);
+  /** When the way out last changed under this screen, and when the network
+   * id and the route list's per-network tags were last read: whether the
+   * map's evidence still describes the network the device is on
+   * (`lib/map-network.ts`). */
+  const [netFresh, setNetFresh] = useState<NetworkFreshness>(NO_ROAM);
   const [lastGood, setLastGood] = useState<LastGoodMap>({});
   /** Per route and protocol, how recent attempts went on this network.
    * Richer than `lastGood`, which holds one route and no outcome. */
@@ -1417,12 +1434,36 @@ export function Dashboard({
    * history with its own single entry. */
   function loadRouteMemory(): void {
     void Promise.all([
-      invoke<string | null>("network_fingerprint")
-        .then(setNetworkId)
-        .catch(() => setNetworkId(null)),
+      readNetworkId(),
       loadLastGood().then(setLastGood),
       loadConnectHistory().then(setHistory),
     ]).finally(() => setRouteMemoryLoaded(true));
+  }
+
+  /** Which network this is, asked again. `keepOnNull` is for a tunnel that
+   * is up: with one owning the default route the fingerprint cannot be
+   * read at all, and that is no reason to take the ladder's memory away
+   * from a reconnect -- the id is asked again once the tunnel is down. */
+  function readNetworkId(keepOnNull = false): Promise<void> {
+    const askedAt = Date.now();
+    return invoke<string | null>("network_fingerprint")
+      .catch(() => null)
+      .then((id) => {
+        if (id === null && keepOnNull) return;
+        setNetworkId(id);
+        setNetFresh((fresh) => ({ ...fresh, idReadAt: Math.max(fresh.idReadAt, askedAt) }));
+      });
+  }
+
+  /** The way out changed under the window, or went altogether: until the
+   * network id and the route list are read again, the map does without
+   * them (`lib/map-network.ts`). A different way out under a live tunnel
+   * asks for the id at once; a lost one does not -- whichever network comes
+   * back is asked about once the tunnel is down. */
+  function noteRoam(reread: "now" | "tunnelUp" | "later") {
+    const at = Date.now();
+    setNetFresh((fresh) => ({ ...fresh, roamedAt: at }));
+    if (reread !== "later") void readNetworkId(reread === "tunnelUp");
   }
 
   /** The server list's own answer, newer than anything this screen holds:
@@ -1694,6 +1735,10 @@ export function Dashboard({
         // wait can outlast: a Disconnect pressed meanwhile breaks the
         // request, and its report must not say nothing was being dialled.
         const routeList = traceRequests("dashboard route list", () => connectionStateRef.current);
+        // Which network the list's per-network tags will be about: the
+        // reading the request carries, or without one the request's own
+        // address, now (`lib/map-network.ts`).
+        const tagsAt = currentNetwork()?.at ?? Date.now();
         const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));
         const routesUnanswered = routeList.settle({ routes: routesResult });
         if (routesResult.ok) {
@@ -1703,6 +1748,7 @@ export function Dashboard({
           if (takesRouteList(routesShownRef.current, load)) {
             setRoutes(currentRoutes);
             routesShownRef.current = { plan: planOf(sub), load, routes: currentRoutes, answered: true };
+            setNetFresh((fresh) => ({ ...fresh, tagsReadAt: Math.max(fresh.tagsReadAt, tagsAt) }));
           }
         } else {
           // Everything else answered and the list did not, so the list
@@ -2327,9 +2373,13 @@ export function Dashboard({
       uplinkInFlightRef.current = true;
       try {
         const seen = await invoke<string | null>("network_uplinks").catch(() => null);
+        const before = uplinkRef.current.seen;
         const [next, step] = nextUplink(uplinkRef.current, seen);
         uplinkRef.current = next;
         if (step === "same") return;
+        // For the map: another network's evidence is not this one's.
+        const moved = tunnelWayOut(before, step, next.seen);
+        if (moved !== null) noteRoam(moved === "moved" ? "tunnelUp" : "later");
         // Stamped as every writer here is: a press landing meanwhile
         // makes what follows old news.
         const generation = intentRef.current.generation;
@@ -2355,6 +2405,35 @@ export function Dashboard({
 
     const id = setInterval(() => void look(), UPLINK_POLL_MS);
     return () => clearInterval(id);
+  }, [connectionState]);
+
+  // The same question while nothing is up, slower, for the map alone: a
+  // roam with the window open and disconnected is noticed, and the network
+  // asked about again (`lib/map-network.ts`). Only while "disconnected":
+  // a connect installs routes of its own, which would read as a roam. And a
+  // roam seen under a tunnel is asked about here, once it is down.
+  useEffect(() => {
+    if (connectionState !== "disconnected") return;
+    if (netFresh.roamedAt !== null && netFresh.idReadAt < netFresh.roamedAt) void readNetworkId();
+    let seen: string | null = null;
+    let asking = false;
+    const look = async () => {
+      if (asking) return;
+      asking = true;
+      try {
+        const now = await invoke<string | null>("network_uplinks").catch(() => null);
+        const step = idleWayOut(seen, now);
+        seen = step.next;
+        if (step.roamed) noteRoam("now");
+      } finally {
+        asking = false;
+      }
+    };
+    void look();
+    const id = setInterval(() => void look(), IDLE_WAY_OUT_POLL_MS);
+    return () => clearInterval(id);
+    // The roam check reads the freshness as it was when the state settled.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectionState]);
 
   // "Connection lost" describes the moment a tunnel went, and only for as
@@ -2540,6 +2619,10 @@ export function Dashboard({
     if (!protocolUser) return;
     setPressed(true);
     setConnectionError(null);
+    // A press of the customer's own supersedes the connect a confirmed
+    // switch still owes (`connectAfterSwitch`): it does what it says, and
+    // nothing dials after it on the switch's behalf.
+    connectAfterSwitchRef.current = false;
     // Whatever the press does next, the screen is no longer describing
     // the moment the last tunnel went.
     setTunnelDropped(false);
@@ -3796,17 +3879,26 @@ export function Dashboard({
     if (now === "connected" || now === "unverified" || now === "degraded") await handleConnectToggle("disconnect");
     else if (now === "connecting" || now === "verifying") await handleConnectToggle("cancelConnect");
     // The service's word that nothing is up, not the screen's: a teardown
-    // that did not finish leaves the pick undone and says why.
+    // that did not finish leaves the pick undone and says why. The service
+    // is asked once more; if that one question goes unanswered -- busy
+    // just after a teardown -- the answer the teardown itself settled on
+    // (`confirmTornDown`, now the screen's state) stands in for it.
     const status = await serviceStatus().catch(() => null);
-    if (!status || status.connected) return false;
+    const down = status ? !status.connected : connectionStateRef.current === "disconnected";
+    if (!down) {
+      setConnectionError({ kind: "serviceUnavailable", messageKey: "sw.notSwitched", detail: status ? "still connected after the switch's teardown" : "no answer after the switch's teardown" });
+      return false;
+    }
     connectAfterSwitchRef.current = true;
     return true;
   }
 
-  /** The other half of `confirmPick`: once the pick has landed -- or its
-   * switch request failed, which leaves the previous choice -- the
-   * customer is connected again, as the confirmation said. Run from the
-   * render the choice landed in, so the connect dials the new pin. */
+  /** The other half of `confirmPick`: once the pick has landed -- for a
+   * server, once the load it starts has settled -- or its switch request
+   * failed, which leaves the previous choice, the customer is connected
+   * again, as the confirmation said. The connect runs from the render the
+   * count lands in, so it dials the new pin. A press of the customer's own
+   * meanwhile cancels it (`handleConnectToggle`). */
   function connectAfterSwitch() {
     if (!connectAfterSwitchRef.current) return;
     connectAfterSwitchRef.current = false;
@@ -4073,22 +4165,46 @@ export function Dashboard({
   // tunnel settled on once one has.
   const settledNow = connectionState === "connected" || connectionState === "unverified" || connectionState === "degraded";
   const arcRoute = gaming ? null : settledNow ? currentRoute : chosenRouteId ? (routes.find((r) => r.id === chosenRouteId) ?? null) : null;
+  // The verified place holds through a brief gap, as the chip's colour
+  // does -- but not once the tunnel has settled somewhere else: a
+  // reconnect that landed unconfirmed on France while the hold ran would
+  // otherwise keep "your verified connection leaves from" on Germany.
+  const verifiedShown =
+    gaming || (settledNow && verifiedRouteRef.current?.id !== currentRoute?.id) ? null : verifiedRouteRef.current;
+  // Evidence about the network the device is on now: after a roam, this
+  // device's history and the list's tags wait to be read again
+  // (`lib/map-network.ts`).
+  const mapRoutes = tagsCurrent(netFresh) ? routes : withoutTags(routes);
+  const evidenceCtx: EvidenceContext = { history, network: mapNetwork(networkId, netFresh), now: Math.floor(now / 60_000) * 60_000 };
   const mapScene = mapLights({
-    routes,
-    history,
-    network: networkId,
-    now: Math.floor(now / 60_000) * 60_000,
-    verified: gaming ? null : verifiedRouteRef.current,
+    routes: mapRoutes,
+    ...evidenceCtx,
+    verified: verifiedShown,
     tone: calmTone,
     shown: arcRoute,
+    up: gaming || !settledNow ? null : currentRoute,
   });
   const mapPlaces = mapCountries(routes);
+  // What the list says beside each place, from the same evidence.
+  const workedPlaces = new Set<string>();
+  for (const [key, evidence] of placesEvidence(mapRoutes, evidenceCtx)) if (evidence.look === "live") workedPlaces.add(key);
+  const listEvidence = {
+    worked: workedPlaces,
+    ownAt: (route: RouteOption) => ownWorkedAt(route, evidenceCtx),
+    tags: tagsCurrent(netFresh),
+  };
 
-  const planName = usage && usage.cap === null ? t("tr.planUnl") : subscription ? t("tr.plan") : null;
-  const planLine =
-    planName && daysLeft !== null
-      ? `${planName} · ${t(daysLeft === 1 ? "tr.dayLeft" : "tr.daysLeft", { n: formatNumber(daysLeft, language) })}`
-      : planName;
+  // The sidebar's line under the email: the days left first -- the useful
+  // part, which a narrow sidebar used to cut off -- then the short plan
+  // name when it says something ("Unlimited").
+  const planLine = subscription
+    ? [
+        daysLeft !== null ? t(daysLeft === 1 ? "tr.dayLeft" : "tr.daysLeft", { n: formatNumber(daysLeft, language) }) : null,
+        usage && usage.cap === null ? t("dash.unlimited") : null,
+      ]
+        .filter(Boolean)
+        .join(" · ") || t("tr.plan")
+    : null;
 
   // The mode switch: refused while a tunnel is up, as the location list
   // once was -- a mode cannot be retrofitted onto a live session -- and
@@ -4290,12 +4406,19 @@ export function Dashboard({
         // Passed explicitly: the state set above has not landed yet when
         // loadAll reads it. Over a tunnel that stays up, the route it is
         // on.
-        void loadAll(shown ?? undefined);
+        //
+        // The connect a confirmed switch owes waits for this load, as the
+        // customer's own press used to: it takes the screen to "Loading..."
+        // (seconds on a filtered network), where a ladder dialling beneath
+        // would have no state, no chip and no Stop on screen -- and the
+        // load's answer would put the chosen credential back over the
+        // candidate the ladder had moved on to.
+        void loadAll(shown ?? undefined).finally(connectAfterSwitch);
         // Begun: the wait for it is over, and nothing in the background
         // starts beside it.
         switchLoadSettled();
-        connectAfterSwitch();
       }}
+      evidence={listEvidence}
       variant={layout === "narrow" ? "overlay" : "panel"}
       confirmPick={confirmPick}
     />
@@ -4310,6 +4433,9 @@ export function Dashboard({
         // as the label on it (`pressFor`).
         onToggle={() => void handleConnectToggle(press.action)}
         label={t(pill.labelKey)}
+        // "Connecting..." stops the connect when pressed: said so to
+        // assistive technology, which would otherwise hear only the label.
+        pressLabel={press.action === "cancelConnect" ? t("btn.stop") : undefined}
         look="pill"
         pill={pill}
       />
@@ -4422,13 +4548,9 @@ export function Dashboard({
                     <p className="nx-subline">
                       <Repeat aria-hidden />
                       <span>
-                        {said.trailingLabel ? (
-                          <>
-                            {t(said.key, said.vars)} <span className="font-medium text-ink">{said.trailingLabel}</span>
-                          </>
-                        ) : (
-                          t(said.key, said.vars)
-                        )}
+                        <Slotted text={t(said.key, { ...said.vars, protocol: SLOT })}>
+                          <bdi className="font-medium text-ink">{said.vars.protocol}</bdi>
+                        </Slotted>
                       </span>
                     </p>
                   );

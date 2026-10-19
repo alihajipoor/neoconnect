@@ -72,6 +72,7 @@ export function ConnectOrb({
   label,
   look = "orb",
   pill,
+  pressLabel,
 }: {
   state: ConnectionState;
   /** A confirmed connection that has been "not fully protected" long
@@ -86,6 +87,10 @@ export function ConnectOrb({
   look?: "orb" | "pill";
   /** The pill's fill and furniture (`pillFor` in lib/hero-model.ts). */
   pill?: { variant: PillVariant; arrow: boolean; progress: boolean };
+  /** What a press does, when the label says what is happening instead:
+   * "Connecting..." stops the connect. Read to assistive technology after
+   * the label, so the busy pill is announced as the control it is. */
+  pressLabel?: string;
 }) {
   // Two inline SVGs sharing a gradient id means the second renders black,
   // so the id has to be per-instance.
@@ -113,7 +118,15 @@ export function ConnectOrb({
   const unsure = tone === "muted";
 
   if (look === "pill") {
-    return <ConnectPill label={label} onPress={onToggle} disabled={disabled} model={pill ?? { variant: busy ? "busy" : "primary", arrow: !busy && !on, progress: busy }} />;
+    return (
+      <ConnectPill
+        label={label}
+        pressLabel={pressLabel}
+        onPress={onToggle}
+        disabled={disabled}
+        model={pill ?? { variant: busy ? "busy" : "primary", arrow: !busy && !on, progress: busy }}
+      />
+    );
   }
 
   // r=54 in a 128 viewBox -> circumference 339.29. The arc is a quarter
@@ -268,16 +281,20 @@ const SAME_PRESS_MS = 600;
  * carries that.
  *
  * Pressable in every state (see the orb above for why a control that can
- * wedge is not a control): busy is `aria-disabled`, never `disabled`, so
- * it stays focusable and announced. When its label changes length its
- * width animates from old to new; under reduced motion it does not. */
+ * wedge is not a control): busy is `aria-busy` and `data-busy`, never
+ * `disabled` -- nor `aria-disabled`, which would tell a screen reader the
+ * press that stops a connect is unavailable. Its accessible name says what
+ * the press does when the label does not. When its label changes length
+ * its width animates from old to new; under reduced motion it does not. */
 function ConnectPill({
   label,
+  pressLabel,
   onPress,
   disabled,
   model,
 }: {
   label: string;
+  pressLabel?: string;
   onPress: () => void;
   disabled?: boolean;
   model: { variant: PillVariant; arrow: boolean; progress: boolean };
@@ -329,8 +346,10 @@ function ConnectPill({
       ref={ref}
       type="button"
       className={cn("nx-btn", model.variant === "busy" ? "busy" : "primary", model.variant === "primary-busy" && "busy")}
-      aria-disabled={busy || disabled ? true : undefined}
+      aria-disabled={disabled || undefined}
       aria-busy={model.progress || undefined}
+      aria-label={pressLabel && pressLabel !== label ? `${label} ${pressLabel}` : undefined}
+      data-busy={busy ? "1" : undefined}
       disabled={disabled}
       onPointerMove={onPointerMove}
       onClick={() => {

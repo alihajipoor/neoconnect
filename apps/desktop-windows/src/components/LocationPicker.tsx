@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Gauge, Loader2, Repeat, Sparkles, X } from "lucide-react";
+import { Check, CircleCheck, Gauge, Loader2, Repeat, Sparkles, X } from "lucide-react";
 import { getAvailableRoutes, switchRoute } from "../lib/customer";
 import { hasRecommended, pickerRows } from "../lib/isp-tags";
 import { IspTagLine } from "./IspTagLine";
@@ -15,7 +15,21 @@ import { failureText, type ShownFailure } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
 import { traceRequests } from "../lib/unanswered-report";
 import { routesToAdopt } from "../lib/picker-routes";
-import { groupByPlace, placeLabel, routePlace } from "../lib/route-place";
+import { groupByPlace, placeKey, placeLabel, routePlace } from "../lib/route-place";
+
+/** What the main page's map lights are made of (`lib/map-lights.ts`), so
+ * the list says the same as the map: its "Worked here" filter keeps the
+ * places whose light twinkles, and a row says why. */
+export interface ListEvidence {
+  /** Places (`placeKey`) with evidence that they worked on this network. */
+  worked: ReadonlySet<string>;
+  /** When a route last carried traffic from this device on this network,
+   * or null. */
+  ownAt: (route: RouteOption) => number | null;
+  /** Whether the list's per-network tags describe the network the device
+   * is on now: not after a roam, until a list asked for since arrives. */
+  tags: boolean;
+}
 
 // Two forms, one list: the full-window overlay the phone opens from its
 // card, and the desktop's locations panel beside the hero ("panel"). The
@@ -35,7 +49,11 @@ export function LocationPicker({
   onRoutes,
   variant = "overlay",
   confirmPick,
+  evidence,
 }: {
+  /** The map's evidence, for the list to agree with it. Absent -- the
+   * phone app -- the filter reads the per-network tags alone, as before. */
+  evidence?: ListEvidence;
   /** "overlay" is the full-window list the phone opens from its card;
    * "panel" the Pearl Glass locations panel the desktop keeps beside the
    * hero. The panel is always there, so it does not fetch the list or time
@@ -149,7 +167,11 @@ export function LocationPicker({
   // -- is into this, not into `routes`. Routes to one place sit
   // together (`groupByPlace`): with relays named by their exit, the
   // server's name order put Iran → Germany and Iran → France in turns.
-  const rows = groupByPlace(pickerRows(routes, recommendedOnly));
+  const rows = groupByPlace(
+    evidence ? workedRows(routes, recommendedOnly, evidence.worked) : pickerRows(routes, recommendedOnly),
+  );
+  // The filter, only when there is something to narrow to.
+  const canNarrow = evidence ? routes.some((r) => evidence.worked.has(placeKey(r))) : hasRecommended(routes);
   // With Automatic chosen, no server row is "the current one": the ladder
   // decides at connect time, and every row stays a way to pin a server.
   const pinnedRouteId = automatic ? undefined : currentRouteId;
@@ -425,7 +447,9 @@ export function LocationPicker({
       )}
       <div className={panel ? "t" : "flex min-w-0 flex-1 flex-col"}>
         <span className={panel ? "n" : "truncate text-sm font-medium"}>{t("loc.automatic")}</span>
-        <span className={panel ? "s wrap" : "text-xs text-muted-foreground"}>{t("loc.automaticHint")}</span>
+        <span className={panel ? "s" : "text-xs text-muted-foreground"} title={panel ? t("loc.automaticHint") : undefined}>
+          {t(panel ? "loc.automaticHintShort" : "loc.automaticHint")}
+        </span>
       </div>
       {automatic ? <Check className={panel ? "nx-tick size-4 shrink-0" : "size-4 shrink-0 text-primary"} /> : null}
     </button>
@@ -437,7 +461,7 @@ export function LocationPicker({
       {/* Only offered when there is something to narrow to. A filter
           that empties the list would read as "nothing works here",
           which is not what an absence of evidence means. */}
-      {hasRecommended(routes) ? (
+      {canNarrow ? (
         panel ? (
           <div className="nx-locs-filter">
             <Segmented
@@ -470,6 +494,11 @@ export function LocationPicker({
           const place = routePlace(route);
           const placeName = placeLabel(route, language);
           const protocol = customerProtocolLabel(route.protocol, route.transport);
+          // In the panel the node's name only where two rows would
+          // otherwise read the same -- one place, one protocol, two nodes.
+          // It is an internal name, and the row's place already says where.
+          const nodeShown = !panel || rows.some((r) => r.id !== route.id && placeKey(r) === placeKey(route) && customerProtocolLabel(r.protocol, r.transport) === protocol);
+          const ownAt = evidence?.ownAt(route) ?? null;
           // "Connected here" only over verified traffic; "In use" over a
           // tunnel that is up and not proven.
           const here = !panel
@@ -523,13 +552,21 @@ export function LocationPicker({
                     place differ. */}
                 <span className={panel ? "n" : "truncate text-sm font-medium"}>{placeName}</span>
                 <span className={panel ? "s" : "truncate text-xs text-muted-foreground"}>
-                  {here ?? (
-                    <>
-                      {route.location.nodeName} &middot; {protocol}
-                    </>
-                  )}
+                  {here ?? (nodeShown ? <>{route.location.nodeName} &middot; {protocol}</> : protocol)}
                 </span>
-                <IspTagLine tag={route.ispTag} t={t} />
+                {ownAt !== null ? (
+                  <span
+                    className={cn("flex min-w-0 items-center gap-1", !panel && "text-[11px] text-success")}
+                    data-own-worked=""
+                    title={t("loc.ownWorkedTip")}
+                    aria-label={`${t("loc.ownWorked")}. ${t("loc.ownWorkedTip")}`}
+                  >
+                    <CircleCheck className="size-3 shrink-0" aria-hidden />
+                    <span className="truncate">{t("loc.ownWorked")}</span>
+                  </span>
+                ) : evidence && !evidence.tags ? null : (
+                  <IspTagLine tag={route.ispTag} t={t} look={panel ? "pearl" : undefined} />
+                )}
               </div>
               {showLatency && (!panel || route.id in latencies) ? (
                 <Latency ms={route.id in latencies ? latencies[route.id] : null} neutral={panel} />
@@ -602,14 +639,16 @@ export function LocationPicker({
               if (!tunnelActive) void measureAll(routesRef.current);
             }}
             aria-disabled={tunnelActive || routes.length === 0 || undefined}
-            title={tunnelActive ? t("loc.pausedNote") : undefined}
+            // Why it does nothing while connected, on the control itself
+            // rather than a note pinned over the list.
+            title={t("loc.pausedNote")}
+            aria-label={tunnelActive ? `${t("loc.measure")}. ${t("loc.pausedNote")}` : undefined}
           >
             <Gauge className="size-4" aria-hidden />
             {t("loc.measure")}
           </button>
         </div>
         <div className="nx-loclist">{body}</div>
-        {tunnelActive ? <p className="nx-lnote">{t("loc.pausedNote")}</p> : null}
       </>
     );
   }
@@ -638,4 +677,14 @@ export function LocationPicker({
       <div className="flex-1 overflow-y-auto px-3 py-3">{body}</div>
     </div>
   );
+}
+
+/** The rows for the "Worked here" filter from the map's evidence, in the
+ * order the server sent them. As `pickerRows`: narrowing never reorders,
+ * and a filter that would leave nothing shows everything instead -- an
+ * absence of evidence is not "nothing works here". */
+function workedRows(routes: readonly RouteOption[], workedOnly: boolean, worked: ReadonlySet<string>): RouteOption[] {
+  if (!workedOnly) return [...routes];
+  const kept = routes.filter((route) => worked.has(placeKey(route)));
+  return kept.length > 0 ? kept : [...routes];
 }

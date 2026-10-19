@@ -44,8 +44,7 @@ function line(language: Language, failed: FailedRung[], crossed = true): string 
       failed,
     }),
   );
-  const said = say(language, text.key, text.vars);
-  return text.trailingLabel ? `${said} ${text.trailingLabel}` : said;
+  return say(language, text.key, text.vars);
 }
 
 describe("a connect the service could not dial for want of a network", () => {
@@ -90,7 +89,7 @@ describe("a pass that landed elsewhere after rungs with no network", () => {
 
   it("does not say the usual protocol failed to get through, when it stayed in the country", () => {
     expect(line("en", noNetwork, false)).toBe("No network connection at first. Now using Stealth");
-    expect(line("fa", noNetwork, false)).toBe("ابتدا اتصال شبکه برقرار نبود. اکنون از این استفاده می‌شود: Stealth");
+    expect(line("fa", noNetwork, false)).toBe("ابتدا اتصال شبکه برقرار نبود. اکنون از Stealth استفاده می‌شود");
   });
 });
 
@@ -137,7 +136,7 @@ describe("a server named as unreachable", () => {
     ];
     for (const failed of nothingDialled) {
       expect(line("en", failed, false), JSON.stringify(failed)).toBe("Now using Stealth");
-      expect(line("fa", failed, false), JSON.stringify(failed)).toBe("اکنون از این استفاده می‌شود: Stealth");
+      expect(line("fa", failed, false), JSON.stringify(failed)).toBe("اکنون از Stealth استفاده می‌شود");
       expect(line("en", failed, false)).not.toContain("didn't get through");
     }
   });

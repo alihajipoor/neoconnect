@@ -209,26 +209,32 @@ export function GamingStatusPanel({
   // The calm rule here too: a "partial" reading after "active" keeps the
   // active look for CAUTION_AFTER_MS before the warning colour shows. The
   // words say it at once.
+  //
+  // Worked out during the render, not in an effect after it: the first
+  // "partial" render is the one that must already hold, or it paints the
+  // warning colour for a frame -- on the Hint, and through `onTone` on the
+  // whole app -- before the effect could take it back. The timer only
+  // re-renders once the hold has run out.
   const lastSettledRef = useRef<GamingPhase>("off");
-  if (phase !== "partial" && phase !== "arming") lastSettledRef.current = phase;
   const partialSinceRef = useRef<number | null>(null);
-  const [partialHeld, setPartialHeld] = useState(false);
-  useEffect(() => {
-    if (phase !== "partial") {
-      partialSinceRef.current = null;
-      setPartialHeld(false);
-      return;
-    }
+  if (phase === "partial") {
     if (partialSinceRef.current === null) partialSinceRef.current = Date.now();
+  } else {
+    partialSinceRef.current = null;
+    if (phase !== "arming") lastSettledRef.current = phase;
+  }
+  const partialHeld =
+    phase === "partial" &&
+    lastSettledRef.current === "active" &&
+    partialSinceRef.current !== null &&
+    Date.now() - partialSinceRef.current < CAUTION_AFTER_MS;
+  const [, setHoldExpired] = useState(0);
+  useEffect(() => {
+    if (!partialHeld || partialSinceRef.current === null) return;
     const left = CAUTION_AFTER_MS - (Date.now() - partialSinceRef.current);
-    if (left <= 0) {
-      setPartialHeld(false);
-      return;
-    }
-    setPartialHeld(lastSettledRef.current === "active");
-    const timer = setTimeout(() => setPartialHeld(false), left);
+    const timer = setTimeout(() => setHoldExpired((n) => n + 1), Math.max(0, left) + 20);
     return () => clearTimeout(timer);
-  }, [phase]);
+  }, [partialHeld, phase]);
 
   const tone: ShownTone =
     phase === "active" || (phase === "partial" && partialHeld)

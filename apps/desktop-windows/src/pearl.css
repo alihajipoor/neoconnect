@@ -688,12 +688,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* Up to two lines, so the days left are never cut off. */
   .nx-profile .s {
     font-size: 12px;
+    line-height: 1.35;
     color: var(--ink-2);
-    white-space: nowrap;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     overflow: hidden;
-    text-overflow: ellipsis;
   }
   .nx-upd {
     display: flex;
@@ -992,6 +996,15 @@
   .nx-decor span {
     display: block;
   }
+  /* Persian is never spaced out or capitalised, and needs its own face:
+     the shorthand above would otherwise give it Inter at 9.5px. */
+  html[lang="fa"] .nx-decor {
+    font-family: var(--font-fa);
+    font-size: 11px;
+    line-height: 1.75;
+    letter-spacing: 0;
+    text-transform: none;
+  }
   .nx-hint {
     margin: 0;
     font-size: 15px;
@@ -1060,7 +1073,7 @@
       box-shadow 200ms,
       width var(--dur-morph) var(--spring-morph);
   }
-  .nx-btn:active:not([aria-disabled="true"]) {
+  .nx-btn:active:not([aria-disabled="true"], [data-busy]) {
     transform: scale(0.965);
     transition-duration: 90ms;
   }
@@ -1179,7 +1192,7 @@
     height: 19px;
     flex: none;
   }
-  .nx-btn[aria-disabled="true"] {
+  .nx-btn:is([aria-disabled="true"], [data-busy]) {
     cursor: default;
   }
   .nx-btn.danger-ink {
@@ -1631,14 +1644,6 @@
     mask-image: linear-gradient(transparent, #000 10px, #000 calc(100% - 18px), transparent);
     content-visibility: auto;
   }
-  .nx-lnote {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 6px 6px 0;
-    font-size: 12px;
-    color: var(--ink-2);
-  }
   .nx-row {
     position: relative;
     display: flex;
@@ -1688,10 +1693,12 @@
   .nx-row .s.wrap {
     white-space: normal;
   }
-  .nx-row [data-isp-tag] {
+  /* Evidence lines: the ink tokens, AA as text; the base hues are for the
+     icons alone. */
+  .nx-row :is([data-isp-tag], [data-own-worked]) {
     font-size: 12px;
   }
-  .nx-row [data-isp-tag="worksOnYourIsp"] {
+  .nx-row :is([data-isp-tag="worksOnYourIsp"], [data-own-worked]) {
     color: var(--ok-ink);
   }
   .nx-row [data-isp-tag]:not([data-isp-tag="worksOnYourIsp"]) {

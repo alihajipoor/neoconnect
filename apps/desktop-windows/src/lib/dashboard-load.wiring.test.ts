@@ -153,7 +153,11 @@ describe.each(screens)("the %s dashboard on its snapshot", (_name, path, signatu
     const onFailed = listed.slice(listed.indexOf("onPickFailed={() => {"));
     expect(onFailed.slice(0, onFailed.indexOf("}}"))).toContain("switchLoadSettled();");
     const onSwitched = listed.slice(listed.indexOf("onSwitched={(routeId) => {"));
-    expect(onSwitched.slice(0, onSwitched.indexOf("}}"))).toMatch(/void loadAll\(shown \?\? undefined\);(\s*\/\/[^\n]*\n)*\s*switchLoadSettled\(\);/);
+    // The Windows screen's connect after a confirmed switch waits for the
+    // load (`connectAfterSwitch`); the phone has no such connect.
+    expect(onSwitched.slice(0, onSwitched.indexOf("}}"))).toMatch(
+      /void loadAll\(shown \?\? undefined\)(\.finally\(connectAfterSwitch\))?;(\s*\/\/[^\n]*\n)*\s*switchLoadSettled\(\);/,
+    );
   });
 
   /** Every answer Neoxify gives, the updater's check and the tunnel's

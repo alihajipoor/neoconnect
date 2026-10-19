@@ -59,6 +59,7 @@ import { Logo } from "@shared/components/Logo";
 import { RouteFlag } from "@shared/components/Flag";
 import { exitCountryName, placeLabel, routePlace } from "@shared/lib/route-place";
 import { LocationPicker } from "@shared/components/LocationPicker";
+import { SLOT, Slotted } from "@shared/components/Slotted";
 import { Sheet } from "@shared/components/Sheet";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
 import { useI18n } from "@shared/lib/i18n";
@@ -2866,8 +2867,9 @@ export function Dashboard({
                       {(connectionState === "connected" || connectionState === "unverified") &&
                       failedOverTo ? (
                         <p className="mt-1 text-xs text-amber-400/90">
-                          {t("dash.switchedTo")}{" "}
-                          <span className="font-medium">{failedOverTo}</span>
+                          <Slotted text={t("dash.switchedTo", { protocol: SLOT })}>
+                            <bdi className="font-medium">{failedOverTo}</bdi>
+                          </Slotted>
                         </p>
                       ) : null}
 

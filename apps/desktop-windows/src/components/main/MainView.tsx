@@ -23,7 +23,8 @@ export interface MainSlots {
   gaming?: ReactNode;
   hint?: ReactNode;
   subline?: ReactNode;
-  /** The device limit, in the hint's place. */
+  /** The device limit, after the hint: the hint still says what the
+   * tunnel is doing -- degraded, dropped, not confined -- beside it. */
   slot?: ReactNode;
   actions?: ReactNode;
   error?: ReactNode;
@@ -96,7 +97,8 @@ export function MainView(slots: MainSlots) {
               {slots.chip ? <div className="nx-chiprow">{slots.chip}</div> : null}
               {slots.locationCard}
               {slots.line}
-              {slots.slot ?? slots.hint}
+              {slots.hint}
+              {slots.slot}
               {slots.subline}
               {slots.actions}
               {slots.error}
