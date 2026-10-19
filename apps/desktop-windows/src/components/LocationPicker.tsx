@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, CircleCheck, Gauge, Loader2, Repeat, Sparkles, X } from "lucide-react";
+import { Check, CircleCheck, Loader2, Repeat, Sparkles, X } from "lucide-react";
 import { getAvailableRoutes, switchRoute } from "../lib/customer";
 import { hasRecommended, pickerRows } from "../lib/isp-tags";
 import { IspTagLine } from "./IspTagLine";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import type { RouteOption } from "../lib/types";
 import { cn } from "../lib/utils";
-import { Button, PillButton, Segmented } from "./ui";
+import { Button, PillButton } from "./ui";
 import { Latency } from "./Latency";
 import { RouteFlag } from "./Flag";
 import { useI18n } from "../lib/i18n";
@@ -16,24 +16,22 @@ import { useStillTrying } from "../lib/still-trying";
 import { traceRequests } from "../lib/unanswered-report";
 import { routesToAdopt } from "../lib/picker-routes";
 import { groupByPlace, placeKey, placeLabel, routePlace } from "../lib/route-place";
+import { LocationList, type ListEvidence } from "./LocationList";
 
-/** What the main page's map lights are made of (`lib/map-lights.ts`), so
- * the list says the same as the map: its "Worked here" filter keeps the
- * places whose light twinkles, and a row says why. */
-export interface ListEvidence {
-  /** Places (`placeKey`) with evidence that they worked on this network. */
-  worked: ReadonlySet<string>;
-  /** When a route last carried traffic from this device on this network,
-   * or null. */
-  ownAt: (route: RouteOption) => number | null;
-  /** Whether the list's per-network tags describe the network the device
-   * is on now: not after a roam, until a list asked for since arrives. */
-  tags: boolean;
-}
+export type { ListEvidence } from "./LocationList";
 
-// Two forms, one list: the full-window overlay the phone opens from its
-// card, and the desktop's locations panel beside the hero ("panel"). The
-// picking, the reconnect wiring and the honesty rules are the same in both.
+/** The last timing of the list, in memory for this run: the panel, the
+ * sheet and the Locations page are separate mounts of the list, and a
+ * measurement taken in one is shown, with its age, in the others rather
+ * than taken again -- a list that timed every server each time it was
+ * opened would be a visible probe pattern on a censored network. */
+let lastTiming: { subscriptionId: string; at: number; values: Record<string, number | null> } | null = null;
+
+// Four forms, one list: the full-window overlay the phone app opens from
+// its card ("overlay"), and the redesign's three -- the desktop's locations
+// panel beside the hero ("panel"), the phone-sized window's sheet ("sheet")
+// and the Locations page ("page"; LocationList.tsx draws those three). The
+// picking, the reconnect wiring and the honesty rules are the same in all.
 export function LocationPicker({
   subscriptionId,
   currentRouteId,
@@ -50,18 +48,27 @@ export function LocationPicker({
   variant = "overlay",
   confirmPick,
   evidence,
+  onOpenFull,
+  focusSection,
 }: {
+  /** The Locations page, from the panel's menu. */
+  onOpenFull?: (section?: "explain") => void;
+  /** The page opened at a section: its explanation of the protocols. */
+  focusSection?: "explain";
   /** The map's evidence, for the list to agree with it. Absent -- the
    * phone app -- the filter reads the per-network tags alone, as before. */
   evidence?: ListEvidence;
-  /** "overlay" is the full-window list the phone opens from its card;
+  /** "overlay" is the full-window list the phone app opens from its card;
    * "panel" the Pearl Glass locations panel the desktop keeps beside the
-   * hero. The panel is always there, so it does not fetch the list or time
+   * hero; "sheet" the phone-sized window's sheet; "page" the Locations
+   * page. The panel is always there, so it does not fetch the list or time
    * every server on its own when it appears -- the dashboard's own loads
    * feed it, and latency is measured when the customer asks: a list that
    * dialled every endpoint each time the window opened would be a visible
-   * probe pattern on a censored network. */
-  variant?: "overlay" | "panel";
+   * probe pattern on a censored network. The sheet and the page are opened
+   * on purpose, as the overlay is: they refresh the list, and time the
+   * servers once if nothing has timed them yet in this run. */
+  variant?: "overlay" | "panel" | "sheet" | "page";
   /** Asked before a pick goes ahead, with the route (null for Automatic):
    * while a tunnel is up the dashboard confirms the switch and takes the
    * tunnel down first. False leaves everything as it was. */
@@ -141,6 +148,7 @@ export function LocationPicker({
 }) {
   const { t, language } = useI18n();
   const panel = variant === "panel";
+  const overlay = variant === "overlay";
   const [routes, setRoutes] = useState<RouteOption[]>(initialRoutes ?? []);
   // Only a blocking load when there is genuinely nothing to show -- and
   // never in the panel, which loads only when asked.
@@ -158,7 +166,15 @@ export function LocationPicker({
   /** Measured round-trip per route. Absent means "not measured yet",
    * which renders as "--" -- distinct from a measured failure, which is
    * an explicit null. Both are honest; neither invents a number. */
-  const [latencies, setLatencies] = useState<Record<string, number | null>>({});
+  const [latencies, setLatencies] = useState<Record<string, number | null>>(() =>
+    !overlay && lastTiming?.subscriptionId === subscriptionId ? { ...lastTiming.values } : {},
+  );
+  /** When the figures on screen were taken, and whether a timing runs now. */
+  const [measuredAt, setMeasuredAt] = useState<number | null>(() =>
+    !overlay && lastTiming?.subscriptionId === subscriptionId ? lastTiming.at : null,
+  );
+  const [measuring, setMeasuring] = useState(false);
+  const measuringRef = useRef(false);
   /** Narrow the list to routes that worked for most people on this
    * network. Off by default: the tags are information, and hiding
    * everything else unasked would make the choice for the customer. */
@@ -198,7 +214,7 @@ export function LocationPicker({
     setError(null);
     if (adopted.length > 0) {
       setLoading(false);
-      if (!panel) void measureAll(adopted);
+      if (!panel) measureIfDue(adopted);
       return;
     }
     // Taken away: they were another plan's. This plan's list is the
@@ -214,7 +230,7 @@ export function LocationPicker({
     // Measuring starts against whatever is on screen now rather than
     // waiting for the refresh, so the numbers fill in while the list is
     // already readable.
-    if ((initialRoutes ?? []).length > 0) void measureAll(initialRoutes ?? []);
+    if ((initialRoutes ?? []).length > 0) measureIfDue(initialRoutes ?? []);
   }, []);
 
   async function load() {
@@ -241,7 +257,7 @@ export function LocationPicker({
       ownAnswered.current = true;
       setRoutes(result.data);
       onRoutes?.(subscriptionId, result.data);
-      void measureAll(result.data);
+      measureIfDue(result.data);
     } else if (shown.length === 0) {
       // A failed refresh must not blank a list the customer can see and
       // use. It only becomes an error when there is nothing behind it.
@@ -266,9 +282,13 @@ export function LocationPicker({
     // Leaving the map empty renders every row as "--", which is what
     // "not measured" already means here.
     if (tunnelActive) return;
+    measuringRef.current = true;
+    setMeasuring(true);
+    const taken: Record<string, number | null> = {};
     await Promise.all(
       options.map(async (route) => {
         if (route.nodeStatus !== "ONLINE") {
+          taken[route.id] = null;
           setLatencies((prev) => ({ ...prev, [route.id]: null }));
           return;
         }
@@ -276,9 +296,26 @@ export function LocationPicker({
           host: route.endpoint.host,
           port: route.endpoint.port,
         }).catch(() => null);
+        taken[route.id] = ms;
         setLatencies((prev) => ({ ...prev, [route.id]: ms }));
       }),
     );
+    measuringRef.current = false;
+    setMeasuring(false);
+    const at = Date.now();
+    setMeasuredAt(at);
+    lastTiming = { subscriptionId, at, values: taken };
+  }
+
+  /** The overlay times the list each time it gets one, as it always has.
+   * The redesign's lists time it once a run, and again when asked. */
+  function measureIfDue(options: RouteOption[]) {
+    if (overlay) {
+      void measureAll(options);
+      return;
+    }
+    if (measuringRef.current || lastTiming?.subscriptionId === subscriptionId) return;
+    void measureAll(options);
   }
 
   /* One tab stop for the whole list, arrow keys to move within it.
@@ -325,7 +362,7 @@ export function LocationPicker({
   useEffect(() => {
     // Nothing autofocuses in the panel: it sits beside the hero, and taking
     // focus there would take it from wherever the customer was.
-    if (panel || loading || rows.length === 0 || autoFocusedRef.current) return;
+    if (!overlay || loading || rows.length === 0 || autoFocusedRef.current) return;
     const first = rows.findIndex((_, i) => selectable(i));
     if (first < 0) return;
     autoFocusedRef.current = true;
@@ -346,7 +383,7 @@ export function LocationPicker({
    * of this app follows about not claiming things it has not done. */
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (panel || event.key !== "Escape" || switchingId !== null) return;
+      if (panel || variant === "page" || event.key !== "Escape" || switchingId !== null) return;
       event.preventDefault();
       onClose();
     }
@@ -402,59 +439,106 @@ export function LocationPicker({
     }
   }
 
-  // While a tunnel is up nothing is measurable from in here -- see
-  // `tunnelActive` -- so the panel shows no figure rather than a stale one.
-  const showLatency = !(panel && tunnelActive);
+  /** Automatic: no server call -- it means "no pin", which lives on the
+   * device. Over a live tunnel, the dashboard asks first and takes it down. */
+  async function pickAutomatic() {
+    if (!onChooseAutomatic) return;
+    if (automatic || switchingId) return;
+    if (confirmPick && !(await confirmPick(null))) return;
+    onPicking?.(null);
+    onChooseAutomatic();
+    onClose();
+  }
 
+  // The list's own waits and failures, the same in every form.
+  const status = loading ? (
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
+      <Loader2 className="size-4 animate-spin" />
+      {loadingLong ? <p className="text-xs">{t("common.stillTrying")}</p> : null}
+    </div>
+  ) : error ? (
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
+      <p className="text-sm text-destructive">{failureText(error, t)}</p>
+      <Button onClick={() => void load()}>{t("loc.retry")}</Button>
+    </div>
+  ) : routes.length === 0 ? (
+    panel ? (
+      // The panel loads only when asked: an empty list here is one
+      // that has not arrived, not a plan with nothing on it.
+      <div className="flex flex-col items-center gap-3 px-4 py-8 text-center text-sm text-ink-2">
+        <p className="m-0">{t("loc.notLoaded")}</p>
+        <PillButton variant="ghost" size="sm" onClick={() => void load()}>
+          {t("loc.retry")}
+        </PillButton>
+      </div>
+    ) : (
+      <p className="px-2 py-6 text-center text-sm text-muted-foreground">{t("loc.noLocations")}</p>
+    )
+  ) : null;
+
+  const after = (
+    <>
+      {switchingLong ? <p className="px-2 pt-2 text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
+      {switchError ? <p className="px-2 pt-2 text-xs text-destructive">{failureText(switchError, t)}</p> : null}
+    </>
+  );
+
+  if (!overlay) {
+    return (
+      <LocationList
+        variant={variant}
+        routes={routes}
+        latencies={latencies}
+        measuring={measuring}
+        measuredAt={measuredAt}
+        tunnelActive={tunnelActive}
+        connectionState={connectionState}
+        pinnedRouteId={pinnedRouteId}
+        currentRouteId={currentRouteId}
+        automatic={automatic}
+        showAutomatic={onChooseAutomatic !== undefined}
+        switchingId={switchingId}
+        evidence={evidence}
+        onPick={(route) => void handlePick(route)}
+        onAutomatic={() => void pickAutomatic()}
+        // Latency on request: see `variant`. Not from inside a tunnel.
+        onMeasure={() => {
+          if (!tunnelActive && !measuringRef.current) void measureAll(routesRef.current);
+        }}
+        onOpenFull={onOpenFull}
+        focusSection={focusSection}
+        status={status}
+        after={after}
+      />
+    );
+  }
+
+  // The phone app's overlay, as it was before the redesign: its own
+  // dashboard keeps the old look until the phone's phase.
   const automaticRow = onChooseAutomatic ? (
     <button
       type="button"
-      onClick={() =>
-        void (async () => {
-          if (automatic || switchingId) return;
-          if (confirmPick && !(await confirmPick(null))) return;
-          onPicking?.(null);
-          onChooseAutomatic();
-          onClose();
-        })()
-      }
+      onClick={() => void pickAutomatic()}
       disabled={switchingId !== null}
       aria-pressed={automatic}
-      className={
-        panel
-          ? cn("nx-row", automatic && "sel")
-          : cn(
-              "mb-2 flex w-full items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
-              automatic
-                ? "border-primary/50 bg-primary/10"
-                : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",
-            )
-      }
-    >
-      {panel ? (
-        <span className="nx-flag auto" aria-hidden>
-          <Sparkles className="size-4" />
-        </span>
-      ) : (
-        <div
-          className={cn(
-            "flex size-9 shrink-0 items-center justify-center rounded-full",
-            automatic ? "bg-primary/20 text-primary" : "bg-highlight/10 text-highlight",
-          )}
-        >
-          <Sparkles className="size-4" />
-        </div>
+      className={cn(
+        "mb-2 flex w-full items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
+        automatic ? "border-primary/50 bg-primary/10" : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",
       )}
-      <div className={panel ? "t" : "flex min-w-0 flex-1 flex-col"}>
-        {/* The panel's rows are narrow: the short name, the whole one as its title. */}
-        <span className={panel ? "n" : "truncate text-sm font-medium"} title={panel ? t("loc.automatic") : undefined}>
-          {t(panel ? "loc.automaticShort" : "loc.automatic")}
-        </span>
-        <span className={panel ? "s" : "text-xs text-muted-foreground"} title={panel ? t("loc.automaticHint") : undefined}>
-          {t(panel ? "loc.automaticHintShort" : "loc.automaticHint")}
-        </span>
+    >
+      <div
+        className={cn(
+          "flex size-9 shrink-0 items-center justify-center rounded-full",
+          automatic ? "bg-primary/20 text-primary" : "bg-highlight/10 text-highlight",
+        )}
+      >
+        <Sparkles className="size-4" />
       </div>
-      {automatic ? <Check className={panel ? "nx-tick size-4 shrink-0" : "size-4 shrink-0 text-primary"} /> : null}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate text-sm font-medium">{t("loc.automatic")}</span>
+        <span className="text-xs text-muted-foreground">{t("loc.automaticHint")}</span>
+      </div>
+      {automatic ? <Check className="size-4 shrink-0 text-primary" /> : null}
     </button>
   ) : null;
 
@@ -465,52 +549,24 @@ export function LocationPicker({
           that empties the list would read as "nothing works here",
           which is not what an absence of evidence means. */}
       {canNarrow ? (
-        panel ? (
-          <div className="nx-locs-filter">
-            <Segmented
-              size="sm"
-              label={t("loc.recommendedOnly")}
-              value={recommendedOnly ? "worked" : "all"}
-              onChange={(value) => setRecommendedOnly(value === "worked")}
-              options={[
-                { value: "all", label: t("loc.fAll") },
-                { value: "worked", label: t("loc.fWorked") },
-              ]}
-            />
-          </div>
-        ) : (
-          <label className="mb-2 flex cursor-pointer items-center gap-2 px-1 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={recommendedOnly}
-              onChange={(event) => setRecommendedOnly(event.target.checked)}
-              className="accent-primary"
-            />
-            {t("loc.recommendedOnly")}
-          </label>
-        )
+        <label className="mb-2 flex cursor-pointer items-center gap-2 px-1 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={recommendedOnly}
+            onChange={(event) => setRecommendedOnly(event.target.checked)}
+            className="accent-primary"
+          />
+          {t("loc.recommendedOnly")}
+        </label>
       ) : null}
-      <div className={panel ? "flex flex-col gap-0.5" : "flex flex-col gap-2"} onKeyDown={onListKeyDown}>
+      <div className="flex flex-col gap-2" onKeyDown={onListKeyDown}>
         {rows.map((route, index) => {
           const isCurrent = route.id === pinnedRouteId;
           const isSwitching = switchingId === route.id;
           const place = routePlace(route);
           const placeName = placeLabel(route, language);
           const protocol = customerProtocolLabel(route.protocol, route.transport);
-          // In the panel the node's name only where two rows would
-          // otherwise read the same -- one place, one protocol, two nodes.
-          // It is an internal name, and the row's place already says where.
-          const nodeShown = !panel || rows.some((r) => r.id !== route.id && placeKey(r) === placeKey(route) && customerProtocolLabel(r.protocol, r.transport) === protocol);
           const ownAt = evidence?.ownAt(route) ?? null;
-          // "Connected here" only over verified traffic; "In use" over a
-          // tunnel that is up and not proven.
-          const here = !panel
-            ? null
-            : isCurrent && connectionState === "connected"
-              ? t("loc.connectedHere")
-              : isCurrent && (connectionState === "unverified" || connectionState === "degraded")
-                ? t("loc.inUse")
-                : null;
           return (
             <button
               key={route.id}
@@ -521,45 +577,33 @@ export function LocationPicker({
               onFocus={() => setFocusedIndex(index)}
               onClick={() => void handlePick(route)}
               disabled={isCurrent || switchingId !== null}
-              className={
-                panel
-                  ? cn("nx-row", isCurrent && "sel")
-                  : cn(
-                      "flex items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
-                      isCurrent
-                        ? "border-primary/50 bg-primary/10"
-                        : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",
-                    )
-              }
+              className={cn(
+                "flex items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
+                isCurrent ? "border-primary/50 bg-primary/10" : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",
+              )}
             >
               {/* The flag, not a pin: the country is what the list is
                   scanned for. A relay shows its exit's flag with Iran's
                   as a badge, since the exit is the country being chosen. */}
-              {panel ? (
-                <span className="nx-flag">
-                  <RouteFlag region={place.entry} exitRegion={place.exit} label={placeName} size="row" />
-                </span>
-              ) : (
-                <div
-                  className={cn(
-                    "flex size-9 shrink-0 items-center justify-center rounded-full",
-                    isCurrent ? "bg-primary/20" : "bg-highlight/10",
-                  )}
-                >
-                  <RouteFlag region={place.entry} exitRegion={place.exit} label={placeName} />
-                </div>
-              )}
-              <div className={panel ? "t" : "flex min-w-0 flex-1 flex-col"}>
+              <div
+                className={cn(
+                  "flex size-9 shrink-0 items-center justify-center rounded-full",
+                  isCurrent ? "bg-primary/20" : "bg-highlight/10",
+                )}
+              >
+                <RouteFlag region={place.entry} exitRegion={place.exit} label={placeName} />
+              </div>
+              <div className="flex min-w-0 flex-1 flex-col">
                 {/* The country -- "Iran → Germany" for a relay -- over the
                     node and protocol, which is where two routes to one
                     place differ. */}
-                <span className={panel ? "n" : "truncate text-sm font-medium"}>{placeName}</span>
-                <span className={panel ? "s" : "truncate text-xs text-muted-foreground"}>
-                  {here ?? (nodeShown ? <>{route.location.nodeName} &middot; {protocol}</> : protocol)}
+                <span className="truncate text-sm font-medium">{placeName}</span>
+                <span className="truncate text-xs text-muted-foreground">
+                  {route.location.nodeName} &middot; {protocol}
                 </span>
                 {ownAt !== null ? (
                   <span
-                    className={cn("flex min-w-0 items-center gap-1", !panel && "text-[11px] text-success")}
+                    className="flex min-w-0 items-center gap-1 text-[11px] text-success"
                     data-own-worked=""
                     title={t("loc.ownWorkedTip")}
                     aria-label={`${t("loc.ownWorked")}. ${t("loc.ownWorkedTip")}`}
@@ -568,26 +612,20 @@ export function LocationPicker({
                     <span className="truncate">{t("loc.ownWorked")}</span>
                   </span>
                 ) : evidence && !evidence.tags ? null : (
-                  <IspTagLine tag={route.ispTag} t={t} look={panel ? "pearl" : undefined} />
+                  <IspTagLine tag={route.ispTag} t={t} />
                 )}
               </div>
-              {showLatency && (!panel || route.id in latencies) ? (
-                <Latency ms={route.id in latencies ? latencies[route.id] : null} neutral={panel} />
-              ) : null}
+              <Latency ms={route.id in latencies ? latencies[route.id] : null} />
               {route.isRelay ? (
-                panel ? (
-                  <span className="nx-rpill">{t("loc.relayPill")}</span>
-                ) : (
-                  <span className="flex shrink-0 items-center gap-1 rounded-full bg-highlight/15 px-2 py-0.5 text-[10px] font-medium text-highlight">
-                    <Repeat className="size-3" />
-                    {t("loc.relayPill")}
-                  </span>
-                )
+                <span className="flex shrink-0 items-center gap-1 rounded-full bg-highlight/15 px-2 py-0.5 text-[10px] font-medium text-highlight">
+                  <Repeat className="size-3" />
+                  {t("loc.relayPill")}
+                </span>
               ) : null}
               {isSwitching ? (
                 <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
               ) : isCurrent ? (
-                <Check className={panel ? "nx-tick size-4 shrink-0" : "size-4 shrink-0 text-primary"} />
+                <Check className="size-4 shrink-0 text-primary" />
               ) : null}
             </button>
           );
@@ -598,63 +636,10 @@ export function LocationPicker({
 
   const body = (
     <>
-      {loading ? (
-        <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
-          <Loader2 className="size-4 animate-spin" />
-          {loadingLong ? <p className="text-xs">{t("common.stillTrying")}</p> : null}
-        </div>
-      ) : error ? (
-        <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
-          <p className="text-sm text-destructive">{failureText(error, t)}</p>
-          <Button onClick={() => void load()}>{t("loc.retry")}</Button>
-        </div>
-      ) : routes.length === 0 ? (
-        panel ? (
-          // The panel loads only when asked: an empty list here is one
-          // that has not arrived, not a plan with nothing on it.
-          <div className="flex flex-col items-center gap-3 px-4 py-8 text-center text-sm text-ink-2">
-            <p className="m-0">{t("loc.notLoaded")}</p>
-            <PillButton variant="ghost" size="sm" onClick={() => void load()}>
-              {t("loc.retry")}
-            </PillButton>
-          </div>
-        ) : (
-          <p className="px-2 py-6 text-center text-sm text-muted-foreground">{t("loc.noLocations")}</p>
-        )
-      ) : (
-        list
-      )}
-      {switchingLong ? <p className="px-2 pt-2 text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
-      {switchError ? <p className="px-2 pt-2 text-xs text-destructive">{failureText(switchError, t)}</p> : null}
+      {status ?? list}
+      {after}
     </>
   );
-
-  if (panel) {
-    return (
-      <>
-        <div className="nx-locs-head">
-          <h2>{t("loc.panelTitle")}</h2>
-          {/* Latency on request: see `variant`. Not from inside a tunnel. */}
-          <button
-            type="button"
-            className="nx-lnk text-[12.5px]"
-            onClick={() => {
-              if (!tunnelActive) void measureAll(routesRef.current);
-            }}
-            aria-disabled={tunnelActive || routes.length === 0 || undefined}
-            // Why it does nothing while connected, on the control itself
-            // rather than a note pinned over the list.
-            title={t("loc.pausedNote")}
-            aria-label={tunnelActive ? `${t("loc.measure")}. ${t("loc.pausedNote")}` : undefined}
-          >
-            <Gauge className="size-4" aria-hidden />
-            {t("loc.measure")}
-          </button>
-        </div>
-        <div className="nx-loclist">{body}</div>
-      </>
-    );
-  }
 
   return (
     <div className="absolute inset-0 z-20 flex flex-col bg-background">

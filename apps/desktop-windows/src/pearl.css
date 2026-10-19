@@ -3105,3 +3105,514 @@
   outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
+
+/* ---------- the server list (design-system.md 4.8, phase 3) ----------
+   One list in three frames -- the locations panel, the phone's sheet and
+   the Locations page (LocationList.tsx) -- and the same rows in each: a
+   country that opens to every protocol it has. Latency is neutral grey,
+   in words when it has no figure; nothing here takes a traffic-light
+   colour except the evidence lines, in the AA ink tokens. */
+@layer components {
+  .nx-locs-head {
+    padding-block: 4px 8px;
+    padding-inline: 8px 2px;
+  }
+  .nx-ibtn.sm {
+    width: 40px;
+    height: 40px;
+  }
+  .nx-ibtn.sm svg {
+    width: 18px;
+    height: 18px;
+  }
+  .nx-search {
+    position: relative;
+    flex: none;
+  }
+  .nx-search input {
+    width: 100%;
+    height: 44px;
+    margin: 0;
+    padding-inline: 40px 44px;
+    border: 1px solid var(--field-line);
+    border-radius: 14px;
+    background: var(--field-bg);
+    color: var(--ink);
+    font: inherit;
+    font-size: 14.5px;
+    user-select: text;
+    -webkit-appearance: none;
+    appearance: none;
+    transition:
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+  .nx-search input::placeholder {
+    color: var(--placeholder);
+    opacity: 1;
+  }
+  .nx-search input::-webkit-search-cancel-button,
+  .nx-search input::-webkit-search-decoration {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  .nx-search input:hover {
+    border-color: var(--ink-2);
+  }
+  .nx-app .nx-search input:focus-visible,
+  .nx-search input:focus {
+    outline: 2px solid transparent;
+    border-color: var(--cobalt);
+    box-shadow: 0 0 0 3px var(--field-focus);
+  }
+  .nx-search > .i {
+    position: absolute;
+    inset-inline-start: 13px;
+    top: 13px;
+    width: 18px;
+    height: 18px;
+    color: var(--ink-2);
+    pointer-events: none;
+  }
+  .nx-search .clr {
+    position: absolute;
+    inset-inline-end: 0;
+    top: 0;
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border-radius: 14px;
+    color: var(--ink-2);
+  }
+  .nx-search .clr:hover {
+    color: var(--ink);
+  }
+  .nx-search .clr svg {
+    width: 16px;
+    height: 16px;
+  }
+  .nx-locs-filter {
+    flex: none;
+    padding: 8px 0 2px;
+  }
+  .nx-locs-filter .nx-seg {
+    display: grid;
+    width: 100%;
+  }
+  .nx-locs-filter .nx-seg button {
+    min-width: 0;
+    padding-inline: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  html[lang="fa"] .nx-locs-filter .nx-seg button {
+    font-size: 13px;
+  }
+
+  .nx-lgrp {
+    margin: 0;
+    padding: 12px 10px 4px;
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+  }
+  html[lang="fa"] .nx-lgrp {
+    font-size: 12.5px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .nx-lgrph {
+    margin: -2px 10px 6px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+  html[lang="fa"] .nx-lgrph {
+    line-height: 1.8;
+  }
+  .nx-loclist .nx-row {
+    min-height: 52px;
+    padding-block: 7px;
+  }
+  /* Focus and selection look different: selection is a fill, focus an
+     inset two-tone ring the edge of the list cannot clip. */
+  .nx-app .nx-loclist .nx-row:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+    box-shadow: inset 0 0 0 5px var(--focus-halo);
+  }
+  .nx-row[aria-disabled="true"] {
+    cursor: default;
+  }
+  .nx-row .end {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+    color: var(--ink-2);
+    font-size: 12.5px;
+  }
+  .nx-row .chev {
+    width: 16px;
+    height: 16px;
+    color: var(--ink-2);
+    transition: transform var(--dur-snappy) var(--spring-snappy);
+  }
+  .nx-row[aria-expanded="true"] .chev {
+    transform: rotate(180deg);
+  }
+  .nx-crow .s {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .nx-crow .s > :last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .nx-rpill {
+    flex: none;
+  }
+  .nx-pick {
+    color: var(--ink);
+  }
+  .nx-ev {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+  }
+  .nx-ev svg {
+    width: 13px;
+    height: 13px;
+    flex: none;
+  }
+  .nx-ev.ok {
+    color: var(--ok-ink);
+  }
+  .nx-ev.warn {
+    color: var(--warn-ink);
+  }
+  .nx-ev.off {
+    color: var(--ink-2);
+  }
+  /* A protocol under its country: indented past the flag. */
+  .nx-loclist .nx-prow {
+    min-height: 44px;
+    padding-inline-start: 52px;
+  }
+  .nx-prow .n {
+    font-size: 13.5px;
+  }
+  .nx-node {
+    color: var(--ink-2);
+    font-weight: 400;
+  }
+  .nx-loclist.page .nx-prow {
+    align-items: flex-start;
+    min-height: 54px;
+    padding-block: 9px;
+  }
+  .nx-loclist.page .nx-prow .end {
+    padding-top: 2px;
+  }
+  .nx-loclist.page .nx-prow .s {
+    font-size: 12.5px;
+    line-height: 1.45;
+  }
+  html[lang="fa"] .nx-loclist.page .nx-prow .s {
+    line-height: 1.75;
+  }
+  .nx-loclist.page .nx-prow :is(.nx-ev, [data-isp-tag]) {
+    margin-top: 2px;
+    align-items: flex-start;
+    white-space: normal;
+    line-height: 1.45;
+  }
+  /* The page says the whole sentence, wrapped, where the panel shortens it. */
+  .nx-loclist.page .nx-prow [data-isp-tag] .truncate {
+    overflow: visible;
+    white-space: normal;
+  }
+  .nx-loclist.page .nx-prow :is(.nx-ev, [data-isp-tag]) svg {
+    margin-top: 2px;
+  }
+  .nx-ispi {
+    display: inline-grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    margin-inline-start: 6px;
+    vertical-align: -4px;
+    border-radius: 50%;
+    color: var(--ok-ink);
+    background: var(--ok-tint);
+  }
+  .nx-ispi.fail {
+    color: var(--warn-ink);
+    background: var(--warn-tint);
+  }
+  .nx-ispi svg {
+    width: 12px;
+    height: 12px;
+    stroke-width: 2.5;
+  }
+  .nx-inuse {
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+  .nx-inuse.ok {
+    color: var(--ok-ink);
+  }
+  .nx-spinning {
+    color: var(--ink-2);
+    animation: nx-spin 0.9s linear infinite;
+  }
+  @keyframes nx-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Latency: what one timing test saw, never a verdict on the server. */
+  .nx-ms {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    direction: ltr;
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    color: var(--ink-2);
+  }
+  .nx-ms .bars {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 12px;
+  }
+  .nx-ms .bars i {
+    width: 3px;
+    border-radius: 1px;
+    background: var(--hairline-2);
+  }
+  .nx-ms .bars i:nth-child(1) {
+    height: 5px;
+  }
+  .nx-ms .bars i:nth-child(2) {
+    height: 8px;
+  }
+  .nx-ms .bars i:nth-child(3) {
+    height: 12px;
+  }
+  .nx-ms .bars i.on {
+    background: var(--ink-2);
+  }
+  .nx-ms.not {
+    direction: inherit;
+    font-size: 12px;
+  }
+  .nx-cant {
+    font-size: 12px;
+    color: var(--ink-2);
+    white-space: nowrap;
+    border-bottom: 1px dotted var(--ink-2);
+    cursor: help;
+  }
+  .nx-cant.off {
+    border-bottom: 0;
+    cursor: default;
+  }
+  .nx-msr {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    line-height: 1.25;
+  }
+  .nx-msr .msn {
+    font-size: 11px;
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+
+  /* A country's protocols: opened on the snappy spring. */
+  .nx-acc {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows var(--dur-snappy) var(--spring-snappy);
+  }
+  .nx-acc.open {
+    grid-template-rows: 1fr;
+  }
+  .nx-acc > div {
+    min-height: 0;
+    overflow: hidden;
+  }
+  :root[data-motion="reduce"] :is(.nx-acc, .nx-row .chev) {
+    transition: none;
+  }
+
+  .nx-lempty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 28px 14px;
+    text-align: center;
+    color: var(--ink-2);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .nx-lempty > svg {
+    width: 28px;
+    height: 28px;
+  }
+  .nx-lempty b {
+    color: var(--ink);
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .nx-lfoot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 6px;
+    margin: 10px 8px 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--ink-2);
+  }
+  .nx-lfoot > svg {
+    width: 14px;
+    height: 14px;
+    flex: none;
+  }
+  .nx-lfoot .nx-lnk {
+    font-size: 12px;
+  }
+
+  /* The phone sheet: as tall as it may be, so the list does not jump as a
+     search narrows it; only the list scrolls. */
+  .nx-locsheet {
+    height: 88%;
+  }
+  .nx-sheet .handle,
+  .nx-locsheet .nx-sheet-head {
+    touch-action: none;
+  }
+  .nx-sheet .handle {
+    cursor: grab;
+  }
+  .nx-locbody {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .nx-locbody .nx-loclist {
+    flex: 1;
+    min-height: 0;
+  }
+  .nx-locbody .nx-mlegend {
+    margin-top: 4px;
+  }
+  .nx-locsheet .nx-search input {
+    font-size: 16px;
+  }
+
+  /* The Locations page: the list beside what it means. */
+  .nx-locpage {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(260px, 0.85fr);
+    gap: 16px;
+    align-items: start;
+  }
+  .nx-loccard {
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+  }
+  .nx-loclist.page {
+    overflow: visible;
+    margin-inline: 0;
+    padding: 4px 0 6px;
+    -webkit-mask-image: none;
+    mask-image: none;
+    content-visibility: visible;
+  }
+  .nx-locside {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .nx-locside .nx-ctitle:focus-visible {
+    outline-offset: 4px;
+  }
+  .nx-protolist {
+    display: flex;
+    flex-direction: column;
+    margin: 10px 0 0;
+  }
+  .nx-protolist > div {
+    padding: 10px 2px;
+    border-top: 1px solid var(--hairline);
+  }
+  .nx-protolist > div:first-child {
+    border-top: 0;
+  }
+  .nx-protolist dt {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .nx-protolist dd {
+    margin: 2px 0 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+  html[lang="fa"] .nx-protolist dd {
+    line-height: 1.8;
+  }
+  .nx-locside .nx-mlegend {
+    margin: 12px 0;
+    padding-inline: 0;
+  }
+  .nx-measure {
+    align-self: flex-start;
+  }
+  .nx-measure svg {
+    width: 16px;
+    height: 16px;
+  }
+  @container app (max-width: 899.98px) {
+    .nx-locpage {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  /* The panel at its narrowest (the 1180 and 940 windows): Automatic keeps
+     its tick and its line, and the Recommended tag gives way. */
+  .nx-panel {
+    container: lpanel / inline-size;
+  }
+  @container lpanel (max-width: 299.98px) {
+    .nx-loclist .nx-row .nx-tagn {
+      display: none;
+    }
+  }
+
+  /* A hovered or focused row rings its place's light on the map. */
+  .nx-lamp[data-ring="1"]:not([data-exit])::before {
+    transform: scale(0.8);
+    box-shadow:
+      0 0 0 2px var(--map-bg),
+      0 0 0 3.5px var(--cobalt);
+  }
+}

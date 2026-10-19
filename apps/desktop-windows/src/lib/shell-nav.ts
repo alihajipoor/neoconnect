@@ -6,8 +6,8 @@
  * thing the main page showed. Nothing here is stored or sent.
  *
  * "Locations" pressed on one of those pages leads back to the main page,
- * which shows its locations panel (or the phone's sheet) once it has
- * loaded: the request waits here for it. */
+ * which shows its Locations page once it has loaded: the request waits
+ * here for it. */
 
 export interface ShellProfile {
   email: string | null;

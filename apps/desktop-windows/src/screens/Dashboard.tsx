@@ -143,7 +143,8 @@ import {
   type PressAction,
 } from "../lib/connect-intent";
 import { Banner, Note, PillButton, Segmented } from "../components/ui";
-import { Dialog } from "../components/overlay";
+import { Dialog, LocationSheet } from "../components/overlay";
+import { Page, PageScene } from "../components/shell/Page";
 import { AppShell } from "../components/shell/AppShell";
 import { rememberShellProfile, takeLocationsRequest } from "../lib/shell-nav";
 import { MainView } from "../components/main/MainView";
@@ -165,7 +166,6 @@ import {
   type NetworkFreshness,
 } from "../lib/map-network";
 import { currentNetwork } from "../lib/network-identity";
-import { Sheet } from "../components/Sheet";
 import {
   chipFor,
   hintTone,
@@ -516,11 +516,10 @@ export function Dashboard({
   // seconds an address; past eight it says it is still trying.
   const loadingLong = useStillTrying(loading);
   // "Locations" pressed on another page of the shell: once this screen has
-  // loaded, the panel (or the phone's sheet) is shown as if it had been
-  // pressed here.
+  // loaded, its Locations page is shown as if it had been pressed here.
   useEffect(() => {
-    if (!loading && takeLocationsRequest()) showLocations();
-    // Once per load; showLocations is this render's.
+    if (!loading && takeLocationsRequest()) openLocationsPage();
+    // Once per load; openLocationsPage is this render's.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
   // Kept as it came, and worded as the screen renders (`ShownFailure`):
@@ -738,6 +737,12 @@ export function Dashboard({
   const layout = useWindowLayout();
   /** Bumped to flash the locations panel when it is asked for. */
   const [panelFlash, setPanelFlash] = useState(0);
+  /** The main page, or its Locations page: the full list, with each
+   * protocol's hint and what the evidence means (design-system.md 4.8).
+   * Drawn by this screen, so a pick there goes through the same
+   * confirmation and the same wiring as one in the panel. */
+  const [view, setView] = useState<"overview" | "locations">("overview");
+  const [locSection, setLocSection] = useState<"explain" | undefined>(undefined);
   /** The switch confirmation open, and how it is answered (`confirmPick`). */
   const [switchAsk, setSwitchAsk] = useState<{
     place: string | null;
@@ -3925,18 +3930,30 @@ export function Dashboard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [switchConnect]);
 
-  /** "Locations" in the nav: the panel beside the hero, flashed and with
-   * its current row focused, or the sheet on a phone-sized window. */
+  /** "Try another location" and the tray's change button: the panel beside
+   * the hero, flashed and with its current row focused, or the sheet on a
+   * phone-sized window. */
   function showLocations() {
+    if (view !== "overview") setView("overview");
     if (layout === "narrow") {
       setShowLocationPicker(true);
       return;
     }
     setPanelFlash((n) => n + 1);
-    const row =
-      document.querySelector<HTMLElement>('.nx-panel .nx-row[tabindex="0"]:not([disabled])') ??
-      document.querySelector<HTMLElement>(".nx-panel .nx-row:not([disabled])");
-    row?.focus();
+    requestAnimationFrame(() => {
+      const row =
+        document.querySelector<HTMLElement>('.nx-panel .nx-row[tabindex="0"]') ??
+        document.querySelector<HTMLElement>(".nx-panel .nx-row");
+      row?.focus();
+    });
+  }
+
+  /** "Locations" in the nav, and "Open the full list" in the panel's menu:
+   * the Locations page. */
+  function openLocationsPage(section?: "explain") {
+    setShowLocationPicker(false);
+    setLocSection(section);
+    setView("locations");
   }
 
   async function handleLogout() {
@@ -4202,6 +4219,7 @@ export function Dashboard({
   const workedPlaces = new Set<string>();
   for (const [key, evidence] of placesEvidence(mapRoutes, evidenceCtx)) if (evidence.look === "live") workedPlaces.add(key);
   const listEvidence = {
+    places: placesEvidence(mapRoutes, evidenceCtx),
     worked: workedPlaces,
     ownAt: (route: RouteOption) => ownWorkedAt(route, evidenceCtx),
     tags: tagsCurrent(netFresh),
@@ -4405,7 +4423,12 @@ export function Dashboard({
         void saveChosenRoute(null);
         connectAfterSwitch();
       }}
-      onClose={() => setShowLocationPicker(false)}
+      onClose={() => {
+        setShowLocationPicker(false);
+        // A pick on the Locations page lands on the main page, where the
+        // connection's state is said.
+        setView("overview");
+      }}
       // Re-reads the provisioned connection rather than adopting the
       // switch response directly: that payload carries no `connection`.
       onSwitched={(routeId) => {
@@ -4431,8 +4454,10 @@ export function Dashboard({
         switchLoadSettled();
       }}
       evidence={listEvidence}
-      variant={layout === "narrow" ? "overlay" : "panel"}
+      variant={view === "locations" ? "page" : layout === "narrow" ? "sheet" : "panel"}
       confirmPick={confirmPick}
+      onOpenFull={openLocationsPage}
+      focusSection={view === "locations" ? locSection : undefined}
     />
   ) : null;
 
@@ -4479,15 +4504,18 @@ export function Dashboard({
 
   return (
     <AppShell
-      active="overview"
+      active={view === "locations" ? "locations" : "overview"}
       shown={calmTone}
       busy={busy}
       banner={bannerShowing}
       titlebar
       email={me?.email ?? null}
       planLine={planLine}
-      onOverview={() => document.querySelector<HTMLElement>(".nx-hero")?.scrollTo({ top: 0 })}
-      onLocations={showLocations}
+      onOverview={() => {
+        if (view !== "overview") setView("overview");
+        else document.querySelector<HTMLElement>(".nx-hero")?.scrollTo({ top: 0 });
+      }}
+      onLocations={() => openLocationsPage()}
       onOpenActivity={onOpenActivity ?? onOpenSettings}
       onOpenSettings={onOpenSettings}
       onBrowsePlans={onBrowsePlans}
@@ -4501,9 +4529,20 @@ export function Dashboard({
           <CommunityLinks />
         </>
       }
-      scene={<HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} alert={mapAlert} />}
+      scene={
+        // A page speaks for no route: no lights behind the Locations page.
+        view === "locations" ? (
+          <PageScene />
+        ) : (
+          <HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} alert={mapAlert} />
+        )
+      }
     >
-      {gaming && subscription && !error ? (
+      {view === "locations" ? (
+        <Page title={t("loc.panelTitle")} lede={t("loc.pageLede")} className="nx-locpg">
+          {picker ?? <p className="nx-csub">{t("dash.noPlanHint")}</p>}
+        </Page>
+      ) : gaming && subscription && !error ? (
         <MainView
           banner={banner}
           gaming={
@@ -4595,7 +4634,16 @@ export function Dashboard({
         />
       )}
 
-      {layout === "narrow" ? <Sheet open={showLocationPicker && subscription !== null}>{picker}</Sheet> : null}
+      {layout === "narrow" && view === "overview" ? (
+        <LocationSheet
+          open={showLocationPicker && subscription !== null}
+          title={t("loc.panelTitle")}
+          closeLabel={t("loc.close")}
+          onClose={() => setShowLocationPicker(false)}
+        >
+          {picker}
+        </LocationSheet>
+      ) : null}
 
       <Dialog
         open={switchAsk !== null}

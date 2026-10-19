@@ -295,7 +295,9 @@ export function Segmented<T extends string>({
   size,
   className,
 }: {
-  options: ReadonlyArray<{ value: T; label: string; icon?: ReactNode }>;
+  /** `long`: the full words, as the accessible name and the tooltip, when
+   * the label is a short form of them. */
+  options: ReadonlyArray<{ value: T; label: string; icon?: ReactNode; long?: string }>;
   value: T;
   onChange: (value: T) => void;
   label: string;
@@ -323,7 +325,8 @@ export function Segmented<T extends string>({
           type="button"
           aria-pressed={option.value === value}
           aria-disabled={locked || undefined}
-          title={locked ? lockedReason : undefined}
+          aria-label={option.long}
+          title={locked ? lockedReason : option.long}
           onClick={() => {
             if (!locked && option.value !== value) onChange(option.value);
           }}

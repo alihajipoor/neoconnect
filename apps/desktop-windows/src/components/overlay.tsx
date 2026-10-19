@@ -31,7 +31,9 @@ function useFocusTrap(
     if (!open) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const node = ref.current;
-    (initialFocus?.current ?? (node ? focusables(node)[0] : null) ?? node)?.focus();
+    // A field marked `data-autofocus` -- the location sheet's search -- before
+    // the first control, which is the close button.
+    (initialFocus?.current ?? node?.querySelector<HTMLElement>("[data-autofocus]") ?? (node ? focusables(node)[0] : null) ?? node)?.focus();
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
         if (!escapeRef.current) return;
@@ -41,6 +43,10 @@ function useFocusTrap(
         return;
       }
       if (event.key !== "Tab" || !node) return;
+      // A dialog opened over this one -- the switch confirmation over the
+      // location sheet -- keeps the focus it has.
+      const above = document.activeElement?.closest('[aria-modal="true"]');
+      if (above && above !== node && !node.contains(above)) return;
       const items = focusables(node);
       if (items.length === 0) {
         event.preventDefault();
@@ -172,6 +178,7 @@ export function Menu({
   onClose,
   label,
   placement = "above",
+  align = "start",
   children,
 }: {
   open: boolean;
@@ -179,6 +186,9 @@ export function Menu({
   onClose: () => void;
   label: string;
   placement?: "above" | "below";
+  /** Which edge of the trigger the menu lines up with: its inline start, or
+   * its inline end -- for a trigger at the window's end edge. */
+  align?: "start" | "end";
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -190,7 +200,7 @@ export function Menu({
     const place = () => {
       const box = anchor.current?.getBoundingClientRect();
       if (!box) return;
-      const rtl = document.documentElement.dir === "rtl";
+      const rtl = (document.documentElement.dir === "rtl") !== (align === "end");
       const horizontal: React.CSSProperties = rtl
         ? { right: Math.max(8, window.innerWidth - box.right), transformOrigin: placement === "above" ? "bottom right" : "top right" }
         : { left: Math.max(8, box.left), transformOrigin: placement === "above" ? "bottom left" : "top left" };
@@ -203,7 +213,7 @@ export function Menu({
     place();
     window.addEventListener("resize", place);
     return () => window.removeEventListener("resize", place);
-  }, [open, anchor, placement]);
+  }, [open, anchor, placement, align]);
 
   useEffect(() => {
     if (!open) return;
@@ -236,5 +246,115 @@ export function Menu({
       {children}
     </div>,
     document.body,
+  );
+}
+
+/** The phone's location list (design-system.md 4.8): a sheet from the
+ * bottom edge, modal, with a scrim, focus kept inside and given back to
+ * whatever opened it (the location card), and a handle that follows the
+ * finger -- released past 120px, or flung faster than .6px/ms, it closes;
+ * otherwise it springs back.
+ *
+ * Escape is the list's own (`LocationPicker`): it is ignored while a switch
+ * is in flight, because closing would not recall a request already sent.
+ *
+ * Drawn into the app root, which holds fixed-position children to its own
+ * box and carries the safe areas; found from where the sheet is placed. */
+export function LocationSheet({
+  open,
+  title,
+  closeLabel,
+  onClose,
+  children,
+}: {
+  open: boolean;
+  title: ReactNode;
+  closeLabel: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const anchor = useRef<HTMLSpanElement>(null);
+  const [container, setContainer] = useState<Element | null>(null);
+  const titleId = useId();
+  const drag = useRef<{ y0: number; t0: number; dy: number; id: number } | null>(null);
+  useFocusTrap(ref, open && container !== null, undefined);
+
+  useLayoutEffect(() => {
+    if (open) setContainer(anchor.current?.closest(".nx-app") ?? document.body);
+  }, [open]);
+
+  function onDown(event: React.PointerEvent<HTMLElement>) {
+    const sheet = ref.current;
+    if (!sheet || event.button !== 0) return;
+    drag.current = { y0: event.clientY, t0: performance.now(), dy: 0, id: event.pointerId };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    sheet.style.transition = "none";
+  }
+  function onMove(event: React.PointerEvent<HTMLElement>) {
+    const sheet = ref.current;
+    const d = drag.current;
+    if (!sheet || !d || d.id !== event.pointerId) return;
+    d.dy = Math.max(0, event.clientY - d.y0);
+    sheet.style.transform = `translateY(${d.dy}px)`;
+  }
+  function onUp(event: React.PointerEvent<HTMLElement>) {
+    const sheet = ref.current;
+    const d = drag.current;
+    drag.current = null;
+    if (!sheet || !d || d.id !== event.pointerId) return;
+    const speed = d.dy / Math.max(1, performance.now() - d.t0);
+    const reduce = document.documentElement.dataset.motion === "reduce";
+    if (d.dy > 120 || speed > 0.6) {
+      if (reduce) {
+        onClose();
+        return;
+      }
+      sheet.style.transition = "transform 220ms cubic-bezier(.4,0,1,1)";
+      sheet.style.transform = "translateY(110%)";
+      setTimeout(onClose, 220);
+      return;
+    }
+    sheet.style.transition = reduce ? "none" : "transform var(--dur-snappy) var(--spring-snappy)";
+    sheet.style.transform = "";
+  }
+  const handle = { onPointerDown: onDown, onPointerMove: onMove, onPointerUp: onUp, onPointerCancel: onUp };
+
+  return (
+    <>
+      <span ref={anchor} hidden />
+      {open && container
+        ? createPortal(
+            <>
+              <div className="nx-scrim" aria-hidden onClick={onClose} />
+              <div
+                ref={ref}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby={titleId}
+                tabIndex={-1}
+                className="nx-glass strong nx-sheet nx-locsheet"
+              >
+                <div className="handle" aria-hidden {...handle} />
+                <div className="nx-sheet-head" {...handle}>
+                  <h2 id={titleId}>{title}</h2>
+                  <button
+                    type="button"
+                    className="nx-ibtn"
+                    onClick={onClose}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    aria-label={closeLabel}
+                    title={closeLabel}
+                  >
+                    <X aria-hidden />
+                  </button>
+                </div>
+                {children}
+              </div>
+            </>,
+            container,
+          )
+        : null}
+    </>
   );
 }

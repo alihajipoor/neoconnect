@@ -1,4 +1,4 @@
-import { CircleAlert, CircleCheck } from "lucide-react";
+import { Check, CircleAlert, CircleCheck, TriangleAlert } from "lucide-react";
 import type { TranslationKey } from "../lib/i18n";
 import type { IspTag } from "../lib/types";
 import { cn } from "../lib/utils";
@@ -19,14 +19,26 @@ type Translate = (key: TranslationKey, vars?: Record<string, string | number>) =
  * tooltip and the accessible name, and colour from pearl.css's ink tokens
  * -- the hues the icon keeps are below AA as text.
  *
+ * `look="icon"` is the redesigned list's protocol row: a check or an alert
+ * in a tinted circle, the full sentence its accessible name and tooltip --
+ * an image role, so a screen reader reads it (a label on a bare span is
+ * ignored).
+ *
  * Takes `t` rather than calling the hook, so it renders -- and is tested
  * -- without the provider. */
-export function IspTagLine({ tag, t, look }: { tag: IspTag | null | undefined; t: Translate; look?: "pearl" }) {
+export function IspTagLine({ tag, t, look }: { tag: IspTag | null | undefined; t: Translate; look?: "pearl" | "icon" }) {
   if (!tag) return null;
   const works = tag.code === "worksOnYourIsp";
   const text = t(works ? "loc.ispWorks" : "loc.ispFailing");
   const detail = t("loc.ispCount", { customers: tag.customers, outOf: tag.outOf, hours: tag.windowHours });
   const Icon = works ? CircleCheck : CircleAlert;
+  if (look === "icon") {
+    return (
+      <span className={cn("nx-ispi", !works && "fail")} role="img" title={`${text}. ${detail}`} aria-label={`${text}. ${detail}`} data-isp-tag={tag.code}>
+        {works ? <Check aria-hidden /> : <TriangleAlert aria-hidden />}
+      </span>
+    );
+  }
   const pearl = look === "pearl";
   return (
     <span

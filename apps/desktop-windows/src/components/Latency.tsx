@@ -1,3 +1,4 @@
+import type { TranslationKey } from "../lib/i18n";
 import { cn } from "../lib/utils";
 
 /** Signal-strength bars plus the actual number.
@@ -49,4 +50,80 @@ export function Latency({ ms, className, neutral = false }: { ms: number | null;
       </span>
     </span>
   );
+}
+
+/** What the redesigned list says about one timing test (design-system.md
+ * 4.8), in words as well as bars, and never in a traffic-light colour: the
+ * figure is how fast the entry answered one TCP connect or ping, not how
+ * good a server is (`measure_latency`, src-tauri/src/vpn.rs).
+ *
+ * - `ms`: the figure, with three neutral bars. A relay's is the connect time
+ *   to its entry in Iran only, and says so.
+ * - `cant`: the test got no answer -- "Can't measure", with the reason. It
+ *   never says the server is down or unreachable: networks drop pings, and
+ *   a UDP port can only be pinged.
+ * - `wait`: being measured now.
+ * - `not`: never measured on this list. Distinct from `cant`.
+ * - `offline`: the control plane reports the server down, so it was not
+ *   timed at all. */
+export type LatencyShown =
+  | { kind: "ms"; ms: number; relay?: boolean }
+  | { kind: "cant"; udp: boolean }
+  | { kind: "wait" }
+  | { kind: "not" }
+  | { kind: "offline" };
+
+type Say = (key: TranslationKey) => string;
+
+export function LatencyValue({ shown, t, bars = true }: { shown: LatencyShown; t: Say; bars?: boolean }) {
+  switch (shown.kind) {
+    case "wait":
+      return (
+        <span className="nx-ms wait">
+          <span aria-hidden>…</span>
+          <span className="nx-sr">{t("loc.measuring")}</span>
+        </span>
+      );
+    case "not":
+      return <span className="nx-ms not">{t("loc.notMeasured")}</span>;
+    case "offline":
+      return (
+        <span className="nx-cant off" title={t("loc.protoOfflineTip")}>
+          {t("loc.evOffline")}
+          <span className="nx-sr">. {t("loc.protoOfflineTip")}</span>
+        </span>
+      );
+    case "cant": {
+      const tip = t(shown.udp ? "loc.cantTipUdp" : "loc.cantTipTcp");
+      return (
+        <span className="nx-cant" title={tip}>
+          {t("loc.cant")}
+          <span className="nx-sr">. {tip}</span>
+        </span>
+      );
+    }
+    case "ms": {
+      const level = shown.ms < 100 ? 3 : shown.ms < 170 ? 2 : 1;
+      const figure = (
+        <span className="nx-ms">
+          {bars && !shown.relay ? (
+            <span className="bars" aria-hidden>
+              {[1, 2, 3].map((k) => (
+                <i key={k} className={k <= level ? "on" : undefined} />
+              ))}
+            </span>
+          ) : null}
+          {/* Kept LTR inside an RTL layout: "23 ms" must not render reversed. */}
+          <span data-ltr dir="ltr">{`${shown.ms} ms`}</span>
+        </span>
+      );
+      if (!shown.relay) return figure;
+      return (
+        <span className="nx-msr" title={t("loc.toIranTip")}>
+          {figure}
+          <span className="msn">{t("loc.toIran")}</span>
+        </span>
+      );
+    }
+  }
 }
