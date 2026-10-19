@@ -28,8 +28,15 @@
 // Exits 1 on any failure. Nothing leaves the machine: the preview answers
 // every Tauri call itself.
 //
-//   node scripts/check-phone-fit.mjs [--all] [--json out.json] [--chrome path]
-//                                     [--text-scale 1.15]
+//   node scripts/check-phone-fit.mjs [--app mobile] [--all] [--json out.json]
+//                                     [--chrome path] [--text-scale 1.15]
+//
+// --app mobile measures the phone app itself instead (apps/mobile, its own
+// preview.html and stylesheet, `pnpm check:phone-fit` there): its main page
+// in the states the phone has -- a declined VPN permission, a protocol not
+// in the app, a disconnect not confirmed among them -- and the sign-in
+// screens at the phone sizes and the tablet. The first-run disclosure is
+// measured too, and only reported: it is longer than a screen, and scrolls.
 //
 // --all adds the states a phone never shows (Gaming mode and "not confined"
 // are Windows-only); they are reported but not failed on.
@@ -48,13 +55,14 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(here, "..");
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(`--${name}`);
 const opt = (name) => {
   const i = args.indexOf(`--${name}`);
   return i >= 0 ? args[i + 1] : undefined;
 };
+const MOBILE = opt("app") === "mobile";
+const root = path.resolve(here, MOBILE ? "../../mobile" : "..");
 
 /** The preview's own labels (src/preview/PreviewApp.tsx `SIZES`). */
 const SIZES = [
@@ -66,9 +74,43 @@ const SIZES = [
 ];
 /** The windows and the tablet, for sign-in only: the card does not scroll
  * there either (AuthFrame.tsx), the first launch's 1180 x 760 included. */
-const WINDOWS = ["720 × 600 (minimum)", "940 × 700 (old default)", "1180 × 760 (first launch)", "1280 × 800", "1440 × 900", "834 × 1112 (tablet)"];
+const WINDOWS = MOBILE
+  ? ["834 × 1112 (tablet)"]
+  : ["720 × 600 (minimum)", "940 × 700 (old default)", "1180 × 760 (first launch)", "1280 × 800", "1440 × 900", "834 × 1112 (tablet)"];
 const LANGS = ["en", "fa"];
-const MAIN = [
+/** The phone app's own states (apps/mobile/src/preview/PhonePreview.tsx):
+ * no "waiting for a network" pass or unknown status there, and the states
+ * only a phone has -- a declined VPN permission, a protocol the app does
+ * not carry, a disconnect the platform has not confirmed. */
+const MOBILE_MAIN = [
+  "idle",
+  "connecting",
+  "verifying",
+  "connected",
+  "adopted",
+  "unverified",
+  "degraded",
+  "reconnectHeld",
+  "reconnectLong",
+  "reconnectOffline",
+  "disconnecting",
+  "teardownStuck",
+  "dropped",
+  "failed",
+  "permission",
+  "unsupported",
+  "slot",
+  "blocked",
+  "capped",
+  "ended",
+  "none",
+  "relayConnected",
+  "relayUnverified",
+  "relayPinned",
+  "crossed",
+  "crossedUnverified",
+];
+const MAIN = MOBILE ? MOBILE_MAIN : [
   "idle",
   "connecting",
   "verifying",
@@ -94,23 +136,30 @@ const MAIN = [
   "crossed",
   "crossedDegraded",
 ];
-const WINDOWS_ONLY = ["unconfined", "gamingOff", "gamingOn", "gamingUnknown"];
+const WINDOWS_ONLY = MOBILE ? [] : ["unconfined", "gamingOff", "gamingOn", "gamingUnknown"];
 /** A message to read is on screen: the stage gives way (it keeps its place
  * and draws nothing), so its size is not compared. */
-const ALERT = new Set(["failed", "slot", "blocked", "ended"]);
+const ALERT = new Set(
+  MOBILE
+    ? ["failed", "slot", "blocked", "ended", "none", "teardownStuck", "permission", "unsupported"]
+    : ["failed", "slot", "blocked", "ended"],
+);
 /** No subscription: another foot altogether (no summary line; on the real
  * screen no location card either). The device limit's card replaces the
  * button. Neither is compared with the others' foot. */
 const OTHER_FOOT = new Set(["none", "slot"]);
 /** The failover line that names a country: compared among themselves. */
-const CROSSED = new Set(["crossed", "crossedDegraded"]);
+const CROSSED = new Set(MOBILE ? ["crossed", "crossedUnverified"] : ["crossed", "crossedDegraded"]);
+/** The phone draws no location card without a plan. */
+const NO_LOCATION = new Set(MOBILE ? ["none"] : []);
 /** Sign-in and its steps (the preview's "Screen"), which the owner asked to
  * fit one screen too: no scrolling, every button that submits on screen --
  * the backup route's sign-up offer among them -- and no provider's label
  * cut. With the states a blocked network brings, which are the ones a
  * customer in Iran sees: a failure, the intranet's note, both, and the
  * backup route offered; and an iPhone's three providers. */
-const AUTH = [
+const MOBILE_AUTH = ["signin", "signinError", "register", "forgot", "verify"];
+const AUTH = MOBILE ? MOBILE_AUTH : [
   "signin",
   "signinNotice",
   "signinError",
@@ -163,7 +212,7 @@ const STYLED = `(() => {
   return ok && !!pearl && getComputedStyle(pearl).display === 'flex';
 })()`;
 
-const MEASURE = `(() => {
+const MEASURE = (noLocation) => `(() => {
   const frame = document.querySelector('[data-testid=frame]');
   const fb = frame.getBoundingClientRect();
   const vis = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
@@ -185,7 +234,7 @@ const MEASURE = `(() => {
   const headBottom = vis(head) ? R(head).b : 0;
   const one = (sel) => [...copy.querySelectorAll(':scope > ' + sel)].find(vis) || null;
   const missing = [];
-  const required = [['chip', '.nx-chiprow'], ['line', '.nx-bigrow'], ['location', '.nx-hloc'], ['button', '.nx-actions, .nx-slot']];
+  const required = [['chip', '.nx-chiprow'], ['line', '.nx-bigrow'], ${noLocation ? "" : "['location', '.nx-hloc'], "}['button', '.nx-actions, .nx-slot']];
   const optional = [['sentence', '.nx-hint'], ['banner', '.nx-banner'], ['slot', '.nx-slot'], ['notes', '.nx-notes'], ['error', '.nx-err'], ['failover', '.nx-sublinebox > .nx-subline']];
   for (const [name, sel] of [...required, ...optional]) {
     const el = one(sel);
@@ -292,6 +341,23 @@ const AUTH_MEASURE = `(() => {
   return { overflow: Math.round(overflow), missing, cut, providers };
 })()`;
 
+/** The disclosure: how far its column scrolls, and whether its button, once
+ * scrolled to, lies inside the safe area and is not cut. */
+const DISCLOSURE_MEASURE = `(() => {
+  const frame = document.querySelector('[data-testid=frame]');
+  const fb = frame.getBoundingClientRect();
+  const [safeT, safeB] = (frame.dataset.safe || '0,0').split(',').map(Number);
+  const scroller = frame.querySelector('.nx-auth-scroll');
+  const button = frame.querySelector('.nx-auth-submit');
+  if (!scroller || !button) return { overflow: -1, reached: false };
+  const overflow = Math.round(scroller.scrollHeight - scroller.clientHeight);
+  scroller.scrollTop = scroller.scrollHeight;
+  const b = button.getBoundingClientRect();
+  const reached = b.top - fb.top >= safeT - 0.5 && b.bottom - fb.top <= fb.height - safeB + 0.5;
+  scroller.scrollTop = 0;
+  return { overflow, reached };
+})()`;
+
 /** Where two measures of the same part differ by more than half a pixel. */
 function differs(a, b) {
   if (a === null || b === null) return a !== b;
@@ -337,6 +403,7 @@ const chrome = spawn(chromePath(), ["--headless=new", `--remote-debugging-port=$
 let ws;
 const results = [];
 const authResults = [];
+const disclosure = [];
 try {
   let targets = [];
   for (let i = 0; i < 80 && !targets.some((t) => t.type === "page"); i++) {
@@ -404,7 +471,7 @@ try {
           await ev(SCALE_TEXT(textScale));
           await sleep(200);
         }
-        const m = await ev(MEASURE);
+        const m = await ev(MEASURE(NO_LOCATION.has(state)));
         results.push({ size: size.split(" (")[0], lang, state, ...m, windowsOnly: WINDOWS_ONLY.includes(state) });
       }
     }
@@ -427,6 +494,20 @@ try {
         }
         const m = await ev(AUTH_MEASURE);
         authResults.push({ size: size.split(" (")[0], lang, screen, ...m });
+      }
+    }
+  }
+  // The phone's first-run disclosure: longer than a screen, so it scrolls
+  // -- reported, not failed on: how far, and that its button is reached.
+  if (MOBILE) {
+    for (const size of SIZES) {
+      await choose("size", size);
+      for (const lang of LANGS) {
+        await choose("language", lang);
+        if (!(await choose("screen", "disclosure"))) throw new Error('The preview has no screen "disclosure".');
+        await sleep(450);
+        await ev("document.fonts.ready.then(() => true)");
+        disclosure.push({ size: size.split(" (")[0], lang, ...(await ev(DISCLOSURE_MEASURE)) });
       }
     }
   }
@@ -467,7 +548,11 @@ for (const size of [...new Set(results.map((r) => r.size))]) {
   }
 }
 
-if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify({ main: results, auth: authResults }, null, 1));
+if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify({ main: results, auth: authResults, disclosure }, null, 1));
+for (const r of disclosure) {
+  console.log(`${r.size} ${r.lang} disclosure: scrolls ${r.overflow}px, its button ${r.reached ? "reached at the end" : "NOT reached"}`);
+}
+const disclosureFailed = disclosure.filter((r) => !r.reached);
 // The iPhone screens must actually draw three providers, or they prove
 // nothing about them.
 for (const r of authResults) {
@@ -508,7 +593,8 @@ if (textScale !== 1) {
   );
   process.exit(0);
 }
-if (failed.length || moved.length || authFailed.length) {
+if (failed.length || moved.length || authFailed.length || disclosureFailed.length) {
+  if (disclosureFailed.length) console.error(`${disclosureFailed.length} disclosure screen(s) whose button cannot be reached.`);
   if (failed.length) console.error(`${failed.length} main-page state(s) do not fit, or cut their text.`);
   if (authFailed.length) console.error(`${authFailed.length} sign-in screen(s) do not fit one screen, or cut a provider's label.`);
   if (moved.length) console.error(`${moved.length} part(s) move or resize with the state.`);
