@@ -39,9 +39,18 @@ if ! command -v zip >/dev/null 2>&1; then
     done
 
     if [ -z "$PY" ]; then
-        echo "error: neither 'zip' nor Python is installed." >&2
+        # Last resort: Node, which the monorepo needs anyway -- and which is
+        # the only one of the three on the owner's Windows PC.
+        if command -v node >/dev/null 2>&1; then
+            echo "note: neither 'zip' nor Python found, building with node instead." >&2
+            node "$SITE_DIR/scripts/make-zip.mjs" "$SITE_DIR" "$ARCHIVE" || exit 1
+            echo
+            echo "Deploy: upload this file to your host and unzip it inside public_html."
+            exit 0
+        fi
+        echo "error: none of 'zip', Python or Node is installed." >&2
         echo "  Debian/Ubuntu: sudo apt-get install zip" >&2
-        echo "  Windows:       install Python, or run this under WSL" >&2
+        echo "  Windows:       install Node or Python, or run this under WSL" >&2
         exit 1
     fi
 
