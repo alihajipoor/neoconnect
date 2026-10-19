@@ -209,7 +209,7 @@ require NX_INC . '/partials/head.php';
       ?>
         <li class="spec card reveal">
           <div class="spec__top">
-            <span class="spec__no" data-ltr><?php echo sprintf('%02d', $nx_n); ?></span>
+            <span class="spec__no" data-ltr><?php echo nx_num(sprintf('%02d', $nx_n)); ?></span>
             <span class="tag tag--<?php echo $nx_tag; ?>"><span class="d" aria-hidden="true"></span><?php echo nx_e($nx_tag_key); ?></span>
           </div>
           <span class="spec__wave" aria-hidden="true">
@@ -427,7 +427,7 @@ require NX_INC . '/partials/head.php';
     <ol class="answers u-list-reset">
       <?php for ($nx_a = 1; $nx_a <= 5; $nx_a++): ?>
         <li class="ans reveal">
-          <span class="n" data-ltr aria-hidden="true"><?php echo sprintf('%02d', $nx_a); ?></span>
+          <span class="n" data-ltr aria-hidden="true"><?php echo nx_num(sprintf('%02d', $nx_a)); ?></span>
           <span class="claim">
             <del><?php echo nx_e('home.answers.' . $nx_a . '.claim'); ?></del>
             <span class="strike" aria-hidden="true">

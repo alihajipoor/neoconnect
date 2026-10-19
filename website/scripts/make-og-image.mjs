@@ -63,7 +63,7 @@ function html(c) {
   return `<!doctype html><html lang="${c === COPY.fa ? 'fa' : 'en'}" dir="${c.dir}"><head><meta charset="utf-8"><style>
 @font-face{font-family:"Inter";src:url(${asset('fonts/inter-latin-v1.woff2')});font-weight:400 700}
 @font-face{font-family:"Inter Tight";src:url(${asset('fonts/inter-tight-latin-v1.woff2')});font-weight:700}
-@font-face{font-family:"Vazirmatn";src:url(${asset('fonts/vazirmatn-v1.woff2')});font-weight:400 800}
+@font-face{font-family:"Vazirmatn";src:url(${asset('fonts/vazirmatn-v2.woff2')});font-weight:400 800}
 *{box-sizing:border-box;margin:0}
 body{width:1200px;height:630px;overflow:hidden;font-family:${c.body};color:#090B10;
   background:radial-gradient(55% 60% at 80% 18%,rgba(16,69,255,.18),transparent 70%),radial-gradient(40% 50% at 4% 96%,rgba(14,124,134,.12),transparent 70%),linear-gradient(#F7F9FC,#EDF1F6)}

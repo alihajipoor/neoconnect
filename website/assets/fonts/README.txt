@@ -14,9 +14,12 @@ site and the app set type identically:
                               wght 400-700, Latin + Latin-1 + punctuation.
   inter-tight-latin-v1.woff2  Inter Tight, display type on English pages.
                               Pinned to 700 (the only weight used).
-  vazirmatn-v1.woff2          Vazirmatn, EVERYTHING on Persian pages,
+  vazirmatn-v2.woff2          Vazirmatn, EVERYTHING on Persian pages,
                               Latin words included, so a Persian page loads
-                              exactly one font. wght 400-800.
+                              exactly one font. wght 400-800. v2 added
+                              the copyright, registered and trade mark
+                              signs; v1 lacked the footer's copyright sign,
+                              which then drew in Tahoma.
 
 Each page preloads only what its first screen paints: an English page
 the two Inter files, a Persian page Vazirmatn. An English page never

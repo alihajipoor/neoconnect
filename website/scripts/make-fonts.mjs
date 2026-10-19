@@ -22,10 +22,11 @@
  *                Persian page loads exactly one font. wght 400-800.
  *                Persian letters (plus the Arabic forms that appear in
  *                Persian text), Persian digits, Persian punctuation, ZWNJ,
- *                and ASCII.
+ *                ASCII, and the copyright/registered/trade mark signs.
  *
  * --check re-reads every character in inc/lang/*.php and inc/content/*.php
- * and reports any the subsets do not cover. A missing glyph does not break
+ * and reports any the subsets do not cover, and any in fa.php that
+ * Vazirmatn alone does not (a Persian page loads no other font). A missing glyph does not break
  * a page -- it falls through to a system font and looks subtly wrong in one
  * spot, which is exactly the kind of fault nobody notices for months. Run
  * it after any copy change.
@@ -53,34 +54,37 @@ const LATIN = range(0x20, 0x7e) + range(0xa1, 0xff) + 'ıŒœˆ˚˜' + PUNCT;
 // harakat, Persian and Arabic digits, Persian punctuation, joiners and marks.
 const PERSIAN = 'آابپتثجچحخدذرزژسشصضطظعغفقکگلمنوهی' + 'ءأإؤئةيكۀۀ' + range(0x64b, 0x655) + 'ٰ'
   + range(0x6f0, 0x6f9) + range(0x660, 0x669) + '،؛؟٪٫٬ـ«»' + '‌‍‎‏⁦⁧⁨⁩';
-const VAZIR = PERSIAN + range(0x20, 0x7e) + ' –—‘’“”…·•×→←✓';
+// © ® ™ too: the Persian footer and pages carry a ©, and without it in the
+// subset that one character fell through to Tahoma (2026-10-19, v1 -> v2).
+const VAZIR = PERSIAN + range(0x20, 0x7e) + ' –—‘’“”…·•×→←✓' + '©®™';
 
 const FONTS = [
   { src: 'Inter-latin-wght.woff2', out: 'inter-latin-v1.woff2', text: LATIN, axes: { wght: { min: 400, max: 700 } } },
   { src: 'InterTight-latin-wght.woff2', out: 'inter-tight-latin-v1.woff2', text: LATIN, axes: { wght: 700 } },
-  { src: 'Vazirmatn-variable.woff2', out: 'vazirmatn-v1.woff2', text: VAZIR, axes: { wght: { min: 400, max: 800 } } },
+  { src: 'Vazirmatn-variable.woff2', out: 'vazirmatn-v2.woff2', text: VAZIR, axes: { wght: { min: 400, max: 800 } } },
 ];
 
-function inventory() {
+function inventory(files) {
   const chars = new Set();
-  for (const dir of ['inc/lang', 'inc/content']) {
-    for (const f of fs.readdirSync(path.join(site, dir))) {
-      if (!f.endsWith('.php')) continue;
-      for (const ch of fs.readFileSync(path.join(site, dir, f), 'utf8')) chars.add(ch);
-    }
-  }
+  for (const f of files) for (const ch of fs.readFileSync(path.join(site, f), 'utf8')) chars.add(ch);
   return chars;
 }
+const phpIn = (dir) => fs.readdirSync(path.join(site, dir)).filter((f) => f.endsWith('.php')).map((f) => dir + '/' + f);
 
 if (check) {
-  const have = new Set([...LATIN, ...VAZIR]);
   // ⟪ ⟫ appear only in comments, where they describe the missing-key marker.
-  const missing = [...inventory()].filter((c) => c.codePointAt(0) > 0x20 && !have.has(c) && !/\s/.test(c) && !'⟪⟫'.includes(c));
-  if (missing.length) {
-    console.log('Not covered by any subset:', missing.map((c) => c + ' U+' + c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')).join(', '));
-    process.exit(1);
-  }
-  console.log('All characters in inc/lang and inc/content are covered.');
+  const gaps = (chars, have) => [...chars].filter((c) => c.codePointAt(0) > 0x20 && !have.has(c) && !/s/.test(c) && !'⟪⟫'.includes(c));
+  const fmt = (cs) => cs.map((c) => c + ' U+' + c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')).join(', ');
+  // Everything must be covered by one subset or the other...
+  const anywhere = gaps(inventory([...phpIn('inc/lang'), ...phpIn('inc/content')]), new Set([...LATIN, ...VAZIR]));
+  // ...and the Persian strings by Vazirmatn ALONE, because a Persian page
+  // loads no other font. Checking against both together is how a © on the
+  // Persian pages passed this check while drawing in Tahoma.
+  const persian = gaps(inventory(['inc/lang/fa.php']), new Set(VAZIR));
+  if (anywhere.length) console.log('Not covered by any subset:', fmt(anywhere));
+  if (persian.length) console.log('In fa.php but not in the Vazirmatn subset:', fmt(persian));
+  if (anywhere.length || persian.length) process.exit(1);
+  console.log('All characters in inc/lang and inc/content are covered; fa.php by Vazirmatn alone.');
   process.exit(0);
 }
 

@@ -30,6 +30,16 @@
   var reduceMotion = false;
   try { reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { /* treat as allowed */ }
 
+  /* Persian pages use Persian digits for every number, including the ones
+   * this file writes (nx_num() does the same in PHP). Built from U+06F0 so
+   * the file stays ASCII whatever charset the server labels it with. */
+  var faDigits = root.getAttribute("lang") === "fa";
+  function num(v) {
+    var s = String(v);
+    if (!faDigits) { return s; }
+    return s.replace(/[0-9]/g, function (d) { return String.fromCharCode(0x06F0 + Number(d)); });
+  }
+
   ready(function () {
     if (root.className.indexOf("js") === -1) { root.className += " js"; }
     nav();
@@ -175,7 +185,7 @@
     function clock() {
       var d = new Date();
       function z(n) { return n < 10 ? "0" + n : "" + n; }
-      return z(d.getHours()) + ":" + z(d.getMinutes()) + ":" + z(d.getSeconds());
+      return num(z(d.getHours()) + ":" + z(d.getMinutes()) + ":" + z(d.getSeconds()));
     }
     function log(kind, msg) {
       lines.push({ kind: kind, text: msg, at: clock() });
@@ -194,7 +204,7 @@
         row.appendChild(s);
         elLog.appendChild(row);
       }
-      if (elLogCount) { elLogCount.textContent = fill(T("lines"), { n: lines.length }); }
+      if (elLogCount) { elLogCount.textContent = fill(T("lines"), { n: num(lines.length) }); }
     }
 
     function compute() {
@@ -241,7 +251,7 @@
               r: reason ? fill(T("logreason"), { c: reason }) : ""
             }));
           }
-          log("good", fill(T("loghand"), { n: handovers, p: laneName(laneById(next)) }));
+          log("good", fill(T("loghand"), { n: num(handovers), p: laneName(laneById(next)) }));
           allDown = false;
         }
         carrying = next;
@@ -256,7 +266,7 @@
       var cur = carrying ? laneById(carrying) : null;
       inst.classList.toggle("is-down", !cur);
       if (elCarry) { elCarry.textContent = cur ? laneName(cur) + " · " + laneTech(cur) : T("noroute"); }
-      if (elHandovers) { elHandovers.textContent = String(handovers); }
+      if (elHandovers) { elHandovers.textContent = num(handovers); }
       if (elLiveText) { elLiveText.textContent = cur ? (st.relay ? T("flowingrelay") : T("flowing")) : T("noroute"); }
       if (elVerdict) {
         if (!cur) {

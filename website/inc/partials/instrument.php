@@ -125,7 +125,7 @@ $nx_first = $nx_protocols[0];
       </span>
       <span class="ro">
         <i><?php echo nx_e('home.inst.handovers'); ?></i>
-        <b data-handovers data-ltr>0</b>
+        <b data-handovers data-ltr><?php echo nx_esc(nx_num('0')); ?></b>
       </span>
       <span class="ro-live">
         <span class="d" aria-hidden="true"></span>
@@ -140,7 +140,7 @@ $nx_first = $nx_protocols[0];
         <li class="lane<?php echo $nx_i === 1 ? ' is-active' : ''; ?>"
              data-lane="<?php echo nx_esc($nx_p['id']); ?>"
              data-blocked-by="<?php echo nx_esc(implode(' ', $nx_blocked)); ?>">
-          <span class="rk" data-ltr aria-hidden="true"><?php echo sprintf('%02d', $nx_i); ?></span>
+          <span class="rk" data-ltr aria-hidden="true"><?php echo nx_num(sprintf('%02d', $nx_i)); ?></span>
           <span class="nm">
             <b><?php echo nx_e_pick($nx_p['label']); ?></b>
             <i data-ltr><?php echo nx_esc($nx_p['tech']); ?></i>

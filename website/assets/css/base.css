@@ -34,7 +34,7 @@
    shift). Values measured by scripts/make-fonts.mjs --metrics.          */
 @font-face{font-family:"Inter";src:url(/assets/fonts/inter-latin-v1.woff2) format("woff2");font-weight:400 700;font-style:normal;font-display:swap;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02C6,U+02DA,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-2193,U+2212,U+2713,U+2715}
 @font-face{font-family:"Inter Tight";src:url(/assets/fonts/inter-tight-latin-v1.woff2) format("woff2");font-weight:700;font-style:normal;font-display:swap;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02C6,U+02DA,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-2193,U+2212,U+2713,U+2715}
-@font-face{font-family:"Vazirmatn";src:url(/assets/fonts/vazirmatn-v1.woff2) format("woff2");font-weight:400 800;font-style:normal;font-display:swap}
+@font-face{font-family:"Vazirmatn";src:url(/assets/fonts/vazirmatn-v2.woff2) format("woff2");font-weight:400 800;font-style:normal;font-display:swap}
 @font-face{font-family:"Inter Fallback";src:local("Arial"),local("ArialMT"),local("Roboto"),local("Helvetica");size-adjust:107%;ascent-override:90%;descent-override:22.5%;line-gap-override:0%}
 @font-face{font-family:"Inter Tight Fallback";src:local("Arial Bold"),local("Arial-BoldMT"),local("Arial"),local("Roboto");font-weight:700;size-adjust:97%;ascent-override:99%;descent-override:24.7%;line-gap-override:0%}
 @font-face{font-family:"Vazirmatn Fallback";src:local("Tahoma"),local("Segoe UI"),local("Noto Sans Arabic");size-adjust:104%;ascent-override:108%;descent-override:58%;line-gap-override:0%}
