@@ -13,6 +13,10 @@
    file, shared by reference, so the two clients cannot drift into looking
    like different products. */
 @import "../../desktop-windows/src/theme.css";
+/* Until the phone's own phase of the Pearl Glass redesign, it keeps the
+   colours its screens were drawn for: the old violet set, put back over
+   the old token names. */
+@import "../../desktop-windows/src/legacy-theme.css";
 
 @layer base {
   body {

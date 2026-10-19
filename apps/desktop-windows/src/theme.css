@@ -1,20 +1,58 @@
-/* The Neoxify design language: tokens, base layer, and the utilities the
-   screens are built from.
- 
+/* The Neoxify design language ("Pearl Glass"): tokens, fonts, base layer,
+   motion, and the utilities the screens are built from.
+
    Split out of globals.css so the Android client can share it. Both apps
    import Tailwind themselves and then this -- the split exists because a
    file cannot import Tailwind twice, and because each app needs its own
-   @source paths and its own idea of whether the page scrolls. */
-/* Vazirmatn, bundled rather than linked: this is an offline desktop app,
-   and a webfont fetched at runtime would leave Persian text falling back
-   to whatever Windows picks -- usually Tahoma, which looks dated and sets
-   Persian noticeably worse than Latin.
+   @source paths and its own idea of whether the page scrolls.
 
-   The variable weight axis means one 109KB file covers every weight the
-   UI uses. Listed first for both languages so Latin text renders in it
-   too, which keeps a mixed screen (an email address beside Persian
-   labels) visually consistent instead of switching typeface mid-line.
-   SIL OFL, licence shipped alongside in src/assets. */
+   The phone client keeps its previous look until its own phase of the
+   redesign: it imports legacy-theme.css after this file, which puts the
+   old violet values back under the old token names. Nothing here may
+   assume the Pearl values are what a shared screen sees. */
+
+/* --- Fonts ------------------------------------------------------------
+   Bundled, never fetched: a font request at runtime fails on a censored
+   network and leaks a request besides. All three are SIL OFL; the
+   licences are shipped beside them in src/assets.
+
+   Inter carries Latin UI text and Inter Tight the display sizes. They
+   are split by unicode-range, so a mixed line -- an email address inside
+   a Persian sentence -- takes each character from the right face, and
+   the Latin-extended file is only read when such a character appears.
+   Vazirmatn covers Persian, and leads the stack under lang="fa". */
+@font-face {
+  font-family: "Inter";
+  src: url("./assets/Inter-latin-wght.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("./assets/Inter-latin-ext-wght.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF,
+    U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Inter Tight";
+  src: url("./assets/InterTight-latin-wght.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* The variable weight axis means one 109KB file covers every weight the
+   UI uses. */
 @font-face {
   font-family: "Vazirmatn";
   src: url("./assets/Vazirmatn-variable.woff2") format("woff2-variations");
@@ -22,45 +60,317 @@
   font-display: swap;
 }
 
-/* Same design tokens as apps/panel/src/app/globals.css -- deliberately
-   kept in sync by hand for now (no shared package yet) so the native
-   client and the admin panel read as the same product. Dark-only,
-   violet primary / cyan highlight, see the panel's own comment for the
-   full reasoning. */
-:root,
-.dark {
+/* --- Tokens -------------------------------------------------------------
+   Pearl (light) is the default; Smoked (dark) follows the system unless
+   `data-theme` on <html> says otherwise. The apps/panel admin keeps its
+   own violet tokens: the two are no longer kept in sync. */
+:root {
+  color-scheme: light;
+  --base: #f1f3f6;
+  --pearl: #f8f9fc;
+  --ink: #090b10;
+  --ink-2: #4a5264;
+  /* Decoration only: 2.9:1 on the base, never text that matters. */
+  --ink-3: #8490a3;
+  --cobalt: #1045ff;
+  --cobalt-hover: #0737e8;
+  --cobalt-ink: #0b3be0;
+  --on-cobalt: #ffffff;
+  --cobalt-shadow: rgba(16, 69, 255, 0.45);
+  --select: rgba(50, 103, 255, 0.1);
+  --select-row: rgba(255, 255, 255, 0.78);
+  --hairline: rgba(32, 48, 80, 0.08);
+  --hairline-2: rgba(32, 48, 80, 0.15);
+  --field: rgba(32, 48, 80, 0.05);
+  --chip-bg: rgba(255, 255, 255, 0.62);
+  --solid: rgba(251, 252, 254, 0.86);
+  --side-bg: rgba(248, 249, 252, 0.8);
+  --scrim: rgba(18, 24, 40, 0.28);
+  --scrim-copy: rgba(241, 243, 246, 0.84);
+  --badge-ring: #f4f6fa;
+  --focus: #0b3be0;
+  --focus-halo: rgba(255, 255, 255, 0.95);
+  --drop: 0 1px 2px rgba(20, 30, 60, 0.05), 0 22px 44px -22px rgba(20, 40, 90, 0.28);
+  --edge: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 0 0 1px rgba(32, 48, 80, 0.05);
+
+  /* Glass: frosted where allowed, solid otherwise. */
+  --glass: rgba(255, 255, 255, 0.42);
+  --glass-strong: rgba(255, 255, 255, 0.7);
+  --glass-solid: rgba(248, 249, 252, 0.95);
+  --sheen-a: rgba(255, 255, 255, 0.3);
+  --sheen-b: rgba(255, 255, 255, 0.06);
+  --rim-a: rgba(255, 255, 255, 0.95);
+  --rim-b: rgba(255, 255, 255, 0.25);
+  --blur: 24px;
+
+  /* State colours: semantic, not the accent. Dot, ink for text, tint for
+     a chip's background. */
+  --ok: #1045ff;
+  --ok-ink: #0b3be0;
+  --ok-tint: rgba(50, 103, 255, 0.12);
+  --hl: #0e7c86;
+  --hl-ink: #0b6670;
+  --hl-tint: rgba(14, 124, 134, 0.11);
+  --warn: #d97a00;
+  --warn-ink: #8f4a00;
+  --warn-tint: rgba(217, 122, 0, 0.13);
+  --danger: #d02c1f;
+  --danger-ink: #a8231a;
+  --danger-tint: rgba(208, 44, 31, 0.1);
+  --muted: #6b7385;
+  --muted-ink: #4d5566;
+  --muted-tint: rgba(80, 90, 110, 0.1);
+
+  /* The scene behind the glass, and the calm tone's ambient glows. */
+  --sky-top: #ffffff;
+  --sky: #e6edf7;
+  --far: #dce5f1;
+  --shade: #bcc9dd;
+  --amb-ok: rgba(16, 69, 255, 0.16);
+  --amb-warn: rgba(217, 122, 0, 0.16);
+  --amb-hl: rgba(14, 124, 134, 0.14);
+  --steel: #a9b6ce;
+  --steel-deep: #5a6884;
+
+  /* Type. */
+  --font-ui: "Inter", "Vazirmatn", system-ui, "Segoe UI", sans-serif;
+  --font-display: "Inter Tight", "Inter", "Vazirmatn", system-ui, "Segoe UI", sans-serif;
+  --font-fa: "Vazirmatn", Tahoma, system-ui, sans-serif;
+
+  /* Shape: concentric radii. */
+  --r-panel: 22px;
+  --p-panel: 12px;
+  --r-row: calc(var(--r-panel) - var(--p-panel));
+  --r-card: 18px;
+
+  /* Motion: Apple's duration-and-bounce springs, sampled to linear() below;
+     a cubic-bezier first for engines without linear() (iOS before 17.2). */
+  --spring-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-smooth: 590ms;
+  --spring-snappy: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-snappy: 540ms;
+  --spring-bouncy: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --dur-bouncy: 560ms;
+  --spring-press: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-press: 300ms;
+  --spring-morph: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-morph: 350ms;
+  /* 0 under reduced motion: every translate multiplies by it. */
+  --move: 1;
+  /* -1 in RTL: every horizontal travel multiplies by it. */
+  --dir: 1;
+
+  /* The names the screens not yet redesigned are written in, aliased to
+     the tokens above for one release. Each phase of the redesign removes
+     the ones it no longer needs. Declared once, as references, so the dark
+     set below re-colours them without restating them. */
   --radius: 0.75rem;
-  --background: #0a0a10;
-  --foreground: #f4f4f8;
-  --card: #131319;
-  --card-hover: #17171f;
-  --elevated: #1a1a22;
-  --card-foreground: #f4f4f8;
-  --popover: #15151c;
-  --popover-foreground: #f4f4f8;
-  --primary: #8b5cf6;
-  --primary-foreground: #ffffff;
-  --secondary: #1c1c26;
-  --secondary-foreground: #f4f4f8;
-  --muted: #1a1a22;
-  --muted-foreground: #9797a8;
-  --accent: #1e1e2a;
-  --accent-foreground: #f4f4f8;
-  --destructive: #ef4444;
+  --background: var(--base);
+  --foreground: var(--ink);
+  --card: var(--solid);
+  --card-hover: var(--pearl);
+  --elevated: var(--pearl);
+  --card-foreground: var(--ink);
+  --popover: var(--glass-solid);
+  --popover-foreground: var(--ink);
+  --primary: var(--cobalt);
+  --primary-foreground: var(--on-cobalt);
+  --secondary: var(--field);
+  --secondary-foreground: var(--ink);
+  --muted-surface: var(--field);
+  --muted-foreground: var(--ink-2);
+  --accent: var(--select);
+  --accent-foreground: var(--ink);
+  --destructive: var(--danger);
   --destructive-foreground: #ffffff;
-  --success: #10b981;
+  --success: var(--ok);
   --success-foreground: #ffffff;
-  /* For states that are neither working nor failed -- chiefly a tunnel
-     that is up but not actually carrying traffic. Distinct from
-     destructive on purpose: nothing is broken enough to be an error, but
-     calling it success would be a lie. */
-  --warning: #f59e0b;
+  --warning: var(--warn);
   --warning-foreground: #1f1300;
-  --highlight: #22d3ee;
-  --highlight-foreground: #06282e;
-  --border: rgba(255, 255, 255, 0.08);
-  --input: rgba(255, 255, 255, 0.1);
-  --ring: #8b5cf6;
+  --highlight: var(--hl);
+  --highlight-foreground: #ffffff;
+  --border: var(--hairline-2);
+  --input: var(--hairline-2);
+  --ring: var(--cobalt);
+  /* The second stop of the old violet-to-cyan button gradient: pure
+     cobalt here (owner decision, 2026-10-19), the old cyan on the phone. */
+  --brand-2: var(--cobalt-hover);
+  --surface-shadow: 0 1px 2px rgba(20, 30, 60, 0.05), 0 8px 24px -12px rgba(20, 40, 90, 0.22);
+  --scroll-thumb: var(--hairline-2);
+  --scroll-thumb-hover: var(--ink-3);
+  --selection: var(--select);
+}
+
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --spring-smooth: linear(0, 0.08, 0.238, 0.406, 0.554, 0.674, 0.766, 0.835, 0.885, 0.921, 0.946, 0.963, 0.975, 0.983, 0.989, 0.992, 1);
+    --spring-snappy: linear(0, 0.047, 0.156, 0.29, 0.426, 0.552, 0.662, 0.753, 0.825, 0.881, 0.923, 0.953, 0.974, 0.988, 0.997, 1.002, 1.005, 1.006, 1.006, 1.006, 1);
+    --spring-bouncy: linear(0, 0.028, 0.098, 0.195, 0.305, 0.419, 0.53, 0.633, 0.724, 0.803, 0.869, 0.923, 0.964, 0.996, 1.018, 1.033, 1.041, 1.045, 1.046, 1.044, 1.04, 1.035, 1.03, 1.025, 1.02, 1.015, 1.011, 1.008, 1);
+    --spring-press: linear(0, 0.128, 0.35, 0.553, 0.707, 0.814, 0.884, 0.93, 0.958, 0.975, 0.985, 0.991, 1);
+    --spring-morph: linear(0, 0.032, 0.108, 0.207, 0.314, 0.419, 0.518, 0.607, 0.684, 0.75, 0.804, 0.849, 0.886, 0.915, 0.937, 0.955, 0.968, 0.978, 0.986, 0.991, 1);
+  }
+}
+
+/* Smoked: the dark set. Written twice -- for the system preference, and
+   for an explicit choice -- because a custom property block cannot be
+   shared between a media query and an attribute selector. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --base: #0b0e15;
+    --pearl: #121620;
+    --ink: #eef1f7;
+    --ink-2: #a9b2c4;
+    --ink-3: #6e788c;
+    --cobalt: #2f5eff;
+    --cobalt-hover: #3a66ff;
+    --cobalt-ink: #93b0ff;
+    --cobalt-shadow: rgba(47, 94, 255, 0.55);
+    --select: rgba(80, 124, 255, 0.16);
+    --select-row: rgba(255, 255, 255, 0.07);
+    --hairline: rgba(255, 255, 255, 0.08);
+    --hairline-2: rgba(255, 255, 255, 0.14);
+    --field: rgba(255, 255, 255, 0.06);
+    --chip-bg: rgba(255, 255, 255, 0.07);
+    --solid: rgba(19, 23, 33, 0.88);
+    --side-bg: rgba(12, 15, 23, 0.82);
+    --scrim: rgba(0, 0, 0, 0.5);
+    --scrim-copy: rgba(11, 14, 21, 0.8);
+    --badge-ring: #171c28;
+    --focus: #ffffff;
+    --focus-halo: rgba(8, 10, 16, 0.95);
+    --drop: 0 1px 2px rgba(0, 0, 0, 0.4), 0 24px 48px -22px rgba(0, 0, 0, 0.7);
+    --edge: inset 0 1px 0 rgba(255, 255, 255, 0.07), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+    --glass: rgba(20, 25, 36, 0.5);
+    --glass-strong: rgba(22, 27, 39, 0.78);
+    --glass-solid: rgba(17, 21, 30, 0.96);
+    --sheen-a: rgba(255, 255, 255, 0.06);
+    --sheen-b: rgba(255, 255, 255, 0.01);
+    --rim-a: rgba(255, 255, 255, 0.3);
+    --rim-b: rgba(255, 255, 255, 0.04);
+    --ok: #5b83ff;
+    --ok-ink: #a7beff;
+    --ok-tint: rgba(80, 124, 255, 0.18);
+    --hl: #3cc6cf;
+    --hl-ink: #7fe0e6;
+    --hl-tint: rgba(60, 198, 207, 0.14);
+    --warn: #f2a93b;
+    --warn-ink: #f7c46f;
+    --warn-tint: rgba(242, 169, 59, 0.15);
+    --danger: #f26b5e;
+    --danger-ink: #f79a90;
+    --danger-tint: rgba(242, 107, 94, 0.14);
+    --muted: #8a93a6;
+    --muted-ink: #b3bbcb;
+    --muted-tint: rgba(150, 160, 180, 0.13);
+    --sky-top: #05070d;
+    --sky: #111a2c;
+    --far: #18223a;
+    --shade: #0f1628;
+    --amb-ok: rgba(47, 94, 255, 0.24);
+    --amb-warn: rgba(242, 169, 59, 0.16);
+    --amb-hl: rgba(60, 198, 207, 0.16);
+    --steel: #7b8aa8;
+    --steel-deep: #2c3754;
+    --surface-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.8);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --base: #0b0e15;
+  --pearl: #121620;
+  --ink: #eef1f7;
+  --ink-2: #a9b2c4;
+  --ink-3: #6e788c;
+  --cobalt: #2f5eff;
+  --cobalt-hover: #3a66ff;
+  --cobalt-ink: #93b0ff;
+  --cobalt-shadow: rgba(47, 94, 255, 0.55);
+  --select: rgba(80, 124, 255, 0.16);
+  --select-row: rgba(255, 255, 255, 0.07);
+  --hairline: rgba(255, 255, 255, 0.08);
+  --hairline-2: rgba(255, 255, 255, 0.14);
+  --field: rgba(255, 255, 255, 0.06);
+  --chip-bg: rgba(255, 255, 255, 0.07);
+  --solid: rgba(19, 23, 33, 0.88);
+  --side-bg: rgba(12, 15, 23, 0.82);
+  --scrim: rgba(0, 0, 0, 0.5);
+  --scrim-copy: rgba(11, 14, 21, 0.8);
+  --badge-ring: #171c28;
+  --focus: #ffffff;
+  --focus-halo: rgba(8, 10, 16, 0.95);
+  --drop: 0 1px 2px rgba(0, 0, 0, 0.4), 0 24px 48px -22px rgba(0, 0, 0, 0.7);
+  --edge: inset 0 1px 0 rgba(255, 255, 255, 0.07), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --glass: rgba(20, 25, 36, 0.5);
+  --glass-strong: rgba(22, 27, 39, 0.78);
+  --glass-solid: rgba(17, 21, 30, 0.96);
+  --sheen-a: rgba(255, 255, 255, 0.06);
+  --sheen-b: rgba(255, 255, 255, 0.01);
+  --rim-a: rgba(255, 255, 255, 0.3);
+  --rim-b: rgba(255, 255, 255, 0.04);
+  --ok: #5b83ff;
+  --ok-ink: #a7beff;
+  --ok-tint: rgba(80, 124, 255, 0.18);
+  --hl: #3cc6cf;
+  --hl-ink: #7fe0e6;
+  --hl-tint: rgba(60, 198, 207, 0.14);
+  --warn: #f2a93b;
+  --warn-ink: #f7c46f;
+  --warn-tint: rgba(242, 169, 59, 0.15);
+  --danger: #f26b5e;
+  --danger-ink: #f79a90;
+  --danger-tint: rgba(242, 107, 94, 0.14);
+  --muted: #8a93a6;
+  --muted-ink: #b3bbcb;
+  --muted-tint: rgba(150, 160, 180, 0.13);
+  --sky-top: #05070d;
+  --sky: #111a2c;
+  --far: #18223a;
+  --shade: #0f1628;
+  --amb-ok: rgba(47, 94, 255, 0.24);
+  --amb-warn: rgba(242, 169, 59, 0.16);
+  --amb-hl: rgba(60, 198, 207, 0.16);
+  --steel: #7b8aa8;
+  --steel-deep: #2c3754;
+  --surface-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.8);
+}
+
+[dir="rtl"] {
+  --dir: -1;
+}
+
+/* Reduced motion, from the OS or from the app's own switch (effects.ts
+   sets data-motion from both; the media query covers the moment before
+   it runs). Translates collapse to fades, springs become plain ease-outs
+   and short. Colour and text changes stay. */
+:root[data-motion="reduce"] {
+  --move: 0;
+  --spring-snappy: ease-out;
+  --spring-morph: ease-out;
+  --spring-bouncy: ease-out;
+  --spring-smooth: ease-out;
+  --spring-press: ease-out;
+  --dur-snappy: 150ms;
+  --dur-morph: 150ms;
+  --dur-smooth: 200ms;
+  --dur-bouncy: 150ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --move: 0;
+    --spring-snappy: ease-out;
+    --spring-morph: ease-out;
+    --spring-bouncy: ease-out;
+    --spring-smooth: ease-out;
+    --spring-press: ease-out;
+    --dur-snappy: 150ms;
+    --dur-morph: 150ms;
+    --dur-smooth: 200ms;
+    --dur-bouncy: 150ms;
+  }
+}
+:root[data-glass="lite"] {
+  --blur: 12px;
 }
 
 @theme inline {
@@ -68,6 +378,36 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  --radius-panel: 22px;
+  --radius-row: 10px;
+  --radius-card: 18px;
+  --font-sans: var(--font-ui);
+  --font-display: var(--font-display);
+  --color-base: var(--base);
+  --color-pearl: var(--pearl);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-cobalt: var(--cobalt);
+  --color-cobalt-ink: var(--cobalt-ink);
+  --color-on-cobalt: var(--on-cobalt);
+  --color-hairline: var(--hairline);
+  --color-hairline-2: var(--hairline-2);
+  --color-select: var(--select);
+  --color-ok: var(--ok);
+  --color-ok-ink: var(--ok-ink);
+  --color-hl: var(--hl);
+  --color-hl-ink: var(--hl-ink);
+  --color-warn: var(--warn);
+  --color-warn-ink: var(--warn-ink);
+  --color-danger: var(--danger);
+  --color-danger-ink: var(--danger-ink);
+  --color-muted-ink: var(--muted-ink);
+  --ease-smooth: var(--spring-smooth);
+  --ease-snappy: var(--spring-snappy);
+  --ease-press: var(--spring-press);
+  --ease-morph: var(--spring-morph);
+  /* The old names. */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -78,7 +418,7 @@
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
+  --color-muted: var(--muted-surface);
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
@@ -105,44 +445,25 @@
     height: 100%;
   }
   body {
-    @apply bg-background text-foreground;
-    /* Vazirmatn first, then the platform default. It carries a full Latin
-       set, so English renders in it too rather than switching typeface
-       between an email address and the Persian label beside it. */
-    font-family:
-      "Vazirmatn",
-      -apple-system,
-      BlinkMacSystemFont,
-      "Segoe UI",
-      system-ui,
-      sans-serif;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-ui);
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
     /* Deliberately no overflow rule here: whether the page scrolls is
        the one base-layer decision the two apps genuinely disagree on --
        a fixed desktop window versus a phone screen -- so each sets it
        in its own globals.css. */
     user-select: none;
   }
-}
-
-@layer base {
-  /* A soft violet wash behind every screen, taken from the site, so no
-     screen starts as a flat black rectangle. Fixed rather than scrolled
-     -- the app window does not scroll, and a wash that moved with content
-     would read as a bug. */
-  body::before {
-    content: "";
-    position: fixed;
-    inset-block-start: -10rem;
-    inset-inline-start: 50%;
-    transform: translateX(-50%);
-    width: min(34rem, 160vw);
-    height: 22rem;
-    background: radial-gradient(ellipse at center, rgba(139, 92, 246, 0.18), transparent 65%);
-    pointer-events: none;
-    z-index: 0;
+  /* Persian first under Persian: Vazirmatn carries its own Latin, so an
+     email address inside a Persian label stays in one typeface there. */
+  html[lang="fa"] body {
+    font-family: var(--font-fa);
+    font-feature-settings: normal;
   }
 
-  /* Everything the app draws sits above the wash. */
+  /* Everything the app draws sits above any wash a theme paints. */
   #root {
     position: relative;
     z-index: 1;
@@ -171,22 +492,11 @@
     cursor: text;
   }
 
-  /* Touch targets, on touch devices only.
-   *
-   * Every Button in the app is h-9 -- 36px -- which is right for a
-   * 400x640 desktop window driven by a mouse and 8px under Apple's 44pt
-   * minimum for a finger. The header icon buttons are the worst case:
-   * size-9 square, so 36x36 for a target the guidelines put at 44x44.
-   *
-   * Applied as min-* rather than by editing two dozen call sites, and
-   * gated on `pointer: coarse` so the desktop client keeps its compact
-   * controls -- the same reasoning the scrollbar rules above use. min-*
-   * wins over the `size-9`/`h-9` utilities without needing !important,
-   * because it is a different property rather than a louder one.
-   *
-   * Anchors are deliberately excluded. A link inside a sentence is
-   * inline, and giving it a 44px box either does nothing or breaks the
-   * line it sits in; the controls that actually need this are buttons. */
+  /* Touch targets, on touch devices only: 44px for a finger, while the
+     desktop client keeps its compact controls. min-* rather than editing
+     every call site, and a different property from size-9/h-9 so it wins
+     without !important. Anchors are excluded: a link inside a sentence is
+     inline. */
   @media (pointer: coarse) {
     button,
     [role="button"],
@@ -197,66 +507,33 @@
   }
 
   ::selection {
-    background: rgba(139, 92, 246, 0.4);
-    color: #fff;
+    background: var(--selection);
   }
 
-  /* The scrollbar is part of the product too. Left alone, the location
-     picker and the plan list draw the platform's own grey bar -- opaque,
-     square, and lit for a light theme -- straight down the edge of a dark
-     violet panel, which reads as a piece of the OS showing through rather
-     than part of the app.
-
-     Deliberately styled with the -webkit- pseudo-elements rather than
-     `scrollbar-color`/`scrollbar-width`: the standard properties offer no
-     control over shape or inset, and in Chromium setting either of them
-     disables these rules for that element -- so the two cannot be
-     combined as progressive enhancement. Both clients run on Chromium
-     (WebView2, Android System WebView), so nothing is lost by picking the
-     expressive one.
-
-     Scoped to `pointer: fine` on purpose, which is to say the desktop
-     client and not the phone. A touch WebView draws its scrollbar as a
-     transient overlay that costs no layout width and fades out on its
-     own; styling these pseudo-elements there replaces it with a
-     permanent one that takes real space -- 10px off a phone's width and
-     a bar that never goes away, to fix a scrollbar the customer only
-     ever sees for a second mid-flick. Android keeps its native
-     behaviour. */
+  /* The scrollbar is part of the product too. -webkit- pseudo-elements
+     rather than scrollbar-color, which in Chromium disables these rules
+     and offers no control over shape. Fine pointers only: a phone's
+     transient overlay scrollbar costs no width and should stay native. */
   @media (pointer: fine) {
     ::-webkit-scrollbar {
       width: 10px;
       height: 10px;
     }
-
-    /* No track. A groove down the side would add a vertical rule the
-       layout never asked for; the thumb alone is enough to say where
-       you are. */
     ::-webkit-scrollbar-track,
     ::-webkit-scrollbar-corner {
       background: transparent;
     }
-
     ::-webkit-scrollbar-thumb {
-      /* Violet at low opacity so it reads as the app's own accent
-         resting on the surface, not a slab painted over it. */
-      background-color: rgba(139, 92, 246, 0.35);
+      background-color: var(--scroll-thumb);
       border-radius: 999px;
-      /* A transparent border clipped away from the background is what
-         insets the thumb inside the 10px gutter: a 6px capsule with room
-         to breathe, rather than a bar wedged against the panel edge.
-         Padding does not work here -- scrollbar parts do not have a box
-         to pad. */
+      /* A transparent border clipped from the background insets the
+         thumb inside the gutter. */
       border: 2px solid transparent;
       background-clip: padding-box;
     }
-
-    ::-webkit-scrollbar-thumb:hover {
-      background-color: rgba(139, 92, 246, 0.55);
-    }
-
+    ::-webkit-scrollbar-thumb:hover,
     ::-webkit-scrollbar-thumb:active {
-      background-color: rgba(167, 139, 250, 0.75);
+      background-color: var(--scroll-thumb-hover);
     }
   }
 
@@ -273,17 +550,21 @@
     direction: ltr;
     unicode-bidi: embed;
   }
+
+  /* The two-tone focus ring: dark on light and light on dark, so it shows
+     on glass, on cobalt and over the scene. */
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
 }
 
 @layer utilities {
-  /* The site's card treatment: a lifted surface with a hairline edge and
-     a shadow that reads as depth rather than a drawn border. */
+  /* A lifted surface with a hairline edge. */
   .surface {
     background: var(--card);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow:
-      0 1px 2px rgba(0, 0, 0, 0.4),
-      0 8px 24px -12px rgba(0, 0, 0, 0.8);
+    border: 1px solid var(--border);
+    box-shadow: var(--surface-shadow);
   }
   .surface-interactive {
     transition:
@@ -293,20 +574,18 @@
   }
   .surface-interactive:hover {
     background: var(--card-hover);
-    border-color: rgba(255, 255, 255, 0.14);
   }
 
-  /* Violet-to-cyan text, the site's treatment for figures worth reading
-     first -- a price, a plan name. */
+  /* Gradient text for figures worth reading first -- a price, a plan
+     name. Cobalt to cobalt-hover here; violet to cyan on the phone. */
   .text-brand-gradient {
-    background-image: linear-gradient(120deg, var(--primary) 0%, var(--highlight) 100%);
+    background-image: linear-gradient(120deg, var(--primary) 0%, var(--brand-2) 100%);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
   }
 
-  /* A hairline gradient edge. Used to make the recommended plan the thing
-     the eye lands on without resorting to a heavier border. */
+  /* A hairline gradient edge, for the thing the eye should land on. */
   .ring-brand {
     position: relative;
   }
@@ -316,7 +595,7 @@
     inset: 0;
     border-radius: inherit;
     padding: 1px;
-    background: linear-gradient(140deg, var(--primary), var(--highlight));
+    background: linear-gradient(140deg, var(--primary), var(--brand-2));
     -webkit-mask:
       linear-gradient(#000 0 0) content-box,
       linear-gradient(#000 0 0);
@@ -326,15 +605,8 @@
   }
 
   /* --- Motion -------------------------------------------------------
-     The app had no animation at all, which is most of why it read as
-     static and unfinished even though the colours were right. Everything
-     below is short and purposeful: state changes get feedback, the
-     connect control has a life of its own, nothing loops distractingly
-     while idle. */
-
-  /* Rings that expand outward from the connect button while connected --
-     the one ambient animation in the app, and the thing that makes
-     "connected" feel like a live state rather than a changed label. */
+     Short and purposeful: state changes get feedback, nothing loops while
+     idle. Every animation here is off under reduced motion. */
   @keyframes ping-ring {
     0% {
       transform: scale(1);
@@ -359,8 +631,6 @@
     animation: spin-slow 3s linear infinite;
   }
 
-  /* A highlight that travels across a surface, for genuinely-busy states
-     (connecting, loading) where a static skeleton would look frozen. */
   @keyframes shimmer {
     100% {
       transform: translateX(200%);
@@ -375,12 +645,10 @@
     animation: shimmer 1.6s ease-in-out infinite;
   }
 
-  /* Screens and cards arrive rather than appearing. 14px is enough to
-     register as movement without feeling like the layout is settling. */
   @keyframes rise {
     from {
       opacity: 0;
-      transform: translateY(14px);
+      transform: translateY(calc(14px * var(--move)));
     }
     to {
       opacity: 1;
@@ -404,18 +672,12 @@
     animation: breathe 3.5s ease-in-out infinite;
   }
 
-  /* Navigation. Screens arrive from the side they logically come from
-     and leave the way they came, which is what makes "back" feel like
-     back rather than another arrival.
-
-     The distance is small -- 24px, not a full screen width. A phone OS
-     slides the whole view because it is moving between apps' worth of
-     content; here the header and the shell stay put, and a long throw
-     would read as the app coming apart and reassembling. */
+  /* Navigation: a screen arrives from the side it logically comes from,
+     mirrored in Persian (--dir), and leaves faster than it arrives. */
   @keyframes screen-enter {
     from {
       opacity: 0;
-      transform: translateX(24px);
+      transform: translateX(calc(24px * var(--dir) * var(--move)));
     }
     to {
       opacity: 1;
@@ -425,16 +687,13 @@
   @keyframes screen-enter-back {
     from {
       opacity: 0;
-      transform: translateX(-24px);
+      transform: translateX(calc(-24px * var(--dir) * var(--move)));
     }
     to {
       opacity: 1;
       transform: none;
     }
   }
-  /* Leaving is faster than arriving, and fades further. The screen you
-     are going to is the one worth watching; the one you left should get
-     out of the way rather than compete for attention on the way out. */
   @keyframes screen-leave {
     from {
       opacity: 1;
@@ -442,7 +701,7 @@
     }
     to {
       opacity: 0;
-      transform: translateX(-16px);
+      transform: translateX(calc(-16px * var(--dir) * var(--move)));
     }
   }
   @keyframes screen-leave-back {
@@ -452,23 +711,15 @@
     }
     to {
       opacity: 0;
-      transform: translateX(16px);
+      transform: translateX(calc(16px * var(--dir) * var(--move)));
     }
   }
-  /* Sheets -- the location picker, which Server, Protocol and Change
-     location all open. It is a full-screen overlay that covered the
-     app in one frame and vanished the same way.
-
-     Up from the bottom rather than in from the side, because it is not
-     a sibling screen: it is a layer arriving over the one you are on,
-     and the direction should say so. Further travel than a screen
-     change (32px) since it is a larger surface, and it fades as it
-     goes so the dashboard reads through it for a moment rather than
-     being replaced by a hard edge. */
+  /* Sheets arrive from the bottom: a layer over the screen, not a
+     sibling of it. */
   @keyframes sheet-enter {
     from {
       opacity: 0;
-      transform: translateY(32px);
+      transform: translateY(calc(32px * var(--move)));
     }
     to {
       opacity: 1;
@@ -482,7 +733,7 @@
     }
     to {
       opacity: 0;
-      transform: translateY(32px);
+      transform: translateY(calc(32px * var(--move)));
     }
   }
   .sheet-enter {
@@ -491,7 +742,6 @@
   .sheet-leave {
     animation: sheet-leave 180ms cubic-bezier(0.4, 0, 1, 1) both;
   }
-
   .screen-enter {
     animation: screen-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
@@ -505,14 +755,17 @@
     animation: screen-leave-back 180ms cubic-bezier(0.4, 0, 1, 1) both;
   }
 
-  /* Respect the OS setting -- a VPN client is a utility, and someone who
-     has asked their machine to stop animating means it. */
+  /* Respect the OS setting and the app's own: a VPN client is a utility,
+     and someone who has asked their machine to stop animating means it.
+     Tailwind's animate-spin and animate-pulse are gated too. */
   @media (prefers-reduced-motion: reduce) {
     .animate-ping-ring,
     .animate-spin-slow,
     .animate-shimmer::after,
     .animate-rise,
     .animate-breathe,
+    .animate-spin,
+    .animate-pulse,
     .screen-enter,
     .screen-enter-back,
     .screen-leave,
@@ -522,10 +775,26 @@
       animation: none;
     }
   }
+  :root[data-motion="reduce"] .animate-shimmer::after,
+  :root[data-motion="reduce"] :is(
+      .animate-ping-ring,
+      .animate-spin-slow,
+      .animate-rise,
+      .animate-breathe,
+      .animate-spin,
+      .animate-pulse,
+      .screen-enter,
+      .screen-enter-back,
+      .screen-leave,
+      .screen-leave-back,
+      .sheet-enter,
+      .sheet-leave
+    ) {
+    animation: none;
+  }
 
   /* --- Interaction --------------------------------------------------
-     Press feedback the app was missing entirely: nothing moved when
-     clicked, so every control felt like a picture of a button. */
+     Press feedback: every control gives way slightly when pressed. */
   .press {
     transition:
       transform 120ms cubic-bezier(0.22, 1, 0.36, 1),
@@ -537,33 +806,15 @@
   .press:active:not(:disabled) {
     transform: translateY(1px) scale(0.985);
   }
+  :root[data-motion="reduce"] .press:active:not(:disabled) {
+    transform: none;
+  }
 
+  /* Kept as a positioning hook for the screens that still carry it. The
+     two 120px filter blurs it used to paint were paid for on every frame
+     with nothing visible behind them (design-system.md, section 7). */
   .glow-backdrop {
     position: relative;
     isolation: isolate;
-  }
-  .glow-backdrop::before,
-  .glow-backdrop::after {
-    content: "";
-    position: absolute;
-    z-index: -1;
-    border-radius: 9999px;
-    filter: blur(120px);
-    opacity: 0.35;
-    pointer-events: none;
-  }
-  .glow-backdrop::before {
-    width: 20rem;
-    height: 20rem;
-    background: var(--primary);
-    top: -6rem;
-    left: -6rem;
-  }
-  .glow-backdrop::after {
-    width: 18rem;
-    height: 18rem;
-    background: var(--highlight);
-    bottom: -6rem;
-    right: -6rem;
   }
 }

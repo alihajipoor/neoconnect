@@ -228,7 +228,7 @@ function ProgressCard({ data }: { data: ReferralOverview }) {
       </div>
       <div className="h-2 w-full overflow-hidden rounded-full bg-white/8">
         <div
-          className="h-full rounded-full bg-[linear-gradient(90deg,var(--primary),var(--highlight))] transition-[width]"
+          className="h-full rounded-full bg-[linear-gradient(90deg,var(--primary),var(--brand-2))] transition-[width]"
           style={{ width: `${percent}%` }}
         />
       </div>

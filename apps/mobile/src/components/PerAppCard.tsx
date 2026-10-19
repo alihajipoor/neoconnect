@@ -125,7 +125,7 @@ export function PerAppCard() {
           className={[
             "press relative h-6 w-11 shrink-0 rounded-full border transition-colors",
             settings.enabled
-              ? "border-transparent bg-[linear-gradient(120deg,var(--primary),var(--highlight))]"
+              ? "border-transparent bg-[linear-gradient(120deg,var(--primary),var(--brand-2))]"
               : "border-white/12 bg-white/8",
           ].join(" ")}
         >

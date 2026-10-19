@@ -562,7 +562,7 @@ export function CustomModeCard() {
           className={[
             "press relative h-6 w-11 shrink-0 rounded-full border transition-colors",
             settings.enabled
-              ? "border-transparent bg-[linear-gradient(120deg,var(--primary),var(--highlight))]"
+              ? "border-transparent bg-[linear-gradient(120deg,var(--primary),var(--brand-2))]"
               : "border-white/12 bg-white/8",
           ].join(" ")}
         >
@@ -605,7 +605,7 @@ export function CustomModeCard() {
                   // one thing on this card that must never be misread,
                   // and a lifted pill says "this one" at a glance.
                   settings.mode === value
-                    ? "bg-[linear-gradient(120deg,var(--primary),var(--highlight))] text-white shadow-[0_2px_10px_-4px_var(--primary)]"
+                    ? "bg-[linear-gradient(120deg,var(--primary),var(--brand-2))] text-white shadow-[0_2px_10px_-4px_var(--primary)]"
                     : "text-muted-foreground hover:bg-white/8 hover:text-foreground",
                 ].join(" ")}
               >

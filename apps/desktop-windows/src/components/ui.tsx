@@ -3,8 +3,8 @@
 // dashboard) don't need dialogs/selects/dropdowns, so pulling in that
 // machinery here would be pure overhead. Revisit if a later screen
 // (route/plan picker) genuinely needs an overlay component.
-import type { ButtonHTMLAttributes, InputHTMLAttributes, LabelHTMLAttributes } from "react";
-import { ChevronRight } from "lucide-react";
+import { useId, useState, type Ref, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type LabelHTMLAttributes, type ReactNode } from "react";
+import { ChevronDown, ChevronRight, Info } from "lucide-react";
 import { cn } from "../lib/utils";
 
 export function Button({
@@ -14,14 +14,14 @@ export function Button({
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "default" | "destructive" | "ghost" | "outline";
 }) {
-  // `default` is the site's violet-to-cyan gradient rather than a flat
+  // `default` is a gradient from the primary to `--brand-2` rather than a flat
   // fill, and lifts on hover -- a solid rectangle was the single biggest
   // reason the app read as a generic template. The glow uses colour-mix
   // so it stays tied to the token instead of a hardcoded rgba that
   // silently drifts if --primary ever changes.
   const variants = {
     default:
-      "bg-[linear-gradient(120deg,var(--primary),color-mix(in_oklab,var(--primary)_55%,var(--highlight)))] text-primary-foreground shadow-[0_4px_16px_-6px_var(--primary)] hover:shadow-[0_8px_26px_-8px_var(--primary)] hover:brightness-110",
+      "bg-[linear-gradient(120deg,var(--primary),color-mix(in_oklab,var(--primary)_55%,var(--brand-2)))] text-primary-foreground shadow-[0_4px_16px_-6px_var(--primary)] hover:shadow-[0_8px_26px_-8px_var(--primary)] hover:brightness-110",
     destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
     ghost: "bg-transparent text-foreground hover:bg-white/8",
     outline:
@@ -55,7 +55,7 @@ export function Label({ className, ...props }: LabelHTMLAttributes<HTMLLabelElem
   return <label className={cn("text-sm font-medium text-foreground", className)} {...props} />;
 }
 
-export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
+export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   // The top hairline is what separates a "surface" from a "box with a
   // border": it reads as light catching an edge, which is the treatment
   // the website uses on its own cards.
@@ -75,7 +75,7 @@ export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElemen
   return (
     <div
       className={cn(
-        "relative shrink-0 overflow-hidden rounded-xl border border-white/10 bg-card/70 p-4 shadow-[0_1px_2px_rgba(0,0,0,0.4),0_12px_32px_-16px_rgba(0,0,0,0.9)] backdrop-blur-sm",
+        "relative shrink-0 overflow-hidden rounded-xl border border-border bg-card/70 p-4 shadow-[var(--surface-shadow)]",
         "before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-gradient-to-r before:from-transparent before:via-white/15 before:to-transparent",
         className,
       )}
@@ -184,5 +184,192 @@ export function Stat({
     >
       {body}
     </button>
+  );
+}
+
+// --- Pearl Glass primitives ------------------------------------------------
+// Styled by pearl.css. The screens not yet redesigned keep the primitives
+// above; everything below is the redesign's (design-system.md, section 4).
+
+/** The floating control layer: frosted where the effects tier allows it,
+ * solid otherwise (`data-glass` on <html>). Text-carrying glass is
+ * `strong`. Nothing else -- rows, cards, banners -- is glass. */
+export function Glass({
+  as: Tag = "div",
+  strong,
+  className,
+  ...props
+}: HTMLAttributes<HTMLElement> & { as?: "div" | "aside" | "section" | "nav"; strong?: boolean }) {
+  return <Tag className={cn("nx-glass", strong && "strong", className)} {...props} />;
+}
+
+/** A pill button: primary (cobalt), ghost, or busy. The connect control's
+ * own pill is ConnectOrb's, which adds the press light, the width morph
+ * and the double-press guard; this one is for everything else. */
+export function PillButton({
+  variant = "primary",
+  size,
+  className,
+  children,
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "ghost"; size?: "sm"; ref?: Ref<HTMLButtonElement> }) {
+  return (
+    <button type="button" className={cn("nx-btn", variant, size, className)} {...props}>
+      <span className="lt" aria-hidden />
+      {children}
+    </button>
+  );
+}
+
+/** A segmented control, fully round, with a sliding thumb that travels
+ * toward the inline end in either language.
+ *
+ * `locked` keeps it readable and focusable but inert, with the reason as
+ * its tooltip -- no opacity drop, which failed contrast at 70%. */
+export function Segmented<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+  locked = false,
+  lockedReason,
+  size,
+  className,
+}: {
+  options: ReadonlyArray<{ value: T; label: string; icon?: ReactNode }>;
+  value: T;
+  onChange: (value: T) => void;
+  label: string;
+  locked?: boolean;
+  lockedReason?: string;
+  size?: "sm";
+  className?: string;
+}) {
+  const index = Math.max(
+    0,
+    options.findIndex((o) => o.value === value),
+  );
+  return (
+    <div
+      role="group"
+      aria-label={label}
+      title={locked ? lockedReason : undefined}
+      className={cn("nx-seg", size, locked && "locked", className)}
+      style={{ "--n": options.length, "--k": index } as React.CSSProperties}
+    >
+      <span className="thumb" aria-hidden />
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          aria-pressed={option.value === value}
+          aria-disabled={locked || undefined}
+          title={locked ? lockedReason : undefined}
+          onClick={() => {
+            if (!locked && option.value !== value) onChange(option.value);
+          }}
+        >
+          {option.icon}
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A switch: 51x31, cobalt when on, the thumb stretching while pressed. */
+export function Switch({
+  checked,
+  onChange,
+  disabled,
+  label,
+  describedBy,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  label: string;
+  describedBy?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      aria-describedby={describedBy}
+      disabled={disabled}
+      className="nx-sw"
+      onClick={() => onChange(!checked)}
+    />
+  );
+}
+
+/** A neutral message at the top of a page: an icon, a bold title and the
+ * sentence. Neutral on purpose -- the blocked-network banner is not an
+ * alarm: the customer can still connect. */
+export function Banner({
+  title,
+  icon,
+  children,
+  className,
+}: {
+  title?: ReactNode;
+  icon?: ReactNode;
+  children?: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={cn("nx-banner", className)}>
+      {icon ?? <Info aria-hidden />}
+      <div className="t">
+        {title ? <b>{title}</b> : null}
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** One line under the hero: neutral, or a real problem in caution or
+ * danger ink. Red only for real leaks. */
+export function Note({
+  tone = "plain",
+  icon,
+  children,
+}: {
+  tone?: "plain" | "info" | "caution" | "danger";
+  icon?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <p className={cn("nx-note m-0", tone !== "plain" && tone)}>
+      {icon}
+      <span>{children}</span>
+    </p>
+  );
+}
+
+/** A small neutral label: Beta, Current, Recommended. */
+export function Tag({ children }: { children: ReactNode }) {
+  return <span className="nx-tagn">{children}</span>;
+}
+
+/** Collapsed detail behind a counted toggle, opening on the snappy spring. */
+export function Disclosure({ label, count, children }: { label: string; count?: number; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  return (
+    <>
+      <button type="button" className="nx-dtoggle" aria-expanded={open} aria-controls={id} onClick={() => setOpen((o) => !o)}>
+        {label}
+        {count !== undefined ? <span className="cnt nx-num">{count}</span> : null}
+        <ChevronDown aria-hidden />
+      </button>
+      <div id={id} className={cn("nx-dpanel", open && "open")}>
+        <div aria-hidden={!open} inert={!open ? true : undefined}>
+          {children}
+        </div>
+      </div>
+    </>
   );
 }

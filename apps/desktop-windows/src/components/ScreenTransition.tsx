@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { viewTransitionsAvailable, withViewTransition } from "../lib/view-transition";
 
 /** Motion between screens.
  *
@@ -45,9 +46,16 @@ const DURATION_MS = 220;
 export function ScreenTransition({
   screenKey,
   children,
+  viewTransitions = false,
 }: {
   screenKey: string;
   children: ReactNode;
+  /** Hand the change to the View Transitions API where the engine has it
+   * (lib/view-transition.ts): the outgoing screen is a snapshot, so it is
+   * not kept mounted, and the incoming one slides in on the snappy spring.
+   * The CSS below stays the fallback. Off for the phone until its own
+   * phase of the redesign. */
+  viewTransitions?: boolean;
 }) {
   const [current, setCurrent] = useState({ key: screenKey, node: children });
   const [leaving, setLeaving] = useState<{
@@ -55,6 +63,9 @@ export function ScreenTransition({
     node: ReactNode;
   } | null>(null);
   const [back, setBack] = useState(false);
+  /** How the last change was animated: by the browser, or by the classes
+   * below. */
+  const [via, setVia] = useState<"vt" | "css">("css");
 
   // Held in a ref because `children` is a new element on every render:
   // depending on it in the effect would restart the transition
@@ -68,7 +79,18 @@ export function ScreenTransition({
     if (showing.current === screenKey) return;
     const from = showing.current;
     showing.current = screenKey;
-    setBack((DEPTH[screenKey] ?? 0) < (DEPTH[from] ?? 0));
+    const goingBack = (DEPTH[screenKey] ?? 0) < (DEPTH[from] ?? 0);
+    if (viewTransitions && viewTransitionsAvailable()) {
+      withViewTransition(() => {
+        setVia("vt");
+        setBack(goingBack);
+        setLeaving(null);
+        setCurrent({ key: screenKey, node: latest.current });
+      }, goingBack ? "back" : "forward");
+      return;
+    }
+    setVia("css");
+    setBack(goingBack);
     setLeaving({ key: from, node: current.node });
     setCurrent({ key: screenKey, node: latest.current });
     const timer = setTimeout(() => setLeaving(null), DURATION_MS);
@@ -106,7 +128,7 @@ export function ScreenTransition({
       ) : null}
       <div
         key={current.key}
-        className={`h-full ${back ? "screen-enter-back" : "screen-enter"}`}
+        className={[viewTransitions ? "nx-viewport" : "", "h-full", via === "css" ? (back ? "screen-enter-back" : "screen-enter") : ""].join(" ")}
       >
         {current.node}
       </div>
