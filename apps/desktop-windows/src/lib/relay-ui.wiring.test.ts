@@ -68,6 +68,26 @@ describe("the approved strings", () => {
     );
   });
 
+  // With the prompt gone, the Settings hint is the only thing that says
+  // what the backup route does before it is used. It said "from Iran" and
+  // named three things; the route is tried wherever the usual way is
+  // blocked, for the app's own background requests too, until the backend
+  // places the network abroad.
+  it("say in Settings that the route is automatic, carries the app's own requests, and when it stops", () => {
+    expect(en["settings.backupRouteHint"]).toMatch(/automatically/);
+    expect(en["settings.backupRouteHint"]).toMatch(/your account, the server list and vouchers/);
+    expect(en["settings.backupRouteHint"]).toMatch(/until you turn this off here/);
+    expect(en["settings.backupRouteHint"]).toMatch(/outside Iran.*for a day/);
+    expect(en["settings.backupRouteHint"]).not.toMatch(/usual way from Iran/);
+    expect(fa["settings.backupRouteHint"]).toContain("به‌طور خودکار");
+    expect(fa["settings.backupRouteHint"]).toContain("فهرست سرورها");
+    expect(fa["settings.backupRouteHint"]).toContain("همین‌جا خاموش");
+    expect(fa["settings.backupRouteHint"]).toMatch(/خارج از ایران.*یک روز/);
+    // The encryption sentence stays.
+    expect(en["settings.backupRouteHint"]).toMatch(/Your data stays encrypted/);
+    expect(fa["settings.backupRouteHint"]).toContain("رمزگذاری‌شده می‌ماند");
+  });
+
   it("mention the backup server having failed only in the string for a relay that was dialled", () => {
     const tried = (Object.keys(en) as (keyof typeof en)[]).filter((key) => /including the backup server/i.test(en[key]));
     expect(tried).toEqual(["api.unreachableWithBackup"]);
