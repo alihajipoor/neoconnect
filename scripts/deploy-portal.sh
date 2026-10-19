@@ -334,6 +334,9 @@ sv() { printf '%s\n' "$swap" | sed -n "s/^$1=//p" | head -1; }
 [ -z "$(sv FAIL)" ] || die "$(sv FAIL)"
 STAGE="$(sv STAGE)"
 BACKUP="$(sv BACKUP)"
+# Everything below removes or moves this directory: it must be exactly the
+# one this run made.
+[ "$STAGE" = "$WEB_ROOT/.account-deploy-$STAMP" ] || die "unexpected staging directory reported by the host: '$STAGE'"
 echo "swap   $(sv SWAP)"
 echo "backup ${BACKUP:-none (there was no live account/)}"
 
