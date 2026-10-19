@@ -100,6 +100,19 @@ describe.each([
     }
   });
 
+  it("keep text at 4.5:1 over the world map, a dot included, and its lights at 3:1", () => {
+    // The map passes behind the copy (design-system.md 5.2): secondary text
+    // must hold on the canvas and directly over a dot, without the veil.
+    for (const ground of [c("map-bg-top"), c("map-bg"), c("map-dot")]) {
+      expect(ratio(c("ink"), ground)).toBeGreaterThanOrEqual(4.5);
+      expect(ratio(c("ink-2"), ground)).toBeGreaterThanOrEqual(4.5);
+    }
+    // A light is a graphic that carries meaning: 3:1 against the canvas.
+    for (const lamp of ["lamp", "lamp-idle"]) {
+      expect(ratio(c(lamp), c("map-bg")), lamp).toBeGreaterThanOrEqual(3);
+    }
+  });
+
   it("keep the focus ring at 3:1 against the base and against its own halo", () => {
     expect(ratio(c("focus"), base)).toBeGreaterThanOrEqual(3);
     expect(ratio(c("focus"), on("focus-halo"))).toBeGreaterThanOrEqual(3);

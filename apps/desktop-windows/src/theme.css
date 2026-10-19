@@ -131,6 +131,18 @@
   --amb-hl: rgba(14, 124, 134, 0.14);
   --steel: #a9b6ce;
   --steel-deep: #5a6884;
+  /* The world map behind the main page (design-system.md 5.2): a quiet
+     canvas, its dots, and the location lights. --map-dot is no darker, or
+     --ink-2 over a dot drops below 4.5:1. */
+  --map-bg-top: #f7f9fc;
+  --map-bg: #edf1f6;
+  --map-dot: #bfcadc;
+  --lamp: #1a7fd4;
+  --lamp-glow: rgba(26, 127, 212, 0.34);
+  --lamp-idle: #7a89a3;
+  --lamp-rim: #ffffff;
+  --halo-ok: rgba(16, 69, 255, 0.3);
+  --halo-warn: rgba(217, 122, 0, 0.28);
 
   /* Type. */
   --font-ui: "Inter", "Vazirmatn", system-ui, "Segoe UI", sans-serif;
@@ -272,6 +284,15 @@
     --amb-hl: rgba(60, 198, 207, 0.16);
     --steel: #7b8aa8;
     --steel-deep: #2c3754;
+    --map-bg-top: #070a11;
+    --map-bg: #0d1320;
+    --map-dot: #28324a;
+    --lamp: #5cb2ff;
+    --lamp-glow: rgba(92, 178, 255, 0.34);
+    --lamp-idle: #7a87a0;
+    --lamp-rim: #0b0e15;
+    --halo-ok: rgba(91, 131, 255, 0.36);
+    --halo-warn: rgba(242, 169, 59, 0.3);
     --surface-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.8);
   }
 }
@@ -332,6 +353,15 @@
   --amb-hl: rgba(60, 198, 207, 0.16);
   --steel: #7b8aa8;
   --steel-deep: #2c3754;
+  --map-bg-top: #070a11;
+  --map-bg: #0d1320;
+  --map-dot: #28324a;
+  --lamp: #5cb2ff;
+  --lamp-glow: rgba(92, 178, 255, 0.34);
+  --lamp-idle: #7a87a0;
+  --lamp-rim: #0b0e15;
+  --halo-ok: rgba(91, 131, 255, 0.36);
+  --halo-warn: rgba(242, 169, 59, 0.3);
   --surface-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.8);
 }
 
