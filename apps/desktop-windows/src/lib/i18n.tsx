@@ -1152,6 +1152,10 @@ const en = {
   "btn.disconnecting": "Disconnecting…",
   "btn.stop": "Stop connecting",
   "btn.tryAnother": "Try another location",
+  // A phone, where the way out shares the button's row: the short words.
+  // The accessible name stays the full words above.
+  "btn.stopShort": "Stop",
+  "btn.tryAnotherShort": "Other location",
   "btn.recheck": "Check again",
   "btn.tryAgain": "Try again",
   "btn.cancel": "Cancel",
@@ -1893,6 +1897,8 @@ const fa: Record<TranslationKey, string> = {
   "btn.disconnecting": "در حال قطع...",
   "btn.stop": "توقف اتصال",
   "btn.tryAnother": "امتحان موقعیت دیگر",
+  "btn.stopShort": "توقف",
+  "btn.tryAnotherShort": "موقعیت دیگر",
   "btn.recheck": "بررسی دوباره",
   "btn.tryAgain": "تلاش دوباره",
   "btn.cancel": "انصراف",

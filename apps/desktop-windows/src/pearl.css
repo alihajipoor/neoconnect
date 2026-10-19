@@ -1145,6 +1145,11 @@
     color: var(--ink);
     font-weight: 600;
   }
+  /* Every sentence the hint can say, unseen: a phone sizes the hint by the
+     longest (the narrow rules, Hero.tsx `Hint`). Nothing elsewhere. */
+  .nx-hint > .rsv {
+    display: none;
+  }
   .nx-hint.danger {
     color: var(--danger-ink);
   }
@@ -1161,6 +1166,11 @@
     gap: 8px;
     min-height: 20px;
   }
+  /* The subline's box adds nothing to the layout: a phone reads whether
+     the line stays in the column from it (MainView `sublineStays`). */
+  .nx-sublinebox {
+    display: contents;
+  }
   .nx-subline svg {
     width: 15px;
     height: 15px;
@@ -1172,6 +1182,10 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 10px;
+  }
+  /* The way out's short words are a phone's (Hero.tsx `WayOut`). */
+  .nx-wayout > .ls {
+    display: none;
   }
 
   /* ---------- buttons ---------- */
@@ -1761,19 +1775,28 @@
     font-size: 11.5px;
     color: var(--ink);
   }
+  /* Whole pieces or none: one line, and a piece that does not fit wraps
+     onto a second line the box does not show. The address goes first, then
+     the days left; the sheet has both. Never an ellipsis inside a piece. */
   .nx-sum {
     flex: 1;
     min-width: 0;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
-  }
-  .nx-sum .p {
-    flex: 1;
-    min-width: 0;
-    white-space: nowrap;
+    column-gap: 0.45em;
+    row-gap: 0;
+    height: 20px;
+    line-height: 20px;
     overflow: hidden;
-    text-overflow: ellipsis;
+  }
+  html[lang="fa"] .nx-sum {
+    height: 22px;
+    line-height: 22px;
+  }
+  .nx-sum > * {
+    flex: none;
+    white-space: nowrap;
   }
   .nx-sum .v {
     color: var(--ink);
@@ -1788,14 +1811,14 @@
   }
   .nx-sum .d::before {
     content: "·";
-    margin-inline: 0.45em;
+    margin-inline-end: 0.45em;
     color: var(--ink-3);
   }
   .nx-sum .d.caution {
     color: var(--warn-ink);
   }
   .nx-sum .ip {
-    flex: none;
+    margin-inline-start: calc(10px - 0.45em);
     color: var(--ink);
     font-weight: 500;
     font-variant-numeric: tabular-nums;
@@ -2715,11 +2738,35 @@
       --big-fs: 30px;
       min-height: calc(var(--big-fs) * 1.04);
     }
+    /* Persian words sit on a taller line (1.45) than the timer. */
+    html[lang="fa"] .nx-hero-copy > .nx-bigrow {
+      min-height: calc(var(--big-fs) * 1.08);
+    }
     .nx-hero-copy > :is(.nx-banner, .nx-upd-hero) {
       order: 4;
     }
+    /* The sentence is as tall as the longest it can say here (`Hint`'s
+       reserve, laid unseen in its own cell): by the width, the language and
+       the text size, never by the state. */
     .nx-hero-copy > .nx-hint {
       order: 5;
+      display: grid;
+    }
+    .nx-hint > :is(.tx, .rsv) {
+      grid-area: 1 / 1;
+    }
+    .nx-hint > .rsv {
+      display: grid;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .nx-hint > .rsv > span {
+      grid-area: 1 / 1;
+    }
+    /* Under a message to read the stage draws nothing and gives way, so
+       nothing below the sentence is held still by it: its own height. */
+    .nx-hero-copy:has(> .nx-mapstage[data-alert="1"]) > .nx-hint > .rsv {
+      display: none;
     }
     .nx-hero-copy > .nx-slot {
       order: 6;
@@ -2738,33 +2785,52 @@
       width: 100%;
       --bleed: 20px;
     }
-    .nx-hero-copy > .nx-hloc {
+    /* A failover to another country, said just above the card that names
+       where the traffic now goes (`sublineStays`). */
+    .nx-hero-copy > .nx-sublinebox > .nx-subline {
       order: 11;
+      margin: 0;
+    }
+    /* Two lines' height whether the card has its second line or not
+       (Automatic has none). */
+    .nx-hero-copy > .nx-hloc {
+      order: 12;
       display: flex;
     }
-    /* The button, and beside it the way out (Stop, Try another) when
-       there is one: one row, so the foot keeps its height. */
+    /* The button, and beside it the way out (Stop, Other location) when
+       there is one: one row at every width, so the foot keeps still and the
+       button stays under the thumb. The way out says its short words; the
+       button takes the rest of the row. */
     .nx-hero-copy > .nx-actions {
-      order: 12;
-      flex-wrap: wrap;
+      order: 13;
+      flex-wrap: nowrap;
       gap: 8px;
     }
     .nx-hero-copy > .nx-actions > .nx-btn {
-      flex: 1 1 auto;
+      flex: 1 1 0;
       min-width: 0;
     }
     .nx-hero-copy > .nx-actions > .nx-btn.ghost {
-      flex: 0 1 auto;
+      flex: none;
       padding-inline: 16px;
       font-size: 14.5px;
     }
+    .nx-wayout > .lf {
+      display: none;
+    }
+    .nx-wayout > .ls {
+      display: inline;
+    }
     .nx-hero-copy > .nx-sumline {
-      order: 13;
+      order: 14;
       display: flex;
     }
-    /* Folded into the summary line's sheet -- the protocol change too:
-       the location card already names the protocol in use. */
-    .nx-hero-copy > :is(.nx-details, .nx-hmet, .nx-modebar, .nx-subline) {
+    /* Folded into the summary line's sheet -- a same-country protocol
+       change too: the location card already names the protocol in use. A
+       failover to another country stays (`sublineStays`). The VPN /
+       Gaming switch is Windows only: not on a phone at all. */
+    .nx-hero-copy > :is(.nx-details, .nx-hmet, .nx-modebar),
+    .nx-hero-copy > .nx-sublinebox:not([data-stays]) > .nx-subline {
       display: none;
     }
     /* The stage gives way to a message the customer must read: it draws
@@ -2781,14 +2847,13 @@
     .nx-big.words {
       font-size: calc(var(--big-fs) * 0.74);
     }
-    /* Three lines kept, so a longer sentence does not move what is below. */
     .nx-hint {
       font-size: 14px;
-      min-height: 4.5em;
+      min-height: 0;
     }
     html[lang="fa"] .nx-hint {
       font-size: 14px;
-      min-height: 5.4em;
+      min-height: 0;
     }
     .nx-ov > .nx-art,
     .nx-ov > .nx-modebar {
@@ -2818,18 +2883,15 @@
     .nx-hero-copy > .nx-bigrow {
       --big-fs: 27px;
     }
-    /* Two lines kept here: the map has little room to give. */
     .nx-hint {
       font-size: 13.5px;
-      min-height: 3em;
     }
     html[lang="fa"] .nx-hint {
       font-size: 13.5px;
       line-height: 1.7;
-      min-height: 3.4em;
     }
     .nx-hloc {
-      min-height: 56px;
+      min-height: 60px;
       padding-block: 8px;
       border-radius: 18px;
     }
@@ -2856,14 +2918,29 @@
       line-height: 1.6;
     }
   }
-  /* The very shortest: the tagline on one line, the gaps at their least. */
+  /* The very shortest: the tagline on one line, the gaps at their least,
+     and a banner or the device limit at its tightest -- never folded. What
+     a larger OS text size adds there makes the column scroll, the last
+     resort: measured as an approximation (check-phone-fit --text-scale),
+     unverified on a device. */
   @container col (max-height: 480px) {
     .nx-hero-copy {
       gap: 5px;
     }
     .nx-banner,
     .nx-slot {
-      padding-block: 8px;
+      padding: 6px 10px;
+      gap: 4px;
+    }
+    .nx-banner .t {
+      gap: 0;
+    }
+    .nx-slot .nx-actions {
+      gap: 6px;
+    }
+    .nx-slot .nx-btn {
+      height: 36px;
+      padding-inline: 14px;
     }
     .nx-hero-copy > .nx-tag .mob {
       display: inline;

@@ -27,6 +27,7 @@ import {
   droppedUnseen,
   fullTunnelPollState,
   handshakeEvidence,
+  HEADLINE_HINTS,
   headlineFor,
   isTunnelUp,
   LIVENESS_POLL_MS,
@@ -145,7 +146,7 @@ import { Banner, Note, PillButton, Segmented } from "../components/ui";
 import { Dialog } from "../components/overlay";
 import { AppShell } from "../components/shell/AppShell";
 import { MainView } from "../components/main/MainView";
-import { Decor, Hint, StateAnnouncer, StateLine, StatusChip } from "../components/main/Hero";
+import { Decor, Hint, StateAnnouncer, StateLine, StatusChip, WayOut } from "../components/main/Hero";
 import { LocationCard, MetricCards, SessionTray, SummaryLine, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
 import { HeroArt } from "../components/main/HeroArt";
 import { SLOT, Slotted } from "../components/Slotted";
@@ -4442,17 +4443,11 @@ export function Dashboard({
           pill between attempts connects now, and during one stops only
           that pass. This stops the reconnecting itself. */}
       {secondary === "stopReconnecting" ? (
-        <PillButton variant="ghost" onClick={() => void stopReconnecting()}>
-          {t("dash.reconnectStop")}
-        </PillButton>
+        <WayOut label={t("dash.reconnectStop")} short={t("btn.stopShort")} onClick={() => void stopReconnecting()} />
       ) : secondary === "stopConnecting" ? (
-        <PillButton variant="ghost" onClick={() => void handleConnectToggle(press.action)}>
-          {t("btn.stop")}
-        </PillButton>
+        <WayOut label={t("btn.stop")} short={t("btn.stopShort")} onClick={() => void handleConnectToggle(press.action)} />
       ) : secondary === "tryAnother" && subscription ? (
-        <PillButton variant="ghost" onClick={showLocations}>
-          {t("btn.tryAnother")}
-        </PillButton>
+        <WayOut label={t("btn.tryAnother")} short={t("btn.tryAnotherShort")} onClick={showLocations} />
       ) : null}
     </div>
   ) : subscription ? (
@@ -4521,7 +4516,13 @@ export function Dashboard({
               />
             )
           }
-          hint={error ? null : <Hint tone={hintTone(calmTone, { failed: connectionError !== null })}>{hintText}</Hint>}
+          hint={
+            error ? null : (
+              <Hint tone={hintTone(calmTone, { failed: connectionError !== null })} reserve={HEADLINE_HINTS}>
+                {hintText}
+              </Hint>
+            )
+          }
           slot={
             slotShowing && slotNotice ? (
               /* The plan's device limit, when it is why this device is not
@@ -4557,6 +4558,9 @@ export function Dashboard({
                 })()
               : null
           }
+          // A failover that crossed a border says why the exit is not the
+          // country chosen: a phone keeps it in the column.
+          sublineStays={Boolean(failedOverTo?.fromRegion)}
           actions={error || slotChoice ? null : actions}
           error={errorBlock}
           notes={notes}

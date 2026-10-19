@@ -4,6 +4,7 @@ import { useI18n, type TranslationKey } from "../../lib/i18n";
 import { formatDuration } from "../../lib/locale-format";
 import type { ChipGlyph, HintTone, LineModel } from "../../lib/hero-model";
 import { cn } from "../../lib/utils";
+import { PillButton } from "../ui";
 
 /** The pieces of the main page's hero column. Each says one thing: the
  * fixed tagline, the state in a chip, the timer or the state in words, and
@@ -119,10 +120,28 @@ export function StateLine({ line, words, decor }: { line: LineModel; words: stri
 }
 
 /** The sentence under the line. Its ink follows the calm tone only for a
- * sustained, real problem; it reserves three lines so a longer sentence
- * does not push the button down. */
-export function Hint({ tone, children }: { tone: HintTone; children: ReactNode }) {
-  return <p className={cn("nx-hint", tone)}>{children}</p>;
+ * sustained, real problem; it reserves room so a longer sentence does not
+ * push the button down.
+ *
+ * `reserve`: every sentence this place can say. On a phone (pearl.css)
+ * they are laid, unseen, in the sentence's own cell, so it is as tall as
+ * the longest of them at this width, in this language and at this text
+ * size -- and the map and the foot below keep still whichever is said.
+ * Wider layouts keep their fixed number of lines. */
+export function Hint({ tone, reserve, children }: { tone: HintTone; reserve?: readonly TranslationKey[]; children: ReactNode }) {
+  const { t } = useI18n();
+  return (
+    <p className={cn("nx-hint", tone)}>
+      <span className="tx">{children}</span>
+      {reserve && reserve.length > 0 ? (
+        <span className="rsv" aria-hidden>
+          {reserve.map((key) => (
+            <span key={key}>{t(key)}</span>
+          ))}
+        </span>
+      ) : null}
+    </p>
+  );
 }
 
 /** "BROWSE / STREAM / WORK / ANYWHERE": decoration, hidden from assistive
@@ -136,5 +155,18 @@ export function Decor({ keys }: { keys: readonly TranslationKey[] }) {
         <span key={key}>{t(key)}</span>
       ))}
     </p>
+  );
+}
+
+/** The quieter way out beside the button -- Stop, Try another. On a phone
+ * it shares the button's row whatever the state, so the foot keeps still
+ * and the button stays under the thumb: there it says the short words
+ * (pearl.css), and its accessible name is the full words everywhere. */
+export function WayOut({ label, short, onClick }: { label: string; short: string; onClick?: () => void }) {
+  return (
+    <PillButton variant="ghost" className="nx-wayout" aria-label={label} onClick={onClick}>
+      <span className="lf">{label}</span>
+      <span className="ls">{short}</span>
+    </PillButton>
   );
 }

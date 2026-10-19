@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
+import { formatNumber } from "../../lib/locale-format";
 import { Disclosure, Glass } from "../ui";
 import { BottomSheet } from "../overlay";
 import { Tagline } from "./Hero";
@@ -17,11 +18,13 @@ import { Tagline } from "./Hero";
  * its height.
  *
  * Phones: one screen, nothing scrolls (owner, 2026-10-19). The plan, the
- * address, the connection details and the mode switch fold into one line
- * at the foot of the column that opens a sheet, the one thing that may
- * scroll; the map and the mark give up their room first. The honest state
- * -- chip, line, sentence, banners, notes, the device limit -- stays in the
- * column. */
+ * address and the connection details fold into one line at the foot of
+ * the column that opens a sheet, the one thing that may scroll; the map
+ * and the mark give up their room first. The honest state -- chip, line,
+ * sentence, banners, notes, the device limit, a failover that crossed a
+ * border -- stays in the column. The VPN / Gaming switch is not offered
+ * there: Gaming mode is Windows only, and a phone-sized window is the
+ * reference for the mobile app. */
 
 export interface MainSlots {
   banner?: ReactNode;
@@ -32,6 +35,11 @@ export interface MainSlots {
   gaming?: ReactNode;
   hint?: ReactNode;
   subline?: ReactNode;
+  /** The subline says the exit is in another country than the one chosen
+   * (a failover that crossed a border): why must be read, so a phone keeps
+   * it in the column rather than in the sheet. A same-country protocol
+   * change folds there: the location card names the protocol. */
+  sublineStays?: boolean;
   /** The device limit, after the hint: the hint still says what the
    * tunnel is doing -- degraded, dropped, not confined -- beside it. */
   slot?: ReactNode;
@@ -66,7 +74,7 @@ export interface MainSlots {
 }
 
 export function MainView(slots: MainSlots) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const taglineId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const heroRef = useRef<HTMLElement>(null);
@@ -117,10 +125,12 @@ export function MainView(slots: MainSlots) {
     ) : null;
 
   // The phone's one line, and the sheet it opens: the plan and the address,
-  // the details open -- a protocol change among them, which the location
-  // card names already -- and the mode switch. Shown by pearl.css on phones
-  // only.
-  const sheetCount = details.length + (slots.subline ? 1 : 0);
+  // and the details open -- a same-country protocol change among them,
+  // which the location card names already. Shown by pearl.css on phones
+  // only. Its name begins with what it opens and goes on with the words on
+  // it, so a screen reader hears what is seen (WCAG 2.5.3).
+  const sublineFolds = Boolean(slots.subline) && !slots.sublineStays;
+  const sheetCount = details.length + (sublineFolds ? 1 : 0);
   const summary = slots.summary ? (
     <button
       type="button"
@@ -128,10 +138,10 @@ export function MainView(slots: MainSlots) {
       onClick={() => setSheetOpen(true)}
       aria-haspopup="dialog"
       aria-expanded={sheetOpen}
-      aria-label={t("sum.open")}
     >
+      <span className="nx-sr">{t("sum.open")}: </span>
       {slots.summary}
-      {sheetCount > 0 ? <span className="cnt nx-num">{sheetCount}</span> : null}
+      {sheetCount > 0 ? <span className="cnt nx-num">{formatNumber(sheetCount, language)}</span> : null}
       <ChevronUp className="nx-i sm" aria-hidden />
     </button>
   ) : null;
@@ -147,14 +157,8 @@ export function MainView(slots: MainSlots) {
       {sheetCount > 0 ? (
         <section className="nx-sheet-sec" aria-label={t("notes.details")}>
           <h3>{t("notes.details")}</h3>
-          {slots.subline}
+          {sublineFolds ? slots.subline : null}
           {details.length > 0 ? <div className="nx-notes">{details}</div> : null}
-        </section>
-      ) : null}
-      {slots.modeBar ? (
-        <section className="nx-sheet-sec" aria-label={t("mode.label")}>
-          <h3>{t("mode.label")}</h3>
-          {slots.modeBar}
         </section>
       ) : null}
     </BottomSheet>
@@ -184,7 +188,11 @@ export function MainView(slots: MainSlots) {
               {slots.line}
               {slots.hint}
               {slots.slot}
-              {slots.subline}
+              {slots.subline ? (
+                <div className="nx-sublinebox" data-stays={slots.sublineStays ? "1" : undefined}>
+                  {slots.subline}
+                </div>
+              ) : null}
               {slots.actions}
               {slots.error ? <div className="nx-err">{slots.error}</div> : null}
               {slots.notes}

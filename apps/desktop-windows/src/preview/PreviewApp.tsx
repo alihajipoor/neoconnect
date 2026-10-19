@@ -6,7 +6,7 @@ import { DeviceSlotCard } from "../components/DeviceSlotCard";
 import { RouteFlag } from "../components/Flag";
 import { GamingStatusPanel } from "../components/GamingStatusPanel";
 import { LocationPicker } from "../components/LocationPicker";
-import { Decor, Hint, StateAnnouncer, StateLine, StatusChip } from "../components/main/Hero";
+import { Decor, Hint, StateAnnouncer, StateLine, StatusChip, WayOut } from "../components/main/Hero";
 import { HeroArt } from "../components/main/HeroArt";
 import { SLOT as PROTOCOL_SLOT, Slotted } from "../components/Slotted";
 import { MapLegend } from "../components/main/MapLegend";
@@ -17,7 +17,8 @@ import { Dialog } from "../components/overlay";
 import { AppShell } from "../components/shell/AppShell";
 import { Banner, Note, PillButton, Segmented } from "../components/ui";
 import { MARK_TONE, type LogoTone } from "../lib/logo-geometry";
-import { headlineFor, isTunnelUp } from "../lib/connection-evidence";
+import { HEADLINE_HINTS, headlineFor, isTunnelUp } from "../lib/connection-evidence";
+import { failoverNotice, failoverText } from "../lib/failover-notice";
 import { pressFor } from "../lib/connect-intent";
 import { effects, type GlassChoice, type ThemeChoice } from "../lib/effects";
 import { chipFor, hintTone, ipFor, lineFor, pillFor, planCaution, secondaryFor, shownTone, type ShownTone } from "../lib/hero-model";
@@ -60,6 +61,9 @@ interface Scenario {
   relay?: boolean;
   /** The relay is pinned, nothing is up: the quiet dashed arc. */
   relayPinned?: boolean;
+  /** Failed over from Germany, the one on screen, to Finland: the
+   * failover line names both countries. */
+  crossed?: boolean;
 }
 
 const SCENARIOS: Record<string, Scenario> = {
@@ -98,6 +102,8 @@ const SCENARIOS: Record<string, Scenario> = {
   relayConnected: { label: "Connected via Iran (relay), verified", state: "connected", timed: true, relay: true },
   relayUnverified: { label: "Via Iran (relay), not confirmed", state: "unverified", relay: true },
   relayPinned: { label: "Via Iran (relay) pinned, not connected", state: "disconnected", relayPinned: true },
+  crossed: { label: "Connected in another country (failover)", state: "connected", timed: true, crossed: true },
+  crossedDegraded: { label: "Another country (failover), not carrying traffic", state: "degraded", crossed: true },
   gamingOff: { label: "Gaming mode off", state: "disconnected", gaming: "off" },
   gamingOn: { label: "Gaming mode on", state: "disconnected", gaming: "active" },
   gamingUnknown: { label: "Gaming mode, status unknown", state: "disconnected", gaming: "unknown" },
@@ -369,7 +375,7 @@ function Composed({
   const sample = EVIDENCE[evidence] ?? EVIDENCE.mixed;
   const routes = useMemo(() => sample.routes(ROUTES), [sample]);
   const history = useMemo(() => sampleHistory(routes, sample.own), [routes, sample]);
-  const current = sc.relay || sc.relayPinned ? routes.find((r) => r.id === "ir-de")! : routes[0];
+  const current = sc.relay || sc.relayPinned ? routes.find((r) => r.id === "ir-de")! : sc.crossed ? routes.find((r) => r.id === "fi-reality")! : routes[0];
   const protocol = customerProtocolLabel(current.protocol, current.transport);
 
   const plan = sc.plan ?? "unlimited";
@@ -479,11 +485,11 @@ function Composed({
       <div className="nx-actions">
         <ConnectOrb state={held} caution={sc.caution} onToggle={() => undefined} label={t(pill.labelKey)} look="pill" pill={pill} />
         {secondary === "stopReconnecting" ? (
-          <PillButton variant="ghost">{t("dash.reconnectStop")}</PillButton>
+          <WayOut label={t("dash.reconnectStop")} short={t("btn.stopShort")} />
         ) : secondary === "stopConnecting" ? (
-          <PillButton variant="ghost">{t("btn.stop")}</PillButton>
+          <WayOut label={t("btn.stop")} short={t("btn.stopShort")} />
         ) : secondary === "tryAnother" ? (
-          <PillButton variant="ghost">{t("btn.tryAnother")}</PillButton>
+          <WayOut label={t("btn.tryAnother")} short={t("btn.tryAnotherShort")} />
         ) : null}
       </div>
     );
@@ -546,24 +552,42 @@ function Composed({
           banner={banner}
           chip={<StatusChip glyph={chip.glyph} label={t(chip.labelKey)} />}
           line={<StateLine line={line} words={lineWords} decor={<Decor keys={["decor.browse", "decor.stream", "decor.work", "decor.anywhere"]} />} />}
-          hint={<Hint tone={hintTone(calmTone, { failed: sc.failed })}>{hintText}</Hint>}
+          hint={
+            <Hint tone={hintTone(calmTone, { failed: sc.failed })} reserve={HEADLINE_HINTS}>
+              {hintText}
+            </Hint>
+          }
           slot={
             sc.slot ? (
               <DeviceSlotCard look="pearl" notice={SLOT} tunnelDown onUseHere={() => undefined} onDismiss={() => undefined} />
             ) : undefined
           }
           subline={
-            sc.failover ? (
-              <p className="nx-subline">
-                <Repeat aria-hidden />
-                <span>
-                  <Slotted text={t("dash.nowUsing", { protocol: PROTOCOL_SLOT })}>
-                    <bdi className="font-medium text-ink">{protocol}</bdi>
-                  </Slotted>
-                </span>
-              </p>
+            sc.failover || sc.crossed ? (
+              (() => {
+                const said = failoverText(
+                  failoverNotice({
+                    label: protocol,
+                    fromRegion: sc.crossed ? placeLabel(routes[0], language) : null,
+                    toRegion: placeLabel(current, language),
+                    shownRouteId: routes[0].id,
+                    failed: sc.crossed ? [{ routeId: routes[0].id, fate: "dialled" }] : [],
+                  }),
+                );
+                return (
+                  <p className="nx-subline">
+                    <Repeat aria-hidden />
+                    <span>
+                      <Slotted text={t(said.key, { ...said.vars, protocol: PROTOCOL_SLOT })}>
+                        <bdi className="font-medium text-ink">{said.vars.protocol}</bdi>
+                      </Slotted>
+                    </span>
+                  </p>
+                );
+              })()
             ) : null
           }
+          sublineStays={Boolean(sc.crossed)}
           actions={sc.slot ? null : actions}
           error={
             sc.failed ? (
