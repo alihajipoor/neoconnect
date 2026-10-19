@@ -271,14 +271,15 @@
     animation: none;
     border-style: dotted;
   }
+  /* Its own fill, not the state's --danger: white on Smoked's #f26b5e is
+     2.98:1 (theme.css, theme-contrast.test.ts). */
   .nx-btn.danger {
-    background: var(--danger);
-    color: #fff;
-    box-shadow: 0 14px 28px -16px var(--danger);
+    background: var(--danger-fill);
+    color: var(--on-danger);
+    box-shadow: 0 14px 28px -16px var(--danger-fill);
   }
   .nx-btn.danger:hover {
-    background: var(--danger);
-    filter: brightness(1.06);
+    background: var(--danger-fill-hover);
   }
   .nx-btn:disabled {
     cursor: not-allowed;

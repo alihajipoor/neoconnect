@@ -94,6 +94,13 @@ describe.each([
     expect(ratio(c("cobalt-ink"), on("select"))).toBeGreaterThanOrEqual(4.5);
   });
 
+  it("keep a destructive button's text at 4.5:1 on its fill, resting and hovered", () => {
+    // Delete account's confirm (pages.css `.nx-btn.danger`): 14px semibold,
+    // so 4.5:1. It drew white on --danger, 2.98:1 in Smoked.
+    expect(ratio(c("on-danger"), c("danger-fill"))).toBeGreaterThanOrEqual(4.5);
+    expect(ratio(c("on-danger"), c("danger-fill-hover"))).toBeGreaterThanOrEqual(4.5);
+  });
+
   it("keep every state's ink at 4.5:1 on its own tint", () => {
     for (const tone of ["ok", "hl", "warn", "danger", "muted"]) {
       expect(ratio(c(`${tone}-ink`), on(`${tone}-tint`)), tone).toBeGreaterThanOrEqual(4.5);
@@ -116,5 +123,37 @@ describe.each([
   it("keep the focus ring at 3:1 against the base and against its own halo", () => {
     expect(ratio(c("focus"), base)).toBeGreaterThanOrEqual(3);
     expect(ratio(c("focus"), on("focus-halo"))).toBeGreaterThanOrEqual(3);
+  });
+});
+
+/** The field tokens the pages add (pages.css): a field's outline must be
+ * findable, 3:1 against the card it sits in (WCAG 1.4.11), and the hint
+ * text inside it readable, 4.5:1 on the field's fill. Measured over the
+ * strong glass composited on the base and on the scene's darkest colour,
+ * as the text on the glass is above. */
+describe.each([
+  ["Pearl", light, ":root"],
+  ["Smoked", dark, ':root[data-theme="dark"]'],
+])("the %s field tokens", (_name, tokens, selector) => {
+  const pagesCss = readFileSync(new URL("../pages.css", import.meta.url), "utf8");
+  const start = pagesCss.indexOf(`${selector} {`);
+  const body = pagesCss.slice(start, pagesCss.indexOf("\n}", start));
+  const field: Record<string, string> = {};
+  for (const m of body.matchAll(/--([a-z0-9-]+):\s*([^;]+);/g)) field[m[1]] = m[2].trim();
+  const c = (name: string) => parse(field[name] ?? tokens[name]);
+
+  it("are read from pages.css", () => {
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(Object.keys(field)).toEqual(expect.arrayContaining(["field-bg", "field-line", "placeholder"]));
+  });
+
+  it("keep the outline at 3:1 on the card and the placeholder at 4.5:1 in the field", () => {
+    for (const ground of [c("base"), c("shade")]) {
+      const card = over(c("glass-strong"), ground);
+      const fill = over(c("field-bg"), card);
+      expect(ratio(c("field-line"), card)).toBeGreaterThanOrEqual(3);
+      expect(ratio(c("placeholder"), fill)).toBeGreaterThanOrEqual(4.5);
+      expect(ratio(c("ink"), fill)).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });

@@ -117,6 +117,12 @@
   --danger: #d02c1f;
   --danger-ink: #a8231a;
   --danger-tint: rgba(208, 44, 31, 0.1);
+  /* A destructive button's fill and its text (Delete account): a pair of
+     its own, because --danger is the state's dot colour and in Smoked is
+     too light to carry white text (2.98:1). */
+  --danger-fill: #d02c1f;
+  --danger-fill-hover: #bb281c;
+  --on-danger: #ffffff;
   --muted: #6b7385;
   --muted-ink: #4d5566;
   --muted-tint: rgba(80, 90, 110, 0.1);
@@ -285,6 +291,8 @@
     --danger: #f26b5e;
     --danger-ink: #f79a90;
     --danger-tint: rgba(242, 107, 94, 0.14);
+    --danger-fill: #c8372b;
+    --danger-fill-hover: #b83226;
     --muted: #8a93a6;
     --muted-ink: #b3bbcb;
     --muted-tint: rgba(150, 160, 180, 0.13);
@@ -360,6 +368,8 @@
   --danger: #f26b5e;
   --danger-ink: #f79a90;
   --danger-tint: rgba(242, 107, 94, 0.14);
+  --danger-fill: #c8372b;
+  --danger-fill-hover: #b83226;
   --muted: #8a93a6;
   --muted-ink: #b3bbcb;
   --muted-tint: rgba(150, 160, 180, 0.13);
