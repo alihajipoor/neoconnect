@@ -6,8 +6,11 @@
     <title>Your account — Neoxify</title>
     <meta name="description" content="Sign in to your Neoxify account to manage your subscription, buy a plan, redeem a voucher or get support." />
     <!-- An account area has nothing to gain from being indexed, and the
-         sign-in form has something to lose from it. -->
-    <meta name="robots" content="noindex, nofollow" />
+         sign-in form has something to lose from it. Its links back to the
+         site's pages may still be followed. robots.txt must let crawlers
+         fetch this page, or they never see this line and index the bare
+         URL from the site's many links to it. -->
+    <meta name="robots" content="noindex, follow" />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#f1f3f6" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0b0e15" media="(prefers-color-scheme: dark)" />

@@ -349,3 +349,12 @@ describe("everything on the page is served from this site", () => {
     expect(licences).toContain("Vazirmatn-OFL.txt");
   });
 });
+
+describe("search engines", () => {
+  it("are asked not to index the page, and are let in to read that", () => {
+    const html = read(new URL("../../index.html", import.meta.url));
+    expect(html).toContain('<meta name="robots" content="noindex, follow" />');
+    const robots = read(new URL("../../../../website/robots.txt", import.meta.url));
+    expect(robots).not.toMatch(/^Disallow:\s*\/account/m);
+  });
+});

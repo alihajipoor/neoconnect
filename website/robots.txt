@@ -15,9 +15,12 @@ Allow: /
 Disallow: /inc/
 Disallow: /data/
 
-# The account area is a signed-in application, not content. Crawling it
-# just produces a login screen indexed under a hundred URLs.
-Disallow: /account/
+# The account area (/account/) is NOT disallowed, on purpose. It is a
+# signed-in application, not content, and its page says so itself:
+# <meta name="robots" content="noindex, follow">. A crawler that is not
+# allowed to fetch the page never reads that line -- and with the Buy and
+# Sign in links on every page pointing at it, the bare URL then gets
+# indexed anyway, as a result with no description.
 
 # Voucher short links resolve to a redirect and are handed out privately.
 Disallow: /r/
