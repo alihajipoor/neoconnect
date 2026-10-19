@@ -83,6 +83,36 @@ describe("the phone's main page", () => {
     expect(dashboard).toContain("{endedState.showPlansButton ? (");
   });
 
+  it("chooses the sheet or the panel by the app root's width, as the stylesheet does, not the window's", () => {
+    // #root pads the side insets on a phone on its side: the window is
+    // wider than the box the container queries measure.
+    expect(dashboard).toContain("const layout = useAppLayout(appRootRef);");
+    expect(dashboard).toMatch(/<AppShell\s+rootRef=\{appRootRef\}/);
+    expect(dashboard).not.toContain("useWindowLayout");
+    const hook = read("./app-layout.ts");
+    expect(hook).toContain("return useLayoutMode(ref, initial);");
+    expect(hook).toContain('document.getElementById("root")');
+  });
+
+  it("says a declined VPN prompt in the platform's own words", () => {
+    expect(dashboard).toContain('t(isIOS() ? "dash.vpnPermissionDeniedIos" : "dash.vpnPermissionDenied")');
+    expect(dashboard).not.toMatch(/t\("dash\.vpnPermissionDenied"\)/);
+    const i18n = read("../../../desktop-windows/src/lib/i18n.tsx");
+    const lines = (key: string) => i18n.split("\n").flatMap((line, i, all) => (line.includes(`"${key}":`) ? [line + all[i + 1]] : []));
+    const android = lines("dash.vpnPermissionDenied");
+    const ios = lines("dash.vpnPermissionDeniedIos");
+    // English and Persian, each.
+    expect(android).toHaveLength(2);
+    expect(ios).toHaveLength(2);
+    expect(android[0]).toContain("Android");
+    expect(android[0]).toContain("choose OK");
+    expect(ios[0]).toContain("iOS");
+    expect(ios[0]).toContain("choose Allow");
+    expect(ios[0]).not.toContain("Android");
+    expect(ios[1]).not.toContain("اندروید");
+    expect(ios[1]).toContain("Allow");
+  });
+
   it("lights the map only on this network's evidence, read since the phone may last have moved", () => {
     expect(dashboard).toContain("const mapNetworkId = reading !== null && reading.at >= roamedAt ? networkKeyFromAsn(now) : null;");
     expect(dashboard).toContain("const mapRoutes = tagsNow ? routes : withoutTags(routes);");
@@ -99,6 +129,51 @@ describe("the phone's own look", () => {
 
   it("keeps per-app routing on Android, and only there", () => {
     expect(app).toContain("customSection={isAndroid() ? <PerAppCard /> : null}");
+  });
+
+  it("keeps the status bar and the home indicator clear on a tablet and a phone on its side", () => {
+    const phone = read("../phone.css");
+    // The status bar's inset stands in for the Windows title strip, which
+    // the medium and wide layouts pad their tops by.
+    expect(phone).toMatch(/\.nx-app \{\s*--tb: var\(--safe-t\);\s*\}/);
+    expect(phone).toMatch(/@container app \(min-width: 640px\) \{\s*\.nx-auth-scroll \{\s*padding-bottom: var\(--safe-b\);/);
+    expect(phone).toMatch(/\.nx-ov \{\s*padding-bottom: calc\(16px \+ var\(--safe-b\)\);/);
+    expect(phone).toMatch(/\.nx-ov \{\s*padding-bottom: calc\(18px \+ var\(--safe-b\)\);/);
+    expect(phone).toMatch(/\.nx-side \{\s*padding-bottom: calc\(14px \+ var\(--safe-b\)\);/);
+    expect(phone.match(/\.nx-pinner \{\s*padding-bottom: calc\(\d+px \+ var\(--safe-b\)\);/g)).toHaveLength(2);
+  });
+
+  it("draws the status bar's inset once under the backup-route chip", () => {
+    // pearl.css declares --safe-t on .nx-app in its components layer: a
+    // layered override loses to it whatever its specificity, so the chip
+    // row's rules are unlayered.
+    const globals = read("../globals.css");
+    const layered = (css: string) => {
+      const spans: [number, number][] = [];
+      for (const m of css.matchAll(/@layer [\w-]+\s*\{/g)) {
+        let depth = 0;
+        for (let i = m.index! + m[0].length - 1; i < css.length; i++) {
+          if (css[i] === "{") depth++;
+          else if (css[i] === "}" && --depth === 0) {
+            spans.push([m.index!, i]);
+            break;
+          }
+        }
+      }
+      return (at: number) => spans.some(([a, b]) => at > a && at < b);
+    };
+    const inLayer = layered(globals);
+    for (const rule of [".nx-relayrow:not(:empty) {", ".nx-relayrow:not(:empty) + .nx-screen .nx-app {"]) {
+      const at = globals.indexOf(rule);
+      expect(at, rule).toBeGreaterThan(0);
+      expect(inLayer(at), rule).toBe(false);
+    }
+    expect(globals).toMatch(/\.nx-relayrow:not\(:empty\) \+ \.nx-screen \.nx-app \{\s*--safe-t: 0px;/);
+    expect(app).toMatch(/<div className="nx-relayrow">\s*<BackupRouteChip \/>\s*<\/div>\s*<div className="nx-screen /);
+  });
+
+  it("outlines an unchosen app's box at 3:1, with the fields' outline", () => {
+    expect(read("../phone.css")).toMatch(/\.nx-perapp-row \.box \{[^}]*box-shadow: inset 0 0 0 1\.5px var\(--field-line\);/);
   });
 });
 
