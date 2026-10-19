@@ -3,7 +3,8 @@
 # Runs scripts/deploy-portal.sh against a stand-in host, end to end.
 #
 # Stand-ins on PATH: `ssh` runs the remote commands here, as the site
-# user would, with HOME pointed at a stand-in home; `curl` answers from
+# user would, with HOME pointed at a stand-in home, and keeps a log of
+# the connections, master and sessions it was asked for; `curl` answers from
 # the stand-in document root the way the live nginx does
 # (try_files $uri $uri/ =404, index index.php index.html), optionally
 # with a server Content-Security-Policy or a PHP fallback for missing
@@ -21,7 +22,8 @@
 # that are the document root, above it or inside it are refused without
 # touching their permissions; a key that cannot log in says so; a dirty
 # tree is refused; an unknown host key is added only when it matches the
-# fingerprint the owner confirmed.
+# fingerprint the owner confirmed; and every run opens at most one SSH
+# connection, runs all its commands on it, and closes it on the way out.
 
 set -euo pipefail
 
@@ -47,20 +49,54 @@ R="$T/repo"
 mkdir -p "$BIN" "$RHOME" "$ROOT/inc" "$T/local"
 
 # --- Stand-ins -----------------------------------------------------------------
+# ssh keeps a log of what it was asked to do, one line each, in $FAKE_SSH_LOG:
+# "connect <options>" for anything that would open a TCP connection to the
+# host, "session" for a command run on a master that is up, "exit" for a
+# master closed by -O exit. A master is a file at its ControlPath.
 cat >"$BIN/ssh" <<'EOF'
 #!/usr/bin/env bash
+ctl="" op="" master="" persist="" nocmd=0 fork=0 opts=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    -i | -p | -o) shift 2 ;;
+    -o)
+      opts="$opts $2"
+      case "$2" in
+        ControlPath=*) ctl="${2#ControlPath=}" ;;
+        ControlMaster=*) master="${2#ControlMaster=}" ;;
+        ControlPersist=*) persist="${2#ControlPersist=}" ;;
+      esac
+      shift 2
+      ;;
+    -O) op="$2"; shift 2 ;;
+    -i | -p) shift 2 ;;
+    -N) nocmd=1; shift ;;
+    -f) fork=1; shift ;;
     -*) shift ;;
     *) break ;;
   esac
 done
 shift # user@host
-if [ -n "${FAKE_SSH_DENY:-}" ]; then
-  echo "site@site.test: Permission denied (publickey)." >&2
-  exit 255
-fi
+log() { printf '%s\n' "$*" >>"$FAKE_SSH_LOG"; }
+nomaster() { echo "Control socket connect($ctl): No such file or directory" >&2; exit 255; }
+case "$op" in
+  check) [ -n "$ctl" ] && [ -e "$ctl" ] || nomaster; exit 0 ;;
+  exit) [ -n "$ctl" ] && [ -e "$ctl" ] || nomaster; rm -f "$ctl"; log exit; exit 0 ;;
+  proxy) [ -n "$ctl" ] && [ -e "$ctl" ] || nomaster; log session ;;
+  "")
+    log "connect$opts"
+    if [ -n "${FAKE_SSH_DENY:-}" ]; then
+      echo "site@site.test: Permission denied (publickey)." >&2
+      exit 255
+    fi
+    if [ "$nocmd" = 1 ]; then
+      # A master: up in the background until -O exit.
+      [ "$master" = auto ] && [ -n "$ctl" ] && [ -n "$persist" ] && [ "$fork" = 1 ] || exit 0
+      : >"$ctl"
+      exit 0
+    fi
+    ;;
+  *) echo "fake ssh: unexpected -O $op" >&2; exit 255 ;;
+esac
 export HOME="$FAKE_HOME"
 cd "$HOME"
 exec bash -c "$*"
@@ -168,13 +204,15 @@ git -C "$R" -c user.name=test -c user.email=test@example.invalid commit -q -m te
 # --- Running it -------------------------------------------------------------------
 KNOWN="$T/local/known_hosts"
 printf '%s\n' "$HOSTLINE" >"$KNOWN"
+SSH_LOG="$T/ssh.log"
 deploy() {
-  local want="$1" got
+  local want="$1" got connects
   shift
+  : >"$SSH_LOG"
   set +e
   (
     cd "$R" &&
-      env PATH="$BIN:$PATH" FAKE_HOME="$RHOME" FAKE_ROOT="$ROOT" FAKE_SITE="$SITE" \
+      env PATH="$BIN:$PATH" FAKE_HOME="$RHOME" FAKE_ROOT="$ROOT" FAKE_SITE="$SITE" FAKE_SSH_LOG="$SSH_LOG" \
         NEOXIFY_WEB_USER=site NEOXIFY_WEB_HOST=site.test NEOXIFY_WEB_KEY="$T/local/key" \
         NEOXIFY_WEB_KNOWN_HOSTS="${KNOWN_HOSTS_FILE:-$KNOWN}" NEOXIFY_WEB_ROOT="$ROOT" \
         NEOXIFY_SITE_URL="$SITE" NEOXIFY_DEPLOY_CHECK_WAIT=0 \
@@ -182,6 +220,12 @@ deploy() {
   ) >"$T/out" 2>&1
   got=$?
   set -e
+  # Every run, whatever its outcome: at most one connection, and a master
+  # that carried a command is closed on the way out.
+  connects="$(grep -c '^connect' "$SSH_LOG" || true)"
+  if [ "$connects" -gt 1 ] || { grep -qx session "$SSH_LOG" && [ "$(tail -1 "$SSH_LOG")" != exit ]; }; then
+    { printf 'deploy %s:\n' "$*" && sed 's/^/  /' "$SSH_LOG"; } >>"$T/ssh-violations"
+  fi
   [ "$got" = "$want" ]
 }
 live_has() { grep -qF -- "$1" "$ROOT/account/index.html"; }
@@ -203,6 +247,27 @@ if [ -z "$(ls -A "$ROOT" | grep '^\.account-deploy-' || true)" ] && [ -z "$(ls -
   pass "nothing is left behind in the document root or the upload directory"
 else
   fail "nothing is left behind in the document root or the upload directory"
+fi
+# The host's firewall allows about 6 new SSH connections in 30 s: the
+# deploy above opens one master, with the same login options it always
+# had, runs every command on it, and closes it, along with the private
+# directory its socket was in.
+connect="$(grep '^connect' "$SSH_LOG" || true)"
+ctl="$(printf '%s\n' "$connect" | tr ' ' '\n' | sed -n 's/^ControlPath=//p')"
+connect_has() {
+  local o
+  for o in "$@"; do
+    case "$connect " in *" $o"*) ;; *) return 1 ;; esac
+  done
+}
+if [ "$(printf '%s\n' "$connect" | grep -c .)" = 1 ] &&
+  connect_has BatchMode=yes IdentitiesOnly=yes PasswordAuthentication=no StrictHostKeyChecking=yes ControlMaster=auto ControlPersist= &&
+  [ "$(grep -cx session "$SSH_LOG")" -ge 7 ] && [ "$(head -1 "$SSH_LOG")" = "$connect" ] && [ "$(tail -1 "$SSH_LOG")" = exit ] &&
+  [ -n "$ctl" ] && [ "$(dirname "$ctl")" != /tmp ] && [ ! -e "$(dirname "$ctl")" ]; then
+  pass "a deploy opens one SSH connection, runs every command on it ($(grep -cx session "$SSH_LOG")), and closes it"
+else
+  fail "a deploy opens one SSH connection, runs every command on it, and closes it"
+  sed 's/^/  ssh: /' "$SSH_LOG"
 fi
 
 # 2. Rolling back to the pre-redesign portal: no pa-boot, no licences.
@@ -327,6 +392,14 @@ if KNOWN_HOSTS_FILE="$T/local/empty_known_hosts" NEOXIFY_WEB_HOST_KEY="$HOSTPRIN
   pass "the confirmed host key is added, and the deploy goes ahead"
 else
   fail "the confirmed host key is added, and the deploy goes ahead"
+fi
+
+if [ ! -s "$T/ssh-violations" ]; then
+  pass "no run, failed or not, opened a second SSH connection or left its master open"
+else
+  failures=$((failures + 1))
+  printf 'FAIL no run, failed or not, opened a second SSH connection or left its master open\n'
+  sed 's/^/  | /' "$T/ssh-violations"
 fi
 
 if [ "$failures" -gt 0 ]; then

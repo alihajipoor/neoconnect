@@ -24,7 +24,8 @@
 #      licences and Content-Security-Policy are all there, and the script
 #      carries the signed bundle the checkout has.
 #   4. Connects as the neoxify.net site's own user, to a host key the owner
-#      has confirmed. The host is SHARED with other sites and a hosting panel
+#      has confirmed, and only once: every command after that runs on the
+#      same connection. The host is SHARED with other sites and a hosting panel
 #      (owner, 2026-10-19), so: never root, nothing outside the site's own
 #      folder, no service reloads, no server-wide changes.
 #   5. Finds the site's document root in the nginx configuration (read
@@ -143,7 +144,20 @@ die() {
 }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# The socket of the run's one SSH connection (section 4) lives in this
+# private directory, and the connection is closed on the way out --
+# before the directory goes, or the master would outlive the run until
+# its ControlPersist ran out.
+SSH_CTL="$TMP/ssh-master"
+cleanup() {
+  if [ -e "$SSH_CTL" ]; then
+    ssh -o "ControlPath=$SSH_CTL" -O exit "$WEB_USER@$WEB_HOST" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- 1. What is being deployed ----------------------------------------------
 COMMIT=""
@@ -263,12 +277,37 @@ if ! ssh-keygen -F "$hostspec" -f "$KNOWN_HOSTS" >/dev/null 2>&1; then
   echo "host key $HOST_KEY_SHA256 confirmed and added to $KNOWN_HOSTS"
 fi
 
+# One connection for the whole run. The host rate-limits new SSH
+# connections (ufw LIMIT on port 22: about 6 in 30 s) and fail2ban bans on
+# top of that; a run that connected once per command was locked out
+# halfway (2026-10-19). So the first command opens a master connection in
+# the background (ControlMaster=auto), every command is a session on it,
+# and cleanup() closes it. ControlPersist only bounds how long it can
+# outlive a run killed before cleanup() runs.
+#
+# Sessions join the master in proxy mode (-O proxy), not the usual way:
+# that passes file descriptors over the socket, which Git Bash's ssh
+# (MSYS) cannot do -- there a plain ControlMaster=auto fails its first
+# command and then quietly opens a new connection for every other one
+# (measured on the Windows PC, 2026-10-19). A proxy session never dials:
+# with no master, it fails.
 SSH=(ssh -i "$WEB_KEY" -p "$WEB_PORT"
   -o IdentitiesOnly=yes -o BatchMode=yes -o PasswordAuthentication=no
   -o ConnectTimeout=20 -o ServerAliveInterval=15
   -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS"
-  "$WEB_USER@$WEB_HOST")
-remote() { "${SSH[@]}" "$@"; }
+  -o "ControlPath=$SSH_CTL")
+TARGET="$WEB_USER@$WEB_HOST"
+# Opens the master unless it is up. A second one is opened only if the
+# first went away mid-run (idle past ControlPersist, or the network
+# dropped it): putting the previous build back must not fail on that.
+master() {
+  "${SSH[@]}" -O check "$TARGET" >/dev/null 2>&1 \
+    || "${SSH[@]}" -o ControlMaster=auto -o ControlPersist=120 -N -f "$TARGET"
+}
+remote() {
+  master || return 255
+  "${SSH[@]}" -O proxy "$TARGET" "$@"
+}
 # Each argument quoted for the remote shell.
 q() { printf '%q ' "$@"; }
 
