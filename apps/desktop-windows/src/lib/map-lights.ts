@@ -202,14 +202,21 @@ function exitCountry(route: Placed): string | null {
  * place there is offline or failing -- one place down says nothing about
  * the others, which may simply be untried -- and otherwise a steady dot. */
 function countryLight(cc: string, evidence: readonly PlaceEvidence[]): MapLight {
-  const base = { cc, listed: true, exit: false, anim: false };
+  return { cc, listed: true, exit: false, anim: false, ...combineEvidence(evidence) };
+}
+
+/** What several places say together -- a country's light, and the list's
+ * row for that country: live when any of them worked (this device's own,
+ * newest, first), down only when every one is down, otherwise nothing
+ * either way. */
+export function combineEvidence(evidence: readonly PlaceEvidence[]): PlaceEvidence {
   const live = evidence.filter((e) => e.look === "live");
   if (live.length > 0) {
     const own = live.filter((e) => e.why === "own").sort((a, b) => (b.at ?? 0) - (a.at ?? 0))[0];
-    return { ...base, ...(own ?? live[0]) };
+    return own ?? live[0];
   }
-  if (evidence.length > 0 && evidence.every((e) => e.look === "down")) return { ...base, ...evidence[0] };
-  return { ...base, ...NOTHING };
+  if (evidence.length > 0 && evidence.every((e) => e.look === "down")) return evidence[0];
+  return NOTHING;
 }
 
 /** One light per country, the connected light, and the relay arc. */
