@@ -1,19 +1,42 @@
 #!/usr/bin/env node
-// DEV ONLY: does the phone's main page fit one screen?
+// DEV ONLY: does the phone's main page fit one screen, and keep still?
 //
 // Starts the dev preview (preview.html, served by Vite on a free local
 // port), drives a headless Chrome through its state switcher over the
 // DevTools protocol, and for each phone size x language x main-page state
-// measures how far anything in the frame could scroll (scrollHeight -
-// clientHeight of every scroller, the locations list excepted) and whether
-// the chip, the state line, the location card and the primary button are
-// on screen above the nav. Exits 1 on any overflow. Nothing leaves the
-// machine: the preview answers every Tauri call itself.
+// measures:
+//   - how far anything in the frame could scroll (scrollHeight -
+//     clientHeight of every scroller, the locations list excepted);
+//   - whether each part that says the state or acts on it -- the chip, the
+//     line, the sentence, a banner, the device limit, notes, an error, the
+//     failover line, the location, the button -- is on screen between the
+//     header and the nav;
+//   - whether any text in those parts, the button row or the summary line
+//     is cut: clipped sideways or ellipsized, or a caution dropped from the
+//     summary line (which shows whole pieces only);
+// and, across the states of one size and language:
+//   - that the foot keeps still: the location card, the button row, the
+//     primary button's top, bottom and starting edge, and the summary line
+//     are in the same place in every state that has them;
+//   - that the map's stage and the mark keep one size and place in every
+//     state with no message to read (a banner, the device limit, an error
+//     make the stage give way), so a brief gap or a longer sentence never
+//     moves or hides them. The failover line that names a country is the
+//     one sustained message that takes room from the stage: the states that
+//     show it are compared with each other.
+// Exits 1 on any failure. Nothing leaves the machine: the preview answers
+// every Tauri call itself.
 //
 //   node scripts/check-phone-fit.mjs [--all] [--json out.json] [--chrome path]
+//                                     [--text-scale 1.15]
 //
 // --all adds the states a phone never shows (Gaming mode and "not confined"
 // are Windows-only); they are reported but not failed on.
+//
+// --text-scale k multiplies every element's font size by k, an
+// approximation of Android's font scale (WebView textZoom) in desktop
+// Chrome -- not a device. Report only: past what the screen holds, the
+// column scrolling is the documented last resort, so it fails nothing.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -64,8 +87,19 @@ const MAIN = [
   "relayConnected",
   "relayUnverified",
   "relayPinned",
+  "crossed",
+  "crossedDegraded",
 ];
 const WINDOWS_ONLY = ["unconfined", "gamingOff", "gamingOn", "gamingUnknown"];
+/** A message to read is on screen: the stage gives way (it keeps its place
+ * and draws nothing), so its size is not compared. */
+const ALERT = new Set(["failed", "slot", "blocked", "ended"]);
+/** No subscription: another foot altogether (no summary line; on the real
+ * screen no location card either). The device limit's card replaces the
+ * button. Neither is compared with the others' foot. */
+const OTHER_FOOT = new Set(["none", "slot"]);
+/** The failover line that names a country: compared among themselves. */
+const CROSSED = new Set(["crossed", "crossedDegraded"]);
 
 function chromePath() {
   if (opt("chrome")) return opt("chrome");
@@ -93,30 +127,133 @@ function freePort() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Whether the page's utility CSS has applied: a run once measured a page
+ * whose `flex` classes computed as blocks. */
+const STYLED = `(() => {
+  const probe = document.createElement('div');
+  probe.className = 'flex items-center';
+  document.body.appendChild(probe);
+  const ok = getComputedStyle(probe).display === 'flex' && getComputedStyle(probe).alignItems === 'center';
+  probe.remove();
+  const pearl = document.querySelector('[data-testid=frame] .nx-hero-copy');
+  return ok && !!pearl && getComputedStyle(pearl).display === 'flex';
+})()`;
+
 const MEASURE = `(() => {
   const frame = document.querySelector('[data-testid=frame]');
   const fb = frame.getBoundingClientRect();
   const vis = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
-  const R = (el) => { const b = el.getBoundingClientRect(); return { t: b.top - fb.top, b: b.bottom - fb.top }; };
+  const R = (el) => {
+    const b = el.getBoundingClientRect();
+    return { t: b.top - fb.top, b: b.bottom - fb.top, l: b.left - fb.left, r: b.right - fb.left, w: b.width, h: b.height };
+  };
+  const rtl = getComputedStyle(frame.querySelector('.nx-app') || frame).direction === 'rtl';
   let overflow = 0;
   for (const el of frame.querySelectorAll('*')) {
     if (el.closest('.nx-loclist')) continue;
     if (!/(auto|scroll)/.test(getComputedStyle(el).overflowY) || !vis(el)) continue;
     overflow = Math.max(overflow, el.scrollHeight - el.clientHeight);
   }
+  const copy = frame.querySelector('.nx-hero-copy');
   const nav = frame.querySelector('.nx-mnav');
   const navTop = vis(nav) ? R(nav).t : fb.height;
+  const head = frame.querySelector('.nx-mhead');
+  const headBottom = vis(head) ? R(head).b : 0;
+  const one = (sel) => [...copy.querySelectorAll(':scope > ' + sel)].find(vis) || null;
   const missing = [];
-  for (const [name, sel] of [['chip', '.nx-chip'], ['line', '.nx-bigrow'], ['location', '.nx-hloc'], ['button', '.nx-actions .nx-btn, .nx-slot .nx-btn']]) {
-    const el = [...frame.querySelectorAll('.nx-hero-copy ' + sel.split(', ').join(', .nx-hero-copy '))].find(vis);
-    if (!el) { missing.push(name + ' missing'); continue; }
+  const required = [['chip', '.nx-chiprow'], ['line', '.nx-bigrow'], ['location', '.nx-hloc'], ['button', '.nx-actions, .nx-slot']];
+  const optional = [['sentence', '.nx-hint'], ['banner', '.nx-banner'], ['slot', '.nx-slot'], ['notes', '.nx-notes'], ['error', '.nx-err'], ['failover', '.nx-sublinebox > .nx-subline']];
+  for (const [name, sel] of [...required, ...optional]) {
+    const el = one(sel);
+    if (!el) {
+      if (required.some(([n]) => n === name)) missing.push(name + ' missing');
+      continue;
+    }
     const r = R(el);
-    if (r.t < 0 || r.b > navTop + 0.5) missing.push(name + ' off screen');
+    if (r.h > 0 && (r.t < headBottom - 0.5 || r.b > navTop + 0.5)) missing.push(name + ' off screen');
   }
-  return { overflow: Math.round(overflow), missing };
+  // Text that is cut: clipped sideways, or ellipsized.
+  const cut = [];
+  const parts = '.nx-chiprow, .nx-bigrow, .nx-hint, .nx-banner, .nx-slot, .nx-notes, .nx-err, .nx-subline, .nx-hloc, .nx-actions, .nx-sumline';
+  for (const box of copy.querySelectorAll(parts)) {
+    for (const el of [box, ...box.querySelectorAll('*')]) {
+      // The screen reader's words are clipped on purpose.
+      if (!vis(el) || el instanceof SVGElement || el.classList.contains('nx-sr') || !(el.textContent || '').trim()) continue;
+      const cs = getComputedStyle(el);
+      const clips = cs.overflowX !== 'visible' || cs.textOverflow === 'ellipsis';
+      if (clips && el.scrollWidth > el.clientWidth + 1) {
+        cut.push((el.className || el.tagName) + ' "' + (el.textContent || '').trim().slice(0, 40) + '"');
+      }
+    }
+  }
+  // The summary line shows whole pieces; one that does not fit drops to a
+  // line the box does not show. A caution (days or data running out) must
+  // never be the one dropped.
+  const dropped = [];
+  const sum = copy.querySelector('.nx-sumline .nx-sum');
+  if (sum && vis(sum)) {
+    const sb = sum.getBoundingClientRect();
+    for (const piece of sum.children) {
+      if (piece.getBoundingClientRect().top >= sb.bottom - 0.5) {
+        dropped.push(piece.className);
+        if (piece.classList.contains('caution') || piece.querySelector('.caution')) cut.push('caution dropped from the summary line: "' + piece.textContent.trim() + '"');
+      }
+    }
+  }
+  const rect = (el) => {
+    if (!el || !vis(el)) return null;
+    const r = R(el);
+    return { t: r.t, b: r.b, s: rtl ? fb.width - r.r : r.l, e: rtl ? fb.width - r.l : r.r };
+  };
+  const actions = one('.nx-actions');
+  const primary = actions ? [...actions.querySelectorAll(':scope > .nx-btn:not(.ghost)')].find(vis) : null;
+  const stageEl = one('.nx-mapstage');
+  const mark = stageEl ? [...stageEl.querySelectorAll('.nx-mark')].find(vis) : null;
+  return {
+    overflow: Math.round(overflow),
+    missing,
+    cut,
+    dropped,
+    // For the JSON: each part's height, to see what took the room.
+    parts: Object.fromEntries([...copy.querySelectorAll(':scope > *, :scope > .nx-sublinebox > *')].filter(vis).map((el) => [String(el.className).split(' ').find((c) => c.startsWith('nx-') && c !== 'nx-glass') || el.tagName, Math.round(R(el).h * 10) / 10])),
+    foot: {
+      location: rect(one('.nx-hloc')),
+      row: rect(actions),
+      primary: primary ? (({ t, b, s }) => ({ t, b, s }))(rect(primary)) : null,
+      summary: rect(one('.nx-sumline')),
+    },
+    stage: stageEl ? (({ t, b }) => ({ t, b }))(rect(stageEl)) : null,
+    mark: mark ? (({ t, s, e }) => ({ t, s, e }))(rect(mark)) : null,
+  };
 })()`;
 
+/** Where two measures of the same part differ by more than half a pixel. */
+function differs(a, b) {
+  if (a === null || b === null) return a !== b;
+  return Object.keys(a).some((k) => Math.abs(a[k] - b[k]) > 0.5);
+}
+const show = (r) => (r === null ? "none" : Object.entries(r).map(([k, v]) => `${k}${Math.round(v)}`).join(" "));
+
 const states = flag("all") ? [...MAIN, ...WINDOWS_ONLY] : MAIN;
+const textScale = Number(opt("text-scale") ?? 1);
+if (!(textScale >= 1 && textScale <= 2)) throw new Error("--text-scale takes a number from 1 to 2.");
+/** Every element's font size times k, as absolute pixels so nothing
+ * compounds; the last scaling undone first, so a part that stays between
+ * states is not scaled twice. */
+const SCALE_TEXT = (k) => `(() => {
+  const els = [...document.querySelectorAll('[data-testid=frame] *')];
+  for (const el of els) {
+    if (el.dataset.fitFz === undefined) continue;
+    el.style.fontSize = el.dataset.fitFz;
+    delete el.dataset.fitFz;
+  }
+  const sizes = els.map((el) => parseFloat(getComputedStyle(el).fontSize));
+  els.forEach((el, i) => {
+    el.dataset.fitFz = el.style.fontSize;
+    el.style.fontSize = sizes[i] * ${k} + 'px';
+  });
+  return true;
+})()`;
 const port = await freePort();
 const server = await createServer({
   root,
@@ -172,6 +309,13 @@ try {
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return el.value === ${JSON.stringify(value)};
     })()`);
+  const styled = async () => {
+    for (let i = 0; i < 40; i++) {
+      if (await ev(STYLED).catch(() => false)) return true;
+      await sleep(250);
+    }
+    return false;
+  };
 
   await send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 1300, deviceScaleFactor: 1, mobile: false });
   await send("Page.navigate", { url: `http://127.0.0.1:${port}/preview.html` });
@@ -180,6 +324,7 @@ try {
     await sleep(250);
   }
   await ev("document.fonts.ready.then(() => true)");
+  if (!(await styled())) throw new Error("The preview's CSS never applied: nothing measured.");
   await choose("theme", "light");
   for (const size of SIZES) {
     if (!(await choose("size", size))) throw new Error(`The preview has no size "${size}".`);
@@ -188,6 +333,11 @@ try {
       for (const state of states) {
         if (!(await choose("scenario", state))) throw new Error(`The preview has no state "${state}".`);
         await sleep(state.startsWith("gaming") ? 900 : 350);
+        if (!(await styled())) throw new Error(`The preview's CSS was not applied at ${size} ${lang} ${state}.`);
+        if (textScale !== 1) {
+          await ev(SCALE_TEXT(textScale));
+          await sleep(200);
+        }
         const m = await ev(MEASURE);
         results.push({ size: size.split(" (")[0], lang, state, ...m, windowsOnly: WINDOWS_ONLY.includes(state) });
       }
@@ -205,21 +355,58 @@ try {
   }
 }
 
+// What moves between states of one size and language.
+const moved = [];
+for (const size of [...new Set(results.map((r) => r.size))]) {
+  for (const lang of LANGS) {
+    const rows = results.filter((r) => r.size === size && r.lang === lang && !r.windowsOnly);
+    const footRows = rows.filter((r) => !OTHER_FOOT.has(r.state));
+    for (const part of ["location", "row", "primary", "summary"]) {
+      const base = footRows.find((r) => r.foot[part] !== null);
+      if (!base) continue;
+      for (const r of footRows) {
+        if (differs(base.foot[part], r.foot[part])) moved.push(`${size} ${lang}: ${part} in ${r.state} (${show(r.foot[part])}) differs from ${base.state} (${show(base.foot[part])})`);
+      }
+    }
+    for (const group of [rows.filter((r) => !ALERT.has(r.state) && !OTHER_FOOT.has(r.state) && !CROSSED.has(r.state)), rows.filter((r) => CROSSED.has(r.state))]) {
+      const [base, ...rest] = group;
+      for (const r of rest) {
+        for (const part of ["stage", "mark"]) {
+          if (differs(base[part], r[part])) moved.push(`${size} ${lang}: ${part} in ${r.state} (${show(r[part])}) differs from ${base.state} (${show(base[part])})`);
+        }
+      }
+    }
+  }
+}
+
 if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify(results, null, 1));
-const failed = results.filter((r) => !r.windowsOnly && (r.overflow > 0 || r.missing.length > 0));
+const failed = results.filter((r) => !r.windowsOnly && (r.overflow > 0 || r.missing.length > 0 || r.cut.length > 0));
 for (const size of [...new Set(results.map((r) => r.size))]) {
   for (const lang of LANGS) {
     const rows = results.filter((r) => r.size === size && r.lang === lang);
     const worst = Math.max(...rows.filter((r) => !r.windowsOnly).map((r) => r.overflow));
-    const bad = rows.filter((r) => r.overflow > 0 || r.missing.length);
+    const bad = rows.filter((r) => r.overflow > 0 || r.missing.length || r.cut.length);
+    const marks = new Set(rows.filter((r) => !r.windowsOnly && !ALERT.has(r.state) && !OTHER_FOOT.has(r.state)).map((r) => (r.mark ? Math.round(r.mark.e - r.mark.s) : 0)));
     console.log(
-      `${size} ${lang}: ${rows.length} states, largest overflow ${worst}px` +
-        (bad.length ? `; ${bad.map((r) => `${r.state}${r.windowsOnly ? " (Windows only)" : ""} ${r.overflow}px ${r.missing.join(" ")}`.trim()).join(", ")}` : ""),
+      `${size} ${lang}: ${rows.length} states, largest overflow ${worst}px, mark ${[...marks].map((s) => (s ? `${s}px` : "hidden")).join(" / ")}` +
+        (bad.length
+          ? `; ${bad.map((r) => `${r.state}${r.windowsOnly ? " (Windows only)" : ""} ${r.overflow}px ${[...r.missing, ...r.cut.map((c) => `cut ${c}`)].join(" ")}`.trim()).join(", ")}`
+          : ""),
     );
   }
 }
-if (failed.length) {
-  console.error(`${failed.length} main-page state(s) do not fit.`);
+for (const line of moved) console.log(`moved: ${line}`);
+if (textScale !== 1) {
+  const scrolls = results.filter((r) => !r.windowsOnly && r.overflow > 0);
+  console.log(
+    `Text at ${textScale}x (an approximation, not a device): ${scrolls.length} of ${results.filter((r) => !r.windowsOnly).length} states scroll in the column` +
+      (scrolls.length ? `: ${scrolls.map((r) => `${r.size} ${r.lang} ${r.state} ${r.overflow}px`).join(", ")}` : "."),
+  );
+  process.exit(0);
+}
+if (failed.length || moved.length) {
+  if (failed.length) console.error(`${failed.length} main-page state(s) do not fit, or cut their text.`);
+  if (moved.length) console.error(`${moved.length} part(s) move or resize with the state.`);
   process.exit(1);
 }
-console.log("Every main-page state fits one screen.");
+console.log("Every main-page state fits one screen, cuts no text, and the foot, the stage and the mark keep still.");
