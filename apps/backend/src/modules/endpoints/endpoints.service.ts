@@ -404,11 +404,15 @@ export class EndpointsService {
 
   /** Stores the server-signed list (/endpoints/bundle2), verbatim.
    *
-   * Held to `publish`'s checks and two more. It carries the statement
+   * Held to `publish`'s checks and three more. It carries the statement
    * clients check it under (`cert`): an offline list belongs at
-   * /endpoints/bundle, which every client reads. And it is version 100 or
+   * /endpoints/bundle, which every client reads. It is version 100 or
    * higher, so it never shares a number with an offline list -- a client
-   * holding offline v8 would refuse a server list that was also v8.
+   * holding offline v8 would refuse a server list that was also v8. And it
+   * is above the offline list too: a client keeps one version number for
+   * both, so once an offline list has been published above the server
+   * list to move clients back to it (docs/reachability.md), a server list
+   * beneath it is one no client holding that list will take.
    */
   async publishServerSigned(signed: string): Promise<{ version: number }> {
     const version = envelopeVersion(signed, { statement: true });
@@ -421,6 +425,13 @@ export class EndpointsService {
     if (version <= state.serverVersion) {
       throw new BadRequestException(
         `Version ${version} is not newer than the published ${state.serverVersion}; clients only accept a strictly higher version.`,
+      );
+    }
+    if (version <= state.version) {
+      // Refused for the reason `publish` refuses an old version: accepted,
+      // it would be a silent no-op.
+      throw new BadRequestException(
+        `Version ${version} is not above the published offline list's ${state.version}; clients holding that list only accept a higher version.`,
       );
     }
     await this.prisma.endpointBundleState.update({

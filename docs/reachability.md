@@ -80,7 +80,9 @@ build. Real domains and addresses never appear here
       # PUT /admin/endpoints/bundle2 {signed}
 
   To move a client that holds a server list back to an offline one,
-  publish the offline list with a version above the server list's.
+  publish the offline list with a version above the server list's. The
+  next server list must then be numbered above that offline list: clients
+  keep one version number for both, and the panel refuses one beneath it.
 - **The statement expires** (at most two years). Vouch again with the
   offline key before it does, or server lists stop being accepted and
   clients fall back to the newest offline list they have fetched (kept
