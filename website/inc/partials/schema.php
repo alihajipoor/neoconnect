@@ -253,6 +253,9 @@ function nx_schema_graph()
 
     if ($page === 'download' || $page === 'home') {
         $apps = array();
+        // The platforms that genuinely ship, and nothing else: macOS and
+        // iOS do not exist and get no node, however much it would pad the
+        // graph.
 
         if (nx_windows_available()) {
             $apps[] = array(
@@ -267,12 +270,7 @@ function nx_schema_graph()
                 // No version number, on purpose and for the same reason the
                 // download page carries none: the URL always resolves to the
                 // current release, and a number here could only go stale.
-                'offers' => nx_free_trial_enabled() ? array(
-                    '@type' => 'Offer',
-                    'price' => '0',
-                    'priceCurrency' => 'USD',
-                    'description' => nx_t('schema.app.trial'),
-                ) : null,
+                'offers' => nx_schema_app_offers(),
             );
         }
 
@@ -286,12 +284,7 @@ function nx_schema_graph()
                 'downloadUrl' => nx_abs_url('download'),
                 'softwareRequirements' => nx_t('download.android.requirements'),
                 'publisher' => array('@id' => $orgId),
-                'offers' => nx_free_trial_enabled() ? array(
-                    '@type' => 'Offer',
-                    'price' => '0',
-                    'priceCurrency' => 'USD',
-                    'description' => nx_t('schema.app.trial'),
-                ) : null,
+                'offers' => nx_schema_app_offers(),
             );
         }
 
@@ -305,6 +298,54 @@ function nx_schema_graph()
     }
 
     return $graph;
+}
+
+/**
+ * What the app costs, as schema.org offers, for both SoftwareApplication
+ * nodes.
+ *
+ * The download itself is free; using the service takes a plan (or the
+ * trial, when the panel grants one). So: the trial as a zero-price Offer
+ * only while free_trial_enabled is on, and the plans as one AggregateOffer
+ * whose low and high prices come from inc/content/plans.php -- the same
+ * file the cards render, so the structured data cannot quote a price the
+ * page does not show. Nothing here invents a rating or a review.
+ *
+ * @return array|null null when there is nothing honest to say
+ */
+function nx_schema_app_offers()
+{
+    $offers = array();
+
+    if (nx_free_trial_enabled()) {
+        $offers[] = array(
+            '@type' => 'Offer',
+            'price' => '0',
+            'priceCurrency' => 'USD',
+            'description' => nx_t('schema.app.trial'),
+            'url' => nx_abs_url('pricing'),
+        );
+    }
+
+    $plans = nx_content('plans');
+    $prices = array();
+    foreach (isset($plans['plans']) ? $plans['plans'] : array() as $plan) {
+        if (empty($plan['coming_soon'])) {
+            $prices[] = (float) $plan['price'];
+        }
+    }
+    if ($prices) {
+        $offers[] = array(
+            '@type' => 'AggregateOffer',
+            'lowPrice' => number_format(min($prices), 2, '.', ''),
+            'highPrice' => number_format(max($prices), 2, '.', ''),
+            'offerCount' => count($prices),
+            'priceCurrency' => 'USD',
+            'url' => nx_abs_url('pricing'),
+        );
+    }
+
+    return $offers ? $offers : null;
 }
 
 /**
