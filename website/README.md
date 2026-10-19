@@ -13,6 +13,67 @@ Marketing, download links, Contact Us, and reseller applications. It is not a
 customer portal: signup, login, purchase and support all happen inside the
 native apps, so there is no auth, no account area and no session state here.
 
+## The 2026-10 redesign: pearl glass
+
+The site wears the look the apps are moving to (owner-approved 2026-10-18):
+pearl light by default, "smoked" dark when the visitor's system asks for it,
+cobalt for the one primary action, frosted glass only for floating controls
+(the header, the app illustration, the form cards), the app's tagline
+("Your internet. / Without limits."), and the app's dotted world map with a
+light on each country that has servers. Every colour is the app's own token
+(`assets/css/base.css` lists them; they come from the app's
+`design-system.md`). **Not deployed** -- it is on `claude/website-redesign`
+for the owner to look at first.
+
+Two honesty notes that come with it:
+
+- The hero illustration shows the **redesigned** app. It is labelled as an
+  illustration with an example time, but until the app redesign ships the
+  picture is ahead of the product. Ship the two together, or not this part.
+- The map lights here say only "there are servers in this country" and
+  "the relay enters here". They never blink: on a website there is no
+  evidence about the visitor's network to light anything with.
+
+### Performance, measured not assumed
+
+- **No render-blocking request.** Each page's CSS (`assets/css/base.css` +
+  `blocks.css` + the page's own module) is read by `head.php`, stripped of
+  comments and inlined in one `<style>`. There is no stylesheet link.
+- **At most two font files, preloaded per locale**: Inter Tight + Inter on
+  English pages, Vazirmatn alone on Persian ones (see
+  `assets/fonts/README.txt`). `font-display: swap`, with metric-matched
+  local fallbacks so the swap does not move anything.
+- **One tiny inline script** (the "loader") flips `no-js` to `js` before the
+  first paint and adds `assets/js/site.js` asynchronously. Nothing on the
+  site needs JavaScript.
+- **No raster image on any page.** The art is HTML, CSS and one SVG (the
+  map, used as a CSS mask, one cached request for the whole site).
+
+Lighthouse on a local preview, mobile and desktop, English and Persian,
+scored 100 in all four categories on the main pages -- the numbers and
+reports are in the branch's write-up, not here, because they go stale.
+
+### Security headers
+
+`inc/headers.php` sends the full set from PHP on **every** response,
+including redirects, the sitemap and the 404: HSTS (two years,
+`includeSubDomains`, preload-ready -- actually submitting to the preload
+list is a separate, near-irreversible decision for the owner),
+`X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options: DENY`,
+`Permissions-Policy`, `Cross-Origin-Opener-Policy` and
+`Cross-Origin-Resource-Policy`, and a Content-Security-Policy with **no**
+`'unsafe-inline'` and **no** `'unsafe-eval'`: the inline stylesheet and the
+loader are each allowed by their SHA-256, computed from the exact bytes the
+page emits, plus `'strict-dynamic'`, `object-src 'none'`,
+`base-uri 'none'`, `frame-ancestors 'none'`.
+
+Because PHP sends them, a missed server-config install no longer leaves
+the pages bare (which is what happened for months). The nginx example adds
+the same fixed set to static files and hides PHP's copies so nothing is
+sent twice; the CSP stays PHP's alone (a second, static CSP would be
+enforced too and block the page's own CSS). `.htaccess` does the same for
+Apache.
+
 ## Before it goes live
 
 Four things need a decision from you. The site runs without them, but it will
@@ -143,6 +204,22 @@ redeploying never overwrites what people have already sent you.
 
 Requirements on the host: PHP 7.4 or newer. That is the whole list.
 
+The script uses `zip` when it exists, then Python's zipfile, then Node
+(`scripts/make-zip.mjs`) -- the owner's Windows PC has only the last. All
+three write forward-slash entry names and exclude the same files.
+
+### Previewing on a machine with no PHP
+
+The owner's PC has no PHP binary, and Smart App Control may block a freshly
+downloaded native one. PHP compiled to WebAssembly runs fine: install
+`@php-wasm/node` and `@php-wasm/universal` (npm, 3.x) in a scratch folder
+and serve the site through a small Node HTTP server that runs each `.php`
+request in the PHP 7.4 runtime (the host's minimum) and mirrors the nginx
+routing -- real 404s, `/sitemap.xml`, `/r/CODE`, trailing-slash 301s. Two
+quirks of that runtime, neither a site bug: `flock()` fails on a
+host-mounted folder (mount `data/` in memory or the forms report a storage
+failure), and `mail()` does nothing.
+
 ## Where form submissions go
 
 Both forms store **first**, then email:
@@ -156,6 +233,8 @@ access outright — two independent layers, because a shared host that quietly
 ignores `.htaccess` should not be able to leak anyone's message.
 
 > **The live host is one of those, and it is not shared hosting.**
+> (Since the 2026-10 redesign PHP sends the security headers itself --
+> see *Security headers* above -- but the rest of this stands.)
 > neoxify.net is served by nginx, which never reads `.htaccess` at all —
 > so on the live site the guard line is the *only* layer, and the CSP,
 > the other security headers, `ErrorDocument 404` and the `/r/CODE`
@@ -203,7 +282,9 @@ Spam protection is a honeypot field, a minimum fill time, and a per-IP rate
 limit. No CAPTCHA: reCAPTCHA is a blocked third-party request for much of this
 audience, and asking Iranian users to solve one is a bad trade.
 
-The site sets **no cookies at all**, which is why there is no cookie banner.
+The site sets no tracking cookies, which is why there is no cookie banner
+(the one cookie remembers a language someone chose; see *Automatic
+language*).
 CSRF uses a self-contained HMAC token instead of a PHP session. IP addresses
 are stored only as salted hashes.
 
@@ -222,11 +303,20 @@ inc/content/plans.php                             prices — must match the pane
 inc/content/{faq,locations,protocols}.php         the rest of the data-shaped copy
 inc/pages/                                        page templates, shared by locale
 inc/partials/                                     head, header, footer, form fields,
-                                                  locations-grid, protocol-table, schema
+                                                  locations-grid, protocol-table, schema,
+                                                  plan-cards, instrument, cta-band
 inc/{form,security}.php                           validate → store → mail
-assets/                                           css, js, fonts, favicon, OG card
+inc/headers.php                                   security headers and the CSP
+assets/css/{base,blocks,home,forms}.css           inlined per page by head.php
+assets/js/site.js                                 enhancement only, loaded async
+assets/fonts/  assets/map/  assets/img/           fonts, the dotted world, icons and
+                                                  the two social cards
 scripts/check-site.php                            pre-deploy check, run it
-scripts/make-og-image.py                          regenerates the social card
+scripts/make-fonts.mjs                            rebuilds the font subsets
+scripts/make-og-image.mjs                         renders the social cards (Chrome)
+scripts/make-icons.py                             the raster icons, from brand/
+scripts/make-zip.{py,mjs}                         zip fallbacks for make-zip.sh
+data/                                             runtime only, never committed
 data/                                             runtime only, never committed
 ```
 
@@ -248,7 +338,13 @@ php scripts/check-site.php
 Renders all eighteen pages through the same include path a real request takes
 and fails on anything that should never reach a visitor — a missing
 translation key rendering as `⟪key⟫`, a duplicate title, an over-long meta
-description. It exists because `<title>⟪meta.delete-account.title⟫` was served
+description, a missing hreflang or social card, a second inline script or
+style (the CSP would block it), a stylesheet link (render-blocking), a
+request to another origin, a preloaded font the CSS does not use -- and
+**where each form posts**: contact, reseller and delete-account must post to
+their own page in their own language, written out literally in the check.
+`--html <dir>` checks pages already rendered into a folder, for a machine
+whose PHP cannot spawn a child process (the WebAssembly one). It exists because `<title>⟪meta.delete-account.title⟫` was served
 on two pages in both languages for months: nothing was ever looking at a
 rendered page. Exit code 0 or 1, so it can gate a deploy.
 
@@ -283,21 +379,29 @@ in a Persian sentence as "GB 30".
   is local, including the typeface. The audience is largely on networks where
   a third-party request is slow at best and blocked at worst, and a blocked
   font is a visibly broken page.
-- **Typeface: Vazirmatn**, self-hosted in `assets/fonts/` as a single variable
-  woff2 (~110KB) covering weights 100–900 for both languages. SIL OFL — the
-  licence ships beside it and must stay there. It is preloaded in `head.php`
-  with a URL that deliberately carries no `?v=` stamp, so it matches the
-  `@font-face` request exactly and isn't downloaded twice.
-- **Claims stay honest even in illustrations.** The hero mockup is drawn from
-  the real desktop app, and the macOS and phone frames carry visible "Soon"
-  badges because those clients don't exist yet. The encryption diagram stops
-  the protected leg at our servers rather than running it to the destination.
-- **No inline styles or scripts.** The CSP in `.htaccess` has no
-  `'unsafe-inline'`. Use the utility classes at the bottom of
-  `assets/css/site.css`.
+- **Typefaces: the app's own.** Inter and Inter Tight on English pages,
+  Vazirmatn on Persian ones, subset and self-hosted in `assets/fonts/`,
+  SIL OFL with the licences beside them. Preloaded in `head.php` with URLs
+  that carry no `?v=` stamp (the version is in the file name), so they
+  match the `@font-face` requests exactly. See `assets/fonts/README.txt`.
+- **The map is the app's**, Natural Earth (public domain) via world-atlas
+  (ISC). `assets/map/LICENSE.txt` must stay beside `world-map.svg`.
+- **Claims stay honest even in illustrations.** The hero illustration is the
+  app drawn in HTML from its own tokens, captioned as an illustration with an
+  example time, and it only names a place and a method the content files
+  list. The map's lights never blink. The encryption diagram stops the
+  protected leg at our servers rather than running it to the destination.
+- **No `style=""` attributes and no extra inline scripts.** The CSP allows
+  exactly one inline `<style>` (the page's inlined CSS) and one inline script
+  (the loader in `head.php`), each by its SHA-256, which `head.php` computes
+  from what it emits. Anything else inline renders locally and is blocked in
+  production; `check-site.php` fails on it. Use the utility classes at the
+  bottom of `assets/css/base.css`.
 - **Direction-agnostic CSS.** Layout uses logical properties
   (`margin-inline`, `inset-inline`), so Persian mirrors from `<html dir="rtl">`
-  alone. There is no second RTL stylesheet. Avoid `left`/`right`.
+  alone. There is no second RTL stylesheet. Avoid `left`/`right` -- except
+  for the map and its lights, which are geography and never mirror, and the
+  glass rim, which is lit from the physical top left like the app's.
 - **PHP 7.4-compatible.** No `match`, no `?->`, no `str_contains`, no named
   arguments — the shared host decides the version, not us.
 - **Honest copy.** No server counts, uptime percentages, user numbers, or
