@@ -9,10 +9,13 @@ import { describe, expect, it } from "vitest";
 describe("the portal's entry", () => {
   const main = readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
 
-  it("starts the effects before anything renders", () => {
-    const started = main.search(/^startEffects\(\);$/m);
+  it("starts the effects before anything renders, and only outside a frame", () => {
+    const started = main.search(/^\s*startEffects\(\);$/m);
     expect(started).toBeGreaterThanOrEqual(0);
     expect(main).toMatch(/import \{ startEffects \} from "@shared\/lib\/effects";/);
     expect(started).toBeLessThan(main.indexOf(".render("));
+    // Inside the frame guard's other branch (frame-guard.ts): nothing of
+    // the app runs inside another site's frame.
+    expect(started).toBeGreaterThan(main.indexOf("} else {", main.indexOf("if (isFramed())")));
   });
 });

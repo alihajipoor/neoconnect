@@ -1,0 +1,962 @@
+/* Pearl Glass, for the portal's sign-in screens.
+
+   The look the owner approved for the apps on 2026-10-18/19 (the design
+   system's tokens, section 2; the sign-in screen, 4.14), here on the
+   web: a pearl canvas with the dotted world map, a strong-glass card,
+   cobalt for the one primary action, Inter for Latin and Vazirmatn for
+   Persian. Light by default; dark follows the system.
+
+   Self-contained on purpose. The account screens behind sign-in still
+   import the apps' theme.css, and that file is being rewritten on the
+   redesign branch, so nothing here reads its tokens: every value is a
+   --pa-* token of this file. The old token names are re-pointed below
+   only so that the few shared pieces drawn inside the card (the social
+   sign-in block, the recovery code, the still-trying line) take these
+   colours instead of the old violet.
+
+   Everything is self-hosted. No font, image or script on this page
+   comes from another host: on the networks much of this audience is on,
+   a third-party request is slow at best and blocked at worst. */
+
+/* --- Fonts ------------------------------------------------------------
+   SIL OFL; the licences ship at /account/licenses/. Split by
+   unicode-range, so the Latin-extended file is only fetched when such a
+   character is on screen. Vazirmatn is declared in index.css. */
+@font-face {
+  font-family: "Inter";
+  src: url("./assets/Inter-latin-wght.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("./assets/Inter-latin-ext-wght.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Inter Tight";
+  src: url("./assets/InterTight-latin-wght.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* --- Tokens: Pearl ----------------------------------------------------- */
+html[data-surface="auth"] {
+  color-scheme: light;
+  --pa-pearl: #f8f9fc;
+  --pa-ink: #090b10;
+  --pa-ink-2: #4a5264;
+  --pa-cobalt: #1045ff;
+  --pa-cobalt-hover: #0737e8;
+  --pa-cobalt-ink: #0b3be0;
+  --pa-on-cobalt: #ffffff;
+  --pa-cobalt-shadow: rgba(16, 69, 255, 0.42);
+  --pa-select: rgba(50, 103, 255, 0.1);
+  --pa-hairline: rgba(32, 48, 80, 0.08);
+  --pa-hairline-2: rgba(32, 48, 80, 0.15);
+  /* A field's fill, and an outline at 3.4:1 against the card: the edge of
+     a control has to be findable (WCAG 1.4.11), not only its label. */
+  --pa-field: rgba(255, 255, 255, 0.78);
+  --pa-field-line: #7a8497;
+  --pa-placeholder: #5d6678;
+  --pa-chip: rgba(255, 255, 255, 0.62);
+  --pa-glass: rgba(255, 255, 255, 0.7);
+  --pa-glass-solid: rgba(248, 249, 252, 0.96);
+  --pa-sheen-a: rgba(255, 255, 255, 0.3);
+  --pa-sheen-b: rgba(255, 255, 255, 0.06);
+  --pa-rim-a: rgba(255, 255, 255, 0.95);
+  --pa-rim-b: rgba(255, 255, 255, 0.25);
+  --pa-edge: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 0 0 1px rgba(32, 48, 80, 0.05);
+  --pa-drop: 0 1px 2px rgba(20, 30, 60, 0.05), 0 22px 44px -22px rgba(20, 40, 90, 0.28);
+  --pa-focus: #0b3be0;
+  --pa-focus-halo: rgba(255, 255, 255, 0.95);
+  --pa-ok-ink: #0b3be0;
+  --pa-ok-tint: rgba(50, 103, 255, 0.12);
+  --pa-danger-ink: #a8231a;
+  --pa-danger-tint: rgba(208, 44, 31, 0.1);
+  --pa-muted-tint: rgba(80, 90, 110, 0.1);
+  --pa-gm-glass-a: rgba(255, 255, 255, 0.72);
+  --pa-gm-glass-b: rgba(206, 217, 235, 0.34);
+  --pa-gm-dot: #9aabc8;
+  --pa-gm-edge: rgba(74, 90, 122, 0.32);
+  --pa-gm-shadow: rgba(18, 24, 40, 0.28);
+  --pa-gm-core: 0.62;
+  --pa-field-focus: rgba(16, 69, 255, 0.22);
+
+  --pa-font: "Inter", "Vazirmatn", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --pa-font-display: "Inter Tight", "Inter", "Vazirmatn", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --pa-font-fa: "Vazirmatn", "Inter", Tahoma, system-ui, sans-serif;
+  --pa-spring: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* The shared pieces inside the card read these names. */
+  --background: var(--pa-bg);
+  --foreground: var(--pa-ink);
+  --card: var(--pa-pearl);
+  --card-foreground: var(--pa-ink);
+  --muted-foreground: var(--pa-ink-2);
+  --primary: var(--pa-cobalt);
+  --primary-foreground: var(--pa-on-cobalt);
+  --highlight: var(--pa-cobalt-hover);
+  --destructive: var(--pa-danger-ink);
+  --success: var(--pa-ok-ink);
+  --border: var(--pa-hairline-2);
+  --input: var(--pa-field-line);
+  --ring: var(--pa-cobalt);
+}
+
+/* --- Tokens: Smoked, when the system is dark --------------------------- */
+@media (prefers-color-scheme: dark) {
+  html[data-surface="auth"] {
+    color-scheme: dark;
+    --pa-pearl: #121620;
+    --pa-ink: #eef1f7;
+    --pa-ink-2: #a9b2c4;
+    --pa-cobalt: #2f5eff;
+    --pa-cobalt-hover: #4a72ff;
+    --pa-cobalt-ink: #93b0ff;
+    --pa-cobalt-shadow: rgba(47, 94, 255, 0.5);
+    --pa-select: rgba(80, 124, 255, 0.16);
+    --pa-hairline: rgba(255, 255, 255, 0.08);
+    --pa-hairline-2: rgba(255, 255, 255, 0.14);
+    --pa-field: rgba(255, 255, 255, 0.05);
+    --pa-field-line: #6e788c;
+    --pa-placeholder: #9aa3b5;
+    --pa-chip: rgba(255, 255, 255, 0.07);
+    --pa-glass: rgba(22, 27, 39, 0.78);
+    --pa-glass-solid: rgba(17, 21, 30, 0.97);
+    --pa-sheen-a: rgba(255, 255, 255, 0.06);
+    --pa-sheen-b: rgba(255, 255, 255, 0.01);
+    --pa-rim-a: rgba(255, 255, 255, 0.3);
+    --pa-rim-b: rgba(255, 255, 255, 0.04);
+    --pa-edge: inset 0 1px 0 rgba(255, 255, 255, 0.07), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+    --pa-drop: 0 1px 2px rgba(0, 0, 0, 0.4), 0 24px 48px -22px rgba(0, 0, 0, 0.7);
+    --pa-focus: #ffffff;
+    --pa-focus-halo: rgba(8, 10, 16, 0.95);
+    --pa-ok-ink: #a7beff;
+    --pa-ok-tint: rgba(80, 124, 255, 0.18);
+    --pa-danger-ink: #f79a90;
+    --pa-danger-tint: rgba(242, 107, 94, 0.14);
+    --pa-muted-tint: rgba(150, 160, 180, 0.13);
+    --pa-gm-glass-a: rgba(214, 226, 255, 0.24);
+    --pa-gm-glass-b: rgba(110, 130, 180, 0.08);
+    --pa-gm-dot: #46557a;
+    --pa-gm-edge: rgba(190, 205, 240, 0.32);
+    --pa-gm-shadow: rgba(0, 0, 0, 0.5);
+    --pa-gm-core: 0.68;
+    --pa-field-focus: rgba(91, 131, 255, 0.4);
+  }
+}
+
+/* --- The page ----------------------------------------------------------- */
+/* The canvas itself is scene.css, inlined into the page. */
+html[data-surface="auth"] body {
+  color: var(--pa-ink);
+  /* The apps' theme turns selection off for a native window; a web page
+     should let someone copy an error to send to support. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+/* The old theme's violet wash: not on this surface. */
+html[data-surface="auth"] body::before {
+  content: none;
+}
+
+
+.pa {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--pa-font);
+  color: var(--pa-ink);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+/* Vazirmatn sets smaller than Inter at the same size: Persian runs a
+   step up throughout (design-system.md 2.5), with taller lines and never
+   letter-spacing. */
+html[lang="fa"] .pa {
+  font-family: var(--pa-font-fa);
+  font-size: 15.5px;
+}
+html[lang="fa"] :is(.pa-label, .pa-link, .pa-switch, .pa-msg) {
+  font-size: 14.5px;
+}
+html[lang="fa"] :is(.pa-lead, .pa-btn) {
+  font-size: 16px;
+}
+html[lang="fa"] :is(.pa-hint, .pa-fine, .pa-foot, .pa .pa-note) {
+  font-size: 13.5px;
+}
+/* An address or code is typed left to right in either language; a Persian
+   placeholder in such a field still reads right to left until something
+   is typed. */
+html[dir="rtl"] .pa-input[dir="ltr"]:placeholder-shown {
+  direction: rtl;
+}
+/* For a moment on the way to a signed-in account: nothing but the canvas. */
+.pa[data-screen="loading"] :is(.pa-top, .pa-hero, .pa-foot) {
+  visibility: hidden;
+}
+
+.pa-sr {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --- Focus: a two-tone ring, visible on glass, map and cobalt alike ----- */
+.pa :is(a, button, input):focus-visible {
+  outline: 2px solid transparent;
+  box-shadow:
+    0 0 0 2px var(--pa-focus-halo),
+    0 0 0 4px var(--pa-focus);
+}
+
+/* --- Header ------------------------------------------------------------- */
+.pa-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px clamp(16px, 4vw, 44px);
+}
+.pa-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px;
+  margin: -6px;
+  border-radius: 12px;
+  color: var(--pa-ink);
+  text-decoration: none;
+}
+.pa-brand-mark {
+  width: 28px;
+  height: 28px;
+  flex: none;
+}
+/* The wordmark is the brand and stays Latin in both languages. */
+.pa-word {
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-weight: 500;
+  font-size: 16px;
+  line-height: 1;
+  letter-spacing: 0.42em;
+  margin-inline-end: -0.42em;
+  text-transform: uppercase;
+}
+
+.pa-lang {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--pa-chip);
+  box-shadow: var(--pa-edge), 0 1px 2px rgba(20, 30, 60, 0.05);
+}
+.pa-lang button {
+  min-height: 38px;
+  min-width: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--pa-ink-2);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1;
+}
+.pa-lang button[lang="fa"] {
+  font-family: var(--pa-font-fa);
+  font-size: 14px;
+}
+.pa-lang button[aria-pressed="true"] {
+  background: var(--pa-pearl);
+  color: var(--pa-ink);
+  box-shadow:
+    0 1px 2px rgba(20, 30, 60, 0.08),
+    inset 0 0 0 1px var(--pa-hairline);
+}
+.pa-lang button:hover:not([aria-pressed="true"]) {
+  color: var(--pa-ink);
+}
+
+/* --- Main: hero and card ------------------------------------------------ */
+.pa-main {
+  flex: 1;
+  display: grid;
+  align-items: center;
+  justify-items: center;
+  gap: 20px;
+  width: 100%;
+  max-width: 1180px;
+  margin-inline: auto;
+  padding: 4px clamp(16px, 4vw, 44px) 20px;
+}
+.pa-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+}
+.pa-gm {
+  display: block;
+  width: 64px;
+  height: 64px;
+  overflow: visible;
+}
+.pa-tag {
+  margin: 0;
+  font-family: var(--pa-font-display);
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1.02;
+  font-size: clamp(30px, 8.6vw, 40px);
+}
+.pa-tag span {
+  display: block;
+  white-space: nowrap;
+}
+html[lang="fa"] .pa-tag {
+  font-family: var(--pa-font-fa);
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1.3;
+  font-size: clamp(27px, 7.6vw, 36px);
+}
+.pa-tag-wide,
+.pa-lede {
+  display: none;
+}
+.pa-lede {
+  margin: 0;
+  max-width: 34ch;
+  color: var(--pa-ink-2);
+  font-size: 16px;
+  line-height: 1.55;
+}
+html[lang="fa"] .pa-lede {
+  line-height: 1.9;
+}
+
+/* Wide: the tagline beside the card, as in the apps' main page. */
+@media (min-width: 900px) {
+  .pa-main {
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 424px);
+    gap: clamp(32px, 5vw, 80px);
+    padding-bottom: 32px;
+  }
+  .pa-hero {
+    justify-self: stretch;
+    align-items: flex-start;
+    text-align: start;
+    gap: 20px;
+  }
+  .pa-gm {
+    width: clamp(140px, 15vw, 210px);
+    height: auto;
+    aspect-ratio: 1;
+    margin-inline-start: -8px;
+  }
+  .pa-tag-phone {
+    display: none;
+  }
+  .pa-tag-wide,
+  .pa-lede {
+    display: block;
+  }
+  .pa-tag {
+    font-size: clamp(42px, 5vw, 68px);
+    line-height: 0.98;
+    letter-spacing: -0.045em;
+  }
+  html[lang="fa"] .pa-tag {
+    font-size: clamp(36px, 4.3vw, 60px);
+    line-height: 1.28;
+  }
+}
+
+/* --- The card: strong glass over the map --------------------------------- */
+.pa-card {
+  position: relative;
+  width: 100%;
+  max-width: 424px;
+  border-radius: 22px;
+  padding: 26px clamp(18px, 5vw, 30px) 24px;
+  background: var(--pa-glass-solid);
+  box-shadow: var(--pa-edge), var(--pa-drop);
+}
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .pa-card {
+    background: linear-gradient(var(--pa-sheen-a), var(--pa-sheen-b)), var(--pa-glass);
+    /* Literal values: older WebKit ignores var() here. */
+    -webkit-backdrop-filter: blur(24px) saturate(130%);
+    backdrop-filter: blur(24px) saturate(130%);
+  }
+}
+/* The rim: light from the top left. Physical, not mirrored in RTL. */
+.pa-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  background: linear-gradient(150deg, var(--pa-rim-a), var(--pa-rim-b) 38%, transparent 60%, var(--pa-rim-b));
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+.pa-step {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: pa-rise 520ms var(--pa-spring) both;
+}
+.pa-hero {
+  animation: pa-rise 640ms var(--pa-spring) both;
+}
+@keyframes pa-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.pa-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pa-title {
+  margin: 0;
+  font-family: var(--pa-font-display);
+  font-weight: 650;
+  font-size: 25px;
+  line-height: 1.18;
+  letter-spacing: -0.025em;
+}
+.pa-lead {
+  margin: 0;
+  color: var(--pa-ink-2);
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+html[lang="fa"] .pa-title {
+  font-family: var(--pa-font-fa);
+  font-weight: 700;
+  font-size: 23px;
+  line-height: 1.45;
+  letter-spacing: 0;
+}
+html[lang="fa"] .pa-lead {
+  line-height: 1.8;
+}
+.pa-strong {
+  color: var(--pa-ink);
+  font-weight: 600;
+}
+
+/* --- Fields -------------------------------------------------------------- */
+.pa-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0;
+}
+.pa-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pa-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--pa-ink);
+}
+html[lang="fa"] .pa-label {
+  line-height: 1.6;
+}
+.pa-input {
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  border: 1px solid var(--pa-field-line);
+  border-radius: 14px;
+  background: var(--pa-field);
+  color: var(--pa-ink);
+  /* 16px: anything smaller makes iOS zoom the page on focus. */
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.2;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease;
+}
+.pa-input::placeholder {
+  color: var(--pa-placeholder);
+  opacity: 1;
+}
+.pa-input:hover {
+  border-color: var(--pa-ink-2);
+}
+/* A field takes focus as a cobalt edge and a soft halo: plain to see, and
+   calmer than the two-tone ring the buttons wear. */
+.pa .pa-input:focus,
+.pa .pa-input:focus-visible {
+  outline: 2px solid transparent;
+  border-color: var(--pa-cobalt);
+  background: var(--pa-pearl);
+  box-shadow: 0 0 0 3px var(--pa-field-focus);
+}
+/* Addresses and codes are Latin and typed left-to-right in both
+   languages (dir="ltr" on the field); the field itself sits where the
+   layout puts it. */
+.pa-code {
+  font-family: "Inter", ui-monospace, system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
+  letter-spacing: 0.4em;
+  text-align: center;
+  padding-inline-start: calc(14px + 0.4em);
+}
+.pa-mono {
+  font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.06em;
+}
+.pa-hint {
+  margin: 0;
+  color: var(--pa-ink-2);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+html[lang="fa"] .pa-hint {
+  line-height: 1.7;
+}
+
+.pa-pw {
+  position: relative;
+}
+.pa-pw .pa-input {
+  padding-inline-end: 52px;
+}
+.pa-eye {
+  position: absolute;
+  inset-block: 4px;
+  inset-inline-end: 4px;
+  width: 42px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--pa-ink-2);
+}
+.pa-eye:hover {
+  color: var(--pa-ink);
+  background: var(--pa-select);
+}
+.pa-eye svg {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.7;
+}
+
+/* --- Buttons -------------------------------------------------------------- */
+.pa-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 50px;
+  margin-top: 2px;
+  padding: 0 22px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--pa-cobalt);
+  color: var(--pa-on-cobalt);
+  font: inherit;
+  font-size: 15.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  box-shadow: 0 12px 26px -12px var(--pa-cobalt-shadow);
+  transition:
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 300ms var(--pa-spring);
+}
+.pa-btn:hover:not(:disabled) {
+  background: var(--pa-cobalt-hover);
+  box-shadow: 0 14px 30px -12px var(--pa-cobalt-shadow);
+}
+.pa-btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+.pa-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+  box-shadow: none;
+}
+.pa-btn[aria-busy="true"] {
+  cursor: progress;
+}
+.pa-spin {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.38);
+  border-top-color: #ffffff;
+  animation: pa-spin 0.8s linear infinite;
+}
+@keyframes pa-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+.pa-btn-2 {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 18px;
+  border: 1px solid var(--pa-hairline-2);
+  border-radius: 999px;
+  background: var(--pa-chip);
+  color: var(--pa-ink);
+  font: inherit;
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.pa-btn-2:hover {
+  border-color: var(--pa-field-line);
+}
+
+.pa-link {
+  display: inline;
+  padding: 2px 2px;
+  margin: -2px -2px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--pa-ink-2);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.pa-link:hover:not(:disabled) {
+  color: var(--pa-ink);
+}
+.pa-link:disabled {
+  opacity: 0.6;
+}
+.pa-link-strong {
+  color: var(--pa-cobalt-ink);
+  font-weight: 600;
+}
+.pa-link-strong:hover:not(:disabled) {
+  color: var(--pa-cobalt-ink);
+  text-decoration-thickness: 2px;
+}
+.pa-after {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  text-align: center;
+}
+.pa-switch {
+  margin: 0;
+  color: var(--pa-ink-2);
+  font-size: 13.5px;
+}
+
+/* --- Messages ------------------------------------------------------------- */
+.pa-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+html[lang="fa"] .pa-msg {
+  line-height: 1.75;
+}
+.pa-msg p {
+  margin: 0;
+}
+.pa-msg-icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin-top: 1px;
+  stroke-width: 1.8;
+}
+html[lang="fa"] .pa-msg-icon {
+  margin-top: 4px;
+}
+.pa-msg[data-tone="danger"] {
+  background: var(--pa-danger-tint);
+  color: var(--pa-danger-ink);
+}
+.pa-msg[data-tone="ok"] {
+  background: var(--pa-ok-tint);
+  color: var(--pa-ok-ink);
+}
+.pa-msg[data-tone="neutral"] {
+  background: var(--pa-muted-tint);
+  color: var(--pa-ink-2);
+}
+.pa .pa-note {
+  margin: 0;
+  color: var(--pa-ink-2);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: center;
+}
+.pa-fine {
+  margin: 0;
+  color: var(--pa-ink-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+html[lang="fa"] .pa-fine {
+  line-height: 1.8;
+}
+
+/* --- Shared pieces drawn inside the card ------------------------------------
+   The recovery code and the social sign-in block are the apps' own
+   components, written for the old dark theme with a few white-on-dark
+   classes. Re-coloured here by those exact class names, inside the card
+   only, so they read on pearl without touching the shared files. */
+.pa-card .border-white\/10,
+.pa-card .border-white\/12 {
+  border-color: var(--pa-hairline-2);
+}
+.pa-card .bg-black\/20 {
+  background: var(--pa-field);
+  border: 1px solid var(--pa-field-line);
+  color: var(--pa-ink);
+}
+.pa-card .bg-white\/\[0\.04\] {
+  background: var(--pa-chip);
+}
+.pa-card .border-white\/25 {
+  border-color: var(--pa-hairline-2);
+}
+.pa-card .border-t-white\/80 {
+  border-top-color: var(--pa-ink-2);
+}
+/* RecoveryCodeNotice draws its own title (icon and "Your recovery code")
+   as its first row. On the portal the card's heading says it
+   (RecoveryStep), so that row is left out -- display:none keeps it from
+   being read out a second time, too. The shape this relies on is pinned
+   by auth-screens.test.tsx. */
+.pa-recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.pa-recovery > .flex-col > :first-child {
+  display: none;
+}
+
+/* --- Footer -------------------------------------------------------------- */
+.pa-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 20px;
+  padding: 10px 16px 18px;
+  font-size: 13px;
+}
+.pa-foot a {
+  color: var(--pa-ink-2);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  border-radius: 6px;
+  padding: 2px;
+}
+.pa-foot a:hover {
+  color: var(--pa-ink);
+}
+
+/* --- The glass mark -------------------------------------------------------- */
+.pa-gm .pa-gm-glass-a {
+  stop-color: var(--pa-gm-glass-a);
+}
+.pa-gm .pa-gm-glass-b {
+  stop-color: var(--pa-gm-glass-b);
+}
+.pa-gm .pa-gm-dot {
+  fill: var(--pa-gm-dot);
+}
+.pa-gm .pa-gm-shadow {
+  stop-color: var(--pa-gm-shadow);
+}
+.pa-gm .pa-gm-floor {
+  opacity: 0.6;
+}
+.pa-gm .pa-gm-refract {
+  opacity: 0.6;
+}
+.pa-gm .pa-gm-core {
+  opacity: var(--pa-gm-core);
+}
+.pa-gm .pa-gm-band {
+  opacity: 0.55;
+}
+.pa-gm .pa-gm-edge {
+  stroke: var(--pa-gm-edge);
+}
+.pa-gm .pa-gm-rim {
+  stroke: var(--pa-rim-a);
+  opacity: 0.9;
+}
+.pa-gm .pa-gm-streak {
+  stroke: #ffffff;
+  opacity: 0.7;
+}
+.pa-gm .pa-gm-glint {
+  fill: #ffffff;
+  opacity: 0.85;
+}
+
+/* --- Phones: the card is the page, and it fits one screen ------------------- */
+@media (max-width: 899px) {
+  .pa-top {
+    padding-block: 12px;
+  }
+}
+@media (max-width: 899px) and (max-height: 820px) {
+  .pa-tag {
+    display: none;
+  }
+  .pa-gm {
+    width: 52px;
+    height: 52px;
+  }
+}
+@media (max-width: 899px) and (max-height: 700px) {
+  .pa-hero {
+    display: none;
+  }
+  .pa-top {
+    padding-block: 10px;
+  }
+  .pa-card {
+    padding-block: 20px 18px;
+  }
+  .pa-step,
+  .pa-form {
+    gap: 12px;
+  }
+  .pa-input {
+    height: 46px;
+  }
+  .pa-btn {
+    min-height: 48px;
+  }
+  .pa-title {
+    font-size: 23px;
+  }
+  .pa-foot {
+    padding-block: 6px 12px;
+  }
+}
+
+/* --- Preferences ------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .pa-step,
+  .pa-hero {
+    animation: none;
+  }
+  .pa-spin {
+    animation: none;
+  }
+  .pa-btn,
+  .pa-input {
+    transition: none;
+  }
+  .pa-btn:active:not(:disabled) {
+    transform: none;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .pa-card {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    background: var(--pa-glass-solid) !important;
+  }
+}
+@media (prefers-contrast: more) {
+  html[data-surface="auth"] {
+    --pa-ink-2: var(--pa-ink);
+    --pa-field-line: var(--pa-ink);
+  }
+  .pa-card {
+    box-shadow:
+      inset 0 0 0 1px var(--pa-ink),
+      var(--pa-drop);
+  }
+}
+@media (forced-colors: active) {
+  .pa-scene,
+  .pa-gm,
+  .pa-card::before {
+    display: none;
+  }
+  .pa-card {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: Canvas;
+    border: 1px solid CanvasText;
+  }
+  .pa-btn {
+    border: 1px solid ButtonText;
+  }
+  .pa :is(a, button, input):focus-visible {
+    outline: 2px solid Highlight;
+  }
+}

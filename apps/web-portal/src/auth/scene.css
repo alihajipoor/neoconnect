@@ -1,0 +1,94 @@
+/* The canvas behind the sign-in screens, and the dotted world map on it.
+
+   Inlined into index.html at build (vite.config.ts, portalHtml), so the
+   page paints its canvas and map from the HTML alone: before the main
+   stylesheet, before the script, on the slowest network. Keep it small
+   and keep it to what that first paint needs; everything else is in
+   auth.css. Also imported normally, so the dev server has it too. */
+html[data-surface="auth"] {
+  color-scheme: light;
+  --pa-bg-top: #f7f9fc;
+  --pa-bg: #edf1f6;
+  --pa-amb: rgba(16, 69, 255, 0.09);
+  --pa-map-opacity: 0.9;
+  --pa-ns-ink: #090b10;
+  --pa-ns-ink-2: #4a5264;
+  --pa-ns-link: #0b3be0;
+}
+@media (prefers-color-scheme: dark) {
+  html[data-surface="auth"] {
+    color-scheme: dark;
+    --pa-bg-top: #070a11;
+    --pa-bg: #0d1320;
+    --pa-amb: rgba(47, 94, 255, 0.16);
+    --pa-map-opacity: 1;
+    --pa-ns-ink: #eef1f7;
+    --pa-ns-ink-2: #a9b2c4;
+    --pa-ns-link: #93b0ff;
+  }
+}
+body {
+  margin: 0;
+}
+html[data-surface="auth"] body {
+  background: var(--pa-bg);
+}
+.pa-scene {
+  display: none;
+}
+html[data-surface="auth"] .pa-scene {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    radial-gradient(56rem 34rem at 70% 34%, var(--pa-amb), transparent 70%),
+    linear-gradient(var(--pa-bg-top), var(--pa-bg));
+}
+/* The whole world, centred, quiet (design-system.md 5.2: "any other page,
+   signed out"). Never mirrored in RTL: geography has no reading
+   direction. The SVG keeps its own 200:82 ratio, so its dots stay round. */
+.pa-map {
+  position: absolute;
+  display: block;
+  max-width: none;
+  width: max(116vw, 1180px);
+  height: auto;
+  aspect-ratio: 200 / 82;
+  left: 50%;
+  top: 54%;
+  transform: translate(-50%, -50%);
+  opacity: var(--pa-map-opacity);
+}
+@media (max-width: 899px) {
+  /* Zoomed in on Europe and the Middle East, behind the card. */
+  .pa-map {
+    width: max(250vw, 900px);
+    top: 34%;
+    transform: translate(-58%, -50%);
+  }
+}
+/* Without JavaScript the main stylesheet never applies (main.tsx turns it
+   on), so the one message that page shows is styled here. */
+.pa-noscript {
+  position: relative;
+  z-index: 1;
+  max-width: 34rem;
+  margin: 18vh auto 0;
+  padding: 0 1.5rem;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--pa-ns-ink);
+}
+.pa-noscript h1 {
+  font-size: 1.3rem;
+  margin: 0 0 0.5rem;
+}
+.pa-noscript p {
+  line-height: 1.6;
+  color: var(--pa-ns-ink-2);
+}
+.pa-noscript a {
+  color: var(--pa-ns-link);
+}

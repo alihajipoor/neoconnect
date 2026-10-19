@@ -19,7 +19,7 @@ export class Store {
   constructor(private readonly name: string) {}
 
   private key(key: string): string {
-    return `neoxify:${this.name}:${key}`;
+    return storageKey(this.name, key);
   }
 
   // `undefined`, not `null`, for a missing key -- that is what Tauri's
@@ -51,6 +51,26 @@ export class Store {
   /** No-op: localStorage is already durable. Kept so shared callers can
    * go on calling save() unchanged. */
   async save(): Promise<void> {}
+}
+
+function storageKey(name: string, key: string): string {
+  return `neoxify:${name}:${key}`;
+}
+
+/** What a store holds under a key, read at once rather than through the
+ * async API the shared code uses.
+ *
+ * For the portal's own first paint only: the sign-in page reads the
+ * language the visitor chose, so it can wait for the shared provider to
+ * restore it instead of drawing a frame in the other language first.
+ * Never throws; anything unreadable is `undefined`, as in get(). */
+export function peek<T>(name: string, key: string): T | undefined {
+  try {
+    const raw = localStorage.getItem(storageKey(name, key));
+    return raw === null ? undefined : (JSON.parse(raw) as T);
+  } catch {
+    return undefined;
+  }
 }
 
 export async function load(name: string, _options?: unknown): Promise<Store> {
