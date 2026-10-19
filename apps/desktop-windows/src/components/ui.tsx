@@ -5,6 +5,8 @@
 // (route/plan picker) genuinely needs an overlay component.
 import { useId, useState, type Ref, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type LabelHTMLAttributes, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Info } from "lucide-react";
+import { useI18n } from "../lib/i18n";
+import { formatNumber } from "../lib/locale-format";
 import { cn } from "../lib/utils";
 
 export function Button({
@@ -358,11 +360,12 @@ export function Tag({ children }: { children: ReactNode }) {
 export function Disclosure({ label, count, children }: { label: string; count?: number; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const id = useId();
+  const { language } = useI18n();
   return (
     <>
       <button type="button" className="nx-dtoggle" aria-expanded={open} aria-controls={id} onClick={() => setOpen((o) => !o)}>
         {label}
-        {count !== undefined ? <span className="cnt nx-num">{count}</span> : null}
+        {count !== undefined ? <span className="cnt nx-num">{formatNumber(count, language)}</span> : null}
         <ChevronDown aria-hidden />
       </button>
       <div id={id} className={cn("nx-dpanel", open && "open")}>
