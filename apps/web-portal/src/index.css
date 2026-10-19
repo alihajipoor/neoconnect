@@ -5,6 +5,10 @@
    both apps already use. Imported rather than copied so the portal can
    never drift into looking like a different product. */
 @import "../../desktop-windows/src/theme.css";
+/* The Pearl Glass components and pages the shared screens are now drawn
+   with (sign-in, Settings, Plans, Support, Invite friends). */
+@import "../../desktop-windows/src/pearl.css";
+@import "../../desktop-windows/src/pages.css";
 
 /* Tailwind v4 scans the project it is run from. The screens live in a
    sibling package, so without this every class they use would be
@@ -98,4 +102,14 @@
 .portal-frame .glow-backdrop::before,
 .portal-frame .glow-backdrop::after {
   content: none;
+}
+
+/* A redesigned screen is its own full-page root (.nx-app): the whole
+   viewport, scrolling inside its own column like in the apps. */
+.portal-frame:has(> .nx-app) {
+  max-width: none;
+}
+.portal-frame > .nx-app {
+  height: 100dvh;
+  min-height: 0;
 }

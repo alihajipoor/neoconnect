@@ -13,9 +13,14 @@
    file, shared by reference, so the two clients cannot drift into looking
    like different products. */
 @import "../../desktop-windows/src/theme.css";
-/* Until the phone's own phase of the Pearl Glass redesign, it keeps the
-   colours its screens were drawn for: the old violet set, put back over
-   the old token names. */
+/* The Pearl Glass components and pages: sign-in, Settings and the other
+   screens the phone shares with the desktop are drawn in them. */
+@import "../../desktop-windows/src/pearl.css";
+@import "../../desktop-windows/src/pages.css";
+/* Until the phone's own phase of the Pearl Glass redesign, its own screens
+   (the Dashboard, the disclosure) keep the colours they were drawn for:
+   the old violet set over the old token names, while App.tsx marks one of
+   them as showing (data-legacy). */
 @import "../../desktop-windows/src/legacy-theme.css";
 
 @layer base {
@@ -50,6 +55,13 @@
     touch-action: pan-x pan-y;
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
+  }
+
+  /* The root below already keeps the safe areas clear, so the Pearl
+     screens inside it add none of their own. */
+  .nx-app {
+    --safe-t: 0px;
+    --safe-b: 0px;
   }
 
   /* Keeps content clear of the notch, the status bar and the gesture

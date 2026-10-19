@@ -1,16 +1,18 @@
 /* The look the clients had before the Pearl Glass redesign: dark only,
    violet primary, cyan highlight.
 
-   Imported by the phone client after theme.css, so the screens it shares
-   with the desktop keep the colours they were drawn for until the phone's
-   own phase of the redesign (design-system.md, section 11). Only the old
-   token names are put back; the new ones are not used on the phone yet.
-   Delete this file when the phone moves to Pearl Glass.
+   Imported by the phone client after theme.css, for the phone's own
+   screens that are not redesigned yet -- its Dashboard and the first-run
+   disclosure -- until the phone's phase of the redesign (design-system.md,
+   section 11). The screens it shares with the desktop (sign-in, Settings,
+   Plans, Support, Invite friends, Activity) are drawn in Pearl Glass there
+   too. The phone's App sets data-legacy="1" on <html> while one of its own
+   screens shows. Only the old token names are put back. Delete this file
+   when the phone moves to Pearl Glass.
 
-   The selector matches every root, with the same weight as theme.css's
-   strongest (its dark set), and comes after it: so it wins whatever the
-   system theme is. */
-:root:not(.nx-never) {
+   The selector has the same weight as theme.css's strongest (its dark set)
+   and comes after it: so it wins whatever the system theme is. */
+:root[data-legacy="1"] {
   color-scheme: dark;
   --background: #0a0a10;
   --foreground: #f4f4f8;
@@ -50,8 +52,8 @@
 @layer base {
   /* Vazirmatn first in both languages, as before: it carries a full Latin
      set, so a mixed screen never switches typeface mid-line. */
-  body,
-  html[lang="fa"] body {
+  :root[data-legacy="1"] body,
+  :root[data-legacy="1"][lang="fa"] body {
     font-family:
       "Vazirmatn",
       -apple-system,
@@ -62,12 +64,13 @@
     font-feature-settings: normal;
   }
 
-  ::selection {
+  :root[data-legacy="1"] ::selection {
     color: #fff;
   }
 
-  /* A soft violet wash behind every screen, fixed rather than scrolled. */
-  body::before {
+  /* A soft violet wash behind the phone's own screens, fixed rather than
+     scrolled. */
+  :root[data-legacy="1"] body::before {
     content: "";
     position: fixed;
     inset-block-start: -10rem;

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ScreenTransition } from "@shared/components/ScreenTransition";
 import { getTokens } from "@shared/lib/session";
 import { flushAttempts } from "@shared/lib/attempts";
@@ -18,11 +18,14 @@ import { StorePlans } from "@shared/screens/StorePlans";
 import { Referrals } from "@shared/screens/Referrals";
 import { Support } from "@shared/screens/Support";
 import { Settings } from "@shared/screens/Settings";
+import { Activity } from "@shared/screens/Activity";
+import { logout } from "@shared/lib/auth";
+import { networkKeyFromAsn } from "@shared/lib/network-identity";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { sweepUnfinishedPurchases } from "@shared/lib/iap";
 import { Dashboard } from "./screens/Dashboard";
 import { PerAppCard } from "./components/PerAppCard";
-import { isAndroid } from "./lib/platform";
+import { isAndroid, isIOS } from "./lib/platform";
 import { ProminentDisclosure, hasAcceptedDisclosure } from "./components/ProminentDisclosure";
 
 /** How often a queued diagnostic report retries. Matches the desktop
@@ -81,7 +84,12 @@ type Screen =
   | "plans"
   | "settings"
   | "referrals"
-  | "support";
+  | "support"
+  | "activity";
+
+/** The phone's own screens, not redesigned yet: they keep the old look
+ * (legacy-theme.css) while they show. */
+const LEGACY_SCREENS: ReadonlySet<Screen> = new Set(["loading", "signingOut", "disclosure", "dashboard"]);
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
@@ -93,6 +101,13 @@ export default function App() {
   const [plansNotice, setPlansNotice] = useState<string | null>(null);
   const endingRef = useRef(false);
   const { t } = useI18n();
+
+  // Before paint, so a screen never shows a frame in the other look.
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    if (LEGACY_SCREENS.has(screen)) root.dataset.legacy = "1";
+    else delete root.dataset.legacy;
+  }, [screen]);
 
   // The disclosure gates everything, including a session that is already
   // signed in. Play wants it shown before the data collection begins,
@@ -207,6 +222,19 @@ export default function App() {
     }
   }
 
+  /** Signing out from Settings, after it has asked: an automatic
+   * reconnect waiting for the app to be in front is cancelled, then
+   * `logout()` takes the tunnel down (setTunnelTeardown above) before it
+   * deletes anything, then the session ends as every other way does. */
+  async function signOutFromSettings() {
+    autoReconnect.cancel("signedOut");
+    try {
+      await logout();
+    } finally {
+      await handleLoggedOut();
+    }
+  }
+
   // See the desktop App: registered once, always calling the current
   // render's handler.
   const handleLoggedOutRef = useRef(handleLoggedOut);
@@ -217,7 +245,7 @@ export default function App() {
   if (screen === "loading") {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        Loading...
+        {t("common.loading")}
       </div>
     );
   }
@@ -302,6 +330,21 @@ export default function App() {
         // test rather than `!isIOS()`, so a platform this does not
         // recognise hides the section instead of offering a broken one.
         customSection={isAndroid() ? <PerAppCard /> : null}
+        onOpenPlans={() => setScreen("plans")}
+        onOpenActivity={() => setScreen("activity")}
+        onSignOut={() => void signOutFromSettings()}
+        platform={isAndroid() ? "android" : isIOS() ? "ios" : "web"}
+      />
+    );
+  }
+  if (screen === "activity") {
+    return (
+      <Activity
+        // The network the phone's connect history is filed under: the
+        // address block the control plane last reported for it.
+        readNetwork={async () => networkKeyFromAsn()}
+        onOpenPlans={() => setScreen("plans")}
+        onBack={() => setScreen("settings")}
       />
     );
   }
