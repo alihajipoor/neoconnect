@@ -1975,6 +1975,18 @@
     .nx-actions .nx-btn.primary {
       flex: 1;
     }
+    /* A banner takes the room the sentence keeps in reserve, so the button
+       stays above the fold on the 720x600 window. */
+    .nx-app[data-banner="1"] .nx-hint {
+      min-height: 0;
+    }
+    .nx-app[data-banner="1"] .nx-hero-copy {
+      gap: 10px;
+    }
+    /* The panel beside the hero already shows where the traffic goes. */
+    .nx-app[data-banner="1"] .nx-hloc {
+      display: none;
+    }
     .nx-ov > .nx-art,
     .nx-ov > .nx-modebar {
       display: none;
