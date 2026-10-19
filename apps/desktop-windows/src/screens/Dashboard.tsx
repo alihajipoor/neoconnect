@@ -1306,6 +1306,13 @@ export function Dashboard({
     sub: Subscription | null,
     users: readonly ProtocolUser[],
   ): Promise<ConnectionState | null> {
+    // Which credential the last dial was on, read first, so that nothing
+    // below -- the check for a pass, the stamps, the service's answer -- is
+    // taken before a wait: the state the service answers and the route it
+    // is on then land on screen together. A pass begun while the service is
+    // asked names its own candidate, and is left to (`passAtStart`).
+    const passAtStart = ladderGenerationRef.current;
+    const dial = await tunnelCredential.last();
     if (ladderInFlight()) {
       if (ladderGenerationRef.current !== ownPassRef.current && adoptedPassIntentRef.current === null) {
         const intent = beginIntent("connect");
@@ -1314,12 +1321,6 @@ export function Dashboard({
       }
       return null;
     }
-    // Which credential the last dial was on, read before anything below
-    // is stamped or the service is asked: the state the service answers
-    // and the route that state is on then land on screen together. A pass
-    // begun meanwhile names its own candidate, and is left to.
-    const passAtStart = ladderGenerationRef.current;
-    const dial = await tunnelCredential.last();
     // A tunnel that ended while no screen was watching -- this one was
     // away in Settings, and both polls with it -- is a drop like any
     // other, if the app was vouching for it and nothing of ours has

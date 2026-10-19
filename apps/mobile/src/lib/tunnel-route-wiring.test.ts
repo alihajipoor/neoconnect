@@ -35,9 +35,12 @@ describe("the phone names the route a tunnel found up is on", () => {
     expect(recorded).toBeLessThan(walk.indexOf("await connectIkev2({"));
   });
 
-  it("asks the record only when no pass of this app has said, and before the platform is asked", () => {
+  it("asks the record only when no pass of this app has said, first", () => {
     const read = adopt.indexOf("const dial = passTunnel.current === null ? await tunnelCredential.last() : null;");
     expect(read).toBeGreaterThan(0);
+    // Before the checks for a pass or a press and the stamps, so none of
+    // them is taken before a wait.
+    expect(read).toBeLessThan(adopt.indexOf("if (passInFlight() || pressElsewhere) {"));
     expect(read).toBeLessThan(adopt.indexOf("await withTimeout(vpnStatus()"));
     expect(read).toBeLessThan(adopt.indexOf("const reconnectStamp = autoReconnect.stamp();"));
   });

@@ -206,10 +206,13 @@ describe("the Dashboard's wiring", () => {
     });
 
     it("names the credential of the last dial when the service's protocol agrees, and no route when it cannot", () => {
-      // Read before the service is asked, so the state and the name land in
-      // one render.
+      // Read first: before the service is asked, so the state and the name
+      // land in one render, and before the check for a pass and the stamps,
+      // so none of them is taken before a wait.
       const read = adopt.indexOf("const dial = await tunnelCredential.last();");
       expect(read).toBeGreaterThan(0);
+      expect(read).toBeLessThan(adopt.indexOf("if (ladderInFlight()) {"));
+      expect(read).toBeLessThan(adopt.indexOf("const reconnectStamp = autoReconnect.stamp();"));
       expect(read).toBeLessThan(adopt.indexOf("await syncFromService()"));
       expect(adopt).toContain("const on = credentialOnTunnel(dial, lastStatusRef.current?.protocol, users);");
       expect(adopt).toContain("if (on !== null) setProtocolUser(on);");

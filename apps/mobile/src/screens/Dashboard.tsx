@@ -1021,6 +1021,12 @@ export function Dashboard({
     sub: Subscription | null,
     ready: () => void = () => undefined,
   ) {
+    // The last dial this app recorded, for a tunnel no pass of this
+    // process can name -- the app opened again over a VPN the platform
+    // kept (`tunnelCredential`). Read first, so that nothing below -- the
+    // checks for a pass or a press, the stamps, the platform's answer -- is
+    // taken before a wait.
+    const dial = passTunnel.current === null ? await tunnelCredential.last() : null;
     // A press of Connect still on its way to its pass is shown as one too,
     // and read again once it settles: read now, between the pass it waited
     // on and its own, the platform said nothing was up -- "You're not
@@ -1034,11 +1040,6 @@ export function Dashboard({
       ready();
       return;
     }
-    // The last dial this app recorded, for a tunnel no pass of this
-    // process can name -- the app opened again over a VPN the platform
-    // kept (`tunnelCredential`). Read before anything below is stamped or
-    // the platform asked.
-    const dial = passTunnel.current === null ? await tunnelCredential.last() : null;
     // What arming quotes, taken before the platform is asked: a press
     // meanwhile -- "Stop reconnecting" above all, which begins nothing
     // `overtaken` sees -- overrules the answer. See `autoReconnect.stamp`.
