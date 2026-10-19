@@ -88,3 +88,31 @@ export function formatDateTime(when: Date | number | string, language: Language)
     return localDigits(date.toISOString().slice(0, 16).replace("T", " "), language);
   }
 }
+
+/** A price in US dollars, as the language writes money: "$4.99", or the
+ * same amount in Persian digits. The amount is the server's; only its
+ * digits change. */
+export function formatPrice(usd: number | string, language: Language): string {
+  const value = Number(usd);
+  if (!Number.isFinite(value)) return String(usd);
+  const latin = `$${value.toFixed(value % 1 === 0 ? 0 : 2)}`;
+  return language === "fa" ? `${localDigits(latin.slice(1), language)} دلار` : latin;
+}
+
+/** How long ago, in words: "12 minutes ago", "yesterday", or the Persian.
+ * A time in the future (a clock that moved) reads as now. */
+export function formatAgo(when: number, language: Language, now: number = Date.now()): string {
+  const seconds = Math.max(0, Math.round((now - when) / 1000));
+  const locale = language === "fa" ? "fa-IR" : "en";
+  try {
+    const rtf = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+    if (seconds < 60) return rtf.format(0, "second");
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return rtf.format(-minutes, "minute");
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return rtf.format(-hours, "hour");
+    return rtf.format(-Math.round(hours / 24), "day");
+  } catch {
+    return formatDateTime(when, language);
+  }
+}

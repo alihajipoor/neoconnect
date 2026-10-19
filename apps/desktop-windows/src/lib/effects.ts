@@ -182,7 +182,9 @@ export function startEffects(): void {
 }
 
 export const effects = {
-  current: (): EffectsState => state ?? compute(),
+  // Cached, so a reader that asks before anything was applied (a page
+  // drawn outside the desktop app) is given the same object each time.
+  current: (): EffectsState => state ?? (state = compute()),
   subscribe(listener: () => void): () => void {
     listeners.add(listener);
     return () => listeners.delete(listener);

@@ -1,13 +1,59 @@
 // Small, dependency-free UI primitives -- deliberately not a full
-// shadcn/Radix setup like the panel has. v1 screens (login/register/
-// dashboard) don't need dialogs/selects/dropdowns, so pulling in that
-// machinery here would be pure overhead. Revisit if a later screen
-// (route/plan picker) genuinely needs an overlay component.
-import { useId, useState, type Ref, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type LabelHTMLAttributes, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, Info } from "lucide-react";
+// shadcn/Radix setup like the panel has.
+//
+// Two generations live here. `Button`, `Input`, `Label`, `Card` and `Stat`
+// are the ones the screens were first written with; the Pearl Glass
+// primitives further down are the redesign's (design-system.md, section 4).
+// Inside a `PearlScope` -- every redesigned page and sign-in screen -- the
+// old four draw in the Pearl look, so the shared cards drawn inside those
+// pages (Custom mode, Gaming mode, the recovery code, Repair) match them
+// without being rewritten. Outside one -- the phone's own dashboard, which
+// keeps its look until its phase of the redesign -- they draw as before.
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type Ref,
+  type ButtonHTMLAttributes,
+  type HTMLAttributes,
+  type InputHTMLAttributes,
+  type LabelHTMLAttributes,
+  type ReactNode,
+} from "react";
+import { flushSync } from "react-dom";
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Eye, EyeOff, Info } from "lucide-react";
 import { useI18n } from "../lib/i18n";
 import { formatNumber } from "../lib/locale-format";
 import { cn } from "../lib/utils";
+
+const PearlContext = createContext(false);
+
+/** Marks a subtree as redesigned: the older primitives inside it draw in
+ * the Pearl look. */
+export function PearlScope({ children }: { children: ReactNode }) {
+  return <PearlContext.Provider value>{children}</PearlContext.Provider>;
+}
+
+/** Whether this is drawn inside a redesigned page. */
+export function usePearl(): boolean {
+  return useContext(PearlContext);
+}
+
+/** The old dark theme's white-on-dark borders and fills, and its sizes,
+ * which mean nothing on pearl: left out there, where the Pearl classes
+ * carry their own. */
+const LEGACY_SURFACE =
+  /^(?:border|border-(?:white|black|destructive|success|primary|warning|highlight)\/\S+|(?:hover:|focus:)?(?:bg|border)-(?:white|black)\/\S+|rounded-(?:md|lg|xl)|h-9|h-10|px-3|px-4|py-2|text-sm|shadow-\[\S*\])$/;
+
+function pearlClasses(className: string | undefined): string {
+  return (className ?? "")
+    .split(/\s+/)
+    .filter((token) => token && !LEGACY_SURFACE.test(token))
+    .join(" ");
+}
 
 export function Button({
   className,
@@ -16,6 +62,11 @@ export function Button({
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "default" | "destructive" | "ghost" | "outline";
 }) {
+  const pearl = usePearl();
+  if (pearl) {
+    const look = variant === "default" ? "primary" : variant === "destructive" ? "danger" : "ghost";
+    return <button className={cn("nx-btn sm nx-bx", look, pearlClasses(className))} {...props} />;
+  }
   // `default` is a gradient from the primary to `--brand-2` rather than a flat
   // fill, and lifts on hover -- a solid rectangle was the single biggest
   // reason the app read as a generic template. The glow uses colour-mix
@@ -42,6 +93,8 @@ export function Button({
 }
 
 export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+  const pearl = usePearl();
+  if (pearl) return <input className={cn("nx-input", pearlClasses(className))} {...props} />;
   return (
     <input
       className={cn(
@@ -54,10 +107,14 @@ export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElem
 }
 
 export function Label({ className, ...props }: LabelHTMLAttributes<HTMLLabelElement>) {
+  const pearl = usePearl();
+  if (pearl) return <label className={cn("nx-label", className)} {...props} />;
   return <label className={cn("text-sm font-medium text-foreground", className)} {...props} />;
 }
 
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
+  const pearl = usePearl();
+  if (pearl) return <div className={cn("nx-card nx-pcard", pearlClasses(className))} {...props} />;
   // The top hairline is what separates a "surface" from a "box with a
   // border": it reads as light catching an edge, which is the treatment
   // the website uses on its own cards.
@@ -285,12 +342,15 @@ export function Switch({
   onChange,
   disabled,
   label,
+  labelledBy,
   describedBy,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
-  label: string;
+  /** The accessible name, when no visible label names it (`labelledBy`). */
+  label?: string;
+  labelledBy?: string;
   describedBy?: string;
 }) {
   return (
@@ -298,7 +358,8 @@ export function Switch({
       type="button"
       role="switch"
       aria-checked={checked}
-      aria-label={label}
+      aria-label={labelledBy ? undefined : label}
+      aria-labelledby={labelledBy}
       aria-describedby={describedBy}
       disabled={disabled}
       className="nx-sw"
@@ -374,5 +435,289 @@ export function Disclosure({ label, count, children }: { label: string; count?: 
         </div>
       </div>
     </>
+  );
+}
+
+// --- Forms, messages and lists (Settings, the other tabs, sign-in) ----------
+
+type FieldInputProps = InputHTMLAttributes<HTMLInputElement> & {
+  id: string;
+  label: ReactNode;
+  /** A line under the field, tied to it with aria-describedby. */
+  hint?: ReactNode;
+  ref?: Ref<HTMLInputElement>;
+};
+
+/** A labelled text field: the label above, a hint below. Native semantics
+ * left alone -- `required`, `type`, `autocomplete` stay the browser's. */
+export function TextField({ id, label, hint, className, ...input }: FieldInputProps) {
+  return (
+    <div className="nx-field">
+      <label htmlFor={id} className="nx-label">
+        {label}
+      </label>
+      <input id={id} className={cn("nx-input", className)} aria-describedby={hint ? `${id}-hint` : undefined} {...input} />
+      {hint ? (
+        <p id={`${id}-hint`} className="nx-fhint">
+          {hint}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** A password field with a Show toggle.
+ *
+ * The toggle changes only how the field draws what is typed. It is a real
+ * button after the input, marked pressed while the password shows. Left to
+ * right in both languages, like the address and the codes: a password is
+ * typed as characters, and a right-to-left field reorders a shown one into
+ * something nobody typed. Hidden again the moment its form is submitted,
+ * before the request goes out, so it is never remembered as ordinary form
+ * history. */
+export function PasswordField({ id, label, hint, ...input }: Omit<FieldInputProps, "type">) {
+  const { t } = useI18n();
+  const [shown, setShown] = useState(false);
+  const field = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const form = field.current?.form;
+    if (!form) return;
+    const hide = () => flushSync(() => setShown(false));
+    form.addEventListener("submit", hide, { capture: true });
+    return () => form.removeEventListener("submit", hide, { capture: true });
+  }, []);
+  return (
+    <div className="nx-field">
+      <label htmlFor={id} className="nx-label">
+        {label}
+      </label>
+      <div className="nx-pw" dir="ltr">
+        <input
+          ref={field}
+          id={id}
+          dir="ltr"
+          type={shown ? "text" : "password"}
+          className="nx-input"
+          aria-describedby={hint ? `${id}-hint` : undefined}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          {...input}
+        />
+        <button
+          type="button"
+          className="nx-eye"
+          aria-label={t("auth.showPassword")}
+          aria-pressed={shown}
+          aria-controls={id}
+          onClick={() => setShown((s) => !s)}
+        >
+          {shown ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
+        </button>
+      </div>
+      {hint ? (
+        <p id={`${id}-hint`} className="nx-fhint">
+          {hint}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+const MESSAGE_ICONS = { danger: AlertCircle, ok: CheckCircle2, neutral: Info } as const;
+
+/** A sentence about what happened, its tone carried by an icon as well as
+ * colour. Errors are announced (`role="alert"`), the rest politely.
+ * Neutral is for what is nobody's fault -- the network, the backup route --
+ * and never wears a warning colour. */
+export function Message({
+  tone,
+  children,
+  className,
+  ...rest
+}: {
+  tone: keyof typeof MESSAGE_ICONS;
+  children: ReactNode;
+  className?: string;
+} & Record<`data-${string}`, unknown>) {
+  const Icon = MESSAGE_ICONS[tone];
+  return (
+    <div className={cn("nx-msg", className)} data-tone={tone} role={tone === "danger" ? "alert" : "status"} {...rest}>
+      <Icon className="nx-msg-i" aria-hidden />
+      <div className="t">{children}</div>
+    </div>
+  );
+}
+
+/** A button that reads as a link: underlined, so it is never told apart
+ * from the text around it by colour alone. */
+export function TextLink({
+  strong,
+  className,
+  ...button
+}: ButtonHTMLAttributes<HTMLButtonElement> & { strong?: boolean }) {
+  return <button type="button" className={cn("nx-tlnk", strong && "strong", className)} {...button} />;
+}
+
+/** "Not built yet": beside a setting the app cannot do, which is drawn
+ * disabled -- never as a control that looks like it works. */
+export function NotBuiltTag() {
+  const { t } = useI18n();
+  return <span className="nx-ntag">{t("set.notBuilt")}</span>;
+}
+
+/** A settings group: a solid card with its title inside it, never on the
+ * scene, and its rows divided by hairlines. */
+export function ListGroup({
+  title,
+  children,
+  className,
+  ...rest
+}: { title: ReactNode; children: ReactNode; className?: string } & Record<`data-${string}`, unknown>) {
+  const id = useId();
+  return (
+    <section className={cn("nx-group", className)} aria-labelledby={id} {...rest}>
+      <h2 className="nx-gt" id={id}>
+        {title}
+      </h2>
+      <div className="nx-rows">{children}</div>
+    </section>
+  );
+}
+
+/** One row of a settings group: an optional icon tile, the label and its
+ * hint, and on the inline end a value, a control or a chevron. A row with
+ * `onClick` is a button and leads somewhere (the chevron mirrors in RTL);
+ * one without is information. */
+export function Row({
+  icon,
+  label,
+  hint,
+  value,
+  control,
+  onClick,
+  danger,
+  tag,
+  wrap,
+  labelId,
+  hintId,
+  disabled,
+  className,
+}: {
+  icon?: ReactNode;
+  label: ReactNode;
+  hint?: ReactNode;
+  value?: ReactNode;
+  control?: ReactNode;
+  onClick?: () => void;
+  danger?: boolean;
+  tag?: ReactNode;
+  /** The control sits under the label rather than beside it. */
+  wrap?: boolean;
+  labelId?: string;
+  hintId?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const body = (
+    <>
+      {icon ? (
+        <span className="nx-ic" aria-hidden>
+          {icon}
+        </span>
+      ) : null}
+      <span className="t">
+        <span className={cn("n", danger && "danger")} id={labelId}>
+          {label}
+          {tag ? <> {tag}</> : null}
+        </span>
+        {hint ? (
+          <span className="s" id={hintId}>
+            {hint}
+          </span>
+        ) : null}
+      </span>
+      {(value !== undefined && value !== null) || onClick || control ? (
+        <span className="tail">
+          {value !== undefined && value !== null ? <span className="v">{value}</span> : null}
+          {control}
+          {onClick ? <ChevronRight className="chev nx-mir" aria-hidden /> : null}
+        </span>
+      ) : null}
+    </>
+  );
+  if (onClick) {
+    return (
+      <button type="button" className={cn("nx-li", wrap && "wrap", className)} onClick={onClick} disabled={disabled}>
+        {body}
+      </button>
+    );
+  }
+  return <div className={cn("nx-li", wrap && "wrap", className)}>{body}</div>;
+}
+
+/** A row with a switch, labelled by the row's label and described by its
+ * hint. A setting the app cannot do yet passes `notBuilt`: the switch is
+ * off and disabled, and the row says so. */
+export function SwitchRow({
+  icon,
+  label,
+  hint,
+  checked,
+  onChange,
+  disabled,
+  notBuilt,
+  tag,
+}: {
+  icon?: ReactNode;
+  label: ReactNode;
+  hint?: ReactNode;
+  checked: boolean;
+  onChange?: (checked: boolean) => void;
+  disabled?: boolean;
+  notBuilt?: boolean;
+  tag?: ReactNode;
+}) {
+  const id = useId();
+  return (
+    <Row
+      icon={icon}
+      label={label}
+      hint={hint}
+      labelId={`${id}-l`}
+      hintId={hint ? `${id}-h` : undefined}
+      tag={notBuilt ? <NotBuiltTag /> : tag}
+      control={
+        <Switch
+          checked={notBuilt ? false : checked}
+          onChange={(next) => onChange?.(next)}
+          disabled={disabled || notBuilt}
+          labelledBy={`${id}-l`}
+          describedBy={hint ? `${id}-h` : undefined}
+        />
+      }
+    />
+  );
+}
+
+/** A small rounded tile for a heading's icon. */
+export function IconTile({ children, tone }: { children: ReactNode; tone?: "danger" }) {
+  return (
+    <span className={cn("nx-ic", tone)} aria-hidden>
+      {children}
+    </span>
+  );
+}
+
+/** A card's heading: an icon tile, the title and a line under it. */
+export function CardHead({ icon, title, hint, tone }: { icon?: ReactNode; title: ReactNode; hint?: ReactNode; tone?: "danger" }) {
+  return (
+    <div className="nx-chead">
+      {icon ? <IconTile tone={tone}>{icon}</IconTile> : null}
+      <div className="t">
+        <h3>{title}</h3>
+        {hint ? <p>{hint}</p> : null}
+      </div>
+    </div>
   );
 }

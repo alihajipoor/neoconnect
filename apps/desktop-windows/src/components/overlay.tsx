@@ -79,10 +79,13 @@ export function Dialog({
   actions,
   alert = false,
   initialFocus,
+  children,
 }: {
   open: boolean;
   title: ReactNode;
   description?: ReactNode;
+  /** Anything between the sentence and the buttons: a list, a field. */
+  children?: ReactNode;
   /** Escape and the scrim. Absent, neither closes it: a choice must be made. */
   onClose?: () => void;
   actions: ReactNode;
@@ -109,6 +112,7 @@ export function Dialog({
         >
           <h2 id={titleId}>{title}</h2>
           {description ? <p id={descriptionId}>{description}</p> : null}
+          {children}
           <div className="nx-actions">{actions}</div>
         </div>
       </div>

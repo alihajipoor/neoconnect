@@ -5,6 +5,8 @@
    primitives in ui.tsx and overlay.tsx. Desktop only for now; the phone
    imports it when its own phase of the redesign begins. */
 @import "./pearl.css";
+/* Sign-in, Settings and the other pages, in the same system. */
+@import "./pages.css";
 
 @layer base {
   body {

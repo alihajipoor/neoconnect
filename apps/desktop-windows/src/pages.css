@@ -1,0 +1,1591 @@
+/* Pearl Glass for the rest of the app: sign-in, registration, password
+   reset and verification (AuthFrame.tsx), and the signed-in pages --
+   Settings, Activity, Plans, Support, Invite friends (shell/Page.tsx) --
+   with the forms, messages and grouped lists they are built from
+   (ui.tsx). design-system.md 4.10 to 4.14 and section 11, phase 2.
+
+   Namespaced `nx-` like pearl.css, whose tokens and primitives it uses.
+   Layout switches are container queries on the app root, as there:
+     wide    >= 900  (desktop windows)
+     medium  640-899 (tablets, the 720x600 window)
+     narrow  < 640   (phones)
+
+   The phone screens the owner asked to fit one screen -- sign-in and
+   registration -- tighten by the room there is (container height), never
+   by what they say. Settings and the other pages scroll inside their own
+   panel; the window never does. */
+
+/* --- Field tokens --------------------------------------------------------
+   A field's fill, and an outline at about 3.4:1 against the card: the edge
+   of a control has to be findable (WCAG 1.4.11), not only its label. The
+   values the website's sign-in uses. */
+:root {
+  --field-bg: rgba(255, 255, 255, 0.78);
+  --field-line: #7a8497;
+  --placeholder: #5d6678;
+  --field-focus: rgba(16, 69, 255, 0.22);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --field-bg: rgba(255, 255, 255, 0.05);
+    --field-line: #6e788c;
+    --placeholder: #9aa3b5;
+    --field-focus: rgba(91, 131, 255, 0.4);
+  }
+}
+:root[data-theme="dark"] {
+  --field-bg: rgba(255, 255, 255, 0.05);
+  --field-line: #6e788c;
+  --placeholder: #9aa3b5;
+  --field-focus: rgba(91, 131, 255, 0.4);
+}
+
+@layer components {
+  /* ---------- the title strip over pages and sign-in (desktop) ---------- */
+  :root[data-titlebar="1"] .nx-app:is(.nx-auth, .nx-solo) {
+    --tb: 32px;
+  }
+
+  /* ---------- forms ---------- */
+  .nx-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin: 0;
+  }
+  .nx-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+  }
+  .nx-label {
+    font-size: 13.5px;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--ink);
+  }
+  html[lang="fa"] .nx-label {
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .nx-input,
+  .nx-textarea {
+    width: 100%;
+    min-width: 0;
+    height: 48px;
+    padding: 0 14px;
+    border: 1px solid var(--field-line);
+    border-radius: 14px;
+    background: var(--field-bg);
+    color: var(--ink);
+    font: inherit;
+    /* 16px: anything smaller makes iOS zoom the page on focus. */
+    font-size: 16px;
+    line-height: 1.2;
+    user-select: text;
+    transition:
+      border-color 160ms ease,
+      background-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+  .nx-textarea {
+    height: auto;
+    min-height: 112px;
+    padding: 12px 14px;
+    line-height: 1.5;
+    resize: vertical;
+  }
+  .nx-input::placeholder,
+  .nx-textarea::placeholder {
+    color: var(--placeholder);
+    opacity: 1;
+  }
+  .nx-input:hover,
+  .nx-textarea:hover {
+    border-color: var(--ink-2);
+  }
+  /* A field takes focus as a cobalt edge and a soft halo: plain to see, and
+     calmer than the two-tone ring the buttons wear. */
+  .nx-app .nx-input:focus-visible,
+  .nx-app .nx-textarea:focus-visible,
+  .nx-input:focus,
+  .nx-textarea:focus {
+    outline: 2px solid transparent;
+    border-color: var(--cobalt);
+    background: var(--pearl);
+    box-shadow: 0 0 0 3px var(--field-focus);
+  }
+  .nx-input:disabled {
+    opacity: 0.6;
+  }
+  /* An address or a code is typed left to right in either language; a
+     Persian placeholder in such a field still reads right to left. */
+  html[dir="rtl"] .nx-input[dir="ltr"]:placeholder-shown {
+    direction: rtl;
+  }
+  .nx-code {
+    font-family: "Inter", ui-monospace, system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+    font-size: 20px;
+    letter-spacing: 0.3em;
+    text-align: center;
+  }
+  html[dir="rtl"] .nx-input.nx-code[dir="ltr"]:placeholder-shown {
+    direction: ltr;
+  }
+  .nx-fhint {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.4;
+  }
+  html[lang="fa"] .nx-fhint {
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  .nx-pw {
+    position: relative;
+  }
+  .nx-pw .nx-input {
+    padding-inline-end: 52px;
+  }
+  .nx-eye {
+    position: absolute;
+    inset-block: 4px;
+    inset-inline-end: 4px;
+    width: 42px;
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    place-items: center;
+    border-radius: 11px;
+    color: var(--ink-2);
+  }
+  .nx-eye:hover {
+    color: var(--ink);
+    background: var(--select);
+  }
+  .nx-eye svg {
+    width: 20px;
+    height: 20px;
+    stroke-width: 1.7;
+  }
+
+  /* ---------- messages ---------- */
+  .nx-msg {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 14px;
+    font-size: 13.5px;
+    line-height: 1.45;
+    user-select: text;
+  }
+  html[lang="fa"] .nx-msg {
+    line-height: 1.75;
+  }
+  .nx-msg .t {
+    min-width: 0;
+  }
+  .nx-msg .t > p {
+    margin: 0;
+  }
+  .nx-msg-i {
+    width: 18px;
+    height: 18px;
+    flex: none;
+    margin-top: 1px;
+    stroke-width: 1.8;
+  }
+  html[lang="fa"] .nx-msg-i {
+    margin-top: 4px;
+  }
+  .nx-msg[data-tone="danger"] {
+    background: var(--danger-tint);
+    color: var(--danger-ink);
+  }
+  .nx-msg[data-tone="ok"] {
+    background: var(--ok-tint);
+    color: var(--ok-ink);
+  }
+  .nx-msg[data-tone="neutral"] {
+    background: var(--muted-tint);
+    color: var(--ink-2);
+  }
+
+  /* A button that reads as a link. Its own touch target, extended by a
+     pseudo-element, rather than the 44px minimum a coarse pointer gives
+     every button (theme.css) -- that would grow each line of text by
+     half again and push the phone's sign-in off its one screen. */
+  .nx-tlnk {
+    position: relative;
+    display: inline;
+    min-width: 0;
+    min-height: 0;
+    padding: 2px;
+    margin: -2px;
+    border-radius: 6px;
+    color: var(--ink-2);
+    font: inherit;
+    font-size: 13.5px;
+    font-weight: 500;
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+  }
+  .nx-tlnk::after {
+    content: "";
+    position: absolute;
+    inset: -10px -4px;
+  }
+  .nx-tlnk:hover:not(:disabled) {
+    color: var(--ink);
+  }
+  .nx-tlnk:disabled {
+    opacity: 0.6;
+  }
+  .nx-tlnk.strong {
+    color: var(--cobalt-ink);
+    font-weight: 600;
+  }
+  html[lang="fa"] .nx-tlnk {
+    font-size: 14px;
+  }
+  .nx-strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .nx-spin {
+    width: 18px;
+    height: 18px;
+    flex: none;
+    border-radius: 50%;
+    border: 2px solid var(--hairline-2);
+    border-top-color: var(--ink-2);
+    animation: nx-spin 0.8s linear infinite;
+  }
+  :root[data-motion="reduce"] .nx-spin {
+    animation: none;
+    border-style: dotted;
+  }
+  .nx-btn.danger {
+    background: var(--danger);
+    color: #fff;
+    box-shadow: 0 14px 28px -16px var(--danger);
+  }
+  .nx-btn.danger:hover {
+    background: var(--danger);
+    filter: brightness(1.06);
+  }
+  .nx-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+    box-shadow: none;
+  }
+  .nx-btn:disabled:active {
+    transform: none;
+  }
+  /* The older Button inside a redesigned page (ui.tsx, PearlScope). */
+  .nx-bx {
+    gap: 8px;
+  }
+  .nx-bx svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  /* ---------- the sign-in page (AuthFrame) ---------- */
+  .nx-app.nx-auth {
+    background: linear-gradient(var(--map-bg-top), var(--map-bg) 72%);
+  }
+  .nx-auth-scene {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .nx-auth-map {
+    position: absolute;
+    left: 50%;
+    top: 54%;
+    width: max(1100px, 118%);
+    aspect-ratio: 200 / 82;
+    transform: translate(-50%, -50%);
+    color: var(--map-dot);
+    opacity: 0.85;
+  }
+  .nx-auth-map > svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .nx-auth-scroll {
+    position: relative;
+    z-index: 1;
+    height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    scrollbar-width: thin;
+  }
+  .nx-auth-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: calc(var(--tb) + 16px) clamp(16px, 4cqw, 44px) 8px;
+  }
+  .nx-auth-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 11px;
+    margin: 0;
+    font: 500 16px/1 var(--font-display);
+    letter-spacing: 0.42em;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+  .nx-auth-logo {
+    width: 28px;
+    height: 28px;
+    flex: none;
+  }
+  .nx-langsw {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 999px;
+    background: var(--chip-bg);
+    box-shadow:
+      var(--edge),
+      0 1px 2px rgba(20, 30, 60, 0.05);
+  }
+  .nx-langsw button {
+    position: relative;
+    height: 36px;
+    min-height: 0;
+    min-width: 44px;
+    padding: 0 14px;
+    border-radius: 999px;
+    color: var(--ink-2);
+    font-family: var(--font-ui);
+    font-size: 13.5px;
+    font-weight: 600;
+    line-height: 1;
+  }
+  .nx-langsw button::after {
+    content: "";
+    position: absolute;
+    inset: -4px 0;
+  }
+  .nx-langsw button[lang="fa"] {
+    font-family: var(--font-fa);
+    font-size: 14px;
+  }
+  .nx-langsw button[aria-pressed="true"] {
+    background: var(--pearl);
+    color: var(--ink);
+    box-shadow:
+      0 1px 2px rgba(20, 30, 60, 0.08),
+      inset 0 0 0 1px var(--hairline);
+  }
+  .nx-langsw button:hover:not([aria-pressed="true"]) {
+    color: var(--ink);
+  }
+  .nx-auth-main {
+    flex: 1;
+    display: grid;
+    align-content: center;
+    align-items: center;
+    justify-items: center;
+    gap: 16px;
+    width: 100%;
+    max-width: 1180px;
+    margin-inline: auto;
+    padding: 4px clamp(16px, 4cqw, 44px) 20px;
+  }
+  .nx-auth-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 10px;
+  }
+  .nx-auth-mark {
+    position: relative;
+    width: 60px;
+    height: 60px;
+    flex: none;
+  }
+  /* GlassLogo places itself absolutely at a pixel size; here it fills the
+     box the layout gives it. */
+  .nx-auth-mark > .nx-mark {
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+  }
+  .nx-auth-tag {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    line-height: 1.02;
+    font-size: clamp(30px, 8.6cqw, 40px);
+    color: var(--ink);
+  }
+  .nx-auth-tag span {
+    display: block;
+    white-space: nowrap;
+  }
+  html[lang="fa"] .nx-auth-tag {
+    font-family: var(--font-fa);
+    font-weight: 800;
+    letter-spacing: 0;
+    line-height: 1.3;
+    font-size: clamp(27px, 7.6cqw, 36px);
+  }
+  .nx-auth-tag.wide {
+    display: none;
+  }
+  .nx-auth-card {
+    width: 100%;
+    max-width: 424px;
+    border-radius: var(--r-panel);
+    padding: 24px clamp(18px, 5cqw, 30px) 22px;
+  }
+  .nx-auth-step {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    animation: nx-rise 520ms var(--spring-smooth) both;
+  }
+  :root[data-motion="reduce"] .nx-auth-step {
+    animation: none;
+  }
+  .nx-auth-head {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .nx-auth-head h1 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 650;
+    font-size: 25px;
+    line-height: 1.18;
+    letter-spacing: -0.025em;
+    color: var(--ink);
+  }
+  .nx-auth-head p {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 14.5px;
+    line-height: 1.5;
+  }
+  html[lang="fa"] .nx-auth-head h1 {
+    font-family: var(--font-fa);
+    font-weight: 700;
+    font-size: 23px;
+    line-height: 1.45;
+    letter-spacing: 0;
+  }
+  html[lang="fa"] .nx-auth-head p {
+    line-height: 1.8;
+  }
+  .nx-auth-submit {
+    width: 100%;
+    height: 50px;
+    font-weight: 600;
+  }
+  .nx-auth-after {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    text-align: center;
+    color: var(--ink-2);
+    font-size: 13.5px;
+  }
+  .nx-auth-after p {
+    margin: 0;
+  }
+  .nx-auth-fine {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  html[lang="fa"] .nx-auth-fine {
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  /* The recovery code, shown once after a sign-up or a reset through the
+     backup route: its own component, inside the card. */
+  .nx-auth-recovery > .flex-col {
+    gap: 14px;
+  }
+
+  /* Social sign-in: stacked full-width buttons, side by side on a phone. */
+  .nx-social {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .nx-social-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .nx-btn.nx-soc {
+    width: 100%;
+    height: 46px;
+    gap: 10px;
+    padding-inline: 16px;
+    font-size: 14.5px;
+    font-weight: 600;
+  }
+  .nx-soc .short {
+    display: none;
+  }
+  .nx-or {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--ink-2);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  html[lang="fa"] .nx-or {
+    letter-spacing: 0;
+    text-transform: none;
+    font-size: 13px;
+  }
+  .nx-or::before,
+  .nx-or::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--hairline-2);
+  }
+
+  /* ---------- the signed-in pages (shell/Page.tsx) ---------- */
+  .nx-app.nx-solo {
+    /* Outside the shell (the phone client, the web portal) only the width
+       decides the layout. */
+    container-type: inline-size;
+  }
+  .nx-pscene .nx-pmap {
+    position: absolute;
+    left: 50%;
+    bottom: -12%;
+    width: max(1200px, 130%);
+    aspect-ratio: 200 / 82;
+    transform: translateX(-50%);
+    color: var(--map-dot);
+    opacity: 0.45;
+  }
+  .nx-pscene .nx-pmap > svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .nx-page {
+    position: relative;
+    z-index: 1;
+    height: 100%;
+    min-height: 0;
+  }
+  .nx-pscroll {
+    height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-gutter: stable;
+  }
+  .nx-pinner {
+    width: 100%;
+    max-width: 1060px;
+    margin-inline: auto;
+    padding: calc(var(--tb) + 22px) clamp(16px, 3cqw, 40px) 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .nx-phead {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+  .nx-phead h1 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(28px, 3.4cqw, 38px);
+    line-height: 1.08;
+    letter-spacing: -0.035em;
+    color: var(--ink);
+  }
+  html[lang="fa"] .nx-phead h1 {
+    font-family: var(--font-fa);
+    font-weight: 800;
+    font-size: clamp(26px, 3cqw, 32px);
+    line-height: 1.5;
+    letter-spacing: 0;
+  }
+  .nx-phead p {
+    margin: 0;
+    max-width: 62ch;
+    color: var(--ink-2);
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  html[lang="fa"] .nx-phead p {
+    line-height: 1.85;
+  }
+  .nx-back {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 38px;
+    min-height: 0;
+    padding-inline: 10px 14px;
+    margin-bottom: 8px;
+    border-radius: 999px;
+    background: var(--chip-bg);
+    box-shadow: inset 0 0 0 1px var(--hairline-2);
+    color: var(--ink);
+    font-size: 13.5px;
+    font-weight: 500;
+  }
+  .nx-back svg {
+    width: 17px;
+    height: 17px;
+  }
+  .nx-back:hover {
+    background: var(--select-row);
+  }
+
+  /* Cards and groups. Two columns where the page is wide enough (a masonry,
+     so a short card does not leave a hole), one below 720px. */
+  .nx-cols {
+    columns: 2 340px;
+    column-gap: 16px;
+  }
+  .nx-cols > * {
+    break-inside: avoid;
+    margin-bottom: 16px;
+  }
+  .nx-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: 720px;
+  }
+  .nx-pcard {
+    position: relative;
+    flex-shrink: 0;
+    padding: 16px 18px;
+  }
+  .nx-chead {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .nx-chead .t {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .nx-chead h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--ink);
+  }
+  .nx-chead p {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  html[lang="fa"] .nx-chead p {
+    line-height: 1.8;
+  }
+  .nx-ctitle {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .nx-csub {
+    margin: 2px 0 0;
+    color: var(--ink-2);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  html[lang="fa"] .nx-csub {
+    line-height: 1.8;
+  }
+  .nx-group {
+    display: block;
+    background: var(--solid);
+    border-radius: var(--r-card);
+    box-shadow:
+      var(--edge),
+      0 1px 2px rgba(20, 30, 60, 0.04);
+    padding: 2px 16px 4px;
+  }
+  :root[data-glass="flat"] .nx-group {
+    background: var(--glass-solid);
+  }
+  .nx-gt {
+    margin: 0;
+    padding: 14px 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+  }
+  html[lang="fa"] .nx-gt {
+    font-size: 13px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .nx-rows > * + * {
+    border-top: 1px solid var(--hairline);
+  }
+  .nx-li {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 56px;
+    padding: 10px 0;
+    text-align: start;
+    color: inherit;
+  }
+  button.nx-li {
+    margin-inline: -8px;
+    padding-inline: 8px;
+    width: calc(100% + 16px);
+    border-radius: 12px;
+    transition: background-color 160ms;
+  }
+  button.nx-li:hover:not(:disabled) {
+    background: var(--select-row);
+  }
+  button.nx-li:disabled {
+    opacity: 0.55;
+  }
+  .nx-rows > button.nx-li + *,
+  .nx-rows > * + button.nx-li {
+    border-top-color: var(--hairline);
+  }
+  .nx-li .t {
+    flex: 1 1 120px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .nx-li .n {
+    font-size: 14.5px;
+    font-weight: 500;
+    line-height: 1.35;
+    color: var(--ink);
+  }
+  .nx-li .n.danger {
+    color: var(--danger-ink);
+  }
+  .nx-li .s {
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--ink-2);
+  }
+  html[lang="fa"] .nx-li .s {
+    font-size: 13px;
+    line-height: 1.75;
+  }
+  .nx-li .tail {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+    max-width: 60%;
+    color: var(--ink-2);
+    font-size: 13.5px;
+  }
+  .nx-li .tail .v {
+    min-width: 0;
+    text-align: end;
+  }
+  .nx-li .chev {
+    width: 18px;
+    height: 18px;
+    flex: none;
+    color: var(--ink-2);
+  }
+  .nx-li.wrap {
+    flex-wrap: wrap;
+  }
+  .nx-li.wrap .tail {
+    flex-basis: 100%;
+    max-width: none;
+    flex-wrap: wrap;
+  }
+  .nx-ic {
+    width: 32px;
+    height: 32px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 10px;
+    background: var(--select);
+    color: var(--cobalt-ink);
+  }
+  .nx-ic svg {
+    width: 17px;
+    height: 17px;
+  }
+  .nx-ic.danger {
+    background: var(--danger-tint);
+    color: var(--danger-ink);
+  }
+  .nx-ntag {
+    display: inline-block;
+    margin-inline-start: 4px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: var(--muted-tint);
+    color: var(--muted-ink);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.5;
+    vertical-align: 1px;
+    white-space: nowrap;
+  }
+  html[lang="fa"] .nx-ntag {
+    font-size: 12.5px;
+  }
+  .nx-osset {
+    color: var(--ink);
+    font-weight: 500;
+  }
+  .nx-sub {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .nx-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .nx-chipbtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 34px;
+    min-height: 0;
+    padding-inline: 10px 12px;
+    border-radius: 999px;
+    background: var(--chip-bg);
+    box-shadow: inset 0 0 0 1px var(--hairline-2);
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .nx-chipbtn svg {
+    width: 15px;
+    height: 15px;
+  }
+  .nx-chipbtn:hover {
+    background: var(--select-row);
+  }
+
+  /* Facts set out as a list: a term and its value. */
+  .nx-kv {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px 18px;
+    margin: 10px 0 0;
+    font-size: 13.5px;
+  }
+  .nx-kv dt {
+    color: var(--ink-2);
+  }
+  .nx-kv dd {
+    margin: 0;
+    color: var(--ink);
+    font-weight: 500;
+    min-width: 0;
+  }
+  .nx-bigstat {
+    margin: 8px 0 0;
+    font-family: var(--font-display);
+    font-size: 34px;
+    font-weight: 600;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+    color: var(--ink);
+  }
+  .nx-bigstat small {
+    margin-inline-start: 6px;
+    font-family: var(--font-ui);
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--ink-2);
+  }
+  html[lang="fa"] .nx-bigstat {
+    font-family: var(--font-fa);
+    letter-spacing: 0;
+  }
+  .nx-tiny {
+    margin: 8px 0 0;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  html[lang="fa"] .nx-tiny {
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  .nx-bar {
+    height: 8px;
+    margin-top: 10px;
+    border-radius: 999px;
+    background: var(--hairline);
+    overflow: hidden;
+  }
+  .nx-bar > i {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--cobalt);
+    transition: width var(--dur-smooth) var(--spring-smooth);
+  }
+  .nx-bar.caution > i {
+    background: var(--warn);
+  }
+
+  /* Activity: what this device has seen on this network. */
+  .nx-alist {
+    display: flex;
+    flex-direction: column;
+    margin-top: 6px;
+  }
+  .nx-alist > * + * {
+    border-top: 1px solid var(--hairline);
+  }
+  .nx-arow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 56px;
+    padding: 8px 0;
+  }
+  .nx-arow .t {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .nx-arow .n {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--ink);
+  }
+  .nx-arow .s {
+    font-size: 12.5px;
+    color: var(--ink-2);
+  }
+  .nx-res {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink-2);
+    text-align: end;
+  }
+  .nx-res svg {
+    width: 15px;
+    height: 15px;
+    flex: none;
+  }
+  .nx-res.ok {
+    color: var(--ok-ink);
+  }
+
+  /* Plans. */
+  .nx-plans {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+    gap: 14px;
+  }
+  .nx-plan {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .nx-plan h3 {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .nx-price {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+  }
+  .nx-price b {
+    font-family: var(--font-display);
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+    color: var(--ink);
+  }
+  html[lang="fa"] .nx-price b {
+    font-family: var(--font-fa);
+    letter-spacing: 0;
+  }
+  .nx-price span {
+    color: var(--ink-2);
+    font-size: 13px;
+  }
+  .nx-facts {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: var(--field);
+    list-style: none;
+  }
+  .nx-facts li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--ink-2);
+  }
+  .nx-facts li svg {
+    width: 15px;
+    height: 15px;
+    flex: none;
+    color: var(--cobalt-ink);
+  }
+  .nx-facts li b {
+    margin-inline-start: auto;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .nx-row2 {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .nx-row2 > .nx-btn {
+    flex: 1 1 0;
+    min-width: 110px;
+  }
+  .nx-pay {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--field);
+  }
+  .nx-pay span {
+    color: var(--ink-2);
+    font-size: 12.5px;
+  }
+  .nx-pay b {
+    color: var(--ink);
+    font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+    font-size: 14px;
+    font-weight: 500;
+    word-break: break-all;
+    user-select: text;
+  }
+  .nx-wait {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--ink-2);
+    font-size: 13px;
+  }
+
+  /* Support: the list, a new message, a thread. */
+  .nx-ticket {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .nx-thread {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: min(56vh, 520px);
+    overflow-y: auto;
+    padding: 4px 2px;
+  }
+  .nx-bubble {
+    max-width: 82%;
+    padding: 10px 14px;
+    border-radius: 18px;
+    user-select: text;
+  }
+  .nx-bubble p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .nx-bubble small {
+    display: block;
+    margin-top: 4px;
+    color: var(--ink-2);
+    font-size: 12px;
+  }
+  .nx-bubble.me {
+    align-self: flex-end;
+    background: var(--select);
+    border-end-end-radius: 6px;
+  }
+  .nx-bubble.them {
+    align-self: flex-start;
+    background: var(--field);
+    border-end-start-radius: 6px;
+  }
+  .nx-compose {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+  }
+  .nx-compose .nx-textarea {
+    min-height: 52px;
+  }
+  .nx-diagtext {
+    max-height: 14rem;
+    overflow: auto;
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: var(--field);
+    color: var(--ink-2);
+    font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    user-select: text;
+  }
+
+  /* Invite friends. */
+  .nx-codebox {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .nx-codebox code {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 14px;
+    border-radius: 14px;
+    background: var(--field);
+    box-shadow: inset 0 0 0 1px var(--hairline-2);
+    font-family: "Inter", ui-monospace, system-ui, sans-serif;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-align: center;
+    color: var(--ink);
+    user-select: all;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .nx-fdot {
+    width: 8px;
+    height: 8px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+  .nx-fdot.paid {
+    background: var(--ok);
+  }
+  .nx-fdot.joined {
+    background: var(--hl);
+  }
+
+  /* The leak protection dialog: what is held, and what is not. */
+  .nx-leak {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 4px 0 18px;
+    padding: 0;
+    list-style: none;
+  }
+  .nx-leak li {
+    display: flex;
+    gap: 10px;
+    font-size: 13.5px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+  html[lang="fa"] .nx-leak li {
+    line-height: 1.8;
+  }
+  .nx-leak li svg {
+    width: 18px;
+    height: 18px;
+    flex: none;
+    margin-top: 1px;
+  }
+  .nx-leak li.ok svg {
+    color: var(--ok-ink);
+  }
+  .nx-leak b {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .nx-dlg .nx-field {
+    margin: 4px 0 18px;
+  }
+
+  /* ---------- WIDE ---------- */
+  @container app (min-width: 900px) {
+    .nx-auth-main {
+      grid-template-columns: minmax(0, 1fr) minmax(360px, 424px);
+      gap: clamp(32px, 5cqw, 80px);
+      padding-bottom: 32px;
+    }
+    .nx-auth-hero {
+      justify-self: stretch;
+      align-items: flex-start;
+      text-align: start;
+      gap: 22px;
+    }
+    .nx-auth-mark {
+      width: clamp(124px, min(14cqw, 22cqh), 190px);
+      height: clamp(124px, min(14cqw, 22cqh), 190px);
+      margin-inline-start: -6px;
+    }
+    .nx-auth-tag.mob {
+      display: none;
+    }
+    .nx-auth-tag.wide {
+      display: block;
+      font-size: clamp(40px, min(5cqw, 8.6cqh), 68px);
+      line-height: 0.98;
+      letter-spacing: -0.045em;
+    }
+    html[lang="fa"] .nx-auth-tag.wide {
+      font-size: clamp(34px, min(4.3cqw, 7.6cqh), 60px);
+      line-height: 1.28;
+      letter-spacing: 0;
+    }
+  }
+  /* A short wide window: the card's column first. */
+  @container app (min-width: 900px) and (max-height: 700px) {
+    .nx-auth-card {
+      padding-block: 20px 18px;
+    }
+    .nx-auth-step {
+      gap: 13px;
+    }
+  }
+
+  /* A short column window (the 720x600 desktop minimum, a tablet on its
+     side): the providers side by side, and the card a little tighter. */
+  @container app (min-width: 640px) and (max-width: 899.98px) and (max-height: 760px) {
+    .nx-social-row {
+      flex-direction: row;
+    }
+    .nx-btn.nx-soc {
+      flex: 1 1 0;
+      min-width: 0;
+      height: 44px;
+    }
+    .nx-soc .full {
+      display: none;
+    }
+    .nx-soc .short {
+      display: inline;
+    }
+    .nx-auth-card {
+      padding-block: 20px 18px;
+    }
+    .nx-auth-step,
+    .nx-form {
+      gap: 12px;
+    }
+    .nx-input {
+      height: 46px;
+    }
+    .nx-auth-submit {
+      height: 48px;
+    }
+  }
+
+  /* ---------- MEDIUM and NARROW: one column ---------- */
+  @container app (max-width: 899.98px) {
+    .nx-auth-top {
+      padding-block-end: 4px;
+    }
+    .nx-cols {
+      columns: 1;
+    }
+  }
+  @container app (min-width: 640px) and (max-width: 899.98px) {
+    .nx-pinner {
+      padding: 10px 20px 28px;
+    }
+  }
+
+  /* ---------- NARROW (phones) ---------- */
+  @container app (max-width: 639.98px) {
+    .nx-auth-top {
+      /* No Windows title strip on a phone: the status bar's inset. */
+      padding: calc(var(--safe-t) + 10px) 16px 2px;
+    }
+    .nx-auth-brand {
+      font-size: 15px;
+      letter-spacing: 0.38em;
+      gap: 9px;
+    }
+    .nx-auth-logo {
+      width: 26px;
+      height: 26px;
+    }
+    .nx-langsw button {
+      height: 34px;
+      padding: 0 12px;
+    }
+    .nx-auth-main {
+      /* In the middle of what the header leaves, and from the top when
+         that is all there is. */
+      align-content: safe center;
+      gap: 12px;
+      padding: 8px 16px calc(var(--safe-b) + 14px);
+    }
+    .nx-auth-card {
+      padding: 20px 18px 18px;
+    }
+    .nx-auth-step,
+    .nx-form {
+      gap: 12px;
+    }
+    .nx-social {
+      gap: 10px;
+    }
+    .nx-social-row {
+      flex-direction: row;
+    }
+    .nx-btn.nx-soc {
+      flex: 1 1 0;
+      min-width: 0;
+      height: 44px;
+      padding-inline: 10px;
+    }
+    .nx-soc .full {
+      display: none;
+    }
+    .nx-soc .short {
+      display: inline;
+    }
+    .nx-input {
+      height: 46px;
+    }
+    .nx-auth-submit {
+      height: 48px;
+    }
+    .nx-auth-head h1 {
+      font-size: 24px;
+    }
+    html[lang="fa"] .nx-auth-head h1 {
+      font-size: 21px;
+    }
+    .nx-pinner {
+      padding: 6px 16px calc(var(--nav-h) + var(--safe-b) + 20px);
+      gap: 14px;
+    }
+    .nx-solo .nx-pinner {
+      padding: 16px 16px 28px;
+    }
+    .nx-phead h1 {
+      font-size: 28px;
+    }
+    html[lang="fa"] .nx-phead h1 {
+      font-size: 25px;
+    }
+    .nx-group {
+      padding-inline: 14px;
+    }
+    .nx-pcard {
+      padding: 14px 16px;
+    }
+    .nx-bigstat {
+      font-size: 30px;
+    }
+  }
+  /* Phones under 800px tall: the tagline gives way, the mark shrinks. */
+  @container app (max-width: 639.98px) and (max-height: 799.98px) {
+    .nx-auth-tag {
+      display: none;
+    }
+    .nx-auth-mark {
+      width: 44px;
+      height: 44px;
+    }
+    .nx-auth-hero {
+      gap: 6px;
+    }
+  }
+  /* Under 760px, or a screen with more to ask (registration, the backup
+     route's sign-up, a reset), the hero goes: the card is the page. */
+  @container app (max-width: 899.98px) and (max-height: 760px) {
+    .nx-auth-hero {
+      display: none;
+    }
+  }
+  @container app (max-width: 639.98px) and (max-height: 960px) {
+    .nx-auth:is([data-step^="register"], [data-step^="forgot"]) .nx-auth-hero {
+      display: none;
+    }
+  }
+  /* The shortest phones (about 640 tall): every gap at its least, and the
+     sentence under the title goes where the title says it already. */
+  @container app (max-width: 639.98px) and (max-height: 700px) {
+    .nx-auth-card {
+      padding: 16px 16px 14px;
+    }
+    .nx-auth-step,
+    .nx-form {
+      gap: 10px;
+    }
+    .nx-field {
+      gap: 4px;
+    }
+    .nx-input {
+      height: 44px;
+    }
+    .nx-auth-submit {
+      height: 46px;
+    }
+    .nx-btn.nx-soc {
+      height: 42px;
+    }
+    .nx-social {
+      gap: 8px;
+    }
+    .nx-auth-head {
+      gap: 2px;
+    }
+    .nx-auth-head h1 {
+      font-size: 22px;
+    }
+    html[lang="fa"] .nx-auth-head h1 {
+      font-size: 20px;
+      line-height: 1.4;
+    }
+    .nx-auth-after {
+      gap: 6px;
+    }
+  }
+  @container app (max-width: 639.98px) and (max-height: 700px) {
+    .nx-auth:is([data-step="register"], [data-step="register-relay"]) .nx-auth-head p {
+      display: none;
+    }
+  }
+  /* A message to read (a notice, an error) takes the hero's room on a
+     phone, as an alert takes the main page's stage; on the shortest ones
+     the sentence under the title gives way to it too. */
+  @container app (max-width: 639.98px) {
+    .nx-auth:has(.nx-msg) .nx-auth-hero {
+      display: none;
+    }
+  }
+  @container app (max-width: 639.98px) and (max-height: 700px) {
+    .nx-auth:has(.nx-msg) .nx-auth-head p {
+      display: none;
+    }
+  }
+}
+
+/* --- The older shared pieces inside a redesigned page ----------------------
+   Custom mode, Gaming mode, Repair, the recovery code and the phone's
+   per-app card were written for the old dark theme, with white-on-dark
+   borders and fills and the state colours as text. Inside a page or the
+   sign-in card they take the Pearl tokens instead: text in the state's
+   ink, which meets AA where the dot colour does not, and the hairlines and
+   fills of the system. Unlayered, so they win over the utilities they
+   re-colour; scoped, so the phone's dashboard keeps its look. */
+:is(.nx-page, .nx-auth, .nx-dlg) {
+  --warning: var(--warn-ink);
+  --destructive: var(--danger-ink);
+  --success: var(--ok-ink);
+  --highlight: var(--hl-ink);
+}
+:is(.nx-page, .nx-auth) :is(.border-white\/6, .border-white\/8, .border-white\/10, .border-white\/12, .border-white\/14, .border-white\/20, .border-white\/25) {
+  border-color: var(--hairline-2);
+}
+:is(.nx-page, .nx-auth) :is(.divide-white\/6) > * + * {
+  border-color: var(--hairline);
+}
+:is(.nx-page, .nx-auth)
+  :is(
+    .bg-black\/20,
+    .bg-black\/30,
+    .bg-black\/40,
+    .bg-white\/2,
+    .bg-white\/3,
+    .bg-white\/4,
+    .bg-white\/5,
+    .bg-white\/8,
+    .bg-white\/\[0\.02\],
+    .bg-white\/\[0\.025\],
+    .bg-white\/\[0\.03\],
+    .bg-white\/\[0\.04\]
+  ) {
+  background-color: var(--field);
+}
+:is(.nx-page, .nx-auth) :is(.hover\:bg-white\/8, .hover\:bg-white\/6, .hover\:bg-white\/\[0\.07\]):hover {
+  background-color: var(--select-row);
+}
+:is(.nx-page, .nx-auth) .border-t-white\/80 {
+  border-top-color: var(--ink-2);
+}
+:is(.nx-page, .nx-auth) .text-\[10px\],
+:is(.nx-page, .nx-auth) .text-\[11px\] {
+  font-size: 12px;
+}
