@@ -54,6 +54,7 @@ import { Page } from "../components/shell/Page";
 import { RepairNetwork } from "../components/RepairNetwork";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { StillTrying } from "../components/StillTrying";
+import { relaySupported } from "../lib/last-resort";
 
 /** Which device this is: decides the rows that only exist on one of them
  * (gaming mode, Custom mode, Repair and leak protection are Windows's; the
@@ -218,24 +219,28 @@ export function Settings({
       {unconfirmedRelay ? <VerifyEmailReminder email={customer.email} onChanged={load} /> : null}
 
       <div className="nx-cols">
-        <ListGroup title={t("set.connection")}>
-          {windows ? (
-            <Row
-              icon={<ShieldCheck />}
-              label={t("set.leak")}
-              value={t("set.leakVal")}
-              onClick={() => setAskLeak(true)}
-            />
-          ) : null}
-          {/* The relay of last resort's switch: on until turned off here
-              (last-resort.ts). Nothing where there is no relay. */}
-          <BackupRouteSection />
-          {windows ? <SwitchRow icon={<Power />} label={t("set.autoStart")} checked={false} notBuilt /> : null}
-          {platform !== "web" ? <SwitchRow icon={<Play />} label={t("set.autoConnect")} checked={false} notBuilt /> : null}
-          {windows ? (
-            <SwitchRow icon={<WifiOff />} label={t("set.blockRecon")} hint={t("set.killHint")} checked={false} notBuilt />
-          ) : null}
-        </ListGroup>
+        {/* Only with a row in it: the web portal has no tunnel and no relay,
+            and an empty titled card says there is something to set. */}
+        {platform !== "web" || relaySupported() ? (
+          <ListGroup title={t("set.connection")}>
+            {windows ? (
+              <Row
+                icon={<ShieldCheck />}
+                label={t("set.leak")}
+                value={t("set.leakVal")}
+                onClick={() => setAskLeak(true)}
+              />
+            ) : null}
+            {/* The relay of last resort's switch: on until turned off here
+                (last-resort.ts). Nothing where there is no relay. */}
+            <BackupRouteSection />
+            {windows ? <SwitchRow icon={<Power />} label={t("set.autoStart")} checked={false} notBuilt /> : null}
+            {platform !== "web" ? <SwitchRow icon={<Play />} label={t("set.autoConnect")} checked={false} notBuilt /> : null}
+            {windows ? (
+              <SwitchRow icon={<WifiOff />} label={t("set.blockRecon")} hint={t("set.killHint")} checked={false} notBuilt />
+            ) : null}
+          </ListGroup>
+        ) : null}
 
         {gamingSection || customSection || platform === "ios" ? (
           <ListGroup title={t("set.modes")}>
@@ -382,7 +387,9 @@ export function Settings({
         </ListGroup>
 
         <ListGroup title={t("set.about")}>
-          <Row label={t("set.version")} value={version ? <bdi dir="ltr">{version}</bdi> : "—"} />
+          {/* Once it is known: a build that cannot say its version shows no
+              row, not a dash. */}
+          {version ? <Row label={t("set.version")} value={<bdi dir="ltr">{version}</bdi>} /> : null}
           <CommunityRow />
         </ListGroup>
       </div>
