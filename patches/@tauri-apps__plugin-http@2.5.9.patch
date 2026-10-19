@@ -1,10 +1,33 @@
 diff --git a/dist-js/index.cjs b/dist-js/index.cjs
-index f1bba4502af349efbde8b94ac1b1773a490f4836..c1f6f24a6c77408a75ff32d29aa6a4bcd0049bf2 100644
+index f1bba4502af349efbde8b94ac1b1773a490f4836..b0e687d068ccb0143127c2a0cadfae1cdfb0742c 100644
 --- a/dist-js/index.cjs
 +++ b/dist-js/index.cjs
-@@ -119,6 +119,16 @@ async function fetch(input, init) {
+@@ -103,7 +103,12 @@ async function fetch(input, init) {
+             danger
+         }
+     });
+-    const abort = () => core.invoke('plugin:http|fetch_cancel', { rid });
++    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
++    // both are only ever fired and forgotten, and the Rust side refuses one
++    // for a resource it has already closed -- a body read to its end, then
++    // aborted -- with "The resource id N is invalid.", which reached nobody
++    // and surfaced as an unhandled rejection. Already gone is released.
++    const abort = () => core.invoke('plugin:http|fetch_cancel', { rid }).catch(() => undefined);
+     // Optimistically check for abort signal
+     // and avoid doing any work after doing intial work on the Rust side
+     if (signal?.aborted) {
+@@ -116,9 +121,24 @@ async function fetch(input, init) {
+     const { status, statusText, url, headers: responseHeaders, rid: responseRid } = await core.invoke('plugin:http|fetch_send', {
+         rid
+     });
++    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
++    // both are only ever fired and forgotten, and the Rust side refuses one
++    // for a resource it has already closed -- a body read to its end, then
++    // aborted -- with "The resource id N is invalid.", which reached nobody
++    // and surfaced as an unhandled rejection. Already gone is released.
      const dropBody = () => {
-         return core.invoke('plugin:http|fetch_cancel_body', { rid: responseRid });
+-        return core.invoke('plugin:http|fetch_cancel_body', { rid: responseRid });
++        return core.invoke('plugin:http|fetch_cancel_body', { rid: responseRid }).catch(() => undefined);
      };
 +    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
 +    // aborted while the answer was on its way. The body below hears an abort
@@ -19,7 +42,7 @@ index f1bba4502af349efbde8b94ac1b1773a490f4836..c1f6f24a6c77408a75ff32d29aa6a4bc
      const readChunk = async (controller) => {
          let data;
          try {
-@@ -161,6 +171,13 @@ async function fetch(input, init) {
+@@ -161,6 +181,13 @@ async function fetch(input, init) {
                  void dropBody();
              }
          });
@@ -34,12 +57,35 @@ index f1bba4502af349efbde8b94ac1b1773a490f4836..c1f6f24a6c77408a75ff32d29aa6a4bc
          status,
          statusText
 diff --git a/dist-js/index.js b/dist-js/index.js
-index 01f0ea49e0fe45425adcb8596f57e97a92c8c958..8da26d6068aa25eca5102cdcce036ec83225a4ce 100644
+index 01f0ea49e0fe45425adcb8596f57e97a92c8c958..b0fdf9da174cf1155403c136aa70057ce8ba0896 100644
 --- a/dist-js/index.js
 +++ b/dist-js/index.js
-@@ -117,6 +117,16 @@ async function fetch(input, init) {
+@@ -101,7 +101,12 @@ async function fetch(input, init) {
+             danger
+         }
+     });
+-    const abort = () => invoke('plugin:http|fetch_cancel', { rid });
++    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
++    // both are only ever fired and forgotten, and the Rust side refuses one
++    // for a resource it has already closed -- a body read to its end, then
++    // aborted -- with "The resource id N is invalid.", which reached nobody
++    // and surfaced as an unhandled rejection. Already gone is released.
++    const abort = () => invoke('plugin:http|fetch_cancel', { rid }).catch(() => undefined);
+     // Optimistically check for abort signal
+     // and avoid doing any work after doing intial work on the Rust side
+     if (signal?.aborted) {
+@@ -114,9 +119,24 @@ async function fetch(input, init) {
+     const { status, statusText, url, headers: responseHeaders, rid: responseRid } = await invoke('plugin:http|fetch_send', {
+         rid
+     });
++    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
++    // both are only ever fired and forgotten, and the Rust side refuses one
++    // for a resource it has already closed -- a body read to its end, then
++    // aborted -- with "The resource id N is invalid.", which reached nobody
++    // and surfaced as an unhandled rejection. Already gone is released.
      const dropBody = () => {
-         return invoke('plugin:http|fetch_cancel_body', { rid: responseRid });
+-        return invoke('plugin:http|fetch_cancel_body', { rid: responseRid });
++        return invoke('plugin:http|fetch_cancel_body', { rid: responseRid }).catch(() => undefined);
      };
 +    // Patched by Neoxify (patches/@tauri-apps__plugin-http@2.5.9.patch):
 +    // aborted while the answer was on its way. The body below hears an abort
@@ -54,7 +100,7 @@ index 01f0ea49e0fe45425adcb8596f57e97a92c8c958..8da26d6068aa25eca5102cdcce036ec8
      const readChunk = async (controller) => {
          let data;
          try {
-@@ -159,6 +169,13 @@ async function fetch(input, init) {
+@@ -159,6 +179,13 @@ async function fetch(input, init) {
                  void dropBody();
              }
          });
