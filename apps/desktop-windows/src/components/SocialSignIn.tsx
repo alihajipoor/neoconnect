@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 
 import { AppleIcon, FacebookIcon, GoogleIcon } from "./BrandIcons";
-import { useI18n } from "../lib/i18n";
-import { failureText } from "../lib/failure-text";
+import { useI18n, type TranslationKey } from "../lib/i18n";
+import { failureText, type ShownFailure } from "../lib/failure-text";
 import { socialSignIn } from "../lib/auth";
 import {
   appleSignInAvailable,
@@ -28,6 +28,14 @@ export function availableSocialProviders(): SocialProvider[] {
   return appleSignInAvailable()
     ? ["apple", "google", "facebook"]
     : ["google", "facebook"];
+}
+
+/** What the sign-in screen says for a provider sign-in that failed: the
+ * sentence the flow wrote for this customer -- no Apple Account on the
+ * iPhone, a provider that is not available, the backend's own reason
+ * (social-auth.ts) -- and the generic line only when there is none. */
+export function socialFailureText(result: ShownFailure, t: (key: TranslationKey) => string): string {
+  return failureText(result, t) || t("auth.socialFailed");
 }
 
 /** The provider buttons, above the email form on Login and Register.
@@ -95,14 +103,17 @@ export function SocialSignIn({
       if (result === null) return;
       setCloudflareNote(false);
       if (!result.ok) {
-        setError(failureText(result, t) || t("auth.socialFailed"));
+        setError(socialFailureText(result, t));
         return;
       }
       onSuccess();
     } catch {
       setCloudflareNote(false);
-      // Never the exception's own text: it is the platform's English, not
-      // the customer's language, and says nothing they can act on.
+      // Never the exception's own text. What reaches here is not the
+      // provider trip -- its refusals come back as a result, above, in the
+      // customer's words -- but what throws after it, such as a store that
+      // would not save the session: the platform's English, which says
+      // nothing they can act on.
       setError(t("auth.socialFailed"));
     } finally {
       if (flow.current === controller) flow.current = null;
