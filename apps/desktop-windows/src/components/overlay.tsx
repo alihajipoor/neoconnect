@@ -1,5 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { X } from "lucide-react";
 import { cn } from "../lib/utils";
 
 /** Dialogs and menus, rendered through a portal at the document root.
@@ -113,6 +114,49 @@ export function Dialog({
       </div>
     </>,
     document.body,
+  );
+}
+
+/** A sheet from the bottom edge over a scrim, for what a phone's one screen
+ * folds away: labelled, modal, and the one thing on that screen that may
+ * scroll -- its body does, inside it, when it is taller than 88% of the
+ * screen. `container` is where it is drawn: the app root, which holds
+ * fixed-position children to its own box (it is a size container) and
+ * carries the safe areas; the document root otherwise. */
+export function BottomSheet({
+  open,
+  title,
+  closeLabel,
+  onClose,
+  container,
+  children,
+}: {
+  open: boolean;
+  title: ReactNode;
+  closeLabel: string;
+  onClose: () => void;
+  container?: Element | null;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useFocusTrap(ref, open, onClose);
+  if (!open || typeof document === "undefined") return null;
+  return createPortal(
+    <>
+      <div className="nx-scrim" aria-hidden onClick={onClose} />
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="nx-glass strong nx-sheet">
+        <div className="handle" aria-hidden />
+        <div className="nx-sheet-head">
+          <h2 id={titleId}>{title}</h2>
+          <button type="button" className="nx-ibtn" onClick={onClose} aria-label={closeLabel} title={closeLabel}>
+            <X aria-hidden />
+          </button>
+        </div>
+        <div className="nx-sheet-body">{children}</div>
+      </div>
+    </>,
+    container ?? document.body,
   );
 }
 

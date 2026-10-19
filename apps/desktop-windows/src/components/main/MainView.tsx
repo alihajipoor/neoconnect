@@ -1,18 +1,27 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
-import { Glass } from "../ui";
+import { Disclosure, Glass } from "../ui";
+import { BottomSheet } from "../overlay";
 import { Tagline } from "./Hero";
 
 /** Where the main page's pieces go. The Dashboard builds them -- every
  * fact and every press stays in its source, where the tests read them --
  * and this places them: the hero column (anchored at a fixed top, so a
  * state change never moves the tagline), the VPN / Gaming switch, the
- * locations panel and the tray. Which of them show at which width is
- * pearl.css's: the window decides, not the monitor.
+ * locations panel and the tray. Which of them show at which width and
+ * height is pearl.css's: the window decides, not the monitor.
  *
- * The hero column scrolls rather than clips. When it overflows, its bottom
- * fades and a "More below" pill scrolls it by most of its height. */
+ * Wide and medium windows: the column scrolls rather than clips. When it
+ * overflows, its bottom fades and a "More below" pill scrolls it by most of
+ * its height.
+ *
+ * Phones: one screen, nothing scrolls (owner, 2026-10-19). The plan, the
+ * address, the connection details and the mode switch fold into one line
+ * at the foot of the column that opens a sheet, the one thing that may
+ * scroll; the map and the mark give up their room first. The honest state
+ * -- chip, line, sentence, banners, notes, the device limit -- stays in the
+ * column. */
 
 export interface MainSlots {
   banner?: ReactNode;
@@ -28,11 +37,19 @@ export interface MainSlots {
   slot?: ReactNode;
   actions?: ReactNode;
   error?: ReactNode;
+  /** What must be read while it is true -- a leak, unprotected lookups:
+   * always in the column. */
   notes?: ReactNode;
+  /** What is only worth knowing: behind "Connection details" in the
+   * column, in the sheet on a phone. */
+  details?: ReactNode[];
   modeBar?: ReactNode;
   /** Medium and phone layouts: the location card, and plan and IP cards. */
   locationCard?: ReactNode;
   metrics?: ReactNode;
+  /** Phones: the one line the plan, the address and the details fold
+   * into (`SummaryLine`). Absent, nothing folds. */
+  summary?: ReactNode;
   /** The locations panel's contents; absent, no panel is drawn. */
   panel?: ReactNode;
   panelLabel?: string;
@@ -41,7 +58,7 @@ export interface MainSlots {
   /** The art in the hero's own grid area, clear of every blur. */
   art?: ReactNode;
   /** Medium and phone layouts: the world map's stage in the hero's column,
-   * where its lights scroll with the copy (`WorldMap` host "stage"). */
+   * where its lights live (`WorldMap` host "stage"). */
   mapStage?: ReactNode;
   /** What the map's lights mean, in words, at the foot of the panel. */
   legend?: ReactNode;
@@ -51,6 +68,7 @@ export interface MainSlots {
 export function MainView(slots: MainSlots) {
   const { t } = useI18n();
   const taglineId = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
   const heroRef = useRef<HTMLElement>(null);
   const [more, setMore] = useState(false);
   // Scrolled at all: the room kept under the last control for the pill
@@ -58,6 +76,8 @@ export function MainView(slots: MainSlots) {
   // it away (pearl.css).
   const [scrolled, setScrolled] = useState(false);
   const [flash, setFlash] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const details = slots.details ?? [];
 
   // "More below": shown only while the column has more than it shows.
   useEffect(() => {
@@ -87,8 +107,66 @@ export function MainView(slots: MainSlots) {
     return () => clearTimeout(timer);
   }, [slots.panelFlash]);
 
+  const detailsInline =
+    details.length > 0 ? (
+      <div className="nx-details">
+        <Disclosure label={t("notes.details")} count={details.length}>
+          {details}
+        </Disclosure>
+      </div>
+    ) : null;
+
+  // The phone's one line, and the sheet it opens: the plan and the address,
+  // the details open -- a protocol change among them, which the location
+  // card names already -- and the mode switch. Shown by pearl.css on phones
+  // only.
+  const sheetCount = details.length + (slots.subline ? 1 : 0);
+  const summary = slots.summary ? (
+    <button
+      type="button"
+      className="nx-glass strong nx-sumline"
+      onClick={() => setSheetOpen(true)}
+      aria-haspopup="dialog"
+      aria-expanded={sheetOpen}
+      aria-label={t("sum.open")}
+    >
+      {slots.summary}
+      {sheetCount > 0 ? <span className="cnt nx-num">{sheetCount}</span> : null}
+      <ChevronUp className="nx-i sm" aria-hidden />
+    </button>
+  ) : null;
+  const sheet = slots.summary ? (
+    <BottomSheet
+      open={sheetOpen}
+      title={t("sum.title")}
+      closeLabel={t("sum.close")}
+      onClose={() => setSheetOpen(false)}
+      container={sheetOpen ? (rootRef.current?.closest(".nx-app") ?? null) : null}
+    >
+      {slots.metrics}
+      {sheetCount > 0 ? (
+        <section className="nx-sheet-sec" aria-label={t("notes.details")}>
+          <h3>{t("notes.details")}</h3>
+          {slots.subline}
+          {details.length > 0 ? <div className="nx-notes">{details}</div> : null}
+        </section>
+      ) : null}
+      {slots.modeBar ? (
+        <section className="nx-sheet-sec" aria-label={t("mode.label")}>
+          <h3>{t("mode.label")}</h3>
+          {slots.modeBar}
+        </section>
+      ) : null}
+    </BottomSheet>
+  ) : null;
+
   return (
-    <div className={slots.panel ? "nx-ov" : "nx-ov nopanel"} data-more={more ? "1" : undefined} data-scrolled={scrolled ? "1" : undefined}>
+    <div
+      ref={rootRef}
+      className={slots.panel ? "nx-ov" : "nx-ov nopanel"}
+      data-more={more ? "1" : undefined}
+      data-scrolled={scrolled ? "1" : undefined}
+    >
       {slots.art}
       <section ref={heroRef} className="nx-hero" aria-labelledby={taglineId}>
         <div className="nx-hero-copy">
@@ -108,13 +186,15 @@ export function MainView(slots: MainSlots) {
               {slots.slot}
               {slots.subline}
               {slots.actions}
-              {slots.error}
+              {slots.error ? <div className="nx-err">{slots.error}</div> : null}
               {slots.notes}
+              {detailsInline}
             </>
           )}
           {slots.mapStage}
           {slots.modeBar}
           {slots.metrics}
+          {summary}
         </div>
       </section>
       {slots.modeBar}
@@ -140,6 +220,7 @@ export function MainView(slots: MainSlots) {
         {t("more.below")}
         <ChevronDown aria-hidden />
       </button>
+      {sheet}
       {slots.announcer}
     </div>
   );

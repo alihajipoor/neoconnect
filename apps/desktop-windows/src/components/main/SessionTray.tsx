@@ -127,6 +127,33 @@ export function LocationCard({ location }: { location: TrayLocation }) {
   );
 }
 
+/** Phones: the plan and the address on one line, the press that opens the
+ * sheet holding the cards below (MainView). The address only once a
+ * verified tunnel's check returned it (`ipFor`); otherwise the line says
+ * nothing about it rather than something vaguer. */
+export function SummaryLine({ plan, ip }: { plan: TrayPlan | null; ip: IpModel }) {
+  const { t } = useI18n();
+  return (
+    <span className="nx-sum">
+      <span className="p">
+        {plan ? (
+          <>
+            <span className="v">{plan.value}</span>
+            {plan.days ? <span className={cn("d", plan.days.caution && "caution")}>{plan.days.text}</span> : null}
+          </>
+        ) : (
+          <span className="v">{t("tr.noPlan")}</span>
+        )}
+      </span>
+      {ip.kind === "ip" ? (
+        <span className="ip nx-ltr" dir="ltr">
+          {ip.ip}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 /** Medium and phone layouts: the plan and the address as two solid cards. */
 export function MetricCards({ plan, ip }: { plan: TrayPlan | null; ip: IpModel }) {
   const { t } = useI18n();

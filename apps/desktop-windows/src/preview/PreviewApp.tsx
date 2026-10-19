@@ -12,10 +12,10 @@ import { SLOT as PROTOCOL_SLOT, Slotted } from "../components/Slotted";
 import { MapLegend } from "../components/main/MapLegend";
 import { WorldMap } from "../components/main/WorldMap";
 import { MainView } from "../components/main/MainView";
-import { LocationCard, MetricCards, SessionTray, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
+import { LocationCard, MetricCards, SessionTray, SummaryLine, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
 import { Dialog } from "../components/overlay";
 import { AppShell } from "../components/shell/AppShell";
-import { Banner, Disclosure, Note, PillButton, Segmented } from "../components/ui";
+import { Banner, Note, PillButton, Segmented } from "../components/ui";
 import { MARK_TONE, type LogoTone } from "../lib/logo-geometry";
 import { headlineFor, isTunnelUp } from "../lib/connection-evidence";
 import { pressFor } from "../lib/connect-intent";
@@ -103,14 +103,22 @@ const SCENARIOS: Record<string, Scenario> = {
   gamingUnknown: { label: "Gaming mode, status unknown", state: "disconnected", gaming: "unknown" },
 };
 
-const SIZES: Record<string, [number, number]> = {
+/** Width, height and, for tablets and phones, the safe areas the device
+ * reports with the app drawn edge to edge (top, bottom): the status bar,
+ * the notch or island, the home indicator or the button bar. The preview
+ * cannot get them from env(), so it sets the app's own variables. */
+const SIZES: Record<string, [number, number, number?, number?]> = {
   "1180 × 760 (first launch)": [1180, 760],
   "940 × 700 (old default)": [940, 700],
   "1440 × 900": [1440, 900],
   "1280 × 800": [1280, 800],
   "720 × 600 (minimum)": [720, 600],
-  "834 × 1112 (tablet)": [834, 1112],
-  "390 × 844 (phone)": [390, 844],
+  "834 × 1112 (tablet)": [834, 1112, 24, 20],
+  "360 × 640 (small Android)": [360, 640, 24, 48],
+  "375 × 667 (iPhone SE)": [375, 667, 20, 0],
+  "390 × 844 (phone)": [390, 844, 47, 34],
+  "412 × 915 (Android)": [412, 915, 32, 24],
+  "430 × 932 (large iPhone)": [430, 932, 59, 34],
 };
 
 function route(id: string, region: string, node: string, protocol: RouteOption["protocol"], transport: string | undefined, extra: Partial<RouteOption> = {}): RouteOption {
@@ -204,7 +212,7 @@ export function PreviewApp() {
   const [logo, setLogo] = useState(true);
   const [logoTone, setLogoTone] = useState<LogoTone>(MARK_TONE);
   const sc = SCENARIOS[key];
-  const [w, h] = SIZES[size];
+  const [w, h, safeT = 0, safeB = 0] = SIZES[size];
   const [askOpen, setAskOpen] = useState(false);
 
   useEffect(() => effects.setTheme(theme), [theme]);
@@ -300,9 +308,13 @@ export function PreviewApp() {
           boxShadow: "0 30px 80px -30px rgba(20,30,60,.45), 0 0 0 1px rgba(20,30,60,.12)",
           // A containing block for the app's fixed overlays.
           transform: "translateZ(0)",
+          ...({ "--pv-safe-t": `${safeT}px`, "--pv-safe-b": `${safeB}px` } as React.CSSProperties),
         }}
         data-testid="frame"
+        data-safe={safeT || safeB ? `${safeT},${safeB}` : undefined}
       >
+        {/* The device's safe areas, which env() cannot report here. */}
+        <style>{`[data-testid="frame"] .nx-app { --safe-t: var(--pv-safe-t); --safe-b: var(--pv-safe-b); }`}</style>
         <Composed sc={sc} t={t} language={language} connectedAt={connectedAt} askOpen={askOpen} onAsk={setAskOpen} width={w} evidence={evidence} logo={logo} logoTone={logoTone} />
       </div>
     </div>
@@ -476,16 +488,8 @@ function Composed({
       </div>
     );
 
-  const notes = (
-    <div className="nx-notes">
-      {sc.leak ? <Note tone="danger">{t("dash.ipv4NotConfined")}</Note> : null}
-      {sc.details ? (
-        <Disclosure label={t("notes.details")} count={1}>
-          <Note tone="info">{t("dash.fullTunnelIpv6Blocked")}</Note>
-        </Disclosure>
-      ) : null}
-    </div>
-  );
+  const notes = <div className="nx-notes">{sc.leak ? <Note tone="danger">{t("dash.ipv4NotConfined")}</Note> : null}</div>;
+  const details = sc.details ? [<Note key="v6" tone="info">{t("dash.fullTunnelIpv6Blocked")}</Note>] : [];
 
   const panel = (
     <LocationPicker
@@ -533,6 +537,7 @@ function Composed({
           modeBar={modeBar}
           locationCard={<LocationCard location={location} />}
           metrics={<MetricCards plan={trayPlan} ip={ip} />}
+          summary={<SummaryLine plan={trayPlan} ip={ip} />}
           mapStage={mapStage}
           tray={<SessionTray label={t("tr.location")} location={location} plan={trayPlan} ip={ip} />}
         />
@@ -569,9 +574,11 @@ function Composed({
             ) : null
           }
           notes={notes}
+          details={details}
           modeBar={modeBar}
           locationCard={<LocationCard location={location} />}
           metrics={<MetricCards plan={trayPlan} ip={ip} />}
+          summary={plan === "none" ? null : <SummaryLine plan={trayPlan} ip={ip} />}
           panel={layout !== "narrow" ? panel : null}
           panelLabel={t("loc.panelTitle")}
           legend={<MapLegend />}

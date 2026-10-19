@@ -141,12 +141,12 @@ import {
   type IntentState,
   type PressAction,
 } from "../lib/connect-intent";
-import { Banner, Disclosure, Note, PillButton, Segmented } from "../components/ui";
+import { Banner, Note, PillButton, Segmented } from "../components/ui";
 import { Dialog } from "../components/overlay";
 import { AppShell } from "../components/shell/AppShell";
 import { MainView } from "../components/main/MainView";
 import { Decor, Hint, StateAnnouncer, StateLine, StatusChip } from "../components/main/Hero";
-import { LocationCard, MetricCards, SessionTray, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
+import { LocationCard, MetricCards, SessionTray, SummaryLine, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
 import { HeroArt } from "../components/main/HeroArt";
 import { SLOT, Slotted } from "../components/Slotted";
 import { MapLegend } from "../components/main/MapLegend";
@@ -4242,7 +4242,8 @@ export function Dashboard({
   ) : null;
 
   // What only applies while a tunnel is up, below the button. Red only for
-  // real leaks; the informational lines fold behind a counted disclosure.
+  // real leaks, always in the column; the informational lines fold behind
+  // a counted disclosure (MainView), or into the summary's sheet on a phone.
   const details: ReactNode[] = [];
   if (isTunnelUp(connectionState) && splitTunnelActive && !splitTunnelProblem) {
     details.push(<Note key="custom" tone="info">{t("dash.customActive")}</Note>);
@@ -4284,11 +4285,6 @@ export function Dashboard({
           Never in Custom mode or on WireGuard (`warnsUnconfined`). */}
       {isTunnelUp(connectionState) && ipv4NotConfined ? (
         <Note tone="danger">{t(unconfinedKey)}</Note>
-      ) : null}
-      {details.length > 0 ? (
-        <Disclosure label={t("notes.details")} count={details.length}>
-          {details}
-        </Disclosure>
       ) : null}
     </div>
   );
@@ -4508,6 +4504,7 @@ export function Dashboard({
           modeBar={modeBar}
           locationCard={<LocationCard location={trayLocation} />}
           metrics={<MetricCards plan={trayPlan} ip={ip} />}
+          summary={<SummaryLine plan={trayPlan} ip={ip} />}
           mapStage={mapStage}
           tray={<SessionTray label={t("tr.location")} location={trayLocation} plan={trayPlan} ip={ip} />}
         />
@@ -4563,9 +4560,11 @@ export function Dashboard({
           actions={error || slotChoice ? null : actions}
           error={errorBlock}
           notes={notes}
+          details={details}
           modeBar={modeBar}
           locationCard={subscription ? <LocationCard location={trayLocation} /> : null}
           metrics={subscription ? <MetricCards plan={trayPlan} ip={ip} /> : null}
+          summary={subscription ? <SummaryLine plan={trayPlan} ip={ip} /> : null}
           panel={layout !== "narrow" ? picker : null}
           panelLabel={t("loc.panelTitle")}
           panelFlash={panelFlash}

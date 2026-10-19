@@ -18,6 +18,7 @@
   .nx-app {
     --tb: 0px;
     --nav-h: 64px;
+    --safe-t: env(safe-area-inset-top, 0px);
     --safe-b: env(safe-area-inset-bottom, 0px);
     --t-tint: var(--muted-tint);
     --t-ink: var(--muted-ink);
@@ -25,6 +26,8 @@
     position: relative;
     width: 100%;
     height: 100%;
+    /* Never taller than the dynamic viewport: the page is one screen. */
+    max-height: 100dvh;
     overflow: hidden;
     background: var(--base);
     color: var(--ink);
@@ -343,15 +346,18 @@
       transform: scale(1.04);
     }
   }
-  /* Still while the window is hidden, and under an open dialog or menu,
-     whose glass would otherwise blur moving lights. Important: these and
-     reduced motion override the more specific rules that start a light. */
+  /* Still while the window is hidden, and under an open dialog, menu or
+     sheet, whose glass would otherwise blur moving lights. Important: these
+     and reduced motion override the more specific rules that start a light. */
   :is(.nx-map, .nx-mapstage)[data-vis="hidden"] .nx-lamp::before,
   :is(.nx-map, .nx-mapstage)[data-vis="hidden"] .nx-lamp::after,
   :is(.nx-map, .nx-mapstage)[data-vis="hidden"] .nx-mark .sweep,
   body:has(> .nx-dlgwrap, > .nx-menu) .nx-lamp::before,
   body:has(> .nx-dlgwrap, > .nx-menu) .nx-lamp::after,
-  body:has(> .nx-dlgwrap, > .nx-menu) .nx-mark .sweep {
+  body:has(> .nx-dlgwrap, > .nx-menu) .nx-mark .sweep,
+  .nx-app:has(> .nx-sheet) .nx-lamp::before,
+  .nx-app:has(> .nx-sheet) .nx-lamp::after,
+  .nx-app:has(> .nx-sheet) .nx-mark .sweep {
     animation-play-state: paused !important;
   }
   /* Nothing moves under reduced motion: a live light keeps a static glow. */
@@ -1719,6 +1725,144 @@
     min-width: 0;
   }
 
+  /* ---------- the phone's summary line and its sheet ---------- */
+  /* One line for what a phone folds away: the plan, the address once a
+     verified tunnel's check returned it, the details' count. Shown on
+     phones only (the narrow rules); it opens the sheet. */
+  .nx-sumline {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 44px;
+    padding: 6px 12px 6px 16px;
+    border-radius: 16px;
+    font-size: 13px;
+    color: var(--ink-2);
+    text-align: start;
+  }
+  [dir="rtl"] .nx-sumline {
+    padding: 6px 16px 6px 12px;
+  }
+  .nx-sumline > svg {
+    flex: none;
+    color: var(--ink-2);
+  }
+  .nx-sumline .cnt {
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--chip-bg);
+    box-shadow: inset 0 0 0 1px var(--hairline-2);
+    font-size: 11.5px;
+    color: var(--ink);
+  }
+  .nx-sum {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .nx-sum .p {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .nx-sum .v {
+    color: var(--ink);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .nx-sum .v small {
+    font-size: inherit;
+    font-weight: 400;
+    color: var(--ink-2);
+    margin-inline-start: 0.25em;
+  }
+  .nx-sum .d::before {
+    content: "·";
+    margin-inline: 0.45em;
+    color: var(--ink-3);
+  }
+  .nx-sum .d.caution {
+    color: var(--warn-ink);
+  }
+  .nx-sum .ip {
+    flex: none;
+    color: var(--ink);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .nx-sheet-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 0 10px 6px;
+  }
+  [dir="rtl"] .nx-sheet-head {
+    padding: 0 6px 10px 0;
+  }
+  .nx-sheet-head h2 {
+    margin: 0;
+    font: 600 17px/1.3 var(--font-display);
+    letter-spacing: -0.01em;
+  }
+  html[lang="fa"] .nx-sheet-head h2 {
+    font-family: var(--font-fa);
+    letter-spacing: 0;
+    line-height: 1.6;
+  }
+  .nx-sheet-body {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 2px 2px 4px;
+  }
+  .nx-sheet-sec {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .nx-sheet-sec h3 {
+    margin: 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink-2);
+  }
+  .nx-sheet-sec .nx-modebar {
+    margin: 0;
+  }
+  .nx-sheet-sec .nx-modehint {
+    max-width: none;
+  }
+  /* The error block and the notes take no room, and no gap, when empty. */
+  .nx-err {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .nx-err:empty,
+  .nx-notes:empty {
+    display: none;
+  }
+  .nx-details {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 54ch;
+  }
+
   /* ---------- the locations panel ---------- */
   .nx-panel {
     display: none;
@@ -2116,7 +2260,7 @@
     display: flex;
     flex-direction: column;
     border-radius: 30px 30px 0 0;
-    padding: 6px 14px calc(14px + env(safe-area-inset-bottom, 0px));
+    padding: 6px 16px calc(14px + var(--safe-b, env(safe-area-inset-bottom, 0px)));
     animation: nx-sheet-in var(--dur-smooth) var(--spring-smooth) both;
   }
   .nx-sheet .handle {
@@ -2500,30 +2644,64 @@
     }
   }
 
-  /* ---------- NARROW: one column + docked bottom nav (phones) ---------- */
+  /* ---------- NARROW: one screen, no page scroll (phones) ----------
+     Owner, 2026-10-19: the phone's main page fits its screen, and only a
+     sheet scrolls. A column of fixed parts with one flexible part:
+       - at the top, the state: chip, tagline, the timer or the state in
+         words, the sentence, and whatever must be read with it -- a
+         banner, the device limit, a protocol change, a leak, an error;
+       - the map's stage, the one part that gives up room: it takes what
+         the column leaves, and under STAGE_MIN tall draws nothing;
+       - at the foot, by the thumb: the location, the button, and one line
+         that the plan, the address, the connection details and the mode
+         switch fold into, which opens a sheet.
+     The column is a size container (`col`: the space between the header
+     and the nav, which no state changes), so the tagline, the cards and
+     the gaps tighten by the room there is, never by the state. The honest
+     state is never what gives way. Only text scaled up past what the screen
+     can hold brings scrolling back, inside the column, as a last resort. */
   @container app (max-width: 639.98px) {
+    .nx-main {
+      --nav-h: 58px;
+    }
     .nx-mhead {
       display: flex;
+      /* No Windows title strip on a phone: the status bar's inset instead. */
+      padding: calc(var(--safe-t) + 4px) 14px 0 20px;
     }
     .nx-ov {
-      display: block;
-      padding: 2px 20px calc(var(--nav-h) + var(--safe-b) + 18px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      padding: 0 20px calc(var(--nav-h) + var(--safe-b) + 10px);
+    }
+    .nx-hero {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      container: col / size;
+      overflow-x: hidden;
+      overflow-y: auto;
+      scrollbar-width: none;
     }
     .nx-hero-copy {
-      gap: 12px;
+      flex: 1 0 auto;
+      gap: clamp(6px, 1.6cqh, 12px);
+      padding-top: 2px;
     }
-    .nx-chiprow {
-      order: -3;
+    .nx-hero-copy > .nx-chiprow {
+      order: 1;
     }
-    .nx-tag {
-      order: -2;
-      font-size: clamp(34px, 10.4cqw, 46px);
+    .nx-hero-copy > .nx-tag {
+      order: 2;
+      font-size: clamp(24px, min(10.4cqw, 6.2cqh), 46px);
       line-height: 1.02;
       white-space: normal;
     }
-    html[lang="fa"] .nx-tag {
+    html[lang="fa"] .nx-hero-copy > .nx-tag {
       line-height: 1.3;
-      font-size: clamp(30px, 9cqw, 40px);
+      font-size: clamp(21px, min(9cqw, 5.2cqh), 40px);
     }
     .nx-tag .dsk {
       display: none;
@@ -2531,45 +2709,86 @@
     .nx-tag .mob {
       display: block;
     }
-    .nx-bigrow {
-      order: -1;
+    /* The timer's height, whether the timer or the state in words shows. */
+    .nx-hero-copy > .nx-bigrow {
+      order: 3;
+      --big-fs: 30px;
+      min-height: calc(var(--big-fs) * 1.04);
+    }
+    .nx-hero-copy > :is(.nx-banner, .nx-upd-hero) {
+      order: 4;
+    }
+    .nx-hero-copy > .nx-hint {
+      order: 5;
+    }
+    .nx-hero-copy > .nx-slot {
+      order: 6;
+    }
+    .nx-hero-copy > .nx-notes {
+      order: 8;
+    }
+    .nx-hero-copy > .nx-err {
+      order: 9;
+    }
+    .nx-hero-copy > .nx-mapstage {
+      order: 10;
+      display: block;
+      flex: 1 1 0;
       min-height: 0;
+      width: 100%;
+      --bleed: 20px;
+    }
+    .nx-hero-copy > .nx-hloc {
+      order: 11;
+      display: flex;
+    }
+    /* The button, and beside it the way out (Stop, Try another) when
+       there is one: one row, so the foot keeps its height. */
+    .nx-hero-copy > .nx-actions {
+      order: 12;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .nx-hero-copy > .nx-actions > .nx-btn {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .nx-hero-copy > .nx-actions > .nx-btn.ghost {
+      flex: 0 1 auto;
+      padding-inline: 16px;
+      font-size: 14.5px;
+    }
+    .nx-hero-copy > .nx-sumline {
+      order: 13;
+      display: flex;
+    }
+    /* Folded into the summary line's sheet -- the protocol change too:
+       the location card already names the protocol in use. */
+    .nx-hero-copy > :is(.nx-details, .nx-hmet, .nx-modebar, .nx-subline) {
+      display: none;
+    }
+    /* The stage gives way to a message the customer must read: it draws
+       nothing, and keeps its place, so the foot does not move. */
+    .nx-hero-copy > .nx-mapstage[data-alert="1"] > * {
+      display: none;
     }
     .nx-decor {
       display: none;
     }
     .nx-big {
-      font-size: 30px;
+      font-size: var(--big-fs);
     }
     .nx-big.words {
-      font-size: 22px;
+      font-size: calc(var(--big-fs) * 0.74);
     }
+    /* Three lines kept, so a longer sentence does not move what is below. */
     .nx-hint {
       font-size: 14px;
-      min-height: 0;
+      min-height: 4.5em;
     }
-    .nx-hloc {
-      display: flex;
-      order: 3;
-    }
-    .nx-actions {
-      order: 4;
-      flex-direction: column;
-      align-items: stretch;
-    }
-    .nx-actions .nx-btn {
-      width: 100%;
-    }
-    .nx-notes,
-    .nx-dtoggle {
-      order: 5;
-    }
-    .nx-hmet {
-      display: grid;
-      order: 6;
-    }
-    .nx-hero-copy .nx-modebar {
-      order: 7;
+    html[lang="fa"] .nx-hint {
+      font-size: 14px;
+      min-height: 5.4em;
     }
     .nx-ov > .nx-art,
     .nx-ov > .nx-modebar {
@@ -2578,31 +2797,101 @@
     .nx-mnav {
       display: grid;
     }
+    /* The last resort's "More below", over the column's foot. */
+    .nx-morecue {
+      position: absolute;
+      inset-inline-end: 24px;
+      bottom: calc(var(--nav-h) + var(--safe-b) + 14px);
+      z-index: 4;
+    }
   }
-  @container app (max-width: 639.98px) and (max-height: 860px) {
+  /* Short columns -- the smallest phones, and any phone with a tall button
+     bar: the parts tighten so the state, the location and the button all
+     stay on the screen. By the column's height alone. */
+  @container col (max-height: 560px) {
     .nx-hero-copy {
-      gap: 8px;
+      gap: clamp(5px, 1.4cqh, 8px);
     }
-    .nx-subline {
-      display: none;
+    .nx-chip {
+      height: 28px;
     }
-    .nx-tag {
-      font-size: clamp(32px, 9.6cqw, 42px);
+    .nx-hero-copy > .nx-bigrow {
+      --big-fs: 27px;
+    }
+    /* Two lines kept here: the map has little room to give. */
+    .nx-hint {
+      font-size: 13.5px;
+      min-height: 3em;
+    }
+    html[lang="fa"] .nx-hint {
+      font-size: 13.5px;
+      line-height: 1.7;
+      min-height: 3.4em;
     }
     .nx-hloc {
-      min-height: 64px;
-      padding-block: 10px;
+      min-height: 56px;
+      padding-block: 8px;
+      border-radius: 18px;
+    }
+    .nx-btn {
+      height: 48px;
+    }
+    .nx-banner,
+    .nx-slot {
+      padding: 10px 12px;
+      gap: 6px;
+      font-size: 12.5px;
+    }
+    html[lang="fa"] :is(.nx-banner, .nx-slot) {
+      line-height: 1.6;
+    }
+    .nx-slot .nx-btn {
+      height: 40px;
+    }
+    .nx-note {
+      padding: 8px 10px;
+      font-size: 12.5px;
+    }
+    html[lang="fa"] .nx-note {
+      line-height: 1.6;
     }
   }
-  @container app (max-width: 379.98px) {
-    .nx-hmet {
-      grid-template-columns: minmax(0, 1fr);
+  /* The very shortest: the tagline on one line, the gaps at their least. */
+  @container col (max-height: 480px) {
+    .nx-hero-copy {
+      gap: 5px;
+    }
+    .nx-banner,
+    .nx-slot {
+      padding-block: 8px;
+    }
+    .nx-hero-copy > .nx-tag .mob {
+      display: inline;
+    }
+    .nx-hero-copy > .nx-tag .mob + .mob::before {
+      content: " ";
+    }
+    .nx-hero-copy > .nx-tag {
+      font-size: clamp(22px, 7.4cqw, 30px);
+    }
+    html[lang="fa"] .nx-hero-copy > .nx-tag {
+      font-size: clamp(20px, 6.6cqw, 27px);
+      line-height: 1.35;
     }
   }
-  /* Medium and narrow show the switch in the column, wide in its corner. */
-  @container app (max-width: 899.98px) {
+  /* Medium shows the switch in the column, wide in its corner, a phone in
+     the summary's sheet. */
+  @container app (min-width: 640px) and (max-width: 899.98px) {
     .nx-hero-copy .nx-modebar {
       display: flex;
+    }
+  }
+  /* In the sheet, the plan and the address one above the other: the
+     address whole, at its own size. */
+  @container app (max-width: 639.98px) {
+    .nx-sheet .nx-hmet {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
     }
   }
 
@@ -2633,25 +2922,6 @@
       width: 100%;
       height: clamp(200px, min(30cqw, 34cqh), 340px);
       margin-top: 4px;
-    }
-  }
-  @container app (max-width: 639.98px) {
-    .nx-hero-copy > .nx-mapstage {
-      display: block;
-      order: 2;
-      width: 100%;
-      height: min(72cqw, 32cqh);
-      margin-top: -4px;
-      --bleed: 20px;
-    }
-    /* On a phone the stage gives way to a message the customer must read. */
-    .nx-hero-copy > .nx-mapstage[data-alert="1"] {
-      display: none;
-    }
-  }
-  @container app (max-width: 639.98px) and (max-height: 860px) {
-    .nx-hero-copy > .nx-mapstage {
-      height: min(62cqw, 25cqh);
     }
   }
 }

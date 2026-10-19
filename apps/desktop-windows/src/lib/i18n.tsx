@@ -1225,6 +1225,9 @@ const en = {
   "loc.ownWorkedTip": "Carried traffic from this device lately, on this network.",
   "sw.notSwitched": "Couldn't confirm the old connection had closed, so the location wasn't switched.",
   "tr.ipChecked": "Checked through the tunnel",
+  "sum.open": "Plan, IP address and connection details",
+  "sum.title": "Plan and connection",
+  "sum.close": "Close",
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -1963,6 +1966,9 @@ const fa: Record<TranslationKey, string> = {
   "loc.ownWorkedTip": "اخیراً در همین شبکه، از این دستگاه ترافیک را رسانده است.",
   "sw.notSwitched": "بسته شدن اتصال قبلی تأیید نشد، بنابراین مکان عوض نشد.",
   "tr.ipChecked": "از طریق تونل بررسی شد",
+  "sum.open": "پلن، آی‌پی و جزئیات اتصال",
+  "sum.title": "پلن و اتصال",
+  "sum.close": "بستن",
 };
 
 /** Exported for the honesty tests in `i18n.test.ts`, which assert things

@@ -30,9 +30,10 @@ import { GlassLogo } from "./GlassLogo";
  *    hero's bottom, which gives way -- the lights step aside, the map stays
  *    put -- when a message must be read or the primary button would not
  *    fit above it ("band").
- *  - `stage` (medium and phone): an element in the hero's column, where the
- *    sculpture was. The lights scroll with it; the mark rides over the
- *    map's empty north-east, which holds no light.
+ *  - `stage` (medium and phone): an element in the hero's column, the one
+ *    part of it that gives up room when room is short: it takes what the
+ *    column leaves, and under `STAGE_MIN` tall draws nothing at all. The
+ *    mark rides over the map's empty north-east, which holds no light.
  *
  * Placement depends on the window, the layout, the language and the route
  * list only -- never on the connection state -- so nothing moves when the
@@ -167,11 +168,15 @@ function placeInScene(app: HTMLElement, box: Box, alert: boolean, bandNow: numbe
   return { mode: yieldBand ? "band-yield" : "band", fit, lights: !yieldBand && fit !== null, wanted, band };
 }
 
+/** Below this a column's stage draws nothing: a map that small is a smudge,
+ * and its lights would crowd past telling apart. */
+export const STAGE_MIN = 96;
+
 /** The column layouts, measured in the stage's own box. */
 function placeInStage(stage: HTMLElement, box: Box): Placement {
   const w = stage.clientWidth;
   const h = stage.clientHeight;
-  if (w < 40 || h < 40) return NONE;
+  if (w < 40 || h < STAGE_MIN) return NONE;
   const fit = fitBox(box, { x: 0, y: 0, w, h });
   if (!fit) return NONE;
   // The map's empty north-east: right of Tehran, above Singapore.
