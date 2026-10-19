@@ -12,13 +12,16 @@ import { cn } from "../lib/utils";
  * the same class of dishonesty as a false "Connected" -- someone would
  * pick a server based on it.
  */
-export function Latency({ ms, className }: { ms: number | null; className?: string }) {
+export function Latency({ ms, className, neutral = false }: { ms: number | null; className?: string; neutral?: boolean }) {
   // Thresholds chosen for how a connection actually feels rather than
   // round numbers: under ~80ms is comfortable for real-time use, under
   // ~180ms is usable, beyond that is noticeable lag.
   const bars = ms === null ? 0 : ms < 80 ? 3 : ms < 180 ? 2 : 1;
-  const tone =
-    ms === null
+  // Neutral in the Pearl panel: the figure says what one timing test
+  // saw, not how good a server is, so it takes no traffic-light colour.
+  const tone = neutral
+    ? "text-ink-2"
+    : ms === null
       ? "text-muted-foreground"
       : bars === 3
         ? "text-success"

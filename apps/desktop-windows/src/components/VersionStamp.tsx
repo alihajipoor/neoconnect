@@ -44,7 +44,7 @@ export function VersionStamp() {
 
   return (
     <div
-      className="pointer-events-none fixed bottom-2 right-3 z-10 select-none text-[11px] tabular-nums text-muted-foreground/70"
+      className="pointer-events-none fixed bottom-2 end-3 z-10 select-none text-[11px] tabular-nums text-muted-foreground/70"
       // Kept clear of the home indicator on the phones that share this
       // component through `@shared`; a no-op on desktop.
       style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}

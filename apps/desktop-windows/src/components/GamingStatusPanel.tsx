@@ -15,9 +15,13 @@ import {
   type GamingStatus,
 } from "../lib/gaming";
 import { ConnectOrb, type ConnectionState } from "./ConnectOrb";
-import { Stat } from "./ui";
+import { Note } from "./ui";
+import { Hint, StateLine, StatusChip } from "./main/Hero";
+import type { ChipGlyph, ShownTone } from "../lib/hero-model";
+import { CAUTION_AFTER_MS } from "../lib/orb-caution";
 
-/** The Dashboard's hero while the app is in gaming mode.
+/** The Dashboard's hero while the app is in gaming mode: its chip, line,
+ * sentence, button and notes, drawn into the main page's hero column.
  *
  * The single fact that shapes every line of this file: **gaming mode
  * brings up no tunnel and no adapter.** It installs namespace-scoped DNS
@@ -73,6 +77,16 @@ const HINT: Record<GamingPhase, TranslationKey> = {
   unknown: "gaming.unknownHint",
 };
 
+/** The status chip's word and glyph for each phase. Never "Connected":
+ * gaming mode brings up no tunnel for the word to describe. */
+const CHIP: Record<GamingPhase, { key: TranslationKey; glyph: ChipGlyph }> = {
+  off: { key: "chip.gamingOff", glyph: "idle" },
+  arming: { key: "chip.gamingArming", glyph: "spin" },
+  active: { key: "chip.gamingOn", glyph: "dot" },
+  partial: { key: "chip.gamingPartial", glyph: "ring" },
+  unknown: { key: "chip.gamingUnknown", glyph: "dash" },
+};
+
 /** Which face the one hero control wears.
  *
  * A translation, not a widening: `ConnectOrb` speaks `ConnectionState`
@@ -88,7 +102,17 @@ const ORB_FACE: Record<GamingPhase, ConnectionState> = {
   unknown: "unknown",
 };
 
-export function GamingStatusPanel({ onOpenSettings }: { onOpenSettings: () => void }) {
+export function GamingStatusPanel({
+  onOpenSettings,
+  onTone,
+  onSummary,
+}: {
+  onOpenSettings: () => void;
+  /** The calm tone the main page wears while gaming mode shows. */
+  onTone?: (tone: ShownTone) => void;
+  /** What the tray says about this mode: how many games are chosen. */
+  onSummary?: (summary: { picked: number; resolver: string | null }) => void;
+}) {
   const { t } = useI18n();
   const [profile, setProfile] = useState<GamingProfileResponse | null>(null);
   const [profileFailed, setProfileFailed] = useState(false);
@@ -182,105 +206,103 @@ export function GamingStatusPanel({ onOpenSettings }: { onOpenSettings: () => vo
       ? t("gaming.turnOff")
       : t("gaming.turnOn");
 
+  // The calm rule here too: a "partial" reading after "active" keeps the
+  // active look for CAUTION_AFTER_MS before the warning colour shows. The
+  // words say it at once.
+  const lastSettledRef = useRef<GamingPhase>("off");
+  if (phase !== "partial" && phase !== "arming") lastSettledRef.current = phase;
+  const partialSinceRef = useRef<number | null>(null);
+  const [partialHeld, setPartialHeld] = useState(false);
+  useEffect(() => {
+    if (phase !== "partial") {
+      partialSinceRef.current = null;
+      setPartialHeld(false);
+      return;
+    }
+    if (partialSinceRef.current === null) partialSinceRef.current = Date.now();
+    const left = CAUTION_AFTER_MS - (Date.now() - partialSinceRef.current);
+    if (left <= 0) {
+      setPartialHeld(false);
+      return;
+    }
+    setPartialHeld(lastSettledRef.current === "active");
+    const timer = setTimeout(() => setPartialHeld(false), left);
+    return () => clearTimeout(timer);
+  }, [phase]);
+
+  const tone: ShownTone =
+    phase === "active" || (phase === "partial" && partialHeld)
+      ? "ok"
+      : phase === "partial"
+        ? "warn"
+        : phase === "unknown"
+          ? "muted"
+          : "idle";
+  useEffect(() => onTone?.(tone), [tone, onTone]);
+  useEffect(
+    () => onSummary?.({ picked: picked.length, resolver: profile?.resolver?.nodeRegion ?? null }),
+    [picked.length, profile, onSummary],
+  );
+
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-4">
-      <ConnectOrb
-        state={ORB_FACE[phase]}
-        disabled={busy || (!rulesUp && phase !== "unknown" && !config)}
-        onToggle={() => void toggle()}
-        label={orbLabel}
-      />
+    <>
+      <div className="nx-chiprow">
+        <StatusChip glyph={CHIP[phase].glyph} label={t(CHIP[phase].key)} />
+      </div>
+      <StateLine line={{ kind: "words", key: HEADLINE[phase] }} words={t(HEADLINE[phase])} />
+      <Hint tone={tone === "warn" ? "warn" : null}>{t(HINT[phase])}</Hint>
 
-      <div className="px-4 text-center">
-        <p
-          className={
-            phase === "active"
-              ? "text-base font-semibold tracking-tight text-success"
-              : phase === "partial"
-                ? "text-base font-semibold tracking-tight text-warning"
-                : phase === "unknown"
-                  ? "text-base font-semibold tracking-tight text-muted-foreground"
-                  : "text-base font-semibold tracking-tight text-foreground"
-          }
-        >
-          {t(HEADLINE[phase])}
-        </p>
-        <p className="mt-1 text-xs text-pretty text-muted-foreground">{t(HINT[phase])}</p>
+      <div className="nx-actions">
+        <ConnectOrb
+          state={ORB_FACE[phase]}
+          disabled={busy || (!rulesUp && phase !== "unknown" && !config)}
+          onToggle={() => void toggle()}
+          label={orbLabel}
+          look="pill"
+          pill={{ variant: busy ? "busy" : "primary", arrow: !busy && !rulesUp && phase !== "unknown", progress: busy }}
+        />
+      </div>
 
-        {/* Where the exit-IP pill sits in VPN mode -- same chrome, and
-            deliberately neutral rather than success-green. There is no
-            single exit address in this mode to put in a pill: the
+      <div className="nx-notes">
+        {/* Where the exit IP sits in VPN mode -- neutral, never the success
+            colour. There is no single exit address in this mode: the
             redirected services are reached from the node and everything
-            else is not. So it states the one fact a pill can carry
-            here, and nothing reads as a win. */}
-        <p className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-white/12 bg-white/[0.04] px-2.5 py-1 text-[11px] text-muted-foreground">
-          <Route className="size-3" />
+            else is not. */}
+        <span className="nx-bchip">
+          <Route aria-hidden />
           {t("gaming.pathDirect")}
-        </p>
+        </span>
 
-        {/* The whole anti-lie, always present: what changes address,
-            and the fact that none of this is a speed claim. */}
-        <p className="mt-1 text-xs text-highlight">{t("gaming.ipUnchanged")}</p>
-        <p className="mt-1 text-[11px] text-muted-foreground">{t("gaming.noSpeedClaim")}</p>
+        {/* The whole anti-lie, always present: what changes address, and
+            the fact that none of this is a speed claim. */}
+        <Note tone="info">{t("gaming.ipUnchanged")}</Note>
+        <Note>{t("gaming.noSpeedClaim")}</Note>
 
-        {/* On with nothing chosen does nothing at all, and the warning
-            chrome is how that gets said instead of the screen sitting
-            there looking enabled. */}
-        {!unavailable && !profileFailed && picked.length === 0 ? (
-          <p className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {t("gaming.noGamesDash")}
-          </p>
-        ) : null}
+        {/* On with nothing chosen does nothing at all, and is said rather
+            than left looking enabled. */}
+        {!unavailable && !profileFailed && picked.length === 0 ? <Note tone="caution">{t("gaming.noGamesDash")}</Note> : null}
 
         {/* The server's own reason, never one of ours. */}
-        {unavailable ? (
-          <p className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {t(unavailable)}
-          </p>
-        ) : null}
+        {unavailable ? <Note tone="caution">{t(unavailable)}</Note> : null}
 
-        {profileFailed ? (
-          <p className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {t("gaming.profileFailed")}
-          </p>
-        ) : null}
+        {profileFailed ? <Note tone="caution">{t("gaming.profileFailed")}</Note> : null}
 
         {/* The service's own words about why it could not confirm, under
             the sentence that already refuses to claim it did. */}
         {status?.detail && (phase === "partial" || phase === "unknown") ? (
-          <p className="mt-1 font-mono text-[10px] break-words text-muted-foreground" data-ltr>
-            {status.detail}
-          </p>
+          <details className="nx-errdetail">
+            <summary>{t("err.showDetail")}</summary>
+            <p data-ltr>{status.detail}</p>
+          </details>
         ) : null}
 
-        {armError ? <p className="mt-1 text-xs text-destructive">{armError}</p> : null}
-      </div>
+        {armError ? <Note tone="danger">{armError}</Note> : null}
 
-      {/* The two facts worth glancing at in this mode, in the same tiles
-          the VPN row uses -- so switching modes rearranges the meaning
-          without rearranging the furniture. Neither is a claim about
-          traffic: one is a count of what was chosen, the other names the
-          server whose resolver the rules point at. */}
-      <div className="grid w-full grid-cols-2 gap-2">
-        <Stat
-          icon={<Gamepad2 className="size-3" />}
-          label={t("gaming.games")}
-          value={<span className="tabular-nums">{picked.length}</span>}
-          onClick={onOpenSettings}
-          actionLabel={t("dash.change")}
-        />
-        <Stat
-          icon={<Route className="size-3" />}
-          label={t("gaming.resolver")}
-          value={
-            profile?.resolver ? (
-              <span dir="ltr">{profile.resolver.nodeRegion}</span>
-            ) : (
-              "—"
-            )
-          }
-        />
+        <button type="button" className="nx-lnk text-[13px]" onClick={onOpenSettings}>
+          <Gamepad2 className="size-4" aria-hidden />
+          {t("gaming.games")} · {picked.length}
+        </button>
       </div>
-    </div>
+    </>
   );
 }

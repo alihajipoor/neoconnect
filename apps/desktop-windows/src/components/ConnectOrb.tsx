@@ -1,6 +1,7 @@
-import { useId } from "react";
-import { AlertTriangle, HelpCircle, Power } from "lucide-react";
+import { useId, useLayoutEffect, useRef, type PointerEvent } from "react";
+import { AlertTriangle, ArrowRight, HelpCircle, Power } from "lucide-react";
 import { orbTone } from "../lib/orb-caution";
+import type { PillVariant } from "../lib/hero-model";
 import { cn } from "../lib/utils";
 
 export type ConnectionState =
@@ -69,6 +70,8 @@ export function ConnectOrb({
   disabled,
   onToggle,
   label,
+  look = "orb",
+  pill,
 }: {
   state: ConnectionState;
   /** A confirmed connection that has been "not fully protected" long
@@ -78,6 +81,11 @@ export function ConnectOrb({
   disabled?: boolean;
   onToggle: () => void;
   label: string;
+  /** "pill" is the Pearl Glass connect control (the desktop main page);
+   * "orb" the dial the phone keeps until its own phase of the redesign. */
+  look?: "orb" | "pill";
+  /** The pill's fill and furniture (`pillFor` in lib/hero-model.ts). */
+  pill?: { variant: PillVariant; arrow: boolean; progress: boolean };
 }) {
   // Two inline SVGs sharing a gradient id means the second renders black,
   // so the id has to be per-instance.
@@ -103,6 +111,10 @@ export function ConnectOrb({
   // as "press me to connect", which is a claim about the tunnel being
   // down, and that is precisely the claim this state exists to withhold.
   const unsure = tone === "muted";
+
+  if (look === "pill") {
+    return <ConnectPill label={label} onPress={onToggle} disabled={disabled} model={pill ?? { variant: busy ? "busy" : "primary", arrow: !busy && !on, progress: busy }} />;
+  }
 
   // r=54 in a 128 viewBox -> circumference 339.29. The arc is a quarter
   // while spinning, and 88% once connected (the gap keeps it reading as a
@@ -243,5 +255,97 @@ export function ConnectOrb({
         <span className="px-2 text-center text-xs leading-tight font-semibold tracking-wide">{label}</span>
       </button>
     </div>
+  );
+}
+
+/** Two presses this close together are one: the reference's "blocked
+ * repeated clicks", without taking away a second press as the way out of a
+ * Disconnect that has stopped describing anything. */
+const SAME_PRESS_MS = 600;
+
+/** The Pearl Glass connect control: a 52px pill whose fill says who
+ * started what it is doing, never how the tunnel is -- the status chip
+ * carries that.
+ *
+ * Pressable in every state (see the orb above for why a control that can
+ * wedge is not a control): busy is `aria-disabled`, never `disabled`, so
+ * it stays focusable and announced. When its label changes length its
+ * width animates from old to new; under reduced motion it does not. */
+function ConnectPill({
+  label,
+  onPress,
+  disabled,
+  model,
+}: {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+  model: { variant: PillVariant; arrow: boolean; progress: boolean };
+}) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const width = useRef<number | null>(null);
+  const lastPress = useRef(0);
+  const frame = useRef(0);
+  const busy = model.variant !== "primary";
+
+  // The width morph: measure the natural width the new label needs, and
+  // animate to it from the old one.
+  useLayoutEffect(() => {
+    const button = ref.current;
+    if (!button) return;
+    const from = width.current;
+    button.style.width = "";
+    const to = button.getBoundingClientRect().width;
+    width.current = to;
+    const reduce = document.documentElement.dataset.motion === "reduce";
+    if (from === null || reduce || Math.abs(from - to) < 1) return;
+    button.style.width = `${from}px`;
+    // Read so the browser lays out the old width before the new one.
+    void button.offsetWidth;
+    button.style.width = `${to}px`;
+    const done = () => {
+      button.style.width = "";
+      button.removeEventListener("transitionend", done);
+    };
+    button.addEventListener("transitionend", done);
+    return () => button.removeEventListener("transitionend", done);
+  }, [label]);
+
+  // The press light follows the pointer, once a frame at most.
+  const onPointerMove = (event: PointerEvent<HTMLButtonElement>) => {
+    const button = event.currentTarget;
+    const { clientX, clientY } = event;
+    if (frame.current) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      const box = button.getBoundingClientRect();
+      button.style.setProperty("--px", `${clientX - box.left}px`);
+      button.style.setProperty("--py", `${clientY - box.top}px`);
+    });
+  };
+
+  return (
+    <button
+      ref={ref}
+      type="button"
+      className={cn("nx-btn", model.variant === "busy" ? "busy" : "primary", model.variant === "primary-busy" && "busy")}
+      aria-disabled={busy || disabled ? true : undefined}
+      aria-busy={model.progress || undefined}
+      disabled={disabled}
+      onPointerMove={onPointerMove}
+      onClick={() => {
+        const now = Date.now();
+        if (now - lastPress.current < SAME_PRESS_MS) return;
+        lastPress.current = now;
+        onPress();
+      }}
+    >
+      <span className="lt" aria-hidden />
+      <span key={label} className="lbl nx-swap">
+        {label}
+      </span>
+      {model.arrow ? <ArrowRight className="nx-mir" aria-hidden /> : null}
+      {model.progress ? <span className="prog" aria-hidden /> : null}
+    </button>
   );
 }

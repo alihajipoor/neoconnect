@@ -1,4 +1,4 @@
-import { Button, Card } from "./ui";
+import { Button, Card, PillButton } from "./ui";
 import { useI18n } from "../lib/i18n";
 import { describeSlotNotice, slotNoticeShown, type SlotNotice } from "../lib/device-slot-notice";
 
@@ -20,15 +20,44 @@ export function DeviceSlotCard({
   tunnelDown,
   onUseHere,
   onDismiss,
+  look = "legacy",
 }: {
   notice: SlotNotice;
   tunnelDown: boolean;
   onUseHere: (takeover: string[]) => void;
   onDismiss: () => void;
+  /** "pearl" is the desktop main page's: the hint's place, a bold lead,
+   * and the pill buttons. The phone keeps the card until its own phase. */
+  look?: "legacy" | "pearl";
 }) {
   const { t, language } = useI18n();
   if (!slotNoticeShown(notice, tunnelDown)) return null;
   const copy = describeSlotNotice(notice, { t, language, tunnelDown });
+
+  if (look === "pearl") {
+    if (!copy.useHere && !copy.dismiss) return <p className="nx-hint">{copy.lines.join(" ")}</p>;
+    return (
+      <div className="nx-slot" role="status">
+        {copy.lines.map((line, i) => (
+          <p key={i} className={i === 0 ? "lead" : undefined}>
+            {line}
+          </p>
+        ))}
+        <div className="nx-actions">
+          {copy.useHere ? (
+            <PillButton size="sm" onClick={() => onUseHere(copy.useHere?.takeover ?? [])}>
+              {copy.useHere.label}
+            </PillButton>
+          ) : null}
+          {copy.dismiss ? (
+            <PillButton variant="ghost" size="sm" onClick={onDismiss}>
+              {copy.dismiss}
+            </PillButton>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
 
   // A note rather than a choice: one line, in the error line's place.
   if (!copy.useHere && !copy.dismiss) {

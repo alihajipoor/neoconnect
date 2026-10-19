@@ -400,15 +400,35 @@ describe("the dashboard and the orb use the rule", () => {
     expect(dashboard).not.toMatch(/caution=\{ipv4NotConfined\}/);
   });
 
-  it("colours the status dot by the same tone as the orb", () => {
-    const dot = dashboard.slice(dashboard.indexOf('<div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">'));
-    expect(dot.slice(0, 2_000)).toContain("orbTone(orbState, cautionShown)");
+  it("colours the status chip by the same held tone as the control", () => {
+    // The redesign's status chip replaced the dot beside the account
+    // (design-system.md, section 12: this pin was moved deliberately). It
+    // takes its colour from the calm tone on the app root, and that tone
+    // is the control's own: orbTone over the held look and the held
+    // caution, never the raw state.
+    expect(dashboard).toMatch(/const calmTone: ShownTone = gaming\s*\?\s*gamingTone\s*:\s*shownTone\(orbTone\(orbState, cautionShown\), /);
+    expect(dashboard).toContain("shown={calmTone}");
+    expect(dashboard).not.toMatch(/shownTone\(orbTone\(connectionState/);
   });
 
   it("takes its looks from the one rule", () => {
     expect(orb).toContain("orbTone(state, caution)");
     // The success rings are the success claim: not under the warning.
     expect(orb).toMatch(/const on = tone === "success";/);
+  });
+
+  it("holds the look through a reconnect nobody pressed for, and drops the hold for a press", () => {
+    // The reconnect is read from the store at the look, not from the render
+    // that scheduled it: a drop publishes the state and starts its episode
+    // in one go.
+    expect(dashboard).toContain("reconnecting: reconnectingView(autoReconnect.current(), sessionGeneration()) !== null,");
+    expect(dashboard).toMatch(/orbHold\.observe\(connectionState, \{[\s\S]{0,400}pressed,\s*caution,/);
+    expect(dashboard).toContain("setCautionShown(orbHold.caution());");
+    // Every press of the customer's marks itself before it acts.
+    const toggle = dashboard.slice(dashboard.indexOf("async function handleConnectToggle(action: PressAction) {"));
+    expect(toggle.slice(0, 200)).toContain("setPressed(true);");
+    const connect = dashboard.slice(dashboard.indexOf("async function connectNow(takeover?: string[]) {"));
+    expect(connect.slice(0, 400)).toContain("setPressed(true);");
   });
 
   it("keeps the headline's words immediate: honesty is not delayed with the colour", () => {

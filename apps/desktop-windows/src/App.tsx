@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { invoke } from "@tauri-apps/api/core";
 import { getTokens } from "./lib/session";
@@ -24,6 +24,7 @@ import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 import { setRelayTunnelReader } from "./lib/last-resort";
 import { BackupRouteChip } from "./components/BackupRoute";
+import { VersionStamp } from "./components/VersionStamp";
 
 /** How often a queued diagnostic report retries.
  *
@@ -296,7 +297,7 @@ export default function App() {
   // mobile was ever wired into it.
   const renderScreen = () => {
   if (screen === "loading") {
-    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading...</div>;
+    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t("common.loading")}</div>;
   }
   if (screen === "signingOut") {
     return (
@@ -390,38 +391,55 @@ export default function App() {
     };
     return <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />;
   }
-  // The banner rides above the Dashboard only. It is the screen people
-  // sit on, and putting it above every screen would mean it appears
-  // over the sign-in form -- telling somebody who cannot get into their
-  // account yet about a version number.
+  // The update notice rides on the Dashboard only -- in its sidebar, or
+  // at the top of the hero on a narrower window. It is the screen people
+  // sit on, and putting it on every screen would mean it appears over the
+  // sign-in form, telling somebody who cannot get into their account yet
+  // about a version number.
   return (
-    <div className="flex h-full flex-col">
-      <UpdateBanner
-        state={updateState}
-        onRestart={() => void restartForUpdate()}
-        busy={restarting}
-        blocked={updateBlocked}
-      />
-      <div className="min-h-0 flex-1">
-        <Dashboard
-          onLoggedOut={() => void handleLoggedOut()}
-          onBrowsePlans={() => setScreen("plans")}
-          onOpenSettings={() => setScreen("settings")}
+    <Dashboard
+      onLoggedOut={() => void handleLoggedOut()}
+      onBrowsePlans={() => setScreen("plans")}
+      onOpenSettings={() => setScreen("settings")}
+      onOpenReferrals={() => setScreen("referrals")}
+      onOpenSupport={() => setScreen("support")}
+      update={
+        <UpdateBanner
+          state={updateState}
+          onRestart={() => void restartForUpdate()}
+          busy={restarting}
+          blocked={updateBlocked}
         />
-      </div>
-    </div>
+      }
+    />
   );
   };
+
+  // The Dashboard is the redesigned shell and keeps the title strip in its
+  // own padding; every other screen is given the strip's 32px here, and
+  // the version stamp in its corner.
+  const framed = (content: ReactNode) =>
+    screen === "dashboard" ? (
+      content
+    ) : (
+      <div className="relative h-full pt-8">
+        {content}
+        <VersionStamp />
+      </div>
+    );
 
   // The backup-route chip above every screen while relay mode lasts, and
   // the consent prompt over them when a request the customer made needs
   // it: both at the root, so neither touches the Dashboard's orb or
   // headline (calm UI).
   return (
-    <div className="flex h-full flex-col">
-      <BackupRouteChip />
-      <div className="min-h-0 flex-1">
-        <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>
+    <div className="relative h-full">
+      <ScreenTransition screenKey={screen} viewTransitions>
+        {framed(renderScreen())}
+      </ScreenTransition>
+      {/* In the title strip, clear of the caption buttons. */}
+      <div className="nx-tbchip">
+        <BackupRouteChip />
       </div>
     </div>
   );
