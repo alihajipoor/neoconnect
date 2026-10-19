@@ -28,6 +28,8 @@ import zipfile
 # POSIX path of each file.
 #
 #   build/        the output directory itself
+#   account/      the customer portal: ships only through
+#                 scripts/deploy-portal.sh, never inside the site zip
 #   README.md     deploy instructions, not part of the site
 #   make-zip.sh   the build script
 #   scripts/      dev tooling: the pre-deploy check, the router, this file
@@ -51,6 +53,9 @@ def excluded(rel):
     if rel.endswith('/.gitignore'):
         return True
     if rel.startswith('build/') or rel.startswith('scripts/'):
+        return True
+    # The customer portal ships only through scripts/deploy-portal.sh.
+    if rel.startswith('account/'):
         return True
     if rel == 'nginx-website.conf.example':
         return True
@@ -81,7 +86,8 @@ def main():
         for root, dirs, files in os.walk(site_dir):
             dirs.sort()
             # Never descend into the output directory or the VCS metadata.
-            dirs[:] = [d for d in dirs if d not in ('build', '.git')]
+            dirs[:] = [d for d in dirs if d not in ('build', '.git')
+                       and not (root == site_dir and d == 'account')]
             for name in sorted(files):
                 full = os.path.join(root, name)
                 rel = os.path.relpath(full, site_dir).replace(os.sep, '/')

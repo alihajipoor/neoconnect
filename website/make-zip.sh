@@ -86,8 +86,15 @@ cd "$SITE_DIR"
 #                 /nginx-website.conf.example -- handing over the CSP, the
 #                 fastcgi socket path and the document root to anyone who asks.
 #                 It belongs in the server's own config directory, not here.
+#   account/      the customer portal, built here by the web-portal app. It
+#                 ships ONLY through scripts/deploy-portal.sh, which backs up
+#                 the live one, swaps atomically and checks it. A build left
+#                 here -- stale, or from a branch without the portal's latest
+#                 screens -- would otherwise be unzipped over the live portal
+#                 with no backup and no check.
 zip -r -q "$ARCHIVE" . \
     -x 'build/*' \
+    -x 'account/*' \
     -x 'README.md' \
     -x 'make-zip.sh' \
     -x 'scripts/*' \

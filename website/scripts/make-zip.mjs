@@ -30,6 +30,8 @@ function excluded(rel) {
   if (rel === 'README.md' || rel === 'make-zip.sh' || rel === '.gitignore') return true;
   if (rel.endsWith('/.gitignore')) return true;
   if (rel.startsWith('build/') || rel.startsWith('scripts/')) return true;
+  // The customer portal ships only through scripts/deploy-portal.sh.
+  if (rel.startsWith('account/')) return true;
   if (rel === 'nginx-website.conf.example') return true;
   if (rel.endsWith('.zip')) return true;
   if (rel === 'data/secret.php' || rel === 'data/ratelimit.php') return true;
@@ -42,7 +44,7 @@ function walk(dir, out) {
     const abs = path.join(dir, ent.name);
     const rel = path.relative(site, abs).split(path.sep).join('/');
     if (ent.isDirectory()) {
-      if (rel === 'build' || rel === 'scripts') continue;
+      if (rel === 'build' || rel === 'scripts' || rel === 'account') continue;
       walk(abs, out);
     } else if (ent.isFile() && !excluded(rel)) {
       out.push({ abs, rel });
