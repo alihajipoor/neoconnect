@@ -6,7 +6,7 @@ import type { PaymentProvider, PaymentStart, Subscription, SubscriptionPlan } fr
 import { Card, Message, PillButton, Tag } from "../components/ui";
 import { Page } from "../components/shell/Page";
 import { RedeemVoucher } from "../components/RedeemVoucher";
-import { formatDate, formatNumber, formatPrice, formatSize } from "../lib/locale-format";
+import { formatAgo, formatDate, formatNumber, formatPrice, formatSize } from "../lib/locale-format";
 import { loadSnapshot } from "../lib/credential-cache";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
@@ -76,14 +76,17 @@ export function Plans({
   const [copied, setCopied] = useState(false);
   // The plan this device last saw, from its own cache: no request of its
   // own, and only what the cache holds -- the plan's name comes from the
-  // list once it arrives.
-  const [current, setCurrent] = useState<Subscription | null>(null);
+  // list once it arrives. Said as what the device last saw, and when, as
+  // Activity says it: the cache can be days old, and the plan changed or
+  // ended on another device since.
+  const [current, setCurrent] = useState<{ sub: Subscription; savedAt: number | null } | null>(null);
   useEffect(() => {
     let alive = true;
     void loadSnapshot()
       .catch(() => null)
       .then((snapshot) => {
-        if (alive && snapshot?.subscription?.status === "ACTIVE") setCurrent(snapshot.subscription);
+        const sub = snapshot?.subscription;
+        if (alive && sub?.status === "ACTIVE") setCurrent({ sub, savedAt: snapshot?.savedAt ?? null });
       });
     return () => {
       alive = false;
@@ -215,10 +218,14 @@ export function Plans({
     );
   }
 
-  const currentPlan = current ? (plans?.find((plan) => plan.id === current.planId) ?? null) : null;
+  // Not once its end date has passed: "Current plan, expires" a day gone
+  // is not a fact. A date that cannot be read is not shown either.
+  const now = Date.now();
+  const shown = current && Date.parse(current.sub.expireAt) > now ? current : null;
+  const currentPlan = shown ? (plans?.find((plan) => plan.id === shown.sub.planId) ?? null) : null;
 
   return (
-    <Page title={t("plans.title")} lede={t("plans.subtitle")} back={onBack} backAlways backLabel={t("plans.back")} data-plans>
+    <Page title={t("plans.title")} lede={t(shown ? "plans.subtitleActive" : "plans.subtitle")} back={onBack} backAlways backLabel={t("plans.back")} data-plans>
       {notice ? (
         <Message tone="neutral" data-plans-notice>
           {notice}
@@ -242,8 +249,8 @@ export function Plans({
       {error ? <Message tone="danger">{error}</Message> : null}
 
       <div className="nx-cols">
-        {current ? (
-          <Card className="flex flex-col gap-1">
+        {shown ? (
+          <Card className="flex flex-col gap-1" data-plans-current>
             <h2 className="nx-ctitle">{t("plans.current")}</h2>
             <dl className="nx-kv">
               {currentPlan ? (
@@ -253,8 +260,9 @@ export function Plans({
                 </>
               ) : null}
               <dt>{t("plans.expires")}</dt>
-              <dd>{formatDate(current.expireAt, language)}</dd>
+              <dd>{formatDate(shown.sub.expireAt, language)}</dd>
             </dl>
+            {shown.savedAt ? <p className="nx-tiny">{t("act.asOf", { when: formatAgo(shown.savedAt, language, now) })}</p> : null}
           </Card>
         ) : null}
         {/* Above the plans, because somebody holding a code is not

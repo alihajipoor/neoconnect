@@ -156,6 +156,7 @@ const en = {
 
   "plans.title": "Choose a plan",
   "plans.subtitle": "Pick a plan to start connecting.",
+  "plans.subtitleActive": "Another plan, or a voucher, whenever you need one.",
   "plans.crypto": "Crypto",
   "plans.card": "Card",
   "plans.loading": "Loading plans...",
@@ -1487,6 +1488,7 @@ const fa: Record<TranslationKey, string> = {
 
   "plans.title": "انتخاب پلن",
   "plans.subtitle": "برای شروع اتصال یک پلن انتخاب کنید.",
+  "plans.subtitleActive": "هر وقت لازم داشتید، پلن دیگری بخرید یا کد هدیه وارد کنید.",
   "plans.crypto": "رمزارز",
   "plans.card": "کارت بانکی",
   "plans.loading": "در حال بارگذاری پلن‌ها...",
