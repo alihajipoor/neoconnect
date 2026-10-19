@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import type { ShownFailure } from "../../lib/failure-text";
+import type { SocialProvider } from "../../lib/social-auth";
 import mapSvg from "../../assets/world-map.svg?raw";
 import { LANGUAGES, useI18n, type Language } from "../../lib/i18n";
 import { MARK_TONE } from "../../lib/logo-geometry";
@@ -19,8 +21,11 @@ import { PearlScope } from "../ui";
  * because there is no tunnel to be verified. Decorative throughout.
  *
  * The page's own column scrolls only as a last resort, for text scaled
- * past what the screen can hold; at every phone size the preview offers,
- * in both languages, each screen fits (`pnpm check:phone-fit`).
+ * past what the screen can hold; at every phone, window and tablet size the
+ * preview offers, in both languages, each screen fits
+ * (`pnpm check:phone-fit`) -- with a failure, the intranet's note, the
+ * backup route's offer, and an iPhone's three providers too. A message on
+ * a short screen tightens the card (pages.css) rather than scrolling it.
  *
  * The card is named by its step's heading (`AuthHead`). A step drawn
  * without one -- the recovery code shown once after a sign-up or a reset --
@@ -91,6 +96,17 @@ function LanguageSwitch() {
       ))}
     </div>
   );
+}
+
+/** DEV ONLY: a state a sign-in screen reaches by itself -- a failure, the
+ * intranet's note, the backup route's offer, the providers an iPhone gets --
+ * drawn at once, for the dev preview and the phone fit check
+ * (src/preview, scripts/check-phone-fit.mjs). The app never passes one. */
+export interface AuthSeed {
+  error?: ShownFailure;
+  intranet?: boolean;
+  relayOffered?: boolean;
+  providers?: SocialProvider[];
 }
 
 /** The card's heading and the sentence under it. */

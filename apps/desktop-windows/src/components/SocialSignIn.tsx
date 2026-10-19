@@ -43,6 +43,10 @@ export function socialFailureText(result: ShownFailure, t: (key: TranslationKey)
  * Above rather than below on purpose. These exist for people who do not
  * want to fill in a form, so putting them under the form they are
  * avoiding is the one placement that fails the audience they are for.
+ * The exception is a declared national intranet, when the note above the
+ * form says these may not work and to sign in with the password: there
+ * Login puts them after the form, without the "or use email" line
+ * (`divider`).
  *
  * Which providers appear is decided by the caller, not here. Apple is
  * offered only where the native sheet exists, because Sign in with
@@ -54,8 +58,11 @@ export function SocialSignIn({
   providers = availableSocialProviders(),
   onSuccess,
   disabled,
+  divider = true,
 }: {
   providers?: SocialProvider[];
+  /** The "or use email" line under the buttons, for when the form follows. */
+  divider?: boolean;
   /** Called once a session exists and is stored. Everything before that
    * -- the provider trip, the exchange, storing the tokens -- is the
    * same for Login and Register, so it lives in socialSignIn() rather
@@ -187,9 +194,11 @@ export function SocialSignIn({
       {/* The divider says what the form below is for, rather than a bare
           rule that leaves the reader to work out why there are two ways
           to do the same thing. */}
-      <div className="nx-or">
-        <span>{t("auth.orUseEmail")}</span>
-      </div>
+      {divider ? (
+        <div className="nx-or">
+          <span>{t("auth.orUseEmail")}</span>
+        </div>
+      ) : null}
     </div>
   );
 }

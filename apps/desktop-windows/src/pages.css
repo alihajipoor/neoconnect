@@ -560,6 +560,13 @@
   .nx-soc .short {
     display: none;
   }
+  /* Three providers side by side -- an iPhone's -- are logos only: at a
+     phone's width "Facebook" does not fit a third of the row, and "Apple"
+     alone is not a title Sign in with Apple allows (logo-only is). Each
+     keeps its full words as its accessible name. */
+  .nx-social-row[data-count="3"] .nx-btn.nx-soc .short {
+    display: none;
+  }
   .nx-or {
     display: flex;
     align-items: center;
@@ -1355,6 +1362,13 @@
     .nx-auth-step {
       gap: 13px;
     }
+    /* Registration's three fields in the old 940x700 default. */
+    .nx-auth[data-step^="register"] .nx-input {
+      height: 44px;
+    }
+    html[lang="fa"] .nx-auth[data-step^="register"] .nx-label {
+      line-height: 1.45;
+    }
   }
 
   /* A short column window (the 720x600 desktop minimum, a tablet on its
@@ -1570,6 +1584,181 @@
   @container app (max-width: 639.98px) and (max-height: 700px) {
     .nx-auth:has(.nx-msg) .nx-auth-head p {
       display: none;
+    }
+  }
+  /* And the line between the providers and the form gives way to it on any
+     phone shorter than the largest: the buttons say what they are. */
+  @container app (max-width: 639.98px) and (max-height: 860px) {
+    .nx-auth:has(.nx-msg) .nx-or {
+      display: none;
+    }
+  }
+  /* A window under 920px tall -- the 1180x760 first launch and 1440x900
+     among them -- with a message: the providers side by side, the line
+     under them and the sentence under the title giving way, and the rest a
+     little tighter, so the card does not scroll. */
+  @container app (min-width: 640px) and (max-height: 920px) {
+    .nx-auth:has(.nx-msg) .nx-social-row {
+      flex-direction: row;
+    }
+    .nx-auth:has(.nx-msg) .nx-btn.nx-soc {
+      flex: 1 1 0;
+      min-width: 0;
+      height: 42px;
+    }
+    .nx-auth:has(.nx-msg) .nx-soc .full {
+      display: none;
+    }
+    .nx-auth:has(.nx-msg) .nx-soc .short {
+      display: inline;
+    }
+    .nx-auth:has(.nx-msg) :is(.nx-or, .nx-auth-head p, .nx-fhint) {
+      display: none;
+    }
+    .nx-auth:has(.nx-msg) .nx-auth-card {
+      padding-block: 16px 14px;
+    }
+    .nx-auth:has(.nx-msg) :is(.nx-auth-step, .nx-form) {
+      gap: 10px;
+    }
+    .nx-auth:has(.nx-msg) .nx-field {
+      gap: 4px;
+    }
+    .nx-auth:has(.nx-msg) .nx-input {
+      height: 42px;
+    }
+    .nx-auth:has(.nx-msg) .nx-auth-submit {
+      height: 44px;
+    }
+    .nx-auth:has(.nx-msg) .nx-msg {
+      gap: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    html[lang="fa"] .nx-auth:has(.nx-msg) .nx-msg {
+      line-height: 1.6;
+    }
+    .nx-auth:has(.nx-msg) .nx-auth-main {
+      padding-block: 0 12px;
+    }
+  }
+  /* The smallest window (720x600): the card wider, so a message takes
+     fewer lines, every gap at its least, and registration's sentence under
+     its title gives way, as on a phone. Over the rules for a message above. */
+  @container app (min-width: 640px) and (max-width: 899.98px) and (max-height: 640px) {
+    .nx-app.nx-auth .nx-auth-top {
+      padding-top: calc(var(--tb) + 8px);
+    }
+    .nx-app.nx-auth .nx-auth-card {
+      max-width: 540px;
+      padding-block: 12px 10px;
+    }
+    .nx-app.nx-auth :is(.nx-auth-step, .nx-form) {
+      gap: 8px;
+    }
+    .nx-app.nx-auth .nx-field {
+      gap: 3px;
+    }
+    .nx-app.nx-auth .nx-input {
+      height: 40px;
+    }
+    .nx-app.nx-auth .nx-auth-submit {
+      height: 42px;
+    }
+    .nx-app.nx-auth .nx-btn.nx-soc {
+      height: 40px;
+    }
+    .nx-app.nx-auth .nx-auth-head h1 {
+      font-size: 21px;
+    }
+    html[lang="fa"] .nx-app.nx-auth .nx-auth-head h1 {
+      font-size: 19px;
+      line-height: 1.35;
+    }
+    html[lang="fa"] .nx-app.nx-auth .nx-label {
+      line-height: 1.4;
+    }
+    .nx-app.nx-auth .nx-auth-main {
+      padding-block: 0 6px;
+    }
+    .nx-app.nx-auth:is([data-step="register"], [data-step="register-relay"]) .nx-auth-head p {
+      display: none;
+    }
+    .nx-app.nx-auth .nx-auth-after {
+      flex-flow: row wrap;
+      justify-content: center;
+      gap: 2px 14px;
+    }
+  }
+  /* The shortest phones with a message -- a failure on a blocked network,
+     the intranet's note, the backup route offered: the states a customer in
+     Iran sees -- tighten everything by the room there is, so the buttons
+     and the message stay on one screen. Nothing is taken away from the
+     form: a field's hint is still its description. */
+  @container app (max-width: 639.98px) and (max-height: 700px) {
+    .nx-auth:has(.nx-msg) .nx-auth-top {
+      padding-top: calc(var(--safe-t) + 6px);
+    }
+    .nx-auth:has(.nx-msg) .nx-langsw button {
+      height: 32px;
+    }
+    .nx-auth:has(.nx-msg) .nx-auth-main {
+      padding-top: 2px;
+      padding-bottom: calc(var(--safe-b) + 4px);
+    }
+    .nx-auth:has(.nx-msg) .nx-auth-card {
+      padding: 10px 12px;
+    }
+    .nx-auth:has(.nx-msg) :is(.nx-auth-step, .nx-form) {
+      gap: 8px;
+    }
+    .nx-auth:has(.nx-msg) .nx-auth-head h1 {
+      font-size: 20px;
+    }
+    html[lang="fa"] .nx-auth:has(.nx-msg) .nx-auth-head h1 {
+      font-size: 18.5px;
+      line-height: 1.35;
+    }
+    .nx-auth:has(.nx-msg) .nx-field {
+      gap: 3px;
+    }
+    html[lang="fa"] .nx-auth:has(.nx-msg) .nx-label {
+      line-height: 1.4;
+    }
+    .nx-auth:has(.nx-msg) .nx-input {
+      height: 42px;
+    }
+    .nx-auth:has(.nx-msg) .nx-fhint {
+      display: none;
+    }
+    .nx-auth:has(.nx-msg) .nx-btn.nx-soc {
+      height: 40px;
+    }
+    .nx-auth:has(.nx-msg) .nx-auth-submit {
+      height: 44px;
+    }
+    .nx-auth:has(.nx-msg) .nx-msg {
+      gap: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    html[lang="fa"] .nx-auth:has(.nx-msg) .nx-msg {
+      line-height: 1.6;
+    }
+    .nx-auth:has(.nx-msg) .nx-msg-i {
+      width: 16px;
+      height: 16px;
+    }
+    html[lang="fa"] .nx-auth:has(.nx-msg) .nx-msg-i {
+      margin-top: 3px;
+    }
+    /* The two ways on, side by side where they fit. */
+    .nx-auth:has(.nx-msg) .nx-auth-after {
+      flex-flow: row wrap;
+      justify-content: center;
+      gap: 2px 14px;
     }
   }
 }

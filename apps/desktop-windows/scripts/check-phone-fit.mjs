@@ -24,6 +24,7 @@
 //     moves or hides them. The failover line that names a country is the
 //     one sustained message that takes room from the stage: the states that
 //     show it are compared with each other.
+// The sign-in screens are measured at the window and tablet sizes too.
 // Exits 1 on any failure. Nothing leaves the machine: the preview answers
 // every Tauri call itself.
 //
@@ -63,6 +64,9 @@ const SIZES = [
   "412 × 915 (Android)",
   "430 × 932 (large iPhone)",
 ];
+/** The windows and the tablet, for sign-in only: the card does not scroll
+ * there either (AuthFrame.tsx), the first launch's 1180 x 760 included. */
+const WINDOWS = ["720 × 600 (minimum)", "940 × 700 (old default)", "1180 × 760 (first launch)", "1280 × 800", "1440 × 900", "834 × 1112 (tablet)"];
 const LANGS = ["en", "fa"];
 const MAIN = [
   "idle",
@@ -101,8 +105,25 @@ const OTHER_FOOT = new Set(["none", "slot"]);
 /** The failover line that names a country: compared among themselves. */
 const CROSSED = new Set(["crossed", "crossedDegraded"]);
 /** Sign-in and its steps (the preview's "Screen"), which the owner asked to
- * fit one screen too: no scrolling, and the primary button on screen. */
-const AUTH = ["signin", "signinNotice", "register", "forgot", "verify"];
+ * fit one screen too: no scrolling, every button that submits on screen --
+ * the backup route's sign-up offer among them -- and no provider's label
+ * cut. With the states a blocked network brings, which are the ones a
+ * customer in Iran sees: a failure, the intranet's note, both, and the
+ * backup route offered; and an iPhone's three providers. */
+const AUTH = [
+  "signin",
+  "signinNotice",
+  "signinError",
+  "signinIntranet",
+  "signinIntranetError",
+  "signinIos",
+  "register",
+  "registerError",
+  "registerRelayOffer",
+  "registerIos",
+  "forgot",
+  "verify",
+];
 
 function chromePath() {
   if (opt("chrome")) return opt("chrome");
@@ -230,27 +251,45 @@ const MEASURE = `(() => {
   };
 })()`;
 
-/** A sign-in screen: how far anything scrolls, and whether the card's
- * primary button lies inside the safe area. */
+/** A sign-in screen: how far anything scrolls; whether every button that
+ * submits, and every message, lies inside the safe area; and whether any
+ * provider button's content is cut. */
 const AUTH_MEASURE = `(() => {
   const frame = document.querySelector('[data-testid=frame]');
   const fb = frame.getBoundingClientRect();
   const [safeT, safeB] = (frame.dataset.safe || '0,0').split(',').map(Number);
+  const vis = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
   let overflow = 0;
   for (const el of frame.querySelectorAll('*')) {
-    if (!/(auto|scroll)/.test(getComputedStyle(el).overflowY) || !el.getClientRects().length) continue;
+    if (!/(auto|scroll)/.test(getComputedStyle(el).overflowY) || !vis(el)) continue;
     overflow = Math.max(overflow, el.scrollHeight - el.clientHeight);
   }
   const missing = [];
+  const onScreen = (el) => {
+    const b = el.getBoundingClientRect();
+    return b.top - fb.top >= safeT - 0.5 && b.bottom - fb.top <= fb.height - safeB + 0.5;
+  };
   const card = frame.querySelector('.nx-auth-card');
-  const submit = frame.querySelector('.nx-auth-submit');
+  const submits = [...frame.querySelectorAll('.nx-auth-submit')].filter(vis);
   if (!card) missing.push('card missing');
-  if (!submit) missing.push('button missing');
-  else {
-    const b = submit.getBoundingClientRect();
-    if (b.top - fb.top < safeT - 0.5 || b.bottom - fb.top > fb.height - safeB + 0.5) missing.push('button off screen');
+  if (!submits.length) missing.push('button missing');
+  submits.forEach((el, i) => {
+    if (!onScreen(el)) missing.push((i ? 'button ' + (i + 1) : 'button') + ' off screen');
+  });
+  for (const msg of [...frame.querySelectorAll('.nx-auth-card .nx-msg')].filter(vis)) {
+    if (!onScreen(msg)) missing.push('message off screen');
   }
-  return { overflow: Math.round(overflow), missing };
+  const cut = [];
+  for (const btn of [...frame.querySelectorAll('.nx-soc')].filter(vis)) {
+    const bb = btn.getBoundingClientRect();
+    const spill = [...btn.querySelectorAll('*')].filter(vis).some((el) => {
+      const r = el.getBoundingClientRect();
+      return r.left < bb.left - 0.5 || r.right > bb.right + 0.5;
+    });
+    if (spill || btn.scrollWidth > btn.clientWidth + 1) cut.push('provider "' + (btn.getAttribute('aria-label') || '') + '" cut');
+  }
+  const providers = [...frame.querySelectorAll('.nx-soc')].filter(vis).length;
+  return { overflow: Math.round(overflow), missing, cut, providers };
 })()`;
 
 /** Where two measures of the same part differ by more than half a pixel. */
@@ -371,11 +410,14 @@ try {
     }
   }
   // Sign-in and its steps.
-  for (const size of SIZES) {
+  for (const size of [...SIZES, ...WINDOWS]) {
     await choose("size", size);
     for (const lang of LANGS) {
       await choose("language", lang);
       for (const screen of AUTH) {
+        // An iPhone's three providers at a Windows window's size are a
+        // screen nobody sees: phones and the tablet only.
+        if (screen.endsWith("Ios") && WINDOWS.includes(size) && !size.includes("tablet")) continue;
         if (!(await choose("screen", screen))) throw new Error(`The preview has no screen "${screen}".`);
         await sleep(450);
         await ev("document.fonts.ready.then(() => true)");
@@ -426,14 +468,19 @@ for (const size of [...new Set(results.map((r) => r.size))]) {
 }
 
 if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify({ main: results, auth: authResults }, null, 1));
-const authFailed = authResults.filter((r) => r.overflow > 0 || r.missing.length > 0);
+// The iPhone screens must actually draw three providers, or they prove
+// nothing about them.
+for (const r of authResults) {
+  if (r.screen.endsWith("Ios") && r.providers !== 3) r.missing.push(`${r.providers} providers drawn, not 3`);
+}
+const authFailed = authResults.filter((r) => r.overflow > 0 || r.missing.length > 0 || r.cut.length > 0);
 for (const size of [...new Set(authResults.map((r) => r.size))]) {
   for (const lang of LANGS) {
     const rows = authResults.filter((r) => r.size === size && r.lang === lang);
-    const bad = rows.filter((r) => r.overflow > 0 || r.missing.length);
+    const bad = rows.filter((r) => r.overflow > 0 || r.missing.length || r.cut.length);
     console.log(
       `${size} ${lang} sign-in: ${rows.length} screens, largest overflow ${Math.max(...rows.map((r) => r.overflow))}px` +
-        (bad.length ? `; ${bad.map((r) => `${r.screen} ${r.overflow}px ${r.missing.join(" ")}`.trim()).join(", ")}` : ""),
+        (bad.length ? `; ${bad.map((r) => `${r.screen} ${r.overflow}px ${[...r.missing, ...r.cut].join(" ")}`.trim()).join(", ")}` : ""),
     );
   }
 }
@@ -463,7 +510,7 @@ if (textScale !== 1) {
 }
 if (failed.length || moved.length || authFailed.length) {
   if (failed.length) console.error(`${failed.length} main-page state(s) do not fit, or cut their text.`);
-  if (authFailed.length) console.error(`${authFailed.length} sign-in screen(s) do not fit one screen.`);
+  if (authFailed.length) console.error(`${authFailed.length} sign-in screen(s) do not fit one screen, or cut a provider's label.`);
   if (moved.length) console.error(`${moved.length} part(s) move or resize with the state.`);
   process.exit(1);
 }

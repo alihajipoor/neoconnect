@@ -21,6 +21,8 @@ import { isTunnelUp } from "../lib/connection-evidence";
 import { useI18n } from "../lib/i18n";
 import { planLineText } from "../lib/shell-nav";
 import type { RouteOption, Subscription } from "../lib/types";
+import type { ShownFailure } from "../lib/failure-text";
+import type { SocialProvider } from "../lib/social-auth";
 
 /** DEV ONLY: the screens of phase 2 in the preview -- sign-in and its steps,
  * and the signed-in pages in the shell -- each drawn by the real component.
@@ -34,7 +36,14 @@ export const PAGE_SCREENS: Record<string, string> = {
   locations: "Locations page",
   signin: "Sign in",
   signinNotice: "Sign in, with a notice",
+  signinError: "Sign in, network blocked",
+  signinIntranet: "Sign in, intranet",
+  signinIntranetError: "Sign in, intranet and an error",
+  signinIos: "Sign in, iPhone (three providers)",
   register: "Create account",
+  registerError: "Create account, an error",
+  registerRelayOffer: "Create account, backup route offered",
+  registerIos: "Create account, iPhone (three providers)",
   forgot: "Forgot password",
   verify: "Verify email",
   settings: "Settings",
@@ -56,6 +65,14 @@ const NAV: Record<string, NavId> = {
 };
 
 const noop = () => undefined;
+
+/** The failures a blocked network gives sign-in, the longest of each kind:
+ * the network's block page, and nothing answering, the backup server
+ * included (failure-text.ts). */
+const BLOCKED: ShownFailure = { error: "", noResponse: true, blockPage: true };
+const NOTHING_ANSWERED: ShownFailure = { error: "", noResponse: true, relayTried: true };
+/** What an iPhone offers (`availableSocialProviders`); a browser has no Apple. */
+const IOS_PROVIDERS: SocialProvider[] = ["apple", "google", "facebook"];
 
 export function PreviewPage({
   screen,
@@ -90,7 +107,23 @@ export function PreviewPage({
 
   switch (screen) {
     case "signin":
-      return <Login onSuccess={noop} onNeedsVerification={noop} onGoRegister={noop} onGoForgotPassword={noop} />;
+    case "signinError":
+    case "signinIntranet":
+    case "signinIntranetError":
+    case "signinIos":
+      return (
+        <Login
+          onSuccess={noop}
+          onNeedsVerification={noop}
+          onGoRegister={noop}
+          onGoForgotPassword={noop}
+          seed={{
+            error: screen === "signinError" ? BLOCKED : screen === "signinIntranetError" ? NOTHING_ANSWERED : undefined,
+            intranet: screen === "signinIntranet" || screen === "signinIntranetError",
+            providers: screen === "signinIos" ? IOS_PROVIDERS : undefined,
+          }}
+        />
+      );
     case "signinNotice":
       return (
         <Login
@@ -102,7 +135,21 @@ export function PreviewPage({
         />
       );
     case "register":
-      return <Register onNeedsVerification={noop} onSuccess={noop} onGoLogin={noop} />;
+    case "registerError":
+    case "registerRelayOffer":
+    case "registerIos":
+      return (
+        <Register
+          onNeedsVerification={noop}
+          onSuccess={noop}
+          onGoLogin={noop}
+          seed={{
+            error: screen === "registerError" ? NOTHING_ANSWERED : screen === "registerRelayOffer" ? BLOCKED : undefined,
+            relayOffered: screen === "registerRelayOffer",
+            providers: screen === "registerIos" ? IOS_PROVIDERS : undefined,
+          }}
+        />
+      );
     case "forgot":
       return <ForgotPassword onDone={noop} onCancel={noop} />;
     case "verify":
