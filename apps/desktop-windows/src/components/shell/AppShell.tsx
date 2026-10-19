@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { CreditCard, Gift, Home, LayoutGrid, LifeBuoy, LogOut, MapPin, Settings as SettingsIcon } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { IS_STORE_BUILD } from "../../lib/distribution";
+import { probeFrames } from "../../lib/effects";
 import type { ShownTone } from "../../lib/hero-model";
 import { Glass } from "../ui";
 import { Menu } from "../overlay";
@@ -60,6 +61,14 @@ export function AppShell(props: ShellProps) {
   const sideProfile = useRef<HTMLButtonElement>(null);
   const headAvatar = useRef<HTMLButtonElement>(null);
   const [anchor, setAnchor] = useState<"side" | "head">("side");
+
+  // Once the glass has painted and the first load has settled: a device
+  // whose frames are slow drops a tier (lib/effects.ts). Never during the
+  // loading screen, where there is no glass to measure.
+  useEffect(() => {
+    const timer = setTimeout(probeFrames, 3_000);
+    return () => clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     let alive = true;

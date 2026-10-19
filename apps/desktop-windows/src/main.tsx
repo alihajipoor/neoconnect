@@ -5,7 +5,7 @@ import { TitleBar } from "./components/TitleBar";
 import { I18nProvider } from "./lib/i18n";
 import { setHealthIpTransport } from "./lib/egress";
 import { ipv4OnlyHealthIp } from "./lib/health-ip-v4";
-import { probeFrames, startEffects } from "./lib/effects";
+import { startEffects } from "./lib/effects";
 import "./globals.css";
 
 // Before anything can take a baseline: the egress check compares two
@@ -29,6 +29,3 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     </I18nProvider>
   </React.StrictMode>,
 );
-
-// Once, after the first glass has painted: a slow device drops a tier.
-requestAnimationFrame(() => setTimeout(probeFrames, 1_500));
