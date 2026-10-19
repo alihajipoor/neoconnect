@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
 import { getTokens } from "@shared/lib/session";
-import { Login } from "@shared/screens/Login";
-import { Register } from "@shared/screens/Register";
-import { VerifyEmail } from "@shared/screens/VerifyEmail";
-import { ForgotPassword } from "@shared/screens/ForgotPassword";
 import { Plans } from "@shared/screens/Plans";
 import { Referrals } from "@shared/screens/Referrals";
 import { Support } from "@shared/screens/Support";
 import { Settings } from "@shared/screens/Settings";
 import { Account } from "./screens/Account";
+import { AuthShell, type AuthScreen } from "./auth/AuthShell";
+import { PortalLogin } from "./auth/PortalLogin";
+import { PortalRegister } from "./auth/PortalRegister";
+import { PortalVerifyEmail } from "./auth/PortalVerifyEmail";
+import { PortalForgotPassword } from "./auth/PortalForgotPassword";
 
 /**
  * The web customer portal.
@@ -93,15 +94,27 @@ export default function App() {
 
   let content: React.ReactNode;
 
+  // The sign-in steps wear the new look (./auth); the account screens
+  // keep the apps' dark one until their own redesign. Worked out from what
+  // actually renders below, so the two cannot disagree.
+  const authScreen: AuthScreen | null =
+    screen === "loading" || screen === "login" || screen === "register" || screen === "forgot"
+      ? screen
+      : screen === "verify" && pendingAuth
+        ? "verify"
+        : null;
+
+  // The canvas and map in index.html, and this surface's colours, follow
+  // the same switch.
+  useEffect(() => {
+    document.documentElement.dataset.surface = authScreen ? "auth" : "app";
+  }, [authScreen]);
+
   if (screen === "loading") {
-    content = (
-      <div className="flex h-dvh items-center justify-center text-sm text-muted-foreground">
-        Loading…
-      </div>
-    );
+    content = null;
   } else if (screen === "login") {
     content = (
-      <Login
+      <PortalLogin
         onSuccess={afterAuth}
         onNeedsVerification={goToVerify}
         onGoRegister={() => setScreen("register")}
@@ -111,7 +124,7 @@ export default function App() {
     );
   } else if (screen === "register") {
     content = (
-      <Register
+      <PortalRegister
         onNeedsVerification={goToVerify}
         // Unreachable here: the only path to it is a provider sign-in,
         // and the portal offers none. Wired to the same handler Login
@@ -123,7 +136,7 @@ export default function App() {
     );
   } else if (screen === "forgot") {
     content = (
-      <ForgotPassword
+      <PortalForgotPassword
         onDone={(notice) => {
           setLoginNotice(notice);
           setScreen("login");
@@ -133,7 +146,7 @@ export default function App() {
     );
   } else if (screen === "verify" && pendingAuth) {
     content = (
-      <VerifyEmail
+      <PortalVerifyEmail
         email={pendingAuth.email}
         password={pendingAuth.password}
         onVerified={() => {
@@ -186,5 +199,6 @@ export default function App() {
     );
   }
 
+  if (authScreen) return <AuthShell screen={authScreen}>{content}</AuthShell>;
   return <div className="portal-frame">{content}</div>;
 }
