@@ -16,20 +16,22 @@ import {
   type Square,
 } from "../../lib/map-fit";
 import type { MapArc, MapLight } from "../../lib/map-lights";
-import { Sculpture } from "./Sculpture";
+import { MARK_TONE, type LogoTone } from "../../lib/logo-geometry";
+import { GlassLogo } from "./GlassLogo";
 
 /** The dotted world map, its location lights, the relay arc and the glass
- * ribbon (design-system.md 5.1 to 5.4).
+ * Neoxify mark (design-system.md 5.1 to 5.4; the mark replaced the glass
+ * ribbon on 2026-10-19, in the same place and at the same size).
  *
  * Two hosts, one per layout, so the lights are never under a blur:
  *  - `scene` (wide windows): a layer behind the whole app. With 200px or
  *    more beside the hero's copy, the lights sit in that strip, low, with
- *    the ribbon above them ("strip"); narrower, they take a band along the
+ *    the mark above them ("strip"); narrower, they take a band along the
  *    hero's bottom, which gives way -- the lights step aside, the map stays
  *    put -- when a message must be read or the primary button would not
  *    fit above it ("band").
  *  - `stage` (medium and phone): an element in the hero's column, where the
- *    sculpture was. The lights scroll with it; the ribbon rides over the
+ *    sculpture was. The lights scroll with it; the mark rides over the
  *    map's empty north-east, which holds no light.
  *
  * Placement depends on the window, the layout, the language and the route
@@ -50,15 +52,17 @@ export interface WorldMapProps {
   lights: readonly MapLight[];
   arc: MapArc | null;
   /** Every country this list can light or leave from: the box the map
-   * fits, and what the ribbon keeps clear of. Stable for a route list, so
+   * fits, and what the mark keeps clear of. Stable for a route list, so
    * a connect never moves anything. */
   countries: readonly string[];
-  /** The glass ribbon over the map. */
-  ribbon?: boolean;
+  /** The glass Neoxify mark over the map. */
+  logo?: boolean;
+  /** Its colours: the logo's own, or the app's cobalt. */
+  logoTone?: LogoTone;
   /** A message the customer must read is showing (a banner, an error, the
    * device limit): the band and the phone's stage give way to it. */
   alert?: boolean;
-  /** The ribbon's slow float after the first verified connect of a session
+  /** The mark's slow float after the first verified connect of a session
    * (`HeroArt`); CSS keeps it still under Lite, Off and reduced motion. */
   float?: boolean;
 }
@@ -70,7 +74,7 @@ interface Placement {
   fit: Fit | null;
   /** Whether the lights may show: not when the band has given way. */
   lights: boolean;
-  /** Where the ribbon would like to be, before it is kept off the lights. */
+  /** Where the mark would like to be, before it is kept off the lights. */
   wanted: Square | null;
   /** The band's height, kept clear under the copy in "band". */
   band: number;
@@ -87,7 +91,7 @@ function relTo(origin: DOMRect) {
 
 /** Where the floating VPN / Gaming switch ends, with three lines of its
  * hint reserved whatever it says now: "Connected, not confined" takes three
- * where "Connected" takes two, and the map and the ribbon must not move
+ * where "Connected" takes two, and the map and the mark must not move
  * with it (pearl.css clamps the hint to three). Measured while the switch
  * is hidden under a banner too -- it keeps its box. Null with no switch. */
 function switchBottom(app: HTMLElement, rel: (el: Element) => Rect): number | null {
@@ -134,7 +138,7 @@ function placeInScene(app: HTMLElement, box: Box, alert: boolean, bandNow: numbe
     const fit = fitBox(box, stage, { align: "bottom", share: 0.5 });
     if (!fit) return { ...NONE, mode: "strip" };
     const above = fit.oy + box.y0 * fit.k - MAP_PAD - 16 - stage.y;
-    // Capped below the strip's width, so the ribbon never outweighs the
+    // Capped below the strip's width, so the mark never outweighs the
     // tagline beside it.
     const size = Math.min(w * 0.9, above);
     const wanted = size > 0 ? { x: x + w / 2 - size / 2, y: stage.y + Math.max(0, (above - size) / 2), s: size } : null;
@@ -150,9 +154,9 @@ function placeInScene(app: HTMLElement, box: Box, alert: boolean, bandNow: numbe
   const stage = { x: area.x + 8, y: area.y + area.h - bandH, w: area.w - 16, h: bandH };
   const fit = fitBox(box, stage);
   const band = yieldBand ? 0 : bandH;
-  // The ribbon: beside the copy column, never under its words; below the
+  // The mark: beside the copy column, never under its words; below the
   // switch's slot; above the band -- the band's geometry even when it has
-  // given way, so the ribbon does not jump when it does. Smaller when that
+  // given way, so the mark does not jump when it does. Smaller when that
   // is all the room there is; under 96px it steps aside (`placeRibbon`).
   const left = rtl ? area.x + 8 : copyEnd + 12;
   const right = rtl ? copyEnd - 12 : area.x + area.w - 8;
@@ -222,7 +226,7 @@ function useWindowHidden(): boolean {
   return hidden;
 }
 
-export function WorldMap({ host, lights, arc, countries, ribbon = true, alert = false, float = false }: WorldMapProps) {
+export function WorldMap({ host, lights, arc, countries, logo = true, logoTone = MARK_TONE, alert = false, float = false }: WorldMapProps) {
   const { language } = useI18n();
   const root = useRef<HTMLDivElement>(null);
   const [placement, setPlacement] = useState<Placement>(NONE);
@@ -300,7 +304,7 @@ export function WorldMap({ host, lights, arc, countries, ribbon = true, alert = 
     return lightPoints(all, fit);
   }, [fit, countryKey, lights]);
   const at = new Map(points.map((p) => [p.cc, p]));
-  const sculpture = ribbon && placement.wanted ? placeRibbon(placement.wanted, shown ? points : []) : null;
+  const mark = logo && placement.wanted ? placeRibbon(placement.wanted, shown ? points : []) : null;
 
   let arcPath: string | null = null;
   if (mounted && arc) {
@@ -366,7 +370,7 @@ export function WorldMap({ host, lights, arc, countries, ribbon = true, alert = 
           </div>
         </>
       ) : null}
-      {sculpture ? <Sculpture x={sculpture.x} y={sculpture.y} size={sculpture.s} float={float && host === "scene"} /> : null}
+      {mark ? <GlassLogo x={mark.x} y={mark.y} size={mark.s} tone={logoTone} float={float && host === "scene"} /> : null}
     </div>
   );
 }

@@ -348,10 +348,10 @@
      reduced motion override the more specific rules that start a light. */
   :is(.nx-map, .nx-mapstage)[data-vis="hidden"] .nx-lamp::before,
   :is(.nx-map, .nx-mapstage)[data-vis="hidden"] .nx-lamp::after,
-  :is(.nx-map, .nx-mapstage)[data-vis="hidden"] .nx-rib .sweep,
+  :is(.nx-map, .nx-mapstage)[data-vis="hidden"] .nx-mark .sweep,
   body:has(> .nx-dlgwrap, > .nx-menu) .nx-lamp::before,
   body:has(> .nx-dlgwrap, > .nx-menu) .nx-lamp::after,
-  body:has(> .nx-dlgwrap, > .nx-menu) .nx-rib .sweep {
+  body:has(> .nx-dlgwrap, > .nx-menu) .nx-mark .sweep {
     animation-play-state: paused !important;
   }
   /* Nothing moves under reduced motion: a live light keeps a static glow. */
@@ -364,29 +364,116 @@
     transition: none;
   }
 
-  /* The ribbon: the vector stand-in (Sculpture.tsx), drawn as clear glass.
-     Colour only inside it: the core is steel until verified, then
-     cross-fades to cobalt -- at most a little over half opaque -- held
-     through a brief gap like the chip. */
-  .nx-rib {
+  /* The Neoxify mark in glass (GlassLogo.tsx), where the ribbon was:
+     LogoMark's geometry, in the logo's own violet-to-cyan or, with
+     data-tone="cobalt", the app's cobalt. A little frosted until the tunnel
+     is verified; then the frost clears and the glass lights from inside
+     over 900ms, held through a brief gap like the chip, and never for
+     "Connected, not confirmed". */
+  .nx-mark {
     position: absolute;
     pointer-events: none;
-    --rib-hi: color-mix(in srgb, var(--steel) 22%, #fff);
-    --rib-cobalt-hi: color-mix(in srgb, var(--cobalt) 40%, #fff);
-    --rib-cobalt-deep: color-mix(in srgb, var(--cobalt) 62%, #000);
-    --rib-shadow: var(--scrim);
+    --mark-a: var(--logo-violet);
+    --mark-b: var(--logo-cyan);
   }
-  .nx-rib svg {
-    display: block;
+  .nx-mark[data-tone="cobalt"] {
+    --mark-a: var(--logo-cobalt-a);
+    --mark-b: var(--cobalt);
+  }
+  .nx-mark > svg {
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
     overflow: visible;
   }
+  .nx-mark .body {
+    --mark-a-deep: color-mix(in srgb, var(--mark-a) 56%, #120a30);
+    --mark-b-deep: color-mix(in srgb, var(--mark-b) 56%, #04243a);
+  }
+  .nx-mark .depth {
+    opacity: 0.55;
+  }
+  .nx-mark .edge-ring {
+    stroke: var(--mark-edge);
+  }
+  .nx-mark .edge-dot {
+    fill: var(--mark-edge);
+  }
+  .nx-mark .frost-ring {
+    stroke: var(--mark-frost);
+  }
+  .nx-mark .frost-dot {
+    fill: var(--mark-frost);
+  }
+  .nx-mark .core-ring {
+    stroke: var(--mark-core);
+  }
+  .nx-mark .core-dot {
+    fill: var(--mark-core);
+  }
+  .nx-mark .spec {
+    fill: none;
+    stroke: #fff;
+    stroke-linecap: round;
+    opacity: 0.88;
+  }
+  .nx-mark .spec.faint {
+    opacity: 0.5;
+  }
+  .nx-mark .caustic {
+    fill: none;
+    stroke: #fff;
+    stroke-linecap: round;
+    opacity: 0.4;
+  }
+  .nx-mark .glint {
+    fill: #fff;
+    opacity: 0.9;
+  }
+  /* The calm tone: frost, glow, the light inside and the colour it throws. */
+  .nx-mark :is(.frost-ring, .frost-dot, .glow, .core-ring, .core-dot, .cast) {
+    transition: opacity 900ms var(--spring-smooth);
+  }
+  .nx-mark :is(.frost-ring, .frost-dot) {
+    opacity: 0.3;
+  }
+  .nx-mark .glow {
+    opacity: 0.4;
+  }
+  .nx-mark :is(.core-ring, .core-dot) {
+    opacity: 0;
+  }
+  .nx-mark .cast {
+    opacity: 0.22;
+  }
+  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-mark :is(.frost-ring, .frost-dot) {
+    opacity: 0;
+  }
+  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-mark .glow {
+    opacity: 1;
+  }
+  /* Two soft strokes along the middle of the glass, and two discs in the
+     centre: a glow from inside, not a line. */
+  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-mark .core-ring {
+    opacity: 0.13;
+  }
+  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-mark .core-dot {
+    opacity: 0.16;
+  }
+  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-mark .cast {
+    opacity: 0.5;
+  }
   /* About 20 s of a slow 9px float after the first verified connect of a
-     session (HeroArt.tsx), transform only. Wide only (the scene's host),
-     and never under Lite, Off, reduced motion or a hidden window. */
-  .nx-rib[data-float="1"] {
+     session (HeroArt.tsx), transform only, its shadow staying on the
+     ground. Wide only (the scene's host), and never under Lite, Off,
+     reduced motion or a hidden window. */
+  .nx-mark[data-float="1"] .body {
     animation: nx-float 5s ease-in-out 4;
+  }
+  .nx-mark[data-float="1"] .ground {
+    transform-origin: 50% 93%;
+    animation: nx-ground 5s ease-in-out 4;
   }
   @keyframes nx-float {
     0%,
@@ -397,77 +484,45 @@
       transform: translateY(-9px);
     }
   }
-  :root:is([data-motion="reduce"], [data-glass="lite"], [data-glass="flat"]) .nx-rib[data-float="1"] {
+  @keyframes nx-ground {
+    0%,
+    100% {
+      transform: scale(1);
+      opacity: 1;
+    }
+    50% {
+      transform: scale(0.9);
+      opacity: 0.72;
+    }
+  }
+  :root:is([data-motion="reduce"], [data-glass="lite"], [data-glass="flat"]) .nx-mark[data-float="1"] :is(.body, .ground) {
     animation: none;
   }
-  .nx-map[data-vis="hidden"] .nx-rib[data-float="1"] {
+  .nx-map[data-vis="hidden"] .nx-mark[data-float="1"] :is(.body, .ground) {
     animation-play-state: paused;
   }
-  .nx-rib .core {
-    transition: opacity 900ms var(--spring-smooth);
-  }
-  .nx-rib .core.steel {
-    opacity: 0.4;
-  }
-  .nx-rib .core.ok {
+  /* A light sweep while a connect, check or disconnect is under way. */
+  .nx-mark .sweep {
     opacity: 0;
   }
-  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-rib .core.steel {
-    opacity: 0;
-  }
-  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-rib .core.ok {
-    opacity: 0.55;
-  }
-  .nx-rib .dots {
-    opacity: 0.6;
-  }
-  .nx-rib .band {
-    stroke: var(--cobalt);
-    opacity: 0.35;
-    transition: opacity 900ms var(--spring-smooth);
-  }
-  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-rib .band {
-    opacity: 0.6;
-  }
-  .nx-rib .edge {
-    stroke: var(--rib-edge);
-  }
-  .nx-rib .rim {
-    stroke: var(--rim-a);
-    opacity: 0.9;
-  }
-  .nx-rib .shadow {
-    opacity: 0.6;
-  }
-  .nx-rib .streak {
-    stroke: #fff;
-    opacity: 0.7;
-  }
-  .nx-rib .glint {
-    fill: #fff;
-    opacity: 0.85;
-  }
-  .nx-rib .sweep {
-    opacity: 0;
-  }
-  .nx-app[data-busy="1"] .nx-rib .sweep {
+  .nx-app[data-busy="1"] .nx-mark .sweep {
     opacity: 1;
-    animation: nx-sweep 2.6s ease-in-out infinite;
+    animation: nx-msweep 2.6s ease-in-out infinite;
   }
-  @keyframes nx-sweep {
+  @keyframes nx-msweep {
     from {
-      transform: translateX(-10px);
+      transform: translateX(0);
     }
     to {
-      transform: translateX(150px);
+      transform: translateX(96px);
     }
   }
-  :root[data-motion="reduce"] .nx-app[data-busy="1"] .nx-rib .sweep {
+  :root[data-motion="reduce"] .nx-app[data-busy="1"] .nx-mark .sweep {
     animation: none !important;
-    transform: translateX(70px);
+    transform: translateX(46px);
     opacity: 0.45;
   }
-  :root[data-motion="reduce"] .nx-rib .core {
+  :root[data-motion="reduce"] .nx-mark :is(.frost-ring, .frost-dot, .glow, .core-ring, .core-dot, .cast) {
     transition: none;
   }
 

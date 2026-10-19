@@ -131,11 +131,19 @@
   --amb-hl: rgba(14, 124, 134, 0.14);
   --steel: #a9b6ce;
   --steel-deep: #5a6884;
-  /* The glass ribbon's clear body, its refracted dots and its hairline. */
-  --rib-glass-a: rgba(255, 255, 255, 0.66);
-  --rib-glass-b: rgba(206, 217, 235, 0.3);
-  --rib-dot: #9aabc8;
-  --rib-edge: rgba(74, 90, 122, 0.3);
+  /* The Neoxify mark in glass over the map (GlassLogo.tsx): the logo's own
+     two colours, the app's cobalt as the alternative (MARK_TONE), and the
+     glass around either -- a hairline, a lit rim, the shade across it, the
+     frost it wears until verified, the light inside, its contact shadow. */
+  --logo-violet: #8b5cf6;
+  --logo-cyan: #22d3ee;
+  --logo-cobalt-a: #6d8cff;
+  --mark-edge: rgba(36, 28, 92, 0.13);
+  --mark-rim: rgba(255, 255, 255, 0.92);
+  --mark-shade: #1d1546;
+  --mark-frost: #f1f3f6;
+  --mark-core: #ffffff;
+  --mark-shadow: rgba(30, 28, 78, 0.3);
   /* The world map behind the main page (design-system.md 5.2): a quiet
      canvas, its dots, and the location lights. --map-dot is no darker, or
      --ink-2 over a dot drops below 4.5:1. */
@@ -289,10 +297,12 @@
     --amb-hl: rgba(60, 198, 207, 0.16);
     --steel: #7b8aa8;
     --steel-deep: #2c3754;
-    --rib-glass-a: rgba(214, 226, 255, 0.2);
-    --rib-glass-b: rgba(110, 130, 180, 0.07);
-    --rib-dot: #46557a;
-    --rib-edge: rgba(190, 205, 240, 0.3);
+    --logo-cobalt-a: #7f9dff;
+    --mark-edge: rgba(0, 0, 0, 0.32);
+    --mark-rim: rgba(255, 255, 255, 0.34);
+    --mark-shade: #04020c;
+    --mark-frost: #0b0e15;
+    --mark-shadow: rgba(0, 0, 0, 0.62);
     --map-bg-top: #070a11;
     --map-bg: #0d1320;
     --map-dot: #28324a;
@@ -362,10 +372,12 @@
   --amb-hl: rgba(60, 198, 207, 0.16);
   --steel: #7b8aa8;
   --steel-deep: #2c3754;
-  --rib-glass-a: rgba(214, 226, 255, 0.2);
-  --rib-glass-b: rgba(110, 130, 180, 0.07);
-  --rib-dot: #46557a;
-  --rib-edge: rgba(190, 205, 240, 0.3);
+  --logo-cobalt-a: #7f9dff;
+  --mark-edge: rgba(0, 0, 0, 0.32);
+  --mark-rim: rgba(255, 255, 255, 0.34);
+  --mark-shade: #04020c;
+  --mark-frost: #0b0e15;
+  --mark-shadow: rgba(0, 0, 0, 0.62);
   --map-bg-top: #070a11;
   --map-bg: #0d1320;
   --map-dot: #28324a;

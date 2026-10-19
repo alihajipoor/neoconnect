@@ -16,6 +16,7 @@ import { LocationCard, MetricCards, SessionTray, type TrayLocation, type TrayPla
 import { Dialog } from "../components/overlay";
 import { AppShell } from "../components/shell/AppShell";
 import { Banner, Disclosure, Note, PillButton, Segmented } from "../components/ui";
+import { MARK_TONE, type LogoTone } from "../lib/logo-geometry";
 import { headlineFor, isTunnelUp } from "../lib/connection-evidence";
 import { pressFor } from "../lib/connect-intent";
 import { effects, type GlassChoice, type ThemeChoice } from "../lib/effects";
@@ -200,7 +201,8 @@ export function PreviewApp() {
   const [glass, setGlass] = useState<GlassChoice>("auto");
   const [motion, setMotion] = useState<boolean>(false);
   const [evidence, setEvidence] = useState("mixed");
-  const [ribbon, setRibbon] = useState(true);
+  const [logo, setLogo] = useState(true);
+  const [logoTone, setLogoTone] = useState<LogoTone>(MARK_TONE);
   const sc = SCENARIOS[key];
   const [w, h] = SIZES[size];
   const [askOpen, setAskOpen] = useState(false);
@@ -272,7 +274,14 @@ export function PreviewApp() {
         </select>
       </label>
       <label>
-        <input type="checkbox" checked={ribbon} onChange={(e) => setRibbon(e.target.checked)} data-testid="ribbon" /> Ribbon
+        <input type="checkbox" checked={logo} onChange={(e) => setLogo(e.target.checked)} data-testid="logo" /> Logo
+      </label>
+      <label>
+        Logo tone{" "}
+        <select value={logoTone} onChange={(e) => setLogoTone(e.target.value as LogoTone)} data-testid="logotone">
+          <option value="brand">Brand (violet to cyan)</option>
+          <option value="cobalt">Cobalt</option>
+        </select>
       </label>
     </div>
   );
@@ -294,7 +303,7 @@ export function PreviewApp() {
         }}
         data-testid="frame"
       >
-        <Composed sc={sc} t={t} language={language} connectedAt={connectedAt} askOpen={askOpen} onAsk={setAskOpen} width={w} evidence={evidence} ribbon={ribbon} />
+        <Composed sc={sc} t={t} language={language} connectedAt={connectedAt} askOpen={askOpen} onAsk={setAskOpen} width={w} evidence={evidence} logo={logo} logoTone={logoTone} />
       </div>
     </div>
   );
@@ -311,7 +320,8 @@ function Composed({
   onAsk,
   width,
   evidence,
-  ribbon,
+  logo,
+  logoTone,
 }: {
   sc: Scenario;
   t: T;
@@ -321,7 +331,8 @@ function Composed({
   onAsk: (open: boolean) => void;
   width: number;
   evidence: string;
-  ribbon: boolean;
+  logo: boolean;
+  logoTone: LogoTone;
 }) {
   const layout = width >= 900 ? "wide" : width >= 640 ? "medium" : "narrow";
   const [gamingTone, setGamingTone] = useState<ShownTone>("idle");
@@ -399,7 +410,7 @@ function Composed({
   const mapPlaces = mapCountries(routes);
   const mapAlert = Boolean(sc.offline || plan === "ended" || sc.slot || sc.failed);
   const mapStage =
-    layout !== "wide" ? <WorldMap host="stage" lights={mapScene.lights} arc={mapScene.arc} countries={mapPlaces} ribbon={ribbon} alert={mapAlert} /> : null;
+    layout !== "wide" ? <WorldMap host="stage" lights={mapScene.lights} arc={mapScene.arc} countries={mapPlaces} logo={logo} logoTone={logoTone} alert={mapAlert} /> : null;
 
   const modeBar =
     plan === "none" ? null : (
@@ -513,7 +524,7 @@ function Composed({
       onOpenSupport={() => undefined}
       onSignOut={() => undefined}
       signingOut={false}
-      scene={<HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} ribbon={ribbon} alert={mapAlert} />}
+      scene={<HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} logo={logo} logoTone={logoTone} alert={mapAlert} />}
     >
       {gaming ? (
         <MainView
