@@ -1315,6 +1315,31 @@
       letter-spacing: 0;
     }
   }
+  /* Registration on a wide window under 820px tall -- the 1180x760 first
+     launch among them: the providers side by side, so the whole form fits
+     without the column scrolling. */
+  @container app (min-width: 900px) and (max-height: 820px) {
+    .nx-auth[data-step^="register"] .nx-social-row {
+      flex-direction: row;
+    }
+    .nx-auth[data-step^="register"] .nx-btn.nx-soc {
+      flex: 1 1 0;
+      min-width: 0;
+      height: 44px;
+    }
+    .nx-auth[data-step^="register"] .nx-soc .full {
+      display: none;
+    }
+    .nx-auth[data-step^="register"] .nx-soc .short {
+      display: inline;
+    }
+    .nx-auth[data-step^="register"] :is(.nx-auth-step, .nx-form) {
+      gap: 12px;
+    }
+    .nx-auth[data-step^="register"] .nx-auth-card {
+      padding-block: 20px 18px;
+    }
+  }
   /* A short wide window: the card's column first. */
   @container app (min-width: 900px) and (max-height: 700px) {
     .nx-auth-card {
