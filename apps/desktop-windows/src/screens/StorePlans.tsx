@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, HardDrive } from "lucide-react";
 
-import { buyIapPlan, loadIapPlans, type IapPlan } from "../lib/iap";
+import { buyIapPlan, iapAvailable, loadIapPlans, type IapPlan } from "../lib/iap";
 import { Card, Message, PillButton } from "../components/ui";
 import { Page } from "../components/shell/Page";
 import { formatNumber, formatSize } from "../lib/locale-format";
@@ -68,9 +68,10 @@ export function StorePlans({
 
   // The same card language as Plans, with the store's own prices and
   // nothing else to buy with: no voucher, no card or crypto, no website
-  // (guideline 3.1.1).
+  // (guideline 3.1.1). "Prices come from the App Store" only where they
+  // do: the Play build is a store build too, and draws this screen.
   return (
-    <Page title={t("plans.title")} lede={t("plans.storeLede")} back={onBack} backAlways backLabel={t("plans.back")} data-store-plans>
+    <Page title={t("plans.title")} lede={iapAvailable() ? t("plans.storeLede") : undefined} back={onBack} backAlways backLabel={t("plans.back")} data-store-plans>
       {loadError ? (
         <Message tone="danger">{loadError}</Message>
       ) : plans === null ? (
