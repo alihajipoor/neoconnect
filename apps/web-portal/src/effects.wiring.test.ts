@@ -34,3 +34,32 @@ describe("the portal's entry", () => {
   });
 });
 
+describe("the portal's stylesheets", () => {
+  const index = readFileSync(new URL("./index.css", import.meta.url), "utf8");
+  const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+
+  it("give the sign-in page only what it draws with: Pearl Glass loads with the screens behind it", () => {
+    // Every sign-in visit waits for the main stylesheet (stylesheet.ts),
+    // often over a slow, filtered link.
+    expect(index).not.toMatch(/@import "[^"]*(pearl|pages)\.css"/);
+    const signedIn = readFileSync(new URL("./signed-in.css", import.meta.url), "utf8");
+    expect(signedIn).toContain('@import "../../desktop-windows/src/pearl.css";');
+    expect(signedIn).toContain('@import "../../desktop-windows/src/pages.css";');
+    expect(readFileSync(new URL("./signed-in-styles.ts", import.meta.url), "utf8")).toContain('import "./signed-in.css";');
+    expect(app).toContain('Promise.all([load(), import("./signed-in-styles")]).then(([screen]) => screen);');
+    // Each screen behind sign-in, with them.
+    const loaders = app.slice(app.indexOf("const SIGNED_IN = {"), app.indexOf("};", app.indexOf("const SIGNED_IN = {")));
+    const lines = loaders.split("\n").filter((line) => line.includes("import("));
+    expect(lines.length).toBe(5);
+    for (const line of lines) expect(line).toMatch(/withStyles\(\(\) => import\(/);
+  });
+
+  it("never let the sign-in steps draw with a Pearl class", () => {
+    // auth/ draws from auth.css alone; a Pearl class there would be
+    // unstyled until the screens behind sign-in had loaded.
+    for (const file of ["AuthShell", "PortalLogin", "PortalRegister", "PortalVerifyEmail", "PortalForgotPassword", "controls", "marks"]) {
+      const source = readFileSync(new URL(`./auth/${file}.tsx`, import.meta.url), "utf8");
+      expect(source, file).not.toMatch(/className=["{`][^"}`]*\bnx-/);
+    }
+  });
+});

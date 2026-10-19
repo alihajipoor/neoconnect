@@ -1,0 +1,9 @@
+/* The Pearl Glass components and pages the screens behind sign-in are drawn
+   with (the account, Settings, Plans, Support, Invite friends). Loaded with
+   those screens (App.tsx, SIGNED_IN), not with the sign-in page: the
+   sign-in steps are drawn from auth.css alone, and everyone who opens the
+   portal -- often over a slow, filtered link -- loads that page first.
+   Same layers as in the apps: these join the components layer index.css
+   opens, under the utilities. */
+@import "../../desktop-windows/src/pearl.css";
+@import "../../desktop-windows/src/pages.css";

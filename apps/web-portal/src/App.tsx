@@ -16,13 +16,21 @@ import { setSurface } from "./surface";
  * script. Once the sign-in card is drawn they are fetched in the
  * background (prefetchSignedInScreens), so signing in rarely waits for
  * them either.
+ *
+ * Their stylesheet with them (signed-in.css: Pearl Glass, most of the
+ * page's CSS), which the sign-in steps do not use: each screen arrives
+ * once both have.
  */
+const withStyles =
+  <T,>(load: () => Promise<T>) =>
+  (): Promise<T> =>
+    Promise.all([load(), import("./signed-in-styles")]).then(([screen]) => screen);
 const SIGNED_IN = {
-  account: () => import("./screens/Account"),
-  plans: () => import("@shared/screens/Plans"),
-  settings: () => import("@shared/screens/Settings"),
-  referrals: () => import("@shared/screens/Referrals"),
-  support: () => import("@shared/screens/Support"),
+  account: withStyles(() => import("./screens/Account")),
+  plans: withStyles(() => import("@shared/screens/Plans")),
+  settings: withStyles(() => import("@shared/screens/Settings")),
+  referrals: withStyles(() => import("@shared/screens/Referrals")),
+  support: withStyles(() => import("@shared/screens/Support")),
 };
 const Account = lazy(() => SIGNED_IN.account().then((m) => ({ default: m.Account })));
 const Plans = lazy(() => SIGNED_IN.plans().then((m) => ({ default: m.Plans })));
