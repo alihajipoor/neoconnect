@@ -14,10 +14,11 @@ describe("numbers in the app's language", () => {
   });
 
   it("times a session without ever going negative", () => {
-    expect(formatDuration(6128, "en")).toBe("1:42:08");
+    expect(formatDuration(6128, "en")).toBe("01:42:08");
+    expect(formatDuration(40 * 3600 + 5, "en")).toBe("40:00:05");
     expect(formatDuration(65, "en")).toBe("01:05");
     expect(formatDuration(-30, "en")).toBe("00:00");
-    expect(formatDuration(6128, "fa")).toBe("۱:۴۲:۰۸");
+    expect(formatDuration(6128, "fa")).toBe("۰۱:۴۲:۰۸");
   });
 
   it("dates in the Solar Hijri calendar in Persian", () => {

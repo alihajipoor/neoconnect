@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { CreditCard, Gift, Home, LayoutGrid, LifeBuoy, LogOut, MapPin, Settings as SettingsIcon } from "lucide-react";
+import { CreditCard, Gift, Home, LifeBuoy, LogOut, MapPin, Settings as SettingsIcon } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { IS_STORE_BUILD } from "../../lib/distribution";
 import { probeFrames } from "../../lib/effects";
@@ -82,7 +82,7 @@ export function AppShell(props: ShellProps) {
   }, []);
 
   const items: { id: NavId; label: string; icon: ReactNode; go: () => void }[] = [
-    { id: "overview", label: t("nav.overview"), icon: <LayoutGrid className="nx-i" aria-hidden />, go: props.onOverview },
+    { id: "overview", label: t("nav.overview"), icon: <Home className="nx-i" aria-hidden />, go: props.onOverview },
     { id: "locations", label: t("nav.locations"), icon: <MapPin className="nx-i" aria-hidden />, go: props.onLocations },
     { id: "settings", label: t("nav.settings"), icon: <SettingsIcon className="nx-i" aria-hidden />, go: props.onOpenSettings },
   ];

@@ -45,15 +45,16 @@ export function sizeParts(bytes: number | string, language: Language): { value: 
   return { value, unit: unit ?? "" };
 }
 
-/** "1:42:08" or "42:08" -- clamped, so a clock moved back mid-session can
- * never show a negative duration. */
+/** "01:42:08" or "42:08" -- hours padded like the rest, so the clock keeps
+ * one shape as it passes an hour; clamped, so a clock moved back
+ * mid-session can never show a negative duration. */
 export function formatDuration(totalSeconds: number, language: Language): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
   const pad = (n: number) => String(n).padStart(2, "0");
-  return localDigits(h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`, language);
+  return localDigits(h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`, language);
 }
 
 function dateLocale(language: Language): string {

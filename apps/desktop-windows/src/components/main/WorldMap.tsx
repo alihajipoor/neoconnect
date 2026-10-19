@@ -58,6 +58,9 @@ export interface WorldMapProps {
   /** A message the customer must read is showing (a banner, an error, the
    * device limit): the band and the phone's stage give way to it. */
   alert?: boolean;
+  /** The ribbon's slow float after the first verified connect of a session
+   * (`HeroArt`); CSS keeps it still under Lite, Off and reduced motion. */
+  float?: boolean;
 }
 
 type Mode = "strip" | "band" | "band-yield" | "stage" | "none";
@@ -82,7 +85,30 @@ function relTo(origin: DOMRect) {
   };
 }
 
-/** The wide layouts, measured against the app root (the scene's own box). */
+/** Where the floating VPN / Gaming switch ends, with three lines of its
+ * hint reserved whatever it says now: "Connected, not confined" takes three
+ * where "Connected" takes two, and the map and the ribbon must not move
+ * with it (pearl.css clamps the hint to three). Measured while the switch
+ * is hidden under a banner too -- it keeps its box. Null with no switch. */
+function switchBottom(app: HTMLElement, rel: (el: Element) => Rect): number | null {
+  const bar = app.querySelector<HTMLElement>(".nx-ov > .nx-modebar");
+  if (!bar || bar.offsetParent === null) return null;
+  const control = bar.firstElementChild ?? bar;
+  const r = rel(control);
+  if (r.h <= 0) return null;
+  const hint = bar.querySelector<HTMLElement>(".nx-modehint");
+  if (!hint) return r.y + r.h;
+  const gap = parseFloat(getComputedStyle(bar).rowGap) || 0;
+  const line = parseFloat(getComputedStyle(hint).lineHeight) || 18;
+  return r.y + r.h + gap + 3 * line;
+}
+
+/** The wide layouts, measured against the app root (the scene's own box).
+ *
+ * Every measure here is of a box that does not change with the connection
+ * state: the hero's area (the tray beneath it has a fixed height), the copy
+ * column's box (its width is fixed by the layout; its contents are not
+ * read), and the switch's reserved slot. */
 function placeInScene(app: HTMLElement, box: Box, alert: boolean, bandNow: number): Placement {
   const hero = app.querySelector<HTMLElement>(".nx-hero");
   const copy = app.querySelector<HTMLElement>(".nx-hero-copy");
@@ -98,21 +124,19 @@ function placeInScene(app: HTMLElement, box: Box, alert: boolean, bandNow: numbe
   const copyEnd = rtl ? copyBox.x : copyBox.x + copyBox.w;
   const stripW = rtl ? copyEnd - area.x - 16 : area.x + area.w - copyEnd - 16;
 
+  const barBottom = switchBottom(app, rel);
   if (stripW >= 200) {
-    // Below the floating VPN / Gaming switch, when it is in its corner.
-    let top = area.y + 12;
-    const bar = app.querySelector<HTMLElement>(".nx-ov > .nx-modebar");
-    if (bar && bar.offsetParent !== null) {
-      const r = rel(bar);
-      if (r.h > 0) top = Math.max(top, r.y + r.h + 14);
-    }
+    // Below the floating VPN / Gaming switch's slot.
+    const top = Math.max(area.y + 12, barBottom === null ? 0 : barBottom + 14);
     const x = rtl ? area.x + 6 : copyEnd + 16;
     const w = stripW - 6;
     const stage = { x, y: top, w, h: area.y + area.h - 10 - top };
     const fit = fitBox(box, stage, { align: "bottom", share: 0.5 });
     if (!fit) return { ...NONE, mode: "strip" };
     const above = fit.oy + box.y0 * fit.k - MAP_PAD - 16 - stage.y;
-    const size = Math.min(w * 1.12, above);
+    // Capped below the strip's width, so the ribbon never outweighs the
+    // tagline beside it.
+    const size = Math.min(w * 0.9, above);
     const wanted = size > 0 ? { x: x + w / 2 - size / 2, y: stage.y + Math.max(0, (above - size) / 2), s: size } : null;
     return { mode: "strip", fit, lights: true, wanted, band: 0 };
   }
@@ -126,9 +150,16 @@ function placeInScene(app: HTMLElement, box: Box, alert: boolean, bandNow: numbe
   const stage = { x: area.x + 8, y: area.y + area.h - bandH, w: area.w - 16, h: bandH };
   const fit = fitBox(box, stage);
   const band = yieldBand ? 0 : bandH;
-  const above = area.h - band - 16;
-  const size = Math.min(origin.width * 0.24, origin.height * 0.42, above);
-  const wanted = size > 0 ? { x: rtl ? area.x + 8 : area.x + area.w - size - 8, y: area.y + (above - size) / 2, s: size } : null;
+  // The ribbon: beside the copy column, never under its words; below the
+  // switch's slot; above the band -- the band's geometry even when it has
+  // given way, so the ribbon does not jump when it does. Smaller when that
+  // is all the room there is; under 96px it steps aside (`placeRibbon`).
+  const left = rtl ? area.x + 8 : copyEnd + 12;
+  const right = rtl ? copyEnd - 12 : area.x + area.w - 8;
+  const top = Math.max(area.y + 8, barBottom === null ? 0 : barBottom + 12);
+  const bottom = area.y + area.h - bandH - 16;
+  const size = Math.min(origin.width * 0.24, origin.height * 0.42, right - left, bottom - top);
+  const wanted = size > 0 ? { x: rtl ? left : right - size, y: top + (bottom - top - size) / 2, s: size } : null;
   return { mode: yieldBand ? "band-yield" : "band", fit, lights: !yieldBand && fit !== null, wanted, band };
 }
 
@@ -191,7 +222,7 @@ function useWindowHidden(): boolean {
   return hidden;
 }
 
-export function WorldMap({ host, lights, arc, countries, ribbon = true, alert = false }: WorldMapProps) {
+export function WorldMap({ host, lights, arc, countries, ribbon = true, alert = false, float = false }: WorldMapProps) {
   const { language } = useI18n();
   const root = useRef<HTMLDivElement>(null);
   const [placement, setPlacement] = useState<Placement>(NONE);
@@ -259,7 +290,10 @@ export function WorldMap({ host, lights, arc, countries, ribbon = true, alert = 
   }, [host, box, alert, language]);
 
   const { fit } = placement;
+  // Drawn wherever the map is; faded out, not taken away, while the band
+  // gives way, so they cross-fade back where they stood.
   const shown = placement.lights && fit !== null;
+  const mounted = fit !== null;
   const points = useMemo<Point[]>(() => {
     if (!fit) return [];
     const all = [...new Set([...countries, ...lights.map((l) => l.cc)])];
@@ -269,7 +303,7 @@ export function WorldMap({ host, lights, arc, countries, ribbon = true, alert = 
   const sculpture = ribbon && placement.wanted ? placeRibbon(placement.wanted, shown ? points : []) : null;
 
   let arcPath: string | null = null;
-  if (shown && arc) {
+  if (mounted && arc) {
     const p0 = at.get(arc.from);
     const p1 = at.get(arc.to);
     if (p0 && p1) {
@@ -304,14 +338,14 @@ export function WorldMap({ host, lights, arc, countries, ribbon = true, alert = 
       dir="ltr"
     >
       {host === "stage" ? <div className="nx-mapclip">{dots}</div> : dots}
-      {shown ? (
+      {mounted ? (
         <>
           {arcPath ? (
-            <svg className="nx-arcs" focusable="false">
+            <svg className="nx-arcs" focusable="false" data-off={shown ? undefined : "1"}>
               <path className={arc?.solid ? "nx-arc on" : "nx-arc"} d={arcPath} />
             </svg>
           ) : null}
-          <div className="nx-lamps">
+          <div className="nx-lamps" data-off={shown ? undefined : "1"}>
             {lights.map((light) => {
               const p = at.get(light.cc);
               if (!p) return null;
@@ -332,7 +366,7 @@ export function WorldMap({ host, lights, arc, countries, ribbon = true, alert = 
           </div>
         </>
       ) : null}
-      {sculpture ? <Sculpture x={sculpture.x} y={sculpture.y} size={sculpture.s} /> : null}
+      {sculpture ? <Sculpture x={sculpture.x} y={sculpture.y} size={sculpture.s} float={float && host === "scene"} /> : null}
     </div>
   );
 }

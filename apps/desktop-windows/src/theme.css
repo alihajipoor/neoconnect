@@ -131,6 +131,11 @@
   --amb-hl: rgba(14, 124, 134, 0.14);
   --steel: #a9b6ce;
   --steel-deep: #5a6884;
+  /* The glass ribbon's clear body, its refracted dots and its hairline. */
+  --rib-glass-a: rgba(255, 255, 255, 0.66);
+  --rib-glass-b: rgba(206, 217, 235, 0.3);
+  --rib-dot: #9aabc8;
+  --rib-edge: rgba(74, 90, 122, 0.3);
   /* The world map behind the main page (design-system.md 5.2): a quiet
      canvas, its dots, and the location lights. --map-dot is no darker, or
      --ink-2 over a dot drops below 4.5:1. */
@@ -284,6 +289,10 @@
     --amb-hl: rgba(60, 198, 207, 0.16);
     --steel: #7b8aa8;
     --steel-deep: #2c3754;
+    --rib-glass-a: rgba(214, 226, 255, 0.2);
+    --rib-glass-b: rgba(110, 130, 180, 0.07);
+    --rib-dot: #46557a;
+    --rib-edge: rgba(190, 205, 240, 0.3);
     --map-bg-top: #070a11;
     --map-bg: #0d1320;
     --map-dot: #28324a;
@@ -353,6 +362,10 @@
   --amb-hl: rgba(60, 198, 207, 0.16);
   --steel: #7b8aa8;
   --steel-deep: #2c3754;
+  --rib-glass-a: rgba(214, 226, 255, 0.2);
+  --rib-glass-b: rgba(110, 130, 180, 0.07);
+  --rib-dot: #46557a;
+  --rib-edge: rgba(190, 205, 240, 0.3);
   --map-bg-top: #070a11;
   --map-bg: #0d1320;
   --map-dot: #28324a;

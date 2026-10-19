@@ -4211,6 +4211,16 @@ export function Dashboard({
   // saying why rather than doing nothing. Its line says what the chosen
   // half does, conditionally while nothing is up: never a present-tense
   // claim about a tunnel that is not there.
+  const modeHint =
+    appMode === "gaming"
+      ? t("mode.gamingHintShort")
+      : (isTunnelUp(connectionState) ? splitTunnelActive : customConfigured)
+        ? t(customExcept ? "dash.modeCustomExceptHint" : "dash.modeCustomHint")
+        : !isTunnelUp(connectionState)
+          ? t("mode.vpnHintIdle")
+          : // Beside the warning that some connections go around a
+            // tunnel not confined, not contradicting it.
+            t(isTunnelUp(connectionState) && ipv4NotConfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint");
   const modeBar = subscription ? (
     <div className="nx-modebar">
       <Segmented
@@ -4224,16 +4234,9 @@ export function Dashboard({
           { value: "gaming", label: t("dash.modeGaming"), icon: <Gamepad2 aria-hidden /> },
         ]}
       />
-      <p className="nx-modehint">
-        {appMode === "gaming"
-          ? t("mode.gamingHintShort")
-          : (isTunnelUp(connectionState) ? splitTunnelActive : customConfigured)
-            ? t(customExcept ? "dash.modeCustomExceptHint" : "dash.modeCustomHint")
-            : !isTunnelUp(connectionState)
-              ? t("mode.vpnHintIdle")
-              : // Beside the warning that some connections go around a
-                // tunnel not confined, not contradicting it.
-                t(isTunnelUp(connectionState) && ipv4NotConfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint")}
+      {/* Clamped to two lines beside the hero; the whole sentence is the title. */}
+      <p className="nx-modehint" title={modeHint}>
+        {modeHint}
       </p>
     </div>
   ) : null;

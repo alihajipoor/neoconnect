@@ -36,10 +36,15 @@ export interface TrayPlan {
 function IpValue({ ip }: { ip: IpModel }) {
   const { t } = useI18n();
   if (ip.kind === "ip") {
+    // Where the address came from: only ever shown for a verified tunnel
+    // (`ipFor`), whose check asked through it.
     return (
-      <span className="nx-tval nx-ipv nx-ltr" dir="ltr">
-        {ip.ip}
-      </span>
+      <>
+        <span className="nx-tval nx-ipv nx-ltr" dir="ltr">
+          {ip.ip}
+        </span>
+        <span className="nx-tsub">{t("tr.ipChecked")}</span>
+      </>
     );
   }
   if (ip.kind === "none") return <span className="nx-tval quiet">—</span>;
@@ -78,7 +83,6 @@ export function SessionTray({ location, plan, ip, label }: { location: TrayLocat
       <div className="nx-tsec nx-tloc">
         <span className="nx-flagbox">{location.flag}</span>
         <div className="t">
-          <span className="nx-tlabel">{t("tr.location")}</span>
           <span className="n">{location.name}</span>
           {location.sub ? <span className="s">{location.sub}</span> : null}
         </div>

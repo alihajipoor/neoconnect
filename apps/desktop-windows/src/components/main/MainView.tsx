@@ -53,13 +53,20 @@ export function MainView(slots: MainSlots) {
   const taglineId = useId();
   const heroRef = useRef<HTMLElement>(null);
   const [more, setMore] = useState(false);
+  // Scrolled at all: the room kept under the last control for the pill
+  // stays while the column is scrolled, so reaching the end does not take
+  // it away (pearl.css).
+  const [scrolled, setScrolled] = useState(false);
   const [flash, setFlash] = useState(false);
 
   // "More below": shown only while the column has more than it shows.
   useEffect(() => {
     const hero = heroRef.current;
     if (!hero) return;
-    const check = () => setMore(hero.scrollHeight - hero.clientHeight - hero.scrollTop > 24);
+    const check = () => {
+      setMore(hero.scrollHeight - hero.clientHeight - hero.scrollTop > 24);
+      setScrolled(hero.scrollTop > 0);
+    };
     check();
     hero.addEventListener("scroll", check, { passive: true });
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(check);
@@ -81,7 +88,7 @@ export function MainView(slots: MainSlots) {
   }, [slots.panelFlash]);
 
   return (
-    <div className={slots.panel ? "nx-ov" : "nx-ov nopanel"} data-more={more ? "1" : undefined}>
+    <div className={slots.panel ? "nx-ov" : "nx-ov nopanel"} data-more={more ? "1" : undefined} data-scrolled={scrolled ? "1" : undefined}>
       {slots.art}
       <section ref={heroRef} className="nx-hero" aria-labelledby={taglineId}>
         <div className="nx-hero-copy">

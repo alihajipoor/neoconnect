@@ -196,6 +196,16 @@
     height: 100%;
     pointer-events: none;
     overflow: visible;
+    transition: opacity 600ms var(--spring-smooth);
+  }
+  /* The band has given way: the lights fade out where they stand, and back
+     in, rather than leaving and arriving. */
+  :is(.nx-lamps, .nx-arcs)[data-off="1"] {
+    opacity: 0;
+  }
+  .nx-lamps[data-off="1"] .nx-lamp::before,
+  .nx-lamps[data-off="1"] .nx-lamp::after {
+    animation-play-state: paused !important;
   }
   .nx-arc {
     fill: none;
@@ -221,6 +231,10 @@
     height: 0;
     transform: translate(var(--lx, -99px), var(--ly, -99px));
   }
+  /* Fixed-size parts, sized by transform: scale and faded by opacity, so a
+     change of look cross-fades over 600ms instead of popping. The core is
+     a 10px disc drawn at the look's size; the glow and the halo share one
+     34px disc. */
   .nx-lamp::before,
   .nx-lamp::after {
     content: "";
@@ -230,39 +244,44 @@
     border-radius: 50%;
     pointer-events: none;
   }
-  /* Steady: listed, nothing proven here yet. */
+  /* Steady: listed, nothing proven here yet (5px). */
   .nx-lamp::before {
-    width: 5px;
-    height: 5px;
-    margin: -2.5px 0 0 -2.5px;
+    width: 10px;
+    height: 10px;
+    margin: -5px 0 0 -5px;
     background: var(--lamp-idle);
+    transform: scale(0.5);
     transition:
+      transform 600ms var(--spring-smooth),
       background-color 600ms var(--spring-smooth),
       box-shadow 600ms var(--spring-smooth);
   }
-  /* Live: it carried traffic on this network lately. */
+  .nx-lamp::after {
+    width: 34px;
+    height: 34px;
+    margin: -17px 0 0 -17px;
+    opacity: 0;
+    transform: scale(0.765);
+    transition:
+      opacity 600ms var(--spring-smooth),
+      transform 600ms var(--spring-smooth);
+  }
+  /* Live: it carried traffic on this network lately (6px, a 26px glow). */
   .nx-lamp[data-look="live"]::before {
-    width: 6px;
-    height: 6px;
-    margin: -3px 0 0 -3px;
     background: var(--lamp);
-    box-shadow: 0 0 0 1.5px var(--lamp-rim);
+    box-shadow: 0 0 0 2.5px var(--lamp-rim);
+    transform: scale(0.6);
   }
   .nx-lamp[data-look="live"]::after {
-    width: 26px;
-    height: 26px;
-    margin: -13px 0 0 -13px;
     background: radial-gradient(closest-side, var(--lamp-glow), transparent);
     opacity: 0.6;
   }
-  /* Down: offline, or what was tried there lately failed. Hollow, never
-     red: information, not an alarm. */
+  /* Down: offline, or failing for most people on this network lately
+     (7px, hollow). Never red: information, not an alarm. */
   .nx-lamp[data-look="down"]::before {
-    width: 7px;
-    height: 7px;
-    margin: -3.5px 0 0 -3.5px;
     background: var(--map-bg);
-    box-shadow: inset 0 0 0 1.5px var(--lamp-idle);
+    box-shadow: inset 0 0 0 2.15px var(--lamp-idle);
+    transform: scale(0.7);
   }
   /* A relay's exit country with no place of its own shows only as the
      connected light. */
@@ -272,18 +291,14 @@
   /* Where the verified tunnel leaves: larger, the state colour, a soft
      halo. map-lights.ts draws it only under the verified tone. */
   .nx-lamp[data-exit="1"]::before {
-    width: 10px;
-    height: 10px;
-    margin: -5px 0 0 -5px;
     background: var(--t-dot);
     box-shadow: 0 0 0 2px var(--lamp-rim);
+    transform: none;
   }
   .nx-lamp[data-exit="1"]::after {
-    width: 34px;
-    height: 34px;
-    margin: -17px 0 0 -17px;
     background: radial-gradient(closest-side, var(--halo), transparent);
     opacity: 0.85;
+    transform: none;
   }
   /* Motion: a slow, staggered twinkle; the connected light breathes. At
      most ten move (map-lights.ts). */
@@ -296,15 +311,16 @@
   .nx-lamp[data-anim="1"][data-exit="1"]::after {
     animation: nx-breathe 3.4s ease-in-out infinite;
   }
+  /* The glow's 26px look on the 34px disc: .55 to 1.12 of 26px. */
   @keyframes nx-twinkle {
     0%,
     100% {
       opacity: 0.12;
-      transform: scale(0.55);
+      transform: scale(0.42);
     }
     50% {
       opacity: 1;
-      transform: scale(1.12);
+      transform: scale(0.86);
     }
   }
   @keyframes nx-twcore {
@@ -348,8 +364,10 @@
     transition: none;
   }
 
-  /* The ribbon: the vector stand-in (Sculpture.tsx). Steel until verified,
-     then a cross-fade to cobalt, held through a brief gap like the chip. */
+  /* The ribbon: the vector stand-in (Sculpture.tsx), drawn as clear glass.
+     Colour only inside it: the core is steel until verified, then
+     cross-fades to cobalt -- at most a little over half opaque -- held
+     through a brief gap like the chip. */
   .nx-rib {
     position: absolute;
     pointer-events: none;
@@ -364,20 +382,62 @@
     height: 100%;
     overflow: visible;
   }
+  /* About 20 s of a slow 9px float after the first verified connect of a
+     session (HeroArt.tsx), transform only. Wide only (the scene's host),
+     and never under Lite, Off, reduced motion or a hidden window. */
+  .nx-rib[data-float="1"] {
+    animation: nx-float 5s ease-in-out 4;
+  }
+  @keyframes nx-float {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-9px);
+    }
+  }
+  :root:is([data-motion="reduce"], [data-glass="lite"], [data-glass="flat"]) .nx-rib[data-float="1"] {
+    animation: none;
+  }
+  .nx-map[data-vis="hidden"] .nx-rib[data-float="1"] {
+    animation-play-state: paused;
+  }
   .nx-rib .core {
-    opacity: 0;
     transition: opacity 900ms var(--spring-smooth);
   }
-  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-rib .core {
-    opacity: 1;
+  .nx-rib .core.steel {
+    opacity: 0.4;
+  }
+  .nx-rib .core.ok {
+    opacity: 0;
+  }
+  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-rib .core.steel {
+    opacity: 0;
+  }
+  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-rib .core.ok {
+    opacity: 0.55;
+  }
+  .nx-rib .dots {
+    opacity: 0.6;
   }
   .nx-rib .band {
     stroke: var(--cobalt);
-    opacity: 0.4;
+    opacity: 0.35;
+    transition: opacity 900ms var(--spring-smooth);
+  }
+  .nx-app:is([data-shown="ok"], [data-shown="caution"]) .nx-rib .band {
+    opacity: 0.6;
+  }
+  .nx-rib .edge {
+    stroke: var(--rib-edge);
   }
   .nx-rib .rim {
     stroke: var(--rim-a);
-    opacity: 0.8;
+    opacity: 0.9;
+  }
+  .nx-rib .shadow {
+    opacity: 0.6;
   }
   .nx-rib .streak {
     stroke: #fff;
@@ -1851,8 +1911,6 @@
     display: block;
   }
   .nx-ipv {
-    font-size: 15px;
-    font-weight: 500;
     font-variant-numeric: tabular-nums;
   }
   .nx-flagbox {
@@ -2156,10 +2214,20 @@
       overflow-x: hidden;
       overflow-y: auto;
       scrollbar-width: thin;
+      /* The scrollbar's room kept whether or not one shows, so a state
+         whose copy overflows does not narrow the column -- in Persian it
+         would shift it, and the map and ribbon measured beside it. */
+      scrollbar-gutter: stable;
     }
     .nx-ov[data-more="1"] > .nx-hero {
       -webkit-mask-image: linear-gradient(#000 calc(100% - 28px), transparent);
       mask-image: linear-gradient(#000 calc(100% - 28px), transparent);
+    }
+    /* Room for the "More below" pill under the last control, so it can be
+       scrolled clear of it -- kept once scrolled, so reaching the end does
+       not take the room away under the reader. */
+    .nx-ov:is([data-more="1"], [data-scrolled="1"]) > .nx-hero > .nx-hero-copy {
+      padding-bottom: 52px;
     }
     /* Anchored at a fixed top: state changes never move the tagline. */
     .nx-hero-copy {
@@ -2193,10 +2261,20 @@
     .nx-ov.nopanel {
       grid-template-areas: "hero hero" "tray tray";
     }
+    /* One height in every state -- capped, offline without Renew, no plan
+       -- so the hero above it, and the map placed in it, never move. */
     .nx-tray {
       grid-area: tray;
       display: grid;
       grid-template-columns: minmax(0, 1.35fr) repeat(2, minmax(0, 1fr));
+      block-size: 108px;
+    }
+    .nx-tray .nx-meter {
+      margin-top: 4px;
+    }
+    .nx-tray .nx-meter + .nx-tlink {
+      margin-top: 2px;
+      min-height: 22px;
     }
     /* The VPN / Gaming switch floats at the hero's top end, like a toolbar
        capsule. It rejoins the column when a banner needs that corner. */
@@ -2212,9 +2290,18 @@
       margin-inline-end: 18px;
       max-width: min(300px, 38%);
     }
+    /* Three lines at most -- the longest hint, "not confined", takes three
+       in both languages -- so a state's hint never moves what is placed
+       below the switch (WorldMap.tsx reserves three). A guard only: the
+       whole sentence is the title. */
     .nx-ov > .nx-modebar .nx-modehint {
       text-align: end;
       max-width: 32ch;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 3;
+      line-clamp: 3;
+      overflow: hidden;
     }
     .nx-morecue {
       grid-area: hero;
@@ -2228,8 +2315,14 @@
     .nx-upd-hero {
       display: none;
     }
+  }
+  /* Compact wide: a banner needs the switch's corner, so the switch joins
+     the column. The floating one keeps its box, hidden, so what is placed
+     below it does not move. From 1100px the banner stays inside the copy
+     column and the switch stays where it is. */
+  @container app (min-width: 900px) and (max-width: 1099.98px) {
     .nx-app[data-banner="1"] .nx-ov > .nx-modebar {
-      display: none;
+      visibility: hidden;
     }
     .nx-app[data-banner="1"] .nx-hero-copy .nx-modebar {
       display: flex;

@@ -106,6 +106,7 @@ const SIZES: Record<string, [number, number]> = {
   "1180 × 760 (first launch)": [1180, 760],
   "940 × 700 (old default)": [940, 700],
   "1440 × 900": [1440, 900],
+  "1280 × 800": [1280, 800],
   "720 × 600 (minimum)": [720, 600],
   "834 × 1112 (tablet)": [834, 1112],
   "390 × 844 (phone)": [390, 844],
@@ -414,7 +415,10 @@ function Composed({
             { value: "gaming", label: t("dash.modeGaming"), icon: <Gamepad2 aria-hidden /> },
           ]}
         />
-        <p className="nx-modehint">
+        <p
+          className="nx-modehint"
+          title={gaming ? t("mode.gamingHintShort") : !isTunnelUp(sc.state) ? t("mode.vpnHintIdle") : t(sc.unconfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint")}
+        >
           {gaming
             ? t("mode.gamingHintShort")
             : !isTunnelUp(sc.state)

@@ -446,7 +446,10 @@ export function LocationPicker({
         </div>
       )}
       <div className={panel ? "t" : "flex min-w-0 flex-1 flex-col"}>
-        <span className={panel ? "n" : "truncate text-sm font-medium"}>{t("loc.automatic")}</span>
+        {/* The panel's rows are narrow: the short name, the whole one as its title. */}
+        <span className={panel ? "n" : "truncate text-sm font-medium"} title={panel ? t("loc.automatic") : undefined}>
+          {t(panel ? "loc.automaticShort" : "loc.automatic")}
+        </span>
         <span className={panel ? "s" : "text-xs text-muted-foreground"} title={panel ? t("loc.automaticHint") : undefined}>
           {t(panel ? "loc.automaticHintShort" : "loc.automaticHint")}
         </span>

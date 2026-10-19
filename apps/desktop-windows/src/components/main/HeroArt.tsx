@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { ShownTone } from "../../lib/hero-model";
 import type { LayoutMode } from "../../lib/layout-mode";
 import type { MapScene } from "../../lib/map-lights";
@@ -41,14 +42,38 @@ export interface HeroArtProps {
   alert?: boolean;
 }
 
+/** The ribbon floats once a session, for about 20 s after its first
+ * verified connect (design-system.md 5.1). Per process, so a screen that
+ * remounts -- Settings opened and closed -- does not float it again. */
+let floatedThisSession = false;
+const FLOAT_MS = 20_000;
+
+function useFirstVerifiedFloat(tone: ShownTone): boolean {
+  const [floating, setFloating] = useState(false);
+  useEffect(() => {
+    if (tone !== "ok" || floatedThisSession) return;
+    floatedThisSession = true;
+    setFloating(true);
+  }, [tone]);
+  // Its own clock: a change of tone meanwhile does not cut it short or
+  // leave it running.
+  useEffect(() => {
+    if (!floating) return;
+    const timer = setTimeout(() => setFloating(false), FLOAT_MS);
+    return () => clearTimeout(timer);
+  }, [floating]);
+  return floating;
+}
+
 export function HeroArt({ tone, layout, map, countries, ribbon = true, alert = false }: HeroArtProps) {
+  const float = useFirstVerifiedFloat(tone);
   return (
     <div className="nx-scene" aria-hidden data-tone={tone}>
       <div className="nx-amb ok" />
       <div className="nx-amb warn" />
       <div className="nx-amb hl" />
       {map && layout === "wide" ? (
-        <WorldMap host="scene" lights={map.lights} arc={map.arc} countries={countries} ribbon={ribbon} alert={alert} />
+        <WorldMap host="scene" lights={map.lights} arc={map.arc} countries={countries} ribbon={ribbon} alert={alert} float={float} />
       ) : null}
     </div>
   );

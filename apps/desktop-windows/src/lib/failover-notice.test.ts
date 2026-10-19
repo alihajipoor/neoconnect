@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { classifyConnectionError } from "./connection-errors";
 import { failoverNotice, failoverText, rungFate, type FailedRung } from "./failover-notice";
 import type { Language, TranslationKey } from "./i18n";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { SLOT, Slotted } from "../components/Slotted";
 
 // attempts.ts and i18n.tsx reach for Tauri at import time through their
 // store, version and API helpers; none of that is exercised here.
@@ -147,5 +150,24 @@ describe("a server named as unreachable", () => {
     expect(line("en", [{ routeId: "fi", fate: "noNetwork" }, { routeId: "fi", fate: "dialled" }], false)).toBe(
       "Your usual protocol didn't get through. Now using Stealth",
     );
+  });
+});
+
+/** The line on screen sets the protocol apart wherever the sentence puts
+ * it: last in English, mid-sentence in Persian (`Slotted`). */
+describe("the protocol in the failover line", () => {
+  const html = (language: Language) => {
+    const text = failoverText(failoverNotice({ label: "Stealth", fromRegion: null, toRegion: "de-germany", shownRouteId: "fi", failed: [] }));
+    return renderToStaticMarkup(
+      createElement(Slotted, {
+        text: say(language, text.key, { ...text.vars, protocol: SLOT }),
+        children: createElement("bdi", null, text.vars.protocol),
+      }),
+    );
+  };
+
+  it("is where each language puts it", () => {
+    expect(html("en")).toBe("Now using <bdi>Stealth</bdi>");
+    expect(html("fa")).toBe("اکنون از <bdi>Stealth</bdi> استفاده می‌شود");
   });
 });
