@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Globe, Repeat, Sparkles } from "lucide-react";
 import type { ConnectionState } from "@shared/components/ConnectOrb";
+import { BackupRouteChip } from "@shared/components/BackupRoute";
 import { ConnectOrb } from "@shared/components/ConnectOrb";
 import { DeviceSlotCard } from "@shared/components/DeviceSlotCard";
 import { RouteFlag } from "@shared/components/Flag";
@@ -26,6 +27,9 @@ import { effects, type GlassChoice, type ThemeChoice } from "@shared/lib/effects
 import { chipFor, hintTone, ipFor, lineFor, pillFor, planCaution, secondaryFor, shownTone } from "@shared/lib/hero-model";
 import { useI18n, type Language, type TranslationKey } from "@shared/lib/i18n";
 import { planLineText } from "@shared/lib/shell-nav";
+import { layoutFor, useLayoutMode } from "@shared/lib/layout-mode";
+import { resetLastResortForTests } from "@shared/lib/last-resort";
+import { networkKeyFromAsn } from "@shared/lib/network-identity";
 import { formatDateTime, formatNumber, formatSize, sizeParts } from "@shared/lib/locale-format";
 import { orbTone } from "@shared/lib/orb-caution";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
@@ -72,6 +76,8 @@ interface Scenario {
   permission?: boolean;
   /** The chosen protocol has no engine in this build. */
   unsupported?: boolean;
+  /** On an iPhone: the platform's own words for a declined prompt. */
+  ios?: boolean;
 }
 
 export const SCENARIOS: Record<string, Scenario> = {
@@ -106,6 +112,7 @@ export const SCENARIOS: Record<string, Scenario> = {
   dropped: { label: "Connection lost", state: "disconnected", dropped: true },
   failed: { label: "Connect failed", state: "disconnected", failed: true },
   permission: { label: "VPN permission declined", state: "disconnected", permission: true },
+  permissionIos: { label: "VPN permission declined (iPhone)", state: "disconnected", permission: true, ios: true },
   unsupported: { label: "Connected, chosen protocol not in the app", state: "connected", timed: true, unsupported: true },
   slot: { label: "Device limit", state: "disconnected", slot: true },
   blocked: { label: "Blocked network (offline banner)", state: "disconnected", offline: true },
@@ -134,16 +141,39 @@ export const SCREENS: Record<string, string> = {
 };
 
 /** Width, height and the safe areas the device reports with the app drawn
- * edge to edge (top, bottom), as the Windows preview has them. The preview
- * cannot get them from env(), so it sets the app's own variables. */
-const SIZES: Record<string, [number, number, number, number]> = {
-  "360 × 640 (small Android)": [360, 640, 24, 48],
-  "375 × 667 (iPhone SE)": [375, 667, 20, 0],
-  "390 × 844 (phone)": [390, 844, 47, 34],
-  "412 × 915 (Android)": [412, 915, 32, 24],
-  "430 × 932 (large iPhone)": [430, 932, 59, 34],
-  "834 × 1112 (tablet)": [834, 1112, 24, 20],
+ * edge to edge (top, bottom, and each side), as the Windows preview has
+ * them. The preview cannot get them from env(), so it sets the app's own
+ * variables, and pads the sides as #root does (globals.css). On its side an
+ * iPhone keeps its notch out of the way with the side insets; an Android
+ * phone keeps its status bar and its gesture bar. */
+const SIZES: Record<string, [number, number, number, number, number]> = {
+  "360 × 640 (small Android)": [360, 640, 24, 48, 0],
+  "375 × 667 (iPhone SE)": [375, 667, 20, 0, 0],
+  "390 × 844 (phone)": [390, 844, 47, 34, 0],
+  "412 × 915 (Android)": [412, 915, 32, 24, 0],
+  "430 × 932 (large iPhone)": [430, 932, 59, 34, 0],
+  "834 × 1112 (tablet)": [834, 1112, 24, 20, 0],
+  "1112 × 834 (tablet, landscape)": [1112, 834, 24, 20, 0],
+  "800 × 1280 (Android tablet, buttons)": [800, 1280, 24, 48, 0],
+  "844 × 390 (phone, landscape)": [844, 390, 0, 21, 47],
+  "932 × 430 (large iPhone, landscape)": [932, 430, 0, 21, 59],
+  "915 × 412 (Android, landscape)": [915, 412, 24, 24, 0],
 };
+
+/** Relay mode as last-resort.ts keeps it -- the backend answered through
+ * the relay on this network moments ago -- written where that file reads
+ * it ("neoxify.relay"), with its memory of it dropped, so the backup-route
+ * chip and sign-in draw it. Nothing is sent: the preview has no relay. */
+function holdRelayMode(on: boolean) {
+  resetLastResortForTests();
+  if (!on) return;
+  try {
+    const network = networkKeyFromAsn() ?? "unknown";
+    localStorage.setItem("neoxify.relay", JSON.stringify({ mode: { [network]: Date.now() + 3_600_000 }, off: {}, sent: [] }));
+  } catch {
+    // No storage: no chip, which the fit check says.
+  }
+}
 
 let sampleHost = 10;
 function route(id: string, region: string, node: string, protocol: RouteOption["protocol"], transport: string | undefined, extra: Partial<RouteOption> = {}): RouteOption {
@@ -237,12 +267,16 @@ export function PhonePreview() {
   const [motion, setMotion] = useState(false);
   const [sheet, setSheet] = useState(false);
   const [ios, setIos] = useState(false);
+  const [relay, setRelay] = useState(false);
   const sc = SCENARIOS[key];
-  const [w, h, safeT, safeB] = SIZES[size];
+  const [w, h, safeT, safeB, side] = SIZES[size];
 
   useEffect(() => effects.setTheme(theme), [theme]);
   useEffect(() => effects.setGlass(glass), [glass]);
   useEffect(() => effects.setMotion(motion ? true : null), [motion]);
+
+  // Relay mode, before the chip and the screens under it mount.
+  useMemo(() => holdRelayMode(relay), [relay]);
 
   // The per-app card's stored settings, set as its screen is chosen and
   // before it mounts.
@@ -315,6 +349,9 @@ export function PhonePreview() {
       <label>
         <input type="checkbox" checked={ios} onChange={(e) => setIos(e.target.checked)} data-testid="ios" /> iPhone sign-in providers
       </label>
+      <label>
+        <input type="checkbox" checked={relay} onChange={(e) => setRelay(e.target.checked)} data-testid="relay" /> Backup route (relay mode)
+      </label>
     </div>
   );
 
@@ -330,20 +367,49 @@ export function PhonePreview() {
           borderRadius: 12,
           overflow: "hidden",
           boxShadow: "0 30px 80px -30px rgba(20,30,60,.45), 0 0 0 1px rgba(20,30,60,.12)",
+          // The page's own background, behind #root's side padding.
+          background: "var(--background)",
           // A containing block for the app's fixed overlays.
           transform: "translateZ(0)",
           ...({ "--pv-safe-t": `${safeT}px`, "--pv-safe-b": `${safeB}px` } as CSSProperties),
         }}
         data-testid="frame"
-        data-safe={`${safeT},${safeB}`}
+        data-safe={`${safeT},${safeB},${side}`}
       >
-        {/* The device's safe areas, which env() cannot report here. */}
-        <style>{`[data-testid="frame"] .nx-app { --safe-t: var(--pv-safe-t); --safe-b: var(--pv-safe-b); }`}</style>
-        {screen === "main" || screen === "locations" ? (
-          <Composed sc={sc} language={language} width={w} sheet={sheet} onSheet={setSheet} view={screen === "locations" ? "locations" : "overview"} />
-        ) : (
-          <Other key={screen} screen={screen} ios={ios} />
-        )}
+        {/* The device's safe areas, which env() cannot report here: the
+            app's own variables, and the backup-route chip's row, which
+            takes the status bar's inset itself (globals.css). */}
+        <style>{`[data-testid="frame"] .nx-app { --safe-t: var(--pv-safe-t); --safe-b: var(--pv-safe-b); }
+[data-testid="frame"] .nx-relayrow:not(:empty) { padding-top: var(--pv-safe-t); }`}</style>
+        {/* #root, with the side insets as its padding (globals.css). */}
+        <div style={{ height: "100%", paddingLeft: side, paddingRight: side, boxSizing: "border-box" }}>
+          {/* App.tsx's frame around every screen: the backup-route chip's
+              row, then the screen in ScreenTransition's two boxes. Keyed,
+              so the chip and sign-in read relay mode afresh. */}
+          <div key={relay ? "relay" : "plain"} className="flex h-full flex-col">
+            <div className="nx-relayrow">
+              <BackupRouteChip />
+            </div>
+            <div className="nx-screen min-h-0 flex-1">
+              <div className="relative h-full w-full overflow-hidden">
+                <div className="h-full">
+                  {screen === "main" || screen === "locations" ? (
+                    <Composed
+                      sc={sc}
+                      language={language}
+                      width={w - 2 * side}
+                      sheet={sheet}
+                      onSheet={setSheet}
+                      view={screen === "locations" ? "locations" : "overview"}
+                    />
+                  ) : (
+                    <Other key={screen} screen={screen} ios={ios} />
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -418,7 +484,10 @@ function Composed({
   view: "overview" | "locations";
 }) {
   const { t } = useI18n();
-  const layout = width >= 900 ? "wide" : width >= 640 ? "medium" : "narrow";
+  // As the Dashboard decides it (lib/app-layout.ts): by the app root's
+  // width, which is the frame's less the side insets.
+  const appRootRef = useRef<HTMLDivElement>(null);
+  const layout = useLayoutMode(appRootRef, layoutFor(width));
   const [askDisconnect, setAskDisconnect] = useState(false);
   const askRef = useRef<HTMLButtonElement>(null);
   const reconnecting = sc.reconnecting ?? null;
@@ -505,7 +574,7 @@ function Composed({
   const notes = (
     <div className="nx-notes">
       {sc.teardownStuck ? <Note tone="danger">{t("err.teardownStuck")}</Note> : null}
-      {sc.permission ? <Note tone="caution">{t("dash.vpnPermissionDenied")}</Note> : null}
+      {sc.permission ? <Note tone="caution">{t(sc.ios ? "dash.vpnPermissionDeniedIos" : "dash.vpnPermissionDenied")}</Note> : null}
       {sc.unsupported ? <Note>{t("dash.androidWireguardOnly", { protocol: "OpenVPN" })}</Note> : null}
     </div>
   );
@@ -595,6 +664,7 @@ function Composed({
 
   return (
     <AppShell
+      rootRef={appRootRef}
       active={view === "locations" ? "locations" : "overview"}
       shown={calmTone}
       busy={pill.progress}

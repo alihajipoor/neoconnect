@@ -35,8 +35,19 @@
 // preview.html and stylesheet, `pnpm check:phone-fit` there): its main page
 // in the states the phone has -- a declined VPN permission, a protocol not
 // in the app, a disconnect not confirmed among them -- and the sign-in
-// screens at the phone sizes and the tablet. The first-run disclosure is
+// screens at the phone sizes and the tablets. The first-run disclosure is
 // measured too, and only reported: it is longer than a screen, and scrolls.
+// Then, there only:
+//   - relay mode at the smallest phone: the backup-route chip's row above
+//     the main page in every state and above every sign-in screen, which
+//     must still fit one screen, with the status bar's inset drawn once;
+//   - the safe areas on the tablets both ways up, an Android tablet with
+//     its button bar, and phones on their sides (the medium and wide
+//     layouts): the header under the status bar's inset and the foot --
+//     the panel and its legend, the tray, the profile, a page's last card
+//     scrolled to, the sign-in card -- above the home indicator or the
+//     button bar; and that the script chose the layout the stylesheet drew
+//     (the panel and the map's stage), which differ by the side insets.
 //
 // --all adds the states a phone never shows (Gaming mode and "not confined"
 // are Windows-only); they are reported but not failed on.
@@ -75,7 +86,7 @@ const SIZES = [
 /** The windows and the tablet, for sign-in only: the card does not scroll
  * there either (AuthFrame.tsx), the first launch's 1180 x 760 included. */
 const WINDOWS = MOBILE
-  ? ["834 × 1112 (tablet)"]
+  ? ["834 × 1112 (tablet)", "1112 × 834 (tablet, landscape)", "800 × 1280 (Android tablet, buttons)"]
   : ["720 × 600 (minimum)", "940 × 700 (old default)", "1180 × 760 (first launch)", "1280 × 800", "1440 × 900", "834 × 1112 (tablet)"];
 const LANGS = ["en", "fa"];
 /** The phone app's own states (apps/mobile/src/preview/PhonePreview.tsx):
@@ -98,6 +109,7 @@ const MOBILE_MAIN = [
   "dropped",
   "failed",
   "permission",
+  "permissionIos",
   "unsupported",
   "slot",
   "blocked",
@@ -141,7 +153,7 @@ const WINDOWS_ONLY = MOBILE ? [] : ["unconfined", "gamingOff", "gamingOn", "gami
  * and draws nothing), so its size is not compared. */
 const ALERT = new Set(
   MOBILE
-    ? ["failed", "slot", "blocked", "ended", "none", "teardownStuck", "permission", "unsupported"]
+    ? ["failed", "slot", "blocked", "ended", "none", "teardownStuck", "permission", "permissionIos", "unsupported"]
     : ["failed", "slot", "blocked", "ended"],
 );
 /** No subscription: another foot altogether (no summary line; on the real
@@ -159,6 +171,23 @@ const NO_LOCATION = new Set(MOBILE ? ["none"] : []);
  * customer in Iran sees: a failure, the intranet's note, both, and the
  * backup route offered; and an iPhone's three providers. */
 const MOBILE_AUTH = ["signin", "signinError", "register", "forgot", "verify"];
+/** --app mobile: relay mode, at the smallest phone. */
+const RELAY_SIZES = MOBILE ? ["360 × 640 (small Android)"] : [];
+/** --app mobile: the medium and wide layouts on a device, with a status bar
+ * and a home indicator or button bar to keep clear -- and, on the phones on
+ * their sides, side insets that make the app root narrower than the window.
+ * The preview's own labels and insets (PhonePreview.tsx `SIZES`). */
+const SAFE_SIZES = MOBILE
+  ? [
+      "834 × 1112 (tablet)",
+      "1112 × 834 (tablet, landscape)",
+      "800 × 1280 (Android tablet, buttons)",
+      "844 × 390 (phone, landscape)",
+      "932 × 430 (large iPhone, landscape)",
+      "915 × 412 (Android, landscape)",
+    ]
+  : [];
+const SAFE_MAIN = ["idle", "connecting", "connected", "failed", "slot", "blocked", "none", "crossed", "permission"];
 const AUTH = MOBILE ? MOBILE_AUTH : [
   "signin",
   "signinNotice",
@@ -341,6 +370,98 @@ const AUTH_MEASURE = `(() => {
   return { overflow: Math.round(overflow), missing, cut, providers };
 })()`;
 
+/** Relay mode: the backup-route chip is drawn, inside the safe area, and
+ * the screen under it does not take the status bar's inset again. */
+const RELAY_MEASURE = `(() => {
+  const frame = document.querySelector('[data-testid=frame]');
+  const fb = frame.getBoundingClientRect();
+  const [safeT] = (frame.dataset.safe || '0').split(',').map(Number);
+  const vis = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+  const chip = frame.querySelector('.nx-relayrow span[title]');
+  if (!vis(chip)) return ['backup-route chip missing'];
+  const problems = [];
+  const cb = chip.getBoundingClientRect();
+  if (cb.top - fb.top < safeT - 0.5) problems.push('backup-route chip under the status bar');
+  const app = frame.querySelector('.nx-app');
+  const inset = getComputedStyle(app).getPropertyValue('--safe-t').trim();
+  if (parseFloat(inset) !== 0) problems.push("the status bar's inset drawn again under the chip (--safe-t " + inset + ')');
+  const head = [...frame.querySelectorAll('.nx-mhead, .nx-side, .nx-auth-top')].find(vis);
+  if (head && head.getBoundingClientRect().top < cb.bottom - 0.5) problems.push('the header under the chip');
+  return problems;
+})()`;
+
+/** The medium and wide layouts on a device: the header clear of the status
+ * bar, the foot clear of the home indicator or the button bar, a page's
+ * last card and the sign-in card too once scrolled to, nothing scrolling
+ * sideways -- and on the main page, the layout the script chose (the panel,
+ * the map's stage) the one the stylesheet drew. */
+const SAFE_MEASURE = (kind, noPlan = false) => `(async () => {
+  const frame = document.querySelector('[data-testid=frame]');
+  const fb = frame.getBoundingClientRect();
+  const [safeT, safeB] = (frame.dataset.safe || '0,0').split(',').map(Number);
+  const vis = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+  const frameOf = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+  const app = frame.querySelector('.nx-app');
+  const w = app.getBoundingClientRect().width;
+  const layout = w >= 900 ? 'wide' : w >= 640 ? 'medium' : 'narrow';
+  const problems = [];
+  const at = (el) => {
+    const b = el.getBoundingClientRect();
+    return { t: b.top - fb.top, b: b.bottom - fb.top };
+  };
+  const name = (el) => (typeof el.className === 'string' ? el.className.split(' ').find((c) => c.startsWith('nx-') && c !== 'nx-glass') : null) || el.tagName.toLowerCase();
+  const top = (sel) => {
+    for (const el of frame.querySelectorAll(sel)) {
+      if (vis(el) && at(el).t < safeT - 0.5) problems.push(name(el) + ' under the status bar (top ' + Math.round(at(el).t) + ', inset ' + safeT + ')');
+    }
+  };
+  const foot = (sel, limit = fb.height - safeB) => {
+    for (const el of typeof sel === 'string' ? frame.querySelectorAll(sel) : [sel]) {
+      if (vis(el) && at(el).b > limit + 0.5) problems.push(name(el) + ' over the home indicator (' + Math.round(fb.height - at(el).b) + 'px from the foot, inset ' + safeB + ')');
+    }
+  };
+  top('.nx-mhead .nx-wm, .nx-mtabs, .nx-avbtn, .nx-side .nx-wm, .nx-side .nx-nav, .nx-auth-top > *');
+  foot('.nx-side .nx-profile');
+  if ('${kind}' === 'main') {
+    top('.nx-ov > .nx-panel, .nx-ov > .nx-hero');
+    foot('.nx-ov > .nx-panel, .nx-ov > .nx-hero, .nx-tray, .nx-morecue');
+    // The legend at the panel's end, inside the panel and the safe area.
+    const panel = frame.querySelector('.nx-ov > .nx-panel');
+    const legend = panel && panel.querySelector('.nx-mlegend');
+    if (vis(legend)) {
+      panel.scrollTop = panel.scrollHeight;
+      await frameOf();
+      if (at(legend).b > at(panel).b + 0.5) problems.push("the map's legend spills out of the panel (" + Math.round(at(legend).b - at(panel).b) + 'px)');
+      else foot(legend);
+      panel.scrollTop = 0;
+    }
+    const hasPanel = !!panel;
+    const hasStage = !!frame.querySelector('.nx-mapstage');
+    // No plan, no list: the panel is not drawn at any width.
+    if (!${noPlan} && hasPanel !== (layout !== 'narrow')) problems.push('the locations panel ' + (hasPanel ? 'drawn' : 'missing') + ' in the ' + layout + ' layout');
+    if (hasStage !== (layout !== 'wide')) problems.push("the map's stage " + (hasStage ? 'drawn' : 'missing') + ' in the ' + layout + ' layout');
+  }
+  if ('${kind}' === 'page') {
+    const scroller = frame.querySelector('.nx-pscroll');
+    top('.nx-phead');
+    scroller.scrollTop = scroller.scrollHeight;
+    await frameOf();
+    const last = [...frame.querySelectorAll('.nx-pinner > *')].filter(vis).pop();
+    if (last) foot(last);
+    scroller.scrollTop = 0;
+  }
+  if ('${kind}' === 'auth') {
+    const scroller = frame.querySelector('.nx-auth-scroll');
+    scroller.scrollTop = scroller.scrollHeight;
+    await frameOf();
+    foot('.nx-auth-card');
+    scroller.scrollTop = 0;
+  }
+  const sideways = app.scrollWidth - app.clientWidth;
+  if (sideways > 1) problems.push('scrolls sideways by ' + sideways + 'px');
+  return { layout, problems };
+})()`;
+
 /** The disclosure: how far its column scrolls, and whether its button, once
  * scrolled to, lies inside the safe area and is not cut. */
 const DISCLOSURE_MEASURE = `(() => {
@@ -404,6 +525,7 @@ let ws;
 const results = [];
 const authResults = [];
 const disclosure = [];
+const safe = [];
 try {
   let targets = [];
   for (let i = 0; i < 80 && !targets.some((t) => t.type === "page"); i++) {
@@ -441,6 +563,13 @@ try {
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(el, ${JSON.stringify(value)});
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return el.value === ${JSON.stringify(value)};
+    })()`);
+  const tick = (testid, on) =>
+    ev(`(() => {
+      const el = document.querySelector('[data-testid="${testid}"]');
+      if (!el) return false;
+      if (el.checked !== ${on}) el.click();
+      return el.checked === ${on};
     })()`);
   const styled = async () => {
     for (let i = 0; i < 40; i++) {
@@ -516,6 +645,74 @@ try {
       }
     }
   }
+  // Relay mode: the chip's row above the main page and sign-in.
+  for (const size of RELAY_SIZES) {
+    await choose("screen", "main");
+    await choose("size", size);
+    if (!(await tick("relay", true))) throw new Error("The preview has no relay mode switch.");
+    await sleep(800);
+    const label = `${size.split(" (")[0]} relay`;
+    for (const lang of LANGS) {
+      await choose("language", lang);
+      await choose("screen", "main");
+      for (const state of MOBILE_MAIN) {
+        await choose("scenario", state);
+        await sleep(350);
+        if (!(await styled())) throw new Error(`The preview's CSS was not applied at ${label} ${lang} ${state}.`);
+        const m = await ev(MEASURE(NO_LOCATION.has(state)));
+        m.missing.push(...(await ev(RELAY_MEASURE)));
+        results.push({ size: label, lang, state, ...m, windowsOnly: false });
+      }
+      for (const screen of AUTH) {
+        if (screen.endsWith("Ios")) continue;
+        await choose("screen", screen);
+        await sleep(450);
+        await ev("document.fonts.ready.then(() => true)");
+        const m = await ev(AUTH_MEASURE);
+        m.missing.push(...(await ev(RELAY_MEASURE)));
+        authResults.push({ size: label, lang, screen, ...m });
+      }
+    }
+    await choose("screen", "main");
+    await tick("relay", false);
+  }
+  // The safe areas of the medium and wide layouts on a device.
+  for (const size of SAFE_SIZES) {
+    await choose("screen", "main");
+    await choose("size", size);
+    // Settled after the jump: the map re-places itself a frame or two on.
+    await sleep(800);
+    const label = size.split(" (")[0];
+    for (const lang of LANGS) {
+      await choose("language", lang);
+      await choose("screen", "main");
+      for (const state of SAFE_MAIN) {
+        await choose("scenario", state);
+        await sleep(350);
+        safe.push({ size: label, lang, what: state, ...(await ev(SAFE_MEASURE("main", NO_LOCATION.has(state)))) });
+      }
+      await choose("screen", "perapp");
+      await sleep(700);
+      safe.push({ size: label, lang, what: "per-app page", ...(await ev(SAFE_MEASURE("page"))) });
+      for (const screen of ["signin", "signinError"]) {
+        await choose("screen", screen);
+        await sleep(450);
+        safe.push({ size: label, lang, what: screen, ...(await ev(SAFE_MEASURE("auth"))) });
+      }
+      // Relay mode on a tablet and a phone on its side: the chip's row
+      // takes the status bar's inset, the header under it does not.
+      await tick("relay", true);
+      for (const screen of ["main", "signin"]) {
+        await choose("screen", screen);
+        if (screen === "main") await choose("scenario", "idle");
+        await sleep(450);
+        const m = await ev(SAFE_MEASURE(screen === "main" ? "main" : "auth"));
+        m.problems.push(...(await ev(RELAY_MEASURE)));
+        safe.push({ size: label, lang, what: `${screen === "main" ? "idle" : screen} relay`, ...m });
+      }
+      await tick("relay", false);
+    }
+  }
   await choose("screen", "main");
 } finally {
   ws?.close();
@@ -553,7 +750,18 @@ for (const size of [...new Set(results.map((r) => r.size))]) {
   }
 }
 
-if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify({ main: results, auth: authResults, disclosure }, null, 1));
+if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify({ main: results, auth: authResults, disclosure, safe }, null, 1));
+for (const size of [...new Set(safe.map((r) => r.size))]) {
+  for (const lang of LANGS) {
+    const rows = safe.filter((r) => r.size === size && r.lang === lang);
+    const bad = rows.filter((r) => r.problems.length);
+    console.log(
+      `${size} ${lang} safe areas (${[...new Set(rows.map((r) => r.layout))].join(", ")}): ${rows.length} screens` +
+        (bad.length ? `; ${bad.map((r) => `${r.what}: ${r.problems.join(", ")}`).join("; ")}` : ", the header and the foot clear"),
+    );
+  }
+}
+const safeFailed = safe.filter((r) => r.problems.length);
 for (const r of disclosure) {
   console.log(`${r.size} ${r.lang} disclosure: scrolls ${r.overflow}px, its button ${r.reached ? "reached at the end" : "NOT reached"}`);
 }
@@ -598,11 +806,15 @@ if (textScale !== 1) {
   );
   process.exit(0);
 }
-if (failed.length || moved.length || authFailed.length || disclosureFailed.length) {
+if (failed.length || moved.length || authFailed.length || disclosureFailed.length || safeFailed.length) {
+  if (safeFailed.length) console.error(`${safeFailed.length} screen(s) on a tablet or a phone on its side reach under the status bar or the home indicator, spill, or are drawn in a layout the stylesheet is not in.`);
   if (disclosureFailed.length) console.error(`${disclosureFailed.length} disclosure screen(s) whose button cannot be reached.`);
   if (failed.length) console.error(`${failed.length} main-page state(s) do not fit, or cut their text.`);
   if (authFailed.length) console.error(`${authFailed.length} sign-in screen(s) do not fit one screen, or cut a provider's label.`);
   if (moved.length) console.error(`${moved.length} part(s) move or resize with the state.`);
   process.exit(1);
 }
-console.log("Every main-page state fits one screen, cuts no text, and the foot, the stage and the mark keep still; every sign-in screen fits one screen.");
+console.log(
+  "Every main-page state fits one screen, cuts no text, and the foot, the stage and the mark keep still; every sign-in screen fits one screen." +
+    (MOBILE ? " Relay mode fits too, with the status bar's inset drawn once; the tablets and the phones on their sides keep the status bar and the home indicator clear." : ""),
+);
