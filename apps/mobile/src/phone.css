@@ -4,6 +4,77 @@
    (pearl.css, pages.css). Tokens only: both themes, both directions. */
 
 @layer components {
+  /* ---------- the safe areas on a tablet, and a phone on its side ----------
+     The phone draws edge to edge (globals.css). The narrow layout keeps the
+     status bar and the home indicator clear itself (--safe-t, --safe-b in
+     pearl.css and pages.css); the medium and wide layouts pad their top by
+     the Windows title strip (--tb) alone, which a phone does not have. So
+     here the status bar's inset stands in for the strip -- every header,
+     the sidebar, the wide overview and the sign-in clear it -- and the foot
+     of each layout clears the home indicator or the button bar. After
+     pearl.css and pages.css in the same layer, so these win. */
+  .nx-app {
+    --tb: var(--safe-t);
+  }
+  @container app (min-width: 640px) {
+    .nx-auth-scroll {
+      padding-bottom: var(--safe-b);
+    }
+  }
+  @container app (min-width: 640px) and (max-width: 899.98px) {
+    .nx-ov {
+      padding-bottom: calc(16px + var(--safe-b));
+    }
+    /* Placed from the overview's padding edge, which the padding above
+       does not move. */
+    .nx-morecue {
+      bottom: calc(10px + var(--safe-b));
+    }
+    .nx-pinner {
+      padding-bottom: calc(28px + var(--safe-b));
+    }
+  }
+  @container app (min-width: 900px) {
+    .nx-side {
+      padding-bottom: calc(14px + var(--safe-b));
+    }
+    .nx-ov {
+      padding-bottom: calc(18px + var(--safe-b));
+    }
+    .nx-pinner {
+      padding-bottom: calc(32px + var(--safe-b));
+    }
+  }
+  /* A phone on its side: the locations panel is shorter than its heading,
+     search, filters and legend together, so the list had no room left and
+     the legend spilled out of the panel's foot (an Android phone at
+     915 x 412). Under 560px tall the panel scrolls as one, the legend at
+     its end, and nothing is cut. No tablet is this short. */
+  @container app (min-width: 640px) and (max-height: 559.98px) {
+    .nx-panel {
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+    }
+    .nx-panel .nx-loclist {
+      flex: none;
+      overflow: visible;
+      content-visibility: visible;
+      -webkit-mask-image: none;
+      mask-image: none;
+    }
+    /* The sidebar: the wordmark closer to the nav, so the profile stays
+       above the gesture bar with the backup-route chip's row over it too;
+       and never cut if even that is not enough. */
+    .nx-side {
+      overflow-y: auto;
+      scrollbar-width: none;
+    }
+    .nx-side .nx-wm {
+      margin-bottom: 16px;
+    }
+  }
+
   /* ---------- the prominent disclosure (ProminentDisclosure.tsx) ---------- */
   .nx-auth[data-step="disclosure"] .nx-auth-card {
     /* Longer than any sign-in step: room for the lines to stay readable. */
