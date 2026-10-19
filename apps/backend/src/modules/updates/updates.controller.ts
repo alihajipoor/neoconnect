@@ -64,8 +64,14 @@ export class UpdatesController {
     @Param("currentVersion") currentVersion: string,
     @Res() res: Response,
   ) {
-    // Only Windows exists today. Anything else is told it is current
-    // rather than handed a Windows installer.
+    if (target === "android") {
+      await this.checkAndroid(currentVersion, res);
+      return;
+    }
+
+    // Anything but Windows and Android (the macOS build's updater asks
+    // as "darwin") is told it is current rather than handed a Windows
+    // installer: nothing publishes an update for it.
     if (target !== "windows") {
       res.status(204).send();
       return;
@@ -93,5 +99,32 @@ export class UpdatesController {
     }
 
     res.json(check.manifest);
+  }
+
+  /** The Android app's update check, for its direct-download (APK)
+   * build only -- the client never asks from a Play or App Store build,
+   * which the store updates; this cannot tell them apart.
+   *
+   * Not a Tauri manifest: Android will not let an app replace itself
+   * without the system installer's confirmation, so the answer is only
+   * the newer version, and the notice's Download opens
+   * `downloadPath` against whichever API base the app reached us by (a
+   * node mirror, often, in Iran). 204 current, 503 unknown, exactly as
+   * for Windows. */
+  private async checkAndroid(currentVersion: string, res: Response) {
+    if (!/^\d+\.\d+\.\d+$/.test(currentVersion)) {
+      res.status(400).json({ message: "currentVersion must be x.y.z" });
+      return;
+    }
+    const check = await this.updates.checkAndroid(currentVersion);
+    if (check.status === "current") {
+      res.status(204).send();
+      return;
+    }
+    if (check.status === "unknown") {
+      res.status(503).json({ message: "Could not determine the newest release" });
+      return;
+    }
+    res.json({ version: check.version, downloadPath: "/updates/installer/android" });
   }
 }
