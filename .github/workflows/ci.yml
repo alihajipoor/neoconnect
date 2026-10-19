@@ -199,6 +199,13 @@ jobs:
       - name: The test-installer build cannot publish, tag or sign
         run: bash scripts/check-test-installer-workflow.sh
 
+      # The portal's deploy runs against a live, shared host, where a
+      # rollback that cannot restore the old build, or a check that passes
+      # a page the browser will blank, is found by customers. Stand-ins
+      # for ssh and curl; the host is a temporary directory.
+      - name: Portal deploy script deploys, checks and rolls back
+        run: bash scripts/test-deploy-portal.sh
+
   desktop:
     name: Desktop client tests
     # The only Windows runner here, and the only reason this job exists:
