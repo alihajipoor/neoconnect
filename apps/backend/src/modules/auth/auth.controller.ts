@@ -3,6 +3,7 @@ import { LoginGuardService } from "../login-guard/login-guard.service";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { AuthService } from "./auth.service";
+import { AdminSignInAlertsService, emailOfAccessToken } from "./admin-sign-in-alerts.service";
 import { LoginDto } from "./dto/login.dto";
 import { MfaDisableDto } from "./dto/mfa-disable.dto";
 import { MfaEnableDto } from "./dto/mfa-enable.dto";
@@ -33,6 +34,7 @@ export class AuthController {
     private readonly authService: AuthService,
     private readonly adminsService: AdminsService,
     private readonly loginGuard: LoginGuardService,
+    private readonly signInAlerts: AdminSignInAlertsService,
   ) {}
 
   // Open to every role, unlike AdminsController's GET /admins/:id --
@@ -64,17 +66,24 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async login(@Body() dto: LoginDto, @Ip() ip: string) {
     this.loginGuard.enforce("admin", dto.challenge, dto.email, ip);
+    let result: Awaited<ReturnType<AuthService["login"]>>;
     try {
-      const result = await this.authService.login(dto.email, dto.password);
+      result = await this.authService.login(dto.email, dto.password);
       // Reached on a correct password even when MFA is still outstanding
       // -- the secret being guessed here is the password, and it was not
       // guessed wrong.
       this.loginGuard.recordSuccess("admin", dto.email);
-      return result;
     } catch (err) {
       this.loginGuard.recordFailure("admin", dto.email, ip);
+      // The owner hears of a run of wrong passwords against an admin
+      // account; never awaited, never in the way of the answer.
+      void this.signInAlerts.failed(dto.email, this.loginGuard.failureCount("admin", dto.email), ip);
       throw err;
     }
+    // Signed in with the password alone: an account with no second factor.
+    // With one, the alert waits for the code (`verifyMfa`).
+    if (!("mfaRequired" in result)) void this.signInAlerts.signedIn(dto.email, ip, false);
+    return result;
   }
 
   // Same brute-force reasoning as login above -- this is the endpoint that
@@ -82,8 +91,11 @@ export class AuthController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("mfa/verify")
   @HttpCode(HttpStatus.OK)
-  verifyMfa(@Body() dto: MfaVerifyDto) {
-    return this.authService.verifyMfaAndLogin(dto.mfaToken, dto.code);
+  async verifyMfa(@Body() dto: MfaVerifyDto, @Ip() ip: string) {
+    const tokens = await this.authService.verifyMfaAndLogin(dto.mfaToken, dto.code);
+    const email = emailOfAccessToken(tokens.accessToken);
+    if (email) void this.signInAlerts.signedIn(email, ip, true);
+    return tokens;
   }
 
   @Post("refresh")

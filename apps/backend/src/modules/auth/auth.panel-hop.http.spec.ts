@@ -14,6 +14,7 @@ import { LoginGuardController } from "../login-guard/login-guard.controller";
 import { LoginGuardService } from "../login-guard/login-guard.service";
 import type { Challenge } from "../login-guard/proof-of-work";
 import { AuthController } from "./auth.controller";
+import { AdminSignInAlertsService } from "./admin-sign-in-alerts.service";
 import { AuthService } from "./auth.service";
 
 /** Admin sign-in as the panel reaches it: from one server, straight to
@@ -34,9 +35,11 @@ describe("admin sign-in through the panel's hop", () => {
   let app: INestApplication;
   let base: string;
   let throttle = true;
+  let alerts: { signedIn: jest.Mock; failed: jest.Mock };
 
   beforeEach(async () => {
     throttle = true;
+    alerts = { signedIn: jest.fn(), failed: jest.fn() };
     const auth = {
       login: jest.fn(async (email: string, password: string) => {
         if (email === ADMIN && password === RIGHT) return { accessToken: "a", refreshToken: "r" };
@@ -57,6 +60,7 @@ describe("admin sign-in through the panel's hop", () => {
         LoginGuardService,
         { provide: AuthService, useValue: auth },
         { provide: AdminsService, useValue: {} },
+        { provide: AdminSignInAlertsService, useValue: alerts },
         { provide: APP_GUARD, useClass: ClientThrottlerGuard },
       ],
     }).compile();
@@ -84,6 +88,24 @@ describe("admin sign-in through the panel's hop", () => {
   const strangerFails = async (n: number, from?: string, email = (i: number) => `nobody${i}@example.com`) => {
     for (let i = 0; i < n; i++) expect((await login(email(i), "wrong-password", from)).status).toBe(401);
   };
+
+  // The owner is told of each completed sign-in, from the address the
+  // panel names, and of every wrong password's running count for the
+  // account -- the service decides which counts to speak at.
+  it("tells the owner who signed in, from where, and how the wrong passwords mount", async () => {
+    throttle = false;
+    expect((await login(ADMIN, "wrong-password", STRANGER)).status).toBe(401);
+    expect((await login(ADMIN, "wrong-password", STRANGER)).status).toBe(401);
+    expect(alerts.failed.mock.calls).toEqual([
+      [ADMIN, 1, STRANGER],
+      [ADMIN, 2, STRANGER],
+    ]);
+    expect(alerts.signedIn).not.toHaveBeenCalled();
+
+    const issued = await post("/login-challenge", { scope: "admin", email: ADMIN }, OPERATOR);
+    expect((await login(ADMIN, RIGHT, OPERATOR, solve(issued.body as unknown as Challenge))).status).toBe(200);
+    expect(alerts.signedIn).toHaveBeenCalledWith(ADMIN, OPERATOR, false);
+  });
 
   it("before: five strangers' failures through the panel refused every operator", async () => {
     // What the panel sent until now: no header, so one address for all.
