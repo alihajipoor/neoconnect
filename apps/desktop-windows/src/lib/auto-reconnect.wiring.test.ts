@@ -486,7 +486,11 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
       'const choice = autoReconnect.choosing({ routeId, tunnelShown: connectionStateRef.current !== "disconnected" });',
     );
     expect(picking).toContain('if (choice === "stopPass") void stopPass();');
-    expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain("onPicking={pickingLocation}");
+    // Every pick is told, whatever else the handler does with it (it also
+    // holds the phone's sheet open while a switch is out).
+    expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toMatch(
+      /onPicking=\{\(routeId\) => \{(?:\s*if \(routeId !== null\) setSwitchInFlight\(true\);)?\s*pickingLocation\(routeId\);\s*\}\}/,
+    );
   });
 
   it("a server picked over a tunnel kept up is what its reconnect leads with, until a switch that fails puts it back", () => {
