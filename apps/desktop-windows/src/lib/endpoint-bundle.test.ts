@@ -210,6 +210,73 @@ describe("lists signed by a server key", () => {
   });
 });
 
+/** The same bytes in a spelling `atob` forgives and the Rust side's
+ * base64 (STANDARD, in bundle_scope.rs) refuses: whitespace, padding
+ * left off, and trailing bits that are not zero. */
+const respellings: [string, (b64: string) => string][] = [
+  ["a newline inside", (b64) => `${b64.slice(0, 8)}\n${b64.slice(8)}`],
+  ["a space inside", (b64) => `${b64.slice(0, 8)} ${b64.slice(8)}`],
+  ["its padding left off", (b64) => b64.replace(/=+$/, "")],
+  [
+    "a trailing bit set",
+    (b64) => {
+      // The last character before the padding carries bits past the end
+      // of the data; setting one changes nothing `atob` returns.
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      const at = b64.replace(/=+$/, "").length - 1;
+      return b64.slice(0, at) + alphabet[alphabet.indexOf(b64[at]) ^ 1] + b64.slice(at + 1);
+    },
+  ],
+];
+
+describe("base64 the scope grant would refuse", () => {
+  // A source that serves the list -- untrusted by design -- could
+  // re-spell a genuine newest list this way. Taken, it was kept: the
+  // scope grant then refused it on every run, and the correctly spelled
+  // copy of the same version was never adopted over it.
+  it("is refused in the envelope's payload and signature", async () => {
+    // A length that leaves padding, so there is some to leave off.
+    const { raw, keys } = await sealed({ ...GOOD, issuedAt: "2026-09-02T00:00:00.000Z" });
+    const envelope = JSON.parse(raw);
+    expect(envelope.payload).toMatch(/=$/);
+    expect(envelope.sig).toMatch(/==$/);
+    for (const [how, respell] of respellings) {
+      for (const field of ["payload", "sig"]) {
+        const altered = { ...envelope, [field]: respell(envelope[field]) };
+        expect(altered[field]).not.toBe(envelope[field]);
+        expect([field, how, await verifyBundle(JSON.stringify(altered), keys)]).toEqual([field, how, null]);
+      }
+    }
+    expect((await verifyBundle(raw, keys))?.v).toBe(4);
+  });
+
+  it("is refused in the statement and its signature", async () => {
+    const { envelope, keys } = await delegated(GOOD);
+    expect(envelope.cert.payload).toMatch(/=$/);
+    for (const [how, respell] of respellings) {
+      for (const field of ["payload", "sig"] as const) {
+        const altered = { ...envelope, cert: { ...envelope.cert, [field]: respell(envelope.cert[field]) } };
+        expect([field, how, await verifyBundle(JSON.stringify(altered), keys, NOW)]).toEqual([field, how, null]);
+      }
+    }
+    expect((await verifyBundle(JSON.stringify(envelope), keys, NOW))?.v).toBe(4);
+  });
+
+  it("is refused in the server key the statement names", async () => {
+    const serverPriv = utils.randomPrivateKey();
+    const publicKey = toBase64(await getPublicKeyAsync(serverPriv));
+    expect(publicKey).toMatch(/=$/);
+    for (const [how, respell] of respellings) {
+      const { envelope, keys } = await delegated(GOOD, { statement: { publicKey: respell(publicKey) } });
+      // Re-signed with the key the statement names, so only its spelling
+      // is wrong.
+      const payload = new TextEncoder().encode(JSON.stringify(GOOD));
+      const signed = { ...envelope, sig: toBase64(await signAsync(payload, serverPriv)) };
+      expect([how, await verifyBundle(JSON.stringify(signed), keys, NOW)]).toEqual([how, null]);
+    }
+  });
+});
+
 describe("bundle replacement", () => {
   // A genuinely-signed OLD bundle is the subtle attack: replaying it
   // walks a client back onto addresses that have since been retired.

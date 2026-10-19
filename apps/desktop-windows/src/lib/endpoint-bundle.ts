@@ -137,8 +137,19 @@ export const BUNDLE_KEYS: Readonly<Record<string, string>> = {
   backup: "BJ3ROKfvxHbec/Zq7jGdUweQEUr2K6VspEPRlEveYsI=",
 };
 
+/** The bytes `value` spells in canonical base64, or a throw.
+ *
+ * As strict as src-tauri/src/bundle_scope.rs, which reads the same fields
+ * with base64's STANDARD engine: padded, nothing but the alphabet, and no
+ * stray bits after the data. `atob` alone forgives whitespace, missing
+ * padding and those bits, so a list any source re-spelled that way was
+ * taken here and kept, then refused by the scope grant on every run --
+ * and the correctly spelled copy of the same version was never adopted
+ * over it, since only a higher version is. */
 function fromBase64(value: string): Uint8Array {
+  if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) throw new Error("not canonical base64");
   const binary = atob(value);
+  if (btoa(binary) !== value) throw new Error("not canonical base64");
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
   return out;
@@ -201,15 +212,12 @@ function relayPinsProblem(pins: unknown): string | null {
     if (encoded.length !== 44 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return "a pin must be 44 base64 characters";
     let bytes: Uint8Array;
     try {
+      // Canonical, so one spelling per digest: no stray trailing bits.
       bytes = fromBase64(encoded);
     } catch {
-      return "a pin is not base64";
+      return "a pin is not canonical base64";
     }
     if (bytes.length !== 32) return "a pin must be a SHA-256 digest";
-    // One spelling per digest: no stray trailing bits.
-    let canonical = "";
-    for (const byte of bytes) canonical += String.fromCharCode(byte);
-    if (btoa(canonical) !== encoded) return "a pin is not canonical base64";
     if (seen.has(encoded)) return "a pin is listed twice";
     seen.add(encoded);
   }
