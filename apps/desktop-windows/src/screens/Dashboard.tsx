@@ -146,7 +146,7 @@ import { Banner, Note, PillButton, Segmented } from "../components/ui";
 import { Dialog, LocationSheet } from "../components/overlay";
 import { Page, PageScene } from "../components/shell/Page";
 import { AppShell } from "../components/shell/AppShell";
-import { rememberShellProfile, takeLocationsRequest } from "../lib/shell-nav";
+import { noteWayOut, planLineText, rememberShellProfile, takeLocationsRequest, type ShellPlan } from "../lib/shell-nav";
 import { MainView } from "../components/main/MainView";
 import { Decor, Hint, StateAnnouncer, StateLine, StatusChip, WayOut } from "../components/main/Hero";
 import { LocationCard, MetricCards, SessionTray, SummaryLine, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
@@ -2395,6 +2395,7 @@ export function Dashboard({
       uplinkInFlightRef.current = true;
       try {
         const seen = await invoke<string | null>("network_uplinks").catch(() => null);
+        noteWayOut(seen);
         const before = uplinkRef.current.seen;
         const [next, step] = nextUplink(uplinkRef.current, seen);
         uplinkRef.current = next;
@@ -2444,6 +2445,7 @@ export function Dashboard({
       asking = true;
       try {
         const now = await invoke<string | null>("network_uplinks").catch(() => null);
+        noteWayOut(now);
         const step = idleWayOut(seen, now);
         seen = step.next;
         if (step.roamed) noteRoam("now");
@@ -4229,17 +4231,10 @@ export function Dashboard({
     tags: tagsCurrent(netFresh),
   };
 
-  // The sidebar's line under the email: the days left first -- the useful
-  // part, which a narrow sidebar used to cut off -- then the short plan
-  // name when it says something ("Unlimited").
-  const planLine = subscription
-    ? [
-        daysLeft !== null ? t(daysLeft === 1 ? "tr.dayLeft" : "tr.daysLeft", { n: formatNumber(daysLeft, language) }) : null,
-        usage && usage.cap === null ? t("dash.unlimited") : null,
-      ]
-        .filter(Boolean)
-        .join(" · ") || t("tr.plan")
-    : null;
+  // The sidebar's line under the email (`planLineText`): the days left,
+  // then "Unlimited" when the plan has no cap.
+  const shellPlan: ShellPlan | null = subscription ? { daysLeft, unlimited: Boolean(usage && usage.cap === null) } : null;
+  const planLine = planLineText(shellPlan, t, language);
 
   // The mode switch: refused while a tunnel is up, as the location list
   // once was -- a mode cannot be retrofitted onto a live session -- and
@@ -4509,7 +4504,7 @@ export function Dashboard({
   const announcement = gaming ? "" : `${lineWords}. ${hintText}`;
 
   // What the other pages of the shell show under the avatar.
-  rememberShellProfile({ email: me?.email ?? null, planLine, network: evidenceCtx.network });
+  rememberShellProfile({ email: me?.email ?? null, plan: shellPlan, network: evidenceCtx.network });
 
   return (
     <AppShell

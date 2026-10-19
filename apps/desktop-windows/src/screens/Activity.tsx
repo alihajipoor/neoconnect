@@ -4,7 +4,7 @@ import type { ConnectHistory } from "../lib/connect-history";
 import { loadConnectHistory } from "../lib/failover-store";
 import { loadSnapshot } from "../lib/credential-cache";
 import { activitySummary, networkActivity } from "../lib/activity";
-import { shellProfile } from "../lib/shell-nav";
+import { currentNetwork } from "../lib/shell-nav";
 import { useI18n } from "../lib/i18n";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { formatAgo, formatDate, formatNumber, formatSize, sizeParts } from "../lib/locale-format";
@@ -39,11 +39,16 @@ export interface ActivityData {
  * check. */
 export function Activity({
   readNetwork,
+  readWayOut,
   onOpenPlans,
   onBack,
 }: {
-  /** Which network this device is on, when the main page has not said. */
+  /** Which network this device is on. */
   readNetwork: () => Promise<string | null>;
+  /** The machine's ways out (`network_uplinks`), where they can be read:
+   * whether the main page's network still holds when `readNetwork` has no
+   * answer (`currentNetwork`). */
+  readWayOut?: () => Promise<string | null>;
   onOpenPlans?: () => void;
   /** Outside the shell (the phone client), the way back to Settings. */
   onBack?: () => void;
@@ -52,11 +57,10 @@ export function Activity({
 
   useEffect(() => {
     let alive = true;
-    const said = shellProfile().network;
     void Promise.all([
       loadConnectHistory().catch(() => ({}) as ConnectHistory),
       loadSnapshot().catch(() => null),
-      said !== undefined ? Promise.resolve(said) : readNetwork().catch(() => null),
+      currentNetwork(readNetwork, readWayOut),
     ]).then(([history, snapshot, network]) => {
       if (!alive) return;
       setData({

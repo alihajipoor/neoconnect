@@ -23,6 +23,7 @@ import { pressFor } from "../lib/connect-intent";
 import { effects, type GlassChoice, type ThemeChoice } from "../lib/effects";
 import { chipFor, hintTone, ipFor, lineFor, pillFor, planCaution, secondaryFor, shownTone, type ShownTone } from "../lib/hero-model";
 import { useI18n, type Language, type TranslationKey } from "../lib/i18n";
+import { planLineText } from "../lib/shell-nav";
 import { formatDateTime, formatNumber, formatSize, sizeParts } from "../lib/locale-format";
 import { orbTone } from "../lib/orb-caution";
 import { customerProtocolLabel } from "../lib/protocol-labels";
@@ -578,7 +579,7 @@ function Composed({
       banner={Boolean(sc.offline || plan === "ended")}
       titlebar
       email="you@example.com"
-      planLine={plan === "none" ? null : `${t("tr.daysLeft", { n: formatNumber(daysLeft, language) })}${cap === null ? ` · ${t("dash.unlimited")}` : ""}`}
+      planLine={planLineText(plan === "none" ? null : { daysLeft, unlimited: cap === null }, t, language)}
       onOverview={() => undefined}
       onLocations={() => undefined}
       onOpenActivity={() => undefined}

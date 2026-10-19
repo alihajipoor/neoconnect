@@ -23,7 +23,7 @@ import { Activity } from "./screens/Activity";
 import { AppShell, type NavId } from "./components/shell/AppShell";
 import { PageScene } from "./components/shell/Page";
 import { CommunityLinks } from "./components/CommunityLinks";
-import { forgetShellProfile, requestLocations, shellProfile } from "./lib/shell-nav";
+import { forgetShellProfile, planLineText, requestLocations, shellProfile } from "./lib/shell-nav";
 import { CustomModeCard } from "./components/CustomModeCard";
 import { GamingModeCard } from "./components/GamingModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
@@ -84,7 +84,7 @@ export default function App() {
   // cosmetic double-render.
   const handledDeepLinkUrls = useRef(new Set<string>());
   const endingRef = useRef(false);
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   // Read through a ref by the deep-link handler, which is registered once
   // and would otherwise word its notice in the language of the first
   // render -- before the saved choice was read back from disk.
@@ -335,7 +335,7 @@ export default function App() {
         shown="idle"
         titlebar
         email={profile.email}
-        planLine={profile.planLine}
+        planLine={planLineText(profile.plan, t, language)}
         onOverview={() => setScreen("dashboard")}
         onLocations={() => {
           requestLocations();
@@ -449,9 +449,11 @@ export default function App() {
     return inShell(
       "activity",
       <Activity
-        // The Windows helper's fingerprint of the network, when the main
-        // page has not said which network its map is reading.
+        // The Windows helper's fingerprint of the network; and, for when it
+        // cannot be read (under a tunnel), the ways out, to tell whether the
+        // main page's network is still the one (`currentNetwork`).
         readNetwork={() => invoke<string | null>("network_fingerprint")}
+        readWayOut={() => invoke<string | null>("network_uplinks")}
         onOpenPlans={() => setScreen("plans")}
       />,
     );

@@ -19,6 +19,7 @@ import { Page } from "../components/shell/Page";
 import { ownWorkedAt, placesEvidence } from "../lib/map-lights";
 import { isTunnelUp } from "../lib/connection-evidence";
 import { useI18n } from "../lib/i18n";
+import { planLineText } from "../lib/shell-nav";
 import type { RouteOption, Subscription } from "../lib/types";
 
 /** DEV ONLY: the screens of phase 2 in the preview -- sign-in and its steps,
@@ -75,7 +76,7 @@ export function PreviewPage({
   subscription: Subscription;
 }) {
   const phone = width < 640;
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const activity = useMemo<ActivityData>(
     () => ({
       history: withMoreTries(history, network, routes),
@@ -162,7 +163,7 @@ export function PreviewPage({
       shown="idle"
       titlebar
       email="you@example.com"
-      planLine="6 days left · Unlimited"
+      planLine={planLineText({ daysLeft: 6, unlimited: true }, t, language)}
       onOverview={noop}
       onLocations={noop}
       onOpenActivity={noop}
