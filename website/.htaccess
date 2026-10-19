@@ -55,18 +55,24 @@ ErrorDocument 404 /404.php
     # THE CSP ON A PAGE IS PHP'S ALONE: it pins the page's inline
     # stylesheet and its one inline script by SHA-256, so it differs per
     # page. setifempty (not 'always') only adds this static policy where
-    # PHP sent none -- static files and the /account/ portal. Two CSP
-    # headers would both be enforced, and this one would block the page's
-    # own CSS.
+    # PHP sent none: static files. Two CSP headers would both be enforced,
+    # and this one would block a page's own CSS.
     #
-    # connect-src is wider than 'self' on purpose: /account/ is the
-    # customer portal, and every call it makes goes to a DIFFERENT origin:
-    # connect.neoxify.site first, then mirrors on neoxify.site names on
-    # nonstandard ports derived at runtime from the customer's credentials
-    # (apps/desktop-windows/src/lib/api-endpoints.ts). 'self' alone would
-    # leave the portal rendering perfectly and failing at its first
-    # request. Nothing else on the site makes a request at all.
-    Header setifempty Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.neoxify.site:*; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    # NOT on /account/. The customer portal is a static build that carries
+    # its own policy in a <meta> (apps/web-portal/portal-html.ts): its
+    # inline loader and first-paint styles by hash, and connect-src https:,
+    # because its API calls go to mirrors on several domains and addresses
+    # that are signed into the endpoint bundle and change without a
+    # release -- no host list written here can stay right, and the ones
+    # Iran can still reach are exactly the ones such a list leaves out.
+    # This policy on top of it would block the loader (a map and no card)
+    # and every mirror not listed. Framing is refused there all the same,
+    # by X-Frame-Options above. Nothing else on the site makes a request,
+    # so connect-src here is 'self'.
+    <IfModule mod_setenvif.c>
+        SetEnvIf Request_URI "^/account(/|$)" NX_PORTAL
+    </IfModule>
+    Header setifempty Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" env=!NX_PORTAL
 </IfModule>
 
 # ---------------------------------------------------------------------

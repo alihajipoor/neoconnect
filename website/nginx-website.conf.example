@@ -27,7 +27,8 @@
 #     page's inline stylesheet and its one inline script by SHA-256, so it
 #     differs per page and cannot be written down here. nginx adds its own
 #     static policy only when the upstream sent none (the `map` below):
-#     static files, and the /account/ portal, which is a static build.
+#     static files. Never on /account/, the customer portal, which carries
+#     its own policy in a <meta> (see its location below).
 #   Two CSP headers on one response would BOTH be enforced -- a static one
 #   here would block the page's own inline CSS. That is why the map exists.
 #   With this file installed, config.php's headers_sent_by_server does not
@@ -41,13 +42,12 @@
 # ---------------------------------------------------------------------
 # 0. Static CSP, only where PHP did not send one (http context)
 # ---------------------------------------------------------------------
-# connect-src is wider than 'self' on purpose: /account/ is the customer
-# portal and every call it makes goes to another origin -- connect.neoxify.site
-# first, then mirrors on neoxify.site names on nonstandard ports, derived at
-# runtime from the customer's own credentials. See .htaccess for the long
-# version. Nothing else on the site makes a request at all.
+# connect-src 'self': nothing on the site makes a request. The one part
+# that does, the /account/ portal, never gets this policy (its location
+# below sends none), because its API calls go to mirrors on several
+# domains and addresses that change without a release.
 map $upstream_http_content_security_policy $nx_static_csp {
-    ""      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.neoxify.site:*; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+    ""      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
     default "";
 }
 
@@ -209,6 +209,47 @@ server {
         add_header Content-Security-Policy $nx_static_csp always;
         access_log off;
         try_files $uri =404;
+    }
+
+    # ------------------------------------------------------------------
+    # The customer portal: the fixed set, and NO Content-Security-Policy
+    # ------------------------------------------------------------------
+    # /account/ is a static build (apps/web-portal) that carries its own
+    # policy in a <meta>: its inline loader and first-paint styles by hash,
+    # and connect-src https:, because its API calls go to mirrors on several
+    # domains and addresses, signed into the endpoint bundle and changed
+    # without a release. The static policy above, enforced on top of it,
+    # would block the loader (a map and no card) and every mirror it does
+    # not list. So this location sends none; framing is still refused, by
+    # X-Frame-Options. ^~ keeps the asset regex above off its files.
+    #
+    # The page is revalidated on every visit: a stale copy would ask for
+    # hashed files that a later deploy may have pruned. Those files never
+    # change in place, so they are cached for a year. This directory is
+    # deployed only by scripts/deploy-portal.sh, never by the site zip.
+    location ^~ /account/ {
+        add_header Cache-Control "no-cache" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()" always;
+        try_files $uri $uri/ =404;
+
+        location ^~ /account/assets/ {
+            add_header Cache-Control "public, max-age=31536000, immutable" always;
+            add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+            add_header X-Frame-Options "DENY" always;
+            add_header Cross-Origin-Opener-Policy "same-origin" always;
+            add_header Cross-Origin-Resource-Policy "same-origin" always;
+            add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()" always;
+            access_log off;
+            try_files $uri =404;
+        }
     }
 
     # ------------------------------------------------------------------
