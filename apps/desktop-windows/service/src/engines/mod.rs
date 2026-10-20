@@ -7082,6 +7082,68 @@ mod helper_tests {
         end_test_session(&mut engines);
     }
 
+    /// BEFORE-FIX CHECK (throwaway branch): the adapter-gone check must hold
+    /// an armed session before it lets go of the confinement.
+    #[test]
+    fn before_fix_adapter_gone_holds_first() {
+        let (mut engines, fake, hold, _g) = armed_session();
+        fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = engines.status();
+        assert_eq!(fake.closed(), vec![1000]);
+        assert_eq!(hold.installs().len(), 1, "the confinement went with no hold put in");
+        assert_eq!(hold.confinements_closed_at_install.lock().unwrap().clone(), vec![0]);
+        engines.release_reconnect_hold("the customer disconnected", true);
+        end_test_session(&mut engines);
+    }
+
+    /// BEFORE-FIX CHECK: thirty-two kills racing the adapter-gone check.
+    #[test]
+    fn before_fix_thirty_two_kills_racing_the_adapter_check() {
+        const AT_ONCE: usize = 32;
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let handles: Vec<_> = (0..AT_ONCE)
+            .map(|i| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let (mut engines, fake, hold, g) = armed_session();
+                    fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    start.wait();
+                    kill_engine_behind_its_back(&mut engines);
+                    std::thread::sleep(Duration::from_millis((i % 4) as u64));
+                    engines.let_go_if_the_tunnel_adapter_is_gone();
+                    assert!(wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]), "session {i}");
+                    assert!(wait_for(Duration::from_secs(5), || recorded(&engines, g)), "session {i}");
+                    assert_eq!(hold.confinements_closed_at_install.lock().unwrap().clone(), vec![0], "session {i}");
+                    engines.end_dead_session(g);
+                    engines.release_reconnect_hold("the customer disconnected", true);
+                })
+            })
+            .collect();
+        let failed = handles.into_iter().map(|h| h.join()).filter(Result::is_err).count();
+        assert_eq!(failed, 0, "{failed} of {AT_ONCE} sessions let the confinement go before the hold was in");
+    }
+
+    /// BEFORE-FIX CHECK: an armed WireGuard session has the hold's filters
+    /// in force before its drop.
+    #[test]
+    fn before_fix_wireguard_hold_in_force_before_the_drop() {
+        use wireguard::ScmView;
+        let mut service_process = engine_stand_in();
+        let pid = service_process.id();
+        let hold = FakeHold::new(None);
+        let mut engines = engines_for_test();
+        engines.set_reconnect_hold_ops_for_test(hold.clone());
+        engines.reconnect_hold.set_wanted(true);
+        let _g = engines.begin_test_wireguard_session(move || ScmView::Running(Some(pid)));
+        engines.arm_reconnect_hold(&wireguard_profile(), false, &[]);
+        let before_drop = hold.installs().len();
+        engines.release_reconnect_hold("the customer disconnected", true);
+        end_test_session(&mut engines);
+        let _ = service_process.kill();
+        let _ = service_process.wait();
+        assert_eq!(before_drop, 1, "nothing in force under the WireGuard tunnel before its drop");
+    }
+
     /// Thirty-two armed sessions dying at once, each torn down while the
     /// app lets go of its hold and the customer disconnects, all racing:
     /// every hold that went in is closed exactly once, and none is left.
