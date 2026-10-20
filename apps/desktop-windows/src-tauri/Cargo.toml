@@ -96,6 +96,10 @@ features = [
   # MIB_IPFORWARDROW, which GetBestRoute fills in -- see
   # vpn.rs::network_fingerprint.
   "Win32_Networking_WinSock",
+  # MIB_IF_ROW2 and its operational state, which GetIfEntry2 fills in:
+  # whether the adapter a way out leaves by is up, as the service asks it
+  # (vpn.rs::network_way_out).
+  "Win32_NetworkManagement_Ndis",
   # EnumWindows: which processes own a window the customer can
   # see. Only answerable here -- the helper service is in
   # session 0 and cannot see the interactive desktop at all.

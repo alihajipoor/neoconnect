@@ -13,10 +13,13 @@
  * when a network with a way out is back. The screen says "Waiting for a
  * network connection" meanwhile (`networkWait`).
  *
- * Whether there is a way out is asked of Windows' routing table
- * (`network_way_out`, the table the service's own refusal reads): soon
- * after the refusal, and less often the longer the wait, up to every
- * `NETWORK_POLL_MS` (`nextLookIn`). That answer is only a hint for when to try: the service
+ * Whether there is a way out is asked of Windows' routing table by the
+ * service's own rule (`network_way_out`: a route on an adapter that is up
+ * and not one of ours, as its refusal takes one -- the best route alone,
+ * wherever it led, said yes with the cable out and ended every wait at its
+ * first look): soon after the refusal, and less often the longer the wait,
+ * up to every `NETWORK_POLL_MS` (`nextLookIn`). That answer is only a hint
+ * for when to try: the service
  * decides, and the rung is dialled again every `NETWORK_RETRY_ANYWAY_MS`
  * regardless -- a dial the service refuses for want of a network costs
  * nothing and names no server -- so a hint that cannot see a way out (a line

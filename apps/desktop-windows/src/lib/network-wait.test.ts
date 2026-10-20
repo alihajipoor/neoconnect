@@ -256,6 +256,43 @@ describe("the Windows ladder waits on the same rung", () => {
     expect(vpn).toMatch(/#\[tauri::command\]\s+pub fn network_way_out\(\) -> bool \{/);
   });
 
+  // The VM, cable out for 25 s: the hint said there was a way out at every
+  // first look while the service refused every dial for want of one, so
+  // each wait ended at once and each round cost a settle of two to four
+  // seconds and a refused dial -- and after a 3 s unplug the dial again came
+  // 4.4 s after the refusal, the quarter-second look having said yes too
+  // soon. The hint asked for Windows' best route alone, wherever it led;
+  // the service takes a route only on an adapter that is up and not one of
+  // ours (adapters::choose_uplink).
+  it("asks the service's question: a route only on an adapter that is up and not one of ours", () => {
+    const vpn = readFileSync(new URL("../../src-tauri/src/vpn.rs", import.meta.url), "utf8");
+    const hint = vpn.slice(vpn.indexOf("pub fn network_way_out() -> bool {"), vpn.indexOf("#[cfg(test)]\nmod way_out_tests"));
+    expect(hint).toContain("way_out_from(best, &defaults, |index| interface_state(index).is_some_and(|(up, alias)| usable_adapter(up, &alias)))");
+    expect(hint).toMatch(/fn way_out_from\(best: Option<u32>, defaults: &\[\(u32, u32\)\], usable: impl Fn\(u32\) -> bool\) -> bool \{\s*if best\.is_some_and\(&usable\) \{\s*return true;\s*\}\s*defaults\.iter\(\)\.any\(\|&\(index, _\)\| usable\(index\)\)/);
+    expect(hint).toContain("up && !OUR_ADAPTERS.contains(&alias)");
+    // Up as the service reads it: the NDIS operational state.
+    expect(hint).toContain("row.OperStatus == IfOperStatusUp");
+    const adapters = readFileSync(new URL("../../service/src/adapters.rs", import.meta.url), "utf8");
+    expect(adapters).toContain("is_up: entry.OperStatus == IF_OPER_STATUS_UP,");
+    expect(adapters).toMatch(/adapter\.is_some_and\(\|a\| a\.is_up && !exclude\.contains\(&a\.name\.as_str\(\)\)\)/);
+    // Ours, by the names the service gives them.
+    const engine = (file: string, name: string) => {
+      const source = readFileSync(new URL(`../../service/src/engines/${file}`, import.meta.url), "utf8");
+      const found = new RegExp(`pub const ${name}: &str = "([^"]+)";`).exec(source);
+      expect(found, `${file} ${name}`).not.toBeNull();
+      return found![1];
+    };
+    const ours = [
+      engine("xray.rs", "ADAPTER_NAME"),
+      engine("wireguard.rs", "TUNNEL_NAME"),
+      engine("openvpn.rs", "ADAPTER_NAME"),
+      engine("ikev2.rs", "ENTRY_NAME"),
+    ];
+    expect(vpn).toContain(`const OUR_ADAPTERS: [&str; 4] = [${ours.map((n) => `"${n}"`).join(", ")}];`);
+    const mod = readFileSync(new URL("../../service/src/engines/mod.rs", import.meta.url), "utf8");
+    expect(mod).toMatch(/const OUR_ADAPTER_NAMES: \[&str; 4\] =\s*\[xray::ADAPTER_NAME, wireguard::TUNNEL_NAME, openvpn::ADAPTER_NAME, ikev2::ENTRY_NAME\];/);
+  });
+
   it("puts the words on screen while it waits", () => {
     expect(dashboard).toContain("const waitingForNetwork = useSyncExternalStore(networkWait.subscribe, networkWait.current);");
     expect(dashboard).toMatch(/headlineFor\(connectionState, \{[^}]*waitingForNetwork[^}]*\}\)/);

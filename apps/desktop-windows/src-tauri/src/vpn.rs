@@ -1833,15 +1833,27 @@ pub fn network_fingerprint() -> Option<String> {
     }
 }
 
-/// Whether this machine has a way out to the internet right now: Windows'
-/// best route toward a public address exists, through a gateway or
-/// on-link (a PPP line has no next hop and is a way out all the same).
+/// Our own adapters, by the names the service gives them
+/// (`OUR_ADAPTER_NAMES` in service/src/engines/mod.rs: Xray's, WireGuard's,
+/// OpenVPN's and IKEv2's). A route on one of them is never a way out.
+const OUR_ADAPTERS: [&str; 4] = ["neoconnect0", "neoconnect", "Neoxify-OpenVPN", "Neoxify"];
+
+/// Whether this machine has a way out to the internet right now, by the
+/// service's own rule -- the one its refusal applies (`NO_NETWORK`,
+/// `refuse_without_a_way_out`, `adapters::choose_uplink`): Windows' best
+/// route toward a public address, through a gateway or on-link (a PPP line
+/// has no next hop and is a way out all the same), on an adapter that is up
+/// and is not one of ours; or else a default route on such an adapter.
 ///
 /// What a connect the service refused for want of a network waits on
-/// before it dials the same server again (`lib/network-wait.ts`): the
-/// service's refusal (`NO_NETWORK`, `refuse_without_a_way_out`) asks the
-/// same table. No tunnel of ours is up while it is asked -- the refused
-/// rung was torn down -- so a route found is the machine's own.
+/// before it dials the same server again (`lib/network-wait.ts`). It used
+/// to be the best route alone, wherever it led, and on the VM it said yes
+/// at every look while the cable was out for 25 s -- a route the service,
+/// which reads the adapters' state, would not take -- so each wait ended at
+/// its first look, and each round was a settle of two to four seconds of
+/// failing requests and a dial refused again: the dials came every 3.5-5 s,
+/// and after a 3 s unplug the dial again 4.4 s after the refusal, the
+/// outage 13.6 s.
 ///
 /// A hint for when to try again, no more: the service decides, and a route
 /// that leads nowhere is found out by the dial, as ever. An error reads as
@@ -1853,11 +1865,90 @@ pub fn network_way_out() -> bool {
 
     // SAFETY: `route` is a valid out-parameter for the call, and only the
     // call's result is read.
-    let err = unsafe {
+    let best = unsafe {
         let mut route: MIB_IPFORWARDROW = std::mem::zeroed();
-        GetBestRoute(u32::from_ne_bytes([1, 1, 1, 1]), 0, &mut route)
+        (GetBestRoute(u32::from_ne_bytes([1, 1, 1, 1]), 0, &mut route) == 0).then_some(route.dwForwardIfIndex)
     };
-    err == 0
+    let defaults = default_routes().unwrap_or_default();
+    way_out_from(best, &defaults, |index| interface_state(index).is_some_and(|(up, alias)| usable_adapter(up, &alias)))
+}
+
+/// The decision behind [`network_way_out`], on facts already gathered:
+/// the interface of Windows' best route (none when there is no route), the
+/// default routes as `(interface, next hop)`, and whether an interface is
+/// one a way out may leave by.
+fn way_out_from(best: Option<u32>, defaults: &[(u32, u32)], usable: impl Fn(u32) -> bool) -> bool {
+    if best.is_some_and(&usable) {
+        return true;
+    }
+    defaults.iter().any(|&(index, _)| usable(index))
+}
+
+/// An adapter a way out may leave by: up, and not one of ours.
+fn usable_adapter(up: bool, alias: &str) -> bool {
+    up && !OUR_ADAPTERS.contains(&alias)
+}
+
+/// Whether an interface is up, as the service reads it (the NDIS
+/// operational state: `IfOperStatusUp`), and its name. None when it cannot
+/// be read.
+fn interface_state(index: u32) -> Option<(bool, String)> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetIfEntry2, MIB_IF_ROW2};
+    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+
+    // SAFETY: all-zero is a valid row to ask with; the index names the
+    // interface, and the call fills the rest.
+    let mut row: MIB_IF_ROW2 = unsafe { std::mem::zeroed() };
+    row.InterfaceIndex = index;
+    // SAFETY: `row` is a live, initialised row of the declared type.
+    if unsafe { GetIfEntry2(&mut row) } != 0 {
+        return None;
+    }
+    let len = row.Alias.iter().position(|&c| c == 0).unwrap_or(row.Alias.len());
+    Some((row.OperStatus == IfOperStatusUp, String::from_utf16_lossy(&row.Alias[..len])))
+}
+
+#[cfg(test)]
+mod way_out_tests {
+    use super::{usable_adapter, way_out_from};
+
+    const ETHERNET: u32 = 7;
+    const TUNNEL: u32 = 31;
+    const GATEWAY: u32 = 0x0101_a8c0;
+
+    #[test]
+    fn a_best_route_on_an_up_adapter_is_a_way_out() {
+        assert!(way_out_from(Some(ETHERNET), &[(ETHERNET, GATEWAY)], |i| i == ETHERNET));
+        // On-link, with no default route listed: a PPP line.
+        assert!(way_out_from(Some(ETHERNET), &[], |i| i == ETHERNET));
+    }
+
+    /// The VM, cable out: a route still answered for a public address, on
+    /// an adapter the service would not take -- down, or ours -- and no
+    /// default route on one it would.
+    #[test]
+    fn a_route_on_an_adapter_the_service_would_not_take_is_none() {
+        assert!(!way_out_from(Some(ETHERNET), &[(ETHERNET, GATEWAY)], |_| false));
+        assert!(!way_out_from(Some(TUNNEL), &[], |i| i == ETHERNET));
+        assert!(!way_out_from(None, &[], |_| true));
+    }
+
+    #[test]
+    fn a_default_route_on_an_up_adapter_is_a_way_out_whatever_the_best_route() {
+        // The best route on a tunnel of ours not yet gone; the Ethernet up.
+        assert!(way_out_from(Some(TUNNEL), &[(ETHERNET, GATEWAY)], |i| i == ETHERNET));
+        assert!(way_out_from(None, &[(ETHERNET, GATEWAY)], |i| i == ETHERNET));
+    }
+
+    #[test]
+    fn only_an_up_adapter_that_is_not_ours() {
+        assert!(usable_adapter(true, "Ethernet"));
+        assert!(usable_adapter(true, "Wi-Fi"));
+        assert!(!usable_adapter(false, "Ethernet"));
+        for ours in ["neoconnect0", "neoconnect", "Neoxify-OpenVPN", "Neoxify"] {
+            assert!(!usable_adapter(true, ours), "{ours}");
+        }
+    }
 }
 
 /// The machine's ways out, as a string that changes when they do: every
