@@ -174,6 +174,10 @@ export default () => ({
   // no pages) or notify (pages too). Anything else is off.
   blockWatch: {
     mode: process.env.BLOCK_WATCH ?? "off",
+    // Its thresholds, as name=value pairs (block-signals.ts, parseTuning).
+    // The values in use are private, set in infra/.env; blank is the
+    // fallbacks in the code.
+    tuning: process.env.BLOCK_WATCH_TUNING ?? "",
   },
   // Minutes without a heartbeat before the owner is paged (webhook and
   // email) that a node has gone quiet, once per gap. Blank or 0 is off,

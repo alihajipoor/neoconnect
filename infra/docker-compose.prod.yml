@@ -109,6 +109,9 @@ services:
       # Block watch (modules/block-watch): off (blank), record, digest or
       # notify. It never changes a server; notify pages the owner.
       BLOCK_WATCH: ${BLOCK_WATCH:-}
+      # Its thresholds, as name=value pairs. The values in use are set in
+      # infra/.env only, never in this repository.
+      BLOCK_WATCH_TUNING: ${BLOCK_WATCH_TUNING:-}
       # Minutes without a heartbeat before the owner is paged (webhook and
       # email). Blank or 0 = off.
       HEARTBEAT_GAP_PAGE_MINUTES: ${HEARTBEAT_GAP_PAGE_MINUTES:-}

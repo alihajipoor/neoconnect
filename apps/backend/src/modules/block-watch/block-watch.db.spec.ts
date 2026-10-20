@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
-import { BlockWatchService } from "./block-watch.service";
+import { BlockWatchService, latestDialsSql } from "./block-watch.service";
 
 /** The block watch's queries against a real Postgres, migrated from
  * nothing. The unit tests run on an in-memory stand-in; this is what
- * proves the grouped upstream count, the per-server latest answer and the
- * digest bookkeeping mean the same thing to Postgres.
+ * proves the grouped upstream count, the per-server latest answer, the
+ * one-row-per-customer-and-route dial query and the digest bookkeeping
+ * mean the same thing to Postgres.
  *
  * Skipped unless BLOCK_WATCH_DB_TEST=1 and DATABASE_URL points at a
  * database it may write to -- CI's own, in the TypeScript job, after
@@ -20,7 +21,7 @@ const ASNS = [64500, 64501];
 describeDb("BlockWatchService against Postgres", () => {
   const prisma = new PrismaClient();
   const tag = randomUUID().slice(0, 8);
-  const ids = { node: "", customers: [] as string[], plan: "", subs: [] as string[] };
+  const ids = { node: "", customers: [] as string[], plan: "", subs: [] as string[], route: "" };
   const pages: { subject: string }[] = [];
   let service: BlockWatchService;
   const now = new Date();
@@ -43,7 +44,8 @@ describeDb("BlockWatchService against Postgres", () => {
       ids.customers.push(customer.id);
     }
     // Reports: the route carried on both networks two days ago, and has
-    // carried nothing for four people on each in the last half hour.
+    // carried nothing for four people on each in the last half hour --
+    // people the server measured traffic for before (below).
     const report = (customerId: string, asn: number, carried: boolean, at: number) =>
       prisma.clientAttempt.create({
         data: {
@@ -89,6 +91,37 @@ describeDb("BlockWatchService against Postgres", () => {
       });
     }
 
+    // The second network's four had used the server too, at an hour no
+    // traffic window looks at.
+    for (let i = 10; i < 14; i += 1) {
+      const sub = await prisma.subscription.create({
+        data: { customerId: ids.customers[i], planId: plan.id, expireAt: new Date(t + 30 * DAY), status: "ACTIVE" },
+      });
+      ids.subs.push(sub.id);
+      const at = new Date(t - 2 * DAY - 6 * 60 * MIN);
+      await prisma.usageRecord.create({
+        data: { subscriptionId: sub.id, nodeId: node.id, periodStart: at, periodEnd: at, bytesUp: 50_000n, bytesDown: 0n, reportedAt: at },
+      });
+    }
+
+    // One account flooding reports: hundreds, the newest last.
+    await prisma.clientAttempt.createMany({
+      data: Array.from({ length: 300 }, (_, i) => ({
+        kind: "CONNECT" as const,
+        outcome: "NOT_CARRYING_TRAFFIC" as const,
+        platform: "windows",
+        appVersion: "0.9.51",
+        customerId: ids.customers[3],
+        asn: ASNS[0],
+        attemptsJson: [
+          { protocol: "Fast", result: "x", routeId: route.id, carried: true },
+          { protocol: "Fast", result: "x", routeId: route.id, carried: false },
+        ],
+        createdAt: new Date(t - 15 * MIN + i),
+      })),
+    });
+    ids.route = route.id;
+
     const identity = { countryOfAsn: () => "IR", orgOf: () => "Example Carrier" };
     const pager = {
       page: async (p: { subject: string }) => {
@@ -116,6 +149,23 @@ describeDb("BlockWatchService against Postgres", () => {
     await prisma.$disconnect();
   });
 
+  it("reads one row per customer and route however many reports: the last rung of the latest", async () => {
+    const rows = await prisma.$queryRaw<{ customerId: string; routeId: string; carried: boolean; rung: number; createdAt: Date }[]>(
+      latestDialsSql(t - 3 * 60 * MIN, ASNS),
+    );
+    const mine = rows.filter((r) => r.routeId === ids.route);
+    const flood = mine.filter((r) => r.customerId === ids.customers[3]);
+    expect(flood).toHaveLength(1);
+    // The later rung of the latest report decides: nothing carried.
+    expect(flood[0]).toMatchObject({ carried: false, rung: 2 });
+    expect(flood[0].createdAt).toBeInstanceOf(Date);
+    // Everyone failing now, and nobody from two days ago.
+    expect(new Set(mine.map((r) => r.customerId))).toEqual(new Set([3, 4, 5, 6, 10, 11, 12, 13].map((i) => ids.customers[i])));
+    // Networks not asked for are not read.
+    const other = await prisma.$queryRaw<{ routeId: string }[]>(latestDialsSql(t - 3 * 60 * MIN, [64999]));
+    expect(other.filter((r) => r.routeId === ids.route)).toHaveLength(0);
+  });
+
   it("finds the block from reports and the traffic cliff, and pages once", async () => {
     const [summary] = (await service.runCycle(now)).filter((s) => s.nodeName === `bw-${tag}`);
     expect(summary).toMatchObject({ verdict: "LIKELY_BLOCKED", outage: null });
@@ -123,9 +173,20 @@ describeDb("BlockWatchService against Postgres", () => {
 
     const incident = await prisma.blockIncident.findFirstOrThrow({
       where: { nodeId: ids.node, status: "OPEN" },
-      select: { verdict: true, pagedAt: true, evidenceJson: true, publicIp: true },
+      select: {
+        verdict: true,
+        pagedAt: true,
+        evidenceJson: true,
+        publicIp: true,
+        firedFamilies: true,
+        failedAsns: true,
+        pageAttempts: true,
+      },
     });
     expect(incident.verdict).toBe("LIKELY_BLOCKED");
+    expect([...incident.firedFamilies].sort()).toEqual(["client", "traffic"]);
+    expect([...incident.failedAsns].sort()).toEqual(ASNS);
+    expect(incident.pageAttempts).toBe(1);
     expect(incident.pagedAt).not.toBeNull();
     const traffic = (incident.evidenceJson as { families: { family: string; summary: string }[] }).families.find(
       (f) => f.family === "traffic",
@@ -140,6 +201,10 @@ describeDb("BlockWatchService against Postgres", () => {
 
   it("after Replaced, reads the owner's answer back and starts over", async () => {
     const open = await prisma.blockIncident.findFirstOrThrow({ where: { nodeId: ids.node, status: "OPEN" }, select: { id: true } });
+    await expect(service.act(open.id, "replaced", "owner@example.test", {}, new Date(t + MIN))).rejects.toThrow(
+      "still has the address",
+    );
+    await prisma.node.update({ where: { id: ids.node }, data: { publicIp: "192.0.2.78" } });
     await service.act(open.id, "replaced", "owner@example.test", {}, new Date(t + MIN));
     const later = new Date(t + 2 * MIN);
     const mine = (await service.runCycle(later)).filter((s) => s.nodeName === `bw-${tag}`);

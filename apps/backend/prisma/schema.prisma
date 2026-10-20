@@ -2110,18 +2110,30 @@ model BlockIncident {
   lastSeenAt  DateTime  @default(now())
   likelyAt    DateTime?
   closedAt    DateTime?
-  /// Consecutive evaluations with nothing firing; the incident clears at
-  /// a small number of them.
+  /// Consecutive evaluations with nothing firing and the server shown
+  /// working again; the incident clears at a small number of them.
   quietCycles Int       @default(0)
+  /// When a cleared incident came back soon after and was opened again,
+  /// rather than a new one -- told in the digest, not paged again.
+  reopenedAt  DateTime?
+
+  /// The signals ("client", "traffic", "probe") that have fired during
+  /// the incident, and the networks (ASNs) whose app reports failed. It
+  /// clears only when one of those signals shows the server working
+  /// again: a signal that merely ran out of data proves nothing.
+  firedFamilies String[] @default([])
+  failedAsns    Int[]    @default([])
 
   /// The latest evaluation: per-signal results, the networks involved,
   /// since when each signal has fired, and the best guess at the kind of
   /// block. Read as a whole.
   evidenceJson Json
 
-  /// Delivery, recorded rather than assumed.
+  /// Delivery, recorded rather than assumed. pagedAt is set only once a
+  /// page reached somebody; until then pageAttempts counts the tries.
   pagedAt            DateTime?
   pageError          String?
+  pageAttempts       Int       @default(0)
   remindedAt         DateTime?
   recoveryNotifiedAt DateTime?
   digestedAt         DateTime?
