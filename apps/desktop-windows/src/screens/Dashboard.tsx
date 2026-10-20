@@ -126,7 +126,9 @@ import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
 import {
   createStatusRelease,
   gapTraffic,
+  gapWord,
   HOLD_HINTS,
+  HOLD_WORD_GRACE_MS,
   holdHint,
   holdNotes,
   holdService,
@@ -2826,12 +2828,25 @@ export function Dashboard({
   /** Where other traffic goes in the gap, as the service has said: the
    * same source the sentence under the state reads (`holdHint`). */
   const gap = gapTraffic(hold, holdWanted(prefs.blockWhileReconnecting));
+  // The service's word, given HOLD_WORD_GRACE_MS in the gap before it is said
+  // not to have come: it answers within about half a second, and "checking"
+  // then "blocked" was a sentence changing twice at every short reconnect.
+  // The hint's room stays empty meanwhile, and no notification goes.
+  const holdWordAwaited = (inHoldGap || waitingForNetwork) && gap === "unconfirmed";
+  const [holdWordLate, setHoldWordLate] = useState(false);
+  useEffect(() => {
+    setHoldWordLate(false);
+    if (!holdWordAwaited) return;
+    const id = setTimeout(() => setHoldWordLate(true), HOLD_WORD_GRACE_MS);
+    return () => clearTimeout(id);
+  }, [holdWordAwaited]);
+  const gapSaid = gapWord(gap, holdWordLate);
   useEffect(() => {
     if (loading) return;
     const step = notifyStep(notifyMemory.current(), {
       tone: notifyTone,
       reconnecting: reconnectRunning,
-      gap,
+      gap: gapSaid,
       // In front, and on the main page: another page of the shell does not
       // say the connection's state, so it is said as for a window behind.
       focused: typeof document !== "undefined" && document.hasFocus() && onMainPage,
@@ -2843,7 +2858,7 @@ export function Dashboard({
     void showNotification(t(text.title), t(text.body), language).catch(() => undefined);
     // On a change of what is said, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, notifyTone, reconnectRunning, appMode, gap]);
+  }, [loading, notifyTone, reconnectRunning, appMode, gapSaid]);
 
   // The session log (lib/session-log.ts), only when the customer has
   // turned it on: a record opens when the screen first shows a tunnel up
@@ -4636,14 +4651,16 @@ export function Dashboard({
   // stands, whatever the hold's last word.
   const heldHint = isTunnelUp(connectionState)
     ? null
-    : holdHint(hold, { reconnecting: reconnecting !== null || waitingForNetwork, dropped, setting: holdSetting });
+    : holdHint(hold, { reconnecting: reconnecting !== null || waitingForNetwork, dropped, setting: holdSetting, wordLate: holdWordLate });
   const hintText = slotTeardownShowing
     ? ""
     : connectionError
       ? t(connectionError.messageKey)
-      : heldHint !== null
-        ? t(heldHint)
-        : t(headline.hint);
+      : heldHint === "pending"
+        ? ""
+        : heldHint !== null
+          ? t(heldHint)
+          : t(headline.hint);
   /** Every sentence the hint can say, for the room it keeps: the hold's
    * only where the setting can make it say them. */
   const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, ...HOLD_HINTS] : HEADLINE_HINTS;

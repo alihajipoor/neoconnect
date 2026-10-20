@@ -9,14 +9,18 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { AutoReconnect, QUICK_DEATHS_TO_STOP, type Episode, type ReconnectPhase } from "./auto-reconnect";
+import { notifyStep } from "./connection-notify";
 import {
   createStatusRelease,
   episodeEndReleases,
   gapTraffic,
   HOLD_HINTS,
+  gapWord,
   holdHint,
   holdNote,
   holdNotes,
+  HOLD_WORD_GRACE_MS,
+  holdWordLate,
   holdService,
   holdStore,
   holdWanted,
@@ -510,6 +514,60 @@ describe("a hold that went in late", () => {
     expect(heard).toBe(2);
     expect(holdStore.current()).toEqual(LATE);
     holdStore.resetForTests();
+  });
+});
+
+// Calm UI (2026-10-20 review): with the setting on, every gap showed
+// "checking whether other connections are blocked" and then "blocked" as
+// soon as the service answered, usually within half a second -- the hint
+// changing twice in the first second of every short reconnect. Now nothing
+// is said until the word has been awaited HOLD_WORD_GRACE_MS: the room stays
+// empty, then the answer, said once.
+describe("the service's word, given its grace", () => {
+  /** Plays a gap from its first moment: the service's word on the hold at
+   * each time (ms), and what the hint and a "lost" notification would say
+   * at every 100 ms -- as the main page reads them, with one clock. */
+  function playGap(words: [number, ReconnectHold | null][], until: number) {
+    const holdAt = (t: number) => [...words].reverse().find(([at]) => at <= t)?.[1] ?? null;
+    const hints: (string | null)[] = [];
+    const toasts: (string | null)[] = [];
+    let awaitedSince: number | null = null;
+    for (let t = 0; t <= until; t += 100) {
+      const hold = holdAt(t);
+      const gap = gapTraffic(hold, true);
+      awaitedSince = gap === "unconfirmed" ? (awaitedSince ?? t) : null;
+      const late = holdWordLate(awaitedSince, t);
+      hints.push(holdHint(hold, { reconnecting: true, dropped: false, setting: true, wordLate: late }));
+      toasts.push(notifyStep(FRESH_MEMORY_UP, { tone: "warn", reconnecting: true, gap: gapWord(gap, late), focused: false, gaming: false }).say);
+    }
+    return { hints, toasts };
+  }
+  const FRESH_MEMORY_UP = { up: true, lostSaid: false };
+  const changes = (said: (string | null)[]) => said.filter((x, i) => i === 0 || x !== said[i - 1]);
+
+  it("says the hold once when the service answers within the grace", () => {
+    const { hints, toasts } = playGap([[0, { state: "armed" }], [400, HOLDING]], 3_000);
+    expect(changes(hints)).toEqual(["pending", "hold.holding"]);
+    expect(hints).not.toContain("hold.unconfirmed");
+    expect(changes(toasts)).toEqual([null, "lostHeld"]);
+  });
+
+  it("says it is checking only once the word is late, then the word", () => {
+    const { hints, toasts } = playGap([[0, { state: "armed" }], [2_000, HOLDING]], 3_000);
+    expect(changes(hints)).toEqual(["pending", "hold.unconfirmed", "hold.holding"]);
+    expect(hints.indexOf("hold.unconfirmed") * 100).toBe(HOLD_WORD_GRACE_MS);
+    expect(changes(toasts)).toEqual([null, "lostUnconfirmed", "lostHeld"]);
+  });
+
+  it("needs no grace for a word already in, or one that says nothing is held", () => {
+    expect(changes(playGap([[0, HOLDING]], 1_000).hints)).toEqual(["hold.holding"]);
+    expect(changes(playGap([[0, { state: "notHeld", problem: "timedOut" }]], 1_000).hints)).toEqual([null]);
+    expect(holdWordLate(null, 10_000)).toBe(false);
+    expect(holdWordLate(0, HOLD_WORD_GRACE_MS - 1)).toBe(false);
+    expect(holdWordLate(0, HOLD_WORD_GRACE_MS)).toBe(true);
+    expect(gapWord("unconfirmed", false)).toBe("pending");
+    expect(gapWord("unconfirmed", true)).toBe("unconfirmed");
+    expect(gapWord("blocked", false)).toBe("blocked");
   });
 });
 

@@ -169,8 +169,11 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    "connection lost" toast waits for the release. **(new)** At no moment,
    frame by frame, does the screen or a toast say traffic goes out without
    Neoxify while the capture shows the hold blocking; before the service
-   has said, the sentence is "checking whether other connections ... are
-   blocked". And the hold is never let go of before the next tunnel is up
+   has said, nothing is said for 1.5 s (the room kept empty), then
+   "checking whether other connections ... are blocked" -- at a short
+   reconnect whose answer comes sooner, the sentence changes once, to
+   "blocked", never "checking" then "blocked". A loss notification whose
+   answer has not come says "hasn't yet confirmed". And the hold is never let go of before the next tunnel is up
    and confined (the service log's "let go of after Ns" against the
    capture).
 6. **The LAN while held, and after roaming.** A LAN host (the VirtualBox

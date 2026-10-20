@@ -270,6 +270,28 @@ export function gapTraffic(hold: ReconnectHold | null, setting: boolean): GapTra
   return "open";
 }
 
+/** How long the gap waits for the service's word on the hold before it says
+ * the word has not come. The service answers within about half a second
+ * (the VM, 2026-10-20), and every gap said "checking" and then "blocked" a
+ * moment later -- a sentence that changed twice in the first second of
+ * every short reconnect. So nothing is said for this long: the hint's room
+ * stays empty, reserved (`HOLD_HINTS`), and no notification goes. */
+export const HOLD_WORD_GRACE_MS = 1_500;
+
+/** Whether the service's word has been awaited past `HOLD_WORD_GRACE_MS`:
+ * `since`, when the gap began waiting for it (null when it is not). */
+export function holdWordLate(since: number | null, now: number): boolean {
+  return since !== null && now - since >= HOLD_WORD_GRACE_MS;
+}
+
+/** `gapTraffic` as it may be said: "unconfirmed" only once the word is late
+ * (`holdWordLate`), "pending" before -- nothing said yet. */
+export type GapWord = GapTraffic | "pending";
+
+export function gapWord(gap: GapTraffic, wordLate: boolean): GapWord {
+  return gap === "unconfirmed" && !wordLate ? "pending" : gap;
+}
+
 export type HoldHintKey = "hold.holding" | "hold.heldAfterDrop" | "hold.unconfirmed";
 
 /** Every sentence `holdHint` can put under the line, for the room the
@@ -284,21 +306,31 @@ export const HOLD_HINTS: readonly HoldHintKey[] = ["hold.holding", "hold.heldAft
  * nothing is reconnecting, while the service still says it holds --
  * between the drop and the release reaching it, or a service that has not
  * answered the release -- blocked until the block is lifted. In the gap
- * with the service's word not in yet: neither. Null leaves the headline's
- * own hint, which says the traffic is going out without Neoxify -- only
- * ever when the service has said nothing is held. */
+ * with the service's word not in yet: neither -- "pending", nothing at all
+ * in the hint's reserved room, until the word is late (`wordLate`, past
+ * `HOLD_WORD_GRACE_MS`; a caller that keeps no clock says it is), then
+ * "checking". Null leaves the headline's own hint, which says the traffic
+ * is going out without Neoxify -- only ever when the service has said
+ * nothing is held. */
 export function holdHint(
   hold: ReconnectHold | null,
-  { reconnecting, dropped, setting }: { reconnecting: boolean; dropped: boolean; setting: boolean },
-): HoldHintKey | null {
+  {
+    reconnecting,
+    dropped,
+    setting,
+    wordLate = true,
+  }: { reconnecting: boolean; dropped: boolean; setting: boolean; wordLate?: boolean },
+): HoldHintKey | "pending" | null {
   if (!reconnecting && !dropped) return null;
-  switch (gapTraffic(hold, setting)) {
+  switch (gapWord(gapTraffic(hold, setting), wordLate)) {
     // Late or not, it blocks now; the note says the rest (`holdNotes`).
     case "blocked":
     case "blockedLate":
       return reconnecting ? "hold.holding" : "hold.heldAfterDrop";
     case "unconfirmed":
       return "hold.unconfirmed";
+    case "pending":
+      return "pending";
     case "open":
       return null;
   }

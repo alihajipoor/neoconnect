@@ -15,7 +15,9 @@
  *    holding the internet while it does ("Block the internet while
  *    reconnecting"), the third when that hold went in only on the report
  *    of the drop (WireGuard's block could not stand while it was up) --
- *    once the service has said which (`gapTraffic`): not before;
+ *    once the service has said which (`gapTraffic`), and not before; or,
+ *    its word late past its grace (`HOLD_WORD_GRACE_MS`), `lostUnconfirmed`:
+ *    reconnecting, and not yet confirmed whether the rest is blocked;
  *  - `back`: verified again after `lost` was said;
  *  - `dropped`: gone, and nothing is reconnecting it (the episode gave up,
  *    or none could start) -- once the service has said it no longer holds
@@ -34,9 +36,9 @@
 
 import type { ShownTone } from "./hero-model";
 import type { TranslationKey } from "./i18n";
-import type { GapTraffic } from "./reconnect-hold";
+import type { GapWord } from "./reconnect-hold";
 
-export type NotifyKind = "connected" | "connectedPartial" | "lost" | "lostHeld" | "lostHeldLate" | "back" | "dropped";
+export type NotifyKind = "connected" | "connectedPartial" | "lost" | "lostHeld" | "lostHeldLate" | "lostUnconfirmed" | "back" | "dropped";
 
 export interface NotifyMemory {
   /** A verified tunnel has been seen since the customer last had nothing up. */
@@ -54,9 +56,9 @@ export interface NotifyInput {
   /** An automatic reconnect is under way. */
   readonly reconnecting: boolean;
   /** Where other traffic goes in the gap, as the service has said
-   * (`gapTraffic` in reconnect-hold.ts): the one source the main page's
-   * sentence reads too. */
-  readonly gap: GapTraffic;
+   * (`gapTraffic` in reconnect-hold.ts), given its grace (`gapWord`): the
+   * one source the main page's sentence reads too. */
+  readonly gap: GapWord;
   /** The window is in front: the screen says it already. */
   readonly focused: boolean;
   readonly gaming: boolean;
@@ -80,9 +82,17 @@ export function notifyStep(memory: NotifyMemory, input: NotifyInput): { memory: 
     // amber is the failover's to fix, and says nothing new.
     case "warn":
       if (input.reconnecting && memory.up && !memory.lostSaid) {
-        // Which of the two is the service's to say first.
-        if (input.gap === "unconfirmed") return { memory, say: null };
-        const kind: NotifyKind = input.gap === "blocked" ? "lostHeld" : input.gap === "blockedLate" ? "lostHeldLate" : "lost";
+        // Which it is, the service's to say first -- within its grace; past
+        // it, that it has not said (`HOLD_WORD_GRACE_MS`).
+        if (input.gap === "pending") return { memory, say: null };
+        const kind: NotifyKind =
+          input.gap === "blocked"
+            ? "lostHeld"
+            : input.gap === "blockedLate"
+              ? "lostHeldLate"
+              : input.gap === "unconfirmed"
+                ? "lostUnconfirmed"
+                : "lost";
         return say(kind, { up: true, lostSaid: true });
       }
       return { memory, say: null };
@@ -109,6 +119,7 @@ export const NOTIFY_TEXT: Record<NotifyKind, { title: TranslationKey; body: Tran
   lost: { title: "notif.lostTitle", body: "notif.lostBody" },
   lostHeld: { title: "notif.lostTitle", body: "notif.lostHeldBody" },
   lostHeldLate: { title: "notif.lostTitle", body: "notif.lostHeldLateBody" },
+  lostUnconfirmed: { title: "notif.lostTitle", body: "notif.lostUnconfirmedBody" },
   back: { title: "notif.backTitle", body: "notif.backBody" },
   dropped: { title: "notif.droppedTitle", body: "notif.droppedBody" },
 };

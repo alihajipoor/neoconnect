@@ -56,13 +56,27 @@ describe("what is worth a notification", () => {
     expect(
       play([
         { tone: "ok" },
-        { tone: "warn", reconnecting: true, gap: "unconfirmed" },
+        { tone: "warn", reconnecting: true, gap: "pending" },
         { tone: "warn", reconnecting: true, gap: "blocked" },
       ]),
     ).toEqual(["connected", null, "lostHeld"]);
     expect(
-      play([{ tone: "ok" }, { tone: "warn", reconnecting: true, gap: "unconfirmed" }, { tone: "warn", reconnecting: true }]),
+      play([{ tone: "ok" }, { tone: "warn", reconnecting: true, gap: "pending" }, { tone: "warn", reconnecting: true }]),
     ).toEqual(["connected", null, "lost"]);
+  });
+
+  it("says the loss once the service's word is late past its grace, without claiming either way", () => {
+    // HOLD_WORD_GRACE_MS: a service that has not answered by then may never;
+    // a sustained loss is still said, as "not yet confirmed", and the word
+    // when it comes is not said again.
+    expect(
+      play([
+        { tone: "ok" },
+        { tone: "warn", reconnecting: true, gap: "unconfirmed" },
+        { tone: "warn", reconnecting: true, gap: "blocked" },
+        { tone: "ok" },
+      ]),
+    ).toEqual(["connected", "lostUnconfirmed", null, "back"]);
   });
 
   it("never says not protected on a stale word after a drop nothing reconnects: the third quick death", () => {
@@ -75,6 +89,7 @@ describe("what is worth a notification", () => {
       null,
       "dropped",
     ]);
+    expect(play([{ tone: "ok" }, { tone: "danger", gap: "pending" }, { tone: "danger" }])).toEqual(["connected", null, "dropped"]);
   });
 
   it("says it is gone when nothing is reconnecting it", () => {
@@ -168,5 +183,10 @@ describe("the words", () => {
     expect(en["notif.lostHeldLateBody"]).toMatch(/blocked/);
     expect(en["notif.lostHeldLateBody"]).toMatch(/may have gone out/);
     expect(fa["notif.lostHeldLateBody"]).toContain("مسدود");
+    expect(NOTIFY_TEXT.lostUnconfirmed).toEqual({ title: "notif.lostTitle", body: "notif.lostUnconfirmedBody" });
+    // Neither "blocked" nor "not protected": not yet confirmed.
+    expect(en["notif.lostUnconfirmedBody"]).toMatch(/hasn't yet confirmed/);
+    expect(en["notif.lostUnconfirmedBody"]).not.toMatch(/not protected/);
+    expect(fa["notif.lostUnconfirmedBody"]).toContain("تأیید نشده");
   });
 });

@@ -49,7 +49,13 @@ describe("the reconnect hold's gate", () => {
   it("says where traffic goes in the gap from one source, on screen and in notifications", () => {
     const dash = source("../screens/Dashboard.tsx");
     expect(dash).toContain("const gap = gapTraffic(hold, holdWanted(prefs.blockWhileReconnecting));");
-    expect(dash).toContain("      gap,\n");
+    expect(dash).toContain("      gap: gapSaid,\n");
+    expect(dash).toContain("const gapSaid = gapWord(gap, holdWordLate);");
+    // Given its grace, by the one clock both read.
+    expect(dash).toContain("const holdWordAwaited = (inHoldGap || waitingForNetwork) && gap === \"unconfirmed\";");
+    expect(dash).toContain("const id = setTimeout(() => setHoldWordLate(true), HOLD_WORD_GRACE_MS);");
+    expect(dash).toMatch(/holdHint\(hold, \{[^}]*wordLate: holdWordLate \}\)/);
+    expect(dash).toContain('heldHint === "pending"\n        ? ""');
     // In the gap only: never over a tunnel that is up.
     expect(dash).toMatch(/const heldHint = isTunnelUp\(connectionState\)\s+\? null\s+: holdHint\(hold, \{/);
     // No sentence about the hold picked by hand, and no release on a
@@ -58,7 +64,7 @@ describe("the reconnect hold's gate", () => {
     expect(dash).not.toContain("shouldRelease");
     expect(dash).toContain("statusReleaseRef.current.see({");
     const notify = source("./connection-notify.ts");
-    expect(notify).toContain("readonly gap: GapTraffic;");
+    expect(notify).toContain("readonly gap: GapWord;");
     expect(notify).not.toMatch(/readonly holding|input\.holding/);
   });
 
