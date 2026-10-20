@@ -392,7 +392,9 @@ export function flipList(container: HTMLElement, before: Map<string, RowSnapshot
     ghost.style.cssText = `top:${was.top - host.top + container.scrollTop}px;left:${was.left - host.left + container.scrollLeft}px;width:${was.width}px;height:${was.height}px`;
     ghost.appendChild(ghostOf(copy));
     container.appendChild(ghost);
-    const a = play(ghost, [{ opacity: 1 }, { opacity: 0 }], { ...exit, fill: "forwards" });
+    // Gone quickly, from the start (an ease-out), so the rows sliding up
+    // into its place are not read through it.
+    const a = play(ghost, [{ opacity: 0.85 }, { opacity: 0 }], { ...fade, duration: Math.min(fade.duration, exit.duration), fill: "forwards" });
     const remove = () => ghost.remove();
     if (a) void a.finished.then(remove, remove);
     else remove();
