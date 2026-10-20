@@ -2378,6 +2378,34 @@ mod tests {
         assert!(!hold.held_for(8), "the tunnel that came up is not the drop held for");
     }
 
+    /// Filters standing for a session are never taken out by its arming
+    /// again -- the setting said again as a reconnect begins, often as the
+    /// tunnel ends. Its server not named this time (a lookup on a network
+    /// going down), or a new plan WFP will not take, leaves them in force
+    /// as they were; its drop is then held with nothing to install. On the
+    /// VM, taken out there, a slow WireGuard stop ran fail-open for 6 to 9 s.
+    #[test]
+    fn arming_a_standing_session_again_never_takes_its_filters_out() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        assert!(hold.arm_for(7, plan(), true, Some(IpAddr::V4(node()))));
+        assert!(hold.standing_for(7));
+
+        assert!(hold.arm_for(7, plan(), true, None), "the server not named this time");
+        assert!(hold.standing_for(7), "the filters standing for the session were taken out");
+        let roamed = Plan { lan: vec![Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24)], ..plan() };
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(hold.arm_for(7, roamed.clone(), true, Some(IpAddr::V4(node()))), "a new plan WFP refused");
+        assert!(hold.standing_for(7), "the filters standing for the session were taken out");
+        assert!(fake.closed.lock().unwrap().is_empty(), "closed: {:?}", fake.closed.lock().unwrap());
+        assert_eq!(fake.installs.lock().unwrap().len(), 1);
+        assert_eq!(hold.report(Some(7)), Some(Report::Armed), "armed again, said as anything but armed");
+
+        assert!(hold.engage(7, "wireguard.exe stopped"));
+        assert_eq!(fake.installs.lock().unwrap().len(), 1, "a hold installed after the drop: a gap");
+        assert!(matches!(hold.report(None), Some(Report::Holding { standing_refused: false, .. })));
+    }
+
     /// The hold's filters against the real filtering engine, inside a
     /// transaction that is then aborted: WFP checks every filter as it is
     /// added, so a structure it would refuse is found here rather than on

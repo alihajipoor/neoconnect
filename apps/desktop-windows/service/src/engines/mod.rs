@@ -1592,6 +1592,17 @@ impl Engines {
         self.active.peek().map_or(0, |s| s.generation)
     }
 
+    #[cfg(test)]
+    fn begin_test_wireguard_session_for(
+        &mut self,
+        profile: &ConnectProfile,
+        scm: impl Fn() -> wireguard::ScmView + Send + Sync + 'static,
+    ) -> u64 {
+        self.wireguard_scm = Arc::new(scm);
+        self.begin_session(Active::WireguardTunnel, profile);
+        self.active.peek().map_or(0, |s| s.generation)
+    }
+
     /// Whether a session is in the slot -- one the status may say has ended
     /// while its engine still runs (`Session::adapter_gone`), which a
     /// teardown still has to reach.
@@ -7492,6 +7503,183 @@ mod helper_tests {
         end_test_session(&mut engines);
         let _ = service_process.kill();
         let _ = service_process.wait();
+    }
+
+    /// A WireGuard session over a scripted service manager, the setting on,
+    /// armed as a connect arms it -- through the setting said, which reads
+    /// the session's own profile -- with its filters standing.
+    fn standing_wireguard_session(
+        scm: Arc<std::sync::Mutex<wireguard::ScmView>>,
+    ) -> (Engines, Arc<FakeHold>, u64) {
+        let hold = FakeHold::new(None);
+        let mut engines = engines_for_test();
+        engines.set_reconnect_hold_ops_for_test(hold.clone());
+        engines.reconnect_hold.set_wanted(true);
+        let g = engines.begin_test_wireguard_session_for(&wireguard_profile(), move || *scm.lock().unwrap());
+        engines.arm_live_session_for_reconnect_hold();
+        assert!(engines.reconnect_hold.standing_for(g), "nothing standing under the WireGuard tunnel");
+        assert_eq!(hold.installs().len(), 1);
+        (engines, hold, g)
+    }
+
+    /// The VM's WireGuard leak (2026-10-20), thirty-two times at once. A
+    /// tunnel service stopped from outside takes seconds to stop --
+    /// STOP_PENDING, its process still running, its adapter already gone --
+    /// and the app's reconnect begins inside that, saying the setting again
+    /// before or after the engine watch has seen the stop. Armed again there,
+    /// the dying session found no adapter to name, was disarmed, and its 108
+    /// standing filters were taken out: 151 to 200 frames left at the NIC per
+    /// drop, until the next tunnel. Whichever gets there first -- the watch's
+    /// report, or the setting said again -- the filters standing for it
+    /// become the hold with nothing installed or closed; the reconnect's
+    /// teardown finds it held and its hard stop does not fail on the stop
+    /// already under way; and the reconnect's tunnel is moved onto before
+    /// anything is let go of.
+    #[test]
+    fn thirty_two_slow_wireguard_stops_racing_the_reconnects_first_word_never_open_a_gap() {
+        use wireguard::ScmView;
+        const AT_ONCE: usize = 32;
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let handles: Vec<_> = (0..AT_ONCE)
+            .map(|i| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let mut service_process = engine_stand_in();
+                    let scm = Arc::new(std::sync::Mutex::new(ScmView::Running(Some(service_process.id()))));
+                    let (mut engines, hold, g) = standing_wireguard_session(Arc::clone(&scm));
+                    start.wait();
+                    // The slow stop begins: the adapter goes first, the
+                    // process runs on, the manager says STOP_PENDING.
+                    *hold.tunnel.lock().unwrap() = None;
+                    *scm.lock().unwrap() = ScmView::Pending;
+                    // The app's reconnect begins -- for some before the
+                    // watch's next look (a slice is a second), for others
+                    // after it.
+                    std::thread::sleep(Duration::from_millis((i % 8) as u64 * 200));
+                    engines.arm_live_session_for_reconnect_hold();
+                    assert!(engines.reconnect_hold.held_for(g), "session {i}: the dying session's drop is not held");
+                    assert!(hold.closed().is_empty(), "session {i}: standing filters taken out: {:?}", hold.closed());
+                    // Said again: nothing changes.
+                    engines.arm_live_session_for_reconnect_hold();
+                    // The app's teardown for its reconnect, as the pipe runs
+                    // it: held from before the hard stop, and through it.
+                    assert!(engines.hold_for_reconnect(), "session {i}: the reconnect's teardown found nothing held");
+                    let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+                    assert!(engines.reconnect_hold.holding(), "session {i}: the hard stop let go");
+                    assert_eq!(hold.installs().len(), 1, "session {i}: a hold installed after the drop: a gap");
+                    assert!(hold.closed().is_empty(), "session {i}: {:?}", hold.closed());
+
+                    // The stop lands; the reconnect's tunnel comes up and the
+                    // hold is moved onto it, the new plan in first.
+                    *scm.lock().unwrap() = ScmView::Stopped(None);
+                    let _ = service_process.kill();
+                    let _ = service_process.wait();
+                    let next_tunnel = 0x0035_0000_0200_0000 + i as u64;
+                    *hold.tunnel.lock().unwrap() = Some(next_tunnel);
+                    *hold.tunnels.lock().unwrap() = Some(vec![next_tunnel]);
+                    let mut next_process = engine_stand_in();
+                    let next_pid = next_process.id();
+                    let g2 = engines.begin_test_wireguard_session_for(&wireguard_profile(), move || ScmView::Running(Some(next_pid)));
+                    engines.arm_reconnect_hold(&wireguard_profile(), false, &[]);
+                    assert_eq!(hold.installs().len(), 2, "session {i}: the hold was not moved onto the new tunnel");
+                    assert_eq!(hold.closed(), vec![7000], "session {i}: the old plan, after the new");
+                    engines.release_reconnect_hold("the app proved a tunnel", false);
+                    assert!(engines.reconnect_hold.standing_for(g2), "session {i}: nothing standing for the new tunnel");
+                    engines.release_reconnect_hold("the customer disconnected", true);
+                    assert_eq!(hold.closed(), vec![7000, 7001], "session {i}");
+                    end_test_session(&mut engines);
+                    let _ = next_process.kill();
+                    let _ = next_process.wait();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a session's thread panicked");
+        }
+    }
+
+    /// The other WireGuard leak the VM found: the tunnel adapter disabled
+    /// under a live wireguard.exe. Its service runs on, so nothing reports
+    /// an ending; the app's reconnect said the setting again, arming found no
+    /// adapter to name, disarmed the session and took out its standing
+    /// filters, and 151 frames left before the next tunnel. Thirty-two at
+    /// once, with the pipe's own calls racing the owning thread's: the
+    /// armed session fails closed -- held, nothing installed or closed --
+    /// said again it stays so, the status says nothing has landed (the app
+    /// reads that as a drop), and the reconnect's teardown keeps it.
+    #[test]
+    fn thirty_two_adapters_disabled_under_live_wireguard_sessions_fail_closed() {
+        use wireguard::ScmView;
+        const AT_ONCE: usize = 32;
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let handles: Vec<_> = (0..AT_ONCE)
+            .map(|i| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let mut service_process = engine_stand_in();
+                    let scm = Arc::new(std::sync::Mutex::new(ScmView::Running(Some(service_process.id()))));
+                    let (mut engines, hold, g) = standing_wireguard_session(scm);
+                    let shared = Arc::clone(&engines.reconnect_hold);
+                    start.wait();
+                    *hold.tunnel.lock().unwrap() = None;
+                    // The pipe, without the owning thread: the setting said,
+                    // a reconnect following, statuses read.
+                    let pipe = std::thread::spawn(move || {
+                        for _ in 0..40 {
+                            shared.set_wanted(true);
+                            shared.followed();
+                            let _ = shared.report(Some(g));
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    });
+                    std::thread::sleep(Duration::from_millis((i % 4) as u64 * 5));
+                    engines.arm_live_session_for_reconnect_hold();
+                    pipe.join().expect("the pipe's thread");
+                    assert!(engines.reconnect_hold.held_for(g), "session {i}: an armed session whose adapter is gone was not held");
+                    assert!(engines.reconnect_hold.armed_for(g), "session {i}: disarmed");
+                    assert!(hold.closed().is_empty(), "session {i}: standing filters taken out: {:?}", hold.closed());
+                    engines.arm_live_session_for_reconnect_hold();
+                    assert_eq!(hold.installs().len(), 1, "session {i}");
+                    assert!(
+                        matches!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Holding { landed: false, .. })),
+                        "session {i}: {:?}",
+                        engines.reconnect_hold_status()
+                    );
+                    assert!(engines.hold_for_reconnect(), "session {i}");
+                    let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+                    assert!(engines.reconnect_hold.holding(), "session {i}: the hard stop let go");
+                    assert!(hold.closed().is_empty(), "session {i}: {:?}", hold.closed());
+                    engines.release_reconnect_hold("the customer disconnected", true);
+                    assert_eq!(hold.closed(), vec![7000], "session {i}");
+                    let _ = service_process.kill();
+                    let _ = service_process.wait();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a session's thread panicked");
+        }
+    }
+
+    /// The same for an armed Xray session the setting is said again over
+    /// whose tunnel adapter cannot be named while xray.exe runs on: held now,
+    /// its plan in as one transaction, its confinement still standing for
+    /// the teardown to let go of after it -- never disarmed.
+    #[test]
+    fn the_setting_said_again_over_an_armed_session_whose_adapter_cannot_be_named_holds_it() {
+        let (mut engines, fake, hold, g) = armed_session();
+        *hold.tunnel.lock().unwrap() = None;
+        engines.arm_live_session_for_reconnect_hold();
+        assert!(engines.reconnect_hold.held_for(g), "the armed session was let go of rather than held");
+        assert!(engines.reconnect_hold.armed_for(g), "disarmed");
+        assert_eq!(hold.installs().len(), 1, "one transaction");
+        assert!(fake.closed().is_empty(), "the confinement went before the teardown");
+        assert!(engines.hold_for_reconnect());
+        let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+        assert_eq!(fake.closed(), vec![1000], "the confinement, let go of with the hold in");
+        assert!(engines.reconnect_hold.holding());
+        engines.release_reconnect_hold("the customer disconnected", true);
+        assert_eq!(hold.closed(), vec![7000]);
     }
 
     /// A connect's limits with a token of its own: `current_token` is the
