@@ -183,23 +183,34 @@ export const firstViews = new FirstViews();
 /** True while the view `key` makes its first entrance of the session: set
  * `data-enter` on its root and the stylesheet staggers what is in it. Null
  * keys never enter (a view with nothing to stagger). Off under reduced
- * motion -- the content is simply there. */
+ * motion -- the content is simply there.
+ *
+ * A key that changes on the same element -- Settings to one of its own
+ * pages, drawn by the same Page -- is a new view: decided while rendering,
+ * so its first frame already carries the mark. */
 export function useFirstView(key: string | null, windowMs: number = ENTER_WINDOW_MS): boolean {
-  const [enter, setEnter] = useState(() => key !== null && firstViews.fresh(key) && !motionReduced());
+  const fresh = () => key !== null && firstViews.fresh(key) && !motionReduced();
+  const [state, setState] = useState(() => ({ key, on: fresh() }));
+  let current = state;
+  if (state.key !== key) {
+    current = { key, on: fresh() };
+    setState(current);
+  }
   const claimed = useRef<string | null>(null);
   useEffect(() => {
     if (key === null) return;
+    const off = () => setState((s) => (s.key === key && s.on ? { key, on: false } : s));
     if (claimed.current !== key) {
       if (!firstViews.claim(key)) {
-        setEnter(false);
+        off();
         return;
       }
       claimed.current = key;
     }
-    const timer = setTimeout(() => setEnter(false), windowMs);
+    const timer = setTimeout(off, windowMs);
     return () => clearTimeout(timer);
   }, [key, windowMs]);
-  return enter;
+  return current.on;
 }
 
 /** What staggers in a view's first entrance: its header, its cards and its
