@@ -34,6 +34,7 @@ import type { SlotNotice } from "../lib/device-slot-notice";
 import type { RouteOption } from "../lib/types";
 import { PAGE_SCREENS, PreviewPage } from "./PreviewPages";
 import { ProgressLineView } from "../components/main/ProgressLine";
+import { rearmCheckPop } from "../lib/check-pop";
 import { SpeedCard, SpeedSection } from "../components/main/TrafficSpeed";
 import { createTrafficMeter } from "../lib/traffic-meter";
 import type { LadderRung } from "../lib/ladder-progress";
@@ -408,8 +409,10 @@ export function PreviewApp() {
         data-testid="replay"
         style={{ padding: "2px 8px", border: "1px solid #9aa3b5", borderRadius: 6, background: "#fff" }}
         onClick={() => {
-          // Every view's first entrance again, as on a fresh launch.
+          // Every view's first entrance again, as on a fresh launch, and
+          // the check's one bounce.
           firstViews.reset();
+          rearmCheckPop();
           setReplay((n) => n + 1);
         }}
       >

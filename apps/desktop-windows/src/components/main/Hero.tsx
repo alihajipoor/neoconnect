@@ -1,5 +1,6 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
+import { claimCheckPop } from "../../lib/check-pop";
 import { useI18n, type TranslationKey } from "../../lib/i18n";
 import { formatDuration } from "../../lib/locale-format";
 import type { ChipGlyph, HintTone, LineModel } from "../../lib/hero-model";
@@ -29,15 +30,10 @@ export function Tagline({ id }: { id: string }) {
  * The check appears only for verified traffic, and pops in on the first
  * verified look of a session (not under reduced motion). */
 export function StatusChip({ glyph, label }: { glyph: ChipGlyph; label: string }) {
-  // The check is its own element, so its pop runs once each time it
-  // appears -- the moment a session is first verified -- and never again
-  // while it stays.
   return (
     <p className="nx-chip">
       {glyph === "check" ? (
-        <span className="nx-dot check nx-popc" aria-hidden>
-          <Check />
-        </span>
+        <CheckDot />
       ) : (
         <span className={cn("nx-dot", glyph)} aria-hidden />
       )}
@@ -45,6 +41,23 @@ export function StatusChip({ glyph, label }: { glyph: ChipGlyph; label: string }
         {label}
       </span>
     </p>
+  );
+}
+
+/** The check. It bounces the first time it is drawn in a session
+ * (lib/check-pop.ts) -- decided before the first paint, so it never shows
+ * full size and then jumps -- and arrives by the colour cross-fade alone
+ * after a brief reconnect, a cleared banner or a remount, so the end of a
+ * gap is never marked with motion. */
+function CheckDot() {
+  const [pop, setPop] = useState(false);
+  useLayoutEffect(() => {
+    if (claimCheckPop()) setPop(true);
+  }, []);
+  return (
+    <span className={cn("nx-dot check", pop && "nx-popc")} aria-hidden>
+      <Check />
+    </span>
   );
 }
 

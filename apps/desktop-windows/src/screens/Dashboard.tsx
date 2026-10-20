@@ -92,6 +92,7 @@ import { sessionGeneration } from "../lib/session-end";
 import { onLateConfig, refreshConnectionConfig } from "../lib/connection-config";
 import { useRefreshOnResume } from "../lib/resume";
 import { swapView } from "../lib/view-transition";
+import { rearmCheckPop } from "../lib/check-pop";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
@@ -3019,6 +3020,9 @@ export function Dashboard({
           await slotTeardown.retry(tearDownForSlotOnce);
           return;
         }
+        // The customer ends this session: their next verified connection
+        // is a new one, and its check bounces again (lib/check-pop.ts).
+        rearmCheckPop();
         const generation = beginIntent("disconnect");
         // This device stops using one of the plan's devices. Released
         // fire and forget, within a second and a half, and never in

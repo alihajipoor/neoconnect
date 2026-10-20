@@ -123,6 +123,7 @@ import {
 import { onLateConfig, refreshConnectionConfig } from "@shared/lib/connection-config";
 import { useRefreshOnResume } from "@shared/lib/resume";
 import { swapView } from "@shared/lib/view-transition";
+import { rearmCheckPop } from "@shared/lib/check-pop";
 import {
   failedDial,
   outcomeFromError,
@@ -1841,6 +1842,9 @@ export function Dashboard({
     }
 
     if (tunnelUp(connectionState)) {
+      // The customer ends this session: their next verified connection is
+      // a new one, and its check bounces again (lib/check-pop.ts).
+      rearmCheckPop();
       // This phone stops using one of the plan's devices. Released fire
       // and forget, within a second and a half, and never in front of
       // the teardown: started while the tunnel is still up, the request
