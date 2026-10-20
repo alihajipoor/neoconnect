@@ -15,10 +15,17 @@ export class AlertingService {
   constructor(private readonly config: ConfigService) {}
 
   async send(message: string, context?: Record<string, unknown>): Promise<void> {
+    await this.deliver(message, context);
+  }
+
+  /** send, saying whether the webhook took it: false when none is
+   * configured, it answered with an error, or it could not be reached.
+   * For callers that record delivery. */
+  async deliver(message: string, context?: Record<string, unknown>): Promise<boolean> {
     const webhookUrl = this.config.get<string>("alerting.webhookUrl");
     if (!webhookUrl) {
       this.logger.debug(`Alert (no ALERT_WEBHOOK_URL configured, not sent): ${message}`);
-      return;
+      return false;
     }
 
     try {
@@ -34,9 +41,12 @@ export class AlertingService {
       });
       if (!res.ok) {
         this.logger.warn(`Alert webhook returned ${res.status}: ${message}`);
+        return false;
       }
+      return true;
     } catch (err) {
       this.logger.warn(`Failed to send alert webhook: ${(err as Error).message}`);
+      return false;
     }
   }
 }
