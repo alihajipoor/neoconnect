@@ -19,6 +19,7 @@
 // Nothing leaves the machine: the preview answers every call itself.
 //
 //   node scripts/capture-motion.mjs --out <dir> [--only name,name] [--chrome path]
+//   node scripts/capture-motion.mjs --probe <js> [--size label] [--screen s] [--scenario s] [--lang en|fa]
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -493,6 +494,14 @@ try {
     await send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 1300, deviceScaleFactor: 1, mobile: false });
   }
 
+  // --probe <expression>: evaluate it in a start state and print the
+  // answer, for looking into a frame without a transition.
+  if (opt("probe")) {
+    await start({ size: opt("size") ?? DESKTOP, screen: opt("screen") ?? "main", scenario: opt("scenario") ?? "connected", language: opt("lang") ?? "en" });
+    console.log(JSON.stringify(await ev(opt("probe")), null, 1));
+    TRANSITIONS.length = 0;
+    STILLS.length = 0;
+  }
   for (const tr of TRANSITIONS) {
     if (only && !only.includes(tr.name)) continue;
     errors.length = 0;
