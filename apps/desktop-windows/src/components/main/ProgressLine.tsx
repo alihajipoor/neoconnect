@@ -72,11 +72,12 @@ export function ProgressLineView({
   // The words swap (a short rise) when the step changes -- the next rung,
   // the next attempt -- and never with the countdown's second, which is
   // simply rewritten (design-system.md 6.3). The reconnect's arrow turns
-  // while an attempt is under way, and only then.
+  // while an attempt is under way -- being dialled ("attempt") or due now
+  // ("now") -- and stands still through the countdown to the next.
   const step = rung ? `${rung.pass}:${rung.index}` : "-";
   if (countText !== null) {
     return (
-      <p className="nx-subline" data-progress="reconnect" data-now={count?.kind === "now" ? "" : undefined}>
+      <p className="nx-subline" data-progress="reconnect" data-now={count && count.kind !== "next" ? "" : undefined}>
         <RotateCw aria-hidden />
         <span key={`rc:${count?.kind === "next" ? "next" : "go"}:${count?.attempt}:${count?.kind === "attempt" ? step : "-"}`} className="nx-swap">
           {count?.kind === "attempt" && rungText ? `${countText} · ${rungText}` : countText}
