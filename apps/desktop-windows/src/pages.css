@@ -1049,6 +1049,44 @@
     color: var(--ok-ink);
   }
 
+  /* Daily usage (Activity): one bar a day, today's lighter -- it is still
+     going. Measured bars only: a day with nothing recorded has none. */
+  .nx-ubars {
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    block-size: 88px;
+    margin-top: 10px;
+    border-bottom: 1px solid var(--hairline-2);
+  }
+  .nx-ubars > li {
+    flex: 1 1 0;
+    min-width: 0;
+    block-size: 100%;
+    display: flex;
+    align-items: flex-end;
+  }
+  .nx-ubars .bar {
+    display: block;
+    inline-size: 100%;
+    min-block-size: 2px;
+    border-radius: 4px 4px 1px 1px;
+    background: var(--cobalt);
+  }
+  .nx-ubars .bar[data-zero="1"] {
+    min-block-size: 0;
+  }
+  .nx-ubars > li:last-child .bar {
+    background: color-mix(in oklab, var(--cobalt) 50%, transparent);
+  }
+  .nx-uaxis {
+    display: flex;
+    justify-content: space-between;
+    margin: 4px 0 6px;
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+
   /* Plans. */
   .nx-plans {
     display: grid;

@@ -55,20 +55,41 @@ import { RepairNetwork } from "../components/RepairNetwork";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { StillTrying } from "../components/StillTrying";
 import { relaySupported } from "../lib/last-resort";
+import { appPrefs, type AppPrefs } from "../lib/app-prefs";
+import type { AutostartBinding } from "../lib/autostart";
+import type { NotifySetting } from "../lib/notify";
 
 /** Which device this is: decides the rows that only exist on one of them
  * (gaming mode, Custom mode, Repair and leak protection are Windows's; the
  * web portal has none of them). */
 export type SettingsPlatform = "windows" | "android" | "ios" | "web";
 
+/** What this platform does for the device's own behaviour. A row exists
+ * only for what the platform has bound -- a switch nothing honours is not
+ * drawn, on any platform (no "Not built yet" ships):
+ *
+ *  - `autostart`: Windows' Run key, read back each time (lib/autostart.ts);
+ *  - `autoConnect`: the main page connects at launch when it is on
+ *    (lib/auto-connect.ts);
+ *  - `notifications`: the main page notifies on a lasting change
+ *    (lib/connection-notify.ts), and how to ask whether the OS shows them;
+ *  - `reconnectHold`: the service holds the internet while reconnecting
+ *    (lib/reconnect-hold.ts), told at once when the switch moves. */
+export interface DeviceSettings {
+  autostart?: AutostartBinding;
+  autoConnect?: boolean;
+  notifications?: { setting?: () => Promise<NotifySetting> };
+  reconnectHold?: { apply: (enabled: boolean) => Promise<void> };
+}
+
 /** The app's settings, as grouped lists (design-system.md 4.10), ordered
  * from everyday to rare: Connection, Modes, Appearance, Notifications,
  * Account, Troubleshoot, About.
  *
- * A setting the app cannot honour yet is shown disabled and tagged "Not
- * built yet" -- never as a control that looks like it works. A value the
- * operating system decides (reduced transparency, reduced motion) is shown
- * as set by it, and its control is disabled.
+ * A setting the platform does not honour is not shown at all
+ * (`DeviceSettings`) -- never as a control that looks like it works. A
+ * value the operating system decides (reduced transparency, reduced
+ * motion) is shown as set by it, and its control is disabled.
  *
  * Gaming mode, Custom mode, the password, the recovery code and Repair open
  * their existing cards in a sub-view of this page, unchanged; deleting the
@@ -93,6 +114,7 @@ export function Settings({
   onOpenActivity,
   onSignOut,
   platform = "web",
+  device = NO_DEVICE,
 }: {
   onBack: () => void;
   onOpenReferrals: () => void;
@@ -131,6 +153,8 @@ export function Settings({
    * it stops an automatic reconnect and takes the tunnel down first. */
   onSignOut?: () => void;
   platform?: SettingsPlatform;
+  /** What this platform has bound; nothing, on the web portal. */
+  device?: DeviceSettings;
 }) {
   const { t, language, setLanguage } = useI18n();
   const [sub, setSub] = useState<SubView | null>(null);
@@ -141,6 +165,7 @@ export function Settings({
   const [askLeak, setAskLeak] = useState(false);
   const stayRef = useRef<HTMLButtonElement>(null);
   const fx = useSyncExternalStore(effects.subscribe, effects.current, effects.current);
+  const prefs = useAppPrefs();
 
   // The account decides which of the ways back in apply
   // (docs/relay-last-resort.md): a reminder to confirm the address for an
@@ -221,7 +246,7 @@ export function Settings({
       <div className="nx-cols">
         {/* Only with a row in it: the web portal has no tunnel and no relay,
             and an empty titled card says there is something to set. */}
-        {platform !== "web" || relaySupported() ? (
+        {windows || device.autostart || device.autoConnect || device.reconnectHold || relaySupported() ? (
           <ListGroup title={t("set.connection")}>
             {windows ? (
               <Row
@@ -234,10 +259,33 @@ export function Settings({
             {/* The relay of last resort's switch: on until turned off here
                 (last-resort.ts). Nothing where there is no relay. */}
             <BackupRouteSection />
-            {windows ? <SwitchRow icon={<Power />} label={t("set.autoStart")} checked={false} notBuilt /> : null}
-            {platform !== "web" ? <SwitchRow icon={<Play />} label={t("set.autoConnect")} checked={false} notBuilt /> : null}
-            {windows ? (
-              <SwitchRow icon={<WifiOff />} label={t("set.blockRecon")} hint={t("set.killHint")} checked={false} notBuilt />
+            {device.autostart ? <AutostartRow binding={device.autostart} /> : null}
+            {device.autoConnect ? (
+              <SwitchRow
+                icon={<Play />}
+                label={t("set.autoConnect")}
+                hint={t("set.autoConnectHint")}
+                checked={prefs.value.autoConnect}
+                disabled={!prefs.loaded}
+                onChange={(next) => void appPrefs.set("autoConnect", next)}
+              />
+            ) : null}
+            {device.reconnectHold ? (
+              <SwitchRow
+                icon={<WifiOff />}
+                label={t("set.blockRecon")}
+                tag={<span className="nx-ntag">{t("set.beta")}</span>}
+                hint={t("set.killHint")}
+                checked={prefs.value.blockWhileReconnecting}
+                disabled={!prefs.loaded}
+                onChange={(next) => {
+                  void appPrefs.set("blockWhileReconnecting", next);
+                  // The live session is told at once: armed now, or let go
+                  // of. A service that cannot be reached is told on the
+                  // next connect, which always says.
+                  void device.reconnectHold?.apply(next).catch(() => undefined);
+                }}
+              />
             ) : null}
           </ListGroup>
         ) : null}
@@ -331,9 +379,13 @@ export function Settings({
           />
         </ListGroup>
 
-        {platform !== "web" ? (
+        {device.notifications ? (
           <ListGroup title={t("set.notifs")}>
-            <SwitchRow icon={<Bell />} label={t("set.notifications")} checked={false} notBuilt />
+            <NotificationsRow
+              checked={prefs.value.notifications}
+              disabled={!prefs.loaded}
+              readSetting={device.notifications.setting}
+            />
           </ListGroup>
         ) : null}
 
@@ -445,10 +497,11 @@ export function Settings({
               <b>{t("leak.notHeldLead")}</b> {t("leak.notHeld")}
             </span>
           </li>
-          <li>
-            <Info aria-hidden />
+          <li className={windows && prefs.value.blockWhileReconnecting ? "ok" : undefined}>
+            {windows && prefs.value.blockWhileReconnecting ? <Check aria-hidden /> : <Info aria-hidden />}
             <span>
-              <b>{t("leak.reconLead")}</b> {t("leak.recon")}
+              <b>{t("leak.reconLead")}</b>{" "}
+              {t(windows && prefs.value.blockWhileReconnecting ? "leak.reconHeld" : "leak.recon")}
             </span>
           </li>
         </ul>
@@ -456,6 +509,114 @@ export function Settings({
     </Page>
   );
 }
+
+const NO_DEVICE: DeviceSettings = {};
+
+/** The device's preferences, and whether they have been read in this run:
+ * a switch is not offered before then, so it never shows a default as the
+ * saved answer. */
+function useAppPrefs(): { value: AppPrefs; loaded: boolean } {
+  const value = useSyncExternalStore(appPrefs.subscribe, appPrefs.current, appPrefs.current);
+  const [loaded, setLoaded] = useState(appPrefs.loaded());
+  useEffect(() => {
+    let alive = true;
+    void appPrefs.load().then(() => alive && setLoaded(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return { value, loaded };
+}
+
+/** "Open Neoxify when I sign in to Windows": read from Windows when the
+ * page opens, and after a change shows what Windows then says -- not what
+ * was pressed (lib/autostart.ts). Until the first answer the switch is
+ * not offered. */
+function AutostartRow({ binding }: { binding: AutostartBinding }) {
+  const { t } = useI18n();
+  const [on, setOn] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    binding.read().then(
+      (value) => alive && setOn(value),
+      () => alive && setFailed(true),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [binding]);
+  async function change(next: boolean) {
+    setBusy(true);
+    setFailed(false);
+    try {
+      setOn(await binding.write(next));
+    } catch {
+      setFailed(true);
+      // What Windows holds now, whatever the write did.
+      await binding.read().then(setOn, () => undefined);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <SwitchRow
+      icon={<Power />}
+      label={t("set.autoStart")}
+      hint={failed ? <span className="nx-osset">{t("set.autoStartFailed")}</span> : t("set.autoStartHint")}
+      checked={on === true}
+      disabled={on === null || busy}
+      onChange={(next) => void change(next)}
+    />
+  );
+}
+
+/** "Notify me when the connection changes", and, under it, whether the
+ * operating system shows them at all: switched on here and off in Windows
+ * shows nothing, and the row says so rather than looking like it works. */
+function NotificationsRow({
+  checked,
+  disabled,
+  readSetting,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  readSetting?: () => Promise<NotifySetting>;
+}) {
+  const { t } = useI18n();
+  const [os, setOs] = useState<NotifySetting>("unknown");
+  useEffect(() => {
+    if (!readSetting) return;
+    let alive = true;
+    void readSetting().then((value) => alive && setOs(value));
+    return () => {
+      alive = false;
+    };
+  }, [readSetting]);
+  const blocked = OS_BLOCKS[os];
+  return (
+    <SwitchRow
+      icon={<Bell />}
+      label={t("set.notifications")}
+      hint={checked && blocked ? <span className="nx-osset">{t(blocked)}</span> : t("set.notificationsHint")}
+      checked={checked}
+      disabled={disabled}
+      onChange={(next) => void appPrefs.set("notifications", next)}
+    />
+  );
+}
+
+/** What the OS's own setting means for the switch above, when it stops
+ * the notifications showing. "unknown" says nothing: a build with no
+ * shortcut to show them under, or a question that could not be asked. */
+const OS_BLOCKS: Record<NotifySetting, "set.notifsOffApp" | "set.notifsOffAll" | "set.notifsOffPolicy" | null> = {
+  enabled: null,
+  disabledForApp: "set.notifsOffApp",
+  disabledForUser: "set.notifsOffAll",
+  disabledByPolicy: "set.notifsOffPolicy",
+  unknown: null,
+};
 
 /** Website, Discord, Instagram, Telegram -- whichever exist (CommunityLinks
  * decides, and drops the website from a store build). */
