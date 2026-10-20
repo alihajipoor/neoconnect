@@ -728,3 +728,69 @@ export interface NodeReachability {
    * told about must not look like one that is merely unacknowledged. */
   alertDelivered: boolean | null;
 }
+
+/** Block watch (backend modules/block-watch). */
+export type BlockWatchMode = "off" | "record" | "digest" | "notify";
+export type BlockVerdict = "SUSPECT" | "LIKELY_BLOCKED";
+export type BlockIncidentStatus = "OPEN" | "CLEARED" | "REPLACED" | "RETIRED";
+export type BlockFamily = "client" | "traffic" | "probe";
+export type BlockType = "address" | "protocol" | "tunnel";
+
+export interface BlockNetworkFinding {
+  asn: number;
+  org: string | null;
+  tried: number;
+  failed: number;
+  baseline: number | null;
+  failing: boolean;
+}
+
+export interface BlockFamilyResult {
+  family: BlockFamily;
+  firing: boolean;
+  thin: boolean;
+  summary: string;
+  networks: BlockNetworkFinding[];
+}
+
+export interface BlockEvidence {
+  evaluatedAt: string;
+  current: BlockVerdict | null;
+  reason: string | null;
+  since: Partial<Record<BlockFamily, string>>;
+  families: BlockFamilyResult[];
+  outage: string | null;
+  blockType: BlockType | null;
+  thinResidential: boolean;
+  country: string;
+}
+
+export interface BlockIncident {
+  id: string;
+  nodeId: string;
+  status: BlockIncidentStatus;
+  /** The strongest verdict reached; the latest is evidenceJson.current. */
+  verdict: BlockVerdict;
+  openedAt: string;
+  lastSeenAt: string;
+  likelyAt: string | null;
+  closedAt: string | null;
+  evidenceJson: BlockEvidence;
+  pagedAt: string | null;
+  pageError: string | null;
+  remindedAt: string | null;
+  recoveryNotifiedAt: string | null;
+  keptAt: string | null;
+  snoozedUntil: string | null;
+  actedBy: string | null;
+  actionNote: string | null;
+  node: { name: string; region: string; status: string };
+}
+
+export interface BlockWatchOverview {
+  mode: BlockWatchMode;
+  country: string;
+  lastCycleAt: string | null;
+  open: BlockIncident[];
+  closed: BlockIncident[];
+}
