@@ -17,7 +17,3 @@ export const windowsAutostart: AutostartBinding = {
   write: (enabled) => invoke<boolean>("set_autostart", { enabled }),
 };
 
-/** Whether this run was started by Windows at sign-in. */
-export function launchedAtSignIn(): Promise<boolean> {
-  return invoke<boolean>("launched_at_sign_in").catch(() => false);
-}

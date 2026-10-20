@@ -18,8 +18,12 @@
 /// The Run value's name: the product name the uninstaller removes.
 pub const VALUE_NAME: &str = "Neoxify";
 
-/// Added to the command line Windows runs at sign-in, so the app can tell
-/// a launch at sign-in from one the customer made (`launched_at_sign_in`).
+/// Added to the command line Windows runs at sign-in. Nothing reads it
+/// yet: whether a launch at sign-in opens the window or starts minimised is
+/// the owner's open decision, and the command that would tell the app was
+/// removed rather than left unused in the handler list. It is written now
+/// so an entry made today carries it when that decision is wired; until
+/// then it changes nothing.
 pub const LAUNCH_ARG: &str = "--autostart";
 
 #[cfg(windows)]
@@ -124,12 +128,6 @@ pub fn autostart_state() -> Result<bool, String> {
 pub fn set_autostart(enabled: bool) -> Result<bool, String> {
     write(enabled)?;
     read()
-}
-
-/// Whether this process was started by Windows at sign-in.
-#[tauri::command]
-pub fn launched_at_sign_in() -> bool {
-    std::env::args().any(|arg| arg == LAUNCH_ARG)
 }
 
 #[cfg(test)]

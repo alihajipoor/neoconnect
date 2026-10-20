@@ -212,7 +212,6 @@ pub fn run() {
             // Run key, read back from Windows each time (autostart.rs).
             autostart::autostart_state,
             autostart::set_autostart,
-            autostart::launched_at_sign_in,
             // "Notify me when the connection changes": a toast, in words
             // the app chose, and whether Windows lets them show (notify.rs).
             notify::notify_show,
