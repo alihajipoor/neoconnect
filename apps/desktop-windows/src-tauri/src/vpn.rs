@@ -507,10 +507,14 @@ pub struct ExitPayload {
 /// through for the service to remove host routes to them that an earlier
 /// session left on the physical adapter. Optional on the same terms:
 /// absent, nothing is purged.
+///
+/// `block_while_reconnecting` is the customer's "Block the internet while
+/// reconnecting" setting, off unless they turned it on; absent is off.
 pub async fn vpn_connect(
     payload: ProtocolUserPayload,
     exits: Option<Vec<ExitPayload>>,
     known_nodes: Option<Vec<String>>,
+    block_while_reconnecting: Option<bool>,
 ) -> Result<(), String> {
     let profile = payload.into_profile()?;
     // Dropped here rather than sent and ignored, because the service
@@ -535,12 +539,39 @@ pub async fn vpn_connect(
     } else {
         Vec::new()
     };
-    call_expecting_ok(&Request::Connect { profile, exits, known_nodes: known_nodes.unwrap_or_default() }).await
+    call_expecting_ok(&Request::Connect {
+        profile,
+        exits,
+        known_nodes: known_nodes.unwrap_or_default(),
+        block_while_reconnecting: block_while_reconnecting.unwrap_or(false),
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn vpn_disconnect() -> Result<(), String> {
     call_expecting_ok(&Request::Disconnect).await
+}
+
+/// Takes the tunnel down for a reconnect: the auto-reconnect pass clearing
+/// the decks, or a tunnel found not carrying. With the setting on, the gap
+/// is held; otherwise the same as `vpn_disconnect`. See
+/// `Request::DisconnectForReconnect`.
+#[tauri::command]
+pub async fn vpn_disconnect_for_reconnect() -> Result<(), String> {
+    call_expecting_ok(&Request::DisconnectForReconnect).await
+}
+
+/// Lets go of the reconnect hold: a tunnel proved, or the reconnect over.
+#[tauri::command]
+pub async fn vpn_release_reconnect_hold() -> Result<(), String> {
+    call_expecting_ok(&Request::ReleaseReconnectHold).await
+}
+
+/// The "Block the internet while reconnecting" setting changed.
+#[tauri::command]
+pub async fn vpn_set_reconnect_hold(enabled: bool) -> Result<(), String> {
+    call_expecting_ok(&Request::SetReconnectHold { enabled }).await
 }
 
 /// Asks the service to prove the tunnel is carrying traffic, over a
@@ -744,6 +775,19 @@ pub struct VpnStatus {
     /// Why not, in English, for support -- never shown as the warning.
     #[serde(rename = "confinementProblem", skip_serializing_if = "Option::is_none")]
     confinement_problem: Option<String>,
+    /// "Block the internet while reconnecting": `{"state":"armed"}`,
+    /// `{"state":"holding","held_secs":n}`, or `{"state":"notHeld",
+    /// "problem":...}` -- facts the UI words in both languages. Absent
+    /// when the setting is off or nothing is armed, or from an older
+    /// service.
+    #[serde(rename = "reconnectHold", skip_serializing_if = "Option::is_none")]
+    reconnect_hold: Option<neoconnect_ipc::ReconnectHold>,
+    /// What the tunnel's adapter has carried this session, from Windows'
+    /// own counters: `rx_bytes`, `tx_bytes`, and `rx_per_sec`,
+    /// `tx_per_sec`, `window_ms` once measured. Absent whenever it was not
+    /// read -- the UI shows no number then, never a zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    traffic: Option<neoconnect_ipc::TunnelTraffic>,
 }
 
 /// How long to wait for a server to answer before calling it unreachable.
@@ -1126,6 +1170,8 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             split_tunnel_restart_needed,
             ipv4_confined,
             confinement_problem,
+            reconnect_hold,
+            traffic,
         } => Ok(VpnStatus {
             connected,
             protocol,
@@ -1137,6 +1183,8 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             split_tunnel_restart_needed,
             ipv4_confined,
             confinement_problem,
+            reconnect_hold,
+            traffic,
         }),
         Response::Error { message } => Err(message),
         Response::Ok
@@ -1285,6 +1333,36 @@ mod gaming_contract {
         // side knowing is caught rather than shipped.
         let keys: Vec<&String> = json.as_object().unwrap().keys().collect();
         assert_eq!(keys.len(), 6, "{json}");
+    }
+
+    /// The reconnect hold and the tunnel's counters reach the webview under
+    /// the names the UI reads, and say nothing when there is nothing --
+    /// never a "not held" or a zero the service did not send.
+    #[test]
+    fn the_hold_and_the_counters_reach_the_webview_by_their_agreed_names() {
+        let status = |reconnect_hold, traffic| VpnStatus {
+            connected: true,
+            protocol: Some("WIREGUARD".into()),
+            health: TunnelHealth::Unknown,
+            split_tunnel_active: false,
+            split_tunnel_problem: None,
+            ipv6_blocked: true,
+            tunnel_dns_unprotected: false,
+            split_tunnel_restart_needed: Vec::new(),
+            ipv4_confined: None,
+            confinement_problem: None,
+            reconnect_hold,
+            traffic,
+        };
+        let json = serde_json::to_value(status(
+            Some(neoconnect_ipc::ReconnectHold::Holding { held_secs: 3 }),
+            Some(neoconnect_ipc::TunnelTraffic { rx_bytes: 10, tx_bytes: 2, ..Default::default() }),
+        ))
+        .unwrap();
+        assert_eq!(json["reconnectHold"], serde_json::json!({"state": "holding", "held_secs": 3}));
+        assert_eq!(json["traffic"], serde_json::json!({"rx_bytes": 10, "tx_bytes": 2}));
+        let quiet = serde_json::to_value(status(None, None)).unwrap();
+        assert!(quiet.get("reconnectHold").is_none() && quiet.get("traffic").is_none(), "{quiet}");
     }
 
     /// `unknown` must survive the trip as itself. Folding it into `off`

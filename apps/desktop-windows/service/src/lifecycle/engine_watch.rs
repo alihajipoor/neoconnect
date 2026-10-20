@@ -438,6 +438,10 @@ struct LedgerState {
     /// generation it was noted for. Weak: the ledger must not keep a
     /// confinement alive past its session.
     confinement: Option<(u64, Weak<dyn ConfinementReport>)>,
+    /// The service's reconnect hold, which outlives sessions: for a status
+    /// answered without the owning thread, and for the pipe to let go of
+    /// it without waiting for that thread.
+    reconnect_hold: Option<Arc<crate::engines::reconnect_hold::Hold>>,
 }
 
 /// What a session's IPv4 confinement says of itself -- `engines::
@@ -641,6 +645,30 @@ impl Ledger {
             }
         };
         report.map_or((None, None), |report| (report.confined(), report.problem()))
+    }
+
+    /// Notes the service's reconnect hold, once, as `Engines` is made.
+    pub fn note_reconnect_hold(&self, hold: Arc<crate::engines::reconnect_hold::Hold>) {
+        self.state().reconnect_hold = Some(hold);
+    }
+
+    /// The service's reconnect hold, for the pipe to let go of directly.
+    pub fn reconnect_hold(&self) -> Option<Arc<crate::engines::reconnect_hold::Hold>> {
+        self.state().reconnect_hold.clone()
+    }
+
+    /// What the reconnect hold is doing, for a status answered without the
+    /// owning thread -- after letting go of one that has held too long with
+    /// no session up, as the owning thread's status would. Read outside the
+    /// ledger's lock: the hold has a lock of its own.
+    pub fn reconnect_hold_status(&self) -> Option<neoconnect_ipc::ReconnectHold> {
+        let (hold, live) = {
+            let state = self.state();
+            (state.reconnect_hold.clone(), state.live)
+        };
+        let hold = hold?;
+        hold.expire_if_due(live != 0, crate::engines::reconnect_hold::HOLD_LONGEST);
+        hold.report((live != 0).then_some(live))
     }
 }
 

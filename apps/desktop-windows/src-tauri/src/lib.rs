@@ -144,6 +144,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             vpn::vpn_connect,
             vpn::vpn_disconnect,
+            // "Block the internet while reconnecting" (opt-in): the
+            // reconnect's own teardown, letting go of the hold, and the
+            // setting changing. See `Request::DisconnectForReconnect`.
+            vpn::vpn_disconnect_for_reconnect,
+            vpn::vpn_release_reconnect_hold,
+            vpn::vpn_set_reconnect_hold,
             vpn::vpn_set_split_tunnel,
             vpn::vpn_exit_placements,
             vpn::vpn_probe_split_tunnel,

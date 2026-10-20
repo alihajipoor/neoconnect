@@ -119,8 +119,48 @@ pub enum Request {
         /// is skipped, and an older service ignores the field.
         #[serde(default)]
         known_nodes: Vec<String>,
+        /// The customer's "Block the internet while reconnecting" setting,
+        /// as of this connect. Off unless the customer turned it on: the
+        /// product fails open by default (owner, 2026-10-12).
+        ///
+        /// On, a tunnel of this session that drops on its own -- or is
+        /// taken down by [`Request::DisconnectForReconnect`] -- leaves the
+        /// machine held: nothing but Neoxify, its servers, the LAN, DHCP
+        /// and name lookups reaches the network until a tunnel is back and
+        /// the app lets go ([`Request::ReleaseReconnectHold`]), the customer
+        /// disconnects, or the app goes away. See
+        /// `service::engines::reconnect_hold`. Covers WireGuard, OpenVPN
+        /// and the Xray protocols as full tunnels; not IKEv2, not Custom
+        /// mode, which the app must say.
+        ///
+        /// Additive: an older app sends none and gets what it had.
+        #[serde(default)]
+        block_while_reconnecting: bool,
     },
+    /// Tear down whatever is up, and let go of the reconnect hold.
+    ///
+    /// The customer's own Disconnect, a sign-out, the device limit's
+    /// teardown: every one of them lets go of a hold, so a machine is
+    /// never left held by a teardown that was not a reconnect's.
     Disconnect,
+    /// Tear down whatever is up, as `Disconnect` does, for a reconnect:
+    /// the auto-reconnect pass clearing the decks before it dials, or the
+    /// app taking down a tunnel it found not carrying. With the setting on
+    /// and a covered tunnel live, the gap is held from before the engine
+    /// stops; a hold already in place stays. Otherwise exactly
+    /// `Disconnect`, but for the hold.
+    DisconnectForReconnect,
+    /// Lets go of the reconnect hold, if one is held: the app has proved a
+    /// tunnel (the same proof that lets it say "protected"), or the
+    /// reconnect gave up. The live session stays armed. Answered at once,
+    /// without waiting for whatever the service is doing.
+    ReleaseReconnectHold,
+    /// The setting changed while the app is running. Off lets go of a hold
+    /// at once and forgets the live session's plan for one; on arms the
+    /// live session, if it is one the hold covers.
+    SetReconnectHold {
+        enabled: bool,
+    },
     Status,
     /// Replaces the Custom-mode selection: which applications, if any,
     /// are the only ones whose traffic goes through the tunnel.
@@ -1274,6 +1314,18 @@ pub enum Response {
         /// support and diagnostics; the customer is shown the app's words.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         confinement_problem: Option<String>,
+        /// The opt-in reconnect hold ("Block the internet while
+        /// reconnecting"): armed, holding, or not holding when it should
+        /// be and why. `None` when the setting is off or nothing is armed,
+        /// or from a service too old to say -- the app shows nothing then.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reconnect_hold: Option<ReconnectHold>,
+        /// What the tunnel's adapter has carried this session, read from
+        /// Windows' own interface counters. `None` whenever they were not
+        /// read -- no session, an adapter that could not be found, a busy
+        /// service -- and never a made-up zero.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        traffic: Option<TunnelTraffic>,
     },
     /// Where each selected application's traffic is leaving from.
     ///
@@ -1371,6 +1423,71 @@ pub enum TunnelHealth {
     /// did.
     #[default]
     Unknown,
+}
+
+/// The reconnect hold, as the status poll says it: what the customer's
+/// "Block the internet while reconnecting" is doing right now.
+///
+/// Facts, not sentences: the app words each in the customer's language.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum ReconnectHold {
+    /// The live tunnel would be held if it dropped. Nothing is blocked.
+    Armed,
+    /// Holding: nothing but Neoxify itself, its servers, the LAN, DHCP and
+    /// name lookups reaches the network outside a Neoxify tunnel, for
+    /// `held_secs` so far. A tunnel brought up meanwhile carries.
+    Holding { held_secs: u64 },
+    /// It should be holding and is not, and why. The internet is not
+    /// blocked: the service fails open rather than strand the machine or
+    /// stop a tunnel from carrying.
+    NotHeld {
+        problem: ReconnectHoldProblem,
+        /// English, for support; the customer is shown the app's words.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+}
+
+/// Why the reconnect hold is not holding when it should be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReconnectHoldProblem {
+    /// The Windows Filtering Platform refused its filters.
+    FiltersRefused,
+    /// A tunnel came up that the hold could not name to the filtering
+    /// platform, so it was let go of rather than block that tunnel.
+    TunnelNotPermitted,
+    /// It held for as long as a reconnect can take with no tunnel coming
+    /// back, and was let go of so the machine is not left offline.
+    TimedOut,
+    /// The next connection is one it does not cover -- IKEv2, or Custom
+    /// mode -- so it was let go of before that one dialled.
+    NotCovered,
+    /// A reason this app does not know yet, from a newer service.
+    #[serde(other)]
+    Other,
+}
+
+/// What a tunnel's adapter has carried this session, from Windows' own
+/// interface counters (`GetIfEntry2`): the bytes that went into and came
+/// out of the tunnel, not an estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TunnelTraffic {
+    /// Received through the tunnel since the session began (download).
+    pub rx_bytes: u64,
+    /// Sent into the tunnel since the session began (upload).
+    pub tx_bytes: u64,
+    /// Received per second, over the `window_ms` before this reading.
+    /// `None` until two readings far enough apart exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_per_sec: Option<u64>,
+    /// Sent per second, over the same window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_per_sec: Option<u64>,
+    /// How long the rates were measured over, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<u64>,
 }
 
 /// The credentials for one connection, in exactly the shape the backend
@@ -2462,6 +2579,8 @@ mod tests {
             tunnel_dns_unprotected: false,
             ipv4_confined: None,
             confinement_problem: None,
+            reconnect_hold: None,
+            traffic: None,
         };
         let text = serde_json::to_string(&unsaid).unwrap();
         assert!(!text.contains("ipv4_confined") && !text.contains("confinement_problem"), "{text}");
@@ -2924,5 +3043,114 @@ mod app_exit_tests {
         let unknown = round(ExitPlacement::Unknown { preferred: "turkey-1".into() });
         assert!(unknown.contains("unknown"));
         assert_ne!(fallback, unknown, "unknown must not be spelled as a mismatch");
+    }
+}
+
+#[cfg(test)]
+mod reconnect_hold_wire_tests {
+    use super::*;
+
+    /// The hold is opt-in on the wire too: a connect from an app that
+    /// predates it carries no setting and asks for no hold.
+    #[test]
+    fn a_connect_without_the_setting_asks_for_no_hold() {
+        let old = r#"{"type":"connect","profile":{"protocol":"IKEV2","server":"node.example.com","username":"u","password":"p"}}"#;
+        match serde_json::from_str::<Request>(old).expect("an older app's connect parses") {
+            Request::Connect { block_while_reconnecting, exits, known_nodes, .. } => {
+                assert!(!block_while_reconnecting, "a hold nobody asked for");
+                assert!(exits.is_empty() && known_nodes.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        let new = r#"{"type":"connect","profile":{"protocol":"IKEV2","server":"node.example.com","username":"u","password":"p"},"block_while_reconnecting":true}"#;
+        assert!(matches!(
+            serde_json::from_str::<Request>(new).expect("parses"),
+            Request::Connect { block_while_reconnecting: true, .. }
+        ));
+    }
+
+    /// The three requests the hold adds, by the names the app sends.
+    #[test]
+    fn the_hold_requests_are_named_on_the_wire() {
+        let name = |request: &Request| serde_json::to_value(request).unwrap()["type"].as_str().unwrap().to_string();
+        assert_eq!(name(&Request::DisconnectForReconnect), "disconnectForReconnect");
+        assert_eq!(name(&Request::ReleaseReconnectHold), "releaseReconnectHold");
+        assert_eq!(name(&Request::SetReconnectHold { enabled: true }), "setReconnectHold");
+        assert_eq!(name(&Request::Disconnect), "disconnect", "the plain one is unchanged");
+        assert!(matches!(
+            serde_json::from_str::<Request>(r#"{"type":"setReconnectHold","enabled":false}"#).unwrap(),
+            Request::SetReconnectHold { enabled: false }
+        ));
+    }
+
+    /// A status from a service that predates the hold and the counters
+    /// says nothing about either -- never "not holding", never zero bytes.
+    #[test]
+    fn an_older_status_says_nothing_about_the_hold_or_the_traffic() {
+        let old = r#"{"status":"state","connected":true,"protocol":"WIREGUARD"}"#;
+        match serde_json::from_str::<Response>(old).expect("an older status parses") {
+            Response::State { reconnect_hold, traffic, .. } => {
+                assert_eq!(reconnect_hold, None);
+                assert_eq!(traffic, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        let quiet = Response::State {
+            connected: false,
+            protocol: None,
+            health: TunnelHealth::Down,
+            split_tunnel_active: false,
+            split_tunnel_problem: None,
+            split_tunnel_restart_needed: Vec::new(),
+            ipv6_blocked: false,
+            tunnel_dns_unprotected: false,
+            ipv4_confined: None,
+            confinement_problem: None,
+            reconnect_hold: None,
+            traffic: None,
+        };
+        let json = serde_json::to_value(&quiet).unwrap();
+        assert!(json.get("reconnect_hold").is_none() && json.get("traffic").is_none(), "{json}");
+    }
+
+    /// The hold's states, as the app branches on them.
+    #[test]
+    fn the_hold_keeps_its_states_apart_on_the_wire() {
+        let round = |hold: ReconnectHold| {
+            let json = serde_json::to_value(&hold).unwrap();
+            let back: ReconnectHold = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(back, hold);
+            json
+        };
+        assert_eq!(round(ReconnectHold::Armed), serde_json::json!({"state": "armed"}));
+        assert_eq!(round(ReconnectHold::Holding { held_secs: 12 }), serde_json::json!({"state": "holding", "held_secs": 12}));
+        assert_eq!(
+            round(ReconnectHold::NotHeld { problem: ReconnectHoldProblem::TunnelNotPermitted, detail: None }),
+            serde_json::json!({"state": "notHeld", "problem": "tunnelNotPermitted"})
+        );
+        for (problem, word) in [
+            (ReconnectHoldProblem::FiltersRefused, "filtersRefused"),
+            (ReconnectHoldProblem::TimedOut, "timedOut"),
+            (ReconnectHoldProblem::NotCovered, "notCovered"),
+        ] {
+            assert_eq!(serde_json::to_value(problem).unwrap(), serde_json::json!(word));
+        }
+        // A reason a newer service adds reaches an older app as "other",
+        // and the rest of the status still reads.
+        let newer: ReconnectHold = serde_json::from_str(r#"{"state":"notHeld","problem":"somethingNew"}"#).unwrap();
+        assert_eq!(newer, ReconnectHold::NotHeld { problem: ReconnectHoldProblem::Other, detail: None });
+    }
+
+    /// The counters, by the names the app reads; rates absent until
+    /// measured.
+    #[test]
+    fn traffic_says_its_rates_only_once_measured() {
+        let first = TunnelTraffic { rx_bytes: 10, tx_bytes: 4, ..TunnelTraffic::default() };
+        assert_eq!(serde_json::to_value(first).unwrap(), serde_json::json!({"rx_bytes": 10, "tx_bytes": 4}));
+        let later = TunnelTraffic { rx_bytes: 2_010, tx_bytes: 504, rx_per_sec: Some(2_000), tx_per_sec: Some(500), window_ms: Some(1_000) };
+        let json = serde_json::to_value(later).unwrap();
+        assert_eq!(json["rx_per_sec"], 2_000);
+        assert_eq!(json["window_ms"], 1_000);
+        assert_eq!(serde_json::from_value::<TunnelTraffic>(json).unwrap(), later);
     }
 }
