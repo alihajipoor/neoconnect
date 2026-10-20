@@ -49,6 +49,17 @@ gates on every engine but failed four:
   too, and the screen and the notifications read one source
   (`gapTraffic`): before the service has said, they say neither.
 
+A review of those fixes found more, also fixed and also not yet carried
+a packet:
+
+- **The hold went at the reconnect's first word.** The app says the
+  setting again as its reconnect begins, which arms the live session --
+  and after the adapter-gone check held a drop, the live session was the
+  dropped one, its adapter gone. Arming it found nothing to name and let go
+  of the hold, so the reconnect ran fail-open under "Stopped blocking the
+  internet so the new connection could carry traffic". The session whose
+  drop is held is now never armed again.
+
 None of these fixes has carried a packet. Items 1, 2 and 5 below are to
 be run again for every engine, with the additions marked **(new)**.
 
@@ -84,6 +95,14 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    showing the "tunnel adapter is gone" path taken in some: no leak in
    any. WireGuard killed hard (`taskkill /f` on the tunnel service's
    wireguard.exe), not only stopped: no leak from the first moment.
+   **(new)** The tunnel adapter taken away under a live engine:
+   `Disable-NetAdapter -Name neoconnect0 -Confirm:$false` with xray.exe
+   running, then let the app reconnect on its own. No leak from the
+   disable to the next tunnel; `reconnect-hold.log` shows the hold put in
+   by "the tunnel adapter is gone" and nothing let go of before the next
+   tunnel is up (no "could not be named", no `tunnelNotPermitted` on
+   screen); the status says the tunnel ended within a second of the
+   disable, not "Connected".
 1b. **(new) Standing under WireGuard.** With the setting on and a
    WireGuard tunnel up: `netsh wfp show filters` shows the hold's filters
    in force before any drop, the tunnel carries as before (exit IP = node,

@@ -747,6 +747,13 @@ impl Hold {
         if !state.wanted || generation == 0 {
             return false;
         }
+        // The session whose drop this holds for, armed again -- the setting
+        // said again as the reconnect begins, while that session is still in
+        // the slot being taken down: its tunnel is gone, and there is nothing
+        // to move the hold onto. Left as it is, armed as it was.
+        if state.holding() && state.engaged_by == Some(generation) {
+            return true;
+        }
         // The same session armed again: never narrower than before.
         let plan = match &state.armed {
             Some((armed, before, _)) if *armed == generation => plan.widened_by(before),
@@ -836,6 +843,16 @@ impl Hold {
     pub fn armed_for(&self, generation: u64) -> bool {
         let state = self.lock();
         state.wanted && state.armed.as_ref().is_some_and(|(armed, _, _)| *armed == generation)
+    }
+
+    /// Whether it is holding for the drop of `generation`: the session whose
+    /// end began the hold, or the last one it went on holding through. That
+    /// session, still in the slot while it is taken down -- its engine
+    /// running on with its tunnel adapter gone, or its death not yet torn
+    /// down -- is no tunnel to arm or to let go of the hold for.
+    pub fn held_for(&self, generation: u64) -> bool {
+        let state = self.lock();
+        state.holding() && state.engaged_by == Some(generation)
     }
 
     /// Whether filters stand in force for `generation` while it is up.
@@ -2172,6 +2189,32 @@ mod tests {
         hold.arm(8, Plan { nodes: Vec::new(), ..plan() }, true);
         assert!(hold.held_plan().is_some_and(|p| p.nodes.is_empty()));
         assert!(hold.standing_for(8));
+    }
+
+    /// The session whose drop it holds, armed again before it is taken down
+    /// -- the setting said again as the reconnect begins, with that session
+    /// still in the slot -- leaves the hold as it is: nothing moved onto a
+    /// tunnel that is gone, nothing let go of. `held_for` names that session,
+    /// and no other.
+    #[test]
+    fn arming_the_dropped_session_again_leaves_the_hold_as_it_is() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), false);
+        assert!(!hold.held_for(7), "armed is not held for");
+        hold.engage(7, "the tunnel adapter is gone");
+        assert!(hold.held_for(7));
+        assert!(!hold.held_for(8));
+        assert!(hold.arm(7, Plan { tunnels: Vec::new(), ..plan() }, true));
+        assert!(hold.holding(), "the hold was let go of");
+        assert_eq!(fake.installs.lock().unwrap().clone(), vec![plan()], "the hold was moved onto a session whose tunnel is gone");
+        assert!(fake.closed.lock().unwrap().is_empty());
+        assert!(matches!(hold.report(Some(7)), Some(Report::Holding { landed: false, .. })));
+        // A tunnel that came up after the drop is moved onto, as ever.
+        let next = Plan { tunnels: vec![TUNNEL, 0x0035_0000_0300_0000], ..plan() };
+        assert!(hold.arm(8, next.clone(), false));
+        assert_eq!(hold.held_plan(), Some(next));
+        assert!(!hold.held_for(8), "the tunnel that came up is not the drop held for");
     }
 
     /// The hold's filters against the real filtering engine, inside a

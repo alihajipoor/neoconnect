@@ -831,8 +831,21 @@ impl Engines {
 
     /// The setting turned on while a tunnel is up: the live session is
     /// armed, if the hold covers it.
+    ///
+    /// Also how the app says, as its reconnect begins, that one follows a
+    /// drop -- and then the live session may be the dropped one, still in
+    /// the slot: an Xray engine running on with its tunnel adapter gone
+    /// (held by `let_go_if_the_tunnel_adapter_is_gone`), or a WireGuard
+    /// tunnel whose death phase one has not taken down yet. That session is
+    /// left as it is. Arming it found no adapter to name and let go of the
+    /// hold -- before the reconnect's first dial, with the confinement
+    /// already gone, so the whole reconnect ran fail-open under a screen
+    /// that said a new connection had needed it.
     pub fn arm_live_session_for_reconnect_hold(&mut self) {
-        let Some(profile) = self.active.peek().map(|s| s.profile.clone()) else { return };
+        let Some((generation, profile)) = self.active.peek().map(|s| (s.generation, s.profile.clone())) else { return };
+        if self.reconnect_hold.held_for(generation) {
+            return;
+        }
         let passive = self.split_tunnel.wants_passive_tunnel();
         self.arm_reconnect_hold(&profile, passive, &[]);
     }
@@ -915,6 +928,12 @@ impl Engines {
             return;
         }
         let Some(generation) = self.active.peek().map(|s| s.generation) else { return };
+        // The session whose drop the hold is for is no tunnel to arm, and its
+        // adapter, gone, is no reason to let go: only a tunnel that came up
+        // after the drop is (`arm_live_session_for_reconnect_hold`).
+        if hold.held_for(generation) {
+            return;
+        }
         let mut servers = servers.to_vec();
         servers.extend(server_literal(profile));
         let plan = hold
@@ -7133,6 +7152,46 @@ mod helper_tests {
             matches!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Holding { landed: false, .. })),
             "the dropped session was said to be a tunnel landed"
         );
+        engines.release_reconnect_hold("the customer disconnected", true);
+        assert_eq!(hold.closed(), vec![7000]);
+        end_test_session(&mut engines);
+    }
+
+    /// The app's reconnect, as it begins, says the setting again
+    /// (`SetReconnectHold`), which arms the live session -- and with the
+    /// tunnel adapter gone under a running xray.exe, the live session is the
+    /// one whose drop the adapter check held. Arming it found no adapter to
+    /// name, let go of the hold before the first dial and said a new
+    /// connection had needed it: the confinement already gone, the whole
+    /// reconnect ran fail-open. The dropped session is left as it is, and
+    /// the app's teardown for the reconnect finds it still held.
+    #[test]
+    fn the_setting_said_again_over_the_dropped_session_keeps_the_hold() {
+        let (mut engines, fake, hold, g) = armed_session();
+        fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        *hold.tunnel.lock().unwrap() = None;
+        *hold.tunnels.lock().unwrap() = Some(Vec::new());
+        let _ = engines.status();
+        assert!(engines.reconnect_hold.held_for(g), "the adapter-gone check did not hold the drop");
+        let held = engines.reconnect_hold.held_plan();
+        assert!(held.is_some());
+
+        engines.arm_live_session_for_reconnect_hold();
+        assert!(engines.reconnect_hold.holding(), "the hold was let go of before the reconnect's first dial");
+        assert_eq!(engines.reconnect_hold.held_plan(), held, "the plan moved");
+        assert_eq!(hold.installs().len(), 1);
+        assert!(hold.closed().is_empty(), "the hold was closed");
+        assert!(
+            matches!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Holding { landed: false, .. })),
+            "not holding, or a tunnel said to have landed: {:?}",
+            engines.reconnect_hold_status()
+        );
+
+        // The app's teardown for the reconnect: still held, and still the
+        // dropped session's.
+        assert!(engines.hold_for_reconnect());
+        assert!(engines.reconnect_hold.held_for(g));
+        assert_eq!(hold.installs().len(), 1);
         engines.release_reconnect_hold("the customer disconnected", true);
         assert_eq!(hold.closed(), vec![7000]);
         end_test_session(&mut engines);
