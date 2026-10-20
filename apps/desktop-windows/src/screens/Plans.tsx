@@ -67,6 +67,10 @@ export function Plans({
   const { active: viaRelay, status: relayStatus } = useRelayMode();
   const [plans, setPlans] = useState<SubscriptionPlan[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** A payment that could not be started, said in the card whose button was
+   * pressed -- beside it, rather than above the page, where it pushed every
+   * card and the button under the pointer down by its height. */
+  const [payError, setPayError] = useState<{ planId: string; text: string } | null>(null);
   // The backend keeps the plan list from an account whose address is not
   // confirmed -- a relay sign-up's (R3.3) -- with 403 VERIFY_EMAIL. Not a
   // fault: such an account takes an Ultimate voucher, above, and nothing
@@ -119,18 +123,19 @@ export function Plans({
 
   async function buy(plan: SubscriptionPlan, provider: PaymentProvider) {
     setError(null);
+    setPayError(null);
     setStage({ name: "starting" });
 
     const created = await createSubscription(plan.id);
     if (!created.ok) {
-      setError(failureText(created, t));
+      setPayError({ planId: plan.id, text: failureText(created, t) });
       setStage({ name: "choosing" });
       return;
     }
 
     const payment = await startPayment(created.data.id, provider);
     if (!payment.ok) {
-      setError(failureText(payment, t));
+      setPayError({ planId: plan.id, text: failureText(payment, t) });
       setStage({ name: "choosing" });
       return;
     }
@@ -360,6 +365,12 @@ export function Plans({
                   {t("plans.card")}
                 </PillButton>
               </div>
+              {/* Under the buttons it answers: nothing above it moves. */}
+              {payError?.planId === plan.id ? (
+                <Message tone="danger" data-pay-error>
+                  {payError.text}
+                </Message>
+              ) : null}
             </Card>
           ))
         )}

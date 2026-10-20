@@ -182,4 +182,34 @@ describe("loading, and what arrives after it", () => {
       expect(read(rel).match(/<Presence show=/g)?.length, rel).toBe(3);
     }
   });
+
+  it("the room a leaving banner was given goes back once it is gone, not while it fades", () => {
+    // data-banner (the sentence's reserve, the switch, the location card)
+    // and the map's alert (the stage, the compact window's band) are held
+    // through the banner's exit, on the same timer Presence keeps it by.
+    expect(read("./motion.ts")).toMatch(/export function useHeldThroughExit\(on: boolean, ms: number = EXIT_MS\): boolean \{\s*return usePresence\(on, ms\)\.mounted;/);
+    const shell = read("../components/shell/AppShell.tsx");
+    expect(shell).toContain("const bannerHeld = useHeldThroughExit(Boolean(props.banner));");
+    expect(shell).toContain('data-banner={bannerHeld ? "1" : undefined}');
+    const map = read("../components/main/WorldMap.tsx");
+    expect(map).toContain("const alert = useHeldThroughExit(alertNow);");
+    expect(map).toContain('data-alert={host === "stage" && alert ? "1" : undefined}');
+  });
+
+  it("a payment that could not start is said beside the button pressed, so nothing above it moves", () => {
+    const plans = read("../screens/Plans.tsx");
+    expect(plans).toContain("setPayError({ planId: plan.id, text: failureText(created, t) });");
+    expect(plans).toContain("setPayError({ planId: plan.id, text: failureText(payment, t) });");
+    expect(plans).toContain("{payError?.planId === plan.id ? (");
+    expect(plans).not.toContain("setError(failureText(created, t));");
+  });
+
+  it("an opened disclosure is brought into view, clear of the column's fade", () => {
+    expect(read("../components/ui.tsx")).toContain('panel.current.scrollIntoView?.({ block: "nearest", behavior: motionReduced() ? "auto" : "smooth" });');
+    expect(read("../pearl.css")).toMatch(/\.nx-dpanel \{\s*scroll-margin-block: 12px 40px;/);
+  });
+
+  it("a sheet is dragged from its handle and its head, where no pan may start", () => {
+    expect(read("../pearl.css")).toMatch(/\.nx-sheet \.handle,\s*\.nx-sheet \.nx-sheet-head \{\s*touch-action: none;/);
+  });
 });
