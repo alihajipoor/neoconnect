@@ -262,42 +262,19 @@ pub(super) fn request_stop_without_waiting() -> Result<(), String> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|err| format!("could not reach the service manager: {err}"))?;
 
-    let service = match manager.open_service(TUNNEL_SERVICE_NAME, ServiceAccess::STOP | ServiceAccess::QUERY_STATUS) {
+    let service = match manager.open_service(TUNNEL_SERVICE_NAME, ServiceAccess::STOP) {
         Ok(service) => service,
         // Not installed. Nothing to stop, which is success.
         Err(_) => return Ok(()),
     };
 
+    // The result is deliberately not inspected beyond reporting it. A
+    // stop sent to a service that is already stopping returns an error
+    // saying so, and that is not something the customer's disconnect
+    // should be held up by or told about.
     match service.stop() {
         Ok(_) => Ok(()),
-        // Refused: asked what it is doing, and one already stopping is the
-        // stop under way (`stop_refusal`).
-        Err(err) => {
-            let view = service.query_status().map_or(ScmView::Unreadable, |status| view_of_status(&status));
-            stop_refusal(view, &err.to_string())
-        }
-    }
-}
-
-/// A stop the tunnel service refused, read against what the service is
-/// doing. One already stopping -- `ERROR_SERVICE_CANNOT_ACCEPT_CTRL` at
-/// `STOP_PENDING` -- or stopped, or gone, is a stop under way or done, not
-/// a failure: the thorough pass behind the hard stop waits for it to finish
-/// (`clear_tunnel_service`, by way of `remove_tunnel_if_present`), and so
-/// does the next connect's.
-///
-/// Measured on the VM (2026-10-20): a WireGuard tunnel service stopped from
-/// outside took 4.4 s to stop, the app's reconnect began inside that, and
-/// its teardown came back "hard stop ... failed: request tunnel service
-/// stop" over a service that was doing exactly that. Anything else -- a
-/// service still starting, which cannot take a stop, or one whose state
-/// could not be read -- stays the error it is.
-pub(super) fn stop_refusal(view: ScmView, refusal: &str) -> Result<(), String> {
-    match view {
-        ScmView::Stopping | ScmView::Stopped(_) | ScmView::NotRegistered => Ok(()),
-        ScmView::Running(_) | ScmView::Pending | ScmView::Unreadable => {
-            Err(format!("the tunnel service did not accept a stop: {refusal}"))
-        }
+        Err(err) => Err(format!("the tunnel service did not accept a stop: {err}")),
     }
 }
 
@@ -716,29 +693,10 @@ mod tests {
         assert!(!counts_as_running(&ScmView::Stopped(Some(1))));
         assert!(counts_as_running(&ScmView::Running(Some(4242))));
         assert!(counts_as_running(&ScmView::Running(None)));
-        // Starting, or not readable: not proof of down, so not reported as
-        // down.
+        // Still stopping, or not readable: not proof of down, so not
+        // reported as down.
         assert!(counts_as_running(&ScmView::Pending));
         assert!(counts_as_running(&ScmView::Unreadable));
-        // Being stopped is: it goes one way, and the tunnel is ending.
-        assert!(!counts_as_running(&ScmView::Stopping), "a tunnel service being stopped read as a running tunnel");
-    }
-
-    /// A stop the tunnel service refused because it is already stopping is
-    /// the stop under way, not a failed teardown: on the VM a slow stop from
-    /// outside (4.4 s) made the reconnect's own teardown come back failed
-    /// over a service doing exactly what was asked. One still starting, or
-    /// whose state could not be read, stays a refusal.
-    #[test]
-    fn a_stop_refused_by_a_service_already_stopping_is_the_stop_under_way() {
-        const REFUSED: &str = "the service cannot accept control messages at this time (os error 1061)";
-        for view in [ScmView::Stopping, ScmView::Stopped(None), ScmView::Stopped(Some(1066)), ScmView::NotRegistered] {
-            assert_eq!(stop_refusal(view, REFUSED), Ok(()), "{view:?}");
-        }
-        for view in [ScmView::Pending, ScmView::Running(Some(4242)), ScmView::Unreadable] {
-            let refused = stop_refusal(view, REFUSED).expect_err("a refusal taken for a stop");
-            assert!(refused.contains(REFUSED), "{view:?}: {refused}");
-        }
     }
 
     /// On a machine without our tunnel service, both questions say no --
@@ -843,29 +801,6 @@ mod tests {
         assert!(matches!(liveness.look(), Look::Again), "a starting service is not an ending");
     }
 
-    /// A tunnel service being stopped from outside is an ending from its
-    /// first look, not from its process's exit seconds later: the watch
-    /// reports it while the process still runs, so an armed session's drop
-    /// is held from there.
-    #[test]
-    fn a_tunnel_service_being_stopped_is_gone_while_its_process_still_runs() {
-        use crate::lifecycle::engine_watch::{Liveness, Look};
-        let mut process = std::process::Command::new(r"C:\Windows\System32\ping.exe")
-            .args(["-n", "30", "127.0.0.1"])
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("spawning ping");
-        let pid = process.id();
-        let view = std::sync::Arc::new(std::sync::Mutex::new(ScmView::Running(Some(pid))));
-        let script = std::sync::Arc::clone(&view);
-        let mut liveness = ServiceLiveness::with_query(move || *script.lock().unwrap());
-        assert!(matches!(liveness.look(), Look::WaitOn(_)), "a running tunnel service is not waited on");
-        *view.lock().unwrap() = ScmView::Stopping;
-        assert!(matches!(liveness.look(), Look::Gone(None)), "a service being stopped read as alive while its process ran");
-        let _ = process.kill();
-        let _ = process.wait();
-    }
-
     /// Only "no such service" is an absent service. Every other reason
     /// the manager would not open it is a question that went unanswered,
     /// and used to be read as a definite ending -- the engine watch
@@ -954,24 +889,15 @@ pub fn tunnel_is_running() -> bool {
 
 /// The rule, apart from the service manager so it can be tested.
 ///
-/// Anything short of stopping counts, deliberately including the other
-/// pending states and a status that could not be read: "I could not ask"
-/// is not "it is down", and a service still starting may be about to
-/// carry -- answering down there would be a tunnel state nothing
-/// verified, in the direction that tells a customer with a live tunnel
-/// that they have none.
-///
-/// `STOP_PENDING` does not count. It is a state the service manager
-/// reports, not a question unanswered, and it goes one way only: the
-/// tunnel is being taken down -- its adapter first -- and does not come
-/// back from it. Counted as running, a tunnel service stopped from
-/// outside read as up for the whole of a slow stop (4.4 s on the VM,
-/// 2026-10-20): the screen said protected over a tunnel that carried
-/// nothing, and the reconnect that followed began over a session the
-/// service still thought was live.
+/// Anything short of `Stopped` counts, deliberately including the
+/// pending states and a status that could not be read. A tunnel that is
+/// still stopping may still be carrying traffic for a moment, and "I
+/// could not ask" is not "it is down" -- answering down there would be a
+/// tunnel state nothing verified, in the direction that tells a customer
+/// with a live tunnel that they have none.
 pub(super) fn counts_as_running(view: &ScmView) -> bool {
     match view {
-        ScmView::NotRegistered | ScmView::Stopped(_) | ScmView::Stopping => false,
+        ScmView::NotRegistered | ScmView::Stopped(_) => false,
         ScmView::Running(_) | ScmView::Pending | ScmView::Unreadable => true,
     }
 }
@@ -986,16 +912,14 @@ pub(super) enum ScmView {
     Unreadable,
     /// Stopped, with the service's own exit code when it set one.
     Stopped(Option<i64>),
-    /// `STOP_PENDING`: being stopped. The tunnel is ending
-    /// (`counts_as_running`).
-    Stopping,
-    /// Starting, pausing or continuing.
+    /// Starting, stopping, pausing or continuing.
     Pending,
     /// Running, with its process id when the manager gave one.
     Running(Option<u32>),
 }
 
 pub(super) fn scm_view() -> ScmView {
+    use windows_service::service::ServiceExitCode;
     let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else {
         // Nothing can be asked. Treated as unreadable rather than as
         // absent, for the reason `counts_as_running` gives.
@@ -1006,22 +930,17 @@ pub(super) fn scm_view() -> ScmView {
         Err(e) => return view_of_open_error(&e),
     };
     match service.query_status() {
-        Ok(status) => view_of_status(&status),
+        Ok(status) => match status.current_state {
+            ServiceState::Stopped => ScmView::Stopped(match status.exit_code {
+                ServiceExitCode::Win32(0) => None,
+                ServiceExitCode::Win32(code) | ServiceExitCode::ServiceSpecific(code) => {
+                    Some(i64::from(code))
+                }
+            }),
+            ServiceState::Running => ScmView::Running(status.process_id),
+            _ => ScmView::Pending,
+        },
         Err(_) => ScmView::Unreadable,
-    }
-}
-
-/// A status the service manager gave, as liveness reads it.
-fn view_of_status(status: &windows_service::service::ServiceStatus) -> ScmView {
-    use windows_service::service::ServiceExitCode;
-    match status.current_state {
-        ServiceState::Stopped => ScmView::Stopped(match status.exit_code {
-            ServiceExitCode::Win32(0) => None,
-            ServiceExitCode::Win32(code) | ServiceExitCode::ServiceSpecific(code) => Some(i64::from(code)),
-        }),
-        ServiceState::StopPending => ScmView::Stopping,
-        ServiceState::Running => ScmView::Running(status.process_id),
-        _ => ScmView::Pending,
     }
 }
 
@@ -1081,11 +1000,6 @@ impl<Q: FnMut() -> ScmView + Send + 'static> crate::lifecycle::engine_watch::Liv
         match (self.query)() {
             ScmView::NotRegistered => Look::Gone(None),
             ScmView::Stopped(code) => Look::Gone(code),
-            // Being stopped: the tunnel is ending now, its process still
-            // running for as long as the stop takes -- seconds, on the VM.
-            // Reported at once, so the drop is held from here
-            // (`Engines::report_to`) rather than when the process exits.
-            ScmView::Stopping => Look::Gone(None),
             ScmView::Running(Some(pid)) => match &self.held {
                 Some((held, handle)) if *held == pid => {
                     if held_alive {
