@@ -1574,7 +1574,12 @@ async fn dispatch(
                 }
             }
             if enabled {
-                let _ = engines.run_detached(|engines: &mut Engines, _| engines.arm_live_session_for_reconnect_hold());
+                // The job's own token, so a Disconnect reaches the lookup of
+                // a WireGuard server's name this may make.
+                let _ = engines.run_detached(|engines: &mut Engines, token| {
+                    crate::engines::adopt_token(token);
+                    engines.arm_live_session_for_reconnect_hold();
+                });
             }
             Response::Ok
         }

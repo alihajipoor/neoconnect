@@ -353,6 +353,11 @@ struct Session {
     /// (`Engines::let_go_if_the_tunnel_adapter_is_gone`): the tunnel carries
     /// nothing, and the status says it ended.
     adapter_gone: bool,
+    /// The address a WireGuard session's engine dials, as this service
+    /// named it for the reconnect hold (`Engines::name_the_hold_server`):
+    /// what filters standing in force under its tunnel must permit. `None`
+    /// for every other engine, and when it could not be named.
+    server: Option<Ipv4Addr>,
 }
 
 impl Session {
@@ -373,6 +378,7 @@ impl Session {
             traffic: traffic::SessionTraffic::default(),
             began: Instant::now(),
             adapter_gone: false,
+            server: None,
         }
     }
 }
@@ -852,7 +858,32 @@ impl Engines {
             return;
         }
         let passive = self.split_tunnel.wants_passive_tunnel();
+        // A WireGuard session connected with the setting off has no server
+        // named for the hold yet. The job's token, adopted by the pipe, so
+        // a Disconnect reaches a lookup in flight.
+        let limits = crate::lifecycle::budget::Limits::new(current_token(), RESOLVE_RETRY_FOR);
+        self.name_the_hold_server(&profile, passive, &limits);
         self.arm_reconnect_hold(&profile, passive, &[]);
+    }
+
+    /// Names the server a WireGuard session's engine dials, on the session,
+    /// for the reconnect hold (`Session::server`): a literal at once, a
+    /// name resolved as OpenVPN's is (`hold_server`). Only with the setting
+    /// on and a tunnel the hold covers -- nothing else reads it -- and only
+    /// for WireGuard, whose kernel socket filters standing in force under
+    /// its tunnel let through by that address alone. The other engines'
+    /// programs are let through anywhere.
+    fn name_the_hold_server(&mut self, profile: &ConnectProfile, passive: bool, limits: &crate::lifecycle::budget::Limits) {
+        if !matches!(profile, ConnectProfile::Wireguard(_))
+            || !self.reconnect_hold.wanted()
+            || !reconnect_hold::covers(profile, passive)
+        {
+            return;
+        }
+        let named = hold_server(profile, limits);
+        if let Some(session) = self.active.peek_mut() {
+            session.server = named;
+        }
     }
 
     /// A plan for the hold: our tunnel adapters as they are now, `tunnel`
@@ -879,7 +910,14 @@ impl Engines {
     /// plan first. A connect never begins a hold: only a drop and the app's
     /// own `DisconnectForReconnect` do, so a press of Connect, or a server
     /// chosen while connected, holds nothing the customer did not ask for.
-    fn hold_through_connect(&mut self, profile: &ConnectProfile, known_nodes: &[String]) {
+    ///
+    /// WireGuard's server goes in by address, a name resolved first
+    /// (`hold_server`): its kernel socket is let through by nothing else, so
+    /// a server named by a name the plan never held could not be dialled
+    /// under the hold. One that cannot be named as an IPv4 address lets go
+    /// of the hold before it dials, said, as a connect the hold does not
+    /// cover does: a protocol is never stopped for the hold's sake.
+    fn hold_through_connect(&mut self, profile: &ConnectProfile, known_nodes: &[String], limits: &crate::lifecycle::budget::Limits) {
         let named: Vec<Ipv4Addr> =
             known_nodes.iter().take(MAX_KNOWN_NODES).filter_map(|host| host.trim().parse().ok()).collect();
         if !named.is_empty() {
@@ -907,9 +945,22 @@ impl Engines {
             return;
         }
         if hold.holding() {
-            let server: Vec<Ipv4Addr> = server_literal(profile).into_iter().collect();
+            let wireguard = matches!(profile, ConnectProfile::Wireguard(_));
+            let server = hold_server(profile, limits);
+            if wireguard && server.is_none() {
+                hold.release(reconnect_hold::Release::Failed(
+                    neoconnect_ipc::ReconnectHoldProblem::TunnelNotPermitted,
+                    "the WireGuard server could not be named as an IPv4 address to put in the hold's plan, so it was let go of before that connection dialled"
+                        .to_string(),
+                ));
+                hold.disarm();
+                return;
+            }
+            let server: Vec<Ipv4Addr> = server.into_iter().collect();
             if let Some(plan) = self.reconnect_hold_plan(None, &server) {
-                hold.replan(plan, false);
+                // Needed for WireGuard: a plan without its server would
+                // refuse the dial, so one that will not go in lets go.
+                hold.replan(plan, wireguard);
             }
         } else {
             // Nothing held: a connect of the customer's own, or the first of
@@ -932,15 +983,18 @@ impl Engines {
         if !hold.wanted() || !reconnect_hold::covers(profile, passive) {
             return;
         }
-        let Some(generation) = self.active.peek().map(|s| s.generation) else { return };
+        let Some((generation, named)) = self.active.peek().map(|s| (s.generation, s.server)) else { return };
         // The session whose drop the hold is for is no tunnel to arm, and its
         // adapter, gone, is no reason to let go: only a tunnel that came up
         // after the drop is (`arm_live_session_for_reconnect_hold`).
         if hold.held_for(generation) {
             return;
         }
+        // The server its engine dials: what filters standing in force under
+        // a WireGuard tunnel must permit, or they cut it (`Hold::arm_for`).
+        let dialled = server_literal(profile).or(named);
         let mut servers = servers.to_vec();
-        servers.extend(server_literal(profile));
+        servers.extend(dialled);
         let plan = hold
             .ops()
             .tunnel_luid(adapter_name_for(profile))
@@ -951,7 +1005,7 @@ impl Engines {
             // session armed and the plan not yet moved -- and a WireGuard
             // session's plan stands in force from now (`stands_while_up`).
             Some(plan) => {
-                hold.arm(generation, plan, reconnect_hold::stands_while_up(profile));
+                hold.arm_for(generation, plan, reconnect_hold::stands_while_up(profile), dialled.map(IpAddr::V4));
             }
             None => {
                 hold.disarm();
@@ -1765,7 +1819,7 @@ impl Engines {
         // The opt-in reconnect hold, before the teardown below opens the
         // gap: kept through it when this connect is one it covers, let go
         // of when it is not or the setting is off (`hold_through_connect`).
-        self.hold_through_connect(profile, known_nodes);
+        self.hold_through_connect(profile, known_nodes, limits);
         let cleared = self.disconnect_keeping_hold();
         // A drop recorded from an earlier session stops being the answer
         // once this connect is past clearing the decks. Left standing, a
@@ -1818,6 +1872,9 @@ impl Engines {
             ConnectProfile::Wireguard(p) => {
                 wireguard::connect(self, p, passive, limits)?;
                 self.begin_session(Active::WireguardTunnel, profile);
+                // The address wireguard.exe dials, for the reconnect hold to
+                // stand on: a name resolved now, as OpenVPN's is below.
+                self.name_the_hold_server(profile, passive, limits);
             }
             // Nothing is spawned: Windows brings the interface up and
             // routes it. Custom mode works here too now -- the entry is
@@ -3502,6 +3559,25 @@ fn server_literal(profile: &ConnectProfile) -> Option<Ipv4Addr> {
         ConnectProfile::Ikev2(p) => Some(p.server.clone()),
     };
     host.and_then(|host| host.parse().ok())
+}
+
+/// The address the engine of `profile` dials, for the reconnect hold's
+/// plan: a literal at once; for WireGuard, whose kernel socket a hold lets
+/// through by that address alone, a name resolved as OpenVPN's is
+/// (`node_address`). `None` when it cannot be named as an IPv4 address --
+/// a name with no IPv4 answer, an IPv6 server (which no plan can name, and
+/// which is not looked up) -- and for a name on any other engine, whose
+/// program the hold lets through anywhere.
+fn hold_server(profile: &ConnectProfile, limits: &crate::lifecycle::budget::Limits) -> Option<Ipv4Addr> {
+    if let Some(server) = server_literal(profile) {
+        return Some(server);
+    }
+    let ConnectProfile::Wireguard(p) = profile else { return None };
+    let (host, _) = split_host_port(&p.endpoint).ok()?;
+    if host.contains(':') {
+        return None;
+    }
+    node_address(profile, limits).ok()
 }
 
 /// The physical adapter traffic to `toward` leaves by, and the next hop
@@ -7112,13 +7188,13 @@ mod helper_tests {
             server_public_key: String::new(),
             endpoint: "198.51.100.23:51820".into(),
         });
-        engines.hold_through_connect(&wireguard, &["203.0.113.7".into(), "node.example.com".into()]);
+        engines.hold_through_connect(&wireguard, &["203.0.113.7".into(), "node.example.com".into()], &fresh_limits());
         assert!(engines.reconnect_hold.holding(), "a covered connect let go of the hold");
         let replanned = hold.installs().last().cloned().expect("a plan");
         assert!(replanned.nodes.contains(&Ipv4Addr::new(198, 51, 100, 23)), "the server it dials is not permitted");
         assert!(replanned.nodes.contains(&Ipv4Addr::new(203, 0, 113, 7)), "the servers the app named are not permitted");
 
-        engines.hold_through_connect(&test_profile(), &[]);
+        engines.hold_through_connect(&test_profile(), &[], &fresh_limits());
         assert!(!engines.reconnect_hold.holding(), "an IKEv2 connect was dialled under the hold");
         assert!(matches!(
             engines.reconnect_hold_status(),
@@ -7129,7 +7205,7 @@ mod helper_tests {
         assert!(engines.hold_for_reconnect());
         end_test_session(&mut engines);
         engines.reconnect_hold.set_wanted(false);
-        engines.hold_through_connect(&reality_profile(), &[]);
+        engines.hold_through_connect(&reality_profile(), &[], &fresh_limits());
         assert!(!engines.reconnect_hold.holding());
         assert_eq!(engines.reconnect_hold_status(), None, "the setting off is not a problem to report");
     }
@@ -7363,13 +7439,113 @@ mod helper_tests {
         let g = engines.begin_test_wireguard_session(move || ScmView::Running(Some(pid)));
         engines.arm_reconnect_hold(&wireguard_profile(), false, &[]);
         assert!(engines.reconnect_hold.standing_for(g));
-        engines.hold_through_connect(&wireguard_profile(), &[]);
+        engines.hold_through_connect(&wireguard_profile(), &[], &fresh_limits());
         assert!(!engines.reconnect_hold.standing_for(g), "a press of Connect left the machine held");
         assert!(!engines.reconnect_hold.holding());
         assert_eq!(hold.closed(), vec![7000]);
         end_test_session(&mut engines);
         let _ = service_process.kill();
         let _ = service_process.wait();
+    }
+
+    /// A connect's limits with a token of its own: `current_token` is the
+    /// process-wide published one, which tests beside this one cancel.
+    fn fresh_limits() -> crate::lifecycle::budget::Limits {
+        crate::lifecycle::budget::Limits::new(
+            crate::lifecycle::cancel::CancelToken::new(),
+            crate::lifecycle::budget::CONNECT_BUDGET.limit,
+        )
+    }
+
+    fn wireguard_at(endpoint: &str) -> ConnectProfile {
+        ConnectProfile::Wireguard(neoconnect_ipc::WireguardProfile {
+            private_key: String::new(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0, ::/0".into(),
+            server_public_key: String::new(),
+            endpoint: endpoint.into(),
+        })
+    }
+
+    /// A WireGuard endpoint named by a hostname. Filters standing in force
+    /// under its tunnel let wireguard-nt's UDP through by the server's
+    /// address alone, and the plan held only literals: they would have cut
+    /// a healthy tunnel the moment it was armed. Unnamed, the session is
+    /// armed without standing -- its drop still held, from the report, and
+    /// said to be held late -- and named, with the address this service
+    /// resolved for it at connect, it stands with that address permitted.
+    #[test]
+    fn a_wireguard_server_named_by_a_hostname_stands_only_once_its_address_is_known() {
+        use wireguard::ScmView;
+        let mut service_process = engine_stand_in();
+        let pid = service_process.id();
+        let hold = FakeHold::new(None);
+        let mut engines = engines_for_test();
+        engines.set_reconnect_hold_ops_for_test(hold.clone());
+        engines.reconnect_hold.set_wanted(true);
+        let g = engines.begin_test_wireguard_session(move || ScmView::Running(Some(pid)));
+        let by_name = wireguard_at("wg.example.invalid:51820");
+        engines.arm_reconnect_hold(&by_name, false, &[]);
+        assert!(!engines.reconnect_hold.standing_for(g), "filters standing that refuse the tunnel's own server");
+        assert!(hold.installs().is_empty());
+        assert!(engines.reconnect_hold.armed_for(g), "the drop is no longer held at all");
+        assert_eq!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Armed));
+
+        // The address resolved for it at connect (`name_the_hold_server`).
+        let resolved = Ipv4Addr::new(198, 51, 100, 61);
+        engines.active.peek_mut().expect("the session").server = Some(resolved);
+        engines.arm_reconnect_hold(&by_name, false, &[]);
+        assert!(engines.reconnect_hold.standing_for(g), "the plan with the resolved server did not stand");
+        assert!(hold.installs()[0].nodes.contains(&resolved), "the tunnel's server is not in the plan standing under it");
+
+        engines.release_reconnect_hold("the customer disconnected", true);
+        assert!(!engines.reconnect_hold.standing_for(g));
+        end_test_session(&mut engines);
+        let _ = service_process.kill();
+        let _ = service_process.wait();
+    }
+
+    /// A literal endpoint is named at once, and only with the setting on:
+    /// nothing else reads it.
+    #[test]
+    fn a_wireguard_sessions_server_is_named_for_the_hold_only_when_it_is_wanted() {
+        use wireguard::ScmView;
+        let mut service_process = engine_stand_in();
+        let pid = service_process.id();
+        let mut engines = engines_for_test();
+        engines.set_reconnect_hold_ops_for_test(FakeHold::new(None));
+        engines.begin_test_wireguard_session(move || ScmView::Running(Some(pid)));
+        let literal = wireguard_at("198.51.100.62:51820");
+        engines.name_the_hold_server(&literal, false, &fresh_limits());
+        assert_eq!(engines.active.peek().and_then(|s| s.server), None, "named with the setting off");
+        engines.reconnect_hold.set_wanted(true);
+        engines.name_the_hold_server(&literal, true, &fresh_limits());
+        assert_eq!(engines.active.peek().and_then(|s| s.server), None, "named for Custom mode, which the hold does not cover");
+        engines.name_the_hold_server(&literal, false, &fresh_limits());
+        assert_eq!(engines.active.peek().and_then(|s| s.server), Some(Ipv4Addr::new(198, 51, 100, 62)));
+        // An IPv6 server is one no plan can name, and is not looked up.
+        assert_eq!(hold_server(&wireguard_at("[2001:db8::51]:51820"), &fresh_limits()), None);
+        end_test_session(&mut engines);
+        let _ = service_process.kill();
+        let _ = service_process.wait();
+    }
+
+    /// A reconnect onto a WireGuard server the hold's plan cannot name -- an
+    /// IPv6 one here; a name with no IPv4 answer is the same -- would dial
+    /// into the hold and fail: a protocol stopped by the hold. It is let go
+    /// of before that connection dials, and said.
+    #[test]
+    fn a_wireguard_reconnect_to_a_server_the_plan_cannot_name_dials_free_of_the_hold() {
+        let (mut engines, _fake, _hold, _g) = armed_session();
+        assert!(engines.hold_for_reconnect());
+        end_test_session(&mut engines);
+        engines.hold_through_connect(&wireguard_at("[2001:db8::51]:51820"), &[], &fresh_limits());
+        assert!(!engines.reconnect_hold.holding(), "a WireGuard dial its plan refuses was left under the hold");
+        assert!(matches!(
+            engines.reconnect_hold_status(),
+            Some(neoconnect_ipc::ReconnectHold::NotHeld { problem: neoconnect_ipc::ReconnectHoldProblem::TunnelNotPermitted, .. })
+        ));
     }
 
     /// Thirty-two armed sessions dying at once, each torn down while the
@@ -7421,7 +7597,7 @@ mod helper_tests {
         let source = include_str!("mod.rs");
         let start = source.find("    fn connect_inner(").expect("connect_inner");
         let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
-        let decided = body.find("self.hold_through_connect(profile, known_nodes);").expect("the hold decided on");
+        let decided = body.find("self.hold_through_connect(profile, known_nodes, limits);").expect("the hold decided on");
         let teardown = body.find("let cleared = self.disconnect_keeping_hold();").expect("the teardown keeps the hold");
         assert!(decided < teardown);
         assert!(!body.contains("self.disconnect()"), "a connect's own teardown lets go of the hold");

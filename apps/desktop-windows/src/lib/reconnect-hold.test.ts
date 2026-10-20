@@ -16,6 +16,7 @@ import {
   HOLD_HINTS,
   holdHint,
   holdNote,
+  holdNotes,
   holdService,
   holdStore,
   holdWanted,
@@ -470,6 +471,45 @@ describe("the sentence under the state", () => {
     expect(holdHint({ state: "armed" }, { reconnecting: true, dropped: false, setting: false })).toBeNull();
     expect(holdHint(HOLDING, { reconnecting: false, dropped: true, setting: false })).toBeNull();
     expect(holdHint(HOLDING, { reconnecting: false, dropped: false, setting: true })).toBeNull();
+  });
+});
+
+// WireGuard's block could not stand while connected (2026-10-20 review):
+// held from the report of the drop, after wireguard.exe's own filters had
+// gone -- the measured 0.2 to 0.6 s. The service says so; nothing on screen
+// or in a toast may say the drop was blocked from its first moment.
+describe("a hold that went in late", () => {
+  const LATE: ReconnectHold = { state: "holding", heldSecs: 2, standingRefused: true };
+
+  it("is read from the service's word, and only from a true", () => {
+    expect(readHold({ state: "holding", held_secs: 2, standing_refused: true })).toEqual(LATE);
+    expect(readHold({ state: "holding", held_secs: 2, standing_refused: "yes" })).toEqual({ state: "holding", heldSecs: 2 });
+    expect(readHold({ state: "holding", held_secs: 2 })).toEqual({ state: "holding", heldSecs: 2 });
+  });
+
+  it("blocks now, and says the moment before was not", () => {
+    expect(gapTraffic(LATE, true)).toBe("blockedLate");
+    expect(gapTraffic(LATE, false)).toBe("open");
+    expect(holdHint(LATE, { reconnecting: true, dropped: false, setting: true })).toBe("hold.holding");
+    expect(holdHint(LATE, { reconnecting: false, dropped: true, setting: true })).toBe("hold.heldAfterDrop");
+    expect(holdNotes(LATE, { inGap: true, setting: true })).toEqual(["hold.holding", "hold.heldLate"]);
+    expect(holdNotes({ ...LATE, dnsAnywhere: true }, { inGap: true, setting: true })).toEqual(["hold.dnsAnywhere", "hold.heldLate"]);
+    expect(holdNotes(LATE, { inGap: false, setting: true })).toEqual([]);
+    expect(holdNotes(LATE, { inGap: true, setting: false })).toEqual([]);
+    expect(holdNotes(HOLDING, { inGap: true, setting: true })).toEqual(["hold.holding"]);
+  });
+
+  it("is news to a screen that heard the hold before", () => {
+    holdStore.resetForTests();
+    let heard = 0;
+    holdStore.subscribe(() => {
+      heard += 1;
+    });
+    holdStore.observe({ state: "holding", held_secs: 1 });
+    holdStore.observe({ state: "holding", held_secs: 2, standing_refused: true });
+    expect(heard).toBe(2);
+    expect(holdStore.current()).toEqual(LATE);
+    holdStore.resetForTests();
   });
 });
 

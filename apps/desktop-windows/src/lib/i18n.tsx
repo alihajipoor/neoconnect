@@ -1272,6 +1272,10 @@ const en = {
   "hold.holding": "Other connections on this computer are blocked until Neoxify reconnects, as you set. Your local network still works, and name lookups still go out.",
   "hold.dnsAnywhere": "This computer's DNS servers couldn't be read, so while other connections are blocked, anything sent to port 53 still goes out, not only name lookups.",
   "hold.heldAfterDrop": "Other connections on this computer are still blocked, as you set, until Neoxify lifts the block. Connect again to get back online.",
+  // WireGuard's block could not stand in force while connected, so it went
+  // in on the report of the drop, after wireguard.exe's own had gone: true
+  // from then, not of that moment (the service's `standing_refused`).
+  "hold.heldLate": "On WireGuard the block couldn't be kept ready while you were connected, so it went in a moment after the tunnel closed. In that moment, traffic may have gone out without Neoxify.",
   // In the gap before the service has said whether the block is in: no
   // claim either way -- not "going out without Neoxify", which is false the
   // moment it is in, nor "blocked", which nothing has confirmed yet.
@@ -1287,6 +1291,7 @@ const en = {
   "notif.lostTitle": "VPN connection lost",
   "notif.lostBody": "Neoxify is reconnecting. Your traffic is not protected until it's back.",
   "notif.lostHeldBody": "Neoxify is reconnecting. Other connections on this computer are blocked until it's back, as you set.",
+  "notif.lostHeldLateBody": "Neoxify is reconnecting. Other connections on this computer are blocked until it's back, as you set, though some traffic may have gone out the moment the connection dropped.",
   "notif.backTitle": "VPN connected again",
   "notif.backBody": "Neoxify checked that your traffic goes through the VPN again.",
   "notif.droppedTitle": "VPN connection lost",
@@ -2282,6 +2287,7 @@ const fa: Record<TranslationKey, string> = {
   "hold.holding": "طبق تنظیم شما، تا اتصال دوبارهٔ نئوکسیفای، اتصال‌های دیگر این رایانه مسدود هستند. شبکهٔ محلی شما کار می‌کند و درخواست‌های نام همچنان ارسال می‌شوند.",
   "hold.dnsAnywhere": "سرورهای DNS این رایانه خوانده نشد؛ برای همین تا وقتی اتصال‌های دیگر مسدود هستند، هر چیزی که به درگاه ۵۳ فرستاده شود همچنان ارسال می‌شود، نه فقط درخواست‌های نام.",
   "hold.heldAfterDrop": "طبق تنظیم شما، اتصال‌های دیگر این رایانه هنوز مسدود هستند تا نئوکسیفای این مسدودسازی را بردارد. برای برگشتن به اینترنت، دوباره وصل شوید.",
+  "hold.heldLate": "در وایرگارد، مسدودسازی در زمان اتصال آماده نگه داشته نشد؛ برای همین لحظه‌ای پس از بسته شدن تونل اعمال شد. ممکن است در همان لحظه ترافیکی بدون نئوکسیفای ارسال شده باشد.",
   "hold.unconfirmed": "تونل بسته شد. نئوکسیفای در حال بررسی است که آیا اتصال‌های دیگر این رایانه، طبق تنظیم شما، مسدود هستند یا نه.",
   "hold.filtersRefused": "هنگام اتصال دوباره نمی‌شد اینترنت را مسدود کرد: ویندوز فیلترها را نپذیرفت. تا برگشتن اتصال، ترافیک شما بدون نئوکسیفای ارسال می‌شود.",
   "hold.tunnelNotPermitted": "مسدودسازی اینترنت متوقف شد تا اتصال جدید بتواند ترافیک را عبور دهد.",
@@ -2294,6 +2300,7 @@ const fa: Record<TranslationKey, string> = {
   "notif.lostTitle": "اتصال VPN قطع شد",
   "notif.lostBody": "نئوکسیفای در حال اتصال دوباره است. تا برگشتن اتصال، ترافیک شما محافظت نمی‌شود.",
   "notif.lostHeldBody": "نئوکسیفای در حال اتصال دوباره است. طبق تنظیم شما، تا برگشتن اتصال، اتصال‌های دیگر این رایانه مسدود هستند.",
+  "notif.lostHeldLateBody": "نئوکسیفای در حال اتصال دوباره است. طبق تنظیم شما، تا برگشتن اتصال، اتصال‌های دیگر این رایانه مسدود هستند؛ هرچند ممکن است در لحظهٔ قطع اتصال، ترافیکی بدون نئوکسیفای ارسال شده باشد.",
   "notif.backTitle": "اتصال VPN برگشت",
   "notif.backBody": "نئوکسیفای بررسی کرد که ترافیک شما دوباره از VPN عبور می‌کند.",
   "notif.droppedTitle": "اتصال VPN قطع شد",

@@ -1467,6 +1467,15 @@ pub enum ReconnectHold {
         /// Absent from an older service, which the app reads as not landed.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         landed: bool,
+        /// The drop this holds for was of a WireGuard session whose filters
+        /// could not stand in force while it was up -- WFP refused them, or
+        /// its plan could not name the server it dials -- so it was held
+        /// from the report of the drop, not from the moment of it: what left
+        /// between wireguard.exe's own kill switch going and the hold going
+        /// in (measured at 0.2 to 0.6 s) was not held. Absent otherwise, and
+        /// from an older service.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        standing_refused: bool,
     },
     /// It should be holding and is not, and why. The internet is not
     /// blocked: the service fails open rather than strand the machine or
@@ -3182,16 +3191,25 @@ mod reconnect_hold_wire_tests {
         };
         assert_eq!(round(ReconnectHold::Armed), serde_json::json!({"state": "armed"}));
         assert_eq!(
-            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: false, landed: false }),
+            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: false, landed: false, standing_refused: false }),
             serde_json::json!({"state": "holding", "held_secs": 12})
         );
         assert_eq!(
-            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: false, landed: true }),
+            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: false, landed: true, standing_refused: false }),
             serde_json::json!({"state": "holding", "held_secs": 12, "landed": true})
         );
         assert_eq!(
-            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: true, landed: false }),
+            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: true, landed: false, standing_refused: false }),
             serde_json::json!({"state": "holding", "held_secs": 12, "dns_anywhere": true})
+        );
+        assert_eq!(
+            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: false, landed: false, standing_refused: true }),
+            serde_json::json!({"state": "holding", "held_secs": 12, "standing_refused": true})
+        );
+        // From an older service: none of the three, each read as false.
+        assert_eq!(
+            serde_json::from_value::<ReconnectHold>(serde_json::json!({"state": "holding", "held_secs": 5})).unwrap(),
+            ReconnectHold::Holding { held_secs: 5, dns_anywhere: false, landed: false, standing_refused: false }
         );
         assert_eq!(
             round(ReconnectHold::NotHeld { problem: ReconnectHoldProblem::TunnelNotPermitted, detail: None }),

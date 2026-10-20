@@ -10,10 +10,12 @@
  *
  * Five things are said, each once per change:
  *  - `connected`: a tunnel verified, from not being up;
- *  - `lost` / `lostHeld`: a verified tunnel gone and Neoxify reconnecting
- *    past the hold -- the second when the service is holding the internet
- *    while it does ("Block the internet while reconnecting") -- once the
- *    service has said which (`gapTraffic`): not before;
+ *  - `lost` / `lostHeld` / `lostHeldLate`: a verified tunnel gone and
+ *    Neoxify reconnecting past the hold -- the second when the service is
+ *    holding the internet while it does ("Block the internet while
+ *    reconnecting"), the third when that hold went in only on the report
+ *    of the drop (WireGuard's block could not stand while it was up) --
+ *    once the service has said which (`gapTraffic`): not before;
  *  - `back`: verified again after `lost` was said;
  *  - `dropped`: gone, and nothing is reconnecting it (the episode gave up,
  *    or none could start) -- once the service has said it no longer holds
@@ -34,7 +36,7 @@ import type { ShownTone } from "./hero-model";
 import type { TranslationKey } from "./i18n";
 import type { GapTraffic } from "./reconnect-hold";
 
-export type NotifyKind = "connected" | "connectedPartial" | "lost" | "lostHeld" | "back" | "dropped";
+export type NotifyKind = "connected" | "connectedPartial" | "lost" | "lostHeld" | "lostHeldLate" | "back" | "dropped";
 
 export interface NotifyMemory {
   /** A verified tunnel has been seen since the customer last had nothing up. */
@@ -80,7 +82,8 @@ export function notifyStep(memory: NotifyMemory, input: NotifyInput): { memory: 
       if (input.reconnecting && memory.up && !memory.lostSaid) {
         // Which of the two is the service's to say first.
         if (input.gap === "unconfirmed") return { memory, say: null };
-        return say(input.gap === "blocked" ? "lostHeld" : "lost", { up: true, lostSaid: true });
+        const kind: NotifyKind = input.gap === "blocked" ? "lostHeld" : input.gap === "blockedLate" ? "lostHeldLate" : "lost";
+        return say(kind, { up: true, lostSaid: true });
       }
       return { memory, say: null };
     // Gone, and nothing reconnecting -- said once the service has said
@@ -105,6 +108,7 @@ export const NOTIFY_TEXT: Record<NotifyKind, { title: TranslationKey; body: Tran
   connectedPartial: { title: "notif.connectedTitle", body: "notif.connectedPartialBody" },
   lost: { title: "notif.lostTitle", body: "notif.lostBody" },
   lostHeld: { title: "notif.lostTitle", body: "notif.lostHeldBody" },
+  lostHeldLate: { title: "notif.lostTitle", body: "notif.lostHeldLateBody" },
   back: { title: "notif.backTitle", body: "notif.backBody" },
   dropped: { title: "notif.droppedTitle", body: "notif.droppedBody" },
 };

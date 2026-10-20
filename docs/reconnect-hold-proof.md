@@ -66,6 +66,20 @@ a packet:
   A session whose tunnel adapter is gone is now said to have ended (with
   the hold on or off), and the app reads "holding, nothing landed" over a
   connected read as a drop.
+- **WireGuard by hostname.** The standing filters let wireguard-nt's UDP
+  through by the server's address alone, and the plan held only literals:
+  a WireGuard endpoint named by a hostname would have had its own tunnel
+  cut the moment it was armed, and a reconnect onto it could not dial
+  under a hold. The service now resolves the endpoint at connect (as it
+  does OpenVPN's) and before a reconnect dials; filters stand only for a
+  plan that permits the server dialled; one it cannot name (no IPv4
+  answer, an IPv6 server) is armed without standing, and a reconnect onto
+  it lets go of the hold before it dials.
+- **A refusal to stand was only in the log.** When WireGuard's filters
+  could not stand, the status still said armed, then holding, as if the
+  drop had been held from its first moment. The hold now says it went in
+  late (`standing_refused`), and the screen and the "lost" notification
+  say traffic may have gone out in that moment.
 
 None of these fixes has carried a packet. Items 1, 2 and 5 below are to
 be run again for every engine, with the additions marked **(new)**.
@@ -116,6 +130,17 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    a sustained download at its usual speed), and they go on Disconnect and
    with the setting off. A connect of the customer's own over it (another
    location) leaves nothing blocked if it fails.
+   **(new)** The same with a WireGuard endpoint named by a hostname (a
+   test credential whose endpoint is a name that resolves to the node):
+   the standing filters permit the resolved address (`netsh wfp show
+   filters`), the tunnel carries at its usual speed, and a reconnect onto
+   it dials under the hold. Then force a refusal -- an endpoint name with
+   no IPv4 answer, or the hold's filters refused -- and check what the
+   screen says at the drop: "blocked" with the note that the block went in
+   a moment after the tunnel closed, the "lost" toast in its late words,
+   and `reconnect-hold.log` saying "not standing". A reconnect onto a
+   server the plan cannot name lets go of the hold before it dials
+   (`tunnelNotPermitted`), and the WireGuard tunnel still comes up.
 2. **Every engine dials under the hold and its tunnel carries** -- above
    all **WireGuard-NT**, whose kernel socket WFP may not attribute to
    wireguard.exe (it is let through by the server's address; prove it).

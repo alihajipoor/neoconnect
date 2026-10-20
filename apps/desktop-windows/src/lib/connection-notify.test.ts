@@ -43,6 +43,10 @@ describe("what is worth a notification", () => {
 
   it("says the internet is blocked meanwhile when the service is holding it", () => {
     expect(play([{ tone: "ok" }, { tone: "warn", reconnecting: true, gap: "blocked" }])).toEqual(["connected", "lostHeld"]);
+    // Held late (WireGuard's block could not stand): blocked, and not said
+    // to have been from the first moment.
+    expect(play([{ tone: "ok" }, { tone: "warn", reconnecting: true, gap: "blockedLate" }])).toEqual(["connected", "lostHeldLate"]);
+    expect(play([{ tone: "ok" }, { tone: "danger", gap: "blockedLate" }, { tone: "danger" }])).toEqual(["connected", null, "dropped"]);
   });
 
   it("says neither until the service has said whether the internet is held", () => {
@@ -160,5 +164,9 @@ describe("the words", () => {
     expect(en["notif.lostHeldBody"]).toMatch(/blocked/);
     expect(en["notif.lostHeldBody"]).toMatch(/as you set/);
     expect(fa["notif.lostHeldBody"]).toContain("مسدود");
+    expect(NOTIFY_TEXT.lostHeldLate).toEqual({ title: "notif.lostTitle", body: "notif.lostHeldLateBody" });
+    expect(en["notif.lostHeldLateBody"]).toMatch(/blocked/);
+    expect(en["notif.lostHeldLateBody"]).toMatch(/may have gone out/);
+    expect(fa["notif.lostHeldLateBody"]).toContain("مسدود");
   });
 });

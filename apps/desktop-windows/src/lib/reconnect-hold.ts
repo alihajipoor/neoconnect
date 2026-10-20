@@ -77,6 +77,12 @@ export type ReconnectHold =
        * which a status can still call connected while it is taken down
        * (`landedUnderHold`). Absent from an older service. */
       readonly landed?: true;
+      /** The drop this holds for was held late: a WireGuard session whose
+       * block could not stand in force while it was up (WFP refused it, or
+       * its server could not be named), so the block went in on the report
+       * of the drop, after wireguard.exe's own had gone -- 0.2 to 0.6 s on
+       * the VM in which traffic may have left. The service's word. */
+      readonly standingRefused?: true;
     }
   | { readonly state: "notHeld"; readonly problem: ReconnectHoldProblem };
 
@@ -99,6 +105,7 @@ export function readHold(raw: unknown): ReconnectHold | null {
         heldSecs: typeof secs === "number" && Number.isFinite(secs) && secs >= 0 ? secs : 0,
         ...(field.dns_anywhere === true ? { dnsAnywhere: true as const } : {}),
         ...(field.landed === true ? { landed: true as const } : {}),
+        ...(field.standing_refused === true ? { standingRefused: true as const } : {}),
       };
     }
     case "notHeld":
@@ -206,6 +213,7 @@ const PRESSES: ReadonlySet<ReconnectStop> = new Set(["customer"]);
 export type HoldNoteKey =
   | "hold.holding"
   | "hold.dnsAnywhere"
+  | "hold.heldLate"
   | "hold.filtersRefused"
   | "hold.tunnelNotPermitted"
   | "hold.timedOut"
@@ -217,12 +225,22 @@ export type HoldNoteKey =
  * the hold is about the gap -- and nothing when the setting is off.
  * Holding with port 53 open to anywhere is said as that, beside the
  * sentence that it holds: "name lookups still go out" would be narrower
- * than what goes out. */
-export function holdNote(hold: ReconnectHold | null, { inGap, setting }: { inGap: boolean; setting: boolean }): HoldNoteKey | null {
-  if (!setting || !inGap || hold === null) return null;
-  if (hold.state === "holding") return hold.dnsAnywhere === true ? "hold.dnsAnywhere" : "hold.holding";
-  if (hold.state === "notHeld") return `hold.${hold.problem}`;
-  return null;
+ * than what goes out. A hold that went in late is said too, after it:
+ * "blocked" is true from then, and not of the moment before. */
+export function holdNotes(hold: ReconnectHold | null, { inGap, setting }: { inGap: boolean; setting: boolean }): HoldNoteKey[] {
+  if (!setting || !inGap || hold === null) return [];
+  if (hold.state === "holding") {
+    const notes: HoldNoteKey[] = [hold.dnsAnywhere === true ? "hold.dnsAnywhere" : "hold.holding"];
+    if (hold.standingRefused === true) notes.push("hold.heldLate");
+    return notes;
+  }
+  if (hold.state === "notHeld") return [`hold.${hold.problem}`];
+  return [];
+}
+
+/** The first of `holdNotes`: what the hold is doing, or why it is not. */
+export function holdNote(hold: ReconnectHold | null, opts: { inGap: boolean; setting: boolean }): HoldNoteKey | null {
+  return holdNotes(hold, opts)[0] ?? null;
 }
 
 /** Where the customer's other traffic goes in a gap -- a reconnect
@@ -231,6 +249,9 @@ export function holdNote(hold: ReconnectHold | null, { inGap, setting }: { inGap
  * about it reads (`holdHint`, `notifyStep`):
  *
  *  - `blocked`: the service says it holds the internet;
+ *  - `blockedLate`: the same, but it went in on the report of the drop,
+ *    not from the moment of it (`standingRefused`): blocked now, and not
+ *    to be said of the moment before;
  *  - `unconfirmed`: the setting is on and the service's last word is
  *    "armed" -- it has not yet said the hold is in, or why not. Its drop
  *    not seen yet, or the session's own confinement still standing over a
@@ -240,11 +261,11 @@ export function holdNote(hold: ReconnectHold | null, { inGap, setting }: { inGap
  *    "blocked", which nothing has confirmed;
  *  - `open`: the setting off, nothing armed or held, or the service says
  *    it is not holding and why. */
-export type GapTraffic = "blocked" | "unconfirmed" | "open";
+export type GapTraffic = "blocked" | "blockedLate" | "unconfirmed" | "open";
 
 export function gapTraffic(hold: ReconnectHold | null, setting: boolean): GapTraffic {
   if (!setting || hold === null) return "open";
-  if (hold.state === "holding") return "blocked";
+  if (hold.state === "holding") return hold.standingRefused === true ? "blockedLate" : "blocked";
   if (hold.state === "armed") return "unconfirmed";
   return "open";
 }
@@ -272,7 +293,9 @@ export function holdHint(
 ): HoldHintKey | null {
   if (!reconnecting && !dropped) return null;
   switch (gapTraffic(hold, setting)) {
+    // Late or not, it blocks now; the note says the rest (`holdNotes`).
     case "blocked":
+    case "blockedLate":
       return reconnecting ? "hold.holding" : "hold.heldAfterDrop";
     case "unconfirmed":
       return "hold.unconfirmed";
@@ -317,7 +340,9 @@ function sameHold(a: ReconnectHold | null, b: ReconnectHold | null): boolean {
   // The seconds held move every poll; only the state and the problem are
   // news.
   if (a.state === "notHeld" && b.state === "notHeld") return a.problem === b.problem;
-  if (a.state === "holding" && b.state === "holding") return a.dnsAnywhere === b.dnsAnywhere && a.landed === b.landed;
+  if (a.state === "holding" && b.state === "holding") {
+    return a.dnsAnywhere === b.dnsAnywhere && a.landed === b.landed && a.standingRefused === b.standingRefused;
+  }
   return true;
 }
 

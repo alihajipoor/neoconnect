@@ -128,7 +128,7 @@ import {
   gapTraffic,
   HOLD_HINTS,
   holdHint,
-  holdNote,
+  holdNotes,
   holdService,
   holdStore,
   holdWanted,
@@ -4628,7 +4628,7 @@ export function Dashboard({
    * Neoxify" then, and saying so would be false), a note when it should
    * and does not (`holdNote`). */
   const holdSetting = holdWanted(prefs.blockWhileReconnecting);
-  const heldNote = holdNote(hold, { inGap: reconnecting !== null || dropped, setting: holdSetting });
+  const heldNotes = holdNotes(hold, { inGap: reconnecting !== null || dropped, setting: holdSetting });
   // A pass waiting for a network under the hold is a reconnect's gap too:
   // its headline's "your traffic is not protected" would be false. Only in
   // the gap itself: over a tunnel that is up -- a reconnect's attempt that
@@ -4866,9 +4866,13 @@ export function Dashboard({
       ) : null}
       {/* The reconnect hold should be blocking and is not, or let go so a
           new tunnel could carry: the service's own reason, in words. */}
-      {heldNote !== null && heldNote !== "hold.holding" ? (
-        <Note tone={heldNote === "hold.tunnelNotPermitted" ? "info" : "caution"}>{t(heldNote)}</Note>
-      ) : null}
+      {heldNotes
+        .filter((note) => note !== "hold.holding")
+        .map((note) => (
+          <Note key={note} tone={note === "hold.tunnelNotPermitted" ? "info" : "caution"}>
+            {t(note)}
+          </Note>
+        ))}
     </div>
   );
 

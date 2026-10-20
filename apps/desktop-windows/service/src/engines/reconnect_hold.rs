@@ -39,7 +39,11 @@
 //! is then held with nothing to install. Letting go of a hold over a
 //! WireGuard tunnel a reconnect brought up leaves them standing for that
 //! tunnel; disarming -- the customer's Disconnect, the setting off, a
-//! connect of theirs -- takes them out.
+//! connect of theirs -- takes them out. They stand only for a plan that
+//! permits the server the tunnel dials (`Hold::arm_for`; a name is
+//! resolved first): one that cannot -- or filters WFP refuses -- arms the
+//! session without them, and the hold of its drop says it went in late
+//! (`Report::Holding.standing_refused`).
 //!
 //! # What it lets through
 //!
@@ -611,6 +615,28 @@ impl HoldOps for Inert {
     }
 }
 
+/// What arming knows of the server a session's engine dials
+/// (`Hold::arm_for`).
+enum Dials {
+    /// Nothing said: nothing checked.
+    Unchecked,
+    /// That server; `None` when it could not be named.
+    Server(Option<IpAddr>),
+}
+
+impl Dials {
+    /// Why filters standing in force with `plan` would refuse the server,
+    /// if they would.
+    fn refusal(&self, plan: &Plan) -> Option<String> {
+        match self {
+            Dials::Unchecked => None,
+            Dials::Server(Some(IpAddr::V4(server))) if plan.nodes.contains(server) => None,
+            Dials::Server(Some(server)) => Some(format!("the plan does not permit the server the tunnel dials ({server})")),
+            Dials::Server(None) => Some("the server the tunnel dials could not be named as an IPv4 address".to_string()),
+        }
+    }
+}
+
 /// Why a hold is let go of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Release {
@@ -671,6 +697,15 @@ struct State {
     /// When the LAN, the DHCP servers and the resolvers are next read
     /// again while filters are in force (`Hold::reread`).
     reread_at: Option<Instant>,
+    /// The session armed to keep its filters standing whose filters are not
+    /// standing, and why: WFP refused them, or its plan does not permit the
+    /// server its engine dials (`Hold::arm_for`). Its drop is held from the
+    /// report of it, after wireguard.exe's own filters have gone.
+    standing_refused: Option<(u64, String)>,
+    /// The drop being held was of that session: held from the report, so
+    /// what left between the tunnel's end and the hold going in was not
+    /// held. Said in the status (`Report::Holding.standing_refused`).
+    held_late: bool,
 }
 
 impl State {
@@ -726,6 +761,7 @@ impl Hold {
         state.wanted = false;
         state.armed = None;
         state.problem = None;
+        state.standing_refused = None;
         self.close_locked(state, "the setting was turned off")
     }
 
@@ -739,10 +775,32 @@ impl Hold {
     /// Otherwise, `stands`: the plan goes in now and stays in force while
     /// the session is up (`stands_while_up`), in place of filters standing
     /// for any other, the new in before the old is closed. One that will
-    /// not go in is said in the log, and the session is armed as any other
-    /// is: its drop is held from the watch's report. Not `stands`: filters
-    /// standing for another session are taken out.
+    /// not go in is said in the log and in the status, and the session is
+    /// armed as any other is: its drop is held from the watch's report. Not
+    /// `stands`: filters standing for another session are taken out.
+    ///
+    /// Nothing here checks the plan against the server the session's
+    /// engine dials: `arm_for` does.
     pub fn arm(&self, generation: u64, plan: Plan, stands: bool) -> bool {
+        self.arm_dialling(generation, plan, stands, Dials::Unchecked)
+    }
+
+    /// `arm`, for a session whose engine dials `server` -- WireGuard's,
+    /// whose kernel socket a plan lets through by that address alone
+    /// (`specs`). Armed to stand, it stands only when its plan permits that
+    /// address: filters standing in force that refused the session's own
+    /// server would cut a healthy tunnel. When the plan does not -- a name
+    /// that would not resolve to IPv4, an IPv6 server, neither of which a
+    /// plan can name -- the session is armed without standing, which the
+    /// log and the status say (`standing_refused`), and its drop is held
+    /// from the report. While a hold is held, a tunnel that came up whose
+    /// server its plan cannot permit lets go of it rather than be blocked
+    /// by it: a protocol is never stopped for the hold's sake.
+    pub fn arm_for(&self, generation: u64, plan: Plan, stands: bool, server: Option<IpAddr>) -> bool {
+        self.arm_dialling(generation, plan, stands, Dials::Server(server))
+    }
+
+    fn arm_dialling(&self, generation: u64, plan: Plan, stands: bool, dials: Dials) -> bool {
         let mut state = self.lock();
         if !state.wanted || generation == 0 {
             return false;
@@ -759,7 +817,29 @@ impl Hold {
             Some((armed, before, _)) if *armed == generation => plan.widened_by(before),
             _ => plan,
         };
+        // Checked against the plan as widened: the one that would stand.
+        let refused = if stands { dials.refusal(&plan) } else { None };
+        let stands = stands && refused.is_none();
         state.armed = Some((generation, plan.clone(), stands));
+        state.standing_refused = refused.clone().map(|why| (generation, why));
+        if let Some(why) = refused {
+            if state.holding() {
+                self.release_locked(
+                    state,
+                    Release::Failed(
+                        ReconnectHoldProblem::TunnelNotPermitted,
+                        format!("the tunnel that came up could not be put in the hold's plan, so the hold was let go of: {why}"),
+                    ),
+                );
+            } else if state.engine != 0 {
+                self.close_locked(state, "the session armed now keeps nothing standing");
+            } else {
+                drop(state);
+            }
+            self.note(&format!("not standing in force while the tunnel is up, so its drop is held from the watch's report: {why}"));
+            crate::cleanup_log::note("keep the hold standing while the tunnel is up", &format!("not standing: {why}"));
+            return true;
+        }
         if state.holding() {
             if state.held.as_ref() == Some(&plan) {
                 return true;
@@ -815,6 +895,7 @@ impl Hold {
                 ));
             }
             Err(e) => {
+                state.standing_refused = Some((generation, e.clone()));
                 if state.engine != 0 {
                     self.close_locked(state, "the filters for the session armed now would not go in");
                 } else {
@@ -833,6 +914,7 @@ impl Hold {
     pub fn disarm(&self) {
         let mut state = self.lock();
         state.armed = None;
+        state.standing_refused = None;
         if state.standing.is_some() {
             self.close_locked(state, "the session they stood for is not to be held");
         }
@@ -896,6 +978,7 @@ impl Hold {
             state.problem = None;
             state.awaiting_follow_up = true;
             state.reread_at = None;
+            state.held_late = false;
             let filters = state.filters;
             drop(state);
             self.note(&format!(
@@ -922,6 +1005,9 @@ impl Hold {
                 state.problem = None;
                 state.awaiting_follow_up = true;
                 state.reread_at = None;
+                // Installed now, after the drop: for a session whose filters
+                // were to stand and could not, late.
+                state.held_late = state.standing_refused.as_ref().is_some_and(|(refused, _)| *refused == generation);
                 if old != 0 {
                     self.ops.close(old);
                 }
@@ -1051,6 +1137,7 @@ impl Hold {
             state.engaged_by = None;
             state.awaiting_follow_up = false;
             state.reread_at = None;
+            state.held_late = false;
             drop(state);
             self.note(&format!("let go of{held_for}: its filters stay standing for the tunnel that is up ({reason})"));
             return true;
@@ -1076,6 +1163,7 @@ impl Hold {
         state.engaged_by = None;
         state.awaiting_follow_up = false;
         state.reread_at = None;
+        state.held_late = false;
         if engine == 0 {
             return false;
         }
@@ -1153,6 +1241,7 @@ impl Hold {
         state.problem = None;
         state.awaiting_follow_up = true;
         state.reread_at = None;
+        state.held_late = false;
         drop(state);
         self.note("holding: the session the filters stood for ended with no word to the hold, so its drop is held");
         true
@@ -1268,7 +1357,7 @@ impl Hold {
             let landed = live.is_some()
                 && live != state.engaged_by
                 && state.armed.as_ref().is_some_and(|(armed, _, _)| live == Some(*armed));
-            return Some(Report::Holding { held_secs, dns_anywhere, landed });
+            return Some(Report::Holding { held_secs, dns_anywhere, landed, standing_refused: state.held_late });
         }
         if let Some((problem, detail)) = &state.problem {
             return Some(Report::NotHeld { problem: *problem, detail: Some(detail.clone()) });
@@ -2056,7 +2145,9 @@ mod tests {
     }
 
     /// Standing filters that will not go in leave the session armed as any
-    /// other: its drop is still held, from the report.
+    /// other: its drop is still held, from the report -- and the hold says
+    /// it went in late, so the screen does not claim the first moment was
+    /// held too: wireguard.exe's own filters went 0.2 to 0.6 s before it.
     #[test]
     fn standing_filters_that_will_not_go_in_leave_the_drop_held_from_the_report() {
         let (hold, fake) = held_by_fake();
@@ -2068,6 +2159,76 @@ mod tests {
         fake.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(hold.engage(7, "wireguard.exe died"));
         assert_eq!(fake.installs.lock().unwrap().len(), 1);
+        assert!(
+            matches!(hold.report(None), Some(Report::Holding { standing_refused: true, .. })),
+            "a drop held late said as held from the first moment: {:?}",
+            hold.report(None)
+        );
+        // Let go of, and armed again with filters that do stand: the next
+        // drop is held from its first moment, and said so.
+        assert!(hold.release(Release::Asked("the reconnect gave up")));
+        assert!(hold.arm(7, plan(), true));
+        assert!(hold.standing_for(7));
+        assert!(hold.engage(7, "wireguard.exe died"));
+        assert!(matches!(hold.report(None), Some(Report::Holding { standing_refused: false, .. })));
+    }
+
+    /// Filters standing in force must permit the server the session's own
+    /// engine dials -- WireGuard's kernel socket is let through by that
+    /// address alone -- or they cut a healthy tunnel. A plan that does not
+    /// name it, or a server that could not be named (a name that would not
+    /// resolve to IPv4, an IPv6 server), arms the session without standing,
+    /// said in the log and, at its drop, in the status. One that names it
+    /// stands.
+    #[test]
+    fn filters_stand_only_for_a_plan_that_permits_the_server_dialled() {
+        let elsewhere = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 200));
+        let v6: IpAddr = "2001:db8::51".parse().unwrap();
+        for server in [Some(elsewhere), Some(v6), None] {
+            let (hold, fake) = held_by_fake();
+            hold.set_wanted(true);
+            assert!(hold.arm_for(7, plan(), true, server), "{server:?}");
+            assert!(!hold.standing_for(7), "{server:?}: standing over a tunnel whose server it refuses");
+            assert!(fake.installs.lock().unwrap().is_empty(), "{server:?}");
+            assert!(hold.armed_for(7), "{server:?}: the drop is no longer held at all");
+            assert_eq!(hold.report(Some(7)), Some(Report::Armed));
+            assert!(hold.engage(7, "wireguard.exe died"), "{server:?}");
+            assert!(matches!(hold.report(None), Some(Report::Holding { standing_refused: true, .. })), "{server:?}");
+        }
+
+        let (hold, _fake) = held_by_fake();
+        hold.set_wanted(true);
+        assert!(hold.arm_for(7, plan(), true, Some(IpAddr::V4(node()))));
+        assert!(hold.standing_for(7), "a plan naming the server did not stand");
+        assert!(hold.engage(7, "wireguard.exe died"));
+        assert!(matches!(hold.report(None), Some(Report::Holding { standing_refused: false, .. })));
+
+        // Not armed to stand -- Xray, OpenVPN -- the server is not asked about.
+        let (hold, _fake) = held_by_fake();
+        hold.set_wanted(true);
+        assert!(hold.arm_for(7, plan(), false, None));
+        assert!(hold.engage(7, "xray.exe died"));
+        assert!(matches!(hold.report(None), Some(Report::Holding { standing_refused: false, .. })));
+    }
+
+    /// A WireGuard tunnel a reconnect brought up whose server the plan
+    /// cannot permit: under the hold it carries nothing, so the hold is let
+    /// go of -- said -- rather than block it, and nothing is left standing.
+    #[test]
+    fn a_tunnel_that_came_up_whose_server_the_plan_cannot_permit_lets_go_of_the_hold() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), true);
+        hold.engage(7, "wireguard.exe died");
+        let next = Plan { tunnels: vec![TUNNEL, 0x0035_0000_0300_0000], ..plan() };
+        assert!(hold.arm_for(8, next, true, None));
+        assert!(!hold.holding(), "a tunnel whose server is refused was left held");
+        assert!(!hold.standing_for(8));
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000]);
+        assert!(matches!(
+            hold.report(Some(8)),
+            Some(Report::NotHeld { problem: ReconnectHoldProblem::TunnelNotPermitted, .. })
+        ));
     }
 
     /// Filters standing for a session that is no longer up: none up -- it
