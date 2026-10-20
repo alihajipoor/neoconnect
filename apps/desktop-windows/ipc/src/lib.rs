@@ -1451,7 +1451,15 @@ pub enum ReconnectHold {
     /// Holding: nothing but Neoxify itself, its servers, the LAN, DHCP and
     /// name lookups reaches the network outside a Neoxify tunnel, for
     /// `held_secs` so far. A tunnel brought up meanwhile carries.
-    Holding { held_secs: u64 },
+    ///
+    /// Name lookups go only to the resolvers the machine is configured
+    /// with -- unless `dns_anywhere`: those could not be read, and port 53
+    /// to anywhere is permitted instead.
+    Holding {
+        held_secs: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dns_anywhere: bool,
+    },
     /// It should be holding and is not, and why. The internet is not
     /// blocked: the service fails open rather than strand the machine or
     /// stop a tunnel from carrying.
@@ -3165,7 +3173,14 @@ mod reconnect_hold_wire_tests {
             json
         };
         assert_eq!(round(ReconnectHold::Armed), serde_json::json!({"state": "armed"}));
-        assert_eq!(round(ReconnectHold::Holding { held_secs: 12 }), serde_json::json!({"state": "holding", "held_secs": 12}));
+        assert_eq!(
+            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: false }),
+            serde_json::json!({"state": "holding", "held_secs": 12})
+        );
+        assert_eq!(
+            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: true }),
+            serde_json::json!({"state": "holding", "held_secs": 12, "dns_anywhere": true})
+        );
         assert_eq!(
             round(ReconnectHold::NotHeld { problem: ReconnectHoldProblem::TunnelNotPermitted, detail: None }),
             serde_json::json!({"state": "notHeld", "problem": "tunnelNotPermitted"})

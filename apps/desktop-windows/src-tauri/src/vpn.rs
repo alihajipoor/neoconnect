@@ -1372,7 +1372,7 @@ mod gaming_contract {
             session_secs: None,
         };
         let json = serde_json::to_value(status(
-            Some(neoconnect_ipc::ReconnectHold::Holding { held_secs: 3 }),
+            Some(neoconnect_ipc::ReconnectHold::Holding { held_secs: 3, dns_anywhere: false }),
             Some(neoconnect_ipc::TunnelTraffic { rx_bytes: 10, tx_bytes: 2, ..Default::default() }),
         ))
         .unwrap();

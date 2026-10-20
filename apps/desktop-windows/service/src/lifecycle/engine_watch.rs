@@ -658,16 +658,17 @@ impl Ledger {
     }
 
     /// What the reconnect hold is doing, for a status answered without the
-    /// owning thread -- after letting go of one that has held too long with
-    /// no session up, as the owning thread's status would. Read outside the
-    /// ledger's lock: the hold has a lock of its own.
+    /// owning thread -- after letting go of one nothing followed or that
+    /// has held too long with no session up, and reading the network again
+    /// while it holds, as the owning thread's status would (`Hold::tend`).
+    /// Read outside the ledger's lock: the hold has a lock of its own.
     pub fn reconnect_hold_status(&self) -> Option<neoconnect_ipc::ReconnectHold> {
         let (hold, live) = {
             let state = self.state();
             (state.reconnect_hold.clone(), state.live)
         };
         let hold = hold?;
-        hold.expire_if_due(live != 0, crate::engines::reconnect_hold::HOLD_LONGEST);
+        hold.tend(live != 0);
         hold.report((live != 0).then_some(live))
     }
 }

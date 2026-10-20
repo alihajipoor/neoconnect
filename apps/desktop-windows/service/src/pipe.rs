@@ -1381,8 +1381,12 @@ async fn dispatch(
         // place through the thorough pass.
         request @ (Request::Disconnect | Request::DisconnectForReconnect) => {
             let for_reconnect = matches!(request, Request::DisconnectForReconnect);
-            if !for_reconnect {
-                if let Some(hold) = ledger.reconnect_hold() {
+            if let Some(hold) = ledger.reconnect_hold() {
+                if for_reconnect {
+                    // A reconnect follows the drop being held for, if one
+                    // is: not a hold nothing followed.
+                    hold.followed();
+                } else {
                     hold.release(crate::engines::reconnect_hold::Release::Asked("the customer disconnected"));
                     hold.disarm();
                 }
@@ -1521,6 +1525,8 @@ async fn dispatch(
             if let Some(hold) = ledger.reconnect_hold() {
                 if block_while_reconnecting {
                     hold.set_wanted(true);
+                    // A connect follows a drop being held for, if one is.
+                    hold.followed();
                 } else {
                     hold.turn_off();
                 }
@@ -1556,11 +1562,13 @@ async fn dispatch(
         }
         // The setting changed. Off lets go and disarms at once; on arms the
         // live session, which needs the owning thread to plan, behind
-        // whatever it is doing.
+        // whatever it is doing. On is also how the app says, as its
+        // reconnect begins, that one follows the drop being held for.
         Request::SetReconnectHold { enabled } => {
             if let Some(hold) = ledger.reconnect_hold() {
                 if enabled {
                     hold.set_wanted(true);
+                    hold.followed();
                 } else {
                     hold.turn_off();
                 }

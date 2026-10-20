@@ -796,10 +796,11 @@ impl Engines {
     }
 
     /// The reconnect hold, as the status poll reports it -- after letting
-    /// go of one that has held too long with no tunnel up.
+    /// go of one nothing followed or that has held too long with no tunnel
+    /// up, and reading the network again while it holds (`Hold::tend`).
     pub fn reconnect_hold_status(&self) -> Option<neoconnect_ipc::ReconnectHold> {
         let live = self.active.peek().map(|s| s.generation);
-        self.reconnect_hold.expire_if_due(live.is_some(), reconnect_hold::HOLD_LONGEST);
+        self.reconnect_hold.tend(live.is_some());
         self.reconnect_hold.report(live)
     }
 
@@ -816,12 +817,16 @@ impl Engines {
 
     /// The live session is about to be taken down by the app to reconnect
     /// (`Request::DisconnectForReconnect`): held from now, before its
-    /// engine stops, if it is armed. Returns whether it is holding.
+    /// engine stops, if it is armed -- and a reconnect is what follows it,
+    /// so the hold is not one nothing followed (`Hold::followed`).
+    /// Returns whether it is holding.
     pub fn hold_for_reconnect(&mut self) -> bool {
-        match self.active.peek().map(|s| s.generation) {
+        let holding = match self.active.peek().map(|s| s.generation) {
             Some(generation) => self.reconnect_hold.engage(generation, "the app is reconnecting"),
             None => self.reconnect_hold.holding(),
-        }
+        };
+        self.reconnect_hold.followed();
+        holding
     }
 
     /// The setting turned on while a tunnel is up: the live session is
@@ -843,7 +848,8 @@ impl Engines {
         let (lan, dhcp_servers) = ops.lan().unwrap_or_default();
         let mut nodes = self.hold_nodes.clone();
         nodes.extend_from_slice(servers);
-        Some(reconnect_hold::Plan::new(tunnels, ops.programs(), nodes, lan, dhcp_servers))
+        let dns = ops.dns_servers().unwrap_or_default();
+        Some(reconnect_hold::Plan::new(tunnels, ops.programs(), nodes, lan, dhcp_servers).with_dns(dns))
     }
 
     /// What a connect does about the hold before it takes down the session
@@ -6920,6 +6926,34 @@ mod helper_tests {
         assert!(!engines.reconnect_hold.holding(), "the customer's disconnect kept the machine held");
         assert_eq!(hold.closed(), vec![7000]);
         assert_eq!(engines.reconnect_hold_status(), None);
+    }
+
+    /// A drop the app does not follow with a reconnect is let go of by
+    /// the service itself after `NO_FOLLOW_UP` -- an app that has decided
+    /// not to reconnect cannot leave the machine held -- while the app's
+    /// own teardown for a reconnect (`DisconnectForReconnect`) is a
+    /// reconnect following, and is not.
+    #[test]
+    fn a_drop_nothing_follows_is_let_go_of_and_a_reconnects_teardown_is_not() {
+        let (mut engines, fake, hold, g) = armed_session();
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]), "the confinement was not let go of");
+        assert!(engines.end_dead_session(g));
+        assert!(engines.reconnect_hold.holding(), "the drop was not held");
+        assert!(engines.reconnect_hold.let_go_if_unfollowed(false, Duration::ZERO), "a drop nothing followed stayed held");
+        assert_eq!(hold.closed(), vec![7000]);
+        assert!(matches!(
+            engines.reconnect_hold_status(),
+            Some(neoconnect_ipc::ReconnectHold::NotHeld { problem: neoconnect_ipc::ReconnectHoldProblem::Other, .. })
+        ));
+
+        let (mut engines, _fake, _hold, _g) = armed_session();
+        assert!(engines.hold_for_reconnect());
+        assert!(
+            !engines.reconnect_hold.let_go_if_unfollowed(false, Duration::ZERO),
+            "the app's own teardown for a reconnect was taken for a drop nothing followed"
+        );
+        assert!(engines.reconnect_hold.holding());
     }
 
     /// The app's teardown for a reconnect holds the gap from before the

@@ -60,10 +60,12 @@ export function holdWanted(preference: boolean): boolean {
 
 export type ReconnectHoldProblem = "filtersRefused" | "tunnelNotPermitted" | "timedOut" | "notCovered" | "other";
 
-/** The service's facts: `Response::State.reconnect_hold`. */
+/** The service's facts: `Response::State.reconnect_hold`. `dnsAnywhere`:
+ * the machine's resolvers could not be read, so port 53 to anywhere is
+ * let through rather than name lookups to those alone. */
 export type ReconnectHold =
   | { readonly state: "armed" }
-  | { readonly state: "holding"; readonly heldSecs: number }
+  | { readonly state: "holding"; readonly heldSecs: number; readonly dnsAnywhere?: true }
   | { readonly state: "notHeld"; readonly problem: ReconnectHoldProblem };
 
 const PROBLEMS: ReadonlySet<string> = new Set(["filtersRefused", "tunnelNotPermitted", "timedOut", "notCovered"]);
@@ -80,7 +82,11 @@ export function readHold(raw: unknown): ReconnectHold | null {
       return { state: "armed" };
     case "holding": {
       const secs = field.held_secs;
-      return { state: "holding", heldSecs: typeof secs === "number" && Number.isFinite(secs) && secs >= 0 ? secs : 0 };
+      return {
+        state: "holding",
+        heldSecs: typeof secs === "number" && Number.isFinite(secs) && secs >= 0 ? secs : 0,
+        ...(field.dns_anywhere === true ? { dnsAnywhere: true as const } : {}),
+      };
     }
     case "notHeld":
       return {
@@ -148,6 +154,7 @@ const PRESSES: ReadonlySet<ReconnectStop> = new Set(["customer"]);
 
 export type HoldNoteKey =
   | "hold.holding"
+  | "hold.dnsAnywhere"
   | "hold.filtersRefused"
   | "hold.tunnelNotPermitted"
   | "hold.timedOut"
@@ -156,10 +163,13 @@ export type HoldNoteKey =
 
 /** What the main page says about the hold while a reconnect runs or the
  * connection has been lost: holding, or why not. Nothing outside those --
- * the hold is about the gap -- and nothing when the setting is off. */
+ * the hold is about the gap -- and nothing when the setting is off.
+ * Holding with port 53 open to anywhere is said as that, beside the
+ * sentence that it holds: "name lookups still go out" would be narrower
+ * than what goes out. */
 export function holdNote(hold: ReconnectHold | null, { inGap, setting }: { inGap: boolean; setting: boolean }): HoldNoteKey | null {
   if (!setting || !inGap || hold === null) return null;
-  if (hold.state === "holding") return "hold.holding";
+  if (hold.state === "holding") return hold.dnsAnywhere === true ? "hold.dnsAnywhere" : "hold.holding";
   if (hold.state === "notHeld") return `hold.${hold.problem}`;
   return null;
 }
@@ -218,6 +228,7 @@ function sameHold(a: ReconnectHold | null, b: ReconnectHold | null): boolean {
   // The seconds held move every poll; only the state and the problem are
   // news.
   if (a.state === "notHeld" && b.state === "notHeld") return a.problem === b.problem;
+  if (a.state === "holding" && b.state === "holding") return a.dnsAnywhere === b.dnsAnywhere;
   return true;
 }
 

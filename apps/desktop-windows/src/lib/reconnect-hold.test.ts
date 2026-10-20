@@ -63,6 +63,16 @@ describe("the service's word on the hold", () => {
     expect(readHold({ state: "blocking" })).toBeNull();
   });
 
+  it("reads that port 53 is open to anywhere when the service says so", () => {
+    expect(readHold({ state: "holding", held_secs: 3, dns_anywhere: true })).toEqual({ state: "holding", heldSecs: 3, dnsAnywhere: true });
+    expect(readHold({ state: "holding", held_secs: 3, dns_anywhere: "yes" })).toEqual({ state: "holding", heldSecs: 3 });
+    const heard = vi.fn();
+    holdStore.subscribe(heard);
+    holdStore.observe({ state: "holding", held_secs: 1 });
+    holdStore.observe({ state: "holding", held_secs: 2, dns_anywhere: true });
+    expect(heard).toHaveBeenCalledTimes(2);
+  });
+
   it("reads a reason from a newer service as other, and nonsense seconds as none", () => {
     expect(readHold({ state: "notHeld", problem: "somethingNew" })).toEqual({ state: "notHeld", problem: "other" });
     expect(readHold({ state: "holding", held_secs: -3 })).toEqual({ state: "holding", heldSecs: 0 });
@@ -389,6 +399,11 @@ describe("what the main page says about it", () => {
     expect(holdNote(HOLDING, { inGap: false, setting: true })).toBeNull();
     expect(holdNote(HOLDING, { inGap: true, setting: false })).toBeNull();
     expect(holdNote({ state: "armed" }, { inGap: true, setting: true })).toBeNull();
+    // Port 53 open to anywhere is said, beside the hint that it holds.
+    expect(holdNote({ state: "holding", heldSecs: 1, dnsAnywhere: true }, { inGap: true, setting: true })).toBe("hold.dnsAnywhere");
+    expect(holdHint({ state: "holding", heldSecs: 1, dnsAnywhere: true }, { reconnecting: true, dropped: false, setting: true })).toBe(
+      "hold.holding",
+    );
   });
 });
 

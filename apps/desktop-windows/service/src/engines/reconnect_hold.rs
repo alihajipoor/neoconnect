@@ -29,12 +29,19 @@
 //! holds credentials for, by address (an engine whose socket WFP does not
 //! attribute to its program -- WireGuard's kernel driver -- still reaches
 //! its server); DHCP, as the confinement permits it; the LAN, as the
-//! confinement permits it; and name lookups (port 53), because the engines
-//! and the app find servers by name through Windows' resolver, which no
-//! app id can single out. That last one is a stated gap: while holding,
-//! the network can see which names the PC looks up, though nothing can
-//! connect to them. Everything else, IPv4 and IPv6, both directions, is
-//! refused.
+//! confinement permits it; and name lookups -- UDP and TCP port 53 to the
+//! resolvers the machine's own adapters are configured with, because the
+//! engines and the app find servers by name through Windows' resolver,
+//! which no app id can single out. That last one is a stated gap: while
+//! holding, the network can see which names the PC looks up, though
+//! nothing can connect to them. When those resolvers cannot be read, port
+//! 53 to anywhere is permitted instead, and the status says so
+//! (`Report::Holding.dns_anywhere`) rather than claim the narrower rule.
+//! Everything else, IPv4 and IPv6, both directions, is refused.
+//!
+//! The LAN, the DHCP servers and the resolvers are read again while it
+//! holds (`Hold::tend`): a laptop that roams during the wait gets its new
+//! network's LAN and resolvers, not the old one's.
 //!
 //! # What lets go of it
 //!
@@ -43,8 +50,12 @@
 //! sign-out, any teardown that is not a reconnect's; the setting turned
 //! off; a connect it does not cover (IKEv2, Custom mode), before that one
 //! dials; the app going away or going silent; the service stopping or
-//! being uninstalled; Repair; and [`HOLD_LONGEST`] without a tunnel, so a
-//! machine is never left offline by a reconnect that will not end. The
+//! being uninstalled; Repair; a drop that no reconnect follows within
+//! [`NO_FOLLOW_UP`] -- no Connect, no `DisconnectForReconnect`, no word
+//! from the app that it is reconnecting -- so an app that has decided not
+//! to reconnect, or has lost track, cannot leave the machine held; and
+//! [`HOLD_LONGEST`] without a tunnel, so a machine is never left offline
+//! by a reconnect that will not end. The
 //! filters live in a dynamic WFP session of their own, so the kernel takes
 //! them away with the process -- a crash, a kill, a reboot -- and the sweep
 //! at the next start looks for them all the same.
@@ -60,7 +71,7 @@
 //! socket above all -- and that every release path lets go, is the VM's
 //! capture (`pktmon --comp nics`) to show.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -96,6 +107,22 @@ pub fn covers(profile: &ConnectProfile, passive: bool) -> bool {
 /// the machine is given its networking back.
 pub const HOLD_LONGEST: Duration = Duration::from_secs(40 * 60);
 
+/// How long a hold a drop began waits for a reconnect to follow it -- a
+/// Connect, a `DisconnectForReconnect`, or the app saying the setting
+/// again as its reconnect begins -- before it is let go of. The app's
+/// reconnect follows within seconds; two minutes allows for a window the
+/// system has slowed to a timer a minute.
+pub const NO_FOLLOW_UP: Duration = Duration::from_secs(120);
+
+/// How often the LAN, the DHCP servers and the resolvers are read again
+/// while it holds, and how long a plan from them that would not go in is
+/// left before it is tried again.
+pub const REREAD_EVERY: Duration = Duration::from_secs(10);
+pub const REREAD_AFTER_REFUSAL: Duration = Duration::from_secs(60);
+
+/// The most resolvers a plan permits.
+pub const MAX_RESOLVERS: usize = 16;
+
 /// The most servers a plan permits by address.
 pub const MAX_NODES: usize = 256;
 
@@ -112,6 +139,10 @@ pub struct Plan {
     /// from, as the confinement reads them.
     pub lan: Vec<Prefix>,
     pub dhcp_servers: Vec<Ipv4Addr>,
+    /// The resolvers the machine's own adapters are configured with: name
+    /// lookups are permitted to these alone. Empty when they could not be
+    /// read, and then to anywhere (`dns_anywhere`).
+    pub dns: Vec<IpAddr>,
 }
 
 impl Plan {
@@ -141,7 +172,27 @@ impl Plan {
             nodes: once(nodes, MAX_NODES),
             lan: once(lan, usize::MAX),
             dhcp_servers: once(dhcp_servers, usize::MAX),
+            dns: Vec::new(),
         }
+    }
+
+    /// The plan with name lookups permitted to `dns` alone: each once,
+    /// bounded, and none that would permit everything or nothing real.
+    pub fn with_dns(mut self, dns: Vec<IpAddr>) -> Self {
+        let mut kept: Vec<IpAddr> = Vec::new();
+        for server in dns {
+            if kept.len() < MAX_RESOLVERS && !server.is_unspecified() && !server.is_loopback() && !kept.contains(&server) {
+                kept.push(server);
+            }
+        }
+        self.dns = kept;
+        self
+    }
+
+    /// Whether name lookups go to anywhere on port 53, the machine's
+    /// resolvers not having been read.
+    pub fn dns_anywhere(&self) -> bool {
+        self.dns.is_empty()
     }
 }
 
@@ -219,8 +270,29 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
         vec![Cond::Protocol(protocol::UDP), Cond::LocalPort(68), Cond::RemotePort(67)],
     ));
     // Name lookups, outbound: see the module's comment for why, and what
-    // it costs.
-    v4.push((Way::Out, WEIGHT_DNS, "permit name lookups".into(), vec![Cond::RemotePort(53)]));
+    // it costs. UDP and TCP to each resolver the machine is configured
+    // with; to anywhere only when none could be read.
+    let lookups = |remote: Cond, who: String| -> Vec<(Way, u8, String, Vec<Cond>)> {
+        [(protocol::UDP, "UDP"), (protocol::TCP, "TCP")]
+            .into_iter()
+            .map(|(number, name)| {
+                (
+                    Way::Out,
+                    WEIGHT_DNS,
+                    format!("permit name lookups to {who} over {name}"),
+                    vec![Cond::Protocol(number), Cond::RemotePort(53), remote.clone()],
+                )
+            })
+            .collect()
+    };
+    if plan.dns_anywhere() {
+        v4.push((Way::Out, WEIGHT_DNS, "permit name lookups to anywhere (the resolvers could not be read)".into(), vec![Cond::RemotePort(53)]));
+    }
+    for server in &plan.dns {
+        if let IpAddr::V4(server) = server {
+            v4.extend(lookups(Cond::RemoteV4(Prefix::host(*server)), server.to_string()));
+        }
+    }
     let mut lan: Vec<Prefix> = Vec::new();
     for prefix in plan.lan.iter().copied().chain(confinement::lan_plumbing()) {
         if !lan.contains(&prefix) {
@@ -233,12 +305,26 @@ pub fn specs(plan: &Plan) -> Vec<FilterSpec> {
 
     let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0);
     let multicast = Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0);
-    let v6_native: Vec<(Way, u8, String, Vec<Cond>)> = vec![
+    let mut v6_native: Vec<(Way, u8, String, Vec<Cond>)> = vec![
         (Way::Both, WEIGHT_LOOPBACK, "permit ::1".into(), vec![Cond::RemoteV6(Ipv6Addr::LOCALHOST, 128)]),
-        (Way::Out, WEIGHT_DNS, "permit name lookups, IPv6".into(), vec![Cond::RemotePort(53)]),
         (Way::Both, WEIGHT_LAN, "permit link-local fe80::/10".into(), vec![Cond::RemoteV6(link_local, 10)]),
         (Way::Both, WEIGHT_LAN, "permit multicast ff00::/8".into(), vec![Cond::RemoteV6(multicast, 8)]),
     ];
+    // Native IPv6 name lookups only to a resolver configured with an IPv6
+    // address -- or, the resolvers unread, to anywhere, as for IPv4.
+    if plan.dns_anywhere() {
+        v6_native.push((
+            Way::Out,
+            WEIGHT_DNS,
+            "permit name lookups to anywhere, IPv6 (the resolvers could not be read)".into(),
+            vec![Cond::RemotePort(53)],
+        ));
+    }
+    for server in &plan.dns {
+        if let IpAddr::V6(server) = server {
+            v6_native.extend(lookups(Cond::RemoteV6(*server, 128), server.to_string()));
+        }
+    }
 
     let direction = |layer: Layer| match layer {
         Layer::ConnectV4 | Layer::ConnectV6 => "outbound",
@@ -363,6 +449,11 @@ pub trait HoldOps: Send + Sync {
     fn lan(&self) -> Option<(Vec<Prefix>, Vec<Ipv4Addr>)>;
     /// Neoxify's own programs that are on this machine.
     fn programs(&self) -> Vec<PathBuf>;
+    /// The resolvers the machine's adapters other than ours are configured
+    /// with, IPv4 and IPv6; `None` when they could not be read.
+    fn dns_servers(&self) -> Option<Vec<IpAddr>> {
+        None
+    }
 }
 
 /// The engines this service runs, by file name in its own directory.
@@ -435,6 +526,10 @@ impl HoldOps for System {
     fn programs(&self) -> Vec<PathBuf> {
         programs_in(&self.exe_dir, std::env::current_exe().ok(), |path| path.is_file())
     }
+
+    fn dns_servers(&self) -> Option<Vec<IpAddr>> {
+        crate::adapters::dns_servers(&super::OUR_ADAPTER_NAMES).ok()
+    }
 }
 
 /// No filtering platform: what the service's own tests run with unless a
@@ -506,6 +601,12 @@ struct State {
     /// Why it is not holding when it should be. Cleared when it holds
     /// again, and when it is let go of on purpose.
     problem: Option<(ReconnectHoldProblem, String)>,
+    /// A drop began this hold and no reconnect has followed it yet
+    /// (`NO_FOLLOW_UP`).
+    awaiting_follow_up: bool,
+    /// When the LAN, the DHCP servers and the resolvers are next read
+    /// again while it holds (`Hold::reread`).
+    reread_at: Option<Instant>,
 }
 
 impl Hold {
@@ -591,6 +692,8 @@ impl Hold {
                 state.since = Some(Instant::now());
                 state.engaged_by = Some(generation);
                 state.problem = None;
+                state.awaiting_follow_up = true;
+                state.reread_at = None;
                 drop(state);
                 self.note(&format!("holding: {} filters, nothing but Neoxify reaches the network outside a tunnel ({why})", installed.filters));
                 true
@@ -649,6 +752,14 @@ impl Hold {
         }
     }
 
+    /// A reconnect follows the drop being held for: a Connect, a
+    /// `DisconnectForReconnect`, or the app saying the setting again as
+    /// its reconnect begins. The hold then lasts until it is let go of or
+    /// [`HOLD_LONGEST`], no longer [`NO_FOLLOW_UP`].
+    pub fn followed(&self) {
+        self.lock().awaiting_follow_up = false;
+    }
+
     /// Lets go of the hold, if one is held. Returns whether this call let
     /// go of it. Safe from any thread, any number of times.
     pub fn release(&self, why: Release) -> bool {
@@ -673,6 +784,8 @@ impl Hold {
         state.held = None;
         state.since = None;
         state.engaged_by = None;
+        state.awaiting_follow_up = false;
+        state.reread_at = None;
         if engine == 0 {
             return false;
         }
@@ -700,8 +813,80 @@ impl Hold {
         self.release_locked(state, Release::Asked("the engine reported gone is running"))
     }
 
-    /// Lets go of a hold that has held for `longest` with no tunnel up.
+    /// What every status poll does to it, from whichever thread answers:
+    /// lets go of a hold nothing followed or that has held too long, and
+    /// reads the network again while it holds.
+    pub fn tend(&self, tunnel_up: bool) {
+        if !self.expire_if_due(tunnel_up, HOLD_LONGEST) {
+            self.reread(Instant::now());
+        }
+    }
+
+    /// Lets go of a hold a drop began that no reconnect has followed
+    /// within `within`, with no tunnel up: the app has decided not to
+    /// reconnect, or lost track, and the machine is not left held behind a
+    /// screen that has moved on.
+    pub fn let_go_if_unfollowed(&self, tunnel_up: bool, within: Duration) -> bool {
+        let state = self.lock();
+        let due = state.engine != 0
+            && !tunnel_up
+            && state.awaiting_follow_up
+            && state.since.is_some_and(|since| since.elapsed() >= within);
+        if !due {
+            return false;
+        }
+        self.release_locked(
+            state,
+            Release::Failed(
+                ReconnectHoldProblem::Other,
+                format!("no reconnect followed the drop within {} seconds, so it was let go of", within.as_secs()),
+            ),
+        )
+    }
+
+    /// The LAN, the DHCP servers and the resolvers read again while it
+    /// holds, at most every [`REREAD_EVERY`], and the plan moved onto them
+    /// when they have changed: a laptop that roamed during the wait gets
+    /// its new network's LAN, not the old one's. A plan that will not go
+    /// in leaves the one held in place, and is not tried again for
+    /// [`REREAD_AFTER_REFUSAL`]. Resolvers that cannot be read this time
+    /// keep the ones held. Returns whether the plan moved.
+    pub fn reread(&self, now: Instant) -> bool {
+        let held = {
+            let mut state = self.lock();
+            if state.engine == 0 || state.reread_at.is_some_and(|at| now < at) {
+                return false;
+            }
+            state.reread_at = Some(now + REREAD_EVERY);
+            match &state.held {
+                Some(plan) => plan.clone(),
+                None => return false,
+            }
+        };
+        let Some((lan, dhcp_servers)) = self.ops.lan() else { return false };
+        let dns = self.ops.dns_servers().unwrap_or_else(|| held.dns.clone());
+        let next = Plan::new(held.tunnels.clone(), held.programs.clone(), held.nodes.clone(), lan, dhcp_servers).with_dns(dns);
+        if next == held {
+            return false;
+        }
+        if self.replan(next, false) {
+            self.note("the network changed while holding, so the LAN and resolvers it permits were read again");
+            return true;
+        }
+        let mut state = self.lock();
+        if state.engine != 0 {
+            state.reread_at = Some(now + REREAD_AFTER_REFUSAL);
+        }
+        false
+    }
+
+    /// Lets go of a hold that has held for `longest` with no tunnel up --
+    /// or, sooner, one a drop began that no reconnect has followed within
+    /// [`NO_FOLLOW_UP`].
     pub fn expire_if_due(&self, tunnel_up: bool, longest: Duration) -> bool {
+        if self.let_go_if_unfollowed(tunnel_up, NO_FOLLOW_UP) {
+            return true;
+        }
         let state = self.lock();
         let due = state.engine != 0 && !tunnel_up && state.since.is_some_and(|since| since.elapsed() >= longest);
         if !due {
@@ -732,7 +917,8 @@ impl Hold {
         let state = self.lock();
         if state.engine != 0 {
             let held_secs = state.since.map_or(0, |since| since.elapsed().as_secs());
-            return Some(Report::Holding { held_secs });
+            let dns_anywhere = state.held.as_ref().is_some_and(Plan::dns_anywhere);
+            return Some(Report::Holding { held_secs, dns_anywhere });
         }
         if let Some((problem, detail)) = &state.problem {
             return Some(Report::NotHeld { problem: *problem, detail: Some(detail.clone()) });
@@ -986,6 +1172,77 @@ mod tests {
         check(&[specs(&plan())], &rows);
     }
 
+    fn resolvers() -> Vec<IpAddr> {
+        vec![IpAddr::V4(Ipv4Addr::new(198, 51, 100, 53)), "2001:db8:53::1".parse().unwrap()]
+    }
+
+    /// With the machine's resolvers read, name lookups go to them alone:
+    /// another VPN on UDP 53, a DNS tunnel, a lookup to a resolver of the
+    /// program's own choosing, and native IPv6 to any :53 are refused.
+    #[test]
+    fn name_lookups_go_only_to_the_machines_resolvers() {
+        const TCP: u8 = protocol::TCP;
+        const UDP: u8 = protocol::UDP;
+        let narrowed = plan().with_dns(resolvers());
+        assert!(!narrowed.dns_anywhere());
+        let mapped = |a: u8, b: u8, c: u8, d: u8| IpAddr::V6(Ipv4Addr::new(a, b, c, d).to_ipv6_mapped());
+        let rows: Vec<(&str, Flow, Verdict)> = vec![
+            ("a browser to some host on UDP 53", out(browser(), v4(203, 0, 113, 9), 53, UDP, PHYSICAL), Verdict::Block),
+            ("a browser to some host on TCP 53", out(browser(), v4(203, 0, 113, 9), 53, TCP, PHYSICAL), Verdict::Block),
+            ("the same, IPv4-mapped", out(browser(), mapped(203, 0, 113, 9), 53, UDP, PHYSICAL), Verdict::Block),
+            ("native IPv6 to some host's :53", out(browser(), "2001:db8::1".parse().unwrap(), 53, UDP, PHYSICAL), Verdict::Block),
+            ("the configured resolver over UDP", out(browser(), v4(198, 51, 100, 53), 53, UDP, PHYSICAL), Verdict::Permit),
+            ("the configured resolver over TCP", out(browser(), v4(198, 51, 100, 53), 53, TCP, PHYSICAL), Verdict::Permit),
+            ("the configured resolver, IPv4-mapped", out(browser(), mapped(198, 51, 100, 53), 53, UDP, PHYSICAL), Verdict::Permit),
+            ("the configured resolver on another port", out(browser(), v4(198, 51, 100, 53), 443, TCP, PHYSICAL), Verdict::Block),
+            ("the configured IPv6 resolver", out(browser(), "2001:db8:53::1".parse().unwrap(), 53, UDP, PHYSICAL), Verdict::Permit),
+            ("the configured IPv6 resolver on another port", out(browser(), "2001:db8:53::1".parse().unwrap(), 443, TCP, PHYSICAL), Verdict::Block),
+            ("the router's resolver, on the LAN", out(browser(), v4(192, 168, 1, 1), 53, UDP, PHYSICAL), Verdict::Permit),
+        ];
+        check(&[specs(&narrowed)], &rows);
+        // Not one unconditional port-53 permit left, at any layer.
+        assert!(
+            !specs(&narrowed).iter().any(|s| s.action == Action::Permit && s.conds.len() == 1 && matches!(s.conds[0], Cond::RemotePort(53))),
+            "port 53 to anywhere is still permitted"
+        );
+    }
+
+    /// Unread, the resolvers leave the broad rule -- and the status says
+    /// so, so the screen does not claim the narrower one.
+    #[test]
+    fn unread_resolvers_leave_port_53_open_and_say_so() {
+        assert!(plan().dns_anywhere());
+        let rows: Vec<(&str, Flow, Verdict)> = vec![(
+            "some host on UDP 53",
+            out(browser(), v4(203, 0, 113, 9), 53, protocol::UDP, PHYSICAL),
+            Verdict::Permit,
+        )];
+        check(&[specs(&plan())], &rows);
+
+        let (hold, _fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan());
+        hold.engage(7, "a drop");
+        assert!(matches!(hold.report(None), Some(Report::Holding { dns_anywhere: true, .. })));
+        hold.release(Release::Asked("the app proved a tunnel"));
+        hold.arm(7, plan().with_dns(resolvers()));
+        hold.engage(7, "a drop");
+        assert!(matches!(hold.report(None), Some(Report::Holding { dns_anywhere: false, .. })));
+    }
+
+    /// The resolvers kept are each once, bounded, and never one that
+    /// would permit everything or nothing real.
+    #[test]
+    fn a_plans_resolvers_are_kept_once_and_bounded() {
+        let one: IpAddr = "198.51.100.53".parse().unwrap();
+        let mut given = vec![one, one, "0.0.0.0".parse().unwrap(), "127.0.0.1".parse().unwrap(), "::1".parse().unwrap(), "::".parse().unwrap()];
+        given.extend((1..=40u8).map(|i| IpAddr::V4(Ipv4Addr::new(198, 18, 0, i))));
+        let dns = plan().with_dns(given).dns;
+        assert_eq!(dns[0], one);
+        assert_eq!(dns.len(), MAX_RESOLVERS);
+        assert!(dns.iter().all(|a| !a.is_unspecified() && !a.is_loopback()));
+    }
+
     /// A tunnel that comes up while it holds carries -- with the session's
     /// own IPv4 confinement and IPv6 block installed beside it, which is
     /// how a reconnected Xray session stands until the app lets go -- and
@@ -1059,6 +1316,10 @@ mod tests {
         closed: Mutex<Vec<isize>>,
         refuse: std::sync::atomic::AtomicBool,
         next: std::sync::atomic::AtomicIsize,
+        /// The LAN and DHCP servers, and the resolvers, as the test says
+        /// they are now.
+        lan: Mutex<(Vec<Prefix>, Vec<Ipv4Addr>)>,
+        dns: Mutex<Option<Vec<IpAddr>>>,
     }
 
     impl HoldOps for Fake {
@@ -1081,10 +1342,13 @@ mod tests {
             Some(TUNNEL)
         }
         fn lan(&self) -> Option<(Vec<Prefix>, Vec<Ipv4Addr>)> {
-            Some((Vec::new(), Vec::new()))
+            Some(self.lan.lock().unwrap().clone())
         }
         fn programs(&self) -> Vec<PathBuf> {
             vec![xray()]
+        }
+        fn dns_servers(&self) -> Option<Vec<IpAddr>> {
+            self.dns.lock().unwrap().clone()
         }
     }
 
@@ -1216,6 +1480,83 @@ mod tests {
         assert!(matches!(hold.report(None), Some(Report::NotHeld { problem: ReconnectHoldProblem::TimedOut, .. })));
     }
 
+    /// A hold a drop began that no reconnect follows -- no Connect, no
+    /// `DisconnectForReconnect`, no word from the app -- is let go of after
+    /// `NO_FOLLOW_UP`, and said; one a reconnect followed is not, nor one
+    /// over a tunnel that is up.
+    #[test]
+    fn a_hold_nothing_followed_is_let_go_of() {
+        let (hold, _fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan());
+        hold.engage(7, "a drop");
+        assert!(!hold.expire_if_due(false, HOLD_LONGEST), "let go of before NO_FOLLOW_UP");
+        assert!(!hold.let_go_if_unfollowed(true, Duration::ZERO), "let go of under a live tunnel");
+        assert!(hold.let_go_if_unfollowed(false, Duration::ZERO));
+        assert!(!hold.holding());
+        assert!(matches!(hold.report(None), Some(Report::NotHeld { problem: ReconnectHoldProblem::Other, .. })));
+
+        hold.arm(7, plan());
+        hold.engage(7, "a drop");
+        hold.followed();
+        assert!(!hold.let_go_if_unfollowed(false, Duration::ZERO), "let go of though a reconnect followed");
+        assert!(hold.holding());
+        // Followed, it lasts to the longest wait, as before.
+        assert!(hold.expire_if_due(false, Duration::ZERO));
+        assert!(matches!(hold.report(None), Some(Report::NotHeld { problem: ReconnectHoldProblem::TimedOut, .. })));
+    }
+
+    /// The LAN, the DHCP servers and the resolvers are read again while it
+    /// holds -- at most every `REREAD_EVERY` -- and a laptop that roamed
+    /// during the wait reaches its new LAN. A plan that will not go in
+    /// leaves the one held, and waits `REREAD_AFTER_REFUSAL` to be tried
+    /// again.
+    #[test]
+    fn the_lan_is_read_again_while_it_holds() {
+        let (hold, fake) = held_by_fake();
+        let t0 = Instant::now();
+        assert!(!hold.reread(t0), "read with nothing held");
+        hold.set_wanted(true);
+        hold.arm(7, plan());
+        hold.engage(7, "a drop");
+
+        let roamed = Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24);
+        *fake.lan.lock().unwrap() = (vec![roamed], vec![Ipv4Addr::new(10, 20, 30, 1)]);
+        *fake.dns.lock().unwrap() = Some(vec![IpAddr::V4(Ipv4Addr::new(10, 20, 30, 1))]);
+        assert!(hold.reread(t0));
+        let held = hold.held_plan().expect("still holding");
+        assert_eq!(held.lan, vec![roamed]);
+        assert_eq!(held.dns, vec![IpAddr::V4(Ipv4Addr::new(10, 20, 30, 1))]);
+        assert_eq!(held.tunnels, plan().tunnels, "the tunnels moved with the LAN");
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000], "the old plan, after the new");
+        let rows: Vec<(&str, Flow, Verdict)> = vec![
+            ("a printer on the new LAN", out(browser(), v4(10, 20, 30, 40), 9100, protocol::TCP, PHYSICAL), Verdict::Permit),
+            ("the internet", out(browser(), v4(93, 184, 216, 34), 443, protocol::TCP, PHYSICAL), Verdict::Block),
+        ];
+        check(&[specs(&held)], &rows);
+
+        assert!(!hold.reread(t0), "read again within REREAD_EVERY");
+        assert!(!hold.reread(t0 + REREAD_EVERY), "the same network is nothing to move");
+        assert_eq!(fake.installs.lock().unwrap().len(), 2);
+
+        // Roamed again, onto a plan the platform will not take.
+        *fake.lan.lock().unwrap() = (vec![Prefix::new(Ipv4Addr::new(172, 16, 5, 0), 24)], Vec::new());
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let t1 = t0 + REREAD_EVERY * 2;
+        assert!(!hold.reread(t1));
+        assert!(hold.holding(), "a plan that would not go in cost the hold");
+        assert_eq!(hold.held_plan().map(|p| p.lan), Some(vec![roamed]));
+        fake.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!hold.reread(t1 + REREAD_EVERY), "tried again before REREAD_AFTER_REFUSAL");
+        assert!(hold.reread(t1 + REREAD_AFTER_REFUSAL));
+
+        // Resolvers that cannot be read this time keep the ones held.
+        *fake.dns.lock().unwrap() = None;
+        *fake.lan.lock().unwrap() = (vec![roamed], Vec::new());
+        assert!(hold.reread(t1 + REREAD_AFTER_REFUSAL + REREAD_EVERY));
+        assert_eq!(hold.held_plan().map(|p| p.dns), Some(vec![IpAddr::V4(Ipv4Addr::new(10, 20, 30, 1))]));
+    }
+
     /// Thirty-two threads at once engaging, moving and letting go of one
     /// hold, as the engine watch, the owning thread and the pipe can: every
     /// WFP session it opens is closed exactly once, and none is left open.
@@ -1265,8 +1606,10 @@ mod tests {
     /// transaction that is then aborted: WFP checks every filter as it is
     /// added, so a structure it would refuse is found here rather than on
     /// a customer's drop, where it would read as "could not hold". Nothing
-    /// stays in force. Skipped without administrator rights; GitHub's
-    /// Windows runners have them. What it cannot show is that traffic
+    /// stays in force. Skipped without administrator rights -- but not on
+    /// CI: GitHub's Windows runners have them, and a skip there, which
+    /// `cargo test` would not show, would leave nothing having checked the
+    /// hold against the real platform. What it cannot show is that traffic
     /// stops -- that is the VM's capture.
     #[test]
     fn wfp_accepts_the_hold_then_aborts() {
@@ -1278,9 +1621,13 @@ mod tests {
             vec![node(), Ipv4Addr::new(198, 51, 100, 9)],
             vec![Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24), Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24)],
             vec![Ipv4Addr::new(10, 0, 2, 2)],
-        );
+        )
+        .with_dns(resolvers());
         let specs = specs(&real);
         match confinement::add_then_abort(&specs, &HOLD_KEYS) {
+            None if std::env::var_os("GITHUB_ACTIONS").is_some() => {
+                panic!("the filtering engine would not open on CI, so the hold was never checked against it")
+            }
             None => eprintln!("skipped: the filtering engine would not open (needs administrator)"),
             Some(Ok(blocks)) => assert_eq!(blocks, 4, "one block per layer"),
             Some(Err(e)) => panic!("the Windows Filtering Platform rejected the hold: {e}"),
