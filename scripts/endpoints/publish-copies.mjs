@@ -15,16 +15,26 @@
  *
  * The copies repository holds those two files and nothing else -- no
  * README, licence or workflow -- so a checkout with any other file in it
- * is refused. Its name is not written in this repository: pass --github,
- * or let it be read off the checkout's origin.
+ * is refused. Neither its name nor the two file names are written in this
+ * repository: pass --github (or let it be read off the checkout's origin)
+ * and --names (or NEOXIFY_COPIES_NAMES), from the owner's own notes.
+ *
+ * Commits carry only the checkout's own identity, which must be set in it
+ * (`git config --local`), and UTC times: nothing of the machine that made
+ * them.
  *
  * Usage:
- *   node scripts/endpoints/publish-copies.mjs --dry-run [--repo <checkout>] [--github <owner>/<repo>]
- *   node scripts/endpoints/publish-copies.mjs --repo <checkout> [--push [--no-purge]]
- *     --api <base>   the panel API (default https://connect.neoxify.site/api)
- *     --dry-run      fetch and verify, say what would change, write nothing
- *     --push         push the commit, then ask jsDelivr to drop its cached
- *                    copies (unless --no-purge)
+ *   node scripts/endpoints/publish-copies.mjs --dry-run [--repo <checkout> --names <a>,<b>] [--github <owner>/<repo>]
+ *   node scripts/endpoints/publish-copies.mjs --repo <checkout> --names <a>,<b> [--push [--no-purge]]
+ *     --api <base>     the panel API (default https://connect.neoxify.site/api)
+ *     --names <a>,<b>  the file names of the offline list and the server
+ *                      list in the copies repository; required with --repo
+ *     --dry-run        fetch and verify, say what would change, write nothing
+ *     --push           push the commit, then ask jsDelivr to drop its cached
+ *                      copies (unless --no-purge)
+ *     --test-keys      trust NEOXIFY_TEST_BUNDLE_KEYS instead of the apps'
+ *                      keys. Tests only: refused for a commit to a checkout
+ *                      whose origin is on GitHub, and never purges the CDN
  *
  * Exit 0 when every published list is copied or already current; 1 when
  * anything was refused or failed. A list that verified is copied either
@@ -45,11 +55,16 @@ const DEFAULT_API = "https://connect.neoxify.site/api";
 // Overridable only so the test can answer the purge itself.
 const PURGE_BASE = process.env.NEOXIFY_PURGE_BASE ?? "https://purge.jsdelivr.net";
 
-/** The two lists, under the file names they keep in the copies repository. */
-const SLOTS = [
-  { file: "bundle.json", path: "/endpoints/bundle", server: false },
-  { file: "bundle2.json", path: "/endpoints/bundle2", server: true },
-];
+/** The two lists, under the file names they keep in the copies
+ * repository (--names). */
+function slotsFor(names) {
+  return [
+    { file: names[0], path: "/endpoints/bundle", server: false },
+    { file: names[1], path: "/endpoints/bundle2", server: true },
+  ];
+}
+/** Printed in place of the names when none were given (a dry run alone). */
+const PLACEHOLDER_NAMES = ["<offline-list>", "<server-list>"];
 /** The compiled-in key ids, as bundle.mjs and the apps name them. */
 const COMPILED_IN = new Set(["primary", "backup"]);
 /** `SERVER_SIGNED_FIRST_VERSION` in the backend's endpoints.service.ts. */
@@ -62,11 +77,16 @@ function die(message) {
   process.exit(1);
 }
 
-const OPTIONS = new Set(["repo", "api", "github"]);
-const FLAGS = new Set(["dry-run", "push", "no-purge"]);
+const OPTIONS = new Set(["repo", "api", "github", "names"]);
+const FLAGS = new Set(["dry-run", "push", "no-purge", "test-keys"]);
+
+/** A file name the copies repository may hold: a plain name, no path. */
+function plainFileName(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(value) && !/^\.git/i.test(value);
+}
 
 function parseArgs(argv) {
-  const opts = { api: DEFAULT_API, dryRun: false, push: false, purge: true };
+  const opts = { api: DEFAULT_API, dryRun: false, push: false, purge: true, testKeys: false };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i].replace(/^--/, "");
     if (!argv[i].startsWith("--") || (!OPTIONS.has(name) && !FLAGS.has(name))) die(`unknown argument ${argv[i]}`);
@@ -74,6 +94,7 @@ function parseArgs(argv) {
       if (name === "dry-run") opts.dryRun = true;
       if (name === "push") opts.push = true;
       if (name === "no-purge") opts.purge = false;
+      if (name === "test-keys") opts.testKeys = true;
       continue;
     }
     const value = argv[i + 1];
@@ -88,14 +109,30 @@ function parseArgs(argv) {
   }
   if (!opts.dryRun && opts.repo === undefined) die("pass --repo <checkout of the copies repository>, or --dry-run");
   if (opts.push && opts.repo === undefined) die("--push needs --repo");
+
+  const rawNames = opts.names ?? process.env.NEOXIFY_COPIES_NAMES;
+  if (rawNames === undefined || rawNames.trim() === "") {
+    if (opts.repo !== undefined) die("pass --names <offline-file>,<server-file> (or set NEOXIFY_COPIES_NAMES)");
+    opts.slots = slotsFor(PLACEHOLDER_NAMES);
+  } else {
+    const names = rawNames.split(",").map((n) => n.trim());
+    if (names.length !== 2 || !names.every(plainFileName) || names[0] === names[1]) {
+      die("--names takes two different plain file names, the offline list's first: <offline-file>,<server-file>");
+    }
+    opts.slots = slotsFor(names);
+  }
   return opts;
 }
 
 /** The apps' compiled-in public keys, by id, read from their source so
- * there is no third copy of them to drift. */
-function compiledInKeys() {
+ * there is no third copy of them to drift. Test keys only when asked for
+ * by flag as well as by environment, so a stray variable cannot put a
+ * list nobody's app accepts on a real mirror. */
+function compiledInKeys(opts) {
   const override = process.env.NEOXIFY_TEST_BUNDLE_KEYS;
-  if (override) {
+  if (override && !opts.testKeys) die("NEOXIFY_TEST_BUNDLE_KEYS is set; unset it, or pass --test-keys in a test");
+  if (opts.testKeys) {
+    if (!override) die("--test-keys needs NEOXIFY_TEST_BUNDLE_KEYS");
     console.error("warning: trusting NEOXIFY_TEST_BUNDLE_KEYS instead of the apps' keys (tests only)");
     return JSON.parse(override);
   }
@@ -197,8 +234,8 @@ async function fetchList(api, slot) {
   return { raw: Buffer.from(await res.arrayBuffer()) };
 }
 
-function git(repo, args, { buffer = false } = {}) {
-  const result = spawnSync("git", ["-C", repo, ...args], { encoding: buffer ? "buffer" : "utf8" });
+function git(repo, args, { buffer = false, env } = {}) {
+  const result = spawnSync("git", ["-C", repo, ...args], { encoding: buffer ? "buffer" : "utf8", env });
   if (result.error) die(`git: ${result.error.message}`);
   if (result.status !== 0) {
     const stderr = buffer ? result.stderr.toString("utf8") : result.stderr;
@@ -226,7 +263,7 @@ function githubSlug(remoteUrl) {
 
 /** What the checkout is, after refusing one that holds anything but the
  * lists or has changes of its own. */
-function openCheckout(repo) {
+function openCheckout(repo, slots) {
   let prefix;
   try {
     prefix = git(repo, ["rev-parse", "--show-prefix"]).trim();
@@ -234,7 +271,7 @@ function openCheckout(repo) {
     die(`${repo} is not a git checkout`);
   }
   if (prefix !== "") die(`${repo} is inside a checkout, not the top of one`);
-  const allowed = new Set(SLOTS.map((s) => s.file));
+  const allowed = new Set(slots.map((s) => s.file));
   const tracked = mustGit(repo, ["ls-files", "-z"]).split("\0").filter(Boolean);
   const others = tracked.filter((file) => !allowed.has(file));
   if (others.length > 0) {
@@ -266,17 +303,42 @@ function openCheckout(repo) {
   return { repo, branch, upstream, origin };
 }
 
-/** The version of the copy already in the checkout: null when there is
- * none, NaN when it cannot be read. */
-function copyVersion(path) {
+/** The checks a client makes, on the exact bytes: whose key, the
+ * signature (and statement) with `bundle.mjs verify`, and whether the
+ * list is one a client would use. `{ envelope, signer, list }`, or
+ * `{ problem }` saying which check refused it (`shape` when it is the
+ * file itself rather than its signature or contents). */
+function checkList(raw, slot, keys) {
+  let envelope;
+  let signer;
+  try {
+    envelope = JSON.parse(raw.toString("utf8"));
+    signer = signerFor(envelope, slot);
+  } catch (err) {
+    return { problem: err instanceof SyntaxError ? "is not JSON" : err.message, shape: true };
+  }
+  if (!Object.prototype.hasOwnProperty.call(keys, signer)) {
+    return { problem: `names no compiled-in key ${signer}`, shape: true };
+  }
+  const verdict = verifyWithTool(raw, keys[signer]);
+  if (!verdict.ok) return { problem: `does not verify against the apps' keys (${verdict.said})` };
+  try {
+    return { envelope, signer, list: usableList(envelope, slot) };
+  } catch (err) {
+    return { problem: `verifies, but ${err.message}` };
+  }
+}
+
+/** The copy already in the checkout: none (v null), one that passes the
+ * same checks as a fetched list, with its version, or one that does not
+ * (v NaN). A copy's version is never taken on its word: a forged or
+ * broken file claiming a huge one would otherwise hold the mirror for
+ * good. */
+function existingCopy(path, slot, keys) {
   if (!existsSync(path)) return { raw: null, v: null };
   const raw = readFileSync(path);
-  try {
-    const v = decodeJson(JSON.parse(raw.toString("utf8")).payload).v;
-    return { raw, v: typeof v === "number" && Number.isFinite(v) ? v : Number.NaN };
-  } catch {
-    return { raw, v: Number.NaN };
-  }
+  const checked = checkList(raw, slot, keys);
+  return checked.problem ? { raw, v: Number.NaN, problem: checked.problem } : { raw, v: checked.list.v };
 }
 
 /** Fetches, verifies and compares one list. Returns what to do with it. */
@@ -292,31 +354,12 @@ async function examine(slot, opts, keys, checkout) {
     return { ok: false };
   }
   const { raw } = fetched;
-  let envelope;
-  let signer;
-  try {
-    envelope = JSON.parse(raw.toString("utf8"));
-    signer = signerFor(envelope, slot);
-  } catch (err) {
-    console.log(`${label} REFUSED: ${slot.path} ${err instanceof SyntaxError ? "is not JSON" : err.message}`);
+  const checked = checkList(raw, slot, keys);
+  if (checked.problem) {
+    console.log(`${label} REFUSED: ${checked.shape ? `${slot.path} ` : ""}${checked.problem}`);
     return { ok: false };
   }
-  if (!Object.prototype.hasOwnProperty.call(keys, signer)) {
-    console.log(`${label} REFUSED: no compiled-in key named ${signer}`);
-    return { ok: false };
-  }
-  const verdict = verifyWithTool(raw, keys[signer]);
-  if (!verdict.ok) {
-    console.log(`${label} REFUSED: does not verify against the apps' keys (${verdict.said})`);
-    return { ok: false };
-  }
-  let list;
-  try {
-    list = usableList(envelope, slot);
-  } catch (err) {
-    console.log(`${label} REFUSED: verifies, but ${err.message}`);
-    return { ok: false };
-  }
+  const { envelope, signer, list } = checked;
 
   let signedBy = `key=${signer}`;
   let ok = true;
@@ -337,13 +380,13 @@ async function examine(slot, opts, keys, checkout) {
     return { ok, write: false };
   }
   const path = join(checkout.repo, slot.file);
-  const copy = copyVersion(path);
+  const copy = existingCopy(path, slot, keys);
   if (copy.v === null) {
     console.log(`${summary} -> ${opts.dryRun ? "would copy" : "copy"} (none there yet)`);
     return { ok, write: true, raw, path, file: slot.file, v: list.v };
   }
   if (Number.isNaN(copy.v)) {
-    console.log(`${summary} -> ${opts.dryRun ? "would replace" : "replace"} an unreadable copy`);
+    console.log(`${summary} -> ${opts.dryRun ? "would replace" : "replace"} a copy that ${copy.problem}`);
     return { ok, write: true, raw, path, file: slot.file, v: list.v };
   }
   if (list.v > copy.v) {
@@ -379,10 +422,55 @@ async function purge(slug, branch, files) {
   }
 }
 
-function printUrls(slug, branch) {
+/** The checkout's own identity, refusing to commit under any other: a
+ * global one would put the owner's name and address in a public
+ * repository, and tie it to this one. */
+function commitIdentity(repo) {
+  const local = (key) => {
+    try {
+      return git(repo, ["config", "--local", "--get", key]).trim();
+    } catch {
+      return "";
+    }
+  };
+  const name = local("user.name");
+  const email = local("user.email");
+  if (!name || !email) {
+    die(
+      `${repo} has no identity of its own; give it one that says nothing about you:\n` +
+        `  git -C ${repo} config --local user.name <neutral name>\n` +
+        `  git -C ${repo} config --local user.email <id>+<name>@users.noreply.github.com`,
+    );
+  }
+  if (!/@users\.noreply\.github\.com$/i.test(email)) {
+    console.error(`warning: the checkout commits as ${email}; a GitHub noreply address says less`);
+  }
+  return { name, email };
+}
+
+/** git's environment for a commit: that identity and UTC, with nothing
+ * inherited that could stand in for either. */
+function commitEnv(identity) {
+  const env = { ...process.env, TZ: "UTC0" };
+  for (const key of Object.keys(env)) {
+    if (/^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)$/i.test(key)) delete env[key];
+  }
+  const stamp = `${Math.floor(Date.now() / 1000)} +0000`;
+  return {
+    ...env,
+    GIT_AUTHOR_NAME: identity.name,
+    GIT_AUTHOR_EMAIL: identity.email,
+    GIT_AUTHOR_DATE: stamp,
+    GIT_COMMITTER_NAME: identity.name,
+    GIT_COMMITTER_EMAIL: identity.email,
+    GIT_COMMITTER_DATE: stamp,
+  };
+}
+
+function printUrls(slug, branch, slots) {
   const name = slug ?? "<owner>/<repo>";
   console.log("\nURLs the apps would read:");
-  for (const { file } of SLOTS) {
+  for (const { file } of slots) {
     console.log(`  https://raw.githubusercontent.com/${name}/${branch}/${file}`);
     console.log(`  https://cdn.jsdelivr.net/gh/${name}@${branch}/${file}`);
   }
@@ -391,19 +479,27 @@ function printUrls(slug, branch) {
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const keys = compiledInKeys();
-  let checkout = opts.repo === undefined ? null : openCheckout(opts.repo);
+  const { slots } = opts;
+  const keys = compiledInKeys(opts);
+  let checkout = opts.repo === undefined ? null : openCheckout(opts.repo, slots);
+  // Test keys never reach a real mirror: no commit to a checkout of a
+  // GitHub repository, and no purge of the real CDN.
+  if (opts.testKeys && checkout && !opts.dryRun && checkout.origin && githubSlug(checkout.origin)) {
+    die("--test-keys is for tests; this checkout's origin is on GitHub");
+  }
+  if (opts.testKeys && process.env.NEOXIFY_PURGE_BASE === undefined) opts.purge = false;
+  const identity = checkout && !opts.dryRun ? commitIdentity(checkout.repo) : null;
 
   // Compare against what is already published, so a copy pushed from
   // another machine is not taken for missing -- and check again what the
   // pull brought in.
   if (checkout && opts.push && checkout.upstream && !opts.dryRun) {
     mustGit(checkout.repo, ["pull", "-q", "--ff-only"]);
-    checkout = openCheckout(opts.repo);
+    checkout = openCheckout(opts.repo, slots);
   }
 
   const results = [];
-  for (const slot of SLOTS) results.push(await examine(slot, opts, keys, checkout));
+  for (const slot of slots) results.push(await examine(slot, opts, keys, checkout));
   const ok = results.every((r) => r.ok);
   const writes = results.filter((r) => r.write);
 
@@ -425,7 +521,7 @@ async function main() {
       }
     }
     const message = `update ${writes.map((w, i) => `${files[i]} to v${w.v}`).join(", ")}`;
-    mustGit(checkout.repo, ["commit", "-q", "-m", message]);
+    mustGit(checkout.repo, ["commit", "-q", "-m", message], { env: commitEnv(identity) });
     committed = true;
     console.log(`\ncommitted ${mustGit(checkout.repo, ["rev-parse", "--short", "HEAD"]).trim()}: ${message}`);
   }
@@ -454,7 +550,7 @@ async function main() {
       mustGit(checkout.repo, checkout.upstream ? ["push", "-q"] : ["push", "-q", "-u", "origin", "HEAD"]);
       console.log(`pushed ${branch}`);
       if (opts.purge) {
-        if (slug) await purge(slug, branch, SLOTS.map((s) => s.file).filter((f) => existsSync(join(checkout.repo, f))));
+        if (slug) await purge(slug, branch, slots.map((s) => s.file).filter((f) => existsSync(join(checkout.repo, f))));
         else console.log("purge skipped: the GitHub name is unknown (pass --github)");
       }
     } else {
@@ -462,7 +558,7 @@ async function main() {
     }
   }
 
-  printUrls(slug, branch);
+  printUrls(slug, branch, slots);
   process.exitCode = ok ? 0 : 1;
 }
 

@@ -4,9 +4,10 @@
  * jsDelivr's purge) and throwaway git checkouts.
  *
  * The lists are signed here with keys made for the test, and the script
- * is told to trust them through NEOXIFY_TEST_BUNDLE_KEYS -- except in the
- * one test that leaves it out, which shows the script holds lists to the
- * apps' real keys. Every endpoint is an RFC 2606 name.
+ * is told to trust them through NEOXIFY_TEST_BUNDLE_KEYS and --test-keys
+ * -- except in the one test that leaves them out, which shows the script
+ * holds lists to the apps' real keys. The file names are the test's own
+ * (--names). Every endpoint is an RFC 2606 name.
  *
  *   node --test scripts/endpoints/publish-copies.test.mjs
  */
@@ -120,12 +121,17 @@ function checkout() {
   return dir;
 }
 
-function run(args, { trusted = true } = {}) {
+/** The file names, given as the owner would (they are not in the script). */
+const NAMES = ["--names", "bundle.json,bundle2.json"];
+
+function run(args, { trusted = true, names = true, flag = trusted } = {}) {
   const env = { ...process.env, NEOXIFY_PURGE_BASE: base };
   delete env.NEOXIFY_TEST_BUNDLE_KEYS;
+  delete env.NEOXIFY_COPIES_NAMES;
   if (trusted) env.NEOXIFY_TEST_BUNDLE_KEYS = TRUSTED;
+  const extra = [...(names ? NAMES : []), ...(flag ? ["--test-keys"] : [])];
   return new Promise((resolve) => {
-    execFile(process.execPath, [SCRIPT, "--api", `${base}/api`, ...args], { env }, (error, stdout, stderr) => {
+    execFile(process.execPath, [SCRIPT, "--api", `${base}/api`, ...extra, ...args], { env }, (error, stdout, stderr) => {
       resolve({ status: error ? error.code : 0, stdout, stderr, out: `${stdout}${stderr}` });
     });
   });
@@ -204,6 +210,85 @@ describe("publish-copies", () => {
     assert.match(result.stdout, /KEPT the copy: same version, different bytes/);
     assert.equal(read(dir, "bundle.json"), held);
     assert.equal(commits(dir), 1);
+  });
+
+  it("replaces a copy that does not verify, whatever version it claims", async () => {
+    const dir = checkout();
+    // Forged, or broken by hand: a version no real list will reach.
+    writeFileSync(join(dir, "bundle.json"), offlineList(999_999, stranger));
+    writeFileSync(join(dir, "bundle2.json"), "{ not json");
+    git(dir, "add", "bundle.json", "bundle2.json");
+    git(dir, "commit", "-q", "-m", "bad copies");
+    const result = await run(["--repo", dir]);
+    assert.equal(result.status, 0, result.out);
+    assert.match(result.stdout, /bundle\.json .*-> replace a copy that does not verify against the apps' keys/);
+    assert.match(result.stdout, /bundle2\.json .*-> replace a copy that is not JSON/);
+    assert.equal(read(dir, "bundle.json"), routes["/api/endpoints/bundle"].body);
+    assert.equal(read(dir, "bundle2.json"), routes["/api/endpoints/bundle2"].body);
+  });
+
+  it("trusts test keys only when asked twice, and never for a GitHub checkout", async () => {
+    let result = await run(["--dry-run"], { flag: false });
+    assert.equal(result.status, 1, result.out);
+    assert.match(result.stderr, /NEOXIFY_TEST_BUNDLE_KEYS is set; unset it, or pass --test-keys/);
+
+    result = await run(["--dry-run"], { trusted: false, flag: true });
+    assert.equal(result.status, 1, result.out);
+    assert.match(result.stderr, /--test-keys needs NEOXIFY_TEST_BUNDLE_KEYS/);
+
+    const dir = checkout();
+    git(dir, "remote", "add", "origin", "https://github.com/acme/copies.git");
+    result = await run(["--repo", dir]);
+    assert.equal(result.status, 1, result.out);
+    assert.match(result.stderr, /--test-keys is for tests; this checkout's origin is on GitHub/);
+    assert.equal(existsSync(join(dir, "bundle.json")), false);
+  });
+
+  it("commits only under the checkout's own identity, in UTC", async () => {
+    const bare = tempDir();
+    git(bare, "init", "-q", "-b", "main");
+    const refused = await run(["--repo", bare]);
+    assert.equal(refused.status, 1, refused.out);
+    assert.match(refused.stderr, /has no identity of its own/);
+    assert.equal(commits(bare), 0);
+
+    const dir = checkout();
+    const env = { ...process.env, TZ: "Asia/Tehran", GIT_AUTHOR_EMAIL: "someone@example.com" };
+    const result = await new Promise((resolve) => {
+      execFile(
+        process.execPath,
+        [SCRIPT, "--api", `${base}/api`, ...NAMES, "--test-keys", "--repo", dir],
+        { env: { ...env, NEOXIFY_TEST_BUNDLE_KEYS: TRUSTED, NEOXIFY_PURGE_BASE: base } },
+        (error, stdout, stderr) => resolve({ status: error ? error.code : 0, out: `${stdout}${stderr}` }),
+      );
+    });
+    assert.equal(result.status, 0, result.out);
+    assert.equal(git(dir, "log", "-1", "--format=%ae %ce"), "test@example.invalid test@example.invalid");
+    assert.match(git(dir, "log", "-1", "--format=%ai|%ci"), /\+0000\|.*\+0000$/);
+    assert.match(result.out, /a GitHub noreply address says less/);
+  });
+
+  it("takes the file names from the owner, never from the script", async () => {
+    const dir = checkout();
+    let result = await run(["--repo", dir], { names: false });
+    assert.equal(result.status, 1, result.out);
+    assert.match(result.stderr, /pass --names <offline-file>,<server-file>/);
+
+    result = await run(["--repo", dir, "--names", "a.json"], { names: false });
+    assert.equal(result.status, 1, result.out);
+    assert.match(result.stderr, /--names takes two different plain file names/);
+    result = await run(["--repo", dir, "--names", "../a.json,b.json"], { names: false });
+    assert.equal(result.status, 1, result.out);
+
+    result = await run(["--repo", dir, "--names", "x1.json,y2.json"], { names: false });
+    assert.equal(result.status, 0, result.out);
+    assert.deepEqual(git(dir, "ls-files").split("\n"), ["x1.json", "y2.json"]);
+    assert.equal(read(dir, "y2.json"), routes["/api/endpoints/bundle2"].body);
+
+    // A dry run with no checkout and no names prints placeholders.
+    result = await run(["--dry-run"], { names: false });
+    assert.equal(result.status, 0, result.out);
+    assert.match(result.stdout, /cdn\.jsdelivr\.net\/gh\/<owner>\/<repo>@main\/<server-list>/);
   });
 
   it("refuses a forged list and still copies the good one", async () => {
