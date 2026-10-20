@@ -102,6 +102,16 @@ jobs:
           pnpm exec prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
           pnpm exec prisma db execute --url "$DATABASE_URL" --file test/sql/rollback-check.sql
 
+      # The block watch's queries (grouped upstream counts, the owner's
+      # latest answer per server) against that same Postgres. Its unit
+      # tests use an in-memory stand-in; this spec is skipped everywhere
+      # but here.
+      - name: Block watch queries run against Postgres
+        working-directory: apps/backend
+        env:
+          BLOCK_WATCH_DB_TEST: "1"
+        run: pnpm exec jest src/modules/block-watch/block-watch.db.spec.ts
+
       - run: pnpm turbo run lint typecheck build test
 
   agent:

@@ -168,6 +168,13 @@ export default () => ({
     // precisely because it needs no maintenance.
     recipients: process.env.REACHABILITY_ALERT_EMAILS,
   },
+  // Watching for servers that look blocked from the country above, and
+  // telling the owner (modules/block-watch). It never changes a server.
+  // off (the default), record (panel only), digest (plus a daily digest,
+  // no pages) or notify (pages too). Anything else is off.
+  blockWatch: {
+    mode: process.env.BLOCK_WATCH ?? "off",
+  },
   // Minutes without a heartbeat before the owner is paged (webhook and
   // email) that a node has gone quiet, once per gap. 0 turns it off; the
   // webhook-only offline alerts are unaffected.

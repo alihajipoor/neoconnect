@@ -40,6 +40,10 @@ const REACHABILITY_INTERVAL_MS = 30 * 60 * 1000;
 // those of devices idle for 30 days -- neither is improved by minutes.
 const DEVICE_CREDENTIALS_INTERVAL_MS = 60 * 60 * 1000;
 const RELAY_UNVERIFIED_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// The reachability probe's cadence: the block watch reads its results,
+// and nothing else it reads changes faster. Runs whatever BLOCK_WATCH
+// says, and does nothing when it is off.
+const BLOCK_WATCH_INTERVAL_MS = 30 * 60 * 1000;
 
 /** Registers the two repeatable sweep jobs on startup. Adding a
  * repeatable job with the same jobId+repeat config is idempotent in
@@ -96,6 +100,11 @@ export class SweepsSchedulerService implements OnModuleInit {
       "relay-unverified",
       {},
       { repeat: { every: RELAY_UNVERIFIED_INTERVAL_MS }, jobId: "relay-unverified-sweep" },
+    );
+    await this.queue.add(
+      "block-watch",
+      {},
+      { repeat: { every: BLOCK_WATCH_INTERVAL_MS }, jobId: "block-watch-sweep" },
     );
   }
 }

@@ -126,7 +126,7 @@ export interface EvidenceRow {
  * latest dial on the route, and the route shown to everyone on the
  * network as worse than it is. Arrival alone still decides which rows
  * are in the window: a client's clock cannot keep a row in. */
-function happenedAt(row: EvidenceRow): number {
+export function happenedAt(row: Pick<EvidenceRow, "createdAt" | "occurredAt">): number {
   const arrived = row.createdAt.getTime();
   const said = row.occurredAt?.getTime();
   return said !== undefined && Number.isFinite(said) && said <= arrived ? said : arrived;

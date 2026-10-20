@@ -106,6 +106,9 @@ services:
       # Unset, every SUPERADMIN in admin_users is mailed, which is the
       # right default because it needs no maintenance.
       REACHABILITY_ALERT_EMAILS: ${REACHABILITY_ALERT_EMAILS:-}
+      # Block watch (modules/block-watch): off (blank), record, digest or
+      # notify. It never changes a server; notify pages the owner.
+      BLOCK_WATCH: ${BLOCK_WATCH:-}
       # Minutes without a heartbeat before the owner is paged (webhook and
       # email). Blank = 10; 0 = off.
       HEARTBEAT_GAP_PAGE_MINUTES: ${HEARTBEAT_GAP_PAGE_MINUTES:-}
