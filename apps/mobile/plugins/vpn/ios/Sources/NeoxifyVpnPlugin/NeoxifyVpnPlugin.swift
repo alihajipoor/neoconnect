@@ -3,6 +3,7 @@ import NetworkExtension
 import StoreKit
 import Tauri
 import UIKit
+import UserNotifications
 
 /// The app half of the VPN, mirroring the Kotlin plugin on Android.
 ///
@@ -261,6 +262,8 @@ class NeoxifyVpnPlugin: Plugin {
             // return -- stopping only those would leave an IKEv2 tunnel
             // up while the app reported it down.
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
+            // The extension says nothing of a stop this app asked for.
+            TunnelNotices.ownStopComing()
             for manager in managers { manager.connection.stopVPNTunnel() }
             await Ikev2Engine.disconnect()
             invoke.resolve()
@@ -292,6 +295,7 @@ class NeoxifyVpnPlugin: Plugin {
     @objc public func forgetProfiles(_ invoke: Invoke) {
         Task {
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
+            TunnelNotices.ownStopComing()
             for manager in managers {
                 manager.connection.stopVPNTunnel()
                 if let proto = manager.protocolConfiguration as? NETunnelProviderProtocol {
@@ -518,6 +522,11 @@ class NeoxifyVpnPlugin: Plugin {
     }
 
     @objc public func status(_ invoke: Invoke) {
+        // The byte totals only when asked: each is a round trip to the
+        // extension. The speeds ask; the ladder and the health checks do
+        // not, and an older caller sending nothing is not asking.
+        struct Args: Decodable { let totals: Bool? }
+        let wantTotals = (try? invoke.parseArgs(Args.self))?.totals ?? false
         Task {
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
             let tunnel = managers.first?.connection.status ?? .invalid
@@ -537,7 +546,185 @@ class NeoxifyVpnPlugin: Plugin {
             // tunnel-provider state unconditionally would report a live
             // IKEv2 session as disconnected.
             let state = up(tunnel) ? tunnel : (up(ikev2) ? ikev2 : tunnel)
-            invoke.resolve(["connected": up(state), "state": String(describing: state)])
+            var answer: JsonObject = ["connected": up(state), "state": String(describing: state)]
+            // How long the live connection has been up, from the system's
+            // own record of it, for the timer on a screen that finds it
+            // already running. None where it is not up or not dated.
+            var live: NEVPNConnection? = nil
+            if up(tunnel) {
+                live = managers.first?.connection
+            } else if up(ikev2) {
+                live = await Ikev2Engine.connection()
+            }
+            if let since = live?.connectedDate {
+                let secs = Int(Date().timeIntervalSince(since))
+                if secs >= 0 { answer["sessionSecs"] = secs }
+            }
+            // Byte totals only from our own extension, which counts them
+            // (ProviderTotals); IKEv2 is the system's client and iOS gives
+            // the app no totals for it, so they stay absent -- null, never 0.
+            if wantTotals, up(tunnel), let session = managers.first?.connection as? NETunnelProviderSession,
+               let totals = await ProviderTotals.read(session) {
+                answer["rxBytes"] = totals.rx
+                answer["txBytes"] = totals.tx
+            }
+            invoke.resolve(answer)
+        }
+    }
+
+    /// Whether iOS shows this app's notifications: "enabled", "canAsk"
+    /// (never asked, so asking shows the system's question) or
+    /// "disabledForApp" (turned off, which only Settings can change).
+    @objc public func notificationState(_ invoke: Invoke) {
+        Task {
+            let state = await TunnelNotices.authorization()
+            invoke.resolve(["state": state])
+        }
+    }
+
+    /// The system's question, raised only from the customer's press in
+    /// Settings, and only where it can still be asked; otherwise the
+    /// state, with nothing shown.
+    @objc public func requestNotifications(_ invoke: Invoke) {
+        Task {
+            if await TunnelNotices.authorization() == "canAsk" {
+                _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+            }
+            let state = await TunnelNotices.authorization()
+            invoke.resolve(["state": state])
+        }
+    }
+
+    /// iOS's settings for this app's notifications (iOS 16 and later), or
+    /// the app's settings page before that.
+    @objc public func openNotificationSettings(_ invoke: Invoke) {
+        DispatchQueue.main.async {
+            let name: String
+            if #available(iOS 16.0, *) {
+                name = UIApplication.openNotificationSettingsURLString
+            } else {
+                name = UIApplication.openSettingsURLString
+            }
+            guard let url = URL(string: name) else {
+                invoke.reject("iOS gave no address for its settings")
+                return
+            }
+            UIApplication.shared.open(url) { opened in
+                if opened {
+                    invoke.resolve()
+                } else {
+                    invoke.reject("iOS did not open its settings")
+                }
+            }
+        }
+    }
+
+    /// The words the extension's notification uses, in the app's language,
+    /// and whether the customer wants it. Kept in the app group, where the
+    /// extension reads them as it stops (TunnelNotice there).
+    @objc public func setNotices(_ invoke: Invoke) {
+        struct Args: Decodable {
+            let enabled: Bool
+            let offTitle: String
+            let offBody: String
+            let stoppedTitle: String?
+            let stoppedBody: String?
+        }
+        do {
+            let args = try invoke.parseArgs(Args.self)
+            TunnelNotices.save(
+                enabled: args.enabled,
+                offTitle: args.offTitle,
+                offBody: args.offBody,
+                stoppedTitle: args.stoppedTitle ?? "",
+                stoppedBody: args.stoppedBody ?? ""
+            )
+            invoke.resolve()
+        } catch {
+            invoke.reject("could not save the notification text: \(error.localizedDescription)")
+        }
+    }
+}
+
+/// The running engine's byte totals, asked of our packet-tunnel extension
+/// (`handleAppMessage` in PacketTunnelProvider.swift). Half a second at
+/// most, because status is polled: an extension that does not answer in
+/// time is no count, not a wait.
+enum ProviderTotals {
+    static func read(_ session: NETunnelProviderSession) async -> (rx: Int64, tx: Int64)? {
+        await withCheckedContinuation { continuation in
+            let once = Once()
+            let finish: ((rx: Int64, tx: Int64)?) -> Void = { totals in
+                once.run { continuation.resume(returning: totals) }
+            }
+            do {
+                try session.sendProviderMessage(Data("totals".utf8)) { data in
+                    finish(parse(data))
+                }
+            } catch {
+                finish(nil)
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { finish(nil) }
+        }
+    }
+
+    static func parse(_ data: Data?) -> (rx: Int64, tx: Int64)? {
+        guard let data,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rx = (object["rx"] as? NSNumber)?.int64Value,
+              let tx = (object["tx"] as? NSNumber)?.int64Value,
+              rx >= 0, tx >= 0 else { return nil }
+        return (rx, tx)
+    }
+
+    /// Runs its work once, whichever caller comes first.
+    final class Once {
+        private let lock = NSLock()
+        private var done = false
+
+        func run(_ work: () -> Void) {
+            lock.lock()
+            let first = !done
+            done = true
+            lock.unlock()
+            if first { work() }
+        }
+    }
+}
+
+/// The app's half of the extension's notification (TunnelNotice in
+/// PacketTunnelProvider.swift, built into the other binary, reading the
+/// same suite and keys): the words and the setting, and a mark that the
+/// next stop is this app's own, so the extension does not report a
+/// disconnect or a sign-out as the system's doing.
+enum TunnelNotices {
+    static let suite = "group.com.neoxify.mobile"
+
+    static func save(enabled: Bool, offTitle: String, offBody: String, stoppedTitle: String, stoppedBody: String) {
+        guard let defaults = UserDefaults(suiteName: suite) else { return }
+        defaults.set(enabled, forKey: "notices.enabled")
+        defaults.set(offTitle, forKey: "notices.offTitle")
+        defaults.set(offBody, forKey: "notices.offBody")
+        defaults.set(stoppedTitle, forKey: "notices.stoppedTitle")
+        defaults.set(stoppedBody, forKey: "notices.stoppedBody")
+    }
+
+    /// A stop this app is about to ask for: the extension stays quiet
+    /// about any stop in the next ten seconds.
+    static func ownStopComing() {
+        UserDefaults(suiteName: suite)?.set(Date().timeIntervalSince1970 + 10, forKey: "notices.ownStopUntil")
+    }
+
+    static func authorization() async -> String {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .notDetermined:
+            return "canAsk"
+        case .denied:
+            return "disabledForApp"
+        default:
+            // Authorized, provisional or ephemeral: they show.
+            return "enabled"
         }
     }
 }

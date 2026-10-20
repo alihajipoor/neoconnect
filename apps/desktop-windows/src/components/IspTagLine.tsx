@@ -54,7 +54,7 @@ export function IspTagLine({
   const pearl = look === "pearl";
   return (
     <span
-      className={cn("flex min-w-0 items-center gap-1", !pearl && "text-[11px]", !pearl && (works ? "text-success" : "text-warning"))}
+      className={cn("flex min-w-0 items-center gap-1", !pearl && "text-[11px]", !pearl && (works ? "text-success" : "text-[var(--warn-ink)]"))}
       title={pearl ? `${text}. ${detail}` : detail}
       aria-label={`${text}. ${detail}`}
       data-isp-tag={tag.code}

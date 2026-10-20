@@ -493,7 +493,11 @@ impl SplitTunnel {
     /// rather than only at connect, because the numbers that matter are
     /// zero at connect and only become meaningful once the chosen apps
     /// have actually tried to send something.
-    pub fn complaint(&self) -> Option<String> {
+    ///
+    /// With the code the app words it by in the customer's language; the
+    /// sentence is English, for support and for an app too old to know
+    /// the code.
+    pub fn complaint(&self) -> Option<(neoconnect_ipc::SplitTunnelProblemCode, String)> {
         let active = self.active.as_ref()?;
         active.complaint()
     }

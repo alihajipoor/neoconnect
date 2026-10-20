@@ -119,7 +119,7 @@ export function CommunityLinks({
           title={label}
           aria-label={label}
           onClick={() => void openUrl(url).catch(() => undefined)}
-          className="press flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-white/8 hover:text-foreground"
+          className="press flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-[var(--select)] hover:text-foreground"
         >
           <Icon className="size-4" />
         </button>

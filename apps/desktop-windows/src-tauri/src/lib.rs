@@ -1,6 +1,8 @@
+mod autostart;
 mod bundle_scope;
 mod control_plane_probe;
 mod health_ip;
+mod notify;
 mod relay_http;
 mod vpn;
 mod window_fit;
@@ -144,6 +146,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             vpn::vpn_connect,
             vpn::vpn_disconnect,
+            // "Block the internet while reconnecting" (opt-in): the
+            // reconnect's own teardown, letting go of the hold, and the
+            // setting changing. See `Request::DisconnectForReconnect`.
+            vpn::vpn_disconnect_for_reconnect,
+            vpn::vpn_release_reconnect_hold,
+            vpn::vpn_set_reconnect_hold,
             vpn::vpn_set_split_tunnel,
             vpn::vpn_exit_placements,
             vpn::vpn_probe_split_tunnel,
@@ -199,7 +207,15 @@ pub fn run() {
             relay_http::relay_request,
             // The HTTP scope for the hosts of a signed endpoint bundle,
             // checked here before it is widened. See bundle_scope.rs.
-            bundle_scope::grant_bundle_scope
+            bundle_scope::grant_bundle_scope,
+            // "Open Neoxify when I sign in to Windows": the current user's
+            // Run key, read back from Windows each time (autostart.rs).
+            autostart::autostart_state,
+            autostart::set_autostart,
+            // "Notify me when the connection changes": a toast, in words
+            // the app chose, and whether Windows lets them show (notify.rs).
+            notify::notify_show,
+            notify::notify_setting
         ])
         // Closing the window is an instruction, and it has to be acted
         // on rather than inferred.

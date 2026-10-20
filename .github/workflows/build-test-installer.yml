@@ -37,6 +37,15 @@ on:
         required: true
         default: main
         type: string
+      # "Block the internet while reconnecting" is not offered until the
+      # VM's capture has proved it (RECONNECT_HOLD_PROVEN in the app's
+      # lib/reconnect-hold.ts). A build for that capture turns it on here;
+      # the release workflow never can.
+      reconnect_hold:
+        description: "Offer Block the internet while reconnecting (unproven; for the VM's capture only)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -100,6 +109,8 @@ jobs:
       # mangles on its way to a native command.
       - name: Build, without updater artifacts
         working-directory: apps/desktop-windows
+        env:
+          VITE_RECONNECT_HOLD: ${{ inputs.reconnect_hold && '1' || '' }}
         run: |
           $noUpdater = Join-Path $env:RUNNER_TEMP 'no-updater.json'
           Set-Content -Path $noUpdater -Value '{ "bundle": { "createUpdaterArtifacts": false } }'

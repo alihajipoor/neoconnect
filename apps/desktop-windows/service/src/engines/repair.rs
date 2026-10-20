@@ -497,6 +497,8 @@ fn our_providers() -> Vec<GUID> {
         super::confinement::CAPTURE_PROVIDER_KEY,
         super::confinement::CAPTURE_PROVIDER_KEY_ALT,
         ipv6_block::HOLD_PROVIDER_KEY,
+        super::reconnect_hold::HOLD_PROVIDER_KEY,
+        super::reconnect_hold::HOLD_PROVIDER_KEY_ALT,
     ]
 }
 
@@ -512,6 +514,8 @@ fn our_sublayers() -> Vec<(GUID, &'static str)> {
         (super::confinement::CAPTURE_SUBLAYER_KEY, "IPv4 confinement sublayer"),
         (super::confinement::CAPTURE_SUBLAYER_KEY_ALT, "second IPv4 confinement sublayer"),
         (ipv6_block::HOLD_SUBLAYER_KEY, "Custom-mode DNS hold sublayer"),
+        (super::reconnect_hold::HOLD_SUBLAYER_KEY, "reconnect hold sublayer"),
+        (super::reconnect_hold::HOLD_SUBLAYER_KEY_ALT, "second reconnect hold sublayer"),
     ]
 }
 
@@ -1400,7 +1404,14 @@ mod tests {
                 assert!(!guid_eq(a, b), "two of our WFP objects share a key");
             }
         }
-        assert_eq!(every.len(), 9);
+        assert_eq!(every.len(), 13);
+        // The reconnect hold's two pairs (`reconnect_hold::HOLD_KEYS`): a
+        // registration of either that outlived its build would hold the
+        // machine's whole internet with nothing reconnecting.
+        for keys in super::super::reconnect_hold::HOLD_KEYS {
+            assert!(our_providers().iter().any(|k| guid_eq(k, &keys.provider)), "a reconnect hold provider is not swept");
+            assert!(our_sublayers().iter().any(|(k, _)| guid_eq(k, &keys.sublayer)), "a reconnect hold sublayer is not swept");
+        }
         // Custom mode's DNS hold (`ipv6_block::DnsHold`): its own pair, for
         // the same reason, and a registration of it that outlived its build
         // would hold port 53.

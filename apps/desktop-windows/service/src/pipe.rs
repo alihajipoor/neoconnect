@@ -151,6 +151,7 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
         match watch {
             Some(watch) if newly_seen => {
                 let engines = engines.clone();
+                let ledger = Arc::clone(&ledger);
                 tokio::spawn(async move {
                     let signal = watch.exited().await;
                     // The service is stopping: its own teardown is
@@ -163,6 +164,16 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
                         return;
                     }
                     crate::cleanup_log::note("the app went away", &signal.reason());
+
+                    // A reconnect hold, at once and before anything queues:
+                    // nobody is left to finish the reconnect it was holding
+                    // for, and the machine must not wait on the owning
+                    // thread for its networking. `disconnect` below lets go
+                    // of anything held again since.
+                    if let Some(hold) = ledger.reconnect_hold() {
+                        hold.release(crate::engines::reconnect_hold::Release::Asked("the app went away"));
+                        hold.disarm();
+                    }
 
                     // Whatever it was doing is no longer wanted by
                     // anyone, so stop it before asking for the lock.
@@ -307,6 +318,13 @@ fn state_after_a_drop(ledger: &Ledger) -> Option<Response> {
         // No session, so nothing to say about one.
         ipv4_confined: None,
         confinement_problem: None,
+        // The hold outlives the session: holding is exactly what it may be
+        // doing now, and the screen must not lose it while the owning
+        // thread is busy with the teardown.
+        reconnect_hold: ledger.reconnect_hold_status(),
+        traffic: None,
+        split_tunnel_problem_code: None,
+        session_secs: None,
     })
 }
 
@@ -489,6 +507,35 @@ mod tests {
         assert_eq!(parsed["connected"], false);
     }
 
+    /// The reconnect hold's three requests, over a real pipe: each is
+    /// understood and answered, the reconnect's teardown as promptly as the
+    /// customer's, and a status with nothing held and no tunnel says
+    /// nothing about a hold or about traffic -- never "not held", never
+    /// zero bytes. (The server's own tests run with no filtering platform:
+    /// nothing here can hold the machine.)
+    #[tokio::test]
+    async fn the_reconnect_hold_requests_are_answered_over_a_real_pipe() {
+        let name = r"\\.\pipe\neoconnect-test-reconnect-hold";
+        start_server(name).await;
+        for raw in [
+            r#"{"type":"setReconnectHold","enabled":true}"#,
+            r#"{"type":"releaseReconnectHold"}"#,
+            r#"{"type":"setReconnectHold","enabled":false}"#,
+        ] {
+            let reply: serde_json::Value = serde_json::from_str(round_trip(name, raw).await.trim()).unwrap();
+            assert_eq!(reply["status"], "ok", "{raw}: {reply}");
+        }
+        let began = Instant::now();
+        let reply: serde_json::Value =
+            serde_json::from_str(round_trip(name, r#"{"type":"disconnectForReconnect"}"#).await.trim()).unwrap();
+        assert!(reply["status"] == "ok" || reply["status"] == "error", "a reconnect's teardown must answer: {reply}");
+        assert!(began.elapsed() < REPLY_MUST_BEAT, "the reconnect's teardown took {:?}", began.elapsed());
+        let status: serde_json::Value = serde_json::from_str(round_trip(name, r#"{"type":"status"}"#).await.trim()).unwrap();
+        assert_eq!(status["status"], "state");
+        assert!(status.get("reconnect_hold").is_none(), "{status}");
+        assert!(status.get("traffic").is_none(), "{status}");
+    }
+
     /// The whole wire path for the DNS complaint, over a real pipe.
     ///
     /// Xray used to fail the connect when the tunnel's DNS rule would
@@ -627,7 +674,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888\nPostUp = calc.exe".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new(), block_while_reconnecting: false }).unwrap();
         let reply = round_trip(name, &request).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
@@ -1077,7 +1124,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new(), block_while_reconnecting: false }).unwrap();
         let connect = tokio::spawn(async move { round_trip(name, &request).await });
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
@@ -1108,7 +1155,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new(), block_while_reconnecting: false }).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(round_trip(name, &request).await.trim()).unwrap();
         assert!(parsed["message"].as_str().unwrap().contains("wireguard.exe"), "{parsed}");
     }
@@ -1125,7 +1172,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new() }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new(), block_while_reconnecting: false }).unwrap();
         let reply = round_trip(name, &request).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
@@ -1196,6 +1243,11 @@ fn fallback_state(ledger: &Ledger, seen: (bool, Option<String>, TunnelHealth), s
         split_tunnel_restart_needed: Vec::new(),
         ipv4_confined,
         confinement_problem,
+        reconnect_hold: ledger.reconnect_hold_status(),
+        // Not read without the owning thread: nothing rather than a guess.
+        traffic: None,
+        split_tunnel_problem_code: None,
+        session_secs: None,
     }
 }
 
@@ -1236,17 +1288,28 @@ async fn dispatch(
                 STATUS_LOCK_WAIT,
                 engines.run(|engines: &mut Engines, _| {
                     let (connected, protocol, health) = engines.status();
+                    // The code and the sentence from one look at the
+                    // counters, so they never disagree.
+                    let (split_tunnel_problem_code, split_tunnel_problem) = match engines.split_tunnel_complaint() {
+                        Some((code, sentence)) => (Some(code), Some(sentence)),
+                        None => (None, None),
+                    };
                     Response::State {
                         connected,
                         protocol,
                         health,
                         split_tunnel_active: engines.split_tunnel_running(),
-                        split_tunnel_problem: engines.split_tunnel_complaint(),
+                        split_tunnel_problem,
                         ipv6_blocked: engines.ipv6_blocked(),
                         tunnel_dns_unprotected: engines.tunnel_dns_unprotected(),
                         split_tunnel_restart_needed: engines.split_tunnel_restart_needed(),
                         ipv4_confined: engines.ipv4_confined(),
                         confinement_problem: engines.confinement_problem(),
+                        reconnect_hold: engines.reconnect_hold_status(),
+                        traffic: engines.traffic(),
+                        split_tunnel_problem_code,
+                        // Only over a session the status just found up.
+                        session_secs: if connected { engines.session_secs() } else { None },
                     }
                 }),
             )
@@ -1309,7 +1372,25 @@ async fn dispatch(
             Ok(apps) => Response::RunningApps { apps },
             Err(_) => Response::Error { message: "could not list running applications".to_string() },
         },
-        Request::Disconnect => {
+        // The customer's Disconnect, and the app's for a reconnect: the
+        // same teardown, but for the reconnect hold. The customer's lets go
+        // of it -- at once, here, without waiting for the owning thread,
+        // and again behind the hard stop in case a connect it cancelled
+        // held meanwhile. A reconnect's holds the gap from before the
+        // engine stops, when the session is armed, and keeps a hold in
+        // place through the thorough pass.
+        request @ (Request::Disconnect | Request::DisconnectForReconnect) => {
+            let for_reconnect = matches!(request, Request::DisconnectForReconnect);
+            if let Some(hold) = ledger.reconnect_hold() {
+                if for_reconnect {
+                    // A reconnect follows the drop being held for, if one
+                    // is: not a hold nothing followed.
+                    hold.followed();
+                } else {
+                    hold.release(crate::engines::reconnect_hold::Release::Asked("the customer disconnected"));
+                    hold.disarm();
+                }
+            }
             // Cancel first, and before queueing anything.
             //
             // This reaches the operation the owning thread is executing
@@ -1326,10 +1407,25 @@ async fn dispatch(
             engines.supersede();
             engines.cancel_running();
 
-            let hard = engines.run(|engines: &mut Engines, token| {
+            let hard = engines.run(move |engines: &mut Engines, token| {
                 crate::engines::adopt_token(token);
-                crate::lifecycle::teardown::hard_stop(engines)
+                if for_reconnect {
+                    engines.hold_for_reconnect();
+                }
+                let report = crate::lifecycle::teardown::hard_stop(&mut *engines);
+                if !for_reconnect {
+                    engines.release_reconnect_hold("the customer disconnected", true);
+                }
+                report
             });
+            // The thorough pass, keeping the hold for a reconnect's.
+            let thorough = move |engines: &mut Engines| {
+                if for_reconnect {
+                    engines.disconnect_keeping_hold()
+                } else {
+                    engines.disconnect()
+                }
+            };
 
             match tokio::time::timeout(DISCONNECT_LOCK_WAIT, hard).await {
                 Ok(Ok(report)) => {
@@ -1341,8 +1437,8 @@ async fn dispatch(
                     // registration, runs the janitor and may reach the
                     // cmdlets, which together can take forty seconds and
                     // cost nothing once networking is already back.
-                    let _ = engines.run_detached(|engines: &mut Engines, _| {
-                        if let Err(message) = engines.disconnect() {
+                    let _ = engines.run_detached(move |engines: &mut Engines, _| {
+                        if let Err(message) = thorough(engines) {
                             crate::cleanup_log::note("thorough teardown after disconnect", &message);
                         }
                     });
@@ -1358,8 +1454,8 @@ async fn dispatch(
                     // already unwinding whatever is ahead of it, so the
                     // teardown will happen. What is not done is making
                     // the customer wait on silence for it.
-                    let _ = engines.run_detached(|engines: &mut Engines, _| {
-                        if let Err(message) = engines.disconnect() {
+                    let _ = engines.run_detached(move |engines: &mut Engines, _| {
+                        if let Err(message) = thorough(engines) {
                             crate::cleanup_log::note(
                                 "deferred teardown after a busy disconnect",
                                 &message,
@@ -1415,13 +1511,25 @@ async fn dispatch(
                 }
             }
         }
-        Request::Connect { profile, exits, known_nodes } => {
+        Request::Connect { profile, exits, known_nodes, block_while_reconnecting } => {
             if crate::gaming::is_armed() {
                 return Response::Error {
                     message: "Gaming mode is on, and a VPN connection cannot run alongside it. \
                               Turn Gaming mode off first."
                         .to_string(),
                 };
+            }
+            // The setting as of this request, taken as it arrives rather
+            // than when the connect runs: a `SetReconnectHold` that turned
+            // it off after this was sent, but before it ran, still wins.
+            if let Some(hold) = ledger.reconnect_hold() {
+                if block_while_reconnecting {
+                    hold.set_wanted(true);
+                    // A connect follows a drop being held for, if one is.
+                    hold.followed();
+                } else {
+                    hold.turn_off();
+                }
             }
             // Taken as the connect is queued, and checked when it starts:
             // a Disconnect that arrived in between means the customer no
@@ -1443,6 +1551,33 @@ async fn dispatch(
                 .await
                 .unwrap_or_else(|_| gone())
         }
+        // Answered at once, without the owning thread: the app has proved
+        // a tunnel, or the reconnect is over, and the machine is let go of
+        // now -- not after whatever that thread is doing.
+        Request::ReleaseReconnectHold => {
+            if let Some(hold) = ledger.reconnect_hold() {
+                hold.release(crate::engines::reconnect_hold::Release::Asked("the app let go of it"));
+            }
+            Response::Ok
+        }
+        // The setting changed. Off lets go and disarms at once; on arms the
+        // live session, which needs the owning thread to plan, behind
+        // whatever it is doing. On is also how the app says, as its
+        // reconnect begins, that one follows the drop being held for.
+        Request::SetReconnectHold { enabled } => {
+            if let Some(hold) = ledger.reconnect_hold() {
+                if enabled {
+                    hold.set_wanted(true);
+                    hold.followed();
+                } else {
+                    hold.turn_off();
+                }
+            }
+            if enabled {
+                let _ = engines.run_detached(|engines: &mut Engines, _| engines.arm_live_session_for_reconnect_hold());
+            }
+            Response::Ok
+        }
         Request::ArmGaming { config } => {
             if let Err(e) = config.validate() {
                 return Response::Error { message: e.to_string() };
@@ -1462,6 +1597,10 @@ async fn dispatch(
                             ),
                         };
                     }
+                    // Gaming mode is ordinary networking with DNS of its
+                    // own: a reconnect hold left in place would refuse the
+                    // game everything.
+                    engines.release_reconnect_hold("Gaming mode was turned on", true);
                     match crate::gaming::arm(config) {
                         Ok(report) => gaming_response(report),
                         Err(message) => Response::Error { message },
@@ -1608,6 +1747,12 @@ fn spawn_idle_watchdog(engines: Supervisor<Engines>, last_seen: Arc<Mutex<Instan
                         crate::cleanup_log::note("disarm gaming mode after the app went away", &err);
                     }
                 }
+
+                // A reconnect hold, tunnel or none, for the reason gaming
+                // goes first: an app that is gone ends no reconnect, and the
+                // check below skips every moment no tunnel is up -- which
+                // is when a hold is holding the whole machine.
+                engines.release_reconnect_hold("the app went silent", true);
 
                 let (up, _, _) = engines.status();
                 if !up {

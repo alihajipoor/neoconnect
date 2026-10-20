@@ -30,6 +30,7 @@ import (
 
 	"github.com/xtls/xray-core/common/platform"
 	core "github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/stats"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	"github.com/xtls/xray-core/transport/internet"
 
@@ -40,6 +41,14 @@ import (
 	_ "github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
+	// The byte counters behind the app's speeds (Uplink, Downlink): the
+	// app's config asks for "stats" and a system "policy" that counts the
+	// outbound, and each of those is an app that must be registered here
+	// or core.New refuses the config as unknown -- every Xray connect
+	// would fail. counters_test.go builds that config to hold the two
+	// together.
+	_ "github.com/xtls/xray-core/app/policy"
+	_ "github.com/xtls/xray-core/app/stats"
 	_ "github.com/xtls/xray-core/proxy/freedom"
 	// Shadowsocks 2022. The whole package, not a .../outbound
 	// subpackage: unlike VLESS and VMess this one keeps client and
@@ -134,14 +143,9 @@ func Start(configJSON string, tunFd int, p Protector) error {
 		return fmt.Errorf("could not publish the tun descriptor: %w", err)
 	}
 
-	config, err := serial.LoadJSONConfig(newReader(configJSON))
+	inst, err := build(configJSON)
 	if err != nil {
-		return fmt.Errorf("bad xray config: %w", err)
-	}
-
-	inst, err := core.New(config)
-	if err != nil {
-		return fmt.Errorf("could not build xray: %w", err)
+		return err
 	}
 	if err := inst.Start(); err != nil {
 		_ = inst.Close()
@@ -180,4 +184,58 @@ func Running() bool {
 	mu.Lock()
 	defer mu.Unlock()
 	return instance != nil
+}
+
+// build turns the app's JSON into an instance, not yet started.
+func build(configJSON string) (*core.Instance, error) {
+	config, err := serial.LoadJSONConfig(newReader(configJSON))
+	if err != nil {
+		return nil, fmt.Errorf("bad xray config: %w", err)
+	}
+	inst, err := core.New(config)
+	if err != nil {
+		return nil, fmt.Errorf("could not build xray: %w", err)
+	}
+	return inst, nil
+}
+
+// The outbound every config the app builds sends the customer's traffic
+// to (xray-config.ts), and xray-core's names for its two counters.
+const (
+	uplinkCounter   = "outbound>>>proxy>>>traffic>>>uplink"
+	downlinkCounter = "outbound>>>proxy>>>traffic>>>downlink"
+)
+
+// Uplink is the bytes this instance has sent through the server since it
+// started, or -1 when nothing is counting them: no instance, or a config
+// that did not ask for the counter. Never 0 for "not known" -- the app
+// shows a speed only from a real count.
+//
+// One value per call because gomobile exports a single result (or a
+// result and an error); reading the two a moment apart is no error in a
+// speed sampled once a second.
+func Uplink() int64 { return counter(uplinkCounter) }
+
+// Downlink is Uplink's other direction: bytes received from the server.
+func Downlink() int64 { return counter(downlinkCounter) }
+
+func counter(name string) int64 {
+	mu.Lock()
+	defer mu.Unlock()
+	return counterOf(instance, name)
+}
+
+func counterOf(inst *core.Instance, name string) int64 {
+	if inst == nil {
+		return -1
+	}
+	manager, ok := inst.GetFeature(stats.ManagerType()).(stats.Manager)
+	if !ok || manager == nil {
+		return -1
+	}
+	c := manager.GetCounter(name)
+	if c == nil {
+		return -1
+	}
+	return c.Value()
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { LocationList } from "../components/LocationList";
+import { LocationList, twinNumber } from "../components/LocationList";
 import { I18nProvider } from "./i18n";
 import type { RouteOption } from "./types";
 
@@ -157,5 +157,50 @@ describe("the redesigned server list", () => {
     expect(html).toContain("Through Iran");
     expect(html).toContain("Via Iran");
     expect(html).toContain("Iran → Germany");
+  });
+
+  it("tells two servers with one protocol in one place apart as Server 1 and 2, never by the node's own name", () => {
+    const twins = [
+      { ...ROUTES[0], location: { region: "de-germany", nodeName: "germany-1" } },
+      ...ROUTES.slice(1),
+      route("de-ws-2", "de-germany", "XRAY_VLESS_TLS", { transport: "WS", location: { region: "de-germany", nodeName: "germany-2" } }),
+    ];
+    for (const variant of ["panel", "sheet", "page"] as const) {
+      const html = text(render({ variant, routes: twins }));
+      expect(html, variant).toContain("Server 1");
+      expect(html, variant).toContain("Server 2");
+      expect(html, variant).not.toMatch(/germany-[12]|node-/);
+    }
+    // A protocol with one server in its place carries no number.
+    expect(text(render())).not.toMatch(/Server \d/);
+  });
+});
+
+describe("twinNumber", () => {
+  const label = (r: RouteOption) => r.protocol;
+  const at = (id: string, node: string, protocol: RouteOption["protocol"] = "WIREGUARD") =>
+    route(id, "de-germany", protocol, { location: { region: "de-germany", nodeName: node } });
+
+  it("numbers by the node's name, however the list arrives", () => {
+    const a = at("x", "germany-10");
+    const b = at("y", "germany-2");
+    const c = at("z", "germany-1");
+    for (const order of [
+      [a, b, c],
+      [c, b, a],
+      [b, a, c],
+    ]) {
+      expect(twinNumber(order, c, label)).toBe(1);
+      expect(twinNumber(order, b, label)).toBe(2);
+      expect(twinNumber(order, a, label)).toBe(3);
+    }
+  });
+
+  it("is null for a protocol alone in its place, or offered only on one node", () => {
+    const wg = at("wg", "germany-1");
+    const tls = at("tls", "germany-2", "XRAY_VLESS_TLS");
+    expect(twinNumber([wg, tls], wg, label)).toBeNull();
+    const again = at("wg-b", "germany-1");
+    expect(twinNumber([wg, again], wg, label)).toBeNull();
   });
 });

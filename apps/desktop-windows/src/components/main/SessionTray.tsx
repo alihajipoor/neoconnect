@@ -5,10 +5,11 @@ import type { IpModel } from "../../lib/hero-model";
 import { cn } from "../../lib/utils";
 import { Glass } from "../ui";
 
-/** The bottom tray: where the traffic goes, what the plan has left, and the
- * address the world sees. Real data only -- there is no speed section,
- * because no engine on this platform reports byte counters yet, and a
- * number that was not measured is not shown (design-system.md, 4.9).
+/** The bottom tray: where the traffic goes, what the plan has left, the
+ * live speed where the platform measures one, and the address the world
+ * sees. Real data only: the speed section exists only while the platform
+ * reports the tunnel's own counters (`speed`; on Windows, TrafficSpeed.tsx),
+ * and a number that was not measured is not shown (design-system.md, 4.9).
  *
  * Wide windows draw it as one strong-glass strip; medium and phone layouts
  * show the location as its own card and the other two as metric cards. */
@@ -76,10 +77,23 @@ function PlanBody({ plan }: { plan: TrayPlan }) {
   );
 }
 
-export function SessionTray({ location, plan, ip, label }: { location: TrayLocation; plan: TrayPlan | null; ip: IpModel; label: string }) {
+export function SessionTray({
+  location,
+  plan,
+  ip,
+  label,
+  speed,
+}: {
+  location: TrayLocation;
+  plan: TrayPlan | null;
+  ip: IpModel;
+  label: string;
+  /** The fourth section, only while there is a measured speed to show. */
+  speed?: ReactNode;
+}) {
   const { t } = useI18n();
   return (
-    <Glass as="section" strong className="nx-tray" aria-label={label}>
+    <Glass as="section" strong className={speed ? "nx-tray speed" : "nx-tray"} aria-label={label}>
       <div className="nx-tsec nx-tloc">
         <span className="nx-flagbox">{location.flag}</span>
         <div className="t">
@@ -95,6 +109,7 @@ export function SessionTray({ location, plan, ip, label }: { location: TrayLocat
       <div className="nx-tsec">
         <div className="t">{plan ? <PlanBody plan={plan} /> : <span className="nx-tval quiet">{t("tr.noPlan")}</span>}</div>
       </div>
+      {speed ? <div className="nx-tsec">{speed}</div> : null}
       <div className="nx-tsec">
         <div className="t">
           <span className="nx-tlabel">{t("tr.ip")}</span>
@@ -156,8 +171,9 @@ export function SummaryLine({ plan, ip }: { plan: TrayPlan | null; ip: IpModel }
   );
 }
 
-/** Medium and phone layouts: the plan and the address as two solid cards. */
-export function MetricCards({ plan, ip }: { plan: TrayPlan | null; ip: IpModel }) {
+/** Medium and phone layouts: the plan and the address as two solid cards,
+ * and the speed under them while there is one (`speed`). */
+export function MetricCards({ plan, ip, speed }: { plan: TrayPlan | null; ip: IpModel; speed?: ReactNode }) {
   const { t } = useI18n();
   return (
     <div className="nx-hmet">
@@ -166,6 +182,7 @@ export function MetricCards({ plan, ip }: { plan: TrayPlan | null; ip: IpModel }
         <span className="nx-tlabel">{t("tr.ip")}</span>
         <IpValue ip={ip} />
       </div>
+      {speed}
     </div>
   );
 }

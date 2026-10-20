@@ -122,6 +122,26 @@ export type VpnStatus = {
   /** Why not, when `ipv4Confined` is false. English, for support; never
    * the words the customer is shown. */
   confinementProblem?: string;
+  /** "Block the internet while reconnecting": armed, holding, or not held
+   * and why -- facts the app words (lib/reconnect-hold.ts, `readHold`).
+   * Absent when the setting is off, nothing is armed, or the service is
+   * older. Read through `readHold`, which says nothing for a shape it does
+   * not know. */
+  reconnectHold?: unknown;
+  /** The tunnel adapter's own counters this session, from Windows
+   * (lib/traffic-meter.ts, `readTraffic`). Absent whenever the service read
+   * nothing -- never a zero standing for "unknown". */
+  traffic?: unknown;
+  /** Which problem `splitTunnelProblem` is, as a code the app words in the
+   * customer's language (lib/custom-mode-problem.ts). Absent with no
+   * problem, or from an older service; a code this app does not know is
+   * shown as the service's own sentence. */
+  splitTunnelProblemCode?: string;
+  /** How long the live session's engine has been up, in whole seconds on
+   * the service's clock: the session timer for a tunnel this window did
+   * not bring up (lib/session-clock.ts, `adoptedSince`). Absent with
+   * no session or from an older service, and then no timer is shown. */
+  sessionSecs?: number;
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }

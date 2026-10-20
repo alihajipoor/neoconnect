@@ -191,11 +191,11 @@ export function CustomModeCard() {
       case "onPreferred":
         return { text: t("settings.customExitOnPreferred"), className: "bg-highlight/15 text-highlight" };
       case "fallback":
-        return { text: t("settings.customExitFallback"), className: "bg-warning/15 text-warning" };
+        return { text: t("settings.customExitFallback"), className: "bg-[var(--warn-tint)] text-[var(--warn-ink)]" };
       case "unknown":
-        return { text: t("settings.customExitUnknown"), className: "bg-white/8 text-muted-foreground" };
+        return { text: t("settings.customExitUnknown"), className: "bg-[var(--muted-tint)] text-muted-foreground" };
       default:
-        return { text: t("settings.customExitNoPreference"), className: "bg-white/8 text-muted-foreground" };
+        return { text: t("settings.customExitNoPreference"), className: "bg-[var(--muted-tint)] text-muted-foreground" };
     }
   }
 
@@ -563,7 +563,7 @@ export function CustomModeCard() {
             "press relative h-6 w-11 shrink-0 rounded-full border transition-colors",
             settings.enabled
               ? "border-transparent bg-[linear-gradient(120deg,var(--primary),var(--brand-2))]"
-              : "border-white/12 bg-white/8",
+              : "border-[var(--hairline-2)] bg-[var(--muted-tint)]",
           ].join(" ")}
         >
           {/* Positioned from the inline start, not from the left. Under
@@ -586,7 +586,7 @@ export function CustomModeCard() {
               underneath rather than left to the labels -- a customer who
               reads this backwards sends the traffic they wanted hidden
               out in the clear. */}
-          <div className="flex gap-1 rounded-lg border border-white/8 bg-white/[0.025] p-1">
+          <div className="flex gap-1 rounded-lg border border-[var(--hairline-2)] bg-[var(--field)] p-1">
             {(
               [
                 ["onlySelected", t("settings.customModeOnly")],
@@ -606,7 +606,7 @@ export function CustomModeCard() {
                   // and a lifted pill says "this one" at a glance.
                   settings.mode === value
                     ? "bg-[linear-gradient(120deg,var(--primary),var(--brand-2))] text-white shadow-[0_2px_10px_-4px_var(--primary)]"
-                    : "text-muted-foreground hover:bg-white/8 hover:text-foreground",
+                    : "text-muted-foreground hover:bg-[var(--select)] hover:text-foreground",
                 ].join(" ")}
               >
                 {label}
@@ -620,7 +620,7 @@ export function CustomModeCard() {
           </p>
 
           {settings.apps.length === 0 ? (
-            <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <p className="rounded-md border border-[color-mix(in_oklab,var(--warn)_35%,transparent)] bg-[var(--warn-tint)] px-3 py-2 text-xs text-[var(--warn-ink)]">
               {/* Says what is actually happening, which is opposite in
                   the two directions: nothing routed, or everything. */}
               {settings.mode === "allExcept"
@@ -637,7 +637,7 @@ export function CustomModeCard() {
                   // they sit on, so a list of chosen apps looked like
                   // stray text and the remove button beside each one
                   // looked like it belonged to nothing.
-                  className="group flex items-center gap-2 rounded-lg border border-white/8 bg-white/[0.04] px-2.5 py-2 transition-colors hover:border-white/14 hover:bg-white/[0.07]"
+                  className="group flex items-center gap-2 rounded-lg border border-[var(--hairline-2)] bg-[var(--field)] px-2.5 py-2 transition-colors hover:border-[var(--ink-3)] hover:bg-[var(--field)]"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
@@ -653,7 +653,7 @@ export function CustomModeCard() {
                         className={[
                           "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
                           settings.mode === "allExcept"
-                            ? "bg-white/8 text-muted-foreground"
+                            ? "bg-[var(--muted-tint)] text-muted-foreground"
                             : "bg-highlight/15 text-highlight",
                         ].join(" ")}
                       >
@@ -768,7 +768,7 @@ export function CustomModeCard() {
               a choice built out of route ids that would report a
               mismatch for a game sitting exactly where it was put. */}
           {settings.mode === "onlySelected" && settings.games.length > 0 && hasExitVocabulary(routes) ? (
-            <div className="flex flex-col gap-2 rounded-lg border border-white/8 bg-white/[0.03] p-2.5">
+            <div className="flex flex-col gap-2 rounded-lg border border-[var(--hairline-2)] bg-[var(--field)] p-2.5">
               <div className="flex items-center gap-1.5">
                 <MapPin className="size-3.5 text-primary" />
                 <p className="text-xs font-semibold">{t("settings.customExitTitle")}</p>
@@ -794,7 +794,7 @@ export function CustomModeCard() {
                   return (
                     <li
                       key={game.slug}
-                      className="flex flex-col gap-1.5 rounded-md border border-white/8 bg-white/[0.04] px-2.5 py-2"
+                      className="flex flex-col gap-1.5 rounded-md border border-[var(--hairline-2)] bg-[var(--field)] px-2.5 py-2"
                     >
                       <div className="flex items-center justify-between gap-2">
                         <p className="truncate text-[13px] font-semibold">{game.displayName}</p>
@@ -813,7 +813,7 @@ export function CustomModeCard() {
                         aria-label={t("settings.customExitFor", { game: game.displayName })}
                         value={game.exit ?? ""}
                         onChange={(event) => void chooseExit(game.slug, event.target.value || null)}
-                        className="w-full rounded-md border border-white/10 bg-surface px-2 py-1.5 text-[12px] outline-none focus:border-primary/60"
+                        className="w-full rounded-md border border-[var(--hairline-2)] bg-[var(--field)] px-2 py-1.5 text-[12px] outline-none focus:border-primary/60"
                       >
                         <option value="">{t("settings.customExitNone")}</option>
                         {/* The ceiling, met before it is hit rather
@@ -865,7 +865,7 @@ export function CustomModeCard() {
                         </p>
                       ) : null}
                       {placement?.placement === "fallback" ? (
-                        <p className="text-[10px] text-warning">
+                        <p className="text-[10px] text-[var(--warn-ink)]">
                           {t("settings.customExitFallbackHint", { game: game.displayName })}
                         </p>
                       ) : null}

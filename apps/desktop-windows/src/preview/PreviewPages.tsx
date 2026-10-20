@@ -10,6 +10,8 @@ import { Referrals } from "../screens/Referrals";
 import { ActivityView, type ActivityData } from "../screens/Activity";
 import { CustomModeCard } from "../components/CustomModeCard";
 import { GamingModeCard } from "../components/GamingModeCard";
+import { GamePicker } from "../components/GamePicker";
+import { RunningAppPicker } from "../components/RunningAppPicker";
 import { AppShell, type NavId } from "../components/shell/AppShell";
 import { PageScene } from "../components/shell/Page";
 import { CommunityLinks } from "../components/CommunityLinks";
@@ -23,6 +25,9 @@ import { planLineText } from "../lib/shell-nav";
 import type { RouteOption, Subscription } from "../lib/types";
 import type { ShownFailure } from "../lib/failure-text";
 import type { SocialProvider } from "../lib/social-auth";
+import type { DeviceSettings } from "../screens/Settings";
+import type { AccountDevices, DailyUsage, GameProfileSummary } from "../lib/customer";
+import type { SessionRecord } from "../lib/session-log";
 
 /** DEV ONLY: the screens of phase 2 in the preview -- sign-in and its steps,
  * and the signed-in pages in the shell -- each drawn by the real component.
@@ -47,7 +52,12 @@ export const PAGE_SCREENS: Record<string, string> = {
   forgot: "Forgot password",
   verify: "Verify email",
   settings: "Settings",
+  pickGame: "Settings, choosing a game",
+  pickApps: "Settings, choosing a running app",
   activity: "Activity",
+  activityLog: "Activity, session log on",
+  activityFailed: "Activity, account not reached",
+  activitySignOut: "Activity, Sign out on other devices (awaiting owner)",
   activityEmpty: "Activity, network unknown",
   plans: "Plans",
   support: "Support",
@@ -57,7 +67,12 @@ export const PAGE_SCREENS: Record<string, string> = {
 const NAV: Record<string, NavId> = {
   locations: "locations",
   settings: "settings",
+  pickGame: "settings",
+  pickApps: "settings",
   activity: "activity",
+  activityLog: "activity",
+  activityFailed: "activity",
+  activitySignOut: "activity",
   activityEmpty: "activity",
   plans: "none",
   support: "none",
@@ -65,6 +80,93 @@ const NAV: Record<string, NavId> = {
 };
 
 const noop = () => undefined;
+
+/** DEV ONLY: Windows' device rows, answered here (Settings' `DeviceSettings`). */
+const PREVIEW_DEVICE: DeviceSettings = {
+  autostart: { read: async () => true, write: async (on) => on },
+  autoConnect: true,
+  notifications: { setting: async () => "enabled" },
+  reconnectHold: { apply: async () => undefined },
+};
+
+/** DEV ONLY: a few catalogue entries for the game picker; one is already
+ * chosen, so the Added mark shows. */
+const SAMPLE_GAMES: GameProfileSummary[] = [
+  ["cs2", "Counter-Strike 2", "Valve"],
+  ["dota2", "Dota 2", "Valve"],
+  ["valorant", "Valorant", "Riot Games"],
+  ["lol", "League of Legends", "Riot Games"],
+  ["fortnite", "Fortnite", "Epic Games"],
+  ["pubg", "PUBG: Battlegrounds", "Krafton"],
+  ["apex", "Apex Legends", "Electronic Arts"],
+  ["cod", "Call of Duty", "Activision"],
+].map(([slug, displayName, publisher]) => ({
+  slug,
+  displayName,
+  iconKey: null,
+  publisher,
+  hostnames: [],
+  excludeHostnames: [],
+  canaryHostname: null,
+}));
+
+/** DEV ONLY: what the preview's `vpn_list_running_apps` answers (main.tsx),
+ * and the one of them already chosen. */
+export const PREVIEW_CHOSEN_APP = "C:\\Program Files\\Mozilla Firefox\\firefox.exe";
+export const PREVIEW_RUNNING_APPS = [
+  { name: "Firefox", path: PREVIEW_CHOSEN_APP },
+  {
+    name: "Discord",
+    path: "C:\\Users\\you\\AppData\\Local\\Discord\\app-1.0.9200\\Discord.exe",
+    paths: [
+      "C:\\Users\\you\\AppData\\Local\\Discord\\app-1.0.9200\\Discord.exe",
+      "C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe",
+    ],
+  },
+  { name: "Telegram", path: "C:\\Users\\you\\AppData\\Roaming\\Telegram Desktop\\Telegram.exe" },
+  { name: "Steam", path: "C:\\Program Files (x86)\\Steam\\steam.exe" },
+  { name: "Spotify", path: "C:\\Users\\you\\AppData\\Roaming\\Spotify\\Spotify.exe" },
+];
+
+let signOutTries = 0;
+/** DEV ONLY: signing a device out, as the Activity page would. */
+async function previewSignOut(): Promise<"done" | "unreached"> {
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  signOutTries += 1;
+  return signOutTries % 2 === 1 ? "unreached" : "done";
+}
+
+const DAY_MS = 86_400_000;
+const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+/** DEV ONLY: the account's devices and a fortnight of usage, in the
+ * backend's shapes (docs/account-activity.md). */
+const SAMPLE_DEVICES: AccountDevices = {
+  inUseKnown: true,
+  devices: [
+    { id: "d1", thisDevice: true, label: null, platform: "windows", signedInAt: isoAgo(17 * DAY_MS), lastSeenAt: isoAgo(60_000), inUse: { since: isoAgo(3_600_000), lastSeen: isoAgo(30_000) } },
+    { id: "d2", thisDevice: false, label: "Pixel 7", platform: "android", signedInAt: isoAgo(21 * DAY_MS), lastSeenAt: isoAgo(5 * 3_600_000), inUse: null },
+    { id: "d3", thisDevice: false, label: null, platform: "ios", signedInAt: isoAgo(3 * DAY_MS), lastSeenAt: isoAgo(DAY_MS), inUse: null },
+  ],
+};
+
+function sampleUsage(): DailyUsage {
+  const days = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date(Date.now() - (13 - i) * DAY_MS).toISOString().slice(0, 10);
+    const down = i === 4 ? 0 : Math.round((0.4 + 0.6 * Math.abs(Math.sin(i * 1.3))) * 1.6e9);
+    return { date: d, bytesDown: String(down), bytesUp: String(Math.round(down / 14)) };
+  });
+  return { subscriptionId: null, timeZone: "Asia/Tehran", from: days[0].date, to: days[13].date, asOf: isoAgo(90_000), days };
+}
+
+function sampleLog(): SessionRecord[] {
+  const at = (h: number) => Date.now() - h * 3_600_000;
+  return [
+    { id: "s1", start: at(50), end: at(48.5), open: false, routeId: "de-stealth", protocol: "XRAY_VLESS_TLS", transport: "WS", rxBytes: 1.4e9, txBytes: 6.1e7, ended: "disconnected" },
+    { id: "s2", start: at(26), end: null, open: false, routeId: "fi-reality", protocol: "XRAY_VLESS_REALITY", rxBytes: null, txBytes: null, ended: null },
+    { id: "s3", start: at(3), end: at(2.2), open: false, routeId: "de-wg", protocol: "WIREGUARD", rxBytes: 3.2e8, txBytes: 1.2e7, ended: "lost" },
+  ];
+}
 
 /** The failures a blocked network gives sign-in, the longest of each kind:
  * the network's block page, and nothing answering, the backup server
@@ -181,21 +283,51 @@ export function PreviewPage({
           }}
         />
       </Page>
-    ) : screen === "settings" ? (
-      <Settings
-        onBack={noop}
-        onOpenReferrals={noop}
-        onOpenSupport={noop}
-        onLoggedOut={noop}
-        customSection={<CustomModeCard />}
-        gamingSection={phone ? undefined : <GamingModeCard />}
+    ) : screen === "settings" || screen === "pickGame" || screen === "pickApps" ? (
+      <>
+        <Settings
+          onBack={noop}
+          onOpenReferrals={noop}
+          onOpenSupport={noop}
+          onLoggedOut={noop}
+          customSection={<CustomModeCard />}
+          gamingSection={phone ? undefined : <GamingModeCard />}
+          onOpenPlans={noop}
+          onOpenActivity={noop}
+          onSignOut={noop}
+          platform={phone ? "android" : "windows"}
+          device={phone ? undefined : PREVIEW_DEVICE}
+        />
+        {screen === "pickGame" ? <GamePicker games={SAMPLE_GAMES} chosen={["dota2"]} onPick={noop} onClose={noop} /> : null}
+        {screen === "pickApps" ? <RunningAppPicker chosen={[PREVIEW_CHOSEN_APP]} onPick={noop} onClose={noop} /> : null}
+      </>
+    ) : screen === "activity" ||
+      screen === "activityEmpty" ||
+      screen === "activityLog" ||
+      screen === "activityFailed" ||
+      screen === "activitySignOut" ? (
+      <ActivityView
+        data={activity}
+        devices={screen === "activityFailed" ? { state: "failed", noAnswer: true } : { state: "ok", data: SAMPLE_DEVICES }}
+        usage={screen === "activityFailed" ? { state: "failed", noAnswer: false } : { state: "ok", data: sampleUsage() }}
+        log={
+          phone
+            ? undefined
+            : {
+                enabled: screen === "activityLog",
+                loaded: true,
+                records: screen === "activityLog" ? sampleLog() : [],
+                onEnabled: noop,
+                onClear: noop,
+              }
+        }
+        // Not offered by any app until the owner approves it; drawn here so
+        // it can be looked at. The first try is not answered, the next is.
+        onSignOutDevice={screen === "activitySignOut" ? previewSignOut : undefined}
+        onRetryDevices={noop}
+        onRetryUsage={noop}
         onOpenPlans={noop}
-        onOpenActivity={noop}
-        onSignOut={noop}
-        platform={phone ? "android" : "windows"}
       />
-    ) : screen === "activity" || screen === "activityEmpty" ? (
-      <ActivityView data={activity} onOpenPlans={noop} />
     ) : screen === "plans" ? (
       <Plans onActivated={noop} onBack={noop} />
     ) : screen === "support" ? (

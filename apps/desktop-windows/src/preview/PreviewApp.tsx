@@ -33,6 +33,12 @@ import { mapCountries, mapLights, ownWorkedAt, placesEvidence } from "../lib/map
 import type { SlotNotice } from "../lib/device-slot-notice";
 import type { RouteOption } from "../lib/types";
 import { PAGE_SCREENS, PreviewPage } from "./PreviewPages";
+import { ProgressLineView } from "../components/main/ProgressLine";
+import { SpeedCard, SpeedSection } from "../components/main/TrafficSpeed";
+import { createTrafficMeter } from "../lib/traffic-meter";
+import type { LadderRung } from "../lib/ladder-progress";
+import type { CountdownLine } from "../lib/reconnect-countdown";
+import type { HoldNoteKey } from "../lib/reconnect-hold";
 import { SAMPLE_SUBSCRIPTION } from "./mocks/customer";
 
 /** DEV ONLY: the scenarios the state switcher offers. Each is the inputs the
@@ -67,6 +73,13 @@ interface Scenario {
   /** Failed over from Germany, the one on screen, to Finland: the
    * failover line names both countries. */
   crossed?: boolean;
+  /** The tunnel's counters are being read: the tray's speed section. */
+  speed?: boolean;
+  /** The line under the state: the ladder's rung, the reconnect's
+   * countdown, and why it connects when nobody pressed. */
+  progress?: { rung?: [index: number, total: number]; count?: CountdownLine; auto?: boolean };
+  /** "Block the internet while reconnecting": what the service says. */
+  hold?: HoldNoteKey;
 }
 
 const SCENARIOS: Record<string, Scenario> = {
@@ -102,6 +115,38 @@ const SCENARIOS: Record<string, Scenario> = {
   ended: { label: "Plan ended", state: "disconnected", plan: "ended" },
   none: { label: "No subscription", state: "disconnected", plan: "none" },
   switch: { label: "Switch location while connected", state: "connected", timed: true, switchDialog: true },
+  speed: { label: "Connected, live speed", state: "connected", timed: true, speed: true },
+  ladder: { label: "Connecting, trying 3 of 8", state: "connecting", pressed: true, progress: { rung: [2, 8] } },
+  autoConnect: { label: "Connecting on start (setting on)", state: "connecting", progress: { rung: [0, 8], auto: true } },
+  reconnectCountdown: {
+    label: "Reconnecting, next try in 5 s",
+    state: "disconnected",
+    dropped: true,
+    reconnecting: { waiting: true, offline: false },
+    progress: { count: { kind: "next", attempt: 3, max: 6, seconds: 5 } },
+  },
+  reconnectAttempt: {
+    label: "Reconnecting, attempt 3 on rung 2 of 8",
+    state: "connecting",
+    dropped: true,
+    reconnecting: { waiting: false, offline: false },
+    progress: { count: { kind: "attempt", attempt: 3, max: 6 }, rung: [1, 8] },
+  },
+  holding: {
+    label: "Reconnecting, internet blocked (setting on)",
+    state: "disconnected",
+    dropped: true,
+    reconnecting: { waiting: true, offline: false },
+    hold: "hold.holding",
+    progress: { count: { kind: "next", attempt: 2, max: 6, seconds: 2 } },
+  },
+  holdRefused: {
+    label: "Reconnecting, Windows refused the block",
+    state: "disconnected",
+    dropped: true,
+    reconnecting: { waiting: true, offline: false },
+    hold: "hold.filtersRefused",
+  },
   relayConnected: { label: "Connected via Iran (relay), verified", state: "connected", timed: true, relay: true },
   relayUnverified: { label: "Via Iran (relay), not confirmed", state: "unverified", relay: true },
   relayPinned: { label: "Via Iran (relay) pinned, not connected", state: "disconnected", relayPinned: true },
@@ -206,6 +251,18 @@ function sampleHistory(routes: RouteOption[], own: [string, boolean, number][]):
     if (r) h = recordAttempt(h, PREVIEW_NET, r.id, r.protocol, ok, now - minutesAgo * 60_000);
   }
   return h;
+}
+
+/** DEV ONLY: a meter of the preview's own, fed a minute of sample
+ * readings and then one a second, as the liveness poll would. */
+const PREVIEW_METER = createTrafficMeter();
+const SAMPLE_RATES = Array.from({ length: 60 }, (_, i) => [
+  Math.round(600_000 + 450_000 * Math.sin(i / 4) + 200_000 * Math.sin(i / 1.7)),
+  Math.round(40_000 + 25_000 * Math.sin(i / 3)),
+]);
+function feedPreviewMeter(step: number): void {
+  const [rx, tx] = SAMPLE_RATES[step % SAMPLE_RATES.length];
+  PREVIEW_METER.observe({ rx_bytes: 1_250_000_000 + step * rx, tx_bytes: 84_000_000 + step * tx, rx_per_sec: rx, tx_per_sec: tx, window_ms: 1000 });
 }
 
 const SLOT: SlotNotice = {
@@ -407,6 +464,14 @@ function Composed({
 }) {
   const layout = width >= 900 ? "wide" : width >= 640 ? "medium" : "narrow";
   const [gamingTone, setGamingTone] = useState<ShownTone>("idle");
+  useEffect(() => {
+    PREVIEW_METER.reset();
+    if (!sc.speed) return;
+    let step = 0;
+    for (; step < SAMPLE_RATES.length; step += 1) feedPreviewMeter(step);
+    const id = setInterval(() => feedPreviewMeter(step++), 1_000);
+    return () => clearInterval(id);
+  }, [sc]);
   const gaming = sc.gaming !== undefined;
   const reconnecting = sc.reconnecting ?? null;
   const headline = headlineFor(sc.state, {
@@ -424,7 +489,7 @@ function Composed({
   const lineWords = t(line.kind === "words" ? line.key : headline.title);
   const pill = pillFor(sc.state, press, { pressed: sc.pressed ?? false, waitingForNetwork: sc.waitingForNetwork, failed: sc.failed });
   const secondary = secondaryFor(press, { reconnecting: reconnecting !== null, failed: sc.failed ?? false });
-  const hintText = sc.failed ? t("err.allProtocolsFailed") : t(headline.hint);
+  const hintText = sc.failed ? t("err.allProtocolsFailed") : sc.hold === "hold.holding" ? t("hold.holding") : t(headline.hint);
   const sample = EVIDENCE[evidence] ?? EVIDENCE.mixed;
   const routes = useMemo(() => sample.routes(ROUTES), [sample]);
   const history = useMemo(() => sampleHistory(routes, sample.own), [routes, sample]);
@@ -547,7 +612,22 @@ function Composed({
       </div>
     );
 
-  const notes = <div className="nx-notes">{sc.leak ? <Note tone="danger">{t("dash.ipv4NotConfined")}</Note> : null}</div>;
+  const notes = (
+    <div className="nx-notes">
+      {sc.leak ? <Note tone="danger">{t("dash.ipv4NotConfined")}</Note> : null}
+      {sc.hold && sc.hold !== "hold.holding" ? <Note tone="caution">{t(sc.hold)}</Note> : null}
+    </div>
+  );
+  const progressRung: LadderRung | null = sc.progress?.rung
+    ? {
+        pass: 1,
+        index: sc.progress.rung[0],
+        total: sc.progress.rung[1],
+        routeId: routes[sc.progress.rung[0] % routes.length].id,
+        protocol: routes[sc.progress.rung[0] % routes.length].protocol,
+        transport: routes[sc.progress.rung[0] % routes.length].transport,
+      }
+    : null;
   const details = sc.details ? [<Note key="v6" tone="info">{t("dash.fullTunnelIpv6Blocked")}</Note>] : [];
 
   const panel = (
@@ -640,6 +720,8 @@ function Composed({
                   </p>
                 );
               })()
+            ) : sc.progress ? (
+              <ProgressLineView routes={routes} autoConnecting={sc.progress.auto ?? false} rung={progressRung} count={sc.progress.count ?? null} />
             ) : null
           }
           sublineStays={Boolean(sc.crossed)}
@@ -656,13 +738,21 @@ function Composed({
           details={details}
           modeBar={modeBar}
           locationCard={<LocationCard location={location} />}
-          metrics={<MetricCards plan={trayPlan} ip={ip} />}
+          metrics={<MetricCards plan={trayPlan} ip={ip} speed={sc.speed ? <SpeedCard meter={PREVIEW_METER} /> : undefined} />}
           summary={plan === "none" ? null : <SummaryLine plan={trayPlan} ip={ip} />}
           panel={layout !== "narrow" ? panel : null}
           panelLabel={t("loc.panelTitle")}
           legend={<MapLegend />}
           mapStage={mapStage}
-          tray={<SessionTray label={t("tr.location")} location={location} plan={trayPlan} ip={ip} />}
+          tray={
+            <SessionTray
+              label={t("tr.location")}
+              location={location}
+              plan={trayPlan}
+              ip={ip}
+              speed={sc.speed ? <SpeedSection meter={PREVIEW_METER} /> : undefined}
+            />
+          }
           announcer={<StateAnnouncer text={`${lineWords}. ${hintText}`} />}
         />
       )}

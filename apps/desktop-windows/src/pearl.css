@@ -2103,6 +2103,54 @@
   button.nx-tlink:hover {
     text-decoration: underline;
   }
+  /* Download and upload (TrafficSpeed.tsx): the measured rate, and a
+     sparkline of the last minute in the tray's cobalt. Steps, never
+     tweened: each figure is a reading. */
+  .nx-speed {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+  .nx-srow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .nx-srow > svg:first-child {
+    width: 14px;
+    height: 14px;
+    flex: none;
+    color: var(--ink-2);
+  }
+  .nx-sval {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .nx-spark {
+    width: 56px;
+    height: 16px;
+    flex: none;
+    overflow: visible;
+  }
+  .nx-spark polyline {
+    fill: none;
+    stroke: var(--cobalt-ink);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+  }
+  .nx-hmet > .nx-speed.wide {
+    grid-column: 1 / -1;
+  }
   .nx-meter {
     height: 4px;
     border-radius: 4px;
@@ -2221,6 +2269,132 @@
   }
   .nx-dlg .nx-actions {
     justify-content: flex-end;
+  }
+  /* A list to pick from (PickerDialog): the running apps, the games. The
+     list is the one part that scrolls. */
+  .nx-pick {
+    width: min(480px, 100%);
+    max-height: min(82vh, 700px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .nx-pick-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .nx-dlg .nx-pick-head h2 {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+  }
+  .nx-dlg .nx-pick-note {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+  .nx-pick-body {
+    flex: 1 1 auto;
+    min-height: 120px;
+    overflow-y: auto;
+    margin-inline: -8px;
+    padding-inline: 8px;
+  }
+  .nx-pick-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .nx-pick-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 52px;
+    padding: 8px 10px;
+    border-radius: 14px;
+    text-align: start;
+    color: var(--ink);
+  }
+  .nx-pick-row:hover:not(:disabled),
+  .nx-pick-row:focus-visible {
+    background: var(--select);
+  }
+  .nx-pick-row:disabled {
+    cursor: default;
+    color: var(--ink-2);
+  }
+  .nx-pick-row .t {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .nx-pick-row .n,
+  .nx-pick-row .s {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .nx-pick-row .n {
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .nx-pick-row .s {
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+  /* A program's path is Latin and left to right; under Persian it lines up
+     with the name above it, on the right. */
+  html[dir="rtl"] .nx-pick-row .s[dir="ltr"] {
+    text-align: right;
+  }
+  .nx-pick-row .tag {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--ok-ink);
+  }
+  .nx-pick-row .tag svg {
+    width: 14px;
+    height: 14px;
+  }
+  .nx-pick-tile {
+    width: 32px;
+    height: 32px;
+    flex: none;
+    border-radius: 9px;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    background: var(--select);
+    color: var(--cobalt-ink);
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .nx-pick-tile img {
+    width: 24px;
+    height: 24px;
+  }
+  .nx-pick-more {
+    padding: 10px 8px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+  .nx-dlg .nx-pick-wait {
+    display: grid;
+    place-items: center;
+    margin: 0;
+    padding: 32px 0;
   }
   .nx-menu {
     position: fixed;
@@ -2512,6 +2686,10 @@
       display: grid;
       grid-template-columns: minmax(0, 1.35fr) repeat(2, minmax(0, 1fr));
       block-size: 108px;
+    }
+    /* A fourth section while a measured speed exists; the same height. */
+    .nx-tray.speed {
+      grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 0.92fr) minmax(0, 1fr);
     }
     .nx-tray .nx-meter {
       margin-top: 4px;

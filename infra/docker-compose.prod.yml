@@ -176,6 +176,10 @@ services:
       # limit with 409 DEVICE_LIMIT; "off" grants every claim. Only apps
       # that claim are affected (docs/device-slots.md).
       DEVICE_SLOTS: ${DEVICE_SLOTS:-}
+      # "Sign out of another device" (DELETE /customer/devices/:id): blank
+      # or "off" (default) answers 404; "on" only with the app release
+      # that offers it, once the owner has decided it.
+      ACCOUNT_DEVICE_SIGNOUT: ${ACCOUNT_DEVICE_SIGNOUT:-}
       # Swagger UI at /api/docs. Off here because NODE_ENV is production;
       # set to "true" only if you deliberately want the whole control
       # plane's routes and payload shapes published unauthenticated.

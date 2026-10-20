@@ -102,6 +102,16 @@ jobs:
           pnpm exec prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
           pnpm exec prisma db execute --url "$DATABASE_URL" --file test/sql/rollback-check.sql
 
+      # Specs that need that migrated Postgres: raw SQL whose column names,
+      # result types and time handling a mocked Prisma cannot check
+      # (*.db.spec.ts). Skipped everywhere NEOXIFY_DB_SPECS is not 1, the
+      # turbo run below included.
+      - name: Database-backed specs
+        working-directory: apps/backend
+        env:
+          NEOXIFY_DB_SPECS: "1"
+        run: pnpm exec jest --testPathPattern '\.db\.spec\.ts$'
+
       - run: pnpm turbo run lint typecheck build test
 
   agent:

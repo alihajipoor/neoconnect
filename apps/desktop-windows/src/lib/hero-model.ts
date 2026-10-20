@@ -93,9 +93,10 @@ export function chipFor(state: ConnectionState, headline: Headline, { teardownSh
 
 export type LineModel = { kind: "timer"; since: number } | { kind: "words"; key: TranslationKey };
 
-/** The big line: the session timer for a verified tunnel this app brought
- * up (the service does not report a start for one adopted at launch, and
- * none is invented), the headline in words in every other state. */
+/** The big line: the session timer for a verified tunnel with a known
+ * start -- this app's own connect, or the age the service reports for one
+ * adopted at launch (lib/session-clock.ts); none is invented when the
+ * service does not say -- the headline in words in every other state. */
 export function lineFor(
   state: ConnectionState,
   headline: Headline,

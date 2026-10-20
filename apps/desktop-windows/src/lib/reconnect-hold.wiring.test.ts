@@ -1,0 +1,55 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import { RECONNECT_HOLD_OFFERED, RECONNECT_HOLD_PROVEN } from "./reconnect-hold";
+
+/** "Block the internet while reconnecting" is not offered until a capture
+ * has proved it (`RECONNECT_HOLD_PROVEN`). These hold the gate where it is
+ * read: a release build draws no switch, tells every connect the setting
+ * is off, and says nothing of a hold -- whatever a test build saved. */
+
+const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+const repo = (path: string) => source(`../../../../${path}`);
+
+describe("the reconnect hold's gate", () => {
+  it("is shut in a build that sets nothing, as a release is built", () => {
+    expect(RECONNECT_HOLD_PROVEN).toBe(false);
+    expect(RECONNECT_HOLD_OFFERED).toBe(false);
+  });
+
+  it("draws the switch only in a build that offers it", () => {
+    const app = source("../App.tsx");
+    const binding = app.slice(app.indexOf("const WINDOWS_DEVICE: DeviceSettings = {"));
+    const body = binding.slice(0, binding.indexOf("\n};\n"));
+    expect(body).toMatch(/\.\.\.\(RECONNECT_HOLD_OFFERED\s+\?\s+\{ reconnectHold: /);
+    // Nowhere else is it bound.
+    expect(app.split("reconnectHold:").length).toBe(2);
+  });
+
+  it("is never opened by the release workflow, only by the VM's test installer when asked", () => {
+    expect(repo(".github/workflows/release-desktop-windows.yml")).not.toContain("VITE_RECONNECT_HOLD");
+    expect(repo(".github/workflows/ci.yml")).not.toContain("VITE_RECONNECT_HOLD");
+    const test = repo(".github/workflows/build-test-installer.yml");
+    expect(test).toMatch(/reconnect_hold:\s+description:[^\n]*\n\s+required: false\n\s+default: false\n\s+type: boolean/);
+    expect(test).toContain("VITE_RECONNECT_HOLD: ${{ inputs.reconnect_hold && '1' || '' }}");
+  });
+
+  it("is read through holdWanted wherever the preference decides what is held or said", () => {
+    for (const path of ["../App.tsx", "../screens/Dashboard.tsx", "../screens/Settings.tsx"]) {
+      const lines = source(path)
+        .split("\n")
+        .filter((line) => /\.blockWhileReconnecting\b/.test(line));
+      expect(lines.length, path).toBeGreaterThan(0);
+      for (const line of lines) {
+        // The switch itself, drawn only where it is offered, and an
+        // effect's dependency list read the preference as saved;
+        // everything else goes through the gate.
+        if (line.includes("checked={prefs.value.blockWhileReconnecting}")) continue;
+        if (line.includes("}, [reconnectRunning, prefs.blockWhileReconnecting]);")) continue;
+        const reads = line.split(".blockWhileReconnecting").length - 1;
+        const gated = line.match(/holdWanted\((?:appPrefs\.current\(\)|prefs|prefs\.value)\.blockWhileReconnecting\)/g)?.length ?? 0;
+        expect(gated, `${path}: ${line.trim()}`).toBe(reads);
+      }
+    }
+  });
+});

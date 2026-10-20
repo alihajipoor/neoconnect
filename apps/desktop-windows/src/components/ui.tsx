@@ -571,13 +571,6 @@ export function TextLink({
   return <button type="button" className={cn("nx-tlnk", strong && "strong", className)} {...button} />;
 }
 
-/** "Not built yet": beside a setting the app cannot do, which is drawn
- * disabled -- never as a control that looks like it works. */
-export function NotBuiltTag() {
-  const { t } = useI18n();
-  return <span className="nx-ntag">{t("set.notBuilt")}</span>;
-}
-
 /** A settings group: a solid card with its title inside it, never on the
  * scene, and its rows divided by hairlines. */
 export function ListGroup({
@@ -669,8 +662,8 @@ export function Row({
 }
 
 /** A row with a switch, labelled by the row's label and described by its
- * hint. A setting the app cannot do yet passes `notBuilt`: the switch is
- * off and disabled, and the row says so. */
+ * hint. A setting a platform does not honour has no row at all (Settings'
+ * `DeviceSettings`): nothing ships as a placeholder. */
 export function SwitchRow({
   icon,
   label,
@@ -678,7 +671,6 @@ export function SwitchRow({
   checked,
   onChange,
   disabled,
-  notBuilt,
   tag,
 }: {
   icon?: ReactNode;
@@ -687,7 +679,6 @@ export function SwitchRow({
   checked: boolean;
   onChange?: (checked: boolean) => void;
   disabled?: boolean;
-  notBuilt?: boolean;
   tag?: ReactNode;
 }) {
   const id = useId();
@@ -698,12 +689,12 @@ export function SwitchRow({
       hint={hint}
       labelId={`${id}-l`}
       hintId={hint ? `${id}-h` : undefined}
-      tag={notBuilt ? <NotBuiltTag /> : tag}
+      tag={tag}
       control={
         <Switch
-          checked={notBuilt ? false : checked}
+          checked={checked}
           onChange={(next) => onChange?.(next)}
-          disabled={disabled || notBuilt}
+          disabled={disabled}
           labelledBy={`${id}-l`}
           describedBy={hint ? `${id}-h` : undefined}
         />

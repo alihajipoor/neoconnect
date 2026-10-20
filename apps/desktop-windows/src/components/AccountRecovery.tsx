@@ -104,7 +104,7 @@ export function VerifyEmailReminder({
       </p>
       <Done text={done} />
       {!open ? (
-        <Button variant="ghost" onClick={() => setOpen(true)} className="justify-center border border-white/10">
+        <Button variant="ghost" onClick={() => setOpen(true)} className="justify-center border border-[var(--hairline-2)]">
           {t("verify.reminderAction")}
         </Button>
       ) : changing ? (
@@ -142,7 +142,7 @@ export function VerifyEmailReminder({
               {busy ? <Loader2 className="size-4 animate-spin" /> : null}
               {t("unverified.change")}
             </Button>
-            <Button type="button" variant="ghost" onClick={() => setChanging(false)} className="border border-white/10">
+            <Button type="button" variant="ghost" onClick={() => setChanging(false)} className="border border-[var(--hairline-2)]">
               {t("voucher.cancel")}
             </Button>
           </div>
@@ -241,7 +241,7 @@ export function RecoveryCodeSection({
           <Header icon={KeyRound} title={t("recovery.settingsTitle")} hint={t("recovery.settingsHint")} />
           <p className="text-xs text-muted-foreground">{hasRecoveryCode ? t("recovery.has") : t("recovery.none")}</p>
           {!open ? (
-            <Button variant="ghost" onClick={() => setOpen(true)} className="justify-center border border-white/10">
+            <Button variant="ghost" onClick={() => setOpen(true)} className="justify-center border border-[var(--hairline-2)]">
               {hasRecoveryCode ? t("recovery.replace") : t("recovery.create")}
             </Button>
           ) : (

@@ -21,6 +21,12 @@ mod janitor;
 mod ras;
 mod openvpn;
 mod readiness;
+/// "Block the internet while reconnecting", opt-in -- see the module's
+/// own comment. `pub(crate)` for the ledger and the pipe, which read and
+/// let go of it without the owning thread.
+pub(crate) mod reconnect_hold;
+/// What a tunnel has carried, from its adapter's own counters.
+mod traffic;
 /// "Repair my network" -- the superset teardown, reusing every module
 /// above. A child of this one so it can call the same private teardowns
 /// the disconnect path does rather than growing second copies of them.
@@ -337,6 +343,12 @@ struct Session {
     /// The last LAN plan WFP refused, and when: not tried again until
     /// `LAN_RETRY_AFTER` has passed (`Engines::follow_the_lan`).
     lan_refused: Option<(confinement::Plan, Instant)>,
+    /// What the tunnel's adapter has carried since the session began, read
+    /// on each status poll (`Engines::traffic`).
+    traffic: traffic::SessionTraffic,
+    /// When the session was installed, its engine up: how long it has been
+    /// up, for an app that opens over it (`Engines::session_secs`).
+    began: Instant,
 }
 
 impl Session {
@@ -354,6 +366,8 @@ impl Session {
             valve: None,
             rescan: None,
             lan_refused: None,
+            traffic: traffic::SessionTraffic::default(),
+            began: Instant::now(),
         }
     }
 }
@@ -551,6 +565,17 @@ pub struct Engines {
     /// `cleanup.log`, so the line is written once whichever teardown
     /// ends the session.
     drop_logged: u64,
+    /// "Block the internet while reconnecting", opt-in: one for the
+    /// service's life, shared with every session's engine watch and with
+    /// the pipe (through the ledger). See `reconnect_hold`.
+    reconnect_hold: Arc<reconnect_hold::Hold>,
+    /// The servers the app last named on a connect (`known_nodes`), as
+    /// addresses: what a hold lets anything reach, so the next rung's
+    /// engine can dial whatever socket WFP attributes it to.
+    hold_nodes: Vec<Ipv4Addr>,
+    /// How a tunnel adapter's counters are read: the machine's, except in
+    /// tests.
+    traffic_ops: Arc<dyn traffic::TrafficOps>,
     /// How many sessions have been ended, by any route. For the tests
     /// that prove a dead engine racing a Disconnect is torn down once.
     #[cfg(test)]
@@ -566,6 +591,17 @@ impl Engines {
         let ledger = Arc::new(Ledger::new());
         let confinement_ops: Arc<dyn confinement::ConfinementOps> =
             Arc::new(confinement::System { log_dir: config_dir.clone() });
+        // The machine's filtering platform -- except in this crate's own
+        // tests, where nothing a test does may hold the machine running it.
+        let hold_ops: Arc<dyn reconnect_hold::HoldOps> = if cfg!(test) {
+            Arc::new(reconnect_hold::Inert)
+        } else {
+            Arc::new(reconnect_hold::System { exe_dir: exe_dir.clone() })
+        };
+        let reconnect_hold = reconnect_hold::Hold::new(hold_ops, Some(&config_dir));
+        ledger.note_reconnect_hold(Arc::clone(&reconnect_hold));
+        let traffic_ops: Arc<dyn traffic::TrafficOps> =
+            if cfg!(test) { Arc::new(traffic::NoAdapters) } else { Arc::new(traffic::System) };
         Self {
             exe_dir,
             config_dir,
@@ -591,6 +627,9 @@ impl Engines {
             uplink_lookup: Arc::new(|dest| adapters::best_uplink_for(dest, &OUR_ADAPTER_NAMES)),
             swept_after: 0,
             drop_logged: 0,
+            reconnect_hold,
+            hold_nodes: Vec::new(),
+            traffic_ops,
             #[cfg(test)]
             sessions_ended: 0,
             #[cfg(test)]
@@ -743,6 +782,160 @@ impl Engines {
     /// Why this session's IPv4 is not confined, while it should be.
     pub fn confinement_problem(&self) -> Option<String> {
         self.active.peek().and_then(|s| s.confinement.problem())
+    }
+
+    /// What the live session's tunnel has carried, read from its adapter
+    /// now: bytes since it began and per second over about the last second.
+    /// `None` when there is no session or its adapter could not be read --
+    /// never a made-up zero. See `traffic`.
+    pub fn traffic(&mut self) -> Option<neoconnect_ipc::TunnelTraffic> {
+        let ops = Arc::clone(&self.traffic_ops);
+        let session = self.active.peek_mut()?;
+        let adapter = adapter_name_for(&session.profile);
+        session.traffic.read(&*ops, adapter, Instant::now())
+    }
+
+    /// The reconnect hold, as the status poll reports it -- after letting
+    /// go of one nothing followed or that has held too long with no tunnel
+    /// up, and reading the network again while it holds (`Hold::tend`).
+    pub fn reconnect_hold_status(&self) -> Option<neoconnect_ipc::ReconnectHold> {
+        let live = self.active.peek().map(|s| s.generation);
+        self.reconnect_hold.tend(live.is_some());
+        self.reconnect_hold.report(live)
+    }
+
+    /// Lets go of the reconnect hold, for `why`. `disarm` also forgets the
+    /// live session's plan for one: every teardown that is not a
+    /// reconnect's -- a Disconnect, the app going away -- so nothing that
+    /// follows it is held.
+    pub fn release_reconnect_hold(&mut self, why: &'static str, disarm: bool) {
+        self.reconnect_hold.release(reconnect_hold::Release::Asked(why));
+        if disarm {
+            self.reconnect_hold.disarm();
+        }
+    }
+
+    /// The live session is about to be taken down by the app to reconnect
+    /// (`Request::DisconnectForReconnect`): held from now, before its
+    /// engine stops, if it is armed -- and a reconnect is what follows it,
+    /// so the hold is not one nothing followed (`Hold::followed`).
+    /// Returns whether it is holding.
+    pub fn hold_for_reconnect(&mut self) -> bool {
+        let holding = match self.active.peek().map(|s| s.generation) {
+            Some(generation) => self.reconnect_hold.engage(generation, "the app is reconnecting"),
+            None => self.reconnect_hold.holding(),
+        };
+        self.reconnect_hold.followed();
+        holding
+    }
+
+    /// The setting turned on while a tunnel is up: the live session is
+    /// armed, if the hold covers it.
+    pub fn arm_live_session_for_reconnect_hold(&mut self) {
+        let Some(profile) = self.active.peek().map(|s| s.profile.clone()) else { return };
+        let passive = self.split_tunnel.wants_passive_tunnel();
+        self.arm_reconnect_hold(&profile, passive, &[]);
+    }
+
+    /// A plan for the hold: our tunnel adapters as they are now, `tunnel`
+    /// among them whatever the listing says; Neoxify's programs; the
+    /// servers the app named and `servers`; the LAN. `None` when our
+    /// adapters could not be listed, since no plan could then name a tunnel.
+    fn reconnect_hold_plan(&self, tunnel: Option<u64>, servers: &[Ipv4Addr]) -> Option<reconnect_hold::Plan> {
+        let ops = self.reconnect_hold.ops();
+        let mut tunnels = ops.our_tunnels()?;
+        tunnels.extend(tunnel);
+        let (lan, dhcp_servers) = ops.lan().unwrap_or_default();
+        let mut nodes = self.hold_nodes.clone();
+        nodes.extend_from_slice(servers);
+        let dns = ops.dns_servers().unwrap_or_default();
+        Some(reconnect_hold::Plan::new(tunnels, ops.programs(), nodes, lan, dhcp_servers).with_dns(dns))
+    }
+
+    /// What a connect does about the hold before it takes down the session
+    /// it replaces. The servers the app named are kept for any plan made
+    /// from here. The setting off, nothing is held. A connect the hold does
+    /// not cover -- IKEv2, Custom mode -- lets go of one before it dials,
+    /// and says why. Otherwise a hold in place stays, through the teardown
+    /// below and the dial after it, with this connect's server put in its
+    /// plan first. A connect never begins a hold: only a drop and the app's
+    /// own `DisconnectForReconnect` do, so a press of Connect, or a server
+    /// chosen while connected, holds nothing the customer did not ask for.
+    fn hold_through_connect(&mut self, profile: &ConnectProfile, known_nodes: &[String]) {
+        let named: Vec<Ipv4Addr> =
+            known_nodes.iter().take(MAX_KNOWN_NODES).filter_map(|host| host.trim().parse().ok()).collect();
+        if !named.is_empty() {
+            self.hold_nodes = named;
+        }
+        let hold = Arc::clone(&self.reconnect_hold);
+        if !hold.wanted() {
+            hold.release(reconnect_hold::Release::Asked("a connect with the setting off"));
+            hold.disarm();
+            return;
+        }
+        let passive = self.split_tunnel.wants_passive_tunnel();
+        if !reconnect_hold::covers(profile, passive) {
+            if hold.holding() {
+                hold.release(reconnect_hold::Release::Failed(
+                    neoconnect_ipc::ReconnectHoldProblem::NotCovered,
+                    format!(
+                        "the next connection ({}{}) is one the hold does not cover, so it was let go of before that one dialled",
+                        profile.protocol_name(),
+                        if passive { ", Custom mode" } else { "" }
+                    ),
+                ));
+            }
+            hold.disarm();
+            return;
+        }
+        if hold.holding() {
+            let server: Vec<Ipv4Addr> = server_literal(profile).into_iter().collect();
+            if let Some(plan) = self.reconnect_hold_plan(None, &server) {
+                hold.replan(plan, false);
+            }
+        }
+    }
+
+    /// Arms the session a connect has just brought up -- the setting on, a
+    /// tunnel the hold covers -- and moves a hold already in place onto it:
+    /// the new tunnel's adapter is put in the plan, so it carries from now.
+    /// A tunnel whose adapter cannot be named is not armed, and a hold in
+    /// place is let go of rather than left blocking that tunnel: a
+    /// protocol is never stopped for the hold's sake.
+    fn arm_reconnect_hold(&mut self, profile: &ConnectProfile, passive: bool, servers: &[Ipv4Addr]) {
+        let hold = Arc::clone(&self.reconnect_hold);
+        if !hold.wanted() || !reconnect_hold::covers(profile, passive) {
+            return;
+        }
+        let Some(generation) = self.active.peek().map(|s| s.generation) else { return };
+        let mut servers = servers.to_vec();
+        servers.extend(server_literal(profile));
+        let plan = hold
+            .ops()
+            .tunnel_luid(adapter_name_for(profile))
+            .and_then(|tunnel| self.reconnect_hold_plan(Some(tunnel), &servers));
+        match plan {
+            Some(plan) => {
+                hold.arm(generation, plan.clone());
+                if hold.holding() {
+                    hold.replan(plan, true);
+                }
+            }
+            None => {
+                hold.disarm();
+                let why = format!(
+                    "the {} tunnel's adapter could not be named to the filtering platform, so the hold was let go of rather than block it",
+                    profile.protocol_name()
+                );
+                if hold.holding() {
+                    hold.release(reconnect_hold::Release::Failed(
+                        neoconnect_ipc::ReconnectHoldProblem::TunnelNotPermitted,
+                        why.clone(),
+                    ));
+                }
+                crate::cleanup_log::note("arm the hold while reconnecting", &format!("not armed: {why}"));
+            }
+        }
     }
 
     /// Confines the session's IPv4 to its tunnel, where `confinement::plan_for`
@@ -1203,6 +1396,21 @@ impl Engines {
         self.confinement_ops = ops;
     }
 
+    /// Points this instance at a reconnect hold over ops the test owns,
+    /// noted in the ledger as the machine's is. Before a session begins:
+    /// its watch takes the hold then.
+    #[cfg(test)]
+    fn set_reconnect_hold_ops_for_test(&mut self, ops: Arc<dyn reconnect_hold::HoldOps>) {
+        self.reconnect_hold = reconnect_hold::Hold::new(ops, None);
+        self.ledger.note_reconnect_hold(Arc::clone(&self.reconnect_hold));
+    }
+
+    /// Points this instance at adapter counters the test owns.
+    #[cfg(test)]
+    fn set_traffic_ops_for_test(&mut self, ops: Arc<dyn traffic::TrafficOps>) {
+        self.traffic_ops = ops;
+    }
+
     /// Confines the live session the way a connect does, through the ops:
     /// an Xray plan to one server, the LAN allowed. Returns whether it is
     /// now held.
@@ -1320,9 +1528,17 @@ impl Engines {
     }
 
     /// What Custom mode's packet counters say is wrong, for the status
-    /// poll. `None` while it is healthy or not running.
-    pub fn split_tunnel_complaint(&self) -> Option<String> {
+    /// poll: the code the app words it by and the service's English
+    /// sentence, read together. `None` while it is healthy or not running.
+    pub fn split_tunnel_complaint(&self) -> Option<(neoconnect_ipc::SplitTunnelProblemCode, String)> {
         self.split_tunnel.complaint()
+    }
+
+    /// How long the live session's engine has been up, in whole seconds on
+    /// the monotonic clock -- for an app that opens over a tunnel it did
+    /// not bring up. `None` with no session.
+    pub fn session_secs(&self) -> Option<u64> {
+        self.active.peek().map(|s| s.began.elapsed().as_secs())
     }
 
     /// Where each selected application's traffic is leaving from. See
@@ -1493,7 +1709,11 @@ impl Engines {
             return Err(ABANDONED.to_string());
         }
 
-        let cleared = self.disconnect();
+        // The opt-in reconnect hold, before the teardown below opens the
+        // gap: kept through it when this connect is one it covers, let go
+        // of when it is not or the setting is off (`hold_through_connect`).
+        self.hold_through_connect(profile, known_nodes);
+        let cleared = self.disconnect_keeping_hold();
         // A drop recorded from an earlier session stops being the answer
         // once this connect is past clearing the decks. Left standing, a
         // status answered from the ledger while the connect holds the
@@ -1720,7 +1940,9 @@ impl Engines {
         }
 
         if limits.cancelled() {
-            let _ = self.disconnect();
+            // The Disconnect that cancelled this lets go of the hold itself
+            // when it is the customer's; a reconnect's keeps it.
+            let _ = self.disconnect_keeping_hold();
             return Err(ABANDONED.to_string());
         }
 
@@ -1748,10 +1970,14 @@ impl Engines {
         // its own: everything outside the tunnel refused but the engine's
         // link to its servers, the LAN, DHCP and loopback. See
         // `confinement`. A failure leaves the tunnel up and is reported.
+        let servers = confine_nodes.clone();
         self.confine_if_needed(profile, passive, confine_nodes);
         // Then what was opened outside it before, so it comes back through
         // it: the owner's decision (c).
         self.reset_outside_the_tunnel(profile, passive);
+        // The opt-in reconnect hold: this session armed for it, and a hold
+        // in place moved onto its tunnel so that tunnel carries.
+        self.arm_reconnect_hold(profile, passive, &servers);
         // Whatever the engine above reported about a full tunnel's DNS
         // rule, collected onto the session now that there is one. Read
         // rather than returned because the engines install it from free
@@ -2044,6 +2270,14 @@ impl Engines {
         let liveness = engine.liveness(&self.wireguard_scm);
         let hold = self.confinement_ops.hold();
         let generation = self.active.fill(Session::new(engine, profile, Arc::clone(&hold)));
+        // The adapter's counters as the session begins: what it carries is
+        // counted from here (`traffic`). An adapter not readable yet is
+        // read from the first status poll that finds it.
+        let traffic_ops = Arc::clone(&self.traffic_ops);
+        if let Some(session) = self.active.peek_mut() {
+            let adapter = adapter_name_for(&session.profile);
+            let _ = session.traffic.read(&*traffic_ops, adapter, Instant::now());
+        }
 
         let started = liveness.and_then(|liveness| {
             engine_watch::watch(generation, label, liveness, self.report_to(hold))
@@ -2074,7 +2308,15 @@ impl Engines {
     fn report_to(&self, confinement: Arc<confinement::Hold>) -> engine_watch::OnGone {
         let ledger = Arc::clone(&self.ledger);
         let sink = self.engine_gone.clone();
+        let reconnect_hold = Arc::clone(&self.reconnect_hold);
         Arc::new(move |gone: engine_watch::Gone| {
+            // The customer's "Block the internet while reconnecting", when
+            // this session was armed for it: held before the confinement
+            // below is let go of, so nothing passes between the two. Here,
+            // on the watch's own thread, for the reason that release is.
+            // Off, or not armed, this is a look and nothing more. A report
+            // the engine contradicts lets go of it in phase one.
+            reconnect_hold.engage(gone.generation, "the tunnel engine was reported gone");
             // First, on any report -- definitive or not, news or not --
             // and here, on the watch's own thread. The owning thread may
             // be busy (a diagnostics snapshot, a probe), and phase one is
@@ -2144,6 +2386,9 @@ impl Engines {
             return true;
         }
         let retracted = self.ledger.retract(generation);
+        // A reconnect hold that report began goes too: the tunnel it was
+        // holding for is running, and the app never saw a drop to end.
+        self.reconnect_hold.release_if_engaged_by(generation);
         // The report let go of the confinement on the watch's thread; the
         // engine is alive, so it goes back. Its hold is re-armed *before*
         // the new watch starts: a report from that watch -- the engine
@@ -2285,7 +2530,8 @@ impl Engines {
         if self.swept_after == generation {
             return;
         }
-        if let Err(message) = self.disconnect() {
+        // Keeping a reconnect hold the drop began: the app is reconnecting.
+        if let Err(message) = self.disconnect_keeping_hold() {
             crate::cleanup_log::note("thorough teardown after the tunnel engine ended", &message);
         }
     }
@@ -2337,6 +2583,12 @@ impl Engines {
         let protocol = engine.as_ref().map_or("unknown", Active::protocol);
         // The engine has ended already: that is why this runs.
         self.mark("engine stopped");
+        // The opt-in reconnect hold, for an armed session, before its
+        // confinement goes -- usually begun already by the watch's report;
+        // this is the poll's path and the net under it.
+        if self.reconnect_hold.engage(generation, "the tunnel engine ended on its own") {
+            self.mark("reconnect hold");
+        }
         // Usually let go of already, by the watch's report; this is the
         // poll's path and the net under it (K2). Before the route.exe
         // deletes, which would otherwise run with the machine refused
@@ -2492,7 +2744,21 @@ impl Engines {
         }
     }
 
+    /// The thorough teardown, letting go of the reconnect hold with it: the
+    /// customer's own Disconnect behind its hard stop, the app going away,
+    /// the idle watchdog, the service stopping, Repair, uninstall -- every
+    /// teardown that is not a reconnect's. The drop paths and a connect
+    /// clearing the decks call [`Self::disconnect_keeping_hold`] instead.
     pub fn disconnect(&mut self) -> Result<(), String> {
+        // First: what follows can take tens of seconds, and nothing it does
+        // needs the machine held. A live session's own confinement still
+        // covers it until its engine stops.
+        self.release_reconnect_hold("a full teardown", true);
+        self.disconnect_keeping_hold()
+    }
+
+    /// The thorough teardown, leaving the reconnect hold as it is.
+    pub fn disconnect_keeping_hold(&mut self) -> Result<(), String> {
         // A Custom-mode session's lookups are pinned to 1.1.1.1 until the
         // rule is out below, and the redirect that carries them stops with
         // the session: port 53 is held outside the tunnel until then
@@ -2889,7 +3155,8 @@ impl Engines {
             // for the configs, not at all.
             Verdict::Dead => {
                 self.tear_down_dead_session(Noticed::ByStatus);
-                if let Err(message) = self.disconnect() {
+                // A drop: a reconnect hold it began stays for the app.
+                if let Err(message) = self.disconnect_keeping_hold() {
                     crate::cleanup_log::note("thorough teardown after the tunnel engine ended", &message);
                 }
                 (false, None, TunnelHealth::Down)
@@ -3149,6 +3416,12 @@ pub(crate) const NO_NETWORK: &str = "no network connection with a gateway was fo
 /// the profile names it by address, otherwise any public one -- the
 /// question is whether there is a way out at all, and nothing is sent.
 fn way_out_probe(profile: &ConnectProfile) -> Ipv4Addr {
+    server_literal(profile).unwrap_or(Ipv4Addr::new(1, 1, 1, 1))
+}
+
+/// The server's address when the profile names it by one -- as nodes are
+/// registered -- without looking anything up.
+fn server_literal(profile: &ConnectProfile) -> Option<Ipv4Addr> {
     let host = match profile {
         ConnectProfile::Wireguard(p) => split_host_port(&p.endpoint).ok().map(|(host, _)| host),
         ConnectProfile::Openvpn(p) => split_host_port(&p.endpoint).ok().map(|(host, _)| host),
@@ -3158,7 +3431,7 @@ fn way_out_probe(profile: &ConnectProfile) -> Ipv4Addr {
         ConnectProfile::Shadowsocks(p) => Some(p.host.clone()),
         ConnectProfile::Ikev2(p) => Some(p.server.clone()),
     };
-    host.and_then(|host| host.parse().ok()).unwrap_or(Ipv4Addr::new(1, 1, 1, 1))
+    host.and_then(|host| host.parse().ok())
 }
 
 /// The physical adapter traffic to `toward` leaves by, and the next hop
@@ -3881,6 +4154,20 @@ mod helper_tests {
             "ending a session left the redirect loop running -- this is the field bug"
         );
         assert!(slot.is_empty());
+    }
+
+    /// How long a session has been up is that session's own: nothing with
+    /// none, counted from its install, and gone with it -- an app opening
+    /// over the next one must never be handed the last one's age.
+    #[test]
+    fn session_age_is_the_sessions_own() {
+        let mut engines = Engines::new(PathBuf::new(), PathBuf::new());
+        assert_eq!(engines.session_secs(), None, "no session, no age");
+        engines.active.fill(test_session());
+        assert!(matches!(engines.session_secs(), Some(secs) if secs < 5), "counted from the install");
+        assert!(engines.end_session().is_some());
+        assert_eq!(engines.session_secs(), None, "the age outlived its session");
+        engines.unblock_ipv6();
     }
 
     /// What the session type is for: nothing that belongs to a session
@@ -6496,5 +6783,396 @@ mod helper_tests {
             end_test_session(&mut engines);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // "Block the internet while reconnecting" (`reconnect_hold`), through
+    // the session paths that begin, keep and let go of it. A model of
+    // the machine: what WFP does is the hold's own install test's and the
+    // VM's capture's to show.
+    // -----------------------------------------------------------------
+
+    /// The hold's WFP, recorded: what went in, what was closed, and how
+    /// many of the session's confinements had been let go of when each
+    /// went in.
+    struct FakeHold {
+        installs: std::sync::Mutex<Vec<reconnect_hold::Plan>>,
+        closed: std::sync::Mutex<Vec<isize>>,
+        next: std::sync::atomic::AtomicIsize,
+        /// Our tunnel adapters, as the test says they are now.
+        tunnels: std::sync::Mutex<Option<Vec<u64>>>,
+        /// The session's own adapter, as the test says it is now.
+        tunnel: std::sync::Mutex<Option<u64>>,
+        /// The confinement's closes, to read as each hold goes in.
+        confinement_closed: Option<Arc<std::sync::Mutex<Vec<isize>>>>,
+        confinements_closed_at_install: std::sync::Mutex<Vec<usize>>,
+    }
+
+    const HELD_TUNNEL: u64 = 0x0035_0000_0100_0000;
+
+    impl FakeHold {
+        fn new(confinement: Option<&Arc<FakeConfinement>>) -> Arc<Self> {
+            Arc::new(Self {
+                installs: std::sync::Mutex::default(),
+                closed: std::sync::Mutex::default(),
+                next: std::sync::atomic::AtomicIsize::new(7000),
+                tunnels: std::sync::Mutex::new(Some(vec![HELD_TUNNEL])),
+                tunnel: std::sync::Mutex::new(Some(HELD_TUNNEL)),
+                confinement_closed: confinement.map(|fake| Arc::clone(&fake.closed)),
+                confinements_closed_at_install: std::sync::Mutex::default(),
+            })
+        }
+        fn installs(&self) -> Vec<reconnect_hold::Plan> {
+            self.installs.lock().unwrap().clone()
+        }
+        fn closed(&self) -> Vec<isize> {
+            self.closed.lock().unwrap().clone()
+        }
+    }
+
+    impl reconnect_hold::HoldOps for FakeHold {
+        fn install(&self, plan: &reconnect_hold::Plan) -> Result<reconnect_hold::Installed, String> {
+            if let Some(closed) = &self.confinement_closed {
+                let gone = closed.lock().unwrap().len();
+                self.confinements_closed_at_install.lock().unwrap().push(gone);
+            }
+            self.installs.lock().unwrap().push(plan.clone());
+            let engine = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(reconnect_hold::Installed { engine, filters: reconnect_hold::specs(plan).len() })
+        }
+        fn close(&self, engine: isize) -> u32 {
+            self.closed.lock().unwrap().push(engine);
+            0
+        }
+        fn our_tunnels(&self) -> Option<Vec<u64>> {
+            self.tunnels.lock().unwrap().clone()
+        }
+        fn tunnel_luid(&self, _adapter: &str) -> Option<u64> {
+            *self.tunnel.lock().unwrap()
+        }
+        fn lan(&self) -> Option<(Vec<confinement::Prefix>, Vec<Ipv4Addr>)> {
+            Some((vec![confinement::Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24)], Vec::new()))
+        }
+        fn programs(&self) -> Vec<PathBuf> {
+            vec![PathBuf::from(r"C:\Program Files\Neoxify\resources\xray.exe")]
+        }
+    }
+
+    /// Engines over a fake confinement and a fake hold, the setting on,
+    /// with an Xray session begun, confined and armed.
+    fn armed_session() -> (Engines, Arc<FakeConfinement>, Arc<FakeHold>, u64) {
+        let fake = FakeConfinement::new();
+        let hold = FakeHold::new(Some(&fake));
+        let mut engines = engines_for_test();
+        engines.set_confinement_ops_for_test(fake.clone());
+        engines.set_reconnect_hold_ops_for_test(hold.clone());
+        engines.reconnect_hold.set_wanted(true);
+        let generation = engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        assert!(engines.confine_for_test());
+        engines.arm_reconnect_hold(&reality_profile(), false, &[]);
+        assert_eq!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Armed));
+        (engines, fake, hold, generation)
+    }
+
+    /// The setting off -- the default -- arms nothing, and a session that
+    /// dies is not held: fail open, as before the setting existed.
+    #[test]
+    fn with_the_setting_off_a_drop_is_not_held() {
+        let fake = FakeConfinement::new();
+        let hold = FakeHold::new(Some(&fake));
+        let mut engines = engines_for_test();
+        engines.set_confinement_ops_for_test(fake.clone());
+        engines.set_reconnect_hold_ops_for_test(hold.clone());
+        let g = engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        assert!(engines.confine_for_test());
+        engines.arm_reconnect_hold(&reality_profile(), false, &[]);
+        assert_eq!(engines.reconnect_hold_status(), None);
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]), "the confinement was not let go of");
+        assert!(engines.end_dead_session(g));
+        assert!(hold.installs().is_empty(), "a hold nobody asked for");
+        assert_eq!(engines.reconnect_hold_status(), None);
+    }
+
+    /// On, an armed session whose engine dies is held from the engine
+    /// watch's own thread *before* its confinement is let go of -- so
+    /// nothing passes between the two -- and the hold outlasts the
+    /// session's teardown for the reconnect. The customer's Disconnect
+    /// then lets go of it.
+    #[test]
+    fn an_armed_sessions_drop_is_held_before_its_confinement_is_let_go_of() {
+        let (mut engines, fake, hold, g) = armed_session();
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]), "the confinement was not let go of");
+        assert_eq!(hold.installs().len(), 1, "the drop was not held");
+        assert_eq!(
+            hold.confinements_closed_at_install.lock().unwrap().clone(),
+            vec![0],
+            "the confinement went before the hold was in"
+        );
+        let held = &hold.installs()[0];
+        assert!(held.tunnels.contains(&HELD_TUNNEL), "the session's own tunnel is not in its plan");
+        assert!(held.nodes.contains(&Ipv4Addr::new(203, 0, 113, 7)), "the session's server is not in its plan");
+
+        // Phase one, as the pipe queues it: the dead session is taken down
+        // and the hold stays, for the app's reconnect.
+        assert!(engines.end_dead_session(g));
+        assert!(engines.reconnect_hold.holding(), "the teardown of a drop let go of the hold");
+        assert!(matches!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Holding { .. })));
+        // A status read without the owning thread says the same.
+        assert!(matches!(engines.ledger().reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Holding { .. })));
+
+        engines.disconnect().expect("disconnect");
+        assert!(!engines.reconnect_hold.holding(), "the customer's disconnect kept the machine held");
+        assert_eq!(hold.closed(), vec![7000]);
+        assert_eq!(engines.reconnect_hold_status(), None);
+    }
+
+    /// A drop the app does not follow with a reconnect is let go of by
+    /// the service itself after `NO_FOLLOW_UP` -- an app that has decided
+    /// not to reconnect cannot leave the machine held -- while the app's
+    /// own teardown for a reconnect (`DisconnectForReconnect`) is a
+    /// reconnect following, and is not.
+    #[test]
+    fn a_drop_nothing_follows_is_let_go_of_and_a_reconnects_teardown_is_not() {
+        let (mut engines, fake, hold, g) = armed_session();
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]), "the confinement was not let go of");
+        assert!(engines.end_dead_session(g));
+        assert!(engines.reconnect_hold.holding(), "the drop was not held");
+        assert!(engines.reconnect_hold.let_go_if_unfollowed(false, Duration::ZERO), "a drop nothing followed stayed held");
+        assert_eq!(hold.closed(), vec![7000]);
+        assert!(matches!(
+            engines.reconnect_hold_status(),
+            Some(neoconnect_ipc::ReconnectHold::NotHeld { problem: neoconnect_ipc::ReconnectHoldProblem::Other, .. })
+        ));
+
+        let (mut engines, _fake, _hold, _g) = armed_session();
+        assert!(engines.hold_for_reconnect());
+        assert!(
+            !engines.reconnect_hold.let_go_if_unfollowed(false, Duration::ZERO),
+            "the app's own teardown for a reconnect was taken for a drop nothing followed"
+        );
+        assert!(engines.reconnect_hold.holding());
+    }
+
+    /// The app's teardown for a reconnect holds the gap from before the
+    /// engine stops; the thorough pass after it keeps the hold; a tunnel
+    /// that comes up under it is put in its plan -- the new plan in before
+    /// the old is closed -- so that tunnel carries; and the app letting go
+    /// leaves the new session armed.
+    #[test]
+    fn a_reconnect_holds_the_gap_and_the_next_tunnel_carries() {
+        let (mut engines, _fake, hold, _g) = armed_session();
+        assert!(engines.hold_for_reconnect());
+        assert_eq!(hold.installs().len(), 1);
+        end_test_session(&mut engines);
+        engines.disconnect_keeping_hold().expect("the thorough pass");
+        assert!(engines.reconnect_hold.holding(), "the thorough pass after a reconnect's teardown let go");
+
+        // The next rung: its own tunnel, under another LUID.
+        let next_tunnel = 0x0035_0000_0200_0000;
+        *hold.tunnel.lock().unwrap() = Some(next_tunnel);
+        *hold.tunnels.lock().unwrap() = Some(vec![next_tunnel]);
+        let g2 = engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.arm_reconnect_hold(&reality_profile(), false, &[Ipv4Addr::new(198, 51, 100, 4)]);
+        let installs = hold.installs();
+        assert_eq!(installs.len(), 2, "the hold was not moved onto the new tunnel");
+        assert!(installs[1].tunnels.contains(&next_tunnel), "the new tunnel is not permitted: it would carry nothing");
+        assert!(installs[1].nodes.contains(&Ipv4Addr::new(198, 51, 100, 4)));
+        assert_eq!(hold.closed(), vec![7000], "the old plan, closed after the new went in");
+        assert!(engines.reconnect_hold.armed_for(g2));
+
+        // The app has proved the tunnel: the hold goes, the session stays armed.
+        engines.release_reconnect_hold("the app proved a tunnel", false);
+        assert_eq!(hold.closed(), vec![7000, 7001]);
+        assert_eq!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Armed));
+        end_test_session(&mut engines);
+    }
+
+    /// A tunnel that comes up while it holds, whose adapter cannot be
+    /// named, lets go of the hold -- said -- rather than leave that tunnel
+    /// blocked: the hold is never kept at the cost of a protocol.
+    #[test]
+    fn a_tunnel_the_hold_cannot_name_lets_go_of_it() {
+        let (mut engines, _fake, hold, _g) = armed_session();
+        assert!(engines.hold_for_reconnect());
+        end_test_session(&mut engines);
+        *hold.tunnel.lock().unwrap() = None;
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.arm_reconnect_hold(&reality_profile(), false, &[]);
+        assert!(!engines.reconnect_hold.holding(), "a tunnel the plan cannot name was left blocked");
+        assert!(matches!(
+            engines.reconnect_hold_status(),
+            Some(neoconnect_ipc::ReconnectHold::NotHeld { problem: neoconnect_ipc::ReconnectHoldProblem::TunnelNotPermitted, .. })
+        ));
+        end_test_session(&mut engines);
+
+        // And adapters that cannot be listed at all, the same.
+        let (mut engines, _fake, hold, _g) = armed_session();
+        assert!(engines.hold_for_reconnect());
+        end_test_session(&mut engines);
+        *hold.tunnels.lock().unwrap() = None;
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.arm_reconnect_hold(&reality_profile(), false, &[]);
+        assert!(!engines.reconnect_hold.holding());
+        end_test_session(&mut engines);
+    }
+
+    /// A connect the hold does not cover -- IKEv2, Custom mode -- lets go
+    /// of it before it dials, and says why; one with the setting off lets
+    /// go and says nothing; one it covers keeps it, with its server put in
+    /// the plan before it dials.
+    #[test]
+    fn a_connect_keeps_the_hold_only_when_it_covers_it() {
+        let (mut engines, _fake, hold, _g) = armed_session();
+        assert!(engines.hold_for_reconnect());
+        end_test_session(&mut engines);
+        let wireguard = ConnectProfile::Wireguard(neoconnect_ipc::WireguardProfile {
+            private_key: String::new(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: String::new(),
+            endpoint: "198.51.100.23:51820".into(),
+        });
+        engines.hold_through_connect(&wireguard, &["203.0.113.7".into(), "node.example.com".into()]);
+        assert!(engines.reconnect_hold.holding(), "a covered connect let go of the hold");
+        let replanned = hold.installs().last().cloned().expect("a plan");
+        assert!(replanned.nodes.contains(&Ipv4Addr::new(198, 51, 100, 23)), "the server it dials is not permitted");
+        assert!(replanned.nodes.contains(&Ipv4Addr::new(203, 0, 113, 7)), "the servers the app named are not permitted");
+
+        engines.hold_through_connect(&test_profile(), &[]);
+        assert!(!engines.reconnect_hold.holding(), "an IKEv2 connect was dialled under the hold");
+        assert!(matches!(
+            engines.reconnect_hold_status(),
+            Some(neoconnect_ipc::ReconnectHold::NotHeld { problem: neoconnect_ipc::ReconnectHoldProblem::NotCovered, .. })
+        ));
+
+        let (mut engines, _fake, _hold, _g) = armed_session();
+        assert!(engines.hold_for_reconnect());
+        end_test_session(&mut engines);
+        engines.reconnect_hold.set_wanted(false);
+        engines.hold_through_connect(&reality_profile(), &[]);
+        assert!(!engines.reconnect_hold.holding());
+        assert_eq!(engines.reconnect_hold_status(), None, "the setting off is not a problem to report");
+    }
+
+    /// A drop report the engine contradicts lets go of the hold that report
+    /// began: the tunnel is running, and the app never saw a drop to end.
+    #[test]
+    fn a_retracted_drop_lets_go_of_the_hold_it_began() {
+        let hold = FakeHold::new(None);
+        let mut engines = engines_for_test();
+        engines.set_reconnect_hold_ops_for_test(hold.clone());
+        engines.reconnect_hold.set_wanted(true);
+        let plan = reconnect_hold::Plan::new(vec![HELD_TUNNEL], Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        // Armed before the watch's first look: the generation is the next
+        // one the ledger gives.
+        let g = engines.begin_test_session_watched_by("XRAY_VLESS_REALITY", engine_stand_in(), Box::new(SaysGone(Some(1066))));
+        engines.reconnect_hold.arm(g, plan);
+        // The report may have come before the arm; the poll's teardown
+        // path is not taken here, so engage as the watch would have.
+        engines.reconnect_hold.engage(g, "the watch's report");
+        assert!(wait_for(Duration::from_secs(5), || recorded(&engines, g)), "the watch never reported");
+        assert!(engines.reconnect_hold.holding());
+        assert!(!engines.end_dead_session(g), "a running engine was torn down");
+        assert!(!engines.reconnect_hold.holding(), "a running tunnel was left held");
+        assert_eq!(hold.closed(), vec![7000]);
+        end_test_session(&mut engines);
+    }
+
+    /// Thirty-two armed sessions dying at once, each torn down while the
+    /// app lets go of its hold and the customer disconnects, all racing:
+    /// every hold that went in is closed exactly once, and none is left.
+    #[test]
+    fn thirty_two_held_drops_racing_their_releases_close_each_hold_once() {
+        const AT_ONCE: usize = 32;
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let handles: Vec<_> = (0..AT_ONCE)
+            .map(|i| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let (mut engines, _fake, hold, g) = armed_session();
+                    let shared = engines.reconnect_hold.clone();
+                    start.wait();
+                    kill_engine_behind_its_back(&mut engines);
+                    // The pipe's release, without the owning thread, at a
+                    // different moment for each.
+                    let releaser = std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis((i % 8) as u64 * 5));
+                        shared.release(reconnect_hold::Release::Asked("the app let go of it"));
+                    });
+                    let _ = wait_for(Duration::from_secs(5), || recorded(&engines, g));
+                    engines.end_dead_session(g);
+                    releaser.join().expect("the releaser");
+                    // The customer's Disconnect, as the pipe runs it on the
+                    // owning thread: the hard stop, and the hold let go of.
+                    let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+                    engines.release_reconnect_hold("the customer disconnected", true);
+                    let opened: Vec<isize> = (0..hold.installs().len() as isize).map(|n| 7000 + n).collect();
+                    let mut closed = hold.closed();
+                    closed.sort_unstable();
+                    assert_eq!(closed, opened, "session {i}: a hold closed twice, or left in");
+                    assert!(!engines.reconnect_hold.holding());
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a session's thread panicked");
+        }
+    }
+
+    /// The connect's order, read from the source: the hold is decided on
+    /// before the teardown that opens the gap, that teardown keeps it, and
+    /// the session is armed once its confinement and reset are done.
+    #[test]
+    fn a_connect_decides_the_hold_before_its_teardown_and_arms_after_its_confinement() {
+        let source = include_str!("mod.rs");
+        let start = source.find("    fn connect_inner(").expect("connect_inner");
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("its end")];
+        let decided = body.find("self.hold_through_connect(profile, known_nodes);").expect("the hold decided on");
+        let teardown = body.find("let cleared = self.disconnect_keeping_hold();").expect("the teardown keeps the hold");
+        assert!(decided < teardown);
+        assert!(!body.contains("self.disconnect()"), "a connect's own teardown lets go of the hold");
+        let reset = body.find("self.reset_outside_the_tunnel(profile, passive);").expect("the reset");
+        let armed = body.find("self.arm_reconnect_hold(profile, passive, &servers);").expect("the session armed");
+        assert!(reset < armed);
+        // And the drop paths keep it: phase two and the poll's.
+        for signature in ["    pub fn finish_dead_session(", "            Verdict::Dead => {"] {
+            let at = source.find(signature).unwrap_or_else(|| panic!("{signature}"));
+            let path = &source[at..at + 600];
+            assert!(path.contains("self.disconnect_keeping_hold()"), "{signature} lets go of a drop's hold");
+        }
+    }
+
+    /// What a session's tunnel has carried, through `Engines`: counted from
+    /// the session's start, nothing for no session, nothing -- not zero --
+    /// for an adapter that cannot be read.
+    #[test]
+    fn traffic_is_the_sessions_own_and_nothing_when_unread() {
+        struct Counting(std::sync::Mutex<traffic::Counters>);
+        impl traffic::TrafficOps for Counting {
+            fn luid(&self, _adapter: &str) -> Option<u64> {
+                Some(HELD_TUNNEL)
+            }
+            fn counters(&self, _luid: u64) -> Option<traffic::Counters> {
+                Some(*self.0.lock().unwrap())
+            }
+        }
+        let mut engines = engines_for_test();
+        assert_eq!(engines.traffic(), None, "no session, no number");
+        let counting = Arc::new(Counting(std::sync::Mutex::new(traffic::Counters { rx: 9_000, tx: 1_000 })));
+        engines.set_traffic_ops_for_test(counting.clone());
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        *counting.0.lock().unwrap() = traffic::Counters { rx: 12_000, tx: 1_500 };
+        let read = engines.traffic().expect("a reading");
+        assert_eq!((read.rx_bytes, read.tx_bytes), (3_000, 500), "counted from the session's start");
+        end_test_session(&mut engines);
+
+        engines.set_traffic_ops_for_test(Arc::new(traffic::NoAdapters));
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        assert_eq!(engines.traffic(), None, "an adapter that could not be read reported as something");
+        end_test_session(&mut engines);
     }
 }

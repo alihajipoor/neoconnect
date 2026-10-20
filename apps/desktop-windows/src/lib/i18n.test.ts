@@ -119,6 +119,9 @@ describe("what the strings are allowed to claim", () => {
     "gaming.listEmpty",
     "settings.customGameEmpty",
     "settings.customGameWholeApp",
+    // OpenVPN is left out of the mobile apps on purpose (its licence), not
+    // waiting to be added: "yet" promised it (2026-10-19).
+    "dash.androidWireguardOnly",
   ] as const;
 
   it("does not tell the customer to wait for something nobody is building", () => {

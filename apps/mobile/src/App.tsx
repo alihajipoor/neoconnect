@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { ScreenTransition } from "@shared/components/ScreenTransition";
 import { getTokens } from "@shared/lib/session";
 import { flushAttempts } from "@shared/lib/attempts";
@@ -30,6 +30,12 @@ import { Dashboard } from "./screens/Dashboard";
 import { PerAppCard } from "./components/PerAppCard";
 import { isAndroid, isIOS } from "./lib/platform";
 import { ProminentDisclosure, hasAcceptedDisclosure } from "./components/ProminentDisclosure";
+import { appPrefs } from "@shared/lib/app-prefs";
+import { PHONE_DEVICE, noticesFor, setNotices } from "./lib/phone-notices";
+import { AndroidUpdateRow } from "./components/AndroidUpdateRow";
+import { autoConnectLatch } from "@shared/lib/auto-connect";
+import { sessionLog } from "@shared/lib/session-log";
+import { PHONE_MAIN_PAGE_EXTRAS } from "./lib/phone-main-extras";
 
 /** How often a queued diagnostic report retries. Matches the desktop
  * client so the two do not report at different rates for no reason. */
@@ -71,9 +77,10 @@ setRelayTunnelReader(async () => (await vpnStatus()).connected);
  * routing table there. Custom mode splits for the same reason, and is
  * passed into the shared Settings as a slot.
  *
- * No update banner: Android cannot silently replace its own APK, so
- * in-app updating is a different mechanism entirely and is not wired up
- * yet. Better absent than present and lying about what it will do.
+ * Updates: Android cannot silently replace its own APK, so the direct
+ * build says in Settings when a newer one is published and opens its
+ * download (components/AndroidUpdateRow.tsx); Android's installer asks
+ * before replacing anything. Play and the App Store update their own.
  */
 type Screen =
   | "loading"
@@ -102,21 +109,58 @@ export default function App() {
   // A sign-out from one of the shell's pages, from its profile menu.
   const [pageSigningOut, setPageSigningOut] = useState(false);
   const { t, language } = useI18n();
+  const prefs = useSyncExternalStore(appPrefs.subscribe, appPrefs.current, appPrefs.current);
+  const [prefsLoaded, setPrefsLoaded] = useState(false);
+
+  // The device's preferences, read once per run (lib/app-prefs.ts).
+  useEffect(() => {
+    let alive = true;
+    void appPrefs.load().then(() => alive && setPrefsLoaded(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // The session log keeps seven days while the app runs, not only at each
+  // start (lib/session-log.ts).
+  useEffect(() => sessionLog.keepPruned(), []);
+
+  // The tunnel's own notifications (lib/phone-notices.ts) in the app's
+  // language, with the customer's setting: handed to the native side now
+  // and whenever either changes, so what it posts in the background is
+  // what Settings says. Not before the setting has been read -- a default
+  // is not the customer's answer.
+  useEffect(() => {
+    if (!prefsLoaded) return;
+    const platform = isAndroid() ? "android" : isIOS() ? "ios" : null;
+    if (platform === null) return;
+    void setNotices(noticesFor(t, prefs.notifications, platform)).catch(() => undefined);
+    // `t` follows the language.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefsLoaded, prefs.notifications, language]);
 
   // The disclosure gates everything, including a session that is already
   // signed in. Play wants it shown before the data collection begins,
   // and someone upgrading from an earlier build has never seen it -- so
   // "has a token" is not evidence of having been told.
+  //
+  // "Connect when Neoxify starts" is for a run that opens on the main page
+  // signed in, with the disclosure already accepted: a run that opens on
+  // either of the other two has nothing to connect "on start", now or after
+  // (lib/auto-connect.ts, lib/phone-main-extras.ts).
   useEffect(() => {
     void (async () => {
       if (!(await hasAcceptedDisclosure())) {
+        autoConnectLatch.disarm();
         setScreen("disclosure");
         return;
       }
       try {
         const tokens = await getTokens();
+        if (!tokens) autoConnectLatch.disarm();
         setScreen(tokens ? "dashboard" : "login");
       } catch {
+        autoConnectLatch.disarm();
         setScreen("login");
       }
     })();
@@ -195,8 +239,13 @@ export default function App() {
     if (endingRef.current) return;
     endingRef.current = true;
     setScreen("signingOut");
-    // The avatar line belongs to the account that just left.
+    // The avatar line belongs to the account that just left; a later
+    // sign-in in this run is not "when Neoxify starts"; and the session log
+    // goes with the session, off for whoever signs in next
+    // (lib/session-log.ts).
     forgetShellProfile();
+    autoConnectLatch.disarm();
+    void sessionLog.wipe();
     try {
       let ended: SessionEnd;
       try {
@@ -365,6 +414,12 @@ export default function App() {
         onOpenActivity={() => setScreen("activity")}
         onSignOut={() => void signOutFromSettings()}
         platform={isAndroid() ? "android" : isIOS() ? "ios" : "web"}
+        // Notifications only (lib/phone-notices.ts): the rows a phone does
+        // not honour are not drawn.
+        device={isAndroid() || isIOS() ? PHONE_DEVICE : undefined}
+        // The direct APK only: Play and the App Store update their own
+        // builds, and a store build never carries the check.
+        aboutExtra={isAndroid() && !IS_STORE_BUILD ? <AndroidUpdateRow /> : null}
       />,
     );
   }
@@ -377,6 +432,9 @@ export default function App() {
         readNetwork={async () => networkKeyFromAsn()}
         onOpenPlans={() => setScreen("plans")}
         onBack={() => setScreen("settings")}
+        // Offered once the phone's main page records it
+        // (lib/phone-main-extras.ts); not before.
+        sessionLog={PHONE_MAIN_PAGE_EXTRAS}
       />,
     );
   }

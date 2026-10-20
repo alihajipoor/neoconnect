@@ -269,6 +269,14 @@ export function buildXrayConfig(user: ProtocolUser): string {
 
   return JSON.stringify({
     log: { loglevel: "warning" },
+    // The bytes sent and received through the server, which the engine
+    // reads back for the app's speeds (Uplink and Downlink in
+    // plugins/vpn/xray/xray.go, under the outbound's tag "proxy"). A count
+    // of the customer's own traffic, never an estimate; each section is an
+    // xray-core app the engine package registers, or core.New refuses the
+    // config (counters_test.go there builds these two).
+    stats: {},
+    policy: { system: { statsOutboundUplink: true, statsOutboundDownlink: true } },
     inbounds: [
       {
         tag: "tun-in",

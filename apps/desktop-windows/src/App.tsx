@@ -16,7 +16,7 @@ import { ForgotPassword } from "./screens/ForgotPassword";
 import { Dashboard } from "./screens/Dashboard";
 import { ScreenTransition } from "./components/ScreenTransition";
 import { Plans } from "./screens/Plans";
-import { Settings } from "./screens/Settings";
+import { Settings, type DeviceSettings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
 import { Support } from "./screens/Support";
 import { Activity } from "./screens/Activity";
@@ -30,6 +30,14 @@ import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 import { setRelayTunnelReader } from "./lib/last-resort";
 import { BackupRouteChip } from "./components/BackupRoute";
+import { windowsAutostart } from "./lib/autostart";
+import { notificationSetting } from "./lib/notify";
+import { autoConnectLatch } from "./lib/auto-connect";
+import { notifyMemory } from "./lib/connection-notify";
+import { holdService, holdWanted, RECONNECT_HOLD_OFFERED, watchEpisodesForHold } from "./lib/reconnect-hold";
+import { appPrefs } from "./lib/app-prefs";
+import { ladderPass } from "./lib/ladder-pass";
+import { sessionLog } from "./lib/session-log";
 
 /** How often a queued diagnostic report retries.
  *
@@ -44,6 +52,20 @@ const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 // relay closed (last-resort.ts). At module scope, so it is in place
 // before any screen can make a request.
 setRelayTunnelReader(async () => (await invoke<{ connected: boolean }>("vpn_status")).connected);
+
+/** What Windows does for Settings' device rows: every one of them bound
+ * here, so Settings draws them (`DeviceSettings`). The phone app binds
+ * its own once its main page honours them. "Block the internet while
+ * reconnecting" only in a build that offers it: not until a capture has
+ * proved it (`RECONNECT_HOLD_PROVEN` in lib/reconnect-hold.ts). */
+const WINDOWS_DEVICE: DeviceSettings = {
+  autostart: windowsAutostart,
+  autoConnect: true,
+  notifications: { setting: notificationSetting },
+  ...(RECONNECT_HOLD_OFFERED
+    ? { reconnectHold: { apply: (enabled: boolean) => invoke<void>("vpn_set_reconnect_hold", { enabled }) } }
+    : {}),
+};
 
 type Screen =
   | "loading"
@@ -96,8 +118,37 @@ export default function App() {
     // means no future change to it can strand the app on "Loading..."
     // with no way forward.
     getTokens()
-      .then((tokens) => setScreen(tokens ? "dashboard" : "login"))
-      .catch(() => setScreen("login"));
+      .then((tokens) => {
+        // A run that opens on sign-in has nothing to connect "when Neoxify
+        // starts": signing in later is not a start (lib/auto-connect.ts).
+        if (!tokens) autoConnectLatch.disarm();
+        setScreen(tokens ? "dashboard" : "login");
+      })
+      .catch(() => {
+        autoConnectLatch.disarm();
+        setScreen("login");
+      });
+  }, []);
+
+  // The session log keeps seven days while the app runs, not only at
+  // each start (lib/session-log.ts).
+  useEffect(() => sessionLog.keepPruned(), []);
+
+  // "Block the internet while reconnecting": the service's hold is let go
+  // of when the reconnect it was for ends -- landed, given up, or ended by
+  // something other than a press whose own pass decides -- from whichever
+  // screen is up (lib/reconnect-hold.ts). Read once; the preferences are
+  // read here so the setting is known before any screen asks.
+  useEffect(() => {
+    void appPrefs.load();
+    return watchEpisodesForHold({
+      phase: autoReconnect.current,
+      subscribe: autoReconnect.subscribe,
+      setting: () => holdWanted(appPrefs.current().blockWhileReconnecting),
+      passRunning: () => ladderPass.inFlight(),
+      release: holdService.release,
+      keep: holdService.keep,
+    });
   }, []);
 
   // Handles the "Open in Neoxify" link from the verification email --
@@ -268,8 +319,15 @@ export default function App() {
     if (endingRef.current) return;
     endingRef.current = true;
     setScreen("signingOut");
-    // The avatar line belongs to the account that just left.
+    // The avatar line belongs to the account that just left, and so does
+    // anything a notification still owed it; a later sign-in in this run
+    // is not "when Neoxify starts".
     forgetShellProfile();
+    notifyMemory.reset();
+    autoConnectLatch.disarm();
+    // The session log goes with the session, and is off for whoever signs
+    // in next (lib/session-log.ts).
+    void sessionLog.wipe();
     try {
       let ended: SessionEnd;
       try {
@@ -442,6 +500,7 @@ export default function App() {
         onOpenActivity={() => setScreen("activity")}
         onSignOut={() => void signOutFromPage()}
         platform="windows"
+        device={WINDOWS_DEVICE}
       />,
     );
   }
@@ -455,6 +514,8 @@ export default function App() {
         readNetwork={() => invoke<string | null>("network_fingerprint")}
         readWayOut={() => invoke<string | null>("network_uplinks")}
         onOpenPlans={() => setScreen("plans")}
+        // The main page records it here, so its switch is offered.
+        sessionLog
       />,
     );
   }

@@ -29,7 +29,7 @@ export function Latency({ ms, className, neutral = false }: { ms: number | null;
       : bars === 3
         ? "text-success"
         : bars === 2
-          ? "text-warning"
+          ? "text-[var(--warn-ink)]"
           : "text-destructive";
 
   return (

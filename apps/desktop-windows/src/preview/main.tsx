@@ -12,6 +12,7 @@ import ReactDOM from "react-dom/client";
 import { I18nProvider } from "../lib/i18n";
 import { startEffects } from "../lib/effects";
 import { PreviewApp } from "./PreviewApp";
+import { PREVIEW_RUNNING_APPS } from "./PreviewPages";
 import "../globals.css";
 
 declare global {
@@ -41,6 +42,10 @@ window.__TAURI_INTERNALS__ = {
       }
       case "gaming_status":
         return { state: window.__NX_PREVIEW_GAMING__ ?? "off", detail: null };
+      case "vpn_list_running_apps":
+        // A moment's wait, so the picker's loading state is seen too.
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        return PREVIEW_RUNNING_APPS;
       default:
         throw new Error(`preview: ${cmd} is not available here`);
     }

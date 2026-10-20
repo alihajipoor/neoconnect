@@ -72,6 +72,7 @@ import {
 } from "../lib/split-tunnel";
 import { exitOfRoute } from "../lib/exit-options";
 import { gamingDisarm, loadGaming, saveGaming, type AppMode } from "../lib/gaming";
+import type { TranslationKey as HintKey } from "../lib/i18n";
 import {
   cachedRoutesFor,
   loadSnapshot,
@@ -117,6 +118,18 @@ import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } f
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
+import { appPrefs } from "../lib/app-prefs";
+import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
+import { holdHint, holdNote, holdService, holdStore, holdWanted, passTeardown, shouldRelease } from "../lib/reconnect-hold";
+import { NOTIFY_TEXT, notifyMemory, notifyStep } from "../lib/connection-notify";
+import { showNotification } from "../lib/notify";
+import { trafficMeter } from "../lib/traffic-meter";
+import { customModeProblemText, readCustomModeProblem, type CustomModeProblem } from "../lib/custom-mode-problem";
+import { adoptedSince } from "../lib/session-clock";
+import { ladderProgress } from "../lib/ladder-progress";
+import { createRecordBytes, sessionLog } from "../lib/session-log";
+import { ProgressLine } from "../components/main/ProgressLine";
+import { SpeedCard, SpeedSection, useTrafficShown } from "../components/main/TrafficSpeed";
 import {
   asReconnectReport,
   autoReconnect,
@@ -724,6 +737,16 @@ export function Dashboard({
   /** The same, for the switch confirmation, which reads it after an await. */
   const reconnectingRef = useRef(reconnecting);
   reconnectingRef.current = reconnecting;
+  /** What the service last said about "Block the internet while
+   * reconnecting" (lib/reconnect-hold.ts), and the device's preferences
+   * (lib/app-prefs.ts). */
+  const hold = useSyncExternalStore(holdStore.subscribe, holdStore.current, holdStore.current);
+  const prefs = useSyncExternalStore(appPrefs.subscribe, appPrefs.current, appPrefs.current);
+  /** Whether the tray has a measured speed to show (lib/traffic-meter.ts). */
+  const trafficShown = useTrafficShown();
+  /** The run's own connect at launch is under way, and says why
+   * (lib/auto-connect.ts). */
+  const [autoConnecting, setAutoConnecting] = useState(false);
   /** How the last ladder pass ended, beyond its outcome: which route it
    * landed on, or the kind of error it stopped on. Read by the reconnect
    * runner, which has to tell "the plan said no" from "the network did". */
@@ -762,9 +785,10 @@ export function Dashboard({
   const [gamingTone, setGamingTone] = useState<ShownTone>("idle");
   const [gamingSummary, setGamingSummary] = useState<{ picked: number; resolver: string | null } | null>(null);
 
-  // Only set when *this* app instance brought the tunnel up. The helper
-  // service doesn't report a start time, so a tunnel adopted on launch
-  // has no honest duration to show and the timer stays blank rather than
+  // Set when *this* app instance brought the tunnel up, or -- for a tunnel
+  // adopted on launch -- from the age the service reports for its session
+  // (`sessionSecs`, lib/session-clock.ts). A service that does not say has
+  // no honest duration to show, and the timer stays blank rather than
   // inventing one from the moment the window opened.
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -803,7 +827,7 @@ export function Dashboard({
       })
       .catch(() => undefined);
   }, []);
-  const [splitTunnelProblem, setSplitTunnelProblem] = useState<string | null>(null);
+  const [splitTunnelProblem, setSplitTunnelProblem] = useState<CustomModeProblem | null>(null);
   // Whether the service asked for the tunnel's DNS rule and did not get
   // it. Read from the service, never derived: only it knows whether an
   // engine tried. `false` is "nothing was reported", not "DNS is
@@ -1024,8 +1048,13 @@ export function Dashboard({
     // customer's other device away as "in use" until it goes stale. Kept
     // while a reconnect runs, whose claim renews it -- and given back by
     // the episode itself if it ends before a pass of it claimed
-    // (`slotIdle`).
-    if (autoReconnect.dropped({ exclusion: reconnectExclusion() }) === "lost") void deviceSlot.release();
+    // (`slotIdle`). And the reconnect hold, which the service began the
+    // moment the engine died: with nothing to reconnect, nothing is to be
+    // held -- whatever phase the drop found (lib/reconnect-hold.ts).
+    if (autoReconnect.dropped({ exclusion: reconnectExclusion() }) === "lost") {
+      void deviceSlot.release();
+      if (holdWanted(appPrefs.current().blockWhileReconnecting)) void holdService.release();
+    }
     return true;
   }
 
@@ -1131,8 +1160,9 @@ export function Dashboard({
 
     lastStatusRef.current = status;
     statusMissesRef.current = 0;
+    noteStatus(status);
     setSplitTunnelActive(Boolean(status.splitTunnelActive));
-    setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+    setSplitTunnelProblem(readCustomModeProblem(status));
     setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
     setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
     setIpv6Blocked(Boolean(status.ipv6Blocked));
@@ -1142,6 +1172,19 @@ export function Dashboard({
     const observed = stateFromStatus(status);
     followTunnelForEndpoints(observed);
     return observed;
+  }
+
+  /** What every status read says beyond the tunnel's state: the reconnect
+   * hold (lib/reconnect-hold.ts) and the tunnel's own counters
+   * (lib/traffic-meter.ts). And a hold the service still reports over a
+   * tunnel that is up, with no pass of ours keeping it, is let go of: the
+   * gap it was for is over (`shouldRelease`). */
+  function noteStatus(status: VpnStatus): void {
+    holdStore.observe(status.reconnectHold);
+    if (status.connected) trafficMeter.observe(status.traffic);
+    if (shouldRelease({ hold: holdStore.current(), tunnelUp: status.connected, passRunning: ladderInFlight() })) {
+      void holdService.release();
+    }
   }
 
   /** Tells the control plane's endpoint order what the service just said
@@ -1174,6 +1217,14 @@ export function Dashboard({
     publishObserved(generation, settled);
     // The clock is only honest while something is up.
     if (settled === "disconnected") setConnectedAt(null);
+    else if (isTunnelUp(settled)) {
+      // A tunnel this window did not bring up -- found up at launch -- is
+      // timed from the age the service reports for its session, never from
+      // when the window opened; nothing when it says nothing. A stamp this
+      // window's own connect made stays.
+      const since = lastStatusRef.current ? adoptedSince(lastStatusRef.current, Date.now()) : null;
+      if (since !== null) setConnectedAt((own) => own ?? since);
+    }
     return settled;
   }
 
@@ -2080,6 +2131,7 @@ export function Dashboard({
         return false;
       }
       statusMissesRef.current = 0;
+      noteStatus(status);
 
       // The plan's device limit, renewed on this poll every
       // `renewEverySec` (four polls at the contract's sixty seconds);
@@ -2106,7 +2158,7 @@ export function Dashboard({
       // yellow for one poll.
       const customMode = Boolean(status.splitTunnelActive);
       setSplitTunnelActive(customMode);
-      setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+      setSplitTunnelProblem(readCustomModeProblem(status));
       setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
       setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
       setIpv6Blocked(Boolean(status.ipv6Blocked));
@@ -2352,7 +2404,10 @@ export function Dashboard({
       try {
         const status = await serviceStatus().catch(() => null);
         const disturbed = statusDisturbances.since(mark);
-        if (!droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) return;
+        if (!droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) {
+          if (status?.connected) noteStatus(status);
+          return;
+        }
         publishDrop(generation);
       } finally {
         livenessInFlightRef.current = false;
@@ -2459,6 +2514,142 @@ export function Dashboard({
     // The roam check reads the freshness as it was when the state settled.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectionState]);
+
+  // The speeds belong to the session they were read in: none while no
+  // tunnel is up, and the next one starts from nothing.
+  useEffect(() => {
+    if (!isTunnelUp(connectionState)) trafficMeter.reset();
+  }, [connectionState]);
+
+  // While an automatic reconnect runs nothing else asks the service, so its
+  // word on the reconnect hold is asked here, every two seconds, for the
+  // line that says the internet is blocked -- or why it is not. Only with
+  // the setting on: off, there is nothing to say.
+  useEffect(() => {
+    if (!reconnectRunning || !holdWanted(prefs.blockWhileReconnecting)) return;
+    let asking = false;
+    const look = () => {
+      if (asking) return;
+      asking = true;
+      serviceStatus()
+        .then((status) => holdStore.observe(status.reconnectHold), () => undefined)
+        .finally(() => {
+          asking = false;
+        });
+    };
+    look();
+    const id = setInterval(look, 2_000);
+    return () => clearInterval(id);
+  }, [reconnectRunning, prefs.blockWhileReconnecting]);
+
+  // "Connect when Neoxify starts" (lib/auto-connect.ts): once per run, at
+  // the first main page of a run that opened signed in, and only over
+  // nothing the service has up -- the customer's own Connect, pressed for
+  // them, which never takes the device slot from another device. Waits for
+  // what a pass reads (the route memory and the list, as the reconnect's
+  // attempt does), for the preference itself and for the mode the app was
+  // left in: a default is never acted on.
+  const connectNowRef = useRef(connectNow);
+  connectNowRef.current = connectNow;
+  useEffect(() => {
+    if (loading || !routeMemoryLoaded || !routeListLoaded || !autoConnectLatch.armed()) return;
+    let alive = true;
+    void Promise.all([appPrefs.load(), loadGaming()]).then(([loadedPrefs, gamingSaved]) => {
+      if (!alive || !autoConnectLatch.take()) return;
+      const decision = autoConnectDecision({
+        enabled: loadedPrefs.autoConnect,
+        mode: gamingSaved.mode,
+        state: connectionStateRef.current,
+        passRunning: ladderInFlight(),
+        reconnecting: reconnectingView(autoReconnect.current(), sessionGeneration()) !== null,
+        hasCredential: protocolUserRef.current !== null,
+        subscriptionStatus: subscriptionRef.current?.status,
+        deviceLimitNotice: slotNoticeStore.current() !== null || slotLostRef.current,
+      });
+      if (!decision.go) return;
+      setAutoConnecting(true);
+      void connectNowRef.current().finally(() => setAutoConnecting(false));
+    });
+    return () => {
+      alive = false;
+    };
+    // Once the screen has what a pass reads; the latch keeps it to once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, routeMemoryLoaded, routeListLoaded]);
+
+  // "Notify me when the connection changes" (lib/connection-notify.ts):
+  // read off the calm tone the screen wears, which holds through a short
+  // gap, so a few seconds' gap is never a notification -- as it is never a
+  // colour. Words in the app's language; nothing while the window is in
+  // front, where the screen says it.
+  const notifyTone: ShownTone =
+    appMode === "gaming"
+      ? "idle"
+      : shownTone(orbTone(orbState, cautionShown), {
+          reconnecting: reconnectRunning,
+          dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()),
+        });
+  const holding = holdWanted(prefs.blockWhileReconnecting) && hold?.state === "holding";
+  useEffect(() => {
+    if (loading) return;
+    const step = notifyStep(notifyMemory.current(), {
+      tone: notifyTone,
+      reconnecting: reconnectRunning,
+      holding,
+      focused: typeof document !== "undefined" && document.hasFocus(),
+      gaming: appMode === "gaming",
+    });
+    notifyMemory.set(step.memory);
+    if (step.say === null || !appPrefs.current().notifications) return;
+    const text = NOTIFY_TEXT[step.say];
+    void showNotification(t(text.title), t(text.body), language).catch(() => undefined);
+    // On a change of what is said, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, notifyTone, reconnectRunning, appMode, holding]);
+
+  // The session log (lib/session-log.ts), only when the customer has
+  // turned it on: a record opens when the screen first shows a tunnel up
+  // and closes when it shows it gone -- lost, or ended -- with what the
+  // tunnel's adapter counted, if it counted -- every session of it, a
+  // reconnect onto the same route included (`createRecordBytes`). A tunnel
+  // the failover moved to another route is a new record: the old one
+  // stopped carrying.
+  const loggedBytesRef = useRef(createRecordBytes());
+  useEffect(
+    () =>
+      trafficMeter.subscribe(() => {
+        const view = trafficMeter.view();
+        loggedBytesRef.current.see(trafficMeter.generation(), view ? { rx: view.rxBytes, tx: view.txBytes } : null);
+      }),
+    [],
+  );
+  useEffect(() => {
+    if (loading) return;
+    const up = connectionState === "connected" || connectionState === "unverified" || connectionState === "degraded";
+    const user = protocolUserRef.current;
+    const open = sessionLog.openRecord();
+    const close = (ended: "disconnected" | "lost", bytes: { rx: number; tx: number } | null) => {
+      void sessionLog.finish({ end: Date.now(), rxBytes: bytes?.rx ?? null, txBytes: bytes?.tx ?? null, ended });
+    };
+    if (up && appModeRef.current !== "gaming") {
+      const moved = open !== null && user !== null && user !== undefined && open.routeId !== user.routeId;
+      if (moved) close("lost", loggedBytesRef.current.split());
+      else if (open === null) loggedBytesRef.current.restart();
+      if (open === null || moved) {
+        void sessionLog.begin({
+          start: connectedAt ?? Date.now(),
+          routeId: user?.routeId ?? null,
+          protocol: user?.protocol ?? null,
+          transport: user?.connection?.transport,
+        });
+      }
+    } else if (connectionState === "disconnected" && open !== null) {
+      close(tunnelDropped ? "lost" : "disconnected", loggedBytesRef.current.total());
+      loggedBytesRef.current.restart();
+    }
+    // On a change of what the screen shows; the credential is read as it is.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, connectionState, tunnelDropped]);
 
   // "Connection lost" describes the moment a tunnel went, and only for as
   // long as nothing has happened since. Any other state -- a connect
@@ -2934,6 +3125,17 @@ export function Dashboard({
      * old order behind a repair or a new location and landed on the old
      * server. Asked wherever the flag used to be. See `passStopped`. */
     const stopped = () => passStopped(cancelRef.current, options.reconnect);
+    /** "Block the internet while reconnecting": whether this pass keeps the
+     * service's hold through its own teardowns -- an automatic pass, or a
+     * press made while the hold is holding -- or lets go of it, as a press
+     * from a quiet screen always has (`passTeardown`). */
+    const holdThrough =
+      passTeardown({
+        setting: holdWanted(appPrefs.current().blockWhileReconnecting),
+        automatic: options.automatic === true,
+        holding: holdStore.current()?.state === "holding",
+      }) === "keepHold";
+    const takeDown = (): Promise<void> => (holdThrough ? holdService.disconnectKeepingHold() : serviceDisconnect());
     /** Whether this pass brought a tunnel up. One of the app's own
      * automatic passes that did not -- the mid-session failover -- has
      * just taken the tunnel the episode was armed for down on purpose,
@@ -3023,7 +3225,7 @@ export function Dashboard({
       } else {
         // Obligation 9: down first, so the question does not go into a
         // tunnel that may be held, then four seconds to ask.
-        await serviceDisconnect().catch(() => undefined);
+        await takeDown().catch(() => undefined);
         const standing = await deviceSlot.checkStanding();
         if (standing.kind === "unanswered") {
           // Said, and then the ladder runs as usual: a limit that could
@@ -3090,7 +3292,10 @@ export function Dashboard({
       // exactly that way when a live WireGuard tunnel was blocked.
       //
       // Harmless from the Connect button, where nothing is up.
-      await serviceDisconnect().catch(() => undefined);
+      //
+      // An automatic pass keeps the reconnect hold through it, if it is on:
+      // the gap between the dead tunnel and the next is the one it blocks.
+      await takeDown().catch(() => undefined);
 
       // Re-sent on every pass, not only when the setting changes. The
       // helper is a Windows service with its own lifetime: it can be
@@ -3250,6 +3455,14 @@ export function Dashboard({
         // while it was still dialling.
         ladderPass.progress(generation);
         options.reconnect?.progress();
+        ladderProgress.rung({
+          pass: generation,
+          index,
+          total: candidates.length,
+          routeId: candidate.routeId,
+          protocol: candidate.protocol,
+          transport: candidate.connection?.transport,
+        });
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
 
@@ -3333,6 +3546,9 @@ export function Dashboard({
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
             knownNodes,
+            // "Block the internet while reconnecting": the service arms this
+            // session when it is on (lib/reconnect-hold.ts).
+            blockWhileReconnecting: holdWanted(appPrefs.current().blockWhileReconnecting),
           });
           showNetworkWait(false);
           // The session this pass was started under ended while the
@@ -3526,6 +3742,9 @@ export function Dashboard({
           // calling it "protected".
           if (verdict === "connected" || verdict === "unverified") {
             publishObserved(intent, verdict);
+            // A tunnel is up: whatever the reconnect hold was holding is
+            // over. Asked of the service at once; nothing waits on it.
+            if (holdWanted(appPrefs.current().blockWhileReconnecting)) void holdService.release();
             // Which exit this session actually leaves from, sent now
             // that a route has come up rather than guessed before one
             // had.
@@ -3766,8 +3985,8 @@ export function Dashboard({
         noNetworkSince = null;
         // Always tear down before moving on, or the next engine inherits
         // this one's routes and fails for a reason that has nothing to
-        // do with it.
-        await invoke("vpn_disconnect").catch(() => undefined);
+        // do with it. Keeping the hold between rungs, when it is kept.
+        await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);
         if (!isLast) publishObserved(intent, "connecting");
       }
 
@@ -3829,7 +4048,11 @@ export function Dashboard({
       // standing. `phaseFor` enforces it rather than this comment: while
       // the intent is "connect", nothing published can render as a
       // teardown.
-      await serviceDisconnect().catch(() => undefined);
+      //
+      // A reconnect's attempt that failed keeps the hold for the next one;
+      // any other pass that failed lets go -- nothing is reconnecting after
+      // it, and the product fails open.
+      await (options.reconnect && holdThrough ? holdService.disconnectKeepingHold() : serviceDisconnect()).catch(() => undefined);
       // The outcome is now known, so the wording rule is lifted before
       // the answer is asked for -- otherwise the settled "disconnected"
       // below would come back out as "connecting" and the spinner would
@@ -3854,6 +4077,8 @@ export function Dashboard({
       endIntent(intent);
       // A wait for a network ends with its pass, however it ended.
       showNetworkWait(false);
+      // And the line saying which rung it was on.
+      ladderProgress.ended(generation);
       // Only the pass that still owns the guard may release it. One that
       // outlived its deadline has already been replaced, and clearing
       // the guard here would unlock a newer pass that is still running.
@@ -4099,7 +4324,23 @@ export function Dashboard({
     failed: connectionError !== null,
     teardownShowing: slotTeardownShowing,
   });
-  const hintText = slotTeardownShowing ? "" : connectionError ? t(connectionError.messageKey) : t(headline.hint);
+  /** The reconnect hold, in the gap it is for: the sentence under the
+   * state while it holds (the internet is not going out "without
+   * Neoxify" then, and saying so would be false), a note when it should
+   * and does not (`holdNote`). */
+  const holdSetting = holdWanted(prefs.blockWhileReconnecting);
+  const heldNote = holdNote(hold, { inGap: reconnecting !== null || dropped, setting: holdSetting });
+  const heldHint = holdHint(hold, { reconnecting: reconnecting !== null, dropped, setting: holdSetting });
+  const hintText = slotTeardownShowing
+    ? ""
+    : connectionError
+      ? t(connectionError.messageKey)
+      : heldHint !== null
+        ? t(heldHint)
+        : t(headline.hint);
+  /** Every sentence the hint can say, for the room it keeps: the hold's
+   * only where the setting can make it say them. */
+  const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, "hold.holding", "hold.heldAfterDrop"] : HEADLINE_HINTS;
   const slotShowing = slotNotice !== null && slotNoticeShown(slotNotice, connectionState === "disconnected");
   /** The device limit's card carries its own primary press ("Use on this
    * device instead") and its way out: with nothing up, the pill steps aside
@@ -4295,10 +4536,11 @@ export function Dashboard({
   }
   const notes = (
     <div className="nx-notes">
-      {/* The service's own words, from counters on the path the chosen
-          apps' packets travel: on and working are not the same thing. */}
+      {/* From the service's counters on the path the chosen apps' packets
+          travel -- on and working are not the same thing -- in the app's
+          words for its code (lib/custom-mode-problem.ts). */}
       {isTunnelUp(connectionState) && splitTunnelActive && splitTunnelProblem ? (
-        <Note tone="danger">{splitTunnelProblem}</Note>
+        <Note tone="danger">{customModeProblemText(splitTunnelProblem, t)}</Note>
       ) : null}
       {/* IPv6 observed reaching the internet while connected. Not in
           Custom mode, where the probe sees only this app's own, direct,
@@ -4315,6 +4557,11 @@ export function Dashboard({
           Never in Custom mode or on WireGuard (`warnsUnconfined`). */}
       {isTunnelUp(connectionState) && ipv4NotConfined ? (
         <Note tone="danger">{t(unconfinedKey)}</Note>
+      ) : null}
+      {/* The reconnect hold should be blocking and is not, or let go so a
+          new tunnel could carry: the service's own reason, in words. */}
+      {heldNote !== null && heldNote !== "hold.holding" ? (
+        <Note tone={heldNote === "hold.tunnelNotPermitted" ? "info" : "caution"}>{t(heldNote)}</Note>
       ) : null}
     </div>
   );
@@ -4577,7 +4824,7 @@ export function Dashboard({
           }
           hint={
             error ? null : (
-              <Hint tone={hintTone(calmTone, { failed: connectionError !== null })} reserve={HEADLINE_HINTS}>
+              <Hint tone={hintTone(calmTone, { failed: connectionError !== null })} reserve={hintReserve}>
                 {hintText}
               </Hint>
             )
@@ -4614,7 +4861,11 @@ export function Dashboard({
                     </p>
                   );
                 })()
-              : null
+              : !isTunnelUp(connectionState)
+                ? // The ladder's rung, the reconnect's attempt and countdown,
+                  // and why it is connecting when nobody pressed.
+                  <ProgressLine routes={routes} autoConnecting={autoConnecting} />
+                : null
           }
           // A failover that crossed a border says why the exit is not the
           // country chosen: a phone keeps it in the column.
@@ -4625,14 +4876,24 @@ export function Dashboard({
           details={details}
           modeBar={modeBar}
           locationCard={subscription ? <LocationCard location={trayLocation} /> : null}
-          metrics={subscription ? <MetricCards plan={trayPlan} ip={ip} /> : null}
+          metrics={subscription ? <MetricCards plan={trayPlan} ip={ip} speed={trafficShown ? <SpeedCard /> : undefined} /> : null}
           summary={subscription ? <SummaryLine plan={trayPlan} ip={ip} /> : null}
           panel={layout !== "narrow" ? picker : null}
           panelLabel={t("loc.panelTitle")}
           panelFlash={panelFlash}
           legend={routes.length > 0 ? <MapLegend /> : null}
           mapStage={mapStage}
-          tray={<SessionTray label={t("tr.location")} location={trayLocation} plan={trayPlan} ip={ip} />}
+          tray={
+            <SessionTray
+              label={t("tr.location")}
+              location={trayLocation}
+              plan={trayPlan}
+              ip={ip}
+              // Download and upload, only while Windows' counters for the
+              // tunnel are being read (lib/traffic-meter.ts).
+              speed={trafficShown ? <SpeedSection /> : undefined}
+            />
+          }
           announcer={<StateAnnouncer text={announcement} />}
         />
       )}

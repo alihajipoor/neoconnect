@@ -290,6 +290,36 @@ describe("UpdatesService", () => {
     });
   });
 
+  describe("checkAndroid", () => {
+    it("offers the newer APK's version to an older app", async () => {
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkAndroid("0.9.24"))).resolves.toEqual({ status: "update", version: "0.9.25" });
+    });
+
+    it("compares versions numerically, not as text", async () => {
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkAndroid("0.9.3"))).resolves.toEqual({ status: "update", version: "0.9.25" });
+      await expect(settle(service.checkAndroid("0.10.0"))).resolves.toEqual({ status: "current" });
+    });
+
+    it("reports current for an app on the newest APK", async () => {
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkAndroid("0.9.25"))).resolves.toEqual({ status: "current" });
+    });
+
+    it("reports unknown, never current, when the feed cannot be read", async () => {
+      fetchMock.mockResolvedValue(failWith(504));
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkAndroid("0.9.24"))).resolves.toEqual({ status: "unknown" });
+    });
+
+    it("does not offer a desktop release to the Android app", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve([windowsRelease]) });
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkAndroid("0.0.1"))).resolves.toEqual({ status: "unknown" });
+    });
+  });
+
   describe("releaseSummary", () => {
     it("reports both platforms from one feed read", async () => {
       const service = new UpdatesService(configWith({}));
