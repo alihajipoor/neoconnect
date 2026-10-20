@@ -511,6 +511,74 @@ pub trait HoldOps: Send + Sync {
     fn dns_servers(&self) -> Option<Vec<IpAddr>> {
         None
     }
+    /// Why filters to stand in force under a tunnel are refused before they
+    /// are tried, if they are: only ever the VM's test switch
+    /// (`TestSwitches::refuse_standing`), in a build that has it.
+    fn refuse_standing(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Whether this build carries the VM's test switches for the hold
+/// (`TestSwitches`): set at compile time by the test installer built for
+/// the capture with `reconnect_hold` ticked (build-test-installer.yml), and
+/// by nothing else. A release build never sets it, so the switches below
+/// are read nowhere in one; `reconnect-hold.wiring.test.ts` holds the
+/// workflows to that.
+pub const TEST_SWITCHES_BUILT_IN: bool = match option_env!("NEOXIFY_RECONNECT_HOLD_TEST") {
+    // "1" only: the workflow sets it empty when the box is not ticked.
+    Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+    None => false,
+};
+
+/// The file in the service's data directory (`%ProgramData%\Neoxify`) the
+/// guest writes the switches into, one per line.
+pub const TEST_SWITCH_FILE: &str = "reconnect-hold-test.txt";
+
+/// What the VM's capture needs forced that the guest alone cannot make
+/// (docs/reconnect-hold-proof.md, gate 1b): filters that will not stand,
+/// and a WireGuard server no plan can name while wireguard.exe still dials
+/// it. Read from `TEST_SWITCH_FILE` each time they are asked, so the guest
+/// turns one on and off between drops; all off in a build without them.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TestSwitches {
+    /// `refuse-standing`: every install of filters to stand under a tunnel
+    /// is refused, as WFP refusing them would be. The session is armed
+    /// without them, and its drop held late.
+    pub refuse_standing: bool,
+    /// `unname-wireguard-server`: the WireGuard server is never named for
+    /// the hold, as a name with no IPv4 answer would not be, while
+    /// wireguard.exe resolves and dials it as ever. Armed without standing,
+    /// and a reconnect onto it lets go of the hold before it dials.
+    pub unname_wireguard_server: bool,
+}
+
+impl TestSwitches {
+    /// The switches written in `text`: a line each, `#` for a comment.
+    pub fn parse(text: &str) -> Self {
+        let mut switches = Self::default();
+        for line in text.lines().map(|line| line.split('#').next().unwrap_or("").trim()) {
+            match line {
+                "refuse-standing" => switches.refuse_standing = true,
+                "unname-wireguard-server" => switches.unname_wireguard_server = true,
+                _ => {}
+            }
+        }
+        switches
+    }
+
+    /// As the guest has set them, in a build that has them; none in any
+    /// other, whatever the file says.
+    pub fn read(data_dir: &Path) -> Self {
+        Self::read_if(TEST_SWITCHES_BUILT_IN, data_dir)
+    }
+
+    fn read_if(built_in: bool, data_dir: &Path) -> Self {
+        if !built_in {
+            return Self::default();
+        }
+        std::fs::read_to_string(data_dir.join(TEST_SWITCH_FILE)).map(|text| Self::parse(&text)).unwrap_or_default()
+    }
 }
 
 /// The engines this service runs, by file name in its own directory.
@@ -535,9 +603,12 @@ pub fn programs_in(exe_dir: &Path, service: Option<PathBuf>, exists: impl Fn(&Pa
     found
 }
 
-/// The machine. `exe_dir` is where the engines are, beside the service.
+/// The machine. `exe_dir` is where the engines are, beside the service;
+/// `data_dir`, the service's own (`%ProgramData%\Neoxify`), where a test
+/// build reads its switches (`TestSwitches`).
 pub struct System {
     pub exe_dir: PathBuf,
+    pub data_dir: PathBuf,
 }
 
 impl HoldOps for System {
@@ -586,6 +657,12 @@ impl HoldOps for System {
 
     fn dns_servers(&self) -> Option<Vec<IpAddr>> {
         crate::adapters::dns_servers(&super::OUR_ADAPTER_NAMES).ok()
+    }
+
+    fn refuse_standing(&self) -> Option<String> {
+        TestSwitches::read(&self.data_dir)
+            .refuse_standing
+            .then(|| "refused by the VM's test switch (refuse-standing), as WFP refusing them would be".to_string())
     }
 }
 
@@ -819,6 +896,22 @@ impl Hold {
         };
         // Checked against the plan as widened: the one that would stand.
         let refused = if stands { dials.refusal(&plan) } else { None };
+        // Filters standing for this session already are never taken out by
+        // its arming again -- the setting said again as a reconnect begins,
+        // often as the tunnel is ending: a server not named this time (a
+        // lookup on a network going down), a new plan WFP will not take,
+        // leave them standing as they are, the plan that went in having
+        // permitted its server. Taken out there, they left a slow WireGuard
+        // stop fail-open for 6 to 9 s on the VM (2026-10-20).
+        let standing_now = state.engine != 0 && state.standing == Some(generation);
+        if stands && standing_now {
+            if let Some(why) = &refused {
+                state.armed = Some((generation, plan, true));
+                drop(state);
+                self.note(&format!("standing as before: armed again, the server could not be checked against its plan this time, so the filters standing for it stay ({why})"));
+                return true;
+            }
+        }
         let stands = stands && refused.is_none();
         state.armed = Some((generation, plan.clone(), stands));
         state.standing_refused = refused.clone().map(|why| (generation, why));
@@ -874,10 +967,18 @@ impl Hold {
             }
             return true;
         }
-        if state.engine != 0 && state.standing == Some(generation) && state.held.as_ref() == Some(&plan) {
+        if standing_now && state.held.as_ref() == Some(&plan) {
             return true;
         }
-        match self.ops.install(&plan) {
+        let installed = match self.ops.refuse_standing() {
+            Some(why) => Err(why),
+            None => self.ops.install(&plan),
+        };
+        match installed {
+            Err(e) if standing_now => {
+                drop(state);
+                self.note(&format!("standing as before: armed again, a new plan would not go in, so the filters standing for it stay: {e}"));
+            }
             Ok(installed) => {
                 let old = std::mem::replace(&mut state.engine, installed.engine);
                 state.filters = installed.filters;
@@ -921,7 +1022,6 @@ impl Hold {
     }
 
     /// Whether a drop of `generation` would be held.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn armed_for(&self, generation: u64) -> bool {
         let state = self.lock();
         state.wanted && state.armed.as_ref().is_some_and(|(armed, _, _)| *armed == generation)
@@ -1761,9 +1861,14 @@ mod tests {
         /// they are now.
         lan: Mutex<(Vec<Prefix>, Vec<Ipv4Addr>)>,
         dns: Mutex<Option<Vec<IpAddr>>>,
+        /// The VM's test switch `refuse-standing`, as the test sets it.
+        refuse_standing: Mutex<Option<String>>,
     }
 
     impl HoldOps for Fake {
+        fn refuse_standing(&self) -> Option<String> {
+            self.refuse_standing.lock().unwrap().clone()
+        }
         fn install(&self, plan: &Plan) -> Result<Installed, String> {
             if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("could not add the filter (0x80320009)".into());
@@ -2376,6 +2481,74 @@ mod tests {
         assert!(hold.arm(8, next.clone(), false));
         assert_eq!(hold.held_plan(), Some(next));
         assert!(!hold.held_for(8), "the tunnel that came up is not the drop held for");
+    }
+
+    /// Filters standing for a session are never taken out by its arming
+    /// again -- the setting said again as a reconnect begins, often as the
+    /// tunnel ends. Its server not named this time (a lookup on a network
+    /// going down), or a new plan WFP will not take, leaves them in force
+    /// as they were; its drop is then held with nothing to install. On the
+    /// VM, taken out there, a slow WireGuard stop ran fail-open for 6 to 9 s.
+    #[test]
+    fn arming_a_standing_session_again_never_takes_its_filters_out() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        assert!(hold.arm_for(7, plan(), true, Some(IpAddr::V4(node()))));
+        assert!(hold.standing_for(7));
+
+        assert!(hold.arm_for(7, plan(), true, None), "the server not named this time");
+        assert!(hold.standing_for(7), "the filters standing for the session were taken out");
+        let roamed = Plan { lan: vec![Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24)], ..plan() };
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(hold.arm_for(7, roamed.clone(), true, Some(IpAddr::V4(node()))), "a new plan WFP refused");
+        assert!(hold.standing_for(7), "the filters standing for the session were taken out");
+        *fake.refuse_standing.lock().unwrap() = Some("the VM's switch".into());
+        assert!(hold.arm_for(7, roamed, true, Some(IpAddr::V4(node()))));
+        assert!(hold.standing_for(7), "the test switch took out filters already standing");
+        assert!(fake.closed.lock().unwrap().is_empty(), "closed: {:?}", fake.closed.lock().unwrap());
+        assert_eq!(fake.installs.lock().unwrap().len(), 1);
+        assert_eq!(hold.report(Some(7)), Some(Report::Armed), "armed again, said as anything but armed");
+
+        assert!(hold.engage(7, "wireguard.exe stopped"));
+        assert_eq!(fake.installs.lock().unwrap().len(), 1, "a hold installed after the drop: a gap");
+        assert!(matches!(hold.report(None), Some(Report::Holding { standing_refused: false, .. })));
+    }
+
+    /// The VM's switch `refuse-standing` (a test build only) refuses
+    /// filters to stand before WFP is asked, as WFP refusing them would:
+    /// armed without them, the drop held late, and said so.
+    #[test]
+    fn standing_refused_by_the_test_switch_is_held_late() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        *fake.refuse_standing.lock().unwrap() = Some("refused by the VM's test switch".into());
+        assert!(hold.arm(7, plan(), true));
+        assert!(!hold.standing_for(7));
+        assert!(hold.armed_for(7));
+        assert!(fake.installs.lock().unwrap().is_empty(), "WFP asked though the switch refused");
+        assert!(hold.engage(7, "wireguard.exe died"));
+        assert!(matches!(hold.report(None), Some(Report::Holding { standing_refused: true, .. })));
+    }
+
+    /// The switches are read from the file only in a build that has them;
+    /// a build that sets nothing -- as every release is built -- has none,
+    /// whatever the file says.
+    #[test]
+    fn the_test_switches_are_read_only_in_a_build_that_has_them() {
+        assert!(!TEST_SWITCHES_BUILT_IN, "a build that set nothing carries the VM's test switches");
+        let text = "# gate 1b\nrefuse-standing\n  unname-wireguard-server  # the second\nsomething else\n";
+        assert_eq!(TestSwitches::parse(text), TestSwitches { refuse_standing: true, unname_wireguard_server: true });
+        assert_eq!(TestSwitches::parse("unname-wireguard-server"), TestSwitches { refuse_standing: false, unname_wireguard_server: true });
+        assert_eq!(TestSwitches::parse("# refuse-standing"), TestSwitches::default());
+
+        let dir = std::env::temp_dir().join(format!("neoxify-hold-switches-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        std::fs::write(dir.join(TEST_SWITCH_FILE), "refuse-standing\n").expect("the file");
+        assert_eq!(TestSwitches::read(&dir), TestSwitches::default(), "read in a build without them");
+        assert!(TestSwitches::read_if(true, &dir).refuse_standing);
+        std::fs::remove_file(dir.join(TEST_SWITCH_FILE)).expect("removed");
+        assert_eq!(TestSwitches::read_if(true, &dir), TestSwitches::default(), "no file is no switch");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The hold's filters against the real filtering engine, inside a
