@@ -978,6 +978,27 @@ mod tests {
         assert_eq!(read(&ledger), (None, None));
     }
 
+    /// The customer's Disconnect lets go of the reconnect hold, and of
+    /// filters standing under a WireGuard tunnel, on the owning thread
+    /// before the hard stop, never behind it: behind it, a connect the
+    /// Disconnect cancelled that had armed a standing session left the whole
+    /// machine refused but Neoxify and the LAN for the length of the stop --
+    /// past the answer, when the stop was queued beyond DISCONNECT_LOCK_WAIT.
+    /// A reconnect's teardown holds first. Read from the source: the order
+    /// is the point, and a hard stop cannot run here.
+    #[test]
+    fn a_customers_disconnect_lets_go_of_the_hold_before_the_hard_stop() {
+        let source = include_str!("pipe.rs");
+        let start = source.rfind("            let hard = engines.run(move |engines: &mut Engines, token| {").expect("the hard stop's job");
+        let job = &source[start..start + source[start..].find("            });").expect("its end")];
+        let held = job.find("engines.hold_for_reconnect();").expect("a reconnect's teardown holds");
+        let released = job.find("engines.release_reconnect_hold(\"the customer disconnected\", true);").expect("the customer's lets go");
+        let stop = job.find("crate::lifecycle::teardown::hard_stop(&mut *engines)").expect("the hard stop");
+        assert!(held < stop, "a reconnect's hold went in after the hard stop");
+        assert!(released < stop, "the customer's Disconnect left the hold, or standing filters, in force through the hard stop");
+        assert_eq!(job.matches("release_reconnect_hold").count(), 1, "let go of behind the hard stop as well");
+    }
+
     /// The fallback answers from the ledger only when the kernel has
     /// said the engine ended and nothing has started since -- never on a
     /// live session, never on a fresh service.
@@ -1375,8 +1396,8 @@ async fn dispatch(
         // The customer's Disconnect, and the app's for a reconnect: the
         // same teardown, but for the reconnect hold. The customer's lets go
         // of it -- at once, here, without waiting for the owning thread,
-        // and again behind the hard stop in case a connect it cancelled
-        // held meanwhile. A reconnect's holds the gap from before the
+        // and again on that thread ahead of the hard stop, in case a connect
+        // it cancelled armed one meanwhile. A reconnect's holds the gap from before the
         // engine stops, when the session is armed, and keeps a hold in
         // place through the thorough pass.
         request @ (Request::Disconnect | Request::DisconnectForReconnect) => {
@@ -1411,12 +1432,19 @@ async fn dispatch(
                 crate::engines::adopt_token(token);
                 if for_reconnect {
                     engines.hold_for_reconnect();
-                }
-                let report = crate::lifecycle::teardown::hard_stop(&mut *engines);
-                if !for_reconnect {
+                } else {
+                    // The customer's: nothing is to be held after it, so the
+                    // hold goes before the hard stop, not behind it -- and
+                    // with it filters standing under a WireGuard tunnel,
+                    // which refuse everything but Neoxify and the LAN. Behind
+                    // it, a connect this cancelled that had armed one kept
+                    // the machine held through the whole hard stop, past the
+                    // answer if that was queued beyond DISCONNECT_LOCK_WAIT.
+                    // wireguard.exe's own kill switch covers its tunnel until
+                    // the stop takes it down.
                     engines.release_reconnect_hold("the customer disconnected", true);
                 }
-                report
+                crate::lifecycle::teardown::hard_stop(&mut *engines)
             });
             // The thorough pass, keeping the hold for a reconnect's.
             let thorough = move |engines: &mut Engines| {
