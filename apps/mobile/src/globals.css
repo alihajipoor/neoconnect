@@ -18,6 +18,9 @@
    with the desktop. */
 @import "../../desktop-windows/src/pearl.css";
 @import "../../desktop-windows/src/pages.css";
+/* How every part moves (the desktop's, shared): after the components and
+   pages it refines. */
+@import "../../desktop-windows/src/motion.css";
 /* The phone's own: the first-run disclosure and the per-app card. */
 @import "./phone.css";
 

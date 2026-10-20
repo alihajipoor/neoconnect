@@ -221,7 +221,7 @@
     border-radius: 12px;
     text-align: start;
     color: var(--ink);
-    transition: background-color 160ms;
+    transition: background-color var(--dur-quick) var(--spring-quick);
   }
   .nx-perapp-row:hover {
     background: var(--select-row);

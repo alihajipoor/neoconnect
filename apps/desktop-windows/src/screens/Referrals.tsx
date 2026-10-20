@@ -6,7 +6,7 @@ import type { ReferralOverview } from "../lib/types";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { formatDate, formatNumber } from "../lib/locale-format";
-import { Card, CardHead, Message, PillButton } from "../components/ui";
+import { Card, CardHead, Message, PillButton, Skeleton } from "../components/ui";
 import { Page } from "../components/shell/Page";
 import { StillTrying } from "../components/StillTrying";
 
@@ -61,6 +61,7 @@ export function Referrals({ onBack }: { onBack: () => void }) {
         <div className="flex flex-col items-center gap-3 py-10">
           <span className="nx-spin" aria-hidden />
           <StillTrying waiting />
+          <Skeleton card rows={2} className="w-full max-w-md" />
         </div>
       ) : null}
 
@@ -88,8 +89,10 @@ export function Referrals({ onBack }: { onBack: () => void }) {
             <div className="nx-codebox">
               <code dir="ltr">{data.code ?? "--"}</code>
               <PillButton variant="ghost" size="sm" onClick={() => void copyCode()}>
-                {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
-                {copied ? t("referrals.copied") : t("referrals.copy")}
+                {copied ? <Check className="nx-done-in" aria-hidden /> : <Copy aria-hidden />}
+                <span key={copied ? "done" : "copy"} className="nx-swap">
+                  {copied ? t("referrals.copied") : t("referrals.copy")}
+                </span>
               </PillButton>
             </div>
           </Card>
@@ -191,7 +194,7 @@ function ProgressCard({ data }: { data: ReferralOverview }) {
         aria-valuemax={total}
         aria-valuenow={done}
       >
-        <i style={{ width: `${percent}%` }} />
+        <i style={{ "--f": percent / 100 } as React.CSSProperties} />
       </div>
       <p className="nx-tiny">
         {t("referrals.progressHint", {

@@ -185,6 +185,43 @@
   --dur-press: 300ms;
   --spring-morph: cubic-bezier(0.22, 1, 0.36, 1);
   --dur-morph: 350ms;
+  /* The rest of the motion vocabulary (motion.css). Every transition and
+     every finite animation in the app takes its duration and its curve
+     from here, so reduced motion is decided in one place:
+     - quick: hover, focus and the colour of a small control;
+     - exit: anything leaving -- a dialog, a menu, a screen, a row -- which
+       goes faster than it came, accelerating away;
+     - tint: a state colour cross-fading (the chip, the button's fill);
+     - glow: the scene's ambience and the mark's inner light;
+     - stagger: the step between the items of a view's first entrance. */
+  --dur-quick: 160ms;
+  --spring-quick: ease-out;
+  --dur-exit: 180ms;
+  --spring-exit: cubic-bezier(0.4, 0, 1, 1);
+  --dur-tint: 600ms;
+  --dur-glow: 900ms;
+  --stagger: 35ms;
+  /* Between the bars of a chart drawing in. */
+  --stagger-fine: 14ms;
+  /* The loops: each runs only while something is under way -- a spinner, a
+     progress line, a skeleton, the mark's sweep -- never at rest. The
+     location lights are the one exception (design-system.md 5.4). */
+  --loop-spin: 900ms;
+  --loop-prog: 1.5s;
+  --loop-shimmer: 1.4s;
+  --loop-sweep: 2.6s;
+  /* The first-generation orb's loops (ConnectOrb's "orb" look). */
+  --loop-ping: 2.8s;
+  --loop-slow: 3s;
+  /* The location lights' twinkle (each light has its own period, 2.4 to
+     3.4 s, WorldMap.tsx) and the connected light's breath. */
+  --loop-twinkle: 2.8s;
+  --loop-breathe: 3.4s;
+  /* The mark's float: four of these, about 20 s, after the first verified
+     connect of a session. */
+  --loop-float: 5s;
+  /* The press itself, before the release springs back on `--dur-press`. */
+  --dur-press-in: 90ms;
   /* 0 under reduced motion: every translate multiplies by it. */
   --move: 1;
   /* -1 in RTL: every horizontal travel multiplies by it. */
@@ -414,10 +451,14 @@
   --spring-bouncy: ease-out;
   --spring-smooth: ease-out;
   --spring-press: ease-out;
+  --spring-exit: ease-out;
   --dur-snappy: 150ms;
   --dur-morph: 150ms;
   --dur-smooth: 200ms;
   --dur-bouncy: 150ms;
+  --dur-exit: 150ms;
+  --stagger: 0ms;
+  --stagger-fine: 0ms;
 }
 @media (prefers-reduced-motion: reduce) {
   :root {
@@ -427,10 +468,14 @@
     --spring-bouncy: ease-out;
     --spring-smooth: ease-out;
     --spring-press: ease-out;
+    --spring-exit: ease-out;
     --dur-snappy: 150ms;
     --dur-morph: 150ms;
     --dur-smooth: 200ms;
     --dur-bouncy: 150ms;
+    --dur-exit: 150ms;
+    --stagger: 0ms;
+    --stagger-fine: 0ms;
   }
 }
 :root[data-glass="lite"] {
@@ -632,9 +677,9 @@
   }
   .surface-interactive {
     transition:
-      background-color 150ms ease,
-      border-color 150ms ease,
-      transform 150ms ease;
+      background-color var(--dur-quick) var(--spring-quick),
+      border-color var(--dur-quick) var(--spring-quick),
+      transform var(--dur-press) var(--spring-press);
   }
   .surface-interactive:hover {
     background: var(--card-hover);
@@ -683,7 +728,7 @@
     }
   }
   .animate-ping-ring {
-    animation: ping-ring 2.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+    animation: ping-ring var(--loop-ping) cubic-bezier(0, 0, 0.2, 1) infinite;
   }
 
   @keyframes spin-slow {
@@ -692,7 +737,7 @@
     }
   }
   .animate-spin-slow {
-    animation: spin-slow 3s linear infinite;
+    animation: spin-slow var(--loop-slow) linear infinite;
   }
 
   @keyframes shimmer {
@@ -706,7 +751,7 @@
     inset: 0;
     transform: translateX(-100%);
     background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.09), transparent);
-    animation: shimmer 1.6s ease-in-out infinite;
+    animation: shimmer var(--loop-shimmer) ease-in-out infinite;
   }
 
   @keyframes rise {
@@ -720,7 +765,7 @@
     }
   }
   .animate-rise {
-    animation: rise 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: rise var(--dur-smooth) var(--spring-smooth) both;
   }
 
   @keyframes breathe {
@@ -733,7 +778,7 @@
     }
   }
   .animate-breathe {
-    animation: breathe 3.5s ease-in-out infinite;
+    animation: breathe var(--loop-breathe) ease-in-out infinite;
   }
 
   /* Navigation: a screen arrives from the side it logically comes from,
@@ -801,22 +846,22 @@
     }
   }
   .sheet-enter {
-    animation: sheet-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: sheet-enter var(--dur-snappy) var(--spring-snappy) both;
   }
   .sheet-leave {
-    animation: sheet-leave 180ms cubic-bezier(0.4, 0, 1, 1) both;
+    animation: sheet-leave var(--dur-exit) var(--spring-exit) both;
   }
   .screen-enter {
-    animation: screen-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: screen-enter var(--dur-snappy) var(--spring-snappy) both;
   }
   .screen-enter-back {
-    animation: screen-enter-back 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: screen-enter-back var(--dur-snappy) var(--spring-snappy) both;
   }
   .screen-leave {
-    animation: screen-leave 180ms cubic-bezier(0.4, 0, 1, 1) both;
+    animation: screen-leave var(--dur-exit) var(--spring-exit) both;
   }
   .screen-leave-back {
-    animation: screen-leave-back 180ms cubic-bezier(0.4, 0, 1, 1) both;
+    animation: screen-leave-back var(--dur-exit) var(--spring-exit) both;
   }
 
   /* Respect the OS setting and the app's own: a VPN client is a utility,
@@ -861,11 +906,11 @@
      Press feedback: every control gives way slightly when pressed. */
   .press {
     transition:
-      transform 120ms cubic-bezier(0.22, 1, 0.36, 1),
-      box-shadow 160ms ease,
-      background-color 160ms ease,
-      border-color 160ms ease,
-      opacity 160ms ease;
+      transform var(--dur-press) var(--spring-press),
+      box-shadow var(--dur-quick) var(--spring-quick),
+      background-color var(--dur-quick) var(--spring-quick),
+      border-color var(--dur-quick) var(--spring-quick),
+      opacity var(--dur-quick) var(--spring-quick);
   }
   .press:active:not(:disabled) {
     transform: translateY(1px) scale(0.985);

@@ -34,7 +34,8 @@ import {
 } from "../lib/account-activity";
 import { parseDevicePlatform, specificDeviceLabel } from "../lib/device-identity";
 import { sessionLog, type SessionRecord } from "../lib/session-log";
-import { Card, CardHead, Message, PillButton, Row, SwitchRow } from "../components/ui";
+import { useFirstView } from "../lib/motion";
+import { Card, CardHead, Message, PillButton, Row, Skeleton, SwitchRow } from "../components/ui";
 import { Dialog } from "../components/overlay";
 import { RouteFlag } from "../components/Flag";
 import { Page } from "../components/shell/Page";
@@ -301,7 +302,7 @@ export function ActivityView({
               </p>
               {cap !== null ? (
                 <div className="nx-bar" aria-hidden>
-                  <i style={{ width: `${Math.min(100, Math.round((used / cap) * 100))}%` }} />
+                  <i style={{ "--f": Math.min(1, used / cap) } as React.CSSProperties} />
                 </div>
               ) : null}
               <dl className="nx-kv">
@@ -329,7 +330,7 @@ export function ActivityView({
             <Unread text={t(devices.noAnswer ? "act.devicesNoAnswer" : "act.devicesFailed")} onRetry={onRetryDevices} />
           ) : (
             <>
-              <ul className="nx-alist m-0 list-none p-0">
+              <ul className="nx-alist nx-loaded m-0 list-none p-0">
                 {devices.data.devices.map((device) => (
                   <DeviceRow
                     key={device.id}
@@ -353,7 +354,9 @@ export function ActivityView({
           ) : usage.state === "failed" ? (
             <Unread text={t(usage.noAnswer ? "act.usageNoAnswer" : "act.usageFailed")} onRetry={onRetryUsage} />
           ) : (
-            <UsageBody usage={usage.data} now={now} />
+            <div className="nx-loaded flex flex-col gap-1">
+              <UsageBody usage={usage.data} now={now} />
+            </div>
           )}
         </Card>
 
@@ -430,10 +433,13 @@ function DeviceSignOutDialog({
 function Waiting() {
   const { t } = useI18n();
   return (
-    <p className="nx-wait mt-3" role="status">
-      <span className="nx-spin" aria-hidden />
-      {t("common.loading")}
-    </p>
+    <>
+      <p className="nx-wait mt-3" role="status">
+        <span className="nx-spin" aria-hidden />
+        {t("common.loading")}
+      </p>
+      <Skeleton rows={2} className="mt-2" />
+    </>
   );
 }
 
@@ -524,6 +530,9 @@ function UsageBody({ usage, now }: { usage: DailyUsage; now: number }) {
   const first = chart.bars[0];
   const last = chart.bars[chart.bars.length - 1];
   const utc = usage.timeZone === "UTC" && deviceTimeZone() !== "UTC";
+  // The bars grow from the axis, in order, the first time the chart is
+  // drawn in a session -- when its numbers first arrive (motion.css).
+  const grow = useFirstView("chart:usage");
   return (
     <>
       <p className="nx-bigstat">
@@ -532,8 +541,8 @@ function UsageBody({ usage, now }: { usage: DailyUsage; now: number }) {
           {total.unit} · {t("act.usagePeriod", { n: formatNumber(chart.bars.length, language) })}
         </small>
       </p>
-      <ol className="nx-ubars m-0 list-none p-0" aria-label={t("act.usage")}>
-        {chart.bars.map((bar) => {
+      <ol className="nx-ubars m-0 list-none p-0" aria-label={t("act.usage")} data-enter={grow ? "" : undefined}>
+        {chart.bars.map((bar, k) => {
           const words = t("act.usageDay", {
             date: formatDay(bar.date, language),
             down: formatSize(bar.down, language),
@@ -541,7 +550,12 @@ function UsageBody({ usage, now }: { usage: DailyUsage; now: number }) {
           });
           return (
             <li key={bar.date} title={words}>
-              <span className="bar" data-zero={bar.total === 0 ? "1" : undefined} style={{ blockSize: `${(bar.total / chart.max) * 100}%` }} aria-hidden />
+              <span
+                className="bar"
+                data-zero={bar.total === 0 ? "1" : undefined}
+                style={{ blockSize: `${(bar.total / chart.max) * 100}%`, "--k": k } as React.CSSProperties}
+                aria-hidden
+              />
               <span className="nx-sr">{words}</span>
             </li>
           );

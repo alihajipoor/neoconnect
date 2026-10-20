@@ -59,7 +59,9 @@ function PlanBody({ plan }: { plan: TrayPlan }) {
       <span className="nx-tval">{plan.value}</span>
       {plan.meter ? (
         <div className={cn("nx-meter", plan.meter.caution && "caution")} aria-hidden>
-          <i style={{ width: `${Math.max(1.5, Math.min(100, plan.meter.fraction * 100))}%` }} />
+          {/* A fraction, drawn by scale (motion.css): grows in, slides when
+              it changes, never re-lays out. */}
+          <i style={{ "--f": Math.max(0.015, Math.min(1, plan.meter.fraction)) } as React.CSSProperties} />
         </div>
       ) : null}
       {plan.days || plan.renew ? (

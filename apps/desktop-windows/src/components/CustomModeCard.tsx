@@ -42,7 +42,7 @@ import {
   unresolvedNames,
   type GameExitGroup,
 } from "../lib/game-apps";
-import { Button, Card } from "../components/ui";
+import { Button, Card, Switch } from "../components/ui";
 
 /** See the re-scan effect in `CustomModeCard` for why this is 15 s and
  * why the timer only exists while a game is incomplete. */
@@ -553,30 +553,15 @@ export function CustomModeCard() {
           </div>
           <p className="text-xs text-muted-foreground">{t("settings.customHint")}</p>
         </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={settings.enabled}
-          aria-label={t("settings.custom")}
-          onClick={() => void apply({ ...settings, enabled: !settings.enabled })}
-          className={[
-            "press relative h-6 w-11 shrink-0 rounded-full border transition-colors",
-            settings.enabled
-              ? "border-transparent bg-[linear-gradient(120deg,var(--primary),var(--brand-2))]"
-              : "border-[var(--hairline-2)] bg-[var(--muted-tint)]",
-          ].join(" ")}
-        >
-          {/* Positioned from the inline start, not from the left. Under
-              Persian the whole card mirrors, and a knob pinned to a
-              physical edge slid the wrong way: "on" sat where the eye
-              reads "off". */}
-          <span
-            className={[
-              "absolute top-0.5 size-4 rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.5)] transition-[inset-inline-start] duration-200",
-              settings.enabled ? "start-[1.375rem]" : "start-0.5",
-            ].join(" ")}
-          />
-        </button>
+        {/* The app's one switch (ui.tsx): its thumb travels toward the
+            inline end in either language -- under Persian the card mirrors,
+            and a knob pinned to a physical edge once slid the wrong way --
+            by transform on the snappy spring, never by moving its edge. */}
+        <Switch
+          checked={settings.enabled}
+          label={t("settings.custom")}
+          onChange={(enabled) => void apply({ ...settings, enabled })}
+        />
       </div>
 
       {settings.enabled ? (

@@ -111,7 +111,7 @@
   .nx-amb {
     z-index: 0;
     opacity: 0;
-    transition: opacity 900ms var(--spring-smooth);
+    transition: opacity var(--dur-glow) var(--spring-smooth);
   }
   .nx-amb.ok {
     background: radial-gradient(42% 40% at 58% 44%, var(--amb-ok), transparent 72%);
@@ -160,7 +160,7 @@
     top: 0;
     color: var(--map-dot);
     opacity: 0;
-    transition: opacity 700ms var(--spring-smooth);
+    transition: opacity var(--dur-tint) var(--spring-smooth);
   }
   .nx-mapdots.on {
     opacity: 1;
@@ -199,7 +199,7 @@
     height: 100%;
     pointer-events: none;
     overflow: visible;
-    transition: opacity 600ms var(--spring-smooth);
+    transition: opacity var(--dur-tint) var(--spring-smooth);
   }
   /* The band has given way: the lights fade out where they stand, and back
      in, rather than leaving and arriving. */
@@ -218,8 +218,8 @@
     stroke-dasharray: 2 4;
     opacity: 0.85;
     transition:
-      stroke 600ms var(--spring-smooth),
-      opacity 600ms var(--spring-smooth);
+      stroke var(--dur-tint) var(--spring-smooth),
+      opacity var(--dur-tint) var(--spring-smooth);
   }
   .nx-arc.on {
     stroke: var(--t-dot);
@@ -255,9 +255,9 @@
     background: var(--lamp-idle);
     transform: scale(0.5);
     transition:
-      transform 600ms var(--spring-smooth),
-      background-color 600ms var(--spring-smooth),
-      box-shadow 600ms var(--spring-smooth);
+      transform var(--dur-tint) var(--spring-smooth),
+      background-color var(--dur-tint) var(--spring-smooth),
+      box-shadow var(--dur-tint) var(--spring-smooth);
   }
   .nx-lamp::after {
     width: 34px;
@@ -266,8 +266,8 @@
     opacity: 0;
     transform: scale(0.765);
     transition:
-      opacity 600ms var(--spring-smooth),
-      transform 600ms var(--spring-smooth);
+      opacity var(--dur-tint) var(--spring-smooth),
+      transform var(--dur-tint) var(--spring-smooth);
   }
   /* Live: it carried traffic on this network lately (6px, a 26px glow). */
   .nx-lamp[data-look="live"]::before {
@@ -306,13 +306,13 @@
   /* Motion: a slow, staggered twinkle; the connected light breathes. At
      most ten move (map-lights.ts). */
   .nx-lamp[data-anim="1"][data-look="live"]:not([data-exit])::after {
-    animation: nx-twinkle var(--tw, 2.8s) ease-in-out var(--twd, 0s) infinite;
+    animation: nx-twinkle var(--tw, var(--loop-twinkle)) ease-in-out var(--twd, 0s) infinite;
   }
   .nx-lamp[data-anim="1"][data-look="live"]:not([data-exit])::before {
-    animation: nx-twcore var(--tw, 2.8s) ease-in-out var(--twd, 0s) infinite;
+    animation: nx-twcore var(--tw, var(--loop-twinkle)) ease-in-out var(--twd, 0s) infinite;
   }
   .nx-lamp[data-anim="1"][data-exit="1"]::after {
-    animation: nx-breathe 3.4s ease-in-out infinite;
+    animation: nx-breathe var(--loop-breathe) ease-in-out infinite;
   }
   /* The glow's 26px look on the 34px disc: .55 to 1.12 of 26px. */
   @keyframes nx-twinkle {
@@ -439,7 +439,7 @@
   }
   /* The calm tone: frost, glow, the light inside and the colour it throws. */
   .nx-mark :is(.frost-ring, .frost-dot, .glow, .core-ring, .core-dot, .cast) {
-    transition: opacity 900ms var(--spring-smooth);
+    transition: opacity var(--dur-glow) var(--spring-smooth);
   }
   .nx-mark :is(.frost-ring, .frost-dot) {
     opacity: 0.3;
@@ -475,11 +475,11 @@
      ground. Wide only (the scene's host), and never under Lite, Off,
      reduced motion or a hidden window. */
   .nx-mark[data-float="1"] .body {
-    animation: nx-float 5s ease-in-out 4;
+    animation: nx-float var(--loop-float) ease-in-out 4;
   }
   .nx-mark[data-float="1"] .ground {
     transform-origin: 50% 93%;
-    animation: nx-ground 5s ease-in-out 4;
+    animation: nx-ground var(--loop-float) ease-in-out 4;
   }
   @keyframes nx-float {
     0%,
@@ -513,7 +513,7 @@
   }
   .nx-app[data-busy="1"] .nx-mark .sweep {
     opacity: 1;
-    animation: nx-msweep 2.6s ease-in-out infinite;
+    animation: nx-msweep var(--loop-sweep) ease-in-out infinite;
   }
   @keyframes nx-msweep {
     from {
@@ -743,7 +743,7 @@
     font-weight: 500;
     font-size: 14px;
     text-align: start;
-    transition: color 200ms;
+    transition: color var(--dur-quick) var(--spring-quick);
   }
   .nx-nav button:hover {
     color: var(--ink);
@@ -763,7 +763,7 @@
     transform: translateY(calc(var(--ni, 0) * 48px));
     transition:
       transform var(--dur-snappy) var(--spring-snappy),
-      opacity 200ms;
+      opacity var(--dur-quick) var(--spring-quick);
   }
   :root[data-motion="reduce"] .nx-nav-pill {
     transition: none;
@@ -910,8 +910,8 @@
     color: var(--ink-2);
     min-height: 44px;
     transition:
-      background-color 200ms,
-      color 200ms;
+      background-color var(--dur-quick) var(--spring-quick),
+      color var(--dur-quick) var(--spring-quick);
   }
   .nx-mnav button[aria-current="page"] {
     color: var(--cobalt-ink);
@@ -1006,8 +1006,8 @@
     text-transform: uppercase;
     white-space: nowrap;
     transition:
-      background-color 600ms var(--spring-smooth),
-      color 600ms var(--spring-smooth);
+      background-color var(--dur-tint) var(--spring-smooth),
+      color var(--dur-tint) var(--spring-smooth);
   }
   html[lang="fa"] .nx-chip {
     letter-spacing: 0;
@@ -1021,8 +1021,8 @@
     border-radius: 50%;
     background: var(--t-dot);
     transition:
-      background-color 600ms var(--spring-smooth),
-      box-shadow 600ms;
+      background-color var(--dur-tint) var(--spring-smooth),
+      box-shadow var(--dur-tint) var(--spring-smooth);
   }
   .nx-dot.check {
     width: 15px;
@@ -1058,7 +1058,7 @@
     background: transparent;
     border: 2px solid var(--hairline-2);
     border-top-color: var(--t-dot);
-    animation: nx-spin 0.9s linear infinite;
+    animation: nx-spin var(--loop-spin) linear infinite;
   }
   :root[data-motion="reduce"] .nx-dot.spin {
     animation: none;
@@ -1134,7 +1134,7 @@
     max-width: 46ch;
     text-wrap: pretty;
     min-height: 3em;
-    transition: color 600ms var(--spring-smooth);
+    transition: color var(--dur-tint) var(--spring-smooth);
   }
   html[lang="fa"] .nx-hint {
     line-height: 1.8;
@@ -1204,13 +1204,12 @@
     white-space: nowrap;
     transition:
       transform var(--dur-press) var(--spring-press),
-      background-color 200ms,
-      box-shadow 200ms,
-      width var(--dur-morph) var(--spring-morph);
+      background-color var(--dur-quick) var(--spring-quick),
+      box-shadow var(--dur-quick) var(--spring-quick);
   }
   .nx-btn:active:not([aria-disabled="true"], [data-busy]) {
     transform: scale(0.965);
-    transition-duration: 90ms;
+    transition-duration: var(--dur-press-in);
   }
   :root[data-motion="reduce"] .nx-btn:active {
     transform: none;
@@ -1231,7 +1230,7 @@
     pointer-events: none;
     opacity: 0;
     background: radial-gradient(130px circle at var(--px, 50%) var(--py, 50%), rgba(255, 255, 255, 0.3), transparent 70%);
-    transition: opacity 300ms var(--spring-smooth);
+    transition: opacity var(--dur-press) var(--spring-smooth);
   }
   @media (hover: hover) {
     .nx-btn:hover .lt {
@@ -1240,7 +1239,7 @@
   }
   .nx-btn:active .lt {
     opacity: 1;
-    transition-duration: 80ms;
+    transition-duration: var(--dur-press-in);
   }
   :root[data-motion="reduce"] .nx-btn .lt {
     transition: none;
@@ -1292,7 +1291,7 @@
     width: 36%;
     border-radius: 2px;
     background: var(--cobalt);
-    animation: nx-prog 1.5s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+    animation: nx-prog var(--loop-prog) cubic-bezier(0.45, 0, 0.55, 1) infinite;
   }
   .nx-btn.primary.busy .prog {
     background: rgba(255, 255, 255, 0.26);
@@ -1443,17 +1442,9 @@
     box-shadow: inset 0 0 0 1px var(--hairline-2);
     font-size: 11.5px;
   }
-  .nx-dpanel {
-    display: grid;
-    grid-template-rows: 0fr;
-    transition: grid-template-rows var(--dur-snappy) var(--spring-snappy);
-  }
-  .nx-dpanel.open {
-    grid-template-rows: 1fr;
-  }
+  /* Opened in layout at once and drawn sliding out from under its toggle
+     (lib/motion.ts revealBelow; motion.css). */
   .nx-dpanel > div {
-    min-height: 0;
-    overflow: hidden;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -1654,7 +1645,7 @@
     flex: none;
     border-radius: 999px;
     background: var(--hairline-2);
-    transition: background-color 260ms var(--spring-smooth);
+    transition: background-color var(--dur-press) var(--spring-smooth);
   }
   .nx-sw::after {
     content: "";
@@ -1673,21 +1664,23 @@
     box-shadow:
       0 2px 6px rgba(0, 0, 0, 0.2),
       0 0 0 0.5px rgba(0, 0, 0, 0.06);
-    transition:
-      transform var(--dur-snappy) var(--spring-snappy),
-      width var(--dur-snappy) var(--spring-snappy);
+    /* The stretch is a scale from the edge it leaves, not a width: the
+       thumb never re-lays out (motion.css). */
+    transform-origin: calc(50% - 50% * var(--dir)) 50%;
+    transition: transform var(--dur-snappy) var(--spring-snappy);
   }
   .nx-sw[aria-checked="true"] {
     background: var(--cobalt);
   }
   .nx-sw[aria-checked="true"]::before {
     transform: translateX(calc(20px * var(--dir)));
+    transform-origin: calc(50% + 50% * var(--dir)) 50%;
   }
   .nx-sw:not([disabled]):active::before {
-    width: 33px;
+    transform: scaleX(1.22);
   }
   .nx-sw[aria-checked="true"]:not([disabled]):active::before {
-    transform: translateX(calc(14px * var(--dir)));
+    transform: translateX(calc(20px * var(--dir))) scaleX(1.22);
   }
   .nx-sw[disabled] {
     opacity: 0.45;
@@ -1897,9 +1890,7 @@
     min-height: 0;
     padding: var(--p-panel);
   }
-  .nx-panel.flash {
-    animation: nx-flash 900ms var(--spring-smooth);
-  }
+
   .nx-locs-head {
     display: flex;
     align-items: center;
@@ -1940,7 +1931,9 @@
     padding: 9px 10px;
     border-radius: var(--r-row);
     text-align: start;
-    transition: background-color 160ms;
+    transition:
+      background-color var(--dur-quick) var(--spring-quick),
+      transform var(--dur-press) var(--spring-press);
   }
   .nx-row:hover:not([disabled]) {
     background: var(--hairline);
@@ -2006,14 +1999,7 @@
     background: var(--select);
     color: var(--cobalt-ink);
   }
-  @keyframes nx-flash {
-    30% {
-      box-shadow:
-        var(--edge),
-        var(--drop),
-        0 0 0 3px var(--select);
-    }
-  }
+
 
   /* ---------- the bottom tray ---------- */
   .nx-tray {
@@ -2163,7 +2149,6 @@
     height: 100%;
     border-radius: inherit;
     background: var(--cobalt);
-    transition: width 700ms var(--spring-smooth);
   }
   .nx-meter.caution i {
     background: var(--warn);
@@ -2232,7 +2217,7 @@
     inset: 0;
     z-index: 40;
     background: var(--scrim);
-    animation: nx-fade 280ms var(--spring-smooth) both;
+    animation: nx-fade var(--dur-press) var(--spring-smooth) both;
   }
   .nx-dlgwrap {
     position: fixed;
@@ -2513,7 +2498,7 @@
 
   /* ---------- motion helpers ---------- */
   .nx-swap {
-    animation: nx-swap 340ms var(--spring-smooth) both;
+    animation: nx-swap var(--dur-morph) var(--spring-smooth) both;
   }
   @keyframes nx-swap {
     from {
@@ -2535,7 +2520,7 @@
   /* First appearance of a view only, never on a re-filter or re-sort. */
   .nx-stagger > * {
     animation: nx-rise var(--dur-smooth) var(--spring-smooth) both;
-    animation-delay: calc(min(var(--i, 0), 7) * 35ms);
+    animation-delay: calc(min(var(--i, 0), 7) * var(--stagger));
   }
   .nx-view-in {
     animation: nx-view-in var(--dur-snappy) var(--spring-snappy) both;
@@ -2567,7 +2552,7 @@
   ::view-transition-group(nxside),
   ::view-transition-group(nxhead),
   ::view-transition-group(nxnav) {
-    animation-duration: 200ms;
+    animation-duration: var(--dur-quick);
   }
   :root[data-vt-dir="back"]::view-transition-new(nxview) {
     animation-name: nx-view-in-back;
@@ -2587,7 +2572,7 @@
     animation-timing-function: var(--spring-morph);
   }
   ::view-transition-old(nxview) {
-    animation: nx-vt-out 180ms ease-out both;
+    animation: nx-vt-out var(--dur-exit) var(--spring-exit) both;
   }
   ::view-transition-new(nxview) {
     animation: nx-view-in var(--dur-snappy) var(--spring-snappy) both;
@@ -3272,8 +3257,8 @@
   place-items: center;
   color: var(--ink-2);
   transition:
-    background-color 120ms,
-    color 120ms;
+    background-color var(--dur-quick) var(--spring-quick),
+    color var(--dur-quick) var(--spring-quick);
 }
 .nx-tbar button:hover {
   background: var(--hairline);
@@ -3326,8 +3311,8 @@
     -webkit-appearance: none;
     appearance: none;
     transition:
-      border-color 160ms ease,
-      box-shadow 160ms ease;
+      border-color var(--dur-quick) var(--spring-quick),
+      box-shadow var(--dur-quick) var(--spring-quick);
   }
   .nx-search input::placeholder {
     color: var(--placeholder);
@@ -3553,7 +3538,7 @@
   }
   .nx-spinning {
     color: var(--ink-2);
-    animation: nx-spin 0.9s linear infinite;
+    animation: nx-spin var(--loop-spin) linear infinite;
   }
   @keyframes nx-spin {
     to {
@@ -3631,20 +3616,10 @@
     white-space: nowrap;
   }
 
-  /* A country's protocols: opened on the snappy spring. */
-  .nx-acc {
-    display: grid;
-    grid-template-rows: 0fr;
-    transition: grid-template-rows var(--dur-snappy) var(--spring-snappy);
-  }
-  .nx-acc.open {
-    grid-template-rows: 1fr;
-  }
-  .nx-acc > div {
-    min-height: 0;
-    overflow: hidden;
-  }
-  :root[data-motion="reduce"] :is(.nx-acc, .nx-row .chev) {
+  /* A country's protocols: opened in layout at once, and drawn sliding out
+     from under the country on the snappy spring while the rows after it
+     move down (lib/motion.ts revealBelow; motion.css). */
+  :root[data-motion="reduce"] .nx-row .chev {
     transition: none;
   }
 

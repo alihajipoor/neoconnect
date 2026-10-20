@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import type { ShownFailure } from "../../lib/failure-text";
 import type { SocialProvider } from "../../lib/social-auth";
 import mapSvg from "../../assets/world-map.svg?raw";
@@ -32,6 +32,15 @@ import { PearlScope } from "../ui";
  * passes `label` instead, so the card's name never points at nothing. */
 export function AuthFrame({ step, label, children }: { step: string; label?: string; children: ReactNode }) {
   const { t } = useI18n();
+  // Which way a step arrives: from the inline end going on (an address to
+  // a code, a code to the recovery code), from the start going back. The
+  // first step of a screen rises in (motion.css).
+  const last = useRef(step);
+  const dir = useRef<"forward" | "back" | undefined>(undefined);
+  if (last.current !== step) {
+    dir.current = stepDirection(last.current, step);
+    last.current = step;
+  }
   return (
     <PearlScope>
       <div className="nx-app nx-auth" data-step={step}>
@@ -63,7 +72,7 @@ export function AuthFrame({ step, label, children }: { step: string; label?: str
             </div>
             <section className="nx-glass strong nx-auth-card" aria-labelledby={label ? undefined : "nx-auth-title"} aria-label={label}>
               {/* Keyed, so each step rises in on its own. */}
-              <div className="nx-auth-step" key={step}>
+              <div className="nx-auth-step" key={step} data-dir={dir.current}>
                 {children}
               </div>
             </section>
@@ -72,6 +81,27 @@ export function AuthFrame({ step, label, children }: { step: string; label?: str
       </div>
     </PearlScope>
   );
+}
+
+/** The order a customer moves through the steps in. */
+const STEP_ORDER = [
+  "login",
+  "register",
+  "register-relay",
+  "register-recovery",
+  "forgot",
+  "forgot-recovery",
+  "forgot-code",
+  "forgot-recovered",
+  "verify",
+];
+
+/** Forward when `to` comes after `from` in the steps' order, back when it
+ * comes before. */
+export function stepDirection(from: string, to: string): "forward" | "back" {
+  const a = STEP_ORDER.indexOf(from);
+  const b = STEP_ORDER.indexOf(to);
+  return a >= 0 && b >= 0 && b < a ? "back" : "forward";
 }
 
 /** English or Persian, before anyone has signed in: the same switch the app

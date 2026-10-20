@@ -1,5 +1,6 @@
 import { useId, useLayoutEffect, useRef, type PointerEvent } from "react";
 import { AlertTriangle, ArrowRight, HelpCircle, Power } from "lucide-react";
+import { curve, motionReduced, play, widthMorph } from "../lib/motion";
 import { orbTone } from "../lib/orb-caution";
 import type { PillVariant } from "../lib/hero-model";
 import { cn } from "../lib/utils";
@@ -286,7 +287,10 @@ const SAME_PRESS_MS = 600;
  * `disabled` -- nor `aria-disabled`, which would tell a screen reader the
  * press that stops a connect is unavailable. Its accessible name says what
  * the press does when the label does not. When its label changes length
- * its width animates from old to new; under reduced motion it does not. */
+ * it grows or shrinks from its old width to its new one -- by scale, held at
+ * its inline start, its label counter-scaled so the words never stretch
+ * (lib/motion.ts widthMorph): the layout changes once, nothing re-lays out
+ * per frame. Under reduced motion it does not. */
 function ConnectPill({
   label,
   pressLabel,
@@ -306,27 +310,24 @@ function ConnectPill({
   const frame = useRef(0);
   const busy = model.variant !== "primary";
 
-  // The width morph: measure the natural width the new label needs, and
-  // animate to it from the old one.
+  // The width morph: the width the new label needs (the layout's, which no
+  // transform changes), drawn growing from the old one.
   useLayoutEffect(() => {
     const button = ref.current;
     if (!button) return;
     const from = width.current;
-    button.style.width = "";
-    const to = button.getBoundingClientRect().width;
+    const to = button.offsetWidth;
     width.current = to;
-    const reduce = document.documentElement.dataset.motion === "reduce";
-    if (from === null || reduce || Math.abs(from - to) < 1) return;
-    button.style.width = `${from}px`;
-    // Read so the browser lays out the old width before the new one.
-    void button.offsetWidth;
-    button.style.width = `${to}px`;
-    const done = () => {
-      button.style.width = "";
-      button.removeEventListener("transitionend", done);
-    };
-    button.addEventListener("transitionend", done);
-    return () => button.removeEventListener("transitionend", done);
+    if (from === null) return;
+    const frames = widthMorph(from, to, motionReduced());
+    if (!frames) return;
+    const timing = curve("morph");
+    play(button, frames.box, timing);
+    for (const child of Array.from(button.children)) {
+      if (child.classList.contains("lt") || child.classList.contains("prog")) continue;
+      // Added to the label's own swap, not instead of it.
+      play(child, frames.content, { ...timing, composite: "add" });
+    }
   }, [label]);
 
   // The press light follows the pointer, once a frame at most.

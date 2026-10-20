@@ -85,9 +85,9 @@
     line-height: 1.2;
     user-select: text;
     transition:
-      border-color 160ms ease,
-      background-color 160ms ease,
-      box-shadow 160ms ease;
+      border-color var(--dur-quick) var(--spring-quick),
+      background-color var(--dur-quick) var(--spring-quick),
+      box-shadow var(--dur-quick) var(--spring-quick);
   }
   .nx-textarea {
     height: auto;
@@ -271,7 +271,7 @@
     border-radius: 50%;
     border: 2px solid var(--hairline-2);
     border-top-color: var(--ink-2);
-    animation: nx-spin 0.8s linear infinite;
+    animation: nx-spin var(--loop-spin) linear infinite;
   }
   :root[data-motion="reduce"] .nx-spin {
     animation: none;
@@ -470,7 +470,7 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
-    animation: nx-rise 520ms var(--spring-smooth) both;
+    animation: nx-rise var(--dur-smooth) var(--spring-smooth) both;
   }
   :root[data-motion="reduce"] .nx-auth-step {
     animation: none;
@@ -798,7 +798,7 @@
     padding-inline: 8px;
     width: calc(100% + 16px);
     border-radius: 12px;
-    transition: background-color 160ms;
+    transition: background-color var(--dur-quick) var(--spring-quick);
   }
   button.nx-li:hover:not(:disabled) {
     background: var(--select-row);
@@ -992,7 +992,6 @@
     height: 100%;
     border-radius: inherit;
     background: var(--cobalt);
-    transition: width var(--dur-smooth) var(--spring-smooth);
   }
   .nx-bar.caution > i {
     background: var(--warn);

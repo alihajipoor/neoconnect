@@ -9,12 +9,16 @@
 // mode, Gaming mode, the recovery code, Repair) match them without being
 // rewritten. Outside one they draw as they were first written.
 import {
+  cloneElement,
   createContext,
+  isValidElement,
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
+  type ReactElement,
   type Ref,
   type ButtonHTMLAttributes,
   type HTMLAttributes,
@@ -26,6 +30,7 @@ import { flushSync } from "react-dom";
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Eye, EyeOff, Info } from "lucide-react";
 import { useI18n } from "../lib/i18n";
 import { formatNumber } from "../lib/locale-format";
+import { EXIT_MS, revealBelow, usePresence } from "../lib/motion";
 import { cn } from "../lib/utils";
 
 const PearlContext = createContext(false);
@@ -401,13 +406,15 @@ export function Note({
   tone = "plain",
   icon,
   children,
+  className,
 }: {
   tone?: "plain" | "info" | "caution" | "danger";
   icon?: ReactNode;
   children: ReactNode;
+  className?: string;
 }) {
   return (
-    <p className={cn("nx-note m-0", tone !== "plain" && tone)}>
+    <p className={cn("nx-note m-0", tone !== "plain" && tone, className)}>
       {icon}
       <span>{children}</span>
     </p>
@@ -419,19 +426,48 @@ export function Tag({ children }: { children: ReactNode }) {
   return <span className="nx-tagn">{children}</span>;
 }
 
-/** Collapsed detail behind a counted toggle, opening on the snappy spring. */
+/** Collapsed detail behind a counted toggle, opening on the snappy spring:
+ * in layout at once, drawn sliding out from under the toggle with what
+ * follows it moving down (lib/motion.ts revealBelow), and back. */
 export function Disclosure({ label, count, children }: { label: string; count?: number; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const { language } = useI18n();
+  const panel = useRef<HTMLDivElement>(null);
+  const opening = useRef(false);
+  const closing = useRef(false);
+  useLayoutEffect(() => {
+    if (!opening.current || !panel.current) return;
+    opening.current = false;
+    revealBelow(panel.current, true);
+  });
+  const toggle = () => {
+    if (closing.current) return;
+    if (!open) {
+      opening.current = true;
+      setOpen(true);
+      return;
+    }
+    if (!panel.current) {
+      setOpen(false);
+      return;
+    }
+    closing.current = true;
+    revealBelow(panel.current, false, {
+      done: () => {
+        closing.current = false;
+        flushSync(() => setOpen(false));
+      },
+    });
+  };
   return (
     <>
-      <button type="button" className="nx-dtoggle" aria-expanded={open} aria-controls={id} onClick={() => setOpen((o) => !o)}>
+      <button type="button" className="nx-dtoggle" aria-expanded={open} aria-controls={id} onClick={toggle}>
         {label}
         {count !== undefined ? <span className="cnt nx-num">{formatNumber(count, language)}</span> : null}
         <ChevronDown aria-hidden />
       </button>
-      <div id={id} className={cn("nx-dpanel", open && "open")}>
+      <div ref={panel} id={id} className={cn("nx-dpanel", open && "open")}>
         <div aria-hidden={!open} inert={!open ? true : undefined}>
           {children}
         </div>
@@ -700,6 +736,35 @@ export function SwitchRow({
         />
       }
     />
+  );
+}
+
+/** Something that comes and goes -- a banner, an error, a notice -- leaving
+ * the way it came: kept for its exit with `nx-leaving` (a short fade,
+ * motion.css), then taken away. It arrives by its own entrance (a banner
+ * or a message rises in). One element child, which takes a className. */
+export function Presence({ show, children }: { show: boolean; children: ReactNode }) {
+  const { mounted, closing } = usePresence(show, EXIT_MS);
+  const last = useRef<ReactNode>(null);
+  if (show) last.current = children;
+  if (!mounted) return null;
+  const shown = show ? children : last.current;
+  if (!closing || !isValidElement(shown)) return <>{shown}</>;
+  const element = shown as ReactElement<{ className?: string; "aria-hidden"?: boolean }>;
+  return cloneElement(element, { className: cn(element.props.className, "nx-leaving"), "aria-hidden": true });
+}
+
+/** A skeleton of what is being read: the shape of the content to come, with
+ * a sheen that runs only while it is on screen (motion.css). Decorative: the
+ * words beside it -- "Loading", or StillTrying's -- say what is happening. */
+export function Skeleton({ rows = 2, card = false, className }: { rows?: number; card?: boolean; className?: string }) {
+  return (
+    <div className={cn("nx-skels", className)} aria-hidden>
+      {card ? <i className="nx-skel card" /> : null}
+      {Array.from({ length: rows }, (_, i) => (
+        <i key={i} className={cn("nx-skel", i === rows - 1 && "short")} />
+      ))}
+    </div>
   );
 }
 

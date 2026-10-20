@@ -6,6 +6,9 @@
 @import "./pearl.css";
 /* Sign-in, Settings and the other pages, in the same system. */
 @import "./pages.css";
+/* How all of it moves: last, in the same layer, so its rules win over the
+   ones they refine. The phone and the web portal load it the same way. */
+@import "./motion.css";
 
 @layer base {
   body {
