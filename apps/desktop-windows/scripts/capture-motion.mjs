@@ -19,6 +19,7 @@
 // Nothing leaves the machine: the preview answers every call itself.
 //
 //   node scripts/capture-motion.mjs --out <dir> [--only name,name] [--chrome path]
+//   node scripts/capture-motion.mjs --fps [--only name,name]   (frame timing, this machine only)
 //   node scripts/capture-motion.mjs --probe <js> [--size label] [--screen s] [--scenario s] [--lang en|fa]
 
 import { spawn } from "node:child_process";
@@ -499,6 +500,35 @@ try {
   if (opt("probe")) {
     await start({ size: opt("size") ?? DESKTOP, screen: opt("screen") ?? "main", scenario: opt("scenario") ?? "connected", language: opt("lang") ?? "en" });
     console.log(JSON.stringify(await ev(opt("probe")), null, 1));
+    TRANSITIONS.length = 0;
+    STILLS.length = 0;
+  }
+  // --fps: each transition run live instead, its frames timed on this
+  // machine's headless Chrome -- an indication, not a device's frame rate.
+  if (args.includes("--fps")) {
+    for (const tr of TRANSITIONS) {
+      if (only && !only.includes(tr.name)) continue;
+      await start(tr.setup);
+      if (tr.slow) await ev("window.__nxSlow = true");
+      const gaps = await ev(`(async () => {
+        const gaps = [];
+        let last = performance.now();
+        let on = true;
+        const tick = (t) => { gaps.push(t - last); last = t; if (on) requestAnimationFrame(tick); };
+        requestAnimationFrame((t) => { last = t; requestAnimationFrame(tick); });
+        await new Promise((r) => setTimeout(r, 100));
+        ${tr.trigger};
+        await new Promise((r) => setTimeout(r, ${Math.max(...tr.times) + 200}));
+        on = false;
+        return gaps;
+      })()`);
+      const sorted = [...gaps].sort((x, y) => x - y);
+      const q = (p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+      const slow = gaps.filter((g) => g > 25).length;
+      report.push({ name: tr.name, frames: gaps.length, p50: +q(0.5).toFixed(1), p90: +q(0.9).toFixed(1), max: +sorted[sorted.length - 1].toFixed(1), over25ms: slow });
+      console.log(`${tr.name}: ${gaps.length} frames, p50 ${q(0.5).toFixed(1)}ms, p90 ${q(0.9).toFixed(1)}ms, max ${sorted[sorted.length - 1].toFixed(1)}ms, ${slow} over 25ms`);
+      await ev("window.__nxSlow = false");
+    }
     TRANSITIONS.length = 0;
     STILLS.length = 0;
   }
