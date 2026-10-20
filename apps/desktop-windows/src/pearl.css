@@ -2103,6 +2103,54 @@
   button.nx-tlink:hover {
     text-decoration: underline;
   }
+  /* Download and upload (TrafficSpeed.tsx): the measured rate, and a
+     sparkline of the last minute in the tray's cobalt. Steps, never
+     tweened: each figure is a reading. */
+  .nx-speed {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+  .nx-srow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .nx-srow > svg:first-child {
+    width: 14px;
+    height: 14px;
+    flex: none;
+    color: var(--ink-2);
+  }
+  .nx-sval {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .nx-spark {
+    width: 56px;
+    height: 16px;
+    flex: none;
+    overflow: visible;
+  }
+  .nx-spark polyline {
+    fill: none;
+    stroke: var(--cobalt-ink);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+  }
+  .nx-hmet > .nx-speed.wide {
+    grid-column: 1 / -1;
+  }
   .nx-meter {
     height: 4px;
     border-radius: 4px;
@@ -2512,6 +2560,10 @@
       display: grid;
       grid-template-columns: minmax(0, 1.35fr) repeat(2, minmax(0, 1fr));
       block-size: 108px;
+    }
+    /* A fourth section while a measured speed exists; the same height. */
+    .nx-tray.speed {
+      grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 0.92fr) minmax(0, 1fr);
     }
     .nx-tray .nx-meter {
       margin-top: 4px;

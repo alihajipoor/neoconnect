@@ -123,7 +123,13 @@ describe("a phone's main page is one screen", () => {
   it("the sentence is as tall as the longest it can say, so a longer one moves nothing", () => {
     expect(narrowRule("    .nx-hint > .rsv")).toMatch(/visibility: hidden;/);
     expect(hero).toContain('<span className="rsv" aria-hidden>');
-    for (const source of [dash, preview]) expect(source).toContain("reserve={HEADLINE_HINTS}");
+    expect(preview).toContain("reserve={HEADLINE_HINTS}");
+    // The main page's: the same, and the reconnect hold's sentence where the
+    // setting can make the hint say it (lib/reconnect-hold.ts).
+    expect(dash).toContain("reserve={hintReserve}");
+    expect(dash).toContain(
+      'const hintReserve: readonly HintKey[] = prefs.blockWhileReconnecting ? [...HEADLINE_HINTS, "hold.holding"] : HEADLINE_HINTS;',
+    );
   });
 
   it("safe areas: the header below the status bar, the nav above the home indicator", () => {
