@@ -59,6 +59,37 @@ describe("the phone names the route a tunnel found up is on", () => {
     expect(load.indexOf("setTunnelRouteUnknown(true);", pin)).toBeLessThan(load.indexOf("await adoptPlatform("));
   });
 
+  // iOS said whether a tunnel was up and nothing about which: every
+  // recorded dial passed the protocol check. Its two configurations --
+  // IKEv2 through the system, Xray and WireGuard through our extension --
+  // can each be started from iOS Settings, so the last dial an IKEv2 rung
+  // and a tunnel-provider configuration holding an earlier Xray rung
+  // started there named the IKEv2 dial's country over it. The Swift is
+  // not compiled here; this pins what it says.
+  it("hears from iOS which protocol is up, as from Android", () => {
+    const swift = readFileSync(
+      new URL("../../plugins/vpn/ios/Sources/NeoxifyVpnPlugin/NeoxifyVpnPlugin.swift", import.meta.url),
+      "utf8",
+    );
+    const status = swift.slice(swift.indexOf("@objc public func status(_ invoke: Invoke) {"));
+    expect(status).toContain("running = providerProtocol(managers.first)");
+    expect(status).toContain('running = "IKEV2"');
+    expect(status).toContain("running = NSNull()");
+    expect(status).toContain('"protocol": running,');
+    // The tunnel provider's, kept beside its engine's keys at each start --
+    // the client's own name from the Xray profile, WIREGUARD for WireGuard
+    // -- and for a configuration saved before that, a name no dial
+    // carries, so no dial is taken for its route.
+    expect(swift).toContain("let `protocol`: String?");
+    expect(swift).toContain("stored[providerProtocolKey] = named");
+    expect(swift).toContain('proto.providerConfiguration = ["wireguard": json, providerProtocolKey: "WIREGUARD"]');
+    expect(swift).toContain('return "UNRECORDED"');
+    // The Xray profile the bridge sends carries it.
+    const bridge = readFileSync(new URL("../../plugins/vpn/src/lib.rs", import.meta.url), "utf8");
+    const xray = bridge.slice(bridge.indexOf("pub struct XrayProfile {"));
+    expect(xray.slice(0, xray.indexOf("}"))).toContain("pub protocol: String,");
+  });
+
   it("asks the record only when no pass of this app has said, first", () => {
     const read = adopt.indexOf("const dial = passTunnel.current === null ? await tunnelCredential.last() : null;");
     expect(read).toBeGreaterThan(0);
