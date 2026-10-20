@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { AdminRole, NodeStatus, Prisma, ReachabilityVerdict } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AlertingService } from "../alerting/alerting.service";
+import { HELD_FOR_BLOCK_WATCH, parseBlockWatchMode } from "../block-watch/block-watch.mode";
 import { EmailService } from "../email/email.service";
 import { CheckHostClient, type ProbeOutcome, type ProbeResult } from "./check-host.client";
 import { reachabilityAlertEmail, reachabilityRecoveryEmail } from "./reachability.emails";
@@ -206,7 +207,9 @@ export class ReachabilityService {
           where: { id: open.id },
           data: { resolvedAt: checkedAt },
         });
-        await this.notifyRecovery(node, open.openedAt, checkedAt);
+        // An outage the owner was never told of separately has no
+        // separate end to tell either.
+        if (open.notifyError !== HELD_FOR_BLOCK_WATCH) await this.notifyRecovery(node, open.openedAt, checkedAt);
       }
       return;
     }
@@ -263,11 +266,31 @@ export class ReachabilityService {
     return admins.map((a) => a.email);
   }
 
+  /** With the block watch paging (BLOCK_WATCH=notify) and an incident
+   * open for this server, the block watch tells the owner itself, with
+   * this probe's evidence in it: a separate page would be the same news
+   * twice. The alert is recorded as held, and the block watch lists it in
+   * its daily digest. */
+  private async heldForBlockWatch(nodeId: string): Promise<boolean> {
+    if (parseBlockWatchMode(this.config.get<string>("blockWatch.mode")) !== "notify") return false;
+    const open = await this.prisma.blockIncident.count({
+      where: { nodeId, status: "OPEN", country: this.country.toLowerCase() },
+    });
+    return open > 0;
+  }
+
   private async notifyOutage(
     node: { id: string; name: string },
     streak: number,
     alertId: string,
   ): Promise<void> {
+    if (await this.heldForBlockWatch(node.id)) {
+      await this.prisma.nodeReachabilityAlert.update({
+        where: { id: alertId },
+        data: { notifyError: HELD_FOR_BLOCK_WATCH },
+      });
+      return;
+    }
     const minutes = streak * 30;
     await this.alerting.send(
       `Node ${node.name} is unreachable from ${this.country.toUpperCase()} (${streak} consecutive checks, ~${minutes} min)`,
