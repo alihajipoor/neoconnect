@@ -400,8 +400,34 @@ const DESKTOP_MEASURE = `(() => {
     mark: mark ? { t: box(mark).top - fb.top, s: box(mark).width } : null,
     // A scrollbar drawn beside the copy column.
     bar: hero.offsetWidth - hero.clientWidth,
-    // A speed reading cut short (the tray, or the speed card).
-    cut: [...frame.querySelectorAll(".nx-sval")].filter(vis).filter((el) => el.scrollWidth > el.clientWidth + 0.5).map((el) => el.textContent),
+    // A speed reading cut short (the tray, or the speed card), or any of the
+    // tray's text: the address, the line under it, a label, Renew (VM,
+    // 2026-10-20: "38.60.249.…" and "Checked through the …" at 922x648).
+    cut: [...frame.querySelectorAll(".nx-sval, .nx-tray .nx-tval, .nx-tray .nx-tsub, .nx-tray .nx-tlabel, .nx-tray .nx-tlink")]
+      .filter(vis)
+      // The text's own width, not scrollWidth: Renew's press area (an
+      // ::after reaching 4px past it) is not text.
+      .filter((el) => {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        return range.getBoundingClientRect().width > el.clientWidth + 0.5;
+      })
+      .map((el) => el.textContent),
+    // The address on one line, the widest IPv4 too, and the section's text
+    // inside the tray's height.
+    ip: (() => {
+      const ip = [...frame.querySelectorAll(".nx-tray .nx-ipv")].find(vis);
+      if (!ip) return null;
+      const lines = (el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight));
+      const probe = ip.cloneNode();
+      probe.textContent = "255.255.255.255";
+      ip.after(probe);
+      const widest = lines(probe);
+      probe.remove();
+      const sec = ip.closest(".nx-tsec");
+      const t = ip.closest(".t");
+      return { lines: lines(ip), widest, spills: t.getBoundingClientRect().height > sec.clientHeight + 0.5 };
+    })(),
     details: !!frame.querySelector(".nx-hero-copy .nx-details .nx-dtoggle"),
   };
 })()`;
@@ -915,6 +941,8 @@ for (const r of desk) {
   if (wide && r.opened && r.opened.bar > 0) deskBars.push(`${where}: a ${r.opened.bar}px scrollbar with "Connection details" open`);
   if (wide && r.opened && !r.opened.shown) deskBars.push(`${where}: "Connection details" opened out of view`);
   if (r.cut.length) deskCut.push(`${where}: ${r.cut.join(" / ")}`);
+  if (r.ip && (r.ip.lines > 1 || r.ip.widest > 1)) deskCut.push(`${where}: the address on ${r.ip.lines} lines (the widest IPv4 on ${r.ip.widest})`);
+  if (r.ip && r.ip.spills) deskCut.push(`${where}: the address section spills out of the tray`);
   if (r.size === "1180 × 760" && !DESKTOP_MAY_SCROLL.has(r.state) && r.overflow > 0) deskScrolls.push(`${where}: ${r.overflow}px to scroll`);
 }
 for (const line of deskMoved) console.log(`moved: ${line}`);
@@ -993,7 +1021,7 @@ if (
 ) {
   if (deskMoved.length) console.error(`${deskMoved.length} desktop state(s) move the button or the mark.`);
   if (deskBars.length) console.error(`${deskBars.length} desktop state(s) draw a scrollbar beside the copy, or open the details out of view.`);
-  if (deskCut.length) console.error(`${deskCut.length} desktop state(s) cut a speed reading.`);
+  if (deskCut.length) console.error(`${deskCut.length} desktop state(s) cut a speed reading or the tray's text, or break the address.`);
   if (deskScrolls.length) console.error(`${deskScrolls.length} state(s) at 1180x760 leave copy to scroll.`);
   if (deskHidden.length) console.error(`${deskHidden.length} desktop state(s) leave the button under the fold or the fade.`);
   if (safeFailed.length) console.error(`${safeFailed.length} screen(s) on a tablet or a phone on its side reach under the status bar or the home indicator, spill, or are drawn in a layout the stylesheet is not in.`);

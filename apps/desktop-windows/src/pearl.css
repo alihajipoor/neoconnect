@@ -2242,6 +2242,37 @@
   .nx-ipv {
     font-variant-numeric: tabular-nums;
   }
+  /* The tray's address, whole at every width: at the fitted 922x648 the
+     section leaves about 136px, and "38.60.249.229" at 21px is 148px. The
+     figure steps down with its section's width (the widest IPv4,
+     "255.255.255.255", fits from about 110px), and the line under it wraps
+     rather than losing its end. Checked by check-phone-fit.mjs --desktop. */
+  .nx-tip {
+    container: nxip / inline-size;
+  }
+  /* The plan's figure the same way: "۲۸٫۴ گیگابایت از ۳۰٫۰ گیگابایت" and
+     "۷٫۲ گیگابایت مصرف‌شده" lost their end beside the speed at 940x700 and
+     922x648. The unit keeps its proportion to the figure. */
+  .nx-tplan {
+    container: nxplan / inline-size;
+  }
+  .nx-tplan .nx-tval:not(.quiet) {
+    font-size: clamp(14px, 10.5cqi, 21px);
+  }
+  .nx-tplan .nx-tval small {
+    font-size: 0.62em;
+  }
+  .nx-tip .nx-ipv {
+    font-size: clamp(14px, 11.5cqi, 21px);
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.2;
+  }
+  .nx-tip .nx-tsub {
+    white-space: normal;
+    line-height: 1.25;
+    text-wrap: balance;
+  }
   .nx-flagbox {
     position: relative;
     flex: none;

@@ -108,11 +108,11 @@ export function SessionTray({
           </button>
         ) : null}
       </div>
-      <div className="nx-tsec">
+      <div className="nx-tsec nx-tplan">
         <div className="t">{plan ? <PlanBody plan={plan} /> : <span className="nx-tval quiet">{t("tr.noPlan")}</span>}</div>
       </div>
       {speed ? <div className="nx-tsec">{speed}</div> : null}
-      <div className="nx-tsec">
+      <div className="nx-tsec nx-tip">
         <div className="t">
           <span className="nx-tlabel">{t("tr.ip")}</span>
           <IpValue ip={ip} />
