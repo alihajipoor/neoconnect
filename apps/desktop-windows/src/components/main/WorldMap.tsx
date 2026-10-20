@@ -9,6 +9,8 @@ import {
   fitBox,
   lightPoints,
   placeRibbon,
+  RIBBON_MIN,
+  RIBBON_MIN_WINDOW,
   type Box,
   type Fit,
   type Point,
@@ -158,7 +160,8 @@ function placeInScene(app: HTMLElement, box: Box, alert: boolean, bandNow: numbe
   // The mark: beside the copy column, never under its words; below the
   // switch's slot; above the band -- the band's geometry even when it has
   // given way, so the mark does not jump when it does. Smaller when that
-  // is all the room there is; under 96px it steps aside (`placeRibbon`).
+  // is all the room there is; under 64px it steps aside (`placeRibbon`,
+  // `RIBBON_MIN_WINDOW`).
   const left = rtl ? area.x + 8 : copyEnd + 12;
   const right = rtl ? copyEnd - 12 : area.x + area.w - 8;
   const top = Math.max(area.y + 8, barBottom === null ? 0 : barBottom + 12);
@@ -309,7 +312,12 @@ export function WorldMap({ host, lights, arc, countries, logo = true, logoTone =
     return lightPoints(all, fit);
   }, [fit, countryKey, lights]);
   const at = new Map(points.map((p) => [p.cc, p]));
-  const mark = logo && placement.wanted ? placeRibbon(placement.wanted, shown ? points : []) : null;
+  // A desktop window's scene lets the mark scale down further before it
+  // steps aside (`RIBBON_MIN_WINDOW`); a stage keeps the larger minimum.
+  const mark =
+    logo && placement.wanted
+      ? placeRibbon(placement.wanted, shown ? points : [], host === "scene" ? RIBBON_MIN_WINDOW : RIBBON_MIN)
+      : null;
 
   let arcPath: string | null = null;
   if (mounted && arc) {

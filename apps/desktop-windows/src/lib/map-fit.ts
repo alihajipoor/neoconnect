@@ -54,8 +54,15 @@ export const LAMP_MIN_SEP = 10;
 export const LAMP_MAX_NUDGE = 6;
 /** The ribbon's box, grown by this, may not hold a light's centre. */
 export const RIBBON_MARGIN = 12;
-/** Below this the ribbon steps aside rather than shrink further. */
+/** Below this the ribbon steps aside rather than shrink further: in a
+ * phone's or a medium window's stage, where the map is the column's last
+ * part and a smaller mark would crowd its lights. */
 export const RIBBON_MIN = 96;
+/** In a desktop window's scene (the wide layouts) the mark scales down to
+ * this before it steps aside: the compact window fitted to a 1280x720
+ * screen at 150% (922x648) has 92px beside the copy, and the mark vanished
+ * there at the 96px minimum. At 64px the glass still reads as the logo. */
+export const RIBBON_MIN_WINDOW = 64;
 
 /** The box around the countries this list can light: the generated listed
  * box, widened for any other anchored country in the list. It depends on
@@ -139,12 +146,13 @@ export function clearOf(square: Square, points: readonly { x: number; y: number 
 
 /** The ribbon's place: the wanted square, shrunk by tenths around its centre
  * until it covers no light; null -- it steps aside -- when that leaves it
- * under `RIBBON_MIN`. */
-export function placeRibbon(wanted: Square, points: readonly { x: number; y: number }[]): Square | null {
+ * under `min` (`RIBBON_MIN`, or `RIBBON_MIN_WINDOW` in a desktop window's
+ * scene). */
+export function placeRibbon(wanted: Square, points: readonly { x: number; y: number }[], min: number = RIBBON_MIN): Square | null {
   let square = { ...wanted };
   for (let i = 0; i < 12 && !clearOf(square, points); i++) {
     const s = square.s * 0.9;
     square = { x: square.x + (square.s - s) / 2, y: square.y + (square.s - s) / 2, s };
   }
-  return square.s >= RIBBON_MIN && clearOf(square, points) ? square : null;
+  return square.s >= min && clearOf(square, points) ? square : null;
 }

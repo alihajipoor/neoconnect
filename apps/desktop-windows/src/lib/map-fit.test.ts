@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ANCHORS,
@@ -7,6 +8,7 @@ import {
   MAP_PAD,
   RIBBON_MARGIN,
   RIBBON_MIN,
+  RIBBON_MIN_WINDOW,
   boxFor,
   clearOf,
   fitBox,
@@ -117,5 +119,41 @@ describe("placeRibbon", () => {
       const placed = placeRibbon(wanted, points);
       if (placed) expect(clearOf(placed, points, RIBBON_MARGIN)).toBe(true);
     }
+  });
+});
+
+/** The mark at the window fitted to a 1280x720 screen at 150% (922x648,
+ * window_fit.rs): the compact layout gave it 92px beside the copy, and at
+ * the 96px minimum it stepped aside and was not drawn at all (2026-10-20).
+ * In a desktop window's scene it now scales down to 64px first. */
+describe("the mark in a desktop window's scene", () => {
+  const wanted = { x: 700, y: 120, s: 92 };
+
+  it("is drawn at the 922x648 window's 92px", () => {
+    expect(placeRibbon(wanted, [], RIBBON_MIN_WINDOW)).toEqual(wanted);
+    // Where it vanished before: a stage's minimum still steps aside there.
+    expect(placeRibbon(wanted, [])).toBeNull();
+  });
+
+  it("scales down gracefully to its own minimum, and steps aside only below it", () => {
+    expect(RIBBON_MIN_WINDOW).toBeLessThan(92);
+    expect(RIBBON_MIN_WINDOW).toBeGreaterThanOrEqual(56);
+    expect(placeRibbon({ x: 0, y: 0, s: RIBBON_MIN_WINDOW }, [], RIBBON_MIN_WINDOW)?.s).toBe(RIBBON_MIN_WINDOW);
+    expect(placeRibbon({ x: 0, y: 0, s: RIBBON_MIN_WINDOW - 1 }, [], RIBBON_MIN_WINDOW)).toBeNull();
+  });
+
+  it("shrinks clear of a light, never under its minimum", () => {
+    const light = { x: wanted.x + 4, y: wanted.y + 4 };
+    const placed = placeRibbon(wanted, [light], RIBBON_MIN_WINDOW);
+    if (placed) {
+      expect(placed.s).toBeGreaterThanOrEqual(RIBBON_MIN_WINDOW);
+      expect(clearOf(placed, [light], RIBBON_MARGIN)).toBe(true);
+    }
+  });
+
+  it("is the scene's minimum only: a phone's or a medium window's stage keeps 96px", () => {
+    const map = readFileSync(new URL("../components/main/WorldMap.tsx", import.meta.url), "utf8");
+    expect(map).toContain('host === "scene" ? RIBBON_MIN_WINDOW : RIBBON_MIN');
+    expect(RIBBON_MIN).toBe(96);
   });
 });
