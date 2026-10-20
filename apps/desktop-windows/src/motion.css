@@ -584,6 +584,20 @@
   :root[data-view-in="back"] :is(.nx-page, .nx-ov) {
     animation: nx-view-in-back var(--dur-snappy) var(--spring-snappy) both;
   }
+  /* The old view, kept over its place while it fades on the exit curve
+     (swapView's `keepOutgoingView`, in script): a still copy -- nothing in
+     it moves, loops or enters again -- that nothing can reach. */
+  .nx-viewghost {
+    z-index: 30;
+    pointer-events: none;
+  }
+  .nx-viewghost,
+  .nx-viewghost *,
+  .nx-viewghost *::before,
+  .nx-viewghost *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 
   /* ---------- the navs, across a page change ---------- */
   /* The selected item's pill travels to the new item: inside one shell by
