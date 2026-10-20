@@ -866,7 +866,10 @@
 
   /* Respect the OS setting and the app's own: a VPN client is a utility,
      and someone who has asked their machine to stop animating means it.
-     Tailwind's animate-spin and animate-pulse are gated too. */
+     Tailwind's animate-spin and animate-pulse are gated too. A change of
+     screen and a sheet are not: under reduced motion they cross-fade,
+     briefly, their travel multiplied away by --move (design-system.md
+     6.4). */
   @media (prefers-reduced-motion: reduce) {
     .animate-ping-ring,
     .animate-spin-slow,
@@ -874,13 +877,7 @@
     .animate-rise,
     .animate-breathe,
     .animate-spin,
-    .animate-pulse,
-    .screen-enter,
-    .screen-enter-back,
-    .screen-leave,
-    .screen-leave-back,
-    .sheet-enter,
-    .sheet-leave {
+    .animate-pulse {
       animation: none;
     }
   }
@@ -891,13 +888,7 @@
       .animate-rise,
       .animate-breathe,
       .animate-spin,
-      .animate-pulse,
-      .screen-enter,
-      .screen-enter-back,
-      .screen-leave,
-      .screen-leave-back,
-      .sheet-enter,
-      .sheet-leave
+      .animate-pulse
     ) {
     animation: none;
   }
