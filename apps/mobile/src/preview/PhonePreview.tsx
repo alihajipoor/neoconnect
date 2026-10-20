@@ -15,6 +15,8 @@ import { MainView } from "@shared/components/main/MainView";
 import { LocationCard, MetricCards, SessionTray, SummaryLine, type TrayLocation, type TrayPlan } from "@shared/components/main/SessionTray";
 import { Dialog, LocationSheet } from "@shared/components/overlay";
 import { AppShell } from "@shared/components/shell/AppShell";
+import { ScreenTransition } from "@shared/components/ScreenTransition";
+import { swapView } from "@shared/lib/view-transition";
 import { Page, PageScene } from "@shared/components/shell/Page";
 import { Banner, Note, PillButton } from "@shared/components/ui";
 import { Login } from "@shared/screens/Login";
@@ -388,29 +390,35 @@ export function PhonePreview() {
         {/* #root, with the side insets as its padding (globals.css). */}
         <div style={{ height: "100%", paddingLeft: side, paddingRight: side, boxSizing: "border-box" }}>
           {/* App.tsx's frame around every screen: the backup-route chip's
-              row, then the screen in ScreenTransition's two boxes. Keyed,
-              so the chip and sign-in read relay mode afresh. */}
+              row, then the screen in the app's own ScreenTransition, so a
+              change of screen here moves as it does there. Keyed, so the
+              chip and sign-in read relay mode afresh. */}
           <div key={relay ? "relay" : "plain"} className="flex h-full flex-col">
             <div className="nx-relayrow">
               <BackupRouteChip />
             </div>
             <div className="nx-screen min-h-0 flex-1">
-              <div className="relative h-full w-full overflow-hidden">
-                <div className="h-full">
-                  {screen === "main" || screen === "locations" ? (
-                    <Composed
-                      sc={sc}
-                      language={language}
-                      width={w - 2 * side}
-                      sheet={sheet}
-                      onSheet={setSheet}
-                      view={screen === "locations" ? "locations" : "overview"}
-                    />
-                  ) : (
-                    <Other key={screen} screen={screen} ios={ios} />
-                  )}
-                </div>
-              </div>
+              <ScreenTransition screenKey={screen === "locations" ? "main" : screen} viewTransitions>
+                {screen === "main" || screen === "locations" ? (
+                  <Composed
+                    sc={sc}
+                    language={language}
+                    width={w - 2 * side}
+                    sheet={sheet}
+                    onSheet={setSheet}
+                    view={screen === "locations" ? "locations" : "overview"}
+                    onNavigate={(next) =>
+                      // The main page and Locations are one screen in the
+                      // app (Dashboard.tsx), changed by swapView.
+                      next === "main" || next === "locations"
+                        ? swapView(() => setScreen(next), next === "locations" ? "forward" : "back")
+                        : setScreen(next)
+                    }
+                  />
+                ) : (
+                  <Other key={screen} screen={screen} ios={ios} />
+                )}
+              </ScreenTransition>
             </div>
           </div>
         </div>
@@ -479,6 +487,7 @@ function Composed({
   sheet,
   onSheet,
   view,
+  onNavigate,
 }: {
   sc: Scenario;
   language: Language;
@@ -486,6 +495,8 @@ function Composed({
   sheet: boolean;
   onSheet: (open: boolean) => void;
   view: "overview" | "locations";
+  /** The shell's nav, as the app wires it: another screen or view. */
+  onNavigate: (screen: string) => void;
 }) {
   const { t } = useI18n();
   // As the Dashboard decides it (lib/app-layout.ts): by the app root's
@@ -678,10 +689,10 @@ function Composed({
       banner={bannerShowing}
       email="you@example.com"
       planLine={planLineText(subscribed ? { daysLeft, unlimited: cap === null } : null, t, language)}
-      onOverview={noop}
-      onLocations={noop}
+      onOverview={() => onNavigate("main")}
+      onLocations={() => onNavigate("locations")}
       onOpenActivity={noop}
-      onOpenSettings={noop}
+      onOpenSettings={() => onNavigate("perapp")}
       onBrowsePlans={noop}
       onOpenReferrals={noop}
       onOpenSupport={noop}

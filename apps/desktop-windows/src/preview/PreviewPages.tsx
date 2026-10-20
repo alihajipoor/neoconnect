@@ -59,6 +59,7 @@ export const PAGE_SCREENS: Record<string, string> = {
   activityFailed: "Activity, account not reached",
   activitySignOut: "Activity, Sign out on other devices (awaiting owner)",
   activityEmpty: "Activity, network unknown",
+  activityLoading: "Activity, still reading (skeletons)",
   plans: "Plans",
   support: "Support",
   referrals: "Invite friends",
@@ -74,6 +75,7 @@ const NAV: Record<string, NavId> = {
   activityFailed: "activity",
   activitySignOut: "activity",
   activityEmpty: "activity",
+  activityLoading: "activity",
   plans: "none",
   support: "none",
   referrals: "none",
@@ -184,9 +186,12 @@ export function PreviewPage({
   network,
   subscription,
   tunnel = "disconnected",
+  onNavigate = noop,
 }: {
   /** The tunnel state the scenario switcher has chosen, for the list. */
   tunnel?: string;
+  /** The shell's nav, as the app wires it (App.tsx): another screen. */
+  onNavigate?: (screen: string) => void;
   screen: string;
   width: number;
   routes: RouteOption[];
@@ -305,11 +310,24 @@ export function PreviewPage({
       screen === "activityEmpty" ||
       screen === "activityLog" ||
       screen === "activityFailed" ||
-      screen === "activitySignOut" ? (
+      screen === "activitySignOut" ||
+      screen === "activityLoading" ? (
       <ActivityView
         data={activity}
-        devices={screen === "activityFailed" ? { state: "failed", noAnswer: true } : { state: "ok", data: SAMPLE_DEVICES }}
-        usage={screen === "activityFailed" ? { state: "failed", noAnswer: false } : { state: "ok", data: sampleUsage() }}
+        devices={
+          screen === "activityFailed"
+            ? { state: "failed", noAnswer: true }
+            : screen === "activityLoading"
+              ? { state: "loading" }
+              : { state: "ok", data: SAMPLE_DEVICES }
+        }
+        usage={
+          screen === "activityFailed"
+            ? { state: "failed", noAnswer: false }
+            : screen === "activityLoading"
+              ? { state: "loading" }
+              : { state: "ok", data: sampleUsage() }
+        }
         log={
           phone
             ? undefined
@@ -343,13 +361,13 @@ export function PreviewPage({
       titlebar
       email="you@example.com"
       planLine={planLineText({ daysLeft: 6, unlimited: true }, t, language)}
-      onOverview={noop}
-      onLocations={noop}
-      onOpenActivity={noop}
-      onOpenSettings={noop}
-      onBrowsePlans={noop}
-      onOpenReferrals={noop}
-      onOpenSupport={noop}
+      onOverview={() => onNavigate("main")}
+      onLocations={() => onNavigate("locations")}
+      onOpenActivity={() => onNavigate("activity")}
+      onOpenSettings={() => onNavigate("settings")}
+      onBrowsePlans={() => onNavigate("plans")}
+      onOpenReferrals={() => onNavigate("referrals")}
+      onOpenSupport={() => onNavigate("support")}
       onSignOut={noop}
       signingOut={false}
       update={<CommunityLinks />}

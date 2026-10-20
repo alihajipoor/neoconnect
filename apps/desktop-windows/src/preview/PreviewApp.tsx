@@ -40,6 +40,28 @@ import type { LadderRung } from "../lib/ladder-progress";
 import type { CountdownLine } from "../lib/reconnect-countdown";
 import type { HoldNoteKey } from "../lib/reconnect-hold";
 import { SAMPLE_SUBSCRIPTION } from "./mocks/customer";
+import { ScreenTransition } from "../components/ScreenTransition";
+import { firstViews } from "../lib/motion";
+
+/** DEV ONLY: the preview's screens as the app's screen machine names them
+ * (App.tsx), so a change of screen here slides the way it does there --
+ * deeper forward, back back (ScreenTransition's depths). */
+const APP_SCREEN: Record<string, string> = {
+  main: "dashboard",
+  locations: "dashboard:locations",
+  settings: "settings",
+  pickGame: "settings",
+  pickApps: "settings",
+  activity: "activity",
+  activityLog: "activity",
+  activityFailed: "activity",
+  activitySignOut: "activity",
+  activityEmpty: "activity",
+  activityLoading: "activity",
+  plans: "plans",
+  support: "support",
+  referrals: "referrals",
+};
 
 /** DEV ONLY: the scenarios the state switcher offers. Each is the inputs the
  * Dashboard would have -- the service's state, the look `orbHold` holds,
@@ -168,6 +190,9 @@ const SCENARIOS: Record<string, Scenario> = {
 const SIZES: Record<string, [number, number, number?, number?]> = {
   "1180 × 760 (first launch)": [1180, 760],
   "940 × 700 (old default)": [940, 700],
+  // A 1280x720 screen at 150%: the window fitted to its work area
+  // (window_fit.rs), where the mark once stepped aside at 92px.
+  "922 × 648 (fitted, 1280×720 at 150%)": [922, 648],
   "1440 × 900": [1440, 900],
   "1280 × 800": [1280, 800],
   "720 × 600 (minimum)": [720, 600],
@@ -289,6 +314,10 @@ export function PreviewApp() {
   const [w, h, safeT = 0, safeB = 0] = SIZES[size];
   const [askOpen, setAskOpen] = useState(false);
   const [sheet, setSheet] = useState(false);
+  /** The shell's nav works in the preview: each press changes the screen
+   * as the app does, through the same transition. */
+  const go = (next: string) => setScreen(next);
+  const [replay, setReplay] = useState(0);
 
   useEffect(() => effects.setTheme(theme), [theme]);
   useEffect(() => effects.setGlass(glass), [glass]);
@@ -374,6 +403,18 @@ export function PreviewApp() {
       <label>
         <input type="checkbox" checked={sheet} onChange={(e) => setSheet(e.target.checked)} data-testid="sheet" /> Locations sheet (phone)
       </label>
+      <button
+        type="button"
+        data-testid="replay"
+        style={{ padding: "2px 8px", border: "1px solid #9aa3b5", borderRadius: 6, background: "#fff" }}
+        onClick={() => {
+          // Every view's first entrance again, as on a fresh launch.
+          firstViews.reset();
+          setReplay((n) => n + 1);
+        }}
+      >
+        Replay first entrances
+      </button>
       <label>
         Logo tone{" "}
         <select value={logoTone} onChange={(e) => setLogoTone(e.target.value as LogoTone)} data-testid="logotone">
@@ -405,33 +446,37 @@ export function PreviewApp() {
       >
         {/* The device's safe areas, which env() cannot report here. */}
         <style>{`[data-testid="frame"] .nx-app { --safe-t: var(--pv-safe-t); --safe-b: var(--pv-safe-b); }`}</style>
-        {screen === "main" ? (
-          <Composed
-            sc={sc}
-            t={t}
-            language={language}
-            connectedAt={connectedAt}
-            askOpen={askOpen}
-            onAsk={setAskOpen}
-            width={w}
-            evidence={evidence}
-            logo={logo}
-            logoTone={logoTone}
-            sheet={sheet}
-            onSheet={setSheet}
-          />
-        ) : (
-          <PreviewPage
-            key={screen}
-            screen={screen}
-            width={w}
-            routes={pageRoutes}
-            history={pageHistory}
-            network={PREVIEW_NET}
-            subscription={SAMPLE_SUBSCRIPTION}
-            tunnel={sc.state}
-          />
-        )}
+        <ScreenTransition key={replay} screenKey={APP_SCREEN[screen] ?? screen} viewTransitions>
+          {screen === "main" ? (
+            <Composed
+              sc={sc}
+              t={t}
+              language={language}
+              connectedAt={connectedAt}
+              askOpen={askOpen}
+              onAsk={setAskOpen}
+              width={w}
+              evidence={evidence}
+              logo={logo}
+              logoTone={logoTone}
+              sheet={sheet}
+              onSheet={setSheet}
+              onNavigate={go}
+            />
+          ) : (
+            <PreviewPage
+              key={screen}
+              screen={screen}
+              width={w}
+              routes={pageRoutes}
+              history={pageHistory}
+              network={PREVIEW_NET}
+              subscription={SAMPLE_SUBSCRIPTION}
+              tunnel={sc.state}
+              onNavigate={go}
+            />
+          )}
+        </ScreenTransition>
       </div>
     </div>
   );
@@ -452,9 +497,11 @@ function Composed({
   logoTone,
   sheet,
   onSheet,
+  onNavigate,
 }: {
   sheet: boolean;
   onSheet: (open: boolean) => void;
+  onNavigate: (screen: string) => void;
   sc: Scenario;
   t: T;
   language: Language;
@@ -670,12 +717,12 @@ function Composed({
       email="you@example.com"
       planLine={planLineText(plan === "none" ? null : { daysLeft, unlimited: cap === null }, t, language)}
       onOverview={() => undefined}
-      onLocations={() => undefined}
-      onOpenActivity={() => undefined}
-      onOpenSettings={() => undefined}
-      onBrowsePlans={() => undefined}
-      onOpenReferrals={() => undefined}
-      onOpenSupport={() => undefined}
+      onLocations={() => (layout === "narrow" ? onSheet(true) : onNavigate("locations"))}
+      onOpenActivity={() => onNavigate("activity")}
+      onOpenSettings={() => onNavigate("settings")}
+      onBrowsePlans={() => onNavigate("plans")}
+      onOpenReferrals={() => onNavigate("referrals")}
+      onOpenSupport={() => onNavigate("support")}
       onSignOut={() => undefined}
       signingOut={false}
       scene={<HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} logo={logo} logoTone={logoTone} alert={mapAlert} />}
