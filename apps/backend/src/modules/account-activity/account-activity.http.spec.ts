@@ -114,8 +114,31 @@ describe("account activity over HTTP", () => {
     });
   });
 
-  describe("DELETE /customer/devices/:id", () => {
-    beforeEach(() => auth.revokeSession.mockClear());
+  describe("DELETE /customer/devices/:id, with ACCOUNT_DEVICE_SIGNOUT off -- the default", () => {
+    beforeEach(() => {
+      auth.revokeSession.mockClear();
+      delete process.env.ACCOUNT_DEVICE_SIGNOUT;
+    });
+
+    it("answers 404 and signs nothing out, as if the route did not exist", async () => {
+      for (const value of [undefined, "", "off", "yes"]) {
+        if (value === undefined) delete process.env.ACCOUNT_DEVICE_SIGNOUT;
+        else process.env.ACCOUNT_DEVICE_SIGNOUT = value;
+        const res = await call("DELETE", `/customer/devices/${deviceIdFor(SECRET, "customer-1", "session-pc")}`);
+        expect(res.status).toBe(404);
+      }
+      expect(auth.revokeSession).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("DELETE /customer/devices/:id, with ACCOUNT_DEVICE_SIGNOUT=on", () => {
+    beforeEach(() => {
+      auth.revokeSession.mockClear();
+      process.env.ACCOUNT_DEVICE_SIGNOUT = "on";
+    });
+    afterAll(() => {
+      delete process.env.ACCOUNT_DEVICE_SIGNOUT;
+    });
 
     it("signs the other device out: 204", async () => {
       const res = await call("DELETE", `/customer/devices/${deviceIdFor(SECRET, "customer-1", "session-pc")}`);

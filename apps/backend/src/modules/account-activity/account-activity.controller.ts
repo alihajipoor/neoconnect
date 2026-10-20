@@ -1,4 +1,4 @@
-import { Controller, Delete, Get, HttpCode, HttpStatus, Param, Query, UseGuards } from "@nestjs/common";
+import { Controller, Delete, Get, HttpCode, HttpStatus, NotFoundException, Param, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
@@ -8,6 +8,7 @@ import type { AuthenticatedCustomer } from "../customer-auth/types";
 import { AccountDevicesService } from "./account-devices.service";
 import { DailyUsageService } from "./daily-usage.service";
 import { DailyUsageQueryDto } from "./dto/daily-usage-query.dto";
+import { deviceSignOutEnabled } from "./device-signout-flag";
 
 /** The Activity screen's account data: the devices signed in to the
  * account, and data use per day. The contract is
@@ -42,12 +43,16 @@ export class AccountActivityController {
 
   /** Signs another of this account's devices out. 204; 404 for an id that
    * is not one of this account's signed-in devices; 400 THIS_DEVICE for
-   * the caller's own (that is POST /customer-auth/logout). */
+   * the caller's own (that is POST /customer-auth/logout).
+   *
+   * 404 for every call while ACCOUNT_DEVICE_SIGNOUT is not "on"
+   * (device-signout-flag.ts): the owner has not decided it yet. */
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @ThrottleVolumePerSession()
   @Delete("devices/:id")
   @HttpCode(HttpStatus.NO_CONTENT)
   async signOut(@CurrentCustomer() customer: AuthenticatedCustomer, @Param("id") id: string) {
+    if (!deviceSignOutEnabled()) throw new NotFoundException();
     await this.devices.signOut({ customerId: customer.sub, sessionId: customer.sid }, id);
   }
 

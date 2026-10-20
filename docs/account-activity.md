@@ -92,7 +92,13 @@ its app signs out. A tunnel on the subscription's *shared* credentials
 
 **Owner decision pending** on whether the apps offer this ("Sign out of
 this device" on a row). The endpoint exists so that decision needs no
-backend release; no client may expose it until it is made.
+backend release, and is switched off until it is made:
+`ACCOUNT_DEVICE_SIGNOUT` in `infra/.env` is blank (off) by default, and
+off it answers **404** to every call -- a deploy does not give every
+customer token the power to sign the account's other devices out.
+Turning it on is `ACCOUNT_DEVICE_SIGNOUT=on` and `docker compose up -d`,
+together with the one-line change in each app's `App.tsx` that passes
+`deviceSignOut`; no client may expose it before then.
 
 ## `GET /customer/usage?days=30&tz=Asia/Tehran`
 ## `GET /customer/subscriptions/:id/usage?days=30&tz=Asia/Tehran`
