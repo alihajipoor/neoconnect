@@ -652,9 +652,13 @@ model Node {
   realityDestCheckedAt DateTime?
 
   /// When the owner was paged that this node had stopped heartbeating.
-  /// Set once per gap and cleared when the node is back, so a gap pages
-  /// once and its end is told only if its start was.
-  heartbeatGapPagedAt DateTime?
+  /// Set once per gap, when the page reached somebody, and cleared once
+  /// the node is back and that has been told, so a gap pages once and its
+  /// end is told only if its start was.
+  heartbeatGapPagedAt  DateTime?
+  /// When the owner was last told this node was heartbeating again. A new
+  /// gap soon after is not paged, so a flapping link does not page all day.
+  heartbeatBackPagedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -59,7 +59,14 @@ SUPERADMIN's mailbox. Delivery is recorded on the incident.
 
 ## Heartbeat gaps
 
-Separate from the block watch and on by default: a node with no heartbeat
-for `HEARTBEAT_GAP_PAGE_MINUTES` (blank = 10, `0` = off) pages the owner
-once, and once more when it is back. Gaps already older than a day when
-first seen (a node long gone) stay with the six-hourly webhook reminder.
+Separate from the block watch, and off until `HEARTBEAT_GAP_PAGE_MINUTES`
+is set (blank or `0` = off; 10 is a sensible value): a node with no
+heartbeat for that many minutes pages the owner once, and once more when
+it is back. Nodes that go quiet in the same sweep are one message, and
+so are nodes that come back. A gap counts as paged only when the page
+reached somebody; otherwise later sweeps try again, a few times. A node
+that was just said to be back is not paged again for some hours, so a
+flapping link is not a page every few minutes. Gaps already older than a
+day when first seen (a node long gone) stay with the six-hourly webhook
+reminder. The "back" message is sent by the sweep, never from the agent's
+reconnect, which re-sends customers' credentials and routes first.

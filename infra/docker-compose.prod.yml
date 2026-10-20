@@ -110,7 +110,7 @@ services:
       # notify. It never changes a server; notify pages the owner.
       BLOCK_WATCH: ${BLOCK_WATCH:-}
       # Minutes without a heartbeat before the owner is paged (webhook and
-      # email). Blank = 10; 0 = off.
+      # email). Blank or 0 = off.
       HEARTBEAT_GAP_PAGE_MINUTES: ${HEARTBEAT_GAP_PAGE_MINUTES:-}
       # Per-ISP recommendations: an offline IP-to-ASN table (iptoasn.com,
       # public domain), downloaded once a day. All optional and on by

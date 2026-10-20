@@ -1,6 +1,8 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 
+export const WEBHOOK_TIMEOUT_MS = 10_000;
+
 /** Sends operational alerts to a generic webhook (Slack/Discord/
  * Telegram-via-adapter/custom endpoint all accept a plain JSON POST).
  * Silent no-op when ALERT_WEBHOOK_URL isn't configured -- alerting is
@@ -32,6 +34,9 @@ export class AlertingService {
       const res = await fetch(webhookUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // A webhook that never answers must not hold up its caller (the
+        // heartbeat sweep, the block watch, a sign-in alert).
+        signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
         // Slack reads "text", Discord reads "content" -- they are not the
         // same field, and Discord rejects a body without it outright
         // ("Cannot send an empty message", 50006). Sending both means one
