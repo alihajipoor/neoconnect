@@ -31,7 +31,11 @@
 // the button's top and the glass mark's place and size never change with
 // the state, and that the button is on screen, clear of the column's fade,
 // without scrolling (a banner's states are reported, not failed: the column
-// is read from the banner down). `--desktop` runs that pass alone.
+// is read from the banner down); that the wide windows draw no scrollbar
+// beside the copy, with "Connection details" closed or open (and opened
+// into view); that no speed reading is cut, at its widest too; and that at
+// the first-launch 1180x760 nothing is left to scroll but a card, a note
+// or a banner. `--desktop` runs that pass alone.
 // Exits 1 on any failure. Nothing leaves the machine: the preview answers
 // every Tauri call itself.
 //
@@ -178,11 +182,17 @@ const DESKTOP_MAIN = [
   "holdRefused",
   "unconfined",
   "speed",
+  "speedWidest",
 ];
 /** Not compared: a banner above the copy (it is read first, and moves
  * what is under it), no plan (another foot), the device limit's card in
  * the button's place. */
 const DESKTOP_APART = new Set(["blocked", "ended", "none", "slot"]);
+/** At the first-launch 1180x760 the copy column fits every state with
+ * nothing to scroll, but these: a card or a note to read in the column (the
+ * device limit, the hold refused, "not confined"), or a banner above it. The
+ * column scrolls for them, under the fade and "More below". */
+const DESKTOP_MAY_SCROLL = new Set(["slot", "holdRefused", "unconfined", "blocked", "ended"]);
 /** The reconnect hold's states: the preview shows them with the setting on,
  * which reserves the hold's longer sentences too (Dashboard's
  * `hintReserve`). Compared with each other: with the setting on, every
@@ -388,7 +398,36 @@ const DESKTOP_MEASURE = `(() => {
     hidden: pb ? Math.max(0, Math.round(pb.bottom - (hb.top + hero.clientHeight - fade))) : 0,
     overflow: Math.round(hero.scrollHeight - hero.clientHeight),
     mark: mark ? { t: box(mark).top - fb.top, s: box(mark).width } : null,
+    // A scrollbar drawn beside the copy column.
+    bar: hero.offsetWidth - hero.clientWidth,
+    // A speed reading cut short (the tray, or the speed card).
+    cut: [...frame.querySelectorAll(".nx-sval")].filter(vis).filter((el) => el.scrollWidth > el.clientWidth + 0.5).map((el) => el.textContent),
+    details: !!frame.querySelector(".nx-hero-copy .nx-details .nx-dtoggle"),
   };
+})()`;
+
+/** "Connection details" opened, on a desktop window: whether a scrollbar is
+ * drawn then, and whether the opened panel is on screen (it is scrolled
+ * into view). Closed again after. */
+const DESKTOP_DETAILS = `(async () => {
+  const frame = document.querySelector("[data-testid=frame]");
+  const hero = frame.querySelector(".nx-hero");
+  const toggle = frame.querySelector(".nx-hero-copy .nx-details .nx-dtoggle");
+  if (!hero || !toggle) return null;
+  toggle.click();
+  await new Promise((r) => setTimeout(r, 900));
+  const panel = frame.querySelector(".nx-hero-copy .nx-details .nx-dpanel");
+  const hb = hero.getBoundingClientRect();
+  const pb = panel ? panel.getBoundingClientRect() : null;
+  const out = {
+    bar: hero.offsetWidth - hero.clientWidth,
+    overflow: Math.round(hero.scrollHeight - hero.clientHeight),
+    shown: !!pb && pb.height > 0 && pb.bottom <= hb.bottom + 0.5 && pb.top >= hb.top - 0.5,
+  };
+  toggle.click();
+  await new Promise((r) => setTimeout(r, 700));
+  hero.scrollTop = 0;
+  return out;
 })()`;
 
 /** A sign-in screen: how far anything scrolls; whether every button that
@@ -684,7 +723,9 @@ try {
         if (!(await choose("scenario", state))) throw new Error(`The preview has no state "${state}".`);
         // The mark re-places itself a frame or two after the copy changes.
         await sleep(400);
-        desk.push({ size: size.split(" (")[0], lang, state, ...(await ev(DESKTOP_MEASURE)) });
+        const row = { size: size.split(" (")[0], lang, state, ...(await ev(DESKTOP_MEASURE)) };
+        if (row.details) row.opened = await ev(DESKTOP_DETAILS);
+        desk.push(row);
       }
     }
   }
@@ -857,8 +898,30 @@ for (const size of [...new Set(desk.map((r) => r.size))]) {
     console.log(`${size} ${lang} desktop: ${rows.length} states, button top ${pills.join(" / ")}, mark ${marks.join(" / ")}, largest overflow ${Math.max(...rows.map((r) => r.overflow))}px`);
   }
 }
+// No scrollbar beside the wide windows' copy column -- closed, or with
+// "Connection details" open, whose panel is brought into view -- no speed
+// reading cut at any desktop size, and at the first-launch 1180x760 nothing
+// to scroll in any state but those with something more to read (VM,
+// 2026-10-20: a scrollbar at 1180x760 as soon as the details' toggle was
+// there, and "کیلوبایت…" cut in the tray).
+const deskBars = [];
+const deskCut = [];
+const deskScrolls = [];
+for (const r of desk) {
+  const where = `${r.size} ${r.lang} ${r.state}`;
+  // The 720x600 window is the medium layout, whose column is another one.
+  const wide = !r.size.startsWith("720");
+  if (wide && r.bar > 0) deskBars.push(`${where}: a ${r.bar}px scrollbar, or its gutter, beside the copy`);
+  if (wide && r.opened && r.opened.bar > 0) deskBars.push(`${where}: a ${r.opened.bar}px scrollbar with "Connection details" open`);
+  if (wide && r.opened && !r.opened.shown) deskBars.push(`${where}: "Connection details" opened out of view`);
+  if (r.cut.length) deskCut.push(`${where}: ${r.cut.join(" / ")}`);
+  if (r.size === "1180 × 760" && !DESKTOP_MAY_SCROLL.has(r.state) && r.overflow > 0) deskScrolls.push(`${where}: ${r.overflow}px to scroll`);
+}
 for (const line of deskMoved) console.log(`moved: ${line}`);
 for (const line of deskHidden) console.log(`hidden: ${line}`);
+for (const line of deskBars) console.log(`scrollbar: ${line}`);
+for (const line of deskCut) console.log(`cut: ${line}`);
+for (const line of deskScrolls) console.log(`scrolls: ${line}`);
 
 if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify({ main: results, auth: authResults, disclosure, safe, desktop: desk }, null, 1));
 for (const size of [...new Set(safe.map((r) => r.size))]) {
@@ -916,8 +979,22 @@ if (textScale !== 1) {
   );
   process.exit(0);
 }
-if (failed.length || moved.length || authFailed.length || disclosureFailed.length || safeFailed.length || deskMoved.length || deskHidden.length) {
+if (
+  failed.length ||
+  moved.length ||
+  authFailed.length ||
+  disclosureFailed.length ||
+  safeFailed.length ||
+  deskMoved.length ||
+  deskHidden.length ||
+  deskBars.length ||
+  deskCut.length ||
+  deskScrolls.length
+) {
   if (deskMoved.length) console.error(`${deskMoved.length} desktop state(s) move the button or the mark.`);
+  if (deskBars.length) console.error(`${deskBars.length} desktop state(s) draw a scrollbar beside the copy, or open the details out of view.`);
+  if (deskCut.length) console.error(`${deskCut.length} desktop state(s) cut a speed reading.`);
+  if (deskScrolls.length) console.error(`${deskScrolls.length} state(s) at 1180x760 leave copy to scroll.`);
   if (deskHidden.length) console.error(`${deskHidden.length} desktop state(s) leave the button under the fold or the fade.`);
   if (safeFailed.length) console.error(`${safeFailed.length} screen(s) on a tablet or a phone on its side reach under the status bar or the home indicator, spill, or are drawn in a layout the stylesheet is not in.`);
   if (disclosureFailed.length) console.error(`${disclosureFailed.length} disclosure screen(s) whose button cannot be reached.`);
@@ -928,6 +1005,8 @@ if (failed.length || moved.length || authFailed.length || disclosureFailed.lengt
 }
 console.log(
   (DESKTOP_ONLY ? "" : "Every main-page state fits one screen, cuts no text, and the foot, the stage and the mark keep still; every sign-in screen fits one screen.") +
-    (DESKTOP_SIZES.length ? " On the desktop windows the button and the mark keep still in every state, and the button is on screen without scrolling." : "") +
+    (DESKTOP_SIZES.length
+      ? " On the desktop windows the button and the mark keep still in every state, and the button is on screen without scrolling; no scrollbar beside the copy, no speed reading cut, and nothing to scroll at 1180x760 but a card, a note or a banner."
+      : "") +
     (MOBILE ? " Relay mode fits too, with the status bar's inset drawn once; the tablets and the phones on their sides keep the status bar and the home indicator clear." : ""),
 );
