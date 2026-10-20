@@ -76,6 +76,7 @@ const HINT: Record<GamingPhase, TranslationKey> = {
   partial: "gaming.partialHint",
   unknown: "gaming.unknownHint",
 };
+const GAMING_HINTS: readonly TranslationKey[] = Object.values(HINT);
 
 /** The status chip's word and glyph for each phase. Never "Connected":
  * gaming mode brings up no tunnel for the word to describe. */
@@ -256,7 +257,11 @@ export function GamingStatusPanel({
         <StatusChip glyph={CHIP[phase].glyph} label={t(CHIP[phase].key)} />
       </div>
       <StateLine line={{ kind: "words", key: HEADLINE[phase] }} words={t(HEADLINE[phase])} />
-      <Hint tone={tone === "warn" ? "warn" : null}>{t(HINT[phase])}</Hint>
+      {/* As tall as its longest sentence, so a change of phase never moves
+          the button under it (pearl.css). */}
+      <Hint tone={tone === "warn" ? "warn" : null} reserve={GAMING_HINTS}>
+        {t(HINT[phase])}
+      </Hint>
 
       <div className="nx-actions">
         <ConnectOrb

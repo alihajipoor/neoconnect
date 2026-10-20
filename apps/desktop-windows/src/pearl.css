@@ -1133,21 +1133,55 @@
     color: var(--ink-2);
     max-width: 46ch;
     text-wrap: pretty;
-    min-height: 3em;
+    /* A hint with no list of sentences keeps three lines. */
+    min-height: 4.5em;
+    min-height: 3lh;
     transition: color var(--dur-tint) var(--spring-smooth);
   }
   html[lang="fa"] .nx-hint {
     line-height: 1.8;
     font-size: 14.5px;
-    min-height: 3.6em;
+    min-height: 5.4em;
+    min-height: 3lh;
   }
   .nx-hint b {
     color: var(--ink);
     font-weight: 600;
   }
-  /* Every sentence the hint can say, unseen: a phone sizes the hint by the
-     longest (the narrow rules, Hero.tsx `Hint`). Nothing elsewhere. */
+  /* The sentence is as tall as the longest it can say here (Hero.tsx
+     `Hint`'s reserve): every sentence laid, unseen, in the sentence's own
+     cell -- by the width, the language and the text size, never by the
+     state. So a held reconnect, "not confirmed" or the hold's longer
+     sentence never moves the button under it (design-system.md 4.6, 6.3),
+     at every width. */
+  .nx-hint {
+    display: grid;
+  }
+  .nx-hint:has(> .rsv),
+  html[lang="fa"] .nx-hint:has(> .rsv) {
+    min-height: 0;
+  }
+  .nx-hint > :is(.tx, .rsv) {
+    grid-area: 1 / 1;
+  }
   .nx-hint > .rsv {
+    display: grid;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .nx-hint > .rsv > span {
+    grid-area: 1 / 1;
+  }
+  /* Under a banner -- an offline network, a plan that ended: sustained, and
+     read first -- the sentence and the subline give their reserve back, so
+     the button stays on screen below the banner. */
+  .nx-app[data-banner="1"] .nx-hint > .rsv {
+    display: none;
+  }
+  .nx-app[data-banner="1"] .nx-sublinebox {
+    min-height: 0;
+  }
+  .nx-app[data-banner="1"] .nx-sublinebox:empty {
     display: none;
   }
   .nx-hint.danger {
@@ -1166,10 +1200,20 @@
     gap: 8px;
     min-height: 20px;
   }
-  /* The subline's box adds nothing to the layout: a phone reads whether
-     the line stays in the column from it (MainView `sublineStays`). */
+  /* The subline's row is kept whether or not it says anything (MainView
+     draws the box in every state of the tunnel's hero), so a reconnect's
+     countdown or a ladder's rung arriving never moves the button under it.
+     A phone folds the line into its sheet instead and reads whether it
+     stays in the column from the box (`sublineStays`, the narrow rules). */
   .nx-sublinebox {
-    display: contents;
+    display: flex;
+    flex-direction: column;
+    font-size: 13px;
+    /* Two lines, less the line's own lift: a failover that names two
+       places, or why it connects with nobody pressing and the rung it is
+       on, takes two at the narrower windows. */
+    min-height: 35px;
+    min-height: calc(2lh - 4px);
   }
   .nx-subline svg {
     width: 15px;
@@ -2851,6 +2895,22 @@
       z-index: 4;
     }
   }
+  /* The 720x600 window: the sentence and the subline keep the room of
+     their longest, so the column tightens by the window's height -- never
+     by the state -- to keep the button above the fold and clear of the
+     column's fade. */
+  @container app (min-width: 640px) and (max-width: 899.98px) and (max-height: 660px) {
+    .nx-hero-copy {
+      gap: 8px;
+    }
+    .nx-hint {
+      font-size: 14px;
+    }
+    html[lang="fa"] .nx-hint {
+      font-size: 14px;
+      line-height: 1.7;
+    }
+  }
 
   /* ---------- NARROW: one screen, no page scroll (phones) ----------
      Owner, 2026-10-19: the phone's main page fits its screen, and only a
@@ -2935,18 +2995,11 @@
        the text size, never by the state. */
     .nx-hero-copy > .nx-hint {
       order: 5;
-      display: grid;
     }
-    .nx-hint > :is(.tx, .rsv) {
-      grid-area: 1 / 1;
-    }
-    .nx-hint > .rsv {
-      display: grid;
-      visibility: hidden;
-      pointer-events: none;
-    }
-    .nx-hint > .rsv > span {
-      grid-area: 1 / 1;
+    /* The subline's box adds nothing to the column: its line is placed by
+       itself (below), or folded into the sheet. */
+    .nx-sublinebox {
+      display: contents;
     }
     /* Under a message to read the stage draws nothing and gives way, so
        nothing below the sentence is held still by it: its own height. */

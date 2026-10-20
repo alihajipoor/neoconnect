@@ -541,6 +541,9 @@ function Composed({
   const pill = pillFor(sc.state, press, { pressed: sc.pressed ?? false, waitingForNetwork: sc.waitingForNetwork, failed: sc.failed });
   const secondary = secondaryFor(press, { reconnecting: reconnecting !== null, failed: sc.failed ?? false });
   const hintText = sc.failed ? t("err.allProtocolsFailed") : sc.hold === "hold.holding" ? t("hold.holding") : t(headline.hint);
+  /** As the main page's: the hold's sentences only where the setting is on
+   * -- here, the states that show the hold. */
+  const hintReserve: readonly TranslationKey[] = sc.hold ? [...HEADLINE_HINTS, "hold.holding", "hold.heldAfterDrop"] : HEADLINE_HINTS;
   const sample = EVIDENCE[evidence] ?? EVIDENCE.mixed;
   const routes = useMemo(() => sample.routes(ROUTES), [sample]);
   const history = useMemo(() => sampleHistory(routes, sample.own), [routes, sample]);
@@ -744,7 +747,7 @@ function Composed({
           chip={<StatusChip glyph={chip.glyph} label={t(chip.labelKey)} />}
           line={<StateLine line={line} words={lineWords} decor={<Decor keys={["decor.browse", "decor.stream", "decor.work", "decor.anywhere"]} />} />}
           hint={
-            <Hint tone={hintTone(calmTone, { failed: sc.failed })} reserve={HEADLINE_HINTS}>
+            <Hint tone={hintTone(calmTone, { failed: sc.failed })} reserve={hintReserve}>
               {hintText}
             </Hint>
           }

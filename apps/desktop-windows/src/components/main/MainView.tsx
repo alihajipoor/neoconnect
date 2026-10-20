@@ -194,11 +194,11 @@ export function MainView(slots: MainSlots) {
               {slots.line}
               {slots.hint}
               {slots.slot}
-              {slots.subline ? (
-                <div className="nx-sublinebox" data-stays={slots.sublineStays ? "1" : undefined}>
-                  {slots.subline}
-                </div>
-              ) : null}
+              {/* Drawn in every state, empty or not: its row is kept, so a
+                  countdown or a rung arriving moves nothing (pearl.css). */}
+              <div className="nx-sublinebox" data-stays={slots.subline && slots.sublineStays ? "1" : undefined}>
+                {slots.subline}
+              </div>
               {slots.actions}
               {slots.error ? <div className="nx-err">{slots.error}</div> : null}
               {slots.notes}

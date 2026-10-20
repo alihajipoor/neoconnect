@@ -25,11 +25,18 @@
 //     one sustained message that takes room from the stage: the states that
 //     show it are compared with each other.
 // The sign-in screens are measured at the window and tablet sizes too.
+// And on the desktop windows (1180x760, 940x700, the fitted 922x648, the
+// 720x600 minimum), in both languages and every state the main page has --
+// the ladder's rung, a reconnect's countdown, the hold among them -- that
+// the button's top and the glass mark's place and size never change with
+// the state, and that the button is on screen, clear of the column's fade,
+// without scrolling (a banner's states are reported, not failed: the column
+// is read from the banner down). `--desktop` runs that pass alone.
 // Exits 1 on any failure. Nothing leaves the machine: the preview answers
 // every Tauri call itself.
 //
 //   node scripts/check-phone-fit.mjs [--app mobile] [--all] [--json out.json]
-//                                     [--chrome path] [--text-scale 1.15]
+//                                     [--chrome path] [--text-scale 1.15] [--desktop]
 //
 // --app mobile measures the phone app itself instead (apps/mobile, its own
 // preview.html and stylesheet, `pnpm check:phone-fit` there): its main page
@@ -73,6 +80,8 @@ const opt = (name) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const MOBILE = opt("app") === "mobile";
+/** --desktop: the desktop windows' pass alone. */
+const DESKTOP_ONLY = flag("desktop") && !MOBILE;
 const root = path.resolve(here, MOBILE ? "../../mobile" : "..");
 
 /** The preview's own labels (src/preview/PreviewApp.tsx `SIZES`). */
@@ -151,6 +160,34 @@ const MAIN = MOBILE ? MOBILE_MAIN : [
   "crossedDegraded",
 ];
 const WINDOWS_ONLY = MOBILE ? [] : ["unconfined", "gamingOff", "gamingOn", "gamingUnknown"];
+/** The desktop windows (the fitted one, the old default, the first
+ * launch): there the button sits in the copy column under the sentence,
+ * and the glass mark in the scene beside it. Neither may move with the
+ * state -- a brief held reconnect, a ladder's rung, a countdown, a longer
+ * sentence (design-system.md 4.5, 6.3; the calm rule) -- and the button
+ * must be on screen, clear of the column's fade, without scrolling. */
+const DESKTOP_SIZES = MOBILE ? [] : ["1180 × 760 (first launch)", "940 × 700 (old default)", "922 × 648 (fitted, 1280×720 at 150%)", "720 × 600 (minimum)"];
+/** Every main-page state, and the progress line's own. */
+const DESKTOP_MAIN = [
+  ...MAIN,
+  "ladder",
+  "autoConnect",
+  "reconnectCountdown",
+  "reconnectAttempt",
+  "holding",
+  "holdRefused",
+  "unconfined",
+  "speed",
+];
+/** Not compared: a banner above the copy (it is read first, and moves
+ * what is under it), no plan (another foot), the device limit's card in
+ * the button's place. */
+const DESKTOP_APART = new Set(["blocked", "ended", "none", "slot"]);
+/** The reconnect hold's states: the preview shows them with the setting on,
+ * which reserves the hold's longer sentences too (Dashboard's
+ * `hintReserve`). Compared with each other: with the setting on, every
+ * state keeps that room. */
+const DESKTOP_HOLD = new Set(["holding", "holdRefused"]);
 /** A message to read is on screen: the stage gives way (it keeps its place
  * and draws nothing), so its size is not compared. */
 const ALERT = new Set(
@@ -328,6 +365,29 @@ const MEASURE = (noLocation) => `(() => {
     },
     stage: stageEl ? (({ t, b }) => ({ t, b }))(rect(stageEl)) : null,
     mark: mark ? (({ t, s, e }) => ({ t, s, e }))(rect(mark)) : null,
+  };
+})()`;
+
+/** A desktop window's main page: where the button and the mark are, and
+ * whether the button is on screen without scrolling, clear of the fade
+ * the column draws at its foot while it has more below. */
+const DESKTOP_MEASURE = `(() => {
+  const frame = document.querySelector('[data-testid=frame]');
+  const fb = frame.getBoundingClientRect();
+  const vis = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+  const hero = frame.querySelector('.nx-hero');
+  const ov = frame.querySelector('.nx-ov');
+  const pill = [...frame.querySelectorAll('.nx-hero-copy > .nx-actions > .nx-btn:not(.ghost)')].find(vis) || null;
+  const mark = [...frame.querySelectorAll('.nx-scene .nx-mark')].find(vis) || null;
+  const box = (el) => el.getBoundingClientRect();
+  const hb = box(hero);
+  const fade = ov && ov.dataset.more === '1' ? 28 : 0;
+  const pb = pill ? box(pill) : null;
+  return {
+    pill: pb ? { t: pb.top - fb.top } : null,
+    hidden: pb ? Math.max(0, Math.round(pb.bottom - (hb.top + hero.clientHeight - fade))) : 0,
+    overflow: Math.round(hero.scrollHeight - hero.clientHeight),
+    mark: mark ? { t: box(mark).top - fb.top, s: box(mark).width } : null,
   };
 })()`;
 
@@ -528,6 +588,7 @@ const results = [];
 const authResults = [];
 const disclosure = [];
 const safe = [];
+const desk = [];
 try {
   let targets = [];
   for (let i = 0; i < 80 && !targets.some((t) => t.type === "page"); i++) {
@@ -590,7 +651,7 @@ try {
   await ev("document.fonts.ready.then(() => true)");
   if (!(await styled())) throw new Error("The preview's CSS never applied: nothing measured.");
   await choose("theme", "light");
-  for (const size of SIZES) {
+  for (const size of DESKTOP_ONLY ? [] : SIZES) {
     if (!(await choose("size", size))) throw new Error(`The preview has no size "${size}".`);
     // What is measured is the layout a size settles on, not the moment after
     // the frame jumped to it: the map re-places its lights and mark a frame
@@ -612,8 +673,23 @@ try {
       }
     }
   }
+  // The desktop windows: the button and the mark keep still.
+  for (const size of DESKTOP_SIZES) {
+    await choose("screen", "main");
+    if (!(await choose("size", size))) throw new Error(`The preview has no size "${size}".`);
+    await sleep(800);
+    for (const lang of LANGS) {
+      await choose("language", lang);
+      for (const state of DESKTOP_MAIN) {
+        if (!(await choose("scenario", state))) throw new Error(`The preview has no state "${state}".`);
+        // The mark re-places itself a frame or two after the copy changes.
+        await sleep(400);
+        desk.push({ size: size.split(" (")[0], lang, state, ...(await ev(DESKTOP_MEASURE)) });
+      }
+    }
+  }
   // Sign-in and its steps.
-  for (const size of [...SIZES, ...WINDOWS]) {
+  for (const size of DESKTOP_ONLY ? [] : [...SIZES, ...WINDOWS]) {
     await choose("size", size);
     for (const lang of LANGS) {
       await choose("language", lang);
@@ -752,7 +828,39 @@ for (const size of [...new Set(results.map((r) => r.size))]) {
   }
 }
 
-if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify({ main: results, auth: authResults, disclosure, safe }, null, 1));
+// The desktop windows: the button and the mark in one place in every
+// state compared, and the button on screen in every state.
+const deskMoved = [];
+const deskHidden = [];
+for (const size of [...new Set(desk.map((r) => r.size))]) {
+  for (const lang of LANGS) {
+    const rows = desk.filter((r) => r.size === size && r.lang === lang);
+    const compared = rows.filter((r) => !DESKTOP_APART.has(r.state));
+    for (const group of [compared.filter((r) => !DESKTOP_HOLD.has(r.state)), compared.filter((r) => DESKTOP_HOLD.has(r.state))]) {
+      const base = group.find((r) => r.pill !== null);
+      for (const r of group) {
+        for (const part of ["pill", "mark"]) {
+          if (base && differs(base[part], r[part])) deskMoved.push(`${size} ${lang}: ${part} in ${r.state} (${show(r[part])}) differs from ${base.state} (${show(base[part])})`);
+        }
+      }
+    }
+    // Under a banner the column is read from the banner down, and scrolls
+    // with "More below": reported, not failed on.
+    for (const r of rows) {
+      if (r.hidden <= 0) continue;
+      const line = `${size} ${lang} ${r.state}: the button ${r.hidden}px under the fold or the fade`;
+      if (DESKTOP_APART.has(r.state)) console.log(`note: ${line} (under a banner)`);
+      else deskHidden.push(line);
+    }
+    const pills = [...new Set(compared.filter((r) => r.pill).map((r) => Math.round(r.pill.t)))];
+    const marks = [...new Set(compared.map((r) => (r.mark ? `${Math.round(r.mark.t)}/${Math.round(r.mark.s)}px` : "hidden")))];
+    console.log(`${size} ${lang} desktop: ${rows.length} states, button top ${pills.join(" / ")}, mark ${marks.join(" / ")}, largest overflow ${Math.max(...rows.map((r) => r.overflow))}px`);
+  }
+}
+for (const line of deskMoved) console.log(`moved: ${line}`);
+for (const line of deskHidden) console.log(`hidden: ${line}`);
+
+if (opt("json")) fs.writeFileSync(opt("json"), JSON.stringify({ main: results, auth: authResults, disclosure, safe, desktop: desk }, null, 1));
 for (const size of [...new Set(safe.map((r) => r.size))]) {
   for (const lang of LANGS) {
     const rows = safe.filter((r) => r.size === size && r.lang === lang);
@@ -808,7 +916,9 @@ if (textScale !== 1) {
   );
   process.exit(0);
 }
-if (failed.length || moved.length || authFailed.length || disclosureFailed.length || safeFailed.length) {
+if (failed.length || moved.length || authFailed.length || disclosureFailed.length || safeFailed.length || deskMoved.length || deskHidden.length) {
+  if (deskMoved.length) console.error(`${deskMoved.length} desktop state(s) move the button or the mark.`);
+  if (deskHidden.length) console.error(`${deskHidden.length} desktop state(s) leave the button under the fold or the fade.`);
   if (safeFailed.length) console.error(`${safeFailed.length} screen(s) on a tablet or a phone on its side reach under the status bar or the home indicator, spill, or are drawn in a layout the stylesheet is not in.`);
   if (disclosureFailed.length) console.error(`${disclosureFailed.length} disclosure screen(s) whose button cannot be reached.`);
   if (failed.length) console.error(`${failed.length} main-page state(s) do not fit, or cut their text.`);
@@ -817,6 +927,7 @@ if (failed.length || moved.length || authFailed.length || disclosureFailed.lengt
   process.exit(1);
 }
 console.log(
-  "Every main-page state fits one screen, cuts no text, and the foot, the stage and the mark keep still; every sign-in screen fits one screen." +
+  (DESKTOP_ONLY ? "" : "Every main-page state fits one screen, cuts no text, and the foot, the stage and the mark keep still; every sign-in screen fits one screen.") +
+    (DESKTOP_SIZES.length ? " On the desktop windows the button and the mark keep still in every state, and the button is on screen without scrolling." : "") +
     (MOBILE ? " Relay mode fits too, with the status bar's inset drawn once; the tablets and the phones on their sides keep the status bar and the home indicator clear." : ""),
 );

@@ -85,9 +85,19 @@ describe("a phone's main page is one screen", () => {
   });
 
   it("a failover to another country stays in the column; a protocol change folds", () => {
-    expect(view).toContain('<div className="nx-sublinebox" data-stays={slots.sublineStays ? "1" : undefined}>');
+    expect(view).toContain('<div className="nx-sublinebox" data-stays={slots.subline && slots.sublineStays ? "1" : undefined}>');
     expect(dash).toContain("sublineStays={Boolean(failedOverTo?.fromRegion)}");
-    expect(css).toMatch(/\.nx-sublinebox \{\s*display: contents;/);
+    // On a phone the box adds nothing to the column: its line is placed by
+    // itself, or folded into the sheet.
+    expect(narrowRule("    .nx-sublinebox")).toMatch(/display: contents;/);
+  });
+
+  it("wider windows keep the subline's row in every state, so a countdown or a rung moves nothing", () => {
+    // Drawn whether or not it says anything, and two lines tall.
+    expect(view).not.toContain("{slots.subline ? (");
+    const box = css.slice(css.indexOf("  .nx-sublinebox {"), css.indexOf("}", css.indexOf("  .nx-sublinebox {")));
+    expect(box).toMatch(/display: flex;/);
+    expect(box).toMatch(/min-height: calc\(2lh - 4px\);/);
   });
 
   it("the honest state never folds: the chip, the line, the sentence, banners, the device limit, leaks, errors", () => {
@@ -121,9 +131,16 @@ describe("a phone's main page is one screen", () => {
   });
 
   it("the sentence is as tall as the longest it can say, so a longer one moves nothing", () => {
-    expect(narrowRule("    .nx-hint > .rsv")).toMatch(/visibility: hidden;/);
+    // At every width (design-system.md 4.6): the desktop's button sits under
+    // the sentence, and must not move with it either.
+    const rsv = css.slice(css.indexOf("  .nx-hint > .rsv {"), css.indexOf("}", css.indexOf("  .nx-hint > .rsv {")));
+    expect(rsv).toMatch(/visibility: hidden;/);
+    expect(rsv).not.toMatch(/display: none;/);
     expect(hero).toContain('<span className="rsv" aria-hidden>');
-    expect(preview).toContain("reserve={HEADLINE_HINTS}");
+    expect(preview).toContain("reserve={hintReserve}");
+    expect(preview).toContain(
+      'const hintReserve: readonly TranslationKey[] = sc.hold ? [...HEADLINE_HINTS, "hold.holding", "hold.heldAfterDrop"] : HEADLINE_HINTS;',
+    );
     // The main page's: the same, and the reconnect hold's sentence where the
     // setting can make the hint say it (lib/reconnect-hold.ts).
     expect(dash).toContain("reserve={hintReserve}");

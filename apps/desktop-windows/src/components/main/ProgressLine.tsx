@@ -89,7 +89,7 @@ export function ProgressLineView({
       <p className="nx-subline" data-progress="auto">
         <Play aria-hidden />
         <span key={`auto:${step}`} className="nx-swap">
-          {rungText ? `${t("dash.autoConnecting")} ${rungText}` : t("dash.autoConnecting")}
+          {rungText ? t("dash.autoConnectingRung", { rung: rungText }) : t("dash.autoConnecting")}
         </span>
       </p>
     );
