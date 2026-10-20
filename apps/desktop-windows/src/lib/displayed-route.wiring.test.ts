@@ -10,7 +10,7 @@ const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.u
 // pin first. Both now name the route the SERVER tile names.
 describe("the idle screen names what Connect dials", () => {
   it("the PROTOCOL tile reads displayedProtocol, not the credential the last session ended on", () => {
-    expect(dashboard).toContain("displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes)");
+    expect(dashboard).toContain("displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes, tunnelNamed)");
     expect(dashboard).not.toContain("customerProtocolLabel(protocolUser.protocol");
   });
 
@@ -18,7 +18,7 @@ describe("the idle screen names what Connect dials", () => {
     expect(dashboard).not.toContain("currentRouteId={protocolUser?.routeId}");
     expect(dashboard).toContain("currentRouteId={screenRouteId ?? undefined}");
     expect(dashboard).toContain(
-      "const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);",
+      "const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);",
     );
   });
 });
