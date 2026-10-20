@@ -78,6 +78,9 @@ interface Scenario {
   unsupported?: boolean;
   /** On an iPhone: the platform's own words for a declined prompt. */
   ios?: boolean;
+  /** A tunnel the app found up and cannot name (`tunnelNamed`): reopened
+   * over a VPN the platform kept, its last dial on another protocol. */
+  unnamed?: boolean;
 }
 
 export const SCENARIOS: Record<string, Scenario> = {
@@ -86,6 +89,7 @@ export const SCENARIOS: Record<string, Scenario> = {
   verifying: { label: "Checking (pressed)", state: "verifying", pressed: true },
   connected: { label: "Connected, verified (protocol changed)", state: "connected", timed: true, failover: true },
   adopted: { label: "Connected, adopted at launch", state: "connected" },
+  unnamed: { label: "Connected, route not known (reopened)", state: "connected", unnamed: true },
   unverified: { label: "Connected, not confirmed", state: "unverified" },
   degraded: { label: "Not carrying traffic", state: "degraded" },
   reconnectHeld: {
@@ -539,32 +543,35 @@ function Composed({
       };
   const settled = sc.state === "connected" || sc.state === "unverified" || sc.state === "degraded";
   const automaticPending = !pinned && !settled;
+  // Over a tunnel the app cannot name: no place, no protocol, no light --
+  // "—", as the Dashboard says it (`tunnelNamed`).
+  const named = !sc.unnamed;
   const location: TrayLocation = {
     flag: automaticPending ? (
       <span className="nx-flagbox auto">
         <Sparkles aria-hidden />
       </span>
-    ) : current ? (
+    ) : current && named ? (
       <RouteFlag region={routePlace(current).entry} exitRegion={routePlace(current).exit} label={placeLabel(current, language)} size="lg" />
     ) : (
       <Globe className="size-5 text-ink-2" aria-hidden />
     ),
-    name: automaticPending ? t("loc.automaticShort") : placeLabel(current, language),
-    sub: automaticPending ? null : pinned ? protocol : `${t("loc.automaticShort")} · ${protocol}`,
+    name: automaticPending ? t("loc.automaticShort") : named ? placeLabel(current, language) : "—",
+    sub: automaticPending || !named ? null : pinned ? protocol : `${t("loc.automaticShort")} · ${protocol}`,
     onChange: () => onSheet(true),
   };
   const ip = ipFor(sc.state, "198.51.100.42", { gaming: false });
 
   // The map, from the same function the Dashboard uses.
-  const verified = sc.state === "connected" || held === "connected" ? current : null;
+  const verified = named && (sc.state === "connected" || held === "connected") ? current : null;
   const evidenceCtx = { history, network: PREVIEW_NET, now: Date.now() };
   const mapScene = mapLights({
     routes,
     ...evidenceCtx,
     verified,
     tone: calmTone,
-    shown: settled ? current : sc.relayPinned ? current : null,
-    up: settled ? current : null,
+    shown: settled ? (named ? current : null) : sc.relayPinned ? current : null,
+    up: settled && named ? current : null,
   });
   const mapPlaces = mapCountries(routes);
   const placeEvidence = placesEvidence(routes, evidenceCtx);
@@ -645,7 +652,7 @@ function Composed({
     <LocationPicker
       variant={view === "locations" ? "page" : layout === "narrow" ? "sheet" : "panel"}
       subscriptionId="preview"
-      currentRouteId={settled ? current.id : undefined}
+      currentRouteId={settled && named ? current.id : undefined}
       tunnelActive={sc.state !== "disconnected"}
       connectionState={sc.state}
       initialRoutes={routes}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Gamepad2, Repeat, Shield, Sparkles } from "lucide-react";
+import { Gamepad2, Globe, Repeat, Shield, Sparkles } from "lucide-react";
 import type { ConnectionState } from "../components/ConnectOrb";
 import { ConnectOrb } from "../components/ConnectOrb";
 import { DeviceSlotCard } from "../components/DeviceSlotCard";
@@ -80,6 +80,9 @@ interface Scenario {
   progress?: { rung?: [index: number, total: number]; count?: CountdownLine; auto?: boolean };
   /** "Block the internet while reconnecting": what the service says. */
   hold?: HoldNoteKey;
+  /** A tunnel the screen found up and cannot name (`tunnelNamed`): back
+   * from Settings, its last dial on another protocol. */
+  unnamed?: boolean;
 }
 
 const SCENARIOS: Record<string, Scenario> = {
@@ -88,6 +91,7 @@ const SCENARIOS: Record<string, Scenario> = {
   verifying: { label: "Checking (pressed)", state: "verifying", pressed: true },
   connected: { label: "Connected, verified", state: "connected", timed: true, failover: true, details: true },
   adopted: { label: "Connected, adopted at launch", state: "connected" },
+  unnamed: { label: "Connected, route not known (back from Settings)", state: "connected", unnamed: true },
   unconfined: { label: "Connected, not confined", state: "connected", unconfined: true, caution: true, timed: true, leak: true },
   unverified: { label: "Connected, not confirmed", state: "unverified" },
   degraded: { label: "Not carrying traffic", state: "degraded" },
@@ -517,8 +521,13 @@ function Composed({
           days: { text: t("tr.daysLeft", { n: formatNumber(daysLeft, language) }), caution: caution.days },
           renew: sc.offline ? null : { label: t("tr.renew"), onClick: () => undefined },
         };
+  // Over a tunnel the screen cannot name: no place, no protocol, no light
+  // -- "—", as the Dashboard says it (`tunnelNamed`).
+  const named = !sc.unnamed;
   const location: TrayLocation = gaming
     ? { flag: <span className="nx-flagbox auto"><Gamepad2 aria-hidden /></span>, name: t("gaming.games"), sub: t("tr.gamesChosen", { n: formatNumber(2, language) }) }
+    : !named
+      ? { flag: <Globe className="size-5 text-ink-2" aria-hidden />, name: "—", sub: null, onChange: () => onSheet(true) }
     : sc.state === "disconnected" && !sc.timed
       ? { flag: <span className="nx-flagbox auto"><Sparkles aria-hidden /></span>, name: t("loc.automaticShort"), sub: null, onChange: () => onSheet(true) }
       : {
@@ -530,7 +539,7 @@ function Composed({
   const ip = ipFor(sc.state, "198.51.100.42", { gaming });
 
   // The map, from the same function the Dashboard uses.
-  const verified = !gaming && (sc.state === "connected" || held === "connected") ? current : null;
+  const verified = !gaming && named && (sc.state === "connected" || held === "connected") ? current : null;
   const settled = sc.state === "connected" || sc.state === "unverified" || sc.state === "degraded";
   const evidenceCtx = { history, network: PREVIEW_NET, now: Date.now() };
   const mapScene = mapLights({
@@ -538,8 +547,8 @@ function Composed({
     ...evidenceCtx,
     verified,
     tone: calmTone,
-    shown: gaming ? null : settled || sc.relayPinned ? current : null,
-    up: gaming || !settled ? null : current,
+    shown: gaming || (settled && !named) ? null : settled || sc.relayPinned ? current : null,
+    up: gaming || !settled || !named ? null : current,
   });
   const workedPlaces = new Set<string>();
   for (const [key, evidence] of placesEvidence(routes, evidenceCtx)) if (evidence.look === "live") workedPlaces.add(key);
@@ -634,7 +643,7 @@ function Composed({
     <LocationPicker
       variant={layout === "narrow" ? "sheet" : "panel"}
       subscriptionId="preview"
-      currentRouteId={isTunnelUp(sc.state) ? current.id : undefined}
+      currentRouteId={isTunnelUp(sc.state) && named ? current.id : undefined}
       tunnelActive={sc.state !== "disconnected"}
       connectionState={sc.state}
       initialRoutes={routes}
