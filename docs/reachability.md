@@ -83,6 +83,24 @@ build. Real domains and addresses never appear here
   publish the offline list with a version above the server list's. The
   next server list must then be numbered above that offline list: clients
   keep one version number for both, and the panel refuses one beneath it.
+- **Copies on GitHub**, mirrored by jsDelivr. After publishing either
+  list, copy both into a checkout of the copies repository
+  (`{copies-repo}`; its name stays out of this repository):
+
+      node scripts/endpoints/publish-copies.mjs --repo {copies-checkout} \
+        --names {offline-file},{server-file} --push
+
+  It fetches the two lists from the panel, verifies them against the
+  apps' compiled-in keys with `bundle.mjs verify`, writes them unchanged
+  under the two file names given (kept with the repository's name, out
+  of this repository), commits only a higher version, pushes, and asks
+  jsDelivr to refetch. A copy already there is checked the same way
+  before its version counts; one that fails is replaced. `--dry-run`
+  writes nothing. The repository holds those two files and nothing else,
+  and the script refuses a checkout that holds more. It commits only
+  under the checkout's own identity (`git config --local user.name` and
+  `user.email`, ideally a GitHub noreply address), in UTC, and refuses a
+  checkout without one.
 - **The statement expires** (at most two years). Vouch again with the
   offline key before it does, or server lists stop being accepted and
   clients fall back to the newest offline list they have fetched (kept
@@ -135,5 +153,9 @@ On the VM and a phone, with the release build:
 - **Social sign-in during an intranet** cannot work (it needs Google's
   and Apple's servers). Sessions renew without them; social-only
   accounts should be nudged once to set a password.
+- **The apps reading the GitHub copies.** No build fetches them yet:
+  the copies' hosts are outside every shipped HTTP scope, and their URLs
+  need to reach the build the way the seed does, not through this
+  repository.
 - **Bare-address mirrors** need certificates valid for an IP address
   (Let's Encrypt issues short-lived ones), renewed every few days.

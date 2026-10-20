@@ -9,6 +9,7 @@ import { ClientAttemptsService } from "../client-attempts/client-attempts.servic
 import { ReachabilityService } from "../reachability/reachability.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { RelayAuthService } from "../relay-auth/relay-auth.service";
+import { BlockWatchService } from "../block-watch/block-watch.service";
 import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
@@ -24,6 +25,7 @@ export class SweepsProcessor extends WorkerHost {
     private readonly reachabilityService: ReachabilityService,
     private readonly protocolUsersService: ProtocolUsersService,
     private readonly relayAuthService: RelayAuthService,
+    private readonly blockWatchService: BlockWatchService,
   ) {
     super();
   }
@@ -110,6 +112,19 @@ export class SweepsProcessor extends WorkerHost {
         // address; paused during a declared intranet and the 30 days
         // after (docs/relay-last-resort.md, R3.8).
         await this.relayAuthService.sweepUnverified();
+        break;
+      }
+      case "block-watch": {
+        // Looks for servers that seem blocked and tells the owner; never
+        // changes one. Off unless BLOCK_WATCH says otherwise, and swallows
+        // its own failures like the reachability probe.
+        const results = await this.blockWatchService.runCycle();
+        const flagged = results.filter((r) => r.verdict || r.outage);
+        if (flagged.length) {
+          this.logger.warn(
+            `block watch: ${flagged.map((r) => `${r.nodeName}=${r.verdict ?? "outage"}[${r.firing.join("+")}]`).join(", ")}`,
+          );
+        }
         break;
       }
       default:

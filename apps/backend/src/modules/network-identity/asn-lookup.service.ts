@@ -69,6 +69,12 @@ export class AsnLookupService implements OnModuleInit, OnModuleDestroy {
     return this.table?.orgOf(asn) ?? null;
   }
 
+  /** Where an ASN is registered (ISO alpha-2), or null when unknown or
+   * while the table has not loaded. */
+  countryOfAsn(asn: number): string | null {
+    return this.table?.countryOfAsn(asn) ?? null;
+  }
+
   /** Where the network announcing `ip` is registered (ISO alpha-2), or
    * null when unknown -- including while the table has not loaded. For
    * the relay's region gate only; see AsnTable.countryOf. */
