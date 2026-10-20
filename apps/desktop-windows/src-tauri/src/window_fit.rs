@@ -15,9 +15,12 @@
 //! and placed before it was shown -- and still, in 3 of 13 launches on the
 //! VM, it appeared at the config's centred place and moved 0.12-0.39 s
 //! later (9x26 px at 1024x768, 120x30 px at 1920x955): the size had taken,
-//! the move had not. A resize or a move of a window that exists goes to
-//! Windows as `SetWindowPos` with `SWP_ASYNCWINDOWPOS` (tao), so neither is
-//! promised to have landed by the time the window is shown.
+//! the move had not. Why is not proven. `SWP_ASYNCWINDOWPOS` (tao's flag for
+//! a move or resize) was the first guess, and a doubtful one: `setup()`
+//! runs on the window's own thread, where that flag changes nothing.
+//! Whatever the cause, a window that is never moved cannot be seen to move,
+//! and that stays unverified until the VM's 13-launch run (1024x768 and
+//! 1920x955 at 100%, one at 150%) shows none.
 //!
 //! So the main window is no longer created from the config before
 //! `setup()` (`defer_main_window`, which changes the config the app was
@@ -140,8 +143,8 @@ fn placed(config: &WindowConfig, at: Option<Opening>) -> WindowConfig {
     config
 }
 
-/// Creates the main window at its size and place on the primary monitor --
-/// the one the config's centring put it on -- then shows it, painted the
+/// Creates the main window at its size and place on the monitor the
+/// customer is working on (`opening_monitor`), then shows it, painted the
 /// theme's base colour first. Created there rather than created and then
 /// moved: the first rectangle Windows draws it in is the right one. With no
 /// monitor or scale to work from, it is created as the config says.
@@ -156,10 +159,10 @@ pub fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// The opening on the primary monitor: the saved size, or the wide first
-/// launch, clamped to its work area and centred in it.
+/// The opening on the monitor the customer is working on: the saved size,
+/// or the wide first launch, clamped to its work area and centred in it.
 fn main_opening(app: &tauri::App) -> Option<Opening> {
-    let monitor = app.primary_monitor().ok().flatten()?;
+    let monitor = opening_monitor(app)?;
     let scale = monitor.scale_factor();
     if !(scale.is_finite() && scale > 0.0) {
         return None;
@@ -174,6 +177,24 @@ fn main_opening(app: &tauri::App) -> Option<Opening> {
         (area.size.width, area.size.height),
         scale,
     ))
+}
+
+/// The monitor to open on: the one under the pointer as the app starts --
+/// launched from a second screen's taskbar or Start menu, it opens there,
+/// as Windows' own centring did -- or else the primary one. Not the primary
+/// always: that took a launch from a second screen to the first.
+fn opening_monitor(app: &tauri::App) -> Option<tauri::Monitor> {
+    let under_pointer = || {
+        let at = app.cursor_position().ok()?;
+        app.monitor_from_point(at.x, at.y).ok().flatten()
+    };
+    first_found(under_pointer, || app.primary_monitor().ok().flatten())
+}
+
+/// The first of two that is found, the second asked only when the first is
+/// not.
+fn first_found<T>(first: impl FnOnce() -> Option<T>, then: impl FnOnce() -> Option<T>) -> Option<T> {
+    first().or_else(then)
 }
 
 /// The theme's base colour (theme.css `--base`), Pearl and Smoked.
@@ -327,6 +348,20 @@ mod tests {
         let plain = placed(&config, None);
         assert_eq!((plain.width, plain.height, plain.x, plain.center), (940.0, 700.0, None, true));
         assert!(!plain.visible);
+    }
+
+    /// The monitor under the pointer, when there is one; the primary only
+    /// when there is not -- and then only asked.
+    #[test]
+    fn opens_on_the_monitor_under_the_pointer_else_the_primary() {
+        assert_eq!(first_found(|| Some("second screen"), || panic!("the primary asked for")), Some("second screen"));
+        assert_eq!(first_found(|| None, || Some("primary")), Some("primary"));
+        assert_eq!(first_found::<&str>(|| None, || None), None);
+        let source = include_str!("window_fit.rs");
+        let opening = &source[source.find("fn main_opening(").expect("main_opening")..];
+        let opening = &opening[..opening.find("\n}\n").expect("its end")];
+        assert!(opening.contains("let monitor = opening_monitor(app)?;"), "{opening}");
+        assert!(!opening.contains("primary_monitor"), "the primary monitor, whatever screen the app was launched from");
     }
 
     #[test]
