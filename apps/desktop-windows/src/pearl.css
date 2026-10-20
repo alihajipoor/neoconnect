@@ -1935,6 +1935,11 @@
     gap: 8px;
     max-width: 54ch;
   }
+  /* Closed, it is its toggle alone: no gap kept for the panel under it
+     until it opens. */
+  .nx-details > .nx-dpanel:not(.open) {
+    display: none;
+  }
 
   /* ---------- the locations panel ---------- */
   .nx-panel {
@@ -2704,11 +2709,14 @@
       padding-inline-start: clamp(10px, 2.4cqw, 44px);
       overflow-x: hidden;
       overflow-y: auto;
-      scrollbar-width: thin;
-      /* The scrollbar's room kept whether or not one shows, so a state
-         whose copy overflows does not narrow the column -- in Persian it
-         would shift it, and the map and ribbon measured beside it. */
-      scrollbar-gutter: stable;
+      /* It scrolls, and draws no scrollbar: what is below the fold is said
+         by the fade at its foot and the "More below" pill (MainView), and
+         an opened "Connection details" is brought into view (Disclosure).
+         At the first-launch 1180x760 a thin bar stood beside the copy as
+         soon as the details' toggle was there (VM, 2026-10-20). Never a
+         scrollbar, so never one that comes and goes and narrows the column
+         -- in Persian that would shift it, and the map measured beside it. */
+      scrollbar-width: none;
     }
     .nx-ov[data-more="1"] > .nx-hero {
       -webkit-mask-image: linear-gradient(#000 calc(100% - 28px), transparent);
@@ -2730,6 +2738,13 @@
     }
     .nx-hint {
       max-width: 40ch;
+    }
+    /* Persian sets the sentence in the column's own measure: forty of its
+       "ch" -- the width of a Latin zero -- took the longest sentence to four
+       lines where the column holds it in three, and the copy past the fold
+       at 1180x760. */
+    html[lang="fa"] .nx-hint {
+      max-width: none;
     }
     /* The art lives in the hero's own grid area, so it can never sit under
        the panel's or the tray's blur. */
@@ -2848,6 +2863,15 @@
     }
     .nx-decor {
       display: none;
+    }
+  }
+  /* A wide window of a laptop's height -- the first-launch 1180x760, the old
+     940x700: the column's rhythm is closer, so the copy of every ordinary
+     state, "Connection details" included, is above the fold with nothing to
+     scroll (check-phone-fit.mjs --desktop). */
+  @container app (min-width: 900px) and (max-height: 820px) {
+    .nx-hero-copy {
+      gap: clamp(10px, 1.4cqh, 18px);
     }
   }
   @container app (min-width: 900px) and (max-height: 660px) {

@@ -31,7 +31,10 @@ describe("what the map is placed by", () => {
   });
 
   it("a column whose width does not depend on whether it scrolls", () => {
-    expect(css).toContain("scrollbar-gutter: stable;");
+    // It draws no scrollbar at all, so none comes and goes beside it
+    // (desktop-hero-fit.test.ts); it kept a stable gutter before.
+    const hero = css.slice(css.indexOf("    .nx-hero {\n      grid-area: hero;\n      z-index: 1;"));
+    expect(hero.slice(0, hero.indexOf("}"))).toContain("scrollbar-width: none;");
   });
 
   it("a ribbon kept off the copy column, below the switch, above the band's geometry even once it gives way", () => {
