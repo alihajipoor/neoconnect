@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { ScreenTransition } from "@shared/components/ScreenTransition";
 import { getTokens } from "@shared/lib/session";
 import { flushAttempts } from "@shared/lib/attempts";
@@ -30,6 +30,8 @@ import { Dashboard } from "./screens/Dashboard";
 import { PerAppCard } from "./components/PerAppCard";
 import { isAndroid, isIOS } from "./lib/platform";
 import { ProminentDisclosure, hasAcceptedDisclosure } from "./components/ProminentDisclosure";
+import { appPrefs } from "@shared/lib/app-prefs";
+import { PHONE_DEVICE, noticesFor, setNotices } from "./lib/phone-notices";
 
 /** How often a queued diagnostic report retries. Matches the desktop
  * client so the two do not report at different rates for no reason. */
@@ -102,6 +104,31 @@ export default function App() {
   // A sign-out from one of the shell's pages, from its profile menu.
   const [pageSigningOut, setPageSigningOut] = useState(false);
   const { t, language } = useI18n();
+  const prefs = useSyncExternalStore(appPrefs.subscribe, appPrefs.current, appPrefs.current);
+  const [prefsLoaded, setPrefsLoaded] = useState(false);
+
+  // The device's preferences, read once per run (lib/app-prefs.ts).
+  useEffect(() => {
+    let alive = true;
+    void appPrefs.load().then(() => alive && setPrefsLoaded(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // The tunnel's own notifications (lib/phone-notices.ts) in the app's
+  // language, with the customer's setting: handed to the native side now
+  // and whenever either changes, so what it posts in the background is
+  // what Settings says. Not before the setting has been read -- a default
+  // is not the customer's answer.
+  useEffect(() => {
+    if (!prefsLoaded) return;
+    const platform = isAndroid() ? "android" : isIOS() ? "ios" : null;
+    if (platform === null) return;
+    void setNotices(noticesFor(t, prefs.notifications, platform)).catch(() => undefined);
+    // `t` follows the language.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefsLoaded, prefs.notifications, language]);
 
   // The disclosure gates everything, including a session that is already
   // signed in. Play wants it shown before the data collection begins,
@@ -365,6 +392,9 @@ export default function App() {
         onOpenActivity={() => setScreen("activity")}
         onSignOut={() => void signOutFromSettings()}
         platform={isAndroid() ? "android" : isIOS() ? "ios" : "web"}
+        // Notifications only (lib/phone-notices.ts): the rows a phone does
+        // not honour are not drawn.
+        device={isAndroid() || isIOS() ? PHONE_DEVICE : undefined}
       />,
     );
   }

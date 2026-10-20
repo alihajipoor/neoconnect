@@ -72,13 +72,21 @@ export type SettingsPlatform = "windows" | "android" | "ios" | "web";
  *  - `autoConnect`: the main page connects at launch when it is on
  *    (lib/auto-connect.ts);
  *  - `notifications`: the main page notifies on a lasting change
- *    (lib/connection-notify.ts), and how to ask whether the OS shows them;
+ *    (lib/connection-notify.ts) -- on a phone, the tunnel's own service or
+ *    extension does (apps/mobile lib/phone-notices.ts) -- and how to ask
+ *    whether the OS shows them, to ask it to, and to open its settings;
  *  - `reconnectHold`: the service holds the internet while reconnecting
  *    (lib/reconnect-hold.ts), told at once when the switch moves. */
 export interface DeviceSettings {
   autostart?: AutostartBinding;
   autoConnect?: boolean;
-  notifications?: { setting?: () => Promise<NotifySetting> };
+  notifications?: {
+    setting?: () => Promise<NotifySetting>;
+    /** Raises the system's own question, where it can still be asked. */
+    request?: () => Promise<NotifySetting>;
+    /** The system's settings for this app's notifications. */
+    openSettings?: () => Promise<void>;
+  };
   reconnectHold?: { apply: (enabled: boolean) => Promise<void> };
 }
 
@@ -384,7 +392,9 @@ export function Settings({
             <NotificationsRow
               checked={prefs.value.notifications}
               disabled={!prefs.loaded}
-              readSetting={device.notifications.setting}
+              binding={device.notifications}
+              platform={platform}
+              osName={osName}
             />
           </ListGroup>
         ) : null}
@@ -573,45 +583,148 @@ function AutostartRow({ binding }: { binding: AutostartBinding }) {
 }
 
 /** "Notify me when the connection changes", and, under it, whether the
- * operating system shows them at all: switched on here and off in Windows
- * shows nothing, and the row says so rather than looking like it works. */
+ * operating system shows them at all: switched on here and off in the
+ * system shows nothing, and the row says so rather than looking like it
+ * works.
+ *
+ * On a phone the system has to be asked first (Android 13+, iOS). The
+ * question is the system's own, raised only by the customer: turning the
+ * switch on, or the "Allow notifications" row under it while it is on and
+ * nobody has asked. Once the system has said no, only its settings can
+ * change it, and the row under the switch opens them. The answer is read
+ * again whenever the app comes back to the front -- from those settings,
+ * usually. */
 function NotificationsRow({
   checked,
   disabled,
-  readSetting,
+  binding,
+  platform,
+  osName,
 }: {
   checked: boolean;
   disabled: boolean;
-  readSetting?: () => Promise<NotifySetting>;
+  binding: NonNullable<DeviceSettings["notifications"]>;
+  platform: SettingsPlatform;
+  osName: string | null;
 }) {
   const { t } = useI18n();
   const [os, setOs] = useState<NotifySetting>("unknown");
+  const [asking, setAsking] = useState(false);
+  const read = binding.setting;
   useEffect(() => {
-    if (!readSetting) return;
+    if (!read) return;
     let alive = true;
-    void readSetting().then((value) => alive && setOs(value));
+    const look = () => void read().then((value) => alive && setOs(value), () => undefined);
+    look();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") look();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       alive = false;
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [readSetting]);
-  const blocked = OS_BLOCKS[os];
+  }, [read]);
+  async function ask() {
+    if (!binding.request || asking) return;
+    setAsking(true);
+    try {
+      setOs(await binding.request());
+    } catch {
+      // Nothing was decided; the row still offers the question.
+    } finally {
+      setAsking(false);
+    }
+  }
+  const view = notificationsRowView({
+    checked,
+    os,
+    platform,
+    canRequest: Boolean(binding.request),
+    canOpen: Boolean(binding.openSettings),
+  });
+  const hint =
+    view.hint === "set.notifsCanAsk" || view.hint === "set.notifsOffPhone" ? (
+      <span className="nx-osset">{t(view.hint, { os: osName ?? "" })}</span>
+    ) : view.blocked ? (
+      <span className="nx-osset">{t(view.hint)}</span>
+    ) : (
+      t(view.hint)
+    );
   return (
-    <SwitchRow
-      icon={<Bell />}
-      label={t("set.notifications")}
-      hint={checked && blocked ? <span className="nx-osset">{t(blocked)}</span> : t("set.notificationsHint")}
-      checked={checked}
-      disabled={disabled}
-      onChange={(next) => void appPrefs.set("notifications", next)}
-    />
+    <>
+      <SwitchRow
+        icon={<Bell />}
+        label={t("set.notifications")}
+        hint={hint}
+        checked={checked}
+        disabled={disabled}
+        onChange={(next) => {
+          void appPrefs.set("notifications", next);
+          // Turned on where the system has not been asked: the switch is
+          // the customer's answer, so the system's question follows it.
+          if (next && os === "canAsk") void ask();
+        }}
+      />
+      {view.action === "ask" ? <Row label={t("set.notifsAllow")} onClick={() => void ask()} disabled={asking} /> : null}
+      {view.action === "open" && osName ? (
+        <Row
+          label={t("set.notifsOpen", { os: osName })}
+          onClick={() => void binding.openSettings?.().catch(() => undefined)}
+        />
+      ) : null}
+    </>
   );
 }
 
-/** What the OS's own setting means for the switch above, when it stops
+type NotifyHint =
+  | "set.notificationsHint"
+  | "set.notificationsHintAndroid"
+  | "set.notificationsHintIos"
+  | "set.notifsCanAsk"
+  | "set.notifsOffPhone"
+  | "set.notifsOffApp"
+  | "set.notifsOffAll"
+  | "set.notifsOffPolicy";
+
+/** What the notifications row says under its switch, and the row it adds
+ * under it: the system's question while it can still be asked, or the
+ * system's settings once it has said no. Only while the switch is on: off,
+ * whether the system would show them does not matter. */
+export function notificationsRowView(input: {
+  checked: boolean;
+  os: NotifySetting;
+  platform: SettingsPlatform;
+  canRequest: boolean;
+  canOpen: boolean;
+}): { hint: NotifyHint; blocked: boolean; action: "ask" | "open" | null } {
+  const phone = input.platform === "android" || input.platform === "ios";
+  if (input.checked && phone && input.os === "canAsk" && input.canRequest) {
+    return { hint: "set.notifsCanAsk", blocked: true, action: "ask" };
+  }
+  if (input.checked && phone && input.os === "disabledForApp") {
+    return { hint: "set.notifsOffPhone", blocked: true, action: input.canOpen ? "open" : null };
+  }
+  const windowsBlock = phone ? null : OS_BLOCKS[input.os];
+  if (input.checked && windowsBlock) return { hint: windowsBlock, blocked: true, action: null };
+  return { hint: HINT[input.platform], blocked: false, action: null };
+}
+
+/** What the switch does, by platform: Windows notifies from the main page,
+ * a phone from the tunnel's own service or extension, which say less. */
+const HINT: Record<SettingsPlatform, "set.notificationsHint" | "set.notificationsHintAndroid" | "set.notificationsHintIos"> = {
+  windows: "set.notificationsHint",
+  android: "set.notificationsHintAndroid",
+  ios: "set.notificationsHintIos",
+  web: "set.notificationsHint",
+};
+
+/** What Windows' own setting means for the switch above, when it stops
  * the notifications showing. "unknown" says nothing: a build with no
  * shortcut to show them under, or a question that could not be asked. */
 const OS_BLOCKS: Record<NotifySetting, "set.notifsOffApp" | "set.notifsOffAll" | "set.notifsOffPolicy" | null> = {
   enabled: null,
+  canAsk: null,
   disabledForApp: "set.notifsOffApp",
   disabledForUser: "set.notifsOffAll",
   disabledByPolicy: "set.notifsOffPolicy",

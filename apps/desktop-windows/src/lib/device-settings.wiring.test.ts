@@ -59,6 +59,16 @@ describe("Settings' device rows", () => {
     }
   });
 
+  it("on a phone, only the one it binds: notifications, from the tunnel's own side", () => {
+    for (const platform of ["android", "ios"] as const) {
+      const html = render(platform, { notifications: {} });
+      expect(html, platform).toContain("Notify me when the connection changes");
+      for (const row of ROWS.slice(0, 3)) expect(html, `${platform}: ${row}`).not.toContain(row);
+    }
+    expect(render("android", { notifications: {} })).toContain("Tells you when Android or another VPN app turns off");
+    expect(render("ios", { notifications: {} })).toContain("Tells you when Neoxify&#x27;s VPN stops");
+  });
+
   it("never say Not built yet", () => {
     const html = render("windows", WINDOWS);
     expect(html).not.toMatch(/Not built yet/);
@@ -67,13 +77,17 @@ describe("Settings' device rows", () => {
     }
   });
 
-  it("are bound by the Windows app, and not yet by the phone's", () => {
+  it("are bound by the Windows app, and by the phone's for notifications only", () => {
     const app = source("../App.tsx");
     expect(app).toContain("device={WINDOWS_DEVICE}");
     expect(app).toMatch(/autostart: windowsAutostart,\s+autoConnect: true,\s+notifications: \{ setting: notificationSetting \},/);
     expect(app).toContain('reconnectHold: { apply: (enabled) => invoke<void>("vpn_set_reconnect_hold", { enabled }) }');
     const phone = source("../../../mobile/src/App.tsx");
-    expect(phone).not.toMatch(/\bdevice=\{/);
+    expect(phone.match(/\bdevice=\{/g)?.length).toBe(1);
+    expect(phone).toContain("device={isAndroid() || isIOS() ? PHONE_DEVICE : undefined}");
+    expect(source("../../../mobile/src/lib/phone-notices.ts")).toMatch(
+      /export const PHONE_DEVICE: DeviceSettings = \{\s+notifications: \{/,
+    );
   });
 });
 

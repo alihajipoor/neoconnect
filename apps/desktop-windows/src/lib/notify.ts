@@ -4,8 +4,10 @@ import type { Language } from "./i18n";
 /** Windows toasts (src-tauri/src/notify.rs). What to say and when is
  * lib/connection-notify.ts's; this only hands the words over. */
 
-/** Whether Windows lets Neoxify's notifications show. */
-export type NotifySetting = "enabled" | "disabledForApp" | "disabledForUser" | "disabledByPolicy" | "unknown";
+/** Whether the operating system lets Neoxify's notifications show.
+ * "canAsk" is a phone's: not yet, and asking would still raise the
+ * system's own question (Android 13+, iOS). */
+export type NotifySetting = "enabled" | "canAsk" | "disabledForApp" | "disabledForUser" | "disabledByPolicy" | "unknown";
 
 export function showNotification(title: string, body: string, language: Language): Promise<void> {
   return invoke<void>("notify_show", { title, body, lang: language });

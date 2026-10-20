@@ -19,13 +19,22 @@ import { tearDownForSignOut, type TeardownDeps } from "@shared/lib/tunnel-teardo
 export interface VpnStatus {
   connected: boolean;
   protocol: string | null;
-  /** Bytes since the tunnel came up, or null where the platform will
-   * not say. Android reads them from the engine; iOS has none to read,
-   * because the tunnel runs in a separate extension process and
+  /** Bytes since the tunnel came up, or null where nothing counted them.
+   * Android counts WireGuard's (the library's own totals) and Xray's
+   * (xray-core's count of the bytes through the server, published by the
+   * tunnel's process only while the app is in front); IKEv2 is the
+   * platform's client and counts nothing the app can read; iOS has none
+   * to read, because the tunnel runs in a separate extension process and
    * NEVPNConnection exposes no totals to the app. Null rather than zero,
    * so nothing later reads "not known" as "nothing was carried". */
   rxBytes: number | null;
   txBytes: number | null;
+  /** How long the live tunnel has been up, in seconds, where its start was
+   * recorded: Android's WireGuard and Xray, and iOS's connections (the
+   * system's connectedDate). Null for Android's IKEv2 and from an older
+   * plugin. For the timer on a screen that finds the tunnel already up
+   * (adoptedSince, lib/session-clock.ts). */
+  sessionSecs?: number | null;
   /** Seconds since the last WireGuard handshake, or null when the
    * active protocol has no equivalent. The same evidence the Windows
    * client uses to tell "engine running" from "traffic flowing", which
