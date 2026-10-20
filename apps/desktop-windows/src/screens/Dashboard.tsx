@@ -3271,9 +3271,13 @@ export function Dashboard({
         // dialled, as the engine is about to.
         const settleServer = literalTunnelServer(candidate, "windows");
         // Beside the settle after a wait for a network (`redialAfterWait`).
-        // After it, on the VM, the probe waited out its timeout on a
-        // network with IPv6 addresses and no IPv6 route: two seconds more
-        // between the network coming back and the dial.
+        // After it, on the VM, the probe waited out its timeout (about two
+        // seconds) on a network with IPv6 addresses and no IPv6 route,
+        // the settle's half second before it. Beside it saves only that
+        // half second -- the dial still waits for the probe below. By the
+        // VM's R3d timings a four-second blip is still verified about
+        // 1.7 s past the screen's ten-second calm hold: shortened, and
+        // still amber, not fixed.
         const ipv6Beside = redialAfterWait && ipv6BaselineRef.current === null ? captureIpv6Baseline() : null;
         redialAfterWait = false;
         // Fresh every attempt, and taken only once plain networking is
