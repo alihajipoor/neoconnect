@@ -1614,8 +1614,11 @@ unsafe fn add_everything(
 /// inside a transaction, and aborts it: WFP validates each filter as it is
 /// added -- layer, sublayer, weight, every condition's field and value type,
 /// an app id -- and nothing stays in force. `None` where the engine or a
-/// transaction will not open: adding filters needs administrator rights,
-/// which GitHub's Windows runners have.
+/// transaction will not open, or where an add is refused as access denied:
+/// adding filters needs administrator rights, which GitHub's Windows
+/// runners have. A session that is not elevated can open the engine and a
+/// transaction and is refused only at the first add, which used to read as
+/// WFP rejecting the filters.
 #[cfg(test)]
 pub(super) fn add_then_abort(specs: &[FilterSpec], pool: &[CaptureKeys; 2]) -> Option<Result<usize, String>> {
     let mut apps: Vec<(PathBuf, super::ipv6_block::AppId)> = Vec::new();
@@ -1643,7 +1646,31 @@ pub(super) fn add_then_abort(specs: &[FilterSpec], pool: &[CaptureKeys; 2]) -> O
         let result = add_everything(engine, free_keys_of(engine, pool), specs, &apps);
         FwpmTransactionAbort0(engine);
         FwpmEngineClose0(engine);
+        if result.as_ref().is_err_and(|e| access_denied(e)) {
+            return None;
+        }
         Some(result.map(|blocks| blocks.len()))
+    }
+}
+
+/// Whether an add's error is the platform refusing a caller that is not
+/// elevated -- `E_ACCESSDENIED` or `ERROR_ACCESS_DENIED`, as `add_spec` and
+/// its kin write the code -- rather than refusing the filter.
+#[cfg(test)]
+fn access_denied(error: &str) -> bool {
+    ["0x80070005", "0x00000005"].iter().any(|code| error.contains(code))
+}
+
+#[cfg(test)]
+mod access_denied_tests {
+    /// Refused for want of rights, said as not elevated -- never as the
+    /// filters being wrong -- and nothing else taken for it.
+    #[test]
+    fn an_add_refused_for_want_of_rights_is_not_a_rejected_filter() {
+        assert!(super::access_denied("could not add the filter \"Neoxify reconnect hold: block all outbound IPv4\" (0x80070005)"));
+        assert!(super::access_denied("could not register the Neoxify reconnect hold filtering provider (0x00000005)"));
+        assert!(!super::access_denied("could not add the filter (0x80320009)"));
+        assert!(!super::access_denied("an app id: the system cannot find the file specified (0x00000002)"));
     }
 }
 

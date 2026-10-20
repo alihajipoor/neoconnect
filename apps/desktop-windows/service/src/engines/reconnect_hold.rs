@@ -2385,9 +2385,10 @@ mod tests {
     /// standing under a WireGuard tunnel, as filters that never went in.
     /// Nothing stays in force.
     ///
-    /// Never skipped silently. An engine that will not open -- no
-    /// administrator rights -- fails it, unless whoever runs it has said by
-    /// name that they cannot run it elevated (`NEOXIFY_SKIP_WFP_TESTS=1`),
+    /// Never skipped silently. An engine that will not open, or that refuses
+    /// the adds as access denied -- no administrator rights -- fails it,
+    /// unless whoever runs it has said by name that they cannot run it
+    /// elevated (`NEOXIFY_SKIP_WFP_TESTS=1`; see docs/new-machine-setup.md),
     /// which CI never may: GitHub's Windows runners are administrators, and
     /// a skip there would leave nothing having checked the hold against the
     /// real platform. What it cannot show is that traffic stops -- that is
@@ -2411,8 +2412,9 @@ mod tests {
                 let skipped_on_purpose = std::env::var("NEOXIFY_SKIP_WFP_TESTS").is_ok_and(|v| v == "1");
                 assert!(
                     skipped_on_purpose && !on_ci,
-                    "the filtering engine would not open, so the hold was never checked against it: run the tests as \
-                     administrator (or, off CI, set NEOXIFY_SKIP_WFP_TESTS=1 to skip this on purpose)"
+                    "the filtering engine would not open, or refused the filters as access denied, so the hold was never \
+                     checked against it: run the tests as administrator (or, off CI, set NEOXIFY_SKIP_WFP_TESTS=1 to \
+                     skip this on purpose)"
                 );
                 eprintln!("SKIPPED ON PURPOSE (NEOXIFY_SKIP_WFP_TESTS=1): the hold was not checked against the filtering platform");
             }
