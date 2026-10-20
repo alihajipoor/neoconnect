@@ -54,6 +54,7 @@ const en = {
   // Shown when nothing is connected, where the line above would be
   // false: it told customers to disconnect while they already were.
   "loc.pickHint": "Pick a server and protocol",
+  "loc.serverN": "Server {n}",
   "loc.retry": "Retry",
   // The first row of the picker, and what a new install starts on. It
   // promises only what the ladder does: an order, and moving on by
@@ -1483,6 +1484,7 @@ const fa: Record<TranslationKey, string> = {
   "loc.title": "انتخاب موقعیت",
   "loc.disconnectFirst": "برای تغییر سرور ابتدا قطع کنید",
   "loc.pickHint": "یک سرور و پروتکل انتخاب کنید",
+  "loc.serverN": "سرور {n}",
   "loc.retry": "تلاش دوباره",
   "loc.automatic": "خودکار (پیشنهادی)",
   "loc.automaticHint": "ابتدا گزینه‌ای را امتحان می‌کند که در شبکهٔ شما احتمال کار کردنش بیشتر است، و اگر کار نکرد خودش سراغ گزینهٔ بعدی می‌رود",

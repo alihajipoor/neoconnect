@@ -57,6 +57,30 @@ const protocolOf = (route: Pick<RouteOption, "protocol" | "transport">) => custo
 /** Rings a place's light on the main page's map while its row is hovered
  * or focused (design-system.md 5.3). A mark on the light's own element:
  * the map is decoration, and this changes nothing it says. */
+/** Which of a place's servers this row is, counting from 1, when another
+ * row in the same place offers the same protocol -- else null. Counted in
+ * the order of the node's name, then the route's id, so the same server
+ * keeps its number however the list arrives; the name itself is never
+ * shown. */
+export function twinNumber<R extends Pick<RouteOption, "id" | "protocol" | "transport" | "location">>(
+  routes: readonly R[],
+  route: R,
+  labelOf: (r: R) => string,
+): number | null {
+  const label = labelOf(route);
+  const same = routes.filter((r) => labelOf(r) === label);
+  if (!same.some((r) => r.id !== route.id)) return null;
+  const ordered = [...same].sort(
+    (a, b) =>
+      a.location.nodeName.localeCompare(b.location.nodeName, "en", { numeric: true }) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  // Two routes on one node with one protocol are one server, twice.
+  const servers: string[] = [];
+  for (const r of ordered) if (!servers.includes(r.location.nodeName)) servers.push(r.location.nodeName);
+  if (servers.length < 2) return null;
+  return servers.indexOf(route.location.nodeName) + 1;
+}
+
 function ringLight(cc: string | null) {
   if (typeof document === "undefined") return;
   for (const lamp of document.querySelectorAll(".nx-lamp[data-ring]")) lamp.removeAttribute("data-ring");
@@ -363,9 +387,11 @@ export function LocationList({
     const key = `r:${route.id}`;
     const selected = route.id === pinnedRouteId;
     const label = protocolOf(route);
-    // The node's name only where two rows would otherwise read the same --
-    // one place, one protocol, two nodes. It is an internal name.
-    const twin = place.routes.some((r) => r.id !== route.id && protocolOf(r) === label);
+    // Where two rows would otherwise read the same -- one place, one
+    // protocol, two servers -- a neutral "Server 2". Never the node's own
+    // name: that is the operator's internal name for a machine, not
+    // something a customer chose by or should be shown.
+    const twin = twinNumber(place.routes, route, protocolOf);
     const ownAt = evidence ? evidence.ownAt(route) : null;
     const tagsShown = !evidence || evidence.tags;
     const here = hereWord(route);
@@ -383,7 +409,9 @@ export function LocationList({
         <span className="t">
           <span className="n">
             <bdi>{label}</bdi>
-            {twin ? <span className="nx-node"> · {route.location.nodeName}</span> : null}
+            {twin !== null ? (
+              <span className="nx-node"> · {t("loc.serverN", { n: formatNumber(twin, language) })}</span>
+            ) : null}
             {quick ? (
               ownAt !== null ? (
                 <span className="nx-ispi" role="img" data-own-worked="" title={ownTip(route, ownAt)} aria-label={ownTip(route, ownAt)}>
