@@ -19,6 +19,7 @@ import {
 } from "../../lib/map-fit";
 import type { MapArc, MapLight } from "../../lib/map-lights";
 import { MARK_TONE, type LogoTone } from "../../lib/logo-geometry";
+import { useHeldThroughExit } from "../../lib/motion";
 import { GlassLogo } from "./GlassLogo";
 
 /** The dotted world map, its location lights, the relay arc and the glass
@@ -234,7 +235,10 @@ function useWindowHidden(): boolean {
   return hidden;
 }
 
-export function WorldMap({ host, lights, arc, countries, logo = true, logoTone = MARK_TONE, alert = false, float = false }: WorldMapProps) {
+export function WorldMap({ host, lights, arc, countries, logo = true, logoTone = MARK_TONE, alert: alertNow = false, float = false }: WorldMapProps) {
+  // Held through a leaving banner's fade, so the stage and the band take
+  // their room back once it is gone, in one step (lib/motion.ts).
+  const alert = useHeldThroughExit(alertNow);
   const { language } = useI18n();
   const root = useRef<HTMLDivElement>(null);
   const [placement, setPlacement] = useState<Placement>(NONE);

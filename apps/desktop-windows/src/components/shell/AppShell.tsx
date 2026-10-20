@@ -4,6 +4,7 @@ import { BarChart3, CreditCard, Gift, Home, LifeBuoy, LogOut, MapPin, Settings a
 import { useI18n } from "../../lib/i18n";
 import { IS_STORE_BUILD } from "../../lib/distribution";
 import { probeFrames } from "../../lib/effects";
+import { useHeldThroughExit } from "../../lib/motion";
 import type { ShownTone } from "../../lib/hero-model";
 import { Glass, PillButton } from "../ui";
 import { Dialog, Menu } from "../overlay";
@@ -101,6 +102,9 @@ export function AppShell(props: ShellProps) {
     { id: "settings", label: t("nav.settings"), icon: <SettingsIcon className="nx-i" aria-hidden />, go: props.onOpenSettings },
   ];
   const index = items.findIndex((item) => item.id === active);
+  /** Kept through a leaving banner's fade: the room it is given goes back
+   * only once it is gone (lib/motion.ts). */
+  const bannerHeld = useHeldThroughExit(Boolean(props.banner));
 
   const openMenu = (from: "side" | "head") => {
     if (menuOpen && anchor === from) {
@@ -121,7 +125,7 @@ export function AppShell(props: ShellProps) {
       className="nx-app"
       data-shown={props.shown}
       data-busy={props.busy ? "1" : undefined}
-      data-banner={props.banner ? "1" : undefined}
+      data-banner={bannerHeld ? "1" : undefined}
       data-titlebar={props.titlebar ? "1" : undefined}
     >
       {props.scene}

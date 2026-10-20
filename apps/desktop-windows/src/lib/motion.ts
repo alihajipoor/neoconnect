@@ -153,6 +153,16 @@ export function usePresence(open: boolean, ms: number = EXIT_MS): { mounted: boo
   return { mounted: shown !== "closed", closing: shown === "closing" };
 }
 
+/** True while `on`, and on through the exit after it turns off: for what
+ * depends on something that leaves the way it came. A banner fading out
+ * (`Presence`, components/ui.tsx) still holds its room for its exit, so the
+ * room the column gives it -- the sentence's reserve, the map's stage, the
+ * compact window's band -- is taken back only once it is gone, in one
+ * step, rather than everything moving twice. */
+export function useHeldThroughExit(on: boolean, ms: number = EXIT_MS): boolean {
+  return usePresence(on, ms).mounted;
+}
+
 /** What a closing overlay draws: what it said while it was open. Its
  * props can change the moment it is asked to close -- the switch
  * confirmation's place becomes null, and its title would turn into

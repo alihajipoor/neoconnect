@@ -362,9 +362,19 @@ const TRANSITIONS = [
   },
 ];
 
+TRANSITIONS.push({
+  name: "19-banner-leaving",
+  note: "A banner that leaves (the offline notice, at the 720x600 window): it fades where it stands, and only once it is gone does the column take its room back -- the sentence's reserve, the location card -- in one step, not while it fades.",
+  setup: { size: "720 × 600 (minimum)", screen: "main", scenario: "blocked" },
+  slow: true,
+  focus: ".nx-hero",
+  trigger: `(() => { const el = document.querySelector('[data-testid=scenario]'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(el, 'idle'); el.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+  times: steps(240, 30),
+});
+
 /** Static looks: no transition, one picture each. */
 const STILLS = [
-  { name: "19-logo-922x648", note: "The fitted 922x648 window: the glass mark now drawn at 92px (it stepped aside under 96px before).", setup: { size: "922 × 648 (fitted, 1280×720 at 150%)", screen: "main", scenario: "connected" } },
+  { name: "20-logo-922x648", note: "The fitted 922x648 window: the glass mark now drawn at 92px (it stepped aside under 96px before).", setup: { size: "922 × 648 (fitted, 1280×720 at 150%)", screen: "main", scenario: "connected" } },
 ];
 
 const port = await freePort();
