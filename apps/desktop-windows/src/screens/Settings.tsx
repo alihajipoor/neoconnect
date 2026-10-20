@@ -123,6 +123,7 @@ export function Settings({
   onSignOut,
   platform = "web",
   device = NO_DEVICE,
+  aboutExtra,
 }: {
   onBack: () => void;
   onOpenReferrals: () => void;
@@ -163,6 +164,9 @@ export function Settings({
   platform?: SettingsPlatform;
   /** What this platform has bound; nothing, on the web portal. */
   device?: DeviceSettings;
+  /** A row of the platform's own under the version: the direct Android
+   * build's "newer version available". */
+  aboutExtra?: ReactNode;
 }) {
   const { t, language, setLanguage } = useI18n();
   const [sub, setSub] = useState<SubView | null>(null);
@@ -452,6 +456,7 @@ export function Settings({
           {/* Once it is known: a build that cannot say its version shows no
               row, not a dash. */}
           {version ? <Row label={t("set.version")} value={<bdi dir="ltr">{version}</bdi>} /> : null}
+          {aboutExtra}
           <CommunityRow />
         </ListGroup>
       </div>

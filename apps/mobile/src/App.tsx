@@ -32,6 +32,7 @@ import { isAndroid, isIOS } from "./lib/platform";
 import { ProminentDisclosure, hasAcceptedDisclosure } from "./components/ProminentDisclosure";
 import { appPrefs } from "@shared/lib/app-prefs";
 import { PHONE_DEVICE, noticesFor, setNotices } from "./lib/phone-notices";
+import { AndroidUpdateRow } from "./components/AndroidUpdateRow";
 
 /** How often a queued diagnostic report retries. Matches the desktop
  * client so the two do not report at different rates for no reason. */
@@ -73,9 +74,10 @@ setRelayTunnelReader(async () => (await vpnStatus()).connected);
  * routing table there. Custom mode splits for the same reason, and is
  * passed into the shared Settings as a slot.
  *
- * No update banner: Android cannot silently replace its own APK, so
- * in-app updating is a different mechanism entirely and is not wired up
- * yet. Better absent than present and lying about what it will do.
+ * Updates: Android cannot silently replace its own APK, so the direct
+ * build says in Settings when a newer one is published and opens its
+ * download (components/AndroidUpdateRow.tsx); Android's installer asks
+ * before replacing anything. Play and the App Store update their own.
  */
 type Screen =
   | "loading"
@@ -395,6 +397,9 @@ export default function App() {
         // Notifications only (lib/phone-notices.ts): the rows a phone does
         // not honour are not drawn.
         device={isAndroid() || isIOS() ? PHONE_DEVICE : undefined}
+        // The direct APK only: Play and the App Store update their own
+        // builds, and a store build never carries the check.
+        aboutExtra={isAndroid() && !IS_STORE_BUILD ? <AndroidUpdateRow /> : null}
       />,
     );
   }
