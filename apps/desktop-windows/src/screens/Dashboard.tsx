@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Gamepad2, Globe, Repeat, Shield, Sparkles } from "lucide-react";
-import { describesTunnel, displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
+import { describesTunnel, displayedProtocol, displayedRoute, displayedRouteId, heldListLook, showsAutomatic } from "../lib/displayed-route";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
@@ -587,6 +587,10 @@ export function Dashboard({
    * verified tone (`mapLights`), so it holds through a brief gap exactly as
    * the chip's colour does and never stands for an unconfirmed tunnel. */
   const verifiedRouteRef = useRef<RouteOption | null>(null);
+  /** The route the location list named the last time the session was
+   * settled, for its row in use through a brief gap (`heldListLook`): null
+   * for a tunnel it could not name. */
+  const listSettledRef = useRef<string | null>(null);
   /** Which network we are on, so "what worked here last time" means
    * here and not somewhere else. Null when it cannot be determined. */
   const [networkId, setNetworkId] = useState<string | null>(null);
@@ -4828,14 +4832,23 @@ export function Dashboard({
       <WorldMap host="stage" lights={mapScene.lights} arc={mapScene.arc} countries={mapPlaces} alert={mapAlert} />
     ) : null;
 
+  /** The list's row in use and its words, held through a brief gap with
+   * the chip's colour, the button's fill and the map's light: "Connected
+   * here" stays on the row the session settled on until the hold ends
+   * (`heldListLook`). */
+  if (settledNow) listSettledRef.current = screenRouteId;
+  const listLook = heldListLook({ state: connectionState, look: orbState, routeId: screenRouteId, settledRouteId: listSettledRef.current });
+
   // The one location list: the panel beside the hero, or a sheet on a
   // phone-sized window. One element either way.
   const picker = subscription ? (
     <LocationPicker
       subscriptionId={subscription.id}
       // What the tray names: the pin while nothing is up, the route the
-      // tunnel is on once one is (`screenRouteId`).
-      currentRouteId={screenRouteId ?? undefined}
+      // tunnel is on once one is (`screenRouteId`), held through a brief
+      // gap (`listLook`).
+      currentRouteId={listLook.routeId ?? undefined}
+      lookState={listLook.state}
       // Latency cannot be measured from inside the tunnel; anything but
       // "disconnected" means routes are installed.
       tunnelActive={connectionState !== "disconnected"}

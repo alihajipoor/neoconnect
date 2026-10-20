@@ -44,6 +44,7 @@ export function LocationPicker({
   onPicking,
   onPickFailed,
   connectionState,
+  lookState,
   onRoutes,
   variant = "overlay",
   confirmPick,
@@ -85,6 +86,10 @@ export function LocationPicker({
    * probe must not run across a connect or a disconnect, and the list
    * stays open while the dashboard does either (unanswered-report.ts). */
   connectionState?: string;
+  /** The state the list's words are drawn for -- "Connected here", "In
+   * use" -- when it is not the service's: the settled look held through a
+   * brief gap, as the chip's colour is (`heldListLook`). */
+  lookState?: string;
   /** Told the moment a server or Automatic is picked, before anything is
    * awaited -- a server's switch request can take seconds to answer, and
    * `onSwitched` waits for it. Whatever an automatic reconnect was doing
@@ -492,7 +497,7 @@ export function LocationPicker({
         measuring={measuring}
         measuredAt={measuredAt}
         tunnelActive={tunnelActive}
-        connectionState={connectionState}
+        connectionState={lookState ?? connectionState}
         pinnedRouteId={pinnedRouteId}
         currentRouteId={currentRouteId}
         automatic={automatic}

@@ -16,7 +16,11 @@ describe("the idle screen names what Connect dials", () => {
 
   it("the location picker marks the route the SERVER tile names as current", () => {
     expect(dashboard).not.toContain("currentRouteId={protocolUser?.routeId}");
-    expect(dashboard).toContain("currentRouteId={screenRouteId ?? undefined}");
+    // The same route, held through a brief gap with the chip's colour
+    // (`heldListLook`), from the same `screenRouteId`.
+    expect(dashboard).toContain("currentRouteId={listLook.routeId ?? undefined}");
+    expect(dashboard).toContain("routeId: screenRouteId, settledRouteId: listSettledRef.current");
+    expect(dashboard).toContain("if (settledNow) listSettledRef.current = screenRouteId;");
     expect(dashboard).toContain(
       "const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);",
     );

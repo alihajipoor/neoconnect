@@ -133,7 +133,11 @@ describe("the phone names the route a tunnel found up is on", () => {
     expect(dashboard).toContain(
       "const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes, tunnelNamed);",
     );
-    expect(dashboard).toContain("currentRouteId={screenRouteId ?? undefined}");
+    // Held through a brief gap with the chip's colour (`heldListLook`): the
+    // route named while settled, null for a tunnel it could not name.
+    expect(dashboard).toContain("currentRouteId={listLook.routeId ?? undefined}");
+    expect(dashboard).toContain("routeId: screenRouteId, settledRouteId: listSettledRef.current");
+    expect(dashboard).toContain("if (settledNow) listSettledRef.current = screenRouteId;");
     expect(dashboard).not.toMatch(/currentRouteId=\{protocolUser/);
     // And credits no route with a session it cannot name.
     expect(dashboard).toContain("settledRouteRef.current = tunnelRouteUnknown ? null : (protocolUser?.routeId ?? null);");

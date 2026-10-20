@@ -18,6 +18,7 @@ import { AppShell } from "../components/shell/AppShell";
 import { Banner, Note, PillButton, Segmented } from "../components/ui";
 import { MARK_TONE, type LogoTone } from "../lib/logo-geometry";
 import { HEADLINE_HINTS, headlineFor, isTunnelUp } from "../lib/connection-evidence";
+import { heldListLook } from "../lib/displayed-route";
 import { failoverNotice, failoverText } from "../lib/failover-notice";
 import { pressFor } from "../lib/connect-intent";
 import { effects, type GlassChoice, type ThemeChoice } from "../lib/effects";
@@ -692,16 +693,24 @@ function Composed({
     : null;
   const details = sc.details ? [<Note key="v6" tone="info">{t("dash.fullTunnelIpv6Blocked")}</Note>] : [];
 
+  // The list's row in use, held through a brief gap as the main page's is.
+  const listLook = heldListLook({
+    state: sc.state,
+    look: held,
+    routeId: isTunnelUp(sc.state) && named ? current.id : null,
+    settledRouteId: named ? current.id : null,
+  });
   const panel = (
     <LocationPicker
       variant={layout === "narrow" ? "sheet" : "panel"}
       subscriptionId="preview"
-      currentRouteId={isTunnelUp(sc.state) && named ? current.id : undefined}
+      currentRouteId={listLook.routeId ?? undefined}
+      lookState={listLook.state}
       tunnelActive={sc.state !== "disconnected"}
       connectionState={sc.state}
       initialRoutes={routes}
       evidence={{ places: placesEvidence(routes, evidenceCtx), worked: workedPlaces, ownAt: (route) => ownWorkedAt(route, evidenceCtx), tags: true }}
-      automatic={!isTunnelUp(sc.state)}
+      automatic={!isTunnelUp(listLook.state)}
       onChooseAutomatic={() => undefined}
       onClose={() => onSheet(false)}
       onSwitched={() => undefined}

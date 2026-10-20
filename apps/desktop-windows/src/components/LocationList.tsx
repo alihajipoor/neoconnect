@@ -192,6 +192,27 @@ export function LocationList({
    * ones closing: drawn sliding out from under the country and back. */
   const revealing = useRef<string | null>(null);
   const closing = useRef(new Set<string>());
+  /** The row the customer just chose (a route's id, or "auto"): its check
+   * pops in when the choice lands. A selection the state moved -- a tunnel
+   * settling on another route, a gap ending -- shows its check without
+   * the pop: motion never speaks for the tunnel (motion.css). */
+  const [picked, setPicked] = useState<string | null>(null);
+  useEffect(() => {
+    if (picked === null) return;
+    // Long enough for the pop to play from the commit the choice lands in.
+    const timer = setTimeout(() => setPicked(null), 700);
+    return () => clearTimeout(timer);
+    // Counted from when the selection changes, however long the switch took.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedRouteId, automatic]);
+  // A choice that never landed -- the switch refused, "Stay connected" --
+  // is forgotten, so a later change the state makes does not pop for it.
+  useEffect(() => {
+    if (picked === null) return;
+    const timer = setTimeout(() => setPicked(null), 30_000);
+    return () => clearTimeout(timer);
+  }, [picked]);
+  const tick = (chosen: boolean) => cn("size-4", chosen && "nx-tick");
 
   // A place the customer closed opens again for the next search that finds
   // it by a protocol.
@@ -455,7 +476,10 @@ export function LocationList({
         className={cn("nx-row nx-prow", selected && "sel")}
         aria-pressed={selected}
         aria-disabled={switchingId !== null || undefined}
-        onClick={() => onPick(route)}
+        onClick={() => {
+          setPicked(route.id);
+          onPick(route);
+        }}
       >
         <span className="t">
           <span className="n">
@@ -499,7 +523,7 @@ export function LocationList({
           {switchingId === route.id ? (
             <Loader2 className="nx-spinning size-4" aria-hidden />
           ) : selected ? (
-            <Check className="nx-tick size-4" aria-hidden />
+            <Check className={tick(picked === route.id)} aria-hidden />
           ) : null}
         </span>
       </button>
@@ -541,7 +565,7 @@ export function LocationList({
           </span>
           <span className="end">
             {placeLatency(place)}
-            {holds && !open ? <Check className="nx-tick size-4" aria-hidden /> : null}
+            {holds && !open ? <Check className={tick(picked !== null && place.routes.some((route) => route.id === picked))} aria-hidden /> : null}
             <ChevronDown className="chev" aria-hidden />
           </span>
         </button>
@@ -559,7 +583,10 @@ export function LocationList({
       className={cn("nx-row", automatic && "sel")}
       aria-pressed={automatic}
       aria-disabled={switchingId !== null || undefined}
-      onClick={onAutomatic}
+      onClick={() => {
+        setPicked("auto");
+        onAutomatic();
+      }}
     >
       <span className="nx-flag auto" aria-hidden>
         <Sparkles className="size-4" />
@@ -572,7 +599,7 @@ export function LocationList({
           {t(quick ? "loc.automaticHintShort" : "loc.automaticHint")}
         </span>
       </span>
-      <span className="end">{automatic ? <Check className="nx-tick size-4" aria-hidden /> : null}</span>
+      <span className="end">{automatic ? <Check className={tick(picked === "auto")} aria-hidden /> : null}</span>
     </button>
   ) : null;
 

@@ -180,8 +180,12 @@ describe("both main pages feed their surfaces the tunnel's naming", () => {
       expect(source).toContain('name: automaticPending ? t("loc.automaticShort") : currentRoute ? placeLabel(currentRoute, language) : "—",');
       expect(source).toContain("const protocolName = shownProtocol ? customerProtocolLabel(shownProtocol.protocol, shownProtocol.transport) : null;");
       // The list's "Connected here": the row the card names, never the
-      // credential held.
-      expect(source).toContain("currentRouteId={screenRouteId ?? undefined}");
+      // credential held -- held through a brief gap with the chip's colour
+      // (`heldListLook`), and as unnamed as the card over a tunnel it
+      // cannot name.
+      expect(source).toContain("currentRouteId={listLook.routeId ?? undefined}");
+      expect(source).toContain("routeId: screenRouteId, settledRouteId: listSettledRef.current");
+      expect(source).toContain("if (settledNow) listSettledRef.current = screenRouteId;");
       expect(source).not.toMatch(/currentRouteId=\{protocolUser/);
       // The map's connected light and halo: only the route named.
       expect(source).toMatch(/verifiedRouteRef\.current = currentRoute;/);

@@ -17,6 +17,7 @@ import { Dialog, LocationSheet } from "@shared/components/overlay";
 import { AppShell } from "@shared/components/shell/AppShell";
 import { ScreenTransition } from "@shared/components/ScreenTransition";
 import { swapView } from "@shared/lib/view-transition";
+import { heldListLook } from "@shared/lib/displayed-route";
 import { Page, PageScene } from "@shared/components/shell/Page";
 import { Banner, Note, PillButton } from "@shared/components/ui";
 import { Login } from "@shared/screens/Login";
@@ -659,16 +660,24 @@ function Composed({
     </div>
   );
 
+  // The list's row in use, held through a brief gap as the main page's is.
+  const listLook = heldListLook({
+    state: sc.state,
+    look: held,
+    routeId: settled && named ? current.id : null,
+    settledRouteId: named ? current.id : null,
+  });
   const picker = subscribed ? (
     <LocationPicker
       variant={view === "locations" ? "page" : layout === "narrow" ? "sheet" : "panel"}
       subscriptionId="preview"
-      currentRouteId={settled && named ? current.id : undefined}
+      currentRouteId={listLook.routeId ?? undefined}
       tunnelActive={sc.state !== "disconnected"}
       connectionState={sc.state}
+      lookState={listLook.state}
       initialRoutes={routes}
       evidence={{ places: placeEvidence, worked: workedPlaces, ownAt: (r) => ownWorkedAt(r, evidenceCtx), tags: true }}
-      automatic={automaticPending}
+      automatic={automaticPending && listLook.state === sc.state}
       onChooseAutomatic={noop}
       onClose={() => onSheet(false)}
       onSwitched={noop}

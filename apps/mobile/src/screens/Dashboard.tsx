@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Globe, Repeat, Sparkles } from "lucide-react";
-import { displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "@shared/lib/displayed-route";
+import { displayedProtocol, displayedRoute, displayedRouteId, heldListLook, showsAutomatic } from "@shared/lib/displayed-route";
 import { credentialOnTunnel, tunnelCredential } from "@shared/lib/tunnel-credential";
 import {
   ispTagsOf,
@@ -715,6 +715,10 @@ export function Dashboard({
    * the map's connected light: drawn only under the verified tone, so it
    * holds through a brief gap as the chip's colour does. */
   const verifiedRouteRef = useRef<RouteOption | null>(null);
+  /** The route the location list named the last time the session was
+   * settled, for its row in use through a brief gap (`heldListLook`): null
+   * for a tunnel it could not name. */
+  const listSettledRef = useRef<string | null>(null);
 
   /** The layout the app root is in -- the panel beside the hero on a
    * tablet, the sheet on a phone -- measured as the stylesheet measures
@@ -3310,12 +3314,20 @@ export function Dashboard({
     slotTeardownState === "stuck" || customerTeardownState === "stuck" || permissionDenied || unsupportedChoice !== null;
   const mapAlert = bannerShowing || slotShowing || connectionError !== null || notesShowing;
 
+  /** The list's row in use and its words, held through a brief gap with
+   * the chip's colour, the button's fill and the map's light: "Connected
+   * here" stays on the row the session settled on until the hold ends
+   * (`heldListLook`). */
+  if (settledNow) listSettledRef.current = screenRouteId;
+  const listLook = heldListLook({ state: connectionState, look: orbState, routeId: screenRouteId, settledRouteId: listSettledRef.current });
+
   /** The one location list: the panel beside the hero on a tablet, a sheet
    * on a phone, or the Locations page. One element either way. */
   const picker = subscription ? (
     <LocationPicker
       subscriptionId={subscription.id}
-      currentRouteId={screenRouteId ?? undefined}
+      currentRouteId={listLook.routeId ?? undefined}
+      lookState={listLook.state}
       // Latency cannot be measured from inside the tunnel; see the prop's
       // own note. Anything but "disconnected" means routes are installed.
       tunnelActive={connectionState !== "disconnected"}
