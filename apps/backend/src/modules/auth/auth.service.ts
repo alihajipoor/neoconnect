@@ -6,6 +6,7 @@ import { authenticator } from "otplib";
 import * as QRCode from "qrcode";
 import { PrismaService } from "../../prisma/prisma.service";
 import { GuessBudget } from "../../common/guess-budget";
+import { durationSeconds } from "../../common/duration";
 import { AccessTokenPayload, MfaTokenPayload, RefreshTokenPayload } from "./types";
 
 // One time-step of drift tolerance either side (±30s) -- standard practice
@@ -18,6 +19,14 @@ authenticator.options = { window: 1 };
 const TOTP_STEP_SECONDS = 30;
 
 const MFA_TOKEN_TTL = "5m";
+
+/** Admin session lengths when the settings say nothing usable: an hour
+ * idle, twelve from the sign-in at most. Used to be seven days, renewed
+ * on every refresh for ever -- a refresh cookie lifted once was a
+ * standing key to the panel. */
+const DEFAULT_ACCESS_SECONDS = 15 * 60;
+const DEFAULT_IDLE_SECONDS = 60 * 60;
+const DEFAULT_MAX_SECONDS = 12 * 60 * 60;
 
 /** Wrong TOTP codes one admin may send per window before the step refuses
  * everything, a right code included, until the window is over. Three
@@ -60,7 +69,26 @@ export class AuthService {
     return admin;
   }
 
-  async issueTokenPair(admin: { id: string; email: string; role: string; tokenVersion: number }): Promise<TokenPair> {
+  /** Tokens for a session that began at `sessionStart` (unix seconds; now
+   * for a sign-in). Sliding: the refresh token lasts the idle limit, and
+   * each refresh issues a new one -- but neither token outlives the cap
+   * counted from the sign-in, after which only signing in again works. */
+  async issueTokenPair(
+    admin: { id: string; email: string; role: string; tokenVersion: number },
+    sessionStart: number = Math.floor(Date.now() / 1000),
+  ): Promise<TokenPair> {
+    const now = Math.floor(Date.now() / 1000);
+    const left = sessionStart + durationSeconds(this.config.get<string>("adminSession.max"), DEFAULT_MAX_SECONDS) - now;
+    if (left <= 0) throw new UnauthorizedException("Session has expired; sign in again");
+    const accessSeconds = Math.min(
+      durationSeconds(this.config.get<string>("jwt.accessTtl"), DEFAULT_ACCESS_SECONDS),
+      left,
+    );
+    const refreshSeconds = Math.min(
+      durationSeconds(this.config.get<string>("adminSession.idle"), DEFAULT_IDLE_SECONDS),
+      left,
+    );
+
     const accessPayload: AccessTokenPayload = {
       sub: admin.id,
       email: admin.email,
@@ -69,15 +97,16 @@ export class AuthService {
     const refreshPayload: RefreshTokenPayload = {
       sub: admin.id,
       tokenVersion: admin.tokenVersion,
+      ast: sessionStart,
     };
 
     const accessToken = await this.jwt.signAsync(accessPayload, {
       secret: this.config.get<string>("jwt.accessSecret"),
-      expiresIn: this.config.get<string>("jwt.accessTtl"),
+      expiresIn: accessSeconds,
     });
     const refreshToken = await this.jwt.signAsync(refreshPayload, {
       secret: this.config.get<string>("jwt.refreshSecret"),
-      expiresIn: this.config.get<string>("jwt.refreshTtl"),
+      expiresIn: refreshSeconds,
     });
 
     return { accessToken, refreshToken };
@@ -239,7 +268,11 @@ export class AuthService {
       throw new UnauthorizedException("Refresh token has been revoked");
     }
 
-    return this.issueTokenPair(admin);
+    // The session's start travels with it. A token from before `ast`
+    // existed counts from when it was issued, so the cap still applies.
+    const start = typeof payload.ast === "number" ? payload.ast : payload.iat;
+    if (typeof start !== "number") throw new UnauthorizedException("Invalid or expired refresh token");
+    return this.issueTokenPair(admin, start);
   }
 
   /** Invalidates all outstanding refresh tokens for this admin. */

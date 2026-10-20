@@ -20,7 +20,15 @@ export default () => ({
     accessSecret: process.env.JWT_ACCESS_SECRET,
     refreshSecret: process.env.JWT_REFRESH_SECRET,
     accessTtl: process.env.JWT_ACCESS_TTL ?? "15m",
-    refreshTtl: process.env.JWT_REFRESH_TTL ?? "7d",
+  },
+  // How long an admin panel session lasts. Sliding: each renewal moves
+  // the idle limit out again, up to the cap counted from the sign-in.
+  // Replaces JWT_REFRESH_TTL (7 days, renewable for ever), which is no
+  // longer read. Durations like "45m", "1h", "12h"; anything else is the
+  // default.
+  adminSession: {
+    idle: process.env.ADMIN_SESSION_IDLE ?? "1h",
+    max: process.env.ADMIN_SESSION_MAX ?? "12h",
   },
   // Deliberately separate secrets from `jwt` above, not just a different
   // payload shape on the same secret (unlike the MFA challenge token) --

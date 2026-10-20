@@ -10,7 +10,14 @@ import { concurrencyCutMode, deviceSlotsMode } from "./modules/device-slots/mode
  * and never see take effect). Every tuning knob read by code is listed
  * here, and each must be passed through as `${NAME:-}` -- optional, empty
  * meaning "the default in the code". */
-const OPTIONAL_KNOBS = ["CUSTOMER_DEVICE_CREDENTIAL_LIMIT", "CONCURRENCY_CUT", "DEVICE_SLOTS", "RELAY_TRUSTED_PEERS"];
+const OPTIONAL_KNOBS = [
+  "CUSTOMER_DEVICE_CREDENTIAL_LIMIT",
+  "CONCURRENCY_CUT",
+  "DEVICE_SLOTS",
+  "RELAY_TRUSTED_PEERS",
+  "ADMIN_SESSION_IDLE",
+  "ADMIN_SESSION_MAX",
+];
 
 const COMPOSE = readFileSync(join(__dirname, "..", "..", "..", "infra", "docker-compose.prod.yml"), "utf8");
 

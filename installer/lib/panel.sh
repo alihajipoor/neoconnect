@@ -73,7 +73,6 @@ EOF
   ensure_env_key "JWT_ACCESS_SECRET" "$(openssl rand -hex 32)"
   ensure_env_key "JWT_REFRESH_SECRET" "$(openssl rand -hex 32)"
   ensure_env_key "JWT_ACCESS_TTL" "15m"
-  ensure_env_key "JWT_REFRESH_TTL" "7d"
   ensure_env_key "CUSTOMER_JWT_ACCESS_SECRET" "$(openssl rand -hex 32)"
   ensure_env_key "CUSTOMER_JWT_REFRESH_SECRET" "$(openssl rand -hex 32)"
   ensure_env_key "CUSTOMER_JWT_ACCESS_TTL" "15m"
