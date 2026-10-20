@@ -523,7 +523,7 @@ export function LocationPicker({
       aria-pressed={automatic}
       className={cn(
         "mb-2 flex w-full items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
-        automatic ? "border-primary/50 bg-primary/10" : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",
+        automatic ? "border-primary/50 bg-primary/10" : "border-[var(--hairline-2)] bg-card/60 hover:border-[var(--ink-3)] hover:bg-card",
       )}
     >
       <div
@@ -579,7 +579,7 @@ export function LocationPicker({
               disabled={isCurrent || switchingId !== null}
               className={cn(
                 "flex items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
-                isCurrent ? "border-primary/50 bg-primary/10" : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",
+                isCurrent ? "border-primary/50 bg-primary/10" : "border-[var(--hairline-2)] bg-card/60 hover:border-[var(--ink-3)] hover:bg-card",
               )}
             >
               {/* The flag, not a pin: the country is what the list is
@@ -656,7 +656,7 @@ export function LocationPicker({
         </div>
         <button
           onClick={onClose}
-          className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
+          className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-[var(--select)] hover:text-foreground"
         >
           <X className="size-4" />
         </button>

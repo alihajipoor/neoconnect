@@ -177,7 +177,7 @@ export function RepairNetwork({
               back, and this is a line the customer has to reproduce
               exactly. */}
           <code
-            className="block overflow-x-auto rounded-md bg-black/40 px-2.5 py-2 font-mono text-[11px] break-all text-foreground"
+            className="block overflow-x-auto rounded-md bg-[var(--field)] px-2.5 py-2 font-mono text-[11px] break-all text-foreground"
             data-ltr
             dir="ltr"
           >
@@ -206,7 +206,7 @@ export function RepairNetwork({
   );
 
   return variant === "card" ? <Card className="flex flex-col gap-3">{body}</Card> : (
-    <div className="mt-2 rounded-xl border border-white/10 bg-white/3 p-3">{body}</div>
+    <div className="mt-2 rounded-xl border border-[var(--hairline-2)] bg-[var(--field)] p-3">{body}</div>
   );
 }
 
@@ -251,7 +251,7 @@ function Result({ report }: { report: RepairReport }) {
       >
         {t(summaryKey)}
       </p>
-      <ul className="flex flex-col divide-y divide-white/6 rounded-lg border border-white/8">
+      <ul className="flex flex-col divide-y divide-[var(--hairline-2)] rounded-lg border border-[var(--hairline-2)]">
         {report.steps.map((step) => (
           <StepRow key={step.id} step={step} />
         ))}
