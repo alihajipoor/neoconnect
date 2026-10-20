@@ -252,6 +252,102 @@ describe("motion.css changes no layout of its own", () => {
   });
 });
 
+describe("every selector the motion rules use is one the engine keeps", () => {
+  it("no pseudo-element inside :is() or :where(): it is invalid, and drops the whole rule", () => {
+    // `:root[data-motion="reduce"] :is(.nx-skel::after, .nx-spinning)` was
+    // dropped whole, so the skeletons' sheen kept looping under reduced
+    // motion while a test that read the text passed.
+    for (const [name, css] of Object.entries(sheets)) {
+      const re = /:(?:is|where)\(/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(css))) {
+        let depth = 1;
+        let i = re.lastIndex;
+        for (; i < css.length && depth > 0; i++) {
+          if (css[i] === "(") depth++;
+          else if (css[i] === ")") depth--;
+        }
+        expect(css.slice(re.lastIndex, i - 1), `${name}: ${css.slice(m.index, i)}`).not.toMatch(/::/);
+      }
+    }
+  });
+
+  it("the skeletons' sheen stops under reduced motion by a rule of its own", () => {
+    expect(sheets.motion).toMatch(/:root\[data-motion="reduce"\] \.nx-skel::after \{\s*animation: none;\s*opacity: 0;\s*\}/);
+    expect(sheets.motion).toMatch(/:root\[data-motion="reduce"\] \.nx-spinning \{\s*animation: none;\s*\}/);
+  });
+});
+
+describe("nothing is see-through while it moves", () => {
+  it("a sheet is opaque while it slides, and fades only under reduced motion, where it does not move", () => {
+    const sheetIn = keyframes(sheets.pearl).find((k) => k.name === "nx-sheet-in");
+    expect(sheetIn?.body).toMatch(/opacity: calc\(1 - 0\.6 \* \(1 - var\(--move\)\)\);/);
+    const sheetOut = keyframes(sheets.motion).find((k) => k.name === "nx-sheet-out");
+    expect(sheetOut?.body).toMatch(/opacity: var\(--move\);/);
+  });
+
+  it("a sheet over the main page is denser glass, so the cobalt button does not tint the rows over it", () => {
+    expect(sheets.pearl).toMatch(/\.nx-glass\.strong\.nx-sheet \{\s*background: linear-gradient\(var\(--sheen-a\), var\(--sheen-b\)\), var\(--glass-sheet, var\(--glass-strong\)\);/);
+    expect(sheets.theme).toMatch(/--glass-sheet: rgba\(255, 255, 255, 0\.86\);/);
+    expect(sheets.theme.match(/--glass-sheet: rgba\(22, 27, 39, 0\.84\);/g)?.length).toBe(2);
+  });
+
+  it("a change of view never dips: the new view is opaque by the time the old one is gone", () => {
+    expect(sheets.pearl).toMatch(
+      /::view-transition-new\(nxview\) \{\s*animation:\s*nx-vt-in-fade var\(--dur-exit\) var\(--spring-quick\) both,\s*nx-vt-in-slide var\(--dur-snappy\) var\(--spring-snappy\) both;/,
+    );
+    expect(sheets.pearl).toMatch(/::view-transition-old\(nxview\) \{\s*animation: nx-vt-out var\(--dur-exit\) var\(--spring-exit\) both;/);
+    expect(sheets.pearl).toMatch(/:root\[data-vt-dir="back"\]::view-transition-new\(nxview\) \{\s*animation-name: nx-vt-in-fade, nx-vt-in-slide-back;/);
+  });
+
+  it("swapView's fallback keeps the old view as a still copy while it fades", () => {
+    expect(sheets.motion).toMatch(/\.nx-viewghost,\s*\.nx-viewghost \*,\s*\.nx-viewghost \*::before,\s*\.nx-viewghost \*::after \{\s*animation: none !important;\s*transition: none !important;/);
+  });
+});
+
+describe("every control gives way under the finger", () => {
+  /** The controls a customer presses, the phone's location card among them
+   * (it opens the locations sheet: the most pressed control on that page). */
+  const PRESSED = [
+    ".nx-ibtn",
+    ".nx-chipbtn",
+    ".nx-nav button",
+    ".nx-mnav button",
+    ".nx-dtoggle",
+    ".nx-sumline",
+    "button.nx-li",
+    ".nx-row",
+    ".nx-pick-row",
+    ".nx-perapp-row",
+    ".nx-hloc",
+  ];
+  /** Whether `control` is one of the selectors a rule lists. */
+  const lists = (selector: string, control: string) =>
+    selector
+      .replace(/^[^(]*:is\(/, "")
+      .split(",")
+      .map((s) => s.replace(/\)[^)]*$/, "").trim())
+      .includes(control);
+
+  it("each has the press spring, a press of its own, a focus that settles, and stands still under reduced motion", () => {
+    const transitions = declarations(sheets.motion, /^transition$/);
+    const transforms = declarations(sheets.motion, /^transform$/);
+    const focus = declarations(sheets.motion, /^animation$/).filter((d) => d.selector.includes(":focus-visible"));
+    for (const control of PRESSED) {
+      expect(transitions.some((d) => lists(d.selector, control) && /transform var\(--dur-press\) var\(--spring-press\)/.test(d.value)), `${control}: transition`).toBe(true);
+      expect(
+        transforms.some((d) => lists(d.selector, control) && d.selector.includes(":active") && !d.selector.includes("reduce") && /^scale\(/.test(d.value)),
+        `${control}: :active`,
+      ).toBe(true);
+      expect(focus.some((d) => lists(d.selector, control)), `${control}: :focus-visible`).toBe(true);
+      expect(
+        transforms.some((d) => lists(d.selector, control) && d.selector.includes('data-motion="reduce"') && d.selector.includes(":active") && d.value === "none"),
+        `${control}: reduced motion`,
+      ).toBe(true);
+    }
+  });
+});
+
 describe("motion.css is loaded everywhere the screens are drawn, last", () => {
   it("by the desktop, the phone and the web portal's signed-in pages", () => {
     const desktop = read("../globals.css");

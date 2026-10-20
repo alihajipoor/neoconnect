@@ -91,17 +91,18 @@
     transform: none;
   }
 
-  /* Rows -- settings rows, the location list, the pickers, the menu -- are
-     wide: they deepen under the finger and settle back a hair smaller, so
-     the press is felt without the row seeming to shrink away. */
-  :is(button.nx-li, .nx-row, .nx-pick-row, .nx-perapp-row, .nx-menu [role="menuitem"], .nx-dsc-link) {
+  /* Rows -- settings rows, the location list, the pickers, the menu, and
+     the location card that opens the list -- are wide: they deepen under
+     the finger and settle back a hair smaller, so the press is felt without
+     the row seeming to shrink away. */
+  :is(button.nx-li, .nx-row, .nx-pick-row, .nx-perapp-row, .nx-menu [role="menuitem"], .nx-dsc-link, .nx-hloc) {
     transition:
       transform var(--dur-press) var(--spring-press),
       background-color var(--dur-quick) var(--spring-quick),
       color var(--dur-quick) var(--spring-quick),
       box-shadow var(--dur-quick) var(--spring-quick);
   }
-  :is(button.nx-li, .nx-row, .nx-pick-row, .nx-perapp-row, .nx-menu [role="menuitem"], .nx-dsc-link):active:not(
+  :is(button.nx-li, .nx-row, .nx-pick-row, .nx-perapp-row, .nx-menu [role="menuitem"], .nx-dsc-link, .nx-hloc):active:not(
       :disabled,
       [aria-disabled="true"]
     ) {
@@ -145,7 +146,8 @@
       .nx-row,
       .nx-pick-row,
       .nx-perapp-row,
-      .nx-sumline
+      .nx-sumline,
+      .nx-hloc
     ):focus-visible {
     animation: nx-focus var(--dur-quick) var(--spring-quick);
   }
@@ -180,7 +182,8 @@
       .nx-pick-row,
       .nx-perapp-row,
       .nx-menu [role="menuitem"],
-      .nx-dsc-link
+      .nx-dsc-link,
+      .nx-hloc
     ):active {
     transform: none;
   }
@@ -517,11 +520,14 @@
   }
 
   /* ---------- the busy loops, gated ---------- */
-  :root[data-motion="reduce"] :is(.nx-skel::after, .nx-spinning) {
-    animation: none;
-  }
+  /* Separate rules: a pseudo-element inside :is() is invalid, and drops the
+     whole rule. */
   :root[data-motion="reduce"] .nx-skel::after {
+    animation: none;
     opacity: 0;
+  }
+  :root[data-motion="reduce"] .nx-spinning {
+    animation: none;
   }
 
   /* ---------- the ladder and the reconnect ---------- */

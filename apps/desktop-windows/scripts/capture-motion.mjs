@@ -19,7 +19,9 @@
 // Nothing leaves the machine: the preview answers every call itself.
 //
 //   node scripts/capture-motion.mjs --out <dir> [--only name,name] [--chrome path]
-//   node scripts/capture-motion.mjs --fps [--only name,name]   (frame timing, this machine only)
+//   node scripts/capture-motion.mjs --fps [--only name,name] [--cpu 4]   (frame timing, this machine only;
+//                                       --cpu slows the CPU by that factor, a slower laptop's stand-in)
+//   node scripts/capture-motion.mjs --check   (reduced motion runs no loop; every control moves)
 //   node scripts/capture-motion.mjs --probe <js> [--size label] [--screen s] [--scenario s] [--lang en|fa]
 
 import { spawn } from "node:child_process";
@@ -503,13 +505,90 @@ try {
     TRANSITIONS.length = 0;
     STILLS.length = 0;
   }
+  // --check: what a stylesheet's text cannot show, asserted on the page
+  // itself (exit 1 on any failure):
+  //  - under reduced motion no infinite animation runs, on any screen --
+  //    a dropped rule (a pseudo-element inside :is()) once left the
+  //    skeletons' sheen looping while the CSS test passed;
+  //  - every control a customer can press on screen moves: it has a
+  //    transition or an animation (the owner's "animation and transition
+  //    for every thing"), at the desktop's size and a phone's.
+  if (args.includes("--check")) {
+    const failures = [];
+    const LOOPS = `(() => document.getAnimations()
+      .filter((a) => a.playState === 'running' && a.effect && a.effect.getTiming().iterations === Infinity)
+      .map((a) => {
+        const el = a.effect.target;
+        const name = a.animationName || a.id || 'script';
+        return name + ' on ' + (el ? (el.className && typeof el.className === 'string' ? el.tagName.toLowerCase() + '.' + el.className.split(' ').join('.') : el.tagName.toLowerCase()) : '?') + (a.effect.pseudoElement || '');
+      }))()`;
+    const STILL = `(() => {
+      const frame = document.querySelector('[data-testid=frame]');
+      const vis = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+      const ms = (v) => Math.max(...v.split(',').map((x) => parseFloat(x) * (x.trim().endsWith('ms') ? 1 : 1000)));
+      const out = [];
+      for (const el of frame.querySelectorAll('button, [role="button"], [role="switch"], [role="menuitem"], a[href], summary')) {
+        if (!vis(el) || el.disabled || el.closest('[inert], .nx-viewghost')) continue;
+        const cs = getComputedStyle(el);
+        const moves = ms(cs.transitionDuration) > 0 || (cs.animationName !== 'none' && ms(cs.animationDuration) > 0);
+        if (!moves) out.push(el.tagName.toLowerCase() + '.' + String(el.className).trim().split(/\\s+/).join('.') + ' "' + (el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 30) + '"');
+      }
+      return [...new Set(out)];
+    })()`;
+    const REDUCE_SCREENS = [
+      ["main", "connecting"],
+      ["main", "connected"],
+      ["main", "reconnectAttempt"],
+      ["main", "ladder"],
+      ["activityLoading", "connected"],
+      ["plans", "connected"],
+      ["settings", "connected"],
+    ];
+    for (const [screen, scenario] of REDUCE_SCREENS) {
+      for (const size of [DESKTOP, PHONE]) {
+        await start({ size, screen, scenario, reduce: true, settle: 900 });
+        const loops = await ev(LOOPS);
+        const line = `reduced motion, ${screen} ${scenario} at ${size.split(" (")[0]}: ${loops.length ? loops.join(", ") : "no loop running"}`;
+        console.log(line);
+        if (loops.length) failures.push(line);
+      }
+    }
+    const CONTROL_SCREENS = [
+      ["main", "idle"],
+      ["main", "connected"],
+      ["locations", "idle"],
+      ["settings", "connected"],
+      ["activity", "connected"],
+      ["plans", "connected"],
+      ["support", "connected"],
+      ["referrals", "connected"],
+      ["signin", "idle"],
+    ];
+    for (const [screen, scenario] of CONTROL_SCREENS) {
+      for (const size of [DESKTOP, PHONE]) {
+        await start({ size, screen, scenario, settle: 1600 });
+        const still = await ev(STILL);
+        const line = `controls, ${screen} ${scenario} at ${size.split(" (")[0]}: ${still.length ? `${still.length} without motion: ${still.join(", ")}` : "every one moves"}`;
+        console.log(line);
+        if (still.length) failures.push(line);
+      }
+    }
+    if (failures.length) {
+      console.error(`${failures.length} check(s) failed.`);
+      process.exitCode = 1;
+    }
+    TRANSITIONS.length = 0;
+    STILLS.length = 0;
+  }
   // --fps: each transition run live instead, its frames timed on this
   // machine's headless Chrome -- an indication, not a device's frame rate.
   if (args.includes("--fps")) {
+    const cpu = Number(opt("cpu") ?? 1);
     for (const tr of TRANSITIONS) {
       if (only && !only.includes(tr.name)) continue;
       await start(tr.setup);
       if (tr.slow) await ev("window.__nxSlow = true");
+      if (cpu > 1) await send("Emulation.setCPUThrottlingRate", { rate: cpu });
       const gaps = await ev(`(async () => {
         const gaps = [];
         let last = performance.now();
@@ -525,8 +604,9 @@ try {
       const sorted = [...gaps].sort((x, y) => x - y);
       const q = (p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
       const slow = gaps.filter((g) => g > 25).length;
-      report.push({ name: tr.name, frames: gaps.length, p50: +q(0.5).toFixed(1), p90: +q(0.9).toFixed(1), max: +sorted[sorted.length - 1].toFixed(1), over25ms: slow });
-      console.log(`${tr.name}: ${gaps.length} frames, p50 ${q(0.5).toFixed(1)}ms, p90 ${q(0.9).toFixed(1)}ms, max ${sorted[sorted.length - 1].toFixed(1)}ms, ${slow} over 25ms`);
+      if (cpu > 1) await send("Emulation.setCPUThrottlingRate", { rate: 1 });
+      report.push({ name: tr.name, cpu, frames: gaps.length, p50: +q(0.5).toFixed(1), p90: +q(0.9).toFixed(1), max: +sorted[sorted.length - 1].toFixed(1), over25ms: slow });
+      console.log(`${tr.name}${cpu > 1 ? ` (CPU /${cpu})` : ""}: ${gaps.length} frames, p50 ${q(0.5).toFixed(1)}ms, p90 ${q(0.9).toFixed(1)}ms, max ${sorted[sorted.length - 1].toFixed(1)}ms, ${slow} over 25ms`);
       await ev("window.__nxSlow = false");
     }
     TRANSITIONS.length = 0;
