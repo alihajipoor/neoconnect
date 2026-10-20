@@ -6,6 +6,7 @@ import {
   EXIT_MS,
   FLING_PX_PER_MS,
   FirstViews,
+  OpenSnapshot,
   REDUCED_CURVES,
   curve,
   dragOutcome,
@@ -37,6 +38,22 @@ describe("leaving the way it came (usePresence)", () => {
   it("waits no longer than the exit token with room to spare", () => {
     expect(EXIT_MS).toBeGreaterThanOrEqual(CURVES.exit.duration);
     expect(EXIT_MS).toBeLessThan(300);
+  });
+
+  it("a closing dialog draws what it said open, never its new props", () => {
+    // Connected, "Switch to Germany · Stealth?", Switch pressed: the switch
+    // request is cleared at once, and the props for the exit would read
+    // "Switch to Automatic?" with Cancel in place of Stay connected.
+    const held = new OpenSnapshot<{ title: string; stay: string }>();
+    expect(held.take(true, { title: "Switch to Germany · Stealth?", stay: "Stay connected" })).toEqual({ title: "Switch to Germany · Stealth?", stay: "Stay connected" });
+    expect(held.take(false, { title: "Switch to Automatic?", stay: "Cancel" })).toEqual({ title: "Switch to Germany · Stealth?", stay: "Stay connected" });
+    expect(held.take(false, { title: "Sign out ?", stay: "Cancel" }).title).toBe("Switch to Germany · Stealth?");
+    // Opened again, it says what it is asked now.
+    expect(held.take(true, { title: "Sign out Pixel 7?", stay: "Cancel" }).title).toBe("Sign out Pixel 7?");
+  });
+
+  it("one never opened draws what it is given", () => {
+    expect(new OpenSnapshot<string>().take(false, "A")).toBe("A");
   });
 });
 

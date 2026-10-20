@@ -65,6 +65,17 @@ describe("overlays leave the way they came", () => {
     expect(overlay).toContain('if (dragOutcome(d.dy, elapsed) === "close")');
   });
 
+  it("a closing dialog draws what it said open: its title, sentence, buttons and list", () => {
+    expect(overlay).toContain("const held = useOpenSnapshot(open, { title, description, actions, children });");
+    expect(overlay).toContain("const held = useOpenSnapshot(open, { title, headActions, search, note, children, foot });");
+    expect(overlay).toContain("<h2 id={titleId}>{held.title}</h2>");
+    expect(overlay).toContain("<div className=\"nx-actions\">{held.actions}</div>");
+    expect(overlay).toContain("<h2 id={titleId}>{shownTitle}</h2>");
+    const dialogs = overlay.slice(overlay.indexOf("export function Dialog("), overlay.indexOf("export function BottomSheet("));
+    expect(dialogs).not.toContain("<h2 id={titleId}>{title}</h2>");
+    expect(dialogs).not.toContain("{children}");
+  });
+
   it("focus goes in without scrolling what is underneath", () => {
     expect(overlay).toContain("preventScroll: true");
   });

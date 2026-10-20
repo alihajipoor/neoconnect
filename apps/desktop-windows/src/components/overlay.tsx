@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Search as SearchIcon, X } from "lucide-react";
-import { curve, dragOutcome, motionReduced, play, scrimFor, usePresence } from "../lib/motion";
+import { curve, dragOutcome, motionReduced, play, scrimFor, useOpenSnapshot, usePresence } from "../lib/motion";
 import { cn } from "../lib/utils";
 
 /** Dialogs and menus, rendered through a portal at the document root.
@@ -113,6 +113,8 @@ export function Dialog({
   const titleId = useId();
   const descriptionId = useId();
   const { mounted, closing } = usePresence(open);
+  // Drawn from what it said open, while it closes (lib/motion.ts).
+  const held = useOpenSnapshot(open, { title, description, actions, children });
   useFocusTrap(ref, open, onClose, initialFocus);
   if (!mounted || typeof document === "undefined") return null;
   const state = closing ? "closed" : "open";
@@ -130,14 +132,14 @@ export function Dialog({
           role={alert ? "alertdialog" : "dialog"}
           aria-modal="true"
           aria-labelledby={titleId}
-          aria-describedby={description ? descriptionId : undefined}
+          aria-describedby={held.description ? descriptionId : undefined}
           tabIndex={-1}
           className="nx-glass strong nx-dlg"
         >
-          <h2 id={titleId}>{title}</h2>
-          {description ? <p id={descriptionId}>{description}</p> : null}
-          {children}
-          <div className="nx-actions">{actions}</div>
+          <h2 id={titleId}>{held.title}</h2>
+          {held.description ? <p id={descriptionId}>{held.description}</p> : null}
+          {held.children}
+          <div className="nx-actions">{held.actions}</div>
         </div>
       </div>
     </>,
@@ -177,9 +179,12 @@ export function PickerDialog({
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const { mounted, closing } = usePresence(open);
+  // Drawn from what it said open, while it closes (lib/motion.ts).
+  const held = useOpenSnapshot(open, { title, headActions, search, note, children, foot });
   useFocusTrap(ref, open, onClose);
   if (!mounted || typeof document === "undefined") return null;
   const state = closing ? "closed" : "open";
+  const { title: shownTitle, headActions: shownHead, search: shownSearch, note: shownNote, children: shownBody, foot: shownFoot } = held;
   return createPortal(
     <>
       <div className="nx-scrim" data-state={state} aria-hidden onClick={closing ? undefined : onClose} />
@@ -191,28 +196,28 @@ export function PickerDialog({
       >
         <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="nx-glass strong nx-dlg nx-pick">
           <div className="nx-pick-head">
-            <h2 id={titleId}>{title}</h2>
-            {headActions}
+            <h2 id={titleId}>{shownTitle}</h2>
+            {shownHead}
             <button type="button" className="nx-ibtn sm" onClick={onClose} aria-label={closeLabel} title={closeLabel}>
               <X aria-hidden />
             </button>
           </div>
-          {search ? (
+          {shownSearch ? (
             <div className="nx-search">
               <SearchIcon className="i" aria-hidden />
               <input
                 type="search"
                 data-autofocus
-                value={search.value}
-                onChange={(event) => search.onChange(event.target.value)}
-                placeholder={search.placeholder}
-                aria-label={search.placeholder}
+                value={shownSearch.value}
+                onChange={(event) => shownSearch.onChange(event.target.value)}
+                placeholder={shownSearch.placeholder}
+                aria-label={shownSearch.placeholder}
               />
             </div>
           ) : null}
-          {note ? <p className="nx-pick-note">{note}</p> : null}
-          <div className="nx-pick-body">{children}</div>
-          {foot ? <div className="nx-actions">{foot}</div> : null}
+          {shownNote ? <p className="nx-pick-note">{shownNote}</p> : null}
+          <div className="nx-pick-body">{shownBody}</div>
+          {shownFoot ? <div className="nx-actions">{shownFoot}</div> : null}
         </div>
       </div>
     </>,

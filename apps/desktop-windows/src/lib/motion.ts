@@ -153,6 +153,29 @@ export function usePresence(open: boolean, ms: number = EXIT_MS): { mounted: boo
   return { mounted: shown !== "closed", closing: shown === "closing" };
 }
 
+/** What a closing overlay draws: what it said while it was open. Its
+ * props can change the moment it is asked to close -- the switch
+ * confirmation's place becomes null, and its title would turn into
+ * "Switch to Automatic?" for the exit; Activity's "Sign out {device}?"
+ * would lose its device -- and a dialog on its way out must never name a
+ * choice nobody made. `Presence` (components/ui.tsx) holds its children
+ * the same way. */
+export class OpenSnapshot<T> {
+  private last: { value: T } | null = null;
+  take(open: boolean, value: T): T {
+    if (open || this.last === null) this.last = { value };
+    return this.last.value;
+  }
+}
+
+/** `OpenSnapshot` for a component: the value while `open`, and while it
+ * closes, the last value it had open. */
+export function useOpenSnapshot<T>(open: boolean, value: T): T {
+  const snapshot = useRef<OpenSnapshot<T> | null>(null);
+  snapshot.current ??= new OpenSnapshot<T>();
+  return snapshot.current.take(open, value);
+}
+
 // --- a view's first entrance --------------------------------------------------
 
 /** How long a first view's stagger may take to begin, for content that
