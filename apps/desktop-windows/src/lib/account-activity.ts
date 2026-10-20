@@ -26,6 +26,24 @@ export function loadableFrom<T>(result: ApiResult<T>): Loadable<T> {
   return { state: "failed", noAnswer: result.noResponse === true };
 }
 
+/** What signing another device out came to (`signOutDevice`):
+ *  - `done`: it is signed out;
+ *  - `alreadyGone`: it was not signed in any more (404) -- the list was
+ *    stale, and is read again;
+ *  - `thisDevice`: the server says it is this one (400 THIS_DEVICE), which
+ *    the app's own sign-out does, not this;
+ *  - `unreached`: nothing answered;
+ *  - `failed`: anything else -- not done, and said so. */
+export type DeviceSignOutOutcome = "done" | "alreadyGone" | "thisDevice" | "unreached" | "failed";
+
+export function deviceSignOutOutcome(result: ApiResult<unknown>): DeviceSignOutOutcome {
+  if (result.ok) return "done";
+  if (result.noResponse) return "unreached";
+  if (result.status === 404) return "alreadyGone";
+  if (result.status === 400 && result.code === "THIS_DEVICE") return "thisDevice";
+  return "failed";
+}
+
 /** Phones and computers look different on the list. */
 export function deviceKind(platform: string | null): "phone" | "computer" | "unknown" {
   const parsed = parseDevicePlatform(platform);

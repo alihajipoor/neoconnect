@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { bytesOf, deviceKind, loadableFrom, usageChart } from "./account-activity";
+import { readFileSync } from "node:fs";
+import { bytesOf, deviceKind, deviceSignOutOutcome, loadableFrom, usageChart } from "./account-activity";
 import type { AccountDevices, DailyUsage } from "./customer";
 import { I18nProvider } from "./i18n";
 import { formatDay } from "./locale-format";
@@ -115,7 +116,40 @@ describe("devices on the plan", () => {
 
   it("offers no way to sign another device out until the owner decides", () => {
     const text = render({ devices: { state: "ok", data: DEVICES } });
-    expect(text).not.toMatch(/sign out of this device|sign this device out/i);
+    expect(text).not.toMatch(/sign out of this device|sign this device out|sign out pixel/i);
+    // Built, and switched off: no app passes the switch yet (owner decision
+    // pending, docs/account-activity.md).
+    for (const app of ["../App.tsx", "../../../mobile/src/App.tsx", "../../../web-portal/src/App.tsx"]) {
+      expect(readFileSync(new URL(app, import.meta.url), "utf8"), app).not.toMatch(/deviceSignOut/);
+    }
+  });
+
+  it("once approved, offers Sign out on the other devices only, never this one", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        I18nProvider,
+        null,
+        createElement(ActivityView, {
+          data: DATA,
+          now: NOW,
+          devices: { state: "ok", data: DEVICES },
+          onSignOutDevice: async () => "done" as const,
+        }),
+      ),
+    );
+    expect(html.match(/data-device-signout=""/g)?.length).toBe(1);
+    expect(html).toContain('aria-label="Sign out Pixel 7"');
+    const thisRow = html.slice(html.indexOf('data-device="this"'), html.indexOf("</li>", html.indexOf('data-device="this"')));
+    expect(thisRow).not.toContain("data-device-signout");
+  });
+
+  it("says what signing a device out came to", () => {
+    expect(deviceSignOutOutcome({ ok: true, data: undefined })).toBe("done");
+    expect(deviceSignOutOutcome({ ok: false, error: "x", status: 404 })).toBe("alreadyGone");
+    expect(deviceSignOutOutcome({ ok: false, error: "x", status: 400, code: "THIS_DEVICE" })).toBe("thisDevice");
+    expect(deviceSignOutOutcome({ ok: false, error: "x", noResponse: true })).toBe("unreached");
+    expect(deviceSignOutOutcome({ ok: false, error: "x", status: 429 })).toBe("failed");
+    expect(deviceSignOutOutcome({ ok: false, error: "x", status: 400 })).toBe("failed");
   });
 
   it("names a device by its own label, or its kind", () => {

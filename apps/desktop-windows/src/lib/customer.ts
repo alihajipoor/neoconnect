@@ -79,6 +79,14 @@ export interface AccountDevices {
  * connecting needs it (the backend keeps it off the relay's allowlist). */
 export const getDevices = () => apiRequest<AccountDevices>("/customer/devices");
 
+/** Signs another of the account's devices out, as its own sign-out would
+ * (docs/account-activity.md): 204 done, 400 THIS_DEVICE for the caller's
+ * own (that is the app's own sign-out), 404 for one already gone. Not
+ * over the relay, like the list. Offered on screen only once the owner
+ * approves it (`Activity`'s `deviceSignOut`). */
+export const signOutDevice = (id: string) =>
+  apiRequest<void>(`/customer/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+
 /** Data used per day, every device together, over the whole account --
  * not per subscription, which would start again at every purchase. Byte
  * counts are decimal strings: a day can pass 2^53. */

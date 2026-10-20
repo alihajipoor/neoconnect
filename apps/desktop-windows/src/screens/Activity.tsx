@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { BarChart3, Check, CreditCard, History, Monitor, MonitorSmartphone, Smartphone, Trash2, Wifi, X } from "lucide-react";
+import { BarChart3, Check, CreditCard, History, LogOut, Monitor, MonitorSmartphone, Smartphone, Trash2, Wifi, X } from "lucide-react";
 import type { ConnectHistory } from "../lib/connect-history";
 import { loadConnectHistory } from "../lib/failover-store";
 import { loadSnapshot } from "../lib/credential-cache";
@@ -20,13 +20,15 @@ import {
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import { placeLabel, routePlace } from "../lib/route-place";
 import type { RouteOption, Subscription } from "../lib/types";
-import { getDailyUsage, getDevices, type AccountDevice, type AccountDevices, type DailyUsage } from "../lib/customer";
+import { getDailyUsage, getDevices, signOutDevice, type AccountDevice, type AccountDevices, type DailyUsage } from "../lib/customer";
 import {
   deviceKind,
+  deviceSignOutOutcome,
   deviceTimeZone,
   loadableFrom,
   USAGE_DAYS,
   usageChart,
+  type DeviceSignOutOutcome,
   type Loadable,
 } from "../lib/account-activity";
 import { parseDevicePlatform, specificDeviceLabel } from "../lib/device-identity";
@@ -74,6 +76,7 @@ export function Activity({
   onOpenPlans,
   onBack,
   sessionLog: logRecorded = false,
+  deviceSignOut = false,
 }: {
   /** Which network this device is on. */
   readNetwork: () => Promise<string | null>;
@@ -87,6 +90,10 @@ export function Activity({
   /** This platform's main page records the session log, so its switch is
    * offered. Windows does; a phone does once its main page does. */
   sessionLog?: boolean;
+  /** Offer "Sign out" on the account's other devices. Off until the owner
+   * approves it (docs/account-activity.md: no client exposes it before);
+   * built, so approving it is this one prop. */
+  deviceSignOut?: boolean;
 }) {
   const [data, setData] = useState<ActivityData | null>(null);
   const [devices, setDevices] = useState<Loadable<AccountDevices>>({ state: "loading" });
@@ -131,12 +138,23 @@ export function Activity({
 
   const log = useSessionLog(logRecorded);
 
+  const signOut = useCallback(
+    async (device: AccountDevice): Promise<DeviceSignOutOutcome> => {
+      const outcome = deviceSignOutOutcome(await signOutDevice(device.id));
+      // Signed out, or already gone: the list as the account has it now.
+      if (alive.current && (outcome === "done" || outcome === "alreadyGone")) loadDevices();
+      return outcome;
+    },
+    [loadDevices],
+  );
+
   return (
     <ActivityView
       data={data}
       devices={devices}
       usage={usage}
       log={log}
+      onSignOutDevice={deviceSignOut ? signOut : undefined}
       onRetryDevices={loadDevices}
       onRetryUsage={loadUsage}
       onOpenPlans={onOpenPlans}
@@ -183,6 +201,7 @@ export function ActivityView({
   devices = { state: "loading" },
   usage = { state: "loading" },
   log,
+  onSignOutDevice,
   onRetryDevices,
   onRetryUsage,
   onOpenPlans,
@@ -193,6 +212,8 @@ export function ActivityView({
   devices?: Loadable<AccountDevices>;
   usage?: Loadable<DailyUsage>;
   log?: SessionLogView;
+  /** Signs another device out; absent, no row offers it. */
+  onSignOutDevice?: (device: AccountDevice) => Promise<DeviceSignOutOutcome>;
   onRetryDevices?: () => void;
   onRetryUsage?: () => void;
   onOpenPlans?: () => void;
@@ -207,6 +228,7 @@ export function ActivityView({
   const cap = sub?.dataCapBytes ? Number(sub.dataCapBytes) : null;
   const used = sub ? Number(sub.dataUsedBytes) : 0;
   const daysLeft = sub ? Math.max(0, Math.ceil((new Date(sub.expireAt).getTime() - now) / 86_400_000)) : null;
+  const [signingOut, setSigningOut] = useState<AccountDevice | null>(null);
 
   return (
     <Page title={t("act.title")} lede={t("act.lede")} back={onBack} data-activity>
@@ -308,7 +330,13 @@ export function ActivityView({
             <>
               <ul className="nx-alist m-0 list-none p-0">
                 {devices.data.devices.map((device) => (
-                  <DeviceRow key={device.id} device={device} now={now} />
+                  <DeviceRow
+                    key={device.id}
+                    device={device}
+                    now={now}
+                    // Never this device: that is the app's own sign-out.
+                    onSignOut={onSignOutDevice && !device.thisDevice ? () => setSigningOut(device) : undefined}
+                  />
                 ))}
               </ul>
               {!devices.data.inUseKnown ? <p className="nx-tiny">{t("act.inUseUnknown")}</p> : null}
@@ -330,7 +358,71 @@ export function ActivityView({
 
         {log ? <SessionLogGroup log={log} routes={data?.routes ?? []} /> : null}
       </div>
+      {onSignOutDevice ? (
+        <DeviceSignOutDialog device={signingOut} onSignOut={onSignOutDevice} onClose={() => setSigningOut(null)} />
+      ) : null}
     </Page>
+  );
+}
+
+/** "Sign out" for another of the account's devices: what it does, asked
+ * once, and what came of it said -- never a silent failure. */
+function DeviceSignOutDialog({
+  device,
+  onSignOut,
+  onClose,
+}: {
+  device: AccountDevice | null;
+  onSignOut: (device: AccountDevice) => Promise<DeviceSignOutOutcome>;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<TranslationKey | null>(null);
+  const keepRef = useRef<HTMLButtonElement>(null);
+  const name = device ? deviceListName(device, t) : "";
+  const close = () => {
+    if (busy) return;
+    setProblem(null);
+    onClose();
+  };
+  async function go() {
+    if (!device || busy) return;
+    setBusy(true);
+    setProblem(null);
+    const outcome = await onSignOut(device);
+    setBusy(false);
+    if (outcome === "done" || outcome === "alreadyGone") {
+      onClose();
+      return;
+    }
+    setProblem(outcome === "unreached" ? "act.signOutUnreached" : "act.signOutFailed");
+  }
+  return (
+    <Dialog
+      open={device !== null}
+      title={t("act.signOutTitle", { device: name })}
+      description={t("act.signOutBody")}
+      onClose={close}
+      initialFocus={keepRef}
+      actions={
+        <>
+          <PillButton ref={keepRef} variant="ghost" size="sm" onClick={close} disabled={busy}>
+            {t("btn.cancel")}
+          </PillButton>
+          <PillButton size="sm" className="danger" onClick={() => void go()} disabled={busy} aria-busy={busy || undefined}>
+            {busy ? <span className="nx-spin" aria-hidden /> : null}
+            {t("act.signOutGo")}
+          </PillButton>
+        </>
+      }
+    >
+      {problem ? (
+        <Message tone="danger" data-signout-problem="">
+          {t(problem)}
+        </Message>
+      ) : null}
+    </Dialog>
   );
 }
 
@@ -379,7 +471,7 @@ export function deviceListName(device: Pick<AccountDevice, "label" | "platform">
   return t(platform ? DEVICE_NAMES[platform] : "act.devUnknown");
 }
 
-function DeviceRow({ device, now }: { device: AccountDevice; now: number }) {
+function DeviceRow({ device, now, onSignOut }: { device: AccountDevice; now: number; onSignOut?: () => void }) {
   const { t, language } = useI18n();
   const kind = deviceKind(device.platform);
   const seen = device.lastSeenAt ? formatAgo(new Date(device.lastSeenAt).getTime(), language, now) : null;
@@ -407,6 +499,18 @@ function DeviceRow({ device, now }: { device: AccountDevice; now: number }) {
           <Check aria-hidden />
           {t("act.inUse")}
         </span>
+      ) : null}
+      {onSignOut ? (
+        <button
+          type="button"
+          className="nx-ibtn sm"
+          onClick={onSignOut}
+          aria-label={t("act.signOutDevice", { device: deviceListName(device, t) })}
+          title={t("act.signOutDevice", { device: deviceListName(device, t) })}
+          data-device-signout=""
+        >
+          <LogOut aria-hidden />
+        </button>
       ) : null}
     </li>
   );

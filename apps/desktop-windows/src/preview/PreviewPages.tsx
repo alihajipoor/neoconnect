@@ -57,6 +57,7 @@ export const PAGE_SCREENS: Record<string, string> = {
   activity: "Activity",
   activityLog: "Activity, session log on",
   activityFailed: "Activity, account not reached",
+  activitySignOut: "Activity, Sign out on other devices (awaiting owner)",
   activityEmpty: "Activity, network unknown",
   plans: "Plans",
   support: "Support",
@@ -71,6 +72,7 @@ const NAV: Record<string, NavId> = {
   activity: "activity",
   activityLog: "activity",
   activityFailed: "activity",
+  activitySignOut: "activity",
   activityEmpty: "activity",
   plans: "none",
   support: "none",
@@ -125,6 +127,14 @@ export const PREVIEW_RUNNING_APPS = [
   { name: "Steam", path: "C:\\Program Files (x86)\\Steam\\steam.exe" },
   { name: "Spotify", path: "C:\\Users\\you\\AppData\\Roaming\\Spotify\\Spotify.exe" },
 ];
+
+let signOutTries = 0;
+/** DEV ONLY: signing a device out, as the Activity page would. */
+async function previewSignOut(): Promise<"done" | "unreached"> {
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  signOutTries += 1;
+  return signOutTries % 2 === 1 ? "unreached" : "done";
+}
 
 const DAY_MS = 86_400_000;
 const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
@@ -291,7 +301,11 @@ export function PreviewPage({
         {screen === "pickGame" ? <GamePicker games={SAMPLE_GAMES} chosen={["dota2"]} onPick={noop} onClose={noop} /> : null}
         {screen === "pickApps" ? <RunningAppPicker chosen={[PREVIEW_CHOSEN_APP]} onPick={noop} onClose={noop} /> : null}
       </>
-    ) : screen === "activity" || screen === "activityEmpty" || screen === "activityLog" || screen === "activityFailed" ? (
+    ) : screen === "activity" ||
+      screen === "activityEmpty" ||
+      screen === "activityLog" ||
+      screen === "activityFailed" ||
+      screen === "activitySignOut" ? (
       <ActivityView
         data={activity}
         devices={screen === "activityFailed" ? { state: "failed", noAnswer: true } : { state: "ok", data: SAMPLE_DEVICES }}
@@ -307,6 +321,9 @@ export function PreviewPage({
                 onClear: noop,
               }
         }
+        // Not offered by any app until the owner approves it; drawn here so
+        // it can be looked at. The first try is not answered, the next is.
+        onSignOutDevice={screen === "activitySignOut" ? previewSignOut : undefined}
         onRetryDevices={noop}
         onRetryUsage={noop}
         onOpenPlans={noop}
