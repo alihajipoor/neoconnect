@@ -56,6 +56,7 @@ import { CommunityLinks } from "../components/CommunityLinks";
 import { StillTrying } from "../components/StillTrying";
 import { relaySupported } from "../lib/last-resort";
 import { appPrefs, type AppPrefs } from "../lib/app-prefs";
+import { holdWanted } from "../lib/reconnect-hold";
 import type { AutostartBinding } from "../lib/autostart";
 import type { NotifySetting } from "../lib/notify";
 
@@ -512,11 +513,11 @@ export function Settings({
               <b>{t("leak.notHeldLead")}</b> {t("leak.notHeld")}
             </span>
           </li>
-          <li className={windows && prefs.value.blockWhileReconnecting ? "ok" : undefined}>
-            {windows && prefs.value.blockWhileReconnecting ? <Check aria-hidden /> : <Info aria-hidden />}
+          <li className={windows && holdWanted(prefs.value.blockWhileReconnecting) ? "ok" : undefined}>
+            {windows && holdWanted(prefs.value.blockWhileReconnecting) ? <Check aria-hidden /> : <Info aria-hidden />}
             <span>
               <b>{t("leak.reconLead")}</b>{" "}
-              {t(windows && prefs.value.blockWhileReconnecting ? "leak.reconHeld" : "leak.recon")}
+              {t(windows && holdWanted(prefs.value.blockWhileReconnecting) ? "leak.reconHeld" : "leak.recon")}
             </span>
           </li>
         </ul>

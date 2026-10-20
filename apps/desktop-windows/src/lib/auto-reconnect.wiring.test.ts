@@ -73,7 +73,13 @@ describe("where an episode begins", () => {
   });
 
   it("gives the slot back only when nothing is coming back", () => {
-    expect(publishDrop).toContain('=== "lost") void deviceSlot.release();');
+    expect(publishDrop).toMatch(/=== "lost"\) \{\s+void deviceSlot\.release\(\);/);
+  });
+
+  it("lets go of the reconnect hold when nothing is coming back, whatever phase the drop found", () => {
+    expect(publishDrop).toMatch(
+      /=== "lost"\) \{\s+void deviceSlot\.release\(\);\s+if \(holdWanted\(appPrefs\.current\(\)\.blockWhileReconnecting\)\) void holdService\.release\(\);/,
+    );
   });
 
   it("and the episode gives it back when it ends before a claim, or waits for the app", () => {

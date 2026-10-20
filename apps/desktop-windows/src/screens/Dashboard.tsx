@@ -120,7 +120,7 @@ import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
 import { appPrefs } from "../lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
-import { holdNote, holdService, holdStore, passTeardown, shouldRelease } from "../lib/reconnect-hold";
+import { holdHint, holdNote, holdService, holdStore, holdWanted, passTeardown, shouldRelease } from "../lib/reconnect-hold";
 import { NOTIFY_TEXT, notifyMemory, notifyStep } from "../lib/connection-notify";
 import { showNotification } from "../lib/notify";
 import { trafficMeter } from "../lib/traffic-meter";
@@ -1048,8 +1048,13 @@ export function Dashboard({
     // customer's other device away as "in use" until it goes stale. Kept
     // while a reconnect runs, whose claim renews it -- and given back by
     // the episode itself if it ends before a pass of it claimed
-    // (`slotIdle`).
-    if (autoReconnect.dropped({ exclusion: reconnectExclusion() }) === "lost") void deviceSlot.release();
+    // (`slotIdle`). And the reconnect hold, which the service began the
+    // moment the engine died: with nothing to reconnect, nothing is to be
+    // held -- whatever phase the drop found (lib/reconnect-hold.ts).
+    if (autoReconnect.dropped({ exclusion: reconnectExclusion() }) === "lost") {
+      void deviceSlot.release();
+      if (holdWanted(appPrefs.current().blockWhileReconnecting)) void holdService.release();
+    }
     return true;
   }
 
@@ -2521,7 +2526,7 @@ export function Dashboard({
   // line that says the internet is blocked -- or why it is not. Only with
   // the setting on: off, there is nothing to say.
   useEffect(() => {
-    if (!reconnectRunning || !prefs.blockWhileReconnecting) return;
+    if (!reconnectRunning || !holdWanted(prefs.blockWhileReconnecting)) return;
     let asking = false;
     const look = () => {
       if (asking) return;
@@ -2584,7 +2589,7 @@ export function Dashboard({
           reconnecting: reconnectRunning,
           dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()),
         });
-  const holding = hold?.state === "holding";
+  const holding = holdWanted(prefs.blockWhileReconnecting) && hold?.state === "holding";
   useEffect(() => {
     if (loading) return;
     const step = notifyStep(notifyMemory.current(), {
@@ -2600,7 +2605,7 @@ export function Dashboard({
     void showNotification(t(text.title), t(text.body), language).catch(() => undefined);
     // On a change of what is said, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, notifyTone, reconnectRunning, appMode]);
+  }, [loading, notifyTone, reconnectRunning, appMode, holding]);
 
   // The session log (lib/session-log.ts), only when the customer has
   // turned it on: a record opens when the screen first shows a tunnel up
@@ -3124,7 +3129,7 @@ export function Dashboard({
      * from a quiet screen always has (`passTeardown`). */
     const holdThrough =
       passTeardown({
-        setting: appPrefs.current().blockWhileReconnecting,
+        setting: holdWanted(appPrefs.current().blockWhileReconnecting),
         automatic: options.automatic === true,
         holding: holdStore.current()?.state === "holding",
       }) === "keepHold";
@@ -3541,7 +3546,7 @@ export function Dashboard({
             knownNodes,
             // "Block the internet while reconnecting": the service arms this
             // session when it is on (lib/reconnect-hold.ts).
-            blockWhileReconnecting: appPrefs.current().blockWhileReconnecting,
+            blockWhileReconnecting: holdWanted(appPrefs.current().blockWhileReconnecting),
           });
           showNetworkWait(false);
           // The session this pass was started under ended while the
@@ -3737,7 +3742,7 @@ export function Dashboard({
             publishObserved(intent, verdict);
             // A tunnel is up: whatever the reconnect hold was holding is
             // over. Asked of the service at once; nothing waits on it.
-            if (appPrefs.current().blockWhileReconnecting) void holdService.release();
+            if (holdWanted(appPrefs.current().blockWhileReconnecting)) void holdService.release();
             // Which exit this session actually leaves from, sent now
             // that a route has come up rather than guessed before one
             // had.
@@ -4321,17 +4326,19 @@ export function Dashboard({
    * state while it holds (the internet is not going out "without
    * Neoxify" then, and saying so would be false), a note when it should
    * and does not (`holdNote`). */
-  const heldNote = holdNote(hold, { inGap: reconnecting !== null || dropped, setting: prefs.blockWhileReconnecting });
+  const holdSetting = holdWanted(prefs.blockWhileReconnecting);
+  const heldNote = holdNote(hold, { inGap: reconnecting !== null || dropped, setting: holdSetting });
+  const heldHint = holdHint(hold, { reconnecting: reconnecting !== null, dropped, setting: holdSetting });
   const hintText = slotTeardownShowing
     ? ""
     : connectionError
       ? t(connectionError.messageKey)
-      : reconnecting !== null && heldNote === "hold.holding"
-        ? t("hold.holding")
+      : heldHint !== null
+        ? t(heldHint)
         : t(headline.hint);
   /** Every sentence the hint can say, for the room it keeps: the hold's
-   * only where the setting can make it say that. */
-  const hintReserve: readonly HintKey[] = prefs.blockWhileReconnecting ? [...HEADLINE_HINTS, "hold.holding"] : HEADLINE_HINTS;
+   * only where the setting can make it say them. */
+  const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, "hold.holding", "hold.heldAfterDrop"] : HEADLINE_HINTS;
   const slotShowing = slotNotice !== null && slotNoticeShown(slotNotice, connectionState === "disconnected");
   /** The device limit's card carries its own primary press ("Use on this
    * device instead") and its way out: with nothing up, the pill steps aside

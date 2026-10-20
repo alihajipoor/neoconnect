@@ -50,6 +50,20 @@ describe("what is worth a notification", () => {
     expect(play([{ tone: "ok" }, { tone: "danger" }])).toEqual(["connected", "dropped"]);
   });
 
+  it("waits to say it is gone while the service still holds the internet, and says it once the hold has gone", () => {
+    // "Your traffic is not protected" while other connections are still
+    // blocked would be false.
+    expect(
+      play([{ tone: "ok" }, { tone: "warn", reconnecting: true, holding: true }, { tone: "danger", holding: true }, { tone: "danger" }]),
+    ).toEqual(["connected", "lostHeld", null, "dropped"]);
+    expect(play([{ tone: "ok" }, { tone: "danger", holding: true }, { tone: "danger", holding: true }, { tone: "danger" }])).toEqual([
+      "connected",
+      null,
+      null,
+      "dropped",
+    ]);
+  });
+
   it("says nothing about the customer's own Disconnect", () => {
     expect(play([{ tone: "ok" }, { tone: "idle" }, { tone: "idle" }])).toEqual(["connected", null, null]);
     // And a Disconnect forgets the session: a later drop of nothing is silent.

@@ -81,7 +81,8 @@ describe("Settings' device rows", () => {
     const app = source("../App.tsx");
     expect(app).toContain("device={WINDOWS_DEVICE}");
     expect(app).toMatch(/autostart: windowsAutostart,\s+autoConnect: true,\s+notifications: \{ setting: notificationSetting \},/);
-    expect(app).toContain('reconnectHold: { apply: (enabled) => invoke<void>("vpn_set_reconnect_hold", { enabled }) }');
+    // The reconnect hold only where the build offers it (reconnect-hold.wiring.test.ts).
+    expect(app).toContain('reconnectHold: { apply: (enabled: boolean) => invoke<void>("vpn_set_reconnect_hold", { enabled }) }');
     const phone = source("../../../mobile/src/App.tsx");
     expect(phone.match(/\bdevice=\{/g)?.length).toBe(1);
     expect(phone).toContain("device={isAndroid() || isIOS() ? PHONE_DEVICE : undefined}");
@@ -105,14 +106,14 @@ describe("the main page does what the rows say", () => {
   });
 
   it("sends the reconnect hold's setting with every connect, and keeps or lets go of it as the pass goes", () => {
-    expect(dashboard).toContain("blockWhileReconnecting: appPrefs.current().blockWhileReconnecting,");
+    expect(dashboard).toContain("blockWhileReconnecting: holdWanted(appPrefs.current().blockWhileReconnecting),");
     expect(dashboard.match(/await takeDown\(\)\.catch\(\(\) => undefined\);/g)?.length).toBe(2);
     expect(dashboard).toContain('await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);');
     expect(dashboard).toContain(
       "await (options.reconnect && holdThrough ? holdService.disconnectKeepingHold() : serviceDisconnect()).catch(() => undefined);",
     );
     expect(dashboard).toMatch(
-      /publishObserved\(intent, verdict\);\s+\/\/ A tunnel is up[^\n]*\n[^\n]*\n\s+if \(appPrefs\.current\(\)\.blockWhileReconnecting\) void holdService\.release\(\);/,
+      /publishObserved\(intent, verdict\);\s+\/\/ A tunnel is up[^\n]*\n[^\n]*\n\s+if \(holdWanted\(appPrefs\.current\(\)\.blockWhileReconnecting\)\) void holdService\.release\(\);/,
     );
     expect(source("../App.tsx")).toContain("return watchEpisodesForHold({");
   });

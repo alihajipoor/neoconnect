@@ -15,7 +15,9 @@
  *    while it does ("Block the internet while reconnecting");
  *  - `back`: verified again after `lost` was said;
  *  - `dropped`: gone, and nothing is reconnecting it (the episode gave up,
- *    or none could start).
+ *    or none could start) -- once the service no longer holds the internet
+ *    for it: "not protected" while other connections are still blocked
+ *    would be false, so it waits for the release to be confirmed.
  * Nothing for the customer's own Disconnect, nothing in Gaming mode, and
  * nothing while the window is in front: the screen already says it. A
  * change seen on screen counts as said, so "back" after a loss the
@@ -73,8 +75,9 @@ export function notifyStep(memory: NotifyMemory, input: NotifyInput): { memory: 
         return say(input.holding ? "lostHeld" : "lost", { up: true, lostSaid: true });
       }
       return { memory, say: null };
-    // Gone, and nothing reconnecting.
+    // Gone, and nothing reconnecting -- said once the hold has gone too.
     case "danger":
+      if (input.holding) return { memory, say: null };
       if (memory.up || memory.lostSaid) return say("dropped", FRESH_MEMORY);
       return { memory, say: null };
     // Nothing up by the customer's own hand, or a press under way.

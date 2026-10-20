@@ -128,7 +128,7 @@ describe("a phone's main page is one screen", () => {
     // setting can make the hint say it (lib/reconnect-hold.ts).
     expect(dash).toContain("reserve={hintReserve}");
     expect(dash).toContain(
-      'const hintReserve: readonly HintKey[] = prefs.blockWhileReconnecting ? [...HEADLINE_HINTS, "hold.holding"] : HEADLINE_HINTS;',
+      'const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, "hold.holding", "hold.heldAfterDrop"] : HEADLINE_HINTS;',
     );
   });
 

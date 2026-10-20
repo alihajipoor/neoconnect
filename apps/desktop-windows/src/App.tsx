@@ -34,7 +34,7 @@ import { windowsAutostart } from "./lib/autostart";
 import { notificationSetting } from "./lib/notify";
 import { autoConnectLatch } from "./lib/auto-connect";
 import { notifyMemory } from "./lib/connection-notify";
-import { holdService, watchEpisodesForHold } from "./lib/reconnect-hold";
+import { holdService, holdWanted, RECONNECT_HOLD_OFFERED, watchEpisodesForHold } from "./lib/reconnect-hold";
 import { appPrefs } from "./lib/app-prefs";
 import { ladderPass } from "./lib/ladder-pass";
 import { sessionLog } from "./lib/session-log";
@@ -55,12 +55,16 @@ setRelayTunnelReader(async () => (await invoke<{ connected: boolean }>("vpn_stat
 
 /** What Windows does for Settings' device rows: every one of them bound
  * here, so Settings draws them (`DeviceSettings`). The phone app binds
- * its own once its main page honours them. */
+ * its own once its main page honours them. "Block the internet while
+ * reconnecting" only in a build that offers it: not until a capture has
+ * proved it (`RECONNECT_HOLD_PROVEN` in lib/reconnect-hold.ts). */
 const WINDOWS_DEVICE: DeviceSettings = {
   autostart: windowsAutostart,
   autoConnect: true,
   notifications: { setting: notificationSetting },
-  reconnectHold: { apply: (enabled) => invoke<void>("vpn_set_reconnect_hold", { enabled }) },
+  ...(RECONNECT_HOLD_OFFERED
+    ? { reconnectHold: { apply: (enabled: boolean) => invoke<void>("vpn_set_reconnect_hold", { enabled }) } }
+    : {}),
 };
 
 type Screen =
@@ -136,9 +140,10 @@ export default function App() {
     return watchEpisodesForHold({
       phase: autoReconnect.current,
       subscribe: autoReconnect.subscribe,
-      setting: () => appPrefs.current().blockWhileReconnecting,
+      setting: () => holdWanted(appPrefs.current().blockWhileReconnecting),
       passRunning: () => ladderPass.inFlight(),
       release: holdService.release,
+      keep: holdService.keep,
     });
   }, []);
 
