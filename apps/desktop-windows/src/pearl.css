@@ -2599,7 +2599,7 @@
     animation-duration: var(--dur-quick);
   }
   :root[data-vt-dir="back"]::view-transition-new(nxview) {
-    animation-name: nx-view-in-back;
+    animation-name: nx-vt-in-fade, nx-vt-in-slide-back;
   }
   @keyframes nx-view-in-back {
     from {
@@ -2615,15 +2615,36 @@
     animation-duration: var(--dur-morph);
     animation-timing-function: var(--spring-morph);
   }
+  /* The old view fades out on the exit curve (accelerating away) while the
+     new one is fully opaque by the same time (decelerating in): their
+     alphas add to at least one at every moment, so the page never dips
+     toward the base colour mid-change. The slide keeps its spring. */
   ::view-transition-old(nxview) {
     animation: nx-vt-out var(--dur-exit) var(--spring-exit) both;
   }
   ::view-transition-new(nxview) {
-    animation: nx-view-in var(--dur-snappy) var(--spring-snappy) both;
+    animation:
+      nx-vt-in-fade var(--dur-exit) var(--spring-quick) both,
+      nx-vt-in-slide var(--dur-snappy) var(--spring-snappy) both;
   }
   @keyframes nx-vt-out {
     to {
       opacity: 0;
+    }
+  }
+  @keyframes nx-vt-in-fade {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes nx-vt-in-slide {
+    from {
+      transform: translateX(calc(18px * var(--dir) * var(--move)));
+    }
+  }
+  @keyframes nx-vt-in-slide-back {
+    from {
+      transform: translateX(calc(-18px * var(--dir) * var(--move)));
     }
   }
   :root[data-motion="reduce"]::view-transition-group(*),
