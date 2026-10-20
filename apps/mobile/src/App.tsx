@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { ScreenTransition } from "@shared/components/ScreenTransition";
+import { ScreenTransition, screenDirection } from "@shared/components/ScreenTransition";
 import { getTokens } from "@shared/lib/session";
 import { flushAttempts } from "@shared/lib/attempts";
 import { endCustomerSession, setTunnelTeardown, type SessionEnd } from "@shared/lib/session-end";
@@ -9,9 +9,9 @@ import { useI18n } from "@shared/lib/i18n";
 import { tearDownMobileForSignOut, vpnStatus } from "./lib/vpn";
 import { setRelayTunnelReader } from "@shared/lib/last-resort";
 import { BackupRouteChip } from "@shared/components/BackupRoute";
-import { AppShell, type NavId } from "@shared/components/shell/AppShell";
-import { PageScene } from "@shared/components/shell/Page";
-import { forgetShellProfile, planLineText, requestLocations, shellProfile } from "@shared/lib/shell-nav";
+import type { NavId, ShellPage } from "@shared/components/shell/AppShell";
+import { forgetShellProfile, isSignedInScreen, transitionKey } from "@shared/lib/shell-nav";
+import { swapView } from "@shared/lib/view-transition";
 import { Login } from "@shared/screens/Login";
 import { Register } from "@shared/screens/Register";
 import { VerifyEmail } from "@shared/screens/VerifyEmail";
@@ -99,6 +99,10 @@ type Screen =
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
+  /** The screen as of the last render, for a change of screen asked from a
+   * callback (`go`). */
+  const screenRef = useRef<Screen>(screen);
+  screenRef.current = screen;
   // Carries the just-submitted credentials into the verify screen so it
   // can sign in the moment the code is confirmed. Held in memory only.
   const [pendingAuth, setPendingAuth] = useState<{ email: string; password?: string } | null>(null);
@@ -289,35 +293,103 @@ export default function App() {
   handleLoggedOutRef.current = handleLoggedOut;
   useEffect(() => onSessionRevoked(() => void handleLoggedOutRef.current("revoked")), []);
 
-  /** One of the signed-in pages in the same shell as the main page -- the
-   * bottom nav on a phone, the tabs or the sidebar on a tablet -- as on
-   * Windows. `active` is the nav item it belongs to. The avatar line is
-   * the one the main page last showed (`shellProfile`). */
-  const inShell = (active: NavId, content: ReactNode) => {
-    const profile = shellProfile();
-    return (
-      <AppShell
-        active={active}
-        shown="idle"
-        email={profile.email}
-        planLine={planLineText(profile.plan, t, language)}
-        onOverview={() => setScreen("dashboard")}
-        onLocations={() => {
-          requestLocations();
-          setScreen("dashboard");
-        }}
-        onOpenActivity={() => setScreen("activity")}
-        onOpenSettings={() => setScreen("settings")}
-        onBrowsePlans={() => setScreen("plans")}
-        onOpenReferrals={() => setScreen("referrals")}
-        onOpenSupport={() => setScreen("support")}
-        onSignOut={() => void signOutFromSettings()}
-        signingOut={pageSigningOut}
-        scene={<PageScene />}
-      >
-        {content}
-      </AppShell>
-    );
+  /** A change of screen. Between the main page and another page of the
+   * signed-in shell it is animated here, as a change of view (`swapView`):
+   * the transition below keeps one key for all of them (`transitionKey`),
+   * so the Dashboard -- and the shell it draws them in -- stays mounted.
+   * Everything else goes through the transition below. As on Windows,
+   * where a Dashboard mounted anew for every return put "Loading..." over
+   * the whole window and then "Connected, not confirmed", no route and no
+   * list for seconds over a tunnel that never changed (VM, 2026-10-20). */
+  const go = (next: Screen) => {
+    const from = screenRef.current;
+    if (from === next) return;
+    if (isSignedInScreen(from) && isSignedInScreen(next)) {
+      swapView(() => setScreen(next), screenDirection(from, next));
+      return;
+    }
+    setScreen(next);
+  };
+
+  /** One of the signed-in pages, drawn in the main page's own shell (the
+   * Dashboard's `page`) -- the bottom nav on a phone, the tabs or the
+   * sidebar on a tablet -- as on Windows. `nav` is the nav item it belongs
+   * to. Null on the main page and outside the shell. */
+  const shellPage = (): ShellPage | null => {
+    const page = (nav: NavId, node: ReactNode): ShellPage => ({ nav, key: screen, node });
+    if (screen === "settings") {
+      return page(
+        "settings",
+        <Settings
+          onBack={() => go("dashboard")}
+          onOpenReferrals={() => go("referrals")}
+          onOpenSupport={() => go("support")}
+          onLoggedOut={() => void handleLoggedOut()}
+          // Android only. Custom mode is per-app routing, which on iOS
+          // belongs to the system: `vpn_list_apps` has no iOS
+          // implementation and returns unavailable(), so this card
+          // offered a feature that errored the moment it was switched
+          // on -- which is also what App Review would find. Positive
+          // test rather than `!isIOS()`, so a platform this does not
+          // recognise hides the section instead of offering a broken one.
+          customSection={isAndroid() ? <PerAppCard /> : null}
+          onOpenPlans={() => go("plans")}
+          onOpenActivity={() => go("activity")}
+          onSignOut={() => void signOutFromSettings()}
+          platform={isAndroid() ? "android" : isIOS() ? "ios" : "web"}
+          // Notifications only (lib/phone-notices.ts): the rows a phone does
+          // not honour are not drawn.
+          device={isAndroid() || isIOS() ? PHONE_DEVICE : undefined}
+          // The direct APK only: Play and the App Store update their own
+          // builds, and a store build never carries the check.
+          aboutExtra={isAndroid() && !IS_STORE_BUILD ? <AndroidUpdateRow /> : null}
+        />,
+      );
+    }
+    if (screen === "activity") {
+      return page(
+        "activity",
+        <Activity
+          // The network the phone's connect history is filed under: the
+          // address block the control plane last reported for it.
+          readNetwork={async () => networkKeyFromAsn()}
+          onOpenPlans={() => go("plans")}
+          onBack={() => go("settings")}
+          // Offered once the phone's main page records it
+          // (lib/phone-main-extras.ts); not before.
+          sessionLog={PHONE_MAIN_PAGE_EXTRAS}
+        />,
+      );
+    }
+    if (screen === "referrals") {
+      // Back to Settings rather than the Dashboard: that is where they came
+      // from, and landing somewhere else is how a detour starts feeling
+      // like getting lost.
+      return page("none", <Referrals onBack={() => go("settings")} />);
+    }
+    if (screen === "support") {
+      return page("none", <Support onBack={() => go("settings")} />);
+    }
+    // Unreachable in a store build, and unreachable rather than merely
+    // unlinked: the condition is a build-time constant, so the bundler
+    // drops this branch and the Plans screen -- with its purchase flow and
+    // its voucher field -- is not present in the artifact at all. Hiding
+    // the entrance would still ship the room, which is what a reviewer
+    // looks for and what a determined customer finds.
+    if (screen === "plans" && !IS_STORE_BUILD) {
+      const leavePlans = () => {
+        setPlansNotice(null);
+        go("dashboard");
+      };
+      return page("none", <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />);
+    }
+    // The App Store counterpart, and the mirror image of the branch above:
+    // this one is dropped from every non-store build for the same reason,
+    // so neither artifact carries the other's purchase path.
+    if (screen === "plans" && IS_STORE_BUILD) {
+      return page("none", <StorePlans onActivated={() => go("dashboard")} onBack={() => go("dashboard")} />);
+    }
+    return null;
   };
 
   function renderScreen() {
@@ -394,92 +466,18 @@ export default function App() {
       />
     );
   }
-  if (screen === "settings") {
-    return inShell(
-      "settings",
-      <Settings
-        onBack={() => setScreen("dashboard")}
-        onOpenReferrals={() => setScreen("referrals")}
-        onOpenSupport={() => setScreen("support")}
-        onLoggedOut={() => void handleLoggedOut()}
-        // Android only. Custom mode is per-app routing, which on iOS
-        // belongs to the system: `vpn_list_apps` has no iOS
-        // implementation and returns unavailable(), so this card
-        // offered a feature that errored the moment it was switched
-        // on -- which is also what App Review would find. Positive
-        // test rather than `!isIOS()`, so a platform this does not
-        // recognise hides the section instead of offering a broken one.
-        customSection={isAndroid() ? <PerAppCard /> : null}
-        onOpenPlans={() => setScreen("plans")}
-        onOpenActivity={() => setScreen("activity")}
-        onSignOut={() => void signOutFromSettings()}
-        platform={isAndroid() ? "android" : isIOS() ? "ios" : "web"}
-        // Notifications only (lib/phone-notices.ts): the rows a phone does
-        // not honour are not drawn.
-        device={isAndroid() || isIOS() ? PHONE_DEVICE : undefined}
-        // The direct APK only: Play and the App Store update their own
-        // builds, and a store build never carries the check.
-        aboutExtra={isAndroid() && !IS_STORE_BUILD ? <AndroidUpdateRow /> : null}
-      />,
-    );
-  }
-  if (screen === "activity") {
-    return inShell(
-      "activity",
-      <Activity
-        // The network the phone's connect history is filed under: the
-        // address block the control plane last reported for it.
-        readNetwork={async () => networkKeyFromAsn()}
-        onOpenPlans={() => setScreen("plans")}
-        onBack={() => setScreen("settings")}
-        // Offered once the phone's main page records it
-        // (lib/phone-main-extras.ts); not before.
-        sessionLog={PHONE_MAIN_PAGE_EXTRAS}
-      />,
-    );
-  }
-  if (screen === "referrals") {
-    // Back to Settings rather than the Dashboard: that is where they came
-    // from, and landing somewhere else is how a detour starts feeling
-    // like getting lost.
-    return inShell("none", <Referrals onBack={() => setScreen("settings")} />);
-  }
-  if (screen === "support") {
-    return inShell("none", <Support onBack={() => setScreen("settings")} />);
-  }
-  // Unreachable in a store build, and unreachable rather than merely
-  // unlinked: the condition is a build-time constant, so the bundler
-  // drops this branch and the Plans screen -- with its purchase flow and
-  // its voucher field -- is not present in the artifact at all. Hiding
-  // the entrance would still ship the room, which is what a reviewer
-  // looks for and what a determined customer finds.
-  if (screen === "plans" && !IS_STORE_BUILD) {
-    const leavePlans = () => {
-      setPlansNotice(null);
-      setScreen("dashboard");
-    };
-    return inShell("none", <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />);
-  }
-  // The App Store counterpart, and the mirror image of the branch above:
-  // this one is dropped from every non-store build for the same reason,
-  // so neither artifact carries the other's purchase path.
-  if (screen === "plans" && IS_STORE_BUILD) {
-    return inShell(
-      "none",
-      <StorePlans
-        onActivated={() => setScreen("dashboard")}
-        onBack={() => setScreen("dashboard")}
-      />,
-    );
-  }
+    // The main page, and every other page of the signed-in shell drawn in
+    // its shell (`shellPage`): one Dashboard, mounted once a session.
     return (
       <Dashboard
         onLoggedOut={() => void handleLoggedOut()}
-        onBrowsePlans={() => setScreen("plans")}
-        onOpenSettings={() => setScreen("settings")}
-        onOpenActivity={() => setScreen("activity")}
-        onOpenReferrals={() => setScreen("referrals")}
-        onOpenSupport={() => setScreen("support")}
+        onBrowsePlans={() => go("plans")}
+        onOpenSettings={() => go("settings")}
+        onOpenActivity={() => go("activity")}
+        onOpenReferrals={() => go("referrals")}
+        onOpenSupport={() => go("support")}
+        page={shellPage()}
+        onShowMain={() => setScreen("dashboard")}
       />
     );
   }
@@ -497,7 +495,7 @@ export default function App() {
             (Android's Chromium WebView; WKWebView from iOS 18), so the
             bottom nav keeps still and its pill travels while the page
             slides; the CSS slide where it does not. */}
-        <ScreenTransition screenKey={screen} viewTransitions>
+        <ScreenTransition screenKey={transitionKey(screen)} viewTransitions>
           {renderScreen()}
         </ScreenTransition>
       </div>

@@ -37,7 +37,7 @@ describe("the phone's main page", () => {
 
   it("colours the chip and the screen by the button's own held tone", () => {
     expect(dashboard).toContain("const calmTone = shownTone(orbTone(orbState, cautionShown), ");
-    expect(dashboard).toContain("shown={calmTone}");
+    expect(dashboard).toContain('shown={page ? "idle" : calmTone}');
     expect(dashboard).not.toMatch(/shownTone\(orbTone\(connectionState/);
   });
 

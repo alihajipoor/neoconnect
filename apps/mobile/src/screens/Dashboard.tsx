@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Globe, Repeat, Sparkles } from "lucide-react";
 import { displayedProtocol, displayedRoute, displayedRouteId, heldListLook, showsAutomatic } from "@shared/lib/displayed-route";
 import { credentialOnTunnel, tunnelCredential } from "@shared/lib/tunnel-credential";
@@ -53,7 +53,7 @@ import { placeLabel, routePlace } from "@shared/lib/route-place";
 import { LocationPicker } from "@shared/components/LocationPicker";
 import { SLOT, Slotted } from "@shared/components/Slotted";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
-import { AppShell } from "@shared/components/shell/AppShell";
+import { AppShell, type ShellPage } from "@shared/components/shell/AppShell";
 import { Page, PageScene } from "@shared/components/shell/Page";
 import { MainView } from "@shared/components/main/MainView";
 import { Decor, Hint, StateAnnouncer, StateLine, StatusChip, WayOut } from "@shared/components/main/Hero";
@@ -155,7 +155,7 @@ import {
   type ReconnectAttempt,
   type ReconnectStop,
 } from "@shared/lib/auto-reconnect";
-import { HEADLINE_HINTS, headlineFor } from "@shared/lib/connection-evidence";
+import { HEADLINE_HINTS, headlineFor, isTunnelUp } from "@shared/lib/connection-evidence";
 import { pressFor } from "@shared/lib/connect-intent";
 import { ladderPass } from "@shared/lib/ladder-pass";
 import { withTimeout } from "@shared/lib/service-call";
@@ -372,6 +372,8 @@ export function Dashboard({
   onOpenActivity,
   onOpenReferrals,
   onOpenSupport,
+  page = null,
+  onShowMain,
 }: {
   onLoggedOut: () => void;
   onBrowsePlans: () => void;
@@ -381,8 +383,20 @@ export function Dashboard({
   onOpenActivity: () => void;
   onOpenReferrals?: () => void;
   onOpenSupport?: () => void;
+  /** Another page of the shell, drawn in this screen's own shell in place
+   * of the main page; null on the main page. This screen stays mounted
+   * under it -- its load, the platform's word, the verified tunnel, the
+   * route list -- so coming back draws the main page as it was, never a
+   * load in front of it, and asks again only behind it (`revalidate`). As
+   * on Windows (2026-10-20). */
+  page?: ShellPage | null;
+  /** Back to the main page from `page`, as a plain change of state: this
+   * screen's own nav makes it inside its transition (`showMainFrom`). */
+  onShowMain?: () => void;
 }) {
   const { t, language } = useI18n();
+  /** The main page itself is in view, not another page of the shell. */
+  const onMainPage = page === null;
   const [loading, setLoading] = useState(true);
   // The loading screen waits on three reads, each given up to twenty
   // seconds an address; past eight it says it is still trying.
@@ -806,10 +820,12 @@ export function Dashboard({
   }, []);
 
   // "Locations" pressed on another page of the shell: the Locations page,
-  // once this one has loaded.
+  // once this one has loaded -- per load, or per return to the main page.
   useEffect(() => {
-    if (!loading && takeLocationsRequest()) openLocationsPage();
-  }, [loading]);
+    if (!loading && onMainPage && takeLocationsRequest()) openLocationsPage();
+    // openLocationsPage is this render's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, onMainPage]);
 
   /** Loads the screen, and says when an attempt can run on it (`loaded`):
    * once the platform's state is on screen (`adoptPlatform`), or else when
@@ -996,14 +1012,24 @@ export function Dashboard({
       // screen's to show, as on Windows: this older failure neither goes on
       // the banner nor starts the retrying again.
       const superseded = background && loadRef.current !== load;
+      // Asked again on coming back to the main page, with the screen's own
+      // last answer on it rather than the snapshot (`revalidate`).
+      const keptAnswer = retry === "returned" && offlineSinceRef.current === null;
       unanswered?.(
         superseded
           ? `asked again in the background (${retry}); a load of the screen's own had begun meanwhile`
-          : cached
-            ? `${background ? `asked again in the background (${retry}); still ` : ""}showing the cached credentials, ${snapshotAge(cached.savedAt)}`
-            : "showed the load error, with nothing cached to show",
+          : keptAnswer
+            ? "asked again in the background on returning to the main page; still showing the screen's own last answer"
+            : cached
+              ? `${background ? `asked again in the background (${retry}); still ` : ""}showing the cached credentials, ${snapshotAge(cached.savedAt)}`
+              : "showed the load error, with nothing cached to show",
       );
       if (superseded) return "superseded";
+      // That answer stays on screen, under no banner: a load not answered
+      // now says nothing about it, and the next return, or the next load,
+      // asks again. Nothing is retried for it -- the screen is not on its
+      // snapshot.
+      if (keptAnswer) return "unanswered";
       // Said as what happened: nothing answered, or something answered
       // with an error (`offlineReason`) -- unless Neoxify has answered
       // something since this load began, which is the newer word on it.
@@ -1055,7 +1081,15 @@ export function Dashboard({
     // one a tunnel is up on -- is replaced by its new copy, as a
     // refresh's are.
     const chosen = preferRouteId ?? chosenRouteId;
-    if (shownWhileWaiting) {
+    // Asked again on coming back to the main page: the credential held is
+    // replaced by its new copy as long as the answer still lists it, or a
+    // pass is dialling, or a tunnel is up on it. One the answer no longer
+    // lists -- the plan changed on the Plans page -- is chosen again, as a
+    // load of the screen's own would.
+    const heldListed = usersResult.data.some((u) => u.id === protocolUserRef.current?.id);
+    const keepHeld =
+      retry !== "returned" || heldListed || passInFlight() || isTunnelUp(connectionStateRef.current);
+    if (shownWhileWaiting && keepHeld) {
       setProtocolUser((current) => usersResult.data.find((u) => u.id === current?.id) ?? current);
     } else {
       setProtocolUser(
@@ -1173,6 +1207,25 @@ export function Dashboard({
       }),
     [],
   );
+
+  // Back on the main page from another page of the shell. This screen
+  // stayed mounted under that page, its polls with it, so nothing it holds
+  // went: the main page is drawn as it was -- the route named, the list
+  // loaded, the tunnel as verified -- with no load in front of it. What it
+  // shows is asked for again behind it (stale-while-revalidate): a plan
+  // bought or renewed on Plans, credentials refreshed meanwhile. As on
+  // Windows, where every return put "Loading..." over the whole window and
+  // then "Connected, not confirmed" with no route and no list for seconds
+  // over a tunnel that never changed (VM, 2026-10-20).
+  const onMainPageRef = useRef(onMainPage);
+  useEffect(() => {
+    const was = onMainPageRef.current;
+    onMainPageRef.current = onMainPage;
+    if (was || !onMainPage || loading) return;
+    offlineRetry.revalidate();
+    // On the return only; the retry is one per screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onMainPage]);
 
   // A tunnel verified: the path to Neoxify is a different one now, and on
   // a network that filters it, the likeliest one to be answered.
@@ -2939,6 +2992,20 @@ export function Dashboard({
     setView("locations");
   }
 
+  /** From another page of the shell to the main page, or to its Locations
+   * page: the page goes and the view comes in one change, animated as a
+   * change of page is (lib/view-transition.ts) -- never two transitions,
+   * the second cutting the first short. */
+  function showMainFrom(next: "overview" | "locations") {
+    swapView(() => {
+      setShowLocationPicker(false);
+      if (next === "locations") setLocSection(undefined);
+      viewRef.current = next;
+      setViewNow(next);
+      onShowMain?.();
+    }, "back");
+  }
+
   /** Asked by the list before a pick goes ahead. The phone changes
    * location only with nothing up -- the old Change button was disabled
    * otherwise, and nothing here takes a tunnel down to switch it -- so a
@@ -3028,7 +3095,11 @@ export function Dashboard({
    * like the place, over a tunnel this app cannot name. */
   const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes, tunnelNamed);
 
-  if (loading) {
+  // Only for the first load of a session, and only on the main page: a page
+  // of the shell opened before it ends is drawn in the shell meanwhile, and
+  // a return from one never meets this -- the screen stayed mounted under
+  // it, loaded.
+  if (loading && onMainPage) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3">
         <div className="animate-breathe">
@@ -3426,20 +3497,25 @@ export function Dashboard({
   // The state in words for a screen reader, once it has settled.
   const announcement = `${lineWords}. ${hintText}`;
 
+  // One shell for the main page and every other page of it: the bottom nav
+  // (the tabs, the sidebar on a tablet) stays mounted across a change of
+  // page, and so does this screen under a page (`page`). A page wears the
+  // quiet look the pages always had: no tone, no sweep, no banner's room.
   return (
     <AppShell
       rootRef={appRootRef}
-      active={view === "locations" ? "locations" : "overview"}
-      shown={calmTone}
-      busy={pill.progress}
-      banner={bannerShowing}
+      active={page ? page.nav : view === "locations" ? "locations" : "overview"}
+      shown={page ? "idle" : calmTone}
+      busy={page ? false : pill.progress}
+      banner={page ? false : bannerShowing}
       email={me?.email ?? null}
       planLine={planLine}
       onOverview={() => {
-        if (view !== "overview") setView("overview");
+        if (page) showMainFrom("overview");
+        else if (view !== "overview") setView("overview");
         else document.querySelector<HTMLElement>(".nx-hero")?.scrollTo({ top: 0 });
       }}
-      onLocations={() => openLocationsPage()}
+      onLocations={() => (page ? showMainFrom("locations") : openLocationsPage())}
       onOpenActivity={onOpenActivity}
       onOpenSettings={onOpenSettings}
       onBrowsePlans={onBrowsePlans}
@@ -3451,15 +3527,18 @@ export function Dashboard({
       // there; a phone has them in Settings › About.
       update={<CommunityLinks />}
       scene={
-        // A page speaks for no route: no lights behind the Locations page.
-        view === "locations" ? (
+        // A page speaks for no route: no lights behind the Locations page,
+        // or behind any other page of the shell.
+        page || view === "locations" ? (
           <PageScene />
         ) : (
           <HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} alert={mapAlert} />
         )
       }
     >
-      {view === "locations" ? (
+      {page ? (
+        <Fragment key={page.key}>{page.node}</Fragment>
+      ) : view === "locations" ? (
         <Page title={t("loc.panelTitle")} lede={t("loc.pageLede")} className="nx-locpg">
           {picker ?? <p className="nx-csub">{t(canBuy ? "dash.noPlanHint" : "dash.noPlanStore")}</p>}
         </Page>
@@ -3519,7 +3598,7 @@ export function Dashboard({
         />
       )}
 
-      {layout === "narrow" && view === "overview" ? (
+      {layout === "narrow" && view === "overview" && !page ? (
         <LocationSheet
           open={showLocationPicker && subscription !== null}
           title={t("loc.panelTitle")}
