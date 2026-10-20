@@ -30,7 +30,7 @@ import { flushSync } from "react-dom";
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Eye, EyeOff, Info } from "lucide-react";
 import { useI18n } from "../lib/i18n";
 import { formatNumber } from "../lib/locale-format";
-import { EXIT_MS, revealBelow, usePresence } from "../lib/motion";
+import { EXIT_MS, motionReduced, revealBelow, usePresence } from "../lib/motion";
 import { cn } from "../lib/utils";
 
 const PearlContext = createContext(false);
@@ -440,6 +440,10 @@ export function Disclosure({ label, count, children }: { label: string; count?: 
     if (!opening.current || !panel.current) return;
     opening.current = false;
     revealBelow(panel.current, true);
+    // Opened below the fold -- the main page's column at a short window --
+    // it is brought into view, clear of the column's fade (its scroll
+    // margin, pearl.css), or only the chevron would change.
+    panel.current.scrollIntoView?.({ block: "nearest", behavior: motionReduced() ? "auto" : "smooth" });
   });
   const toggle = () => {
     if (closing.current) return;

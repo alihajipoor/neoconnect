@@ -1492,6 +1492,11 @@
   }
   /* Opened in layout at once and drawn sliding out from under its toggle
      (lib/motion.ts revealBelow; motion.css). */
+  /* Scrolled into view when opened (Disclosure): clear of the 28px fade a
+     scrolling column draws at its foot. */
+  .nx-dpanel {
+    scroll-margin-block: 12px 40px;
+  }
   .nx-dpanel > div {
     display: flex;
     flex-direction: column;
