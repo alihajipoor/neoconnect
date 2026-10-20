@@ -124,6 +124,8 @@ import { holdNote, holdService, holdStore, passTeardown, shouldRelease } from ".
 import { NOTIFY_TEXT, notifyMemory, notifyStep } from "../lib/connection-notify";
 import { showNotification } from "../lib/notify";
 import { trafficMeter } from "../lib/traffic-meter";
+import { customModeProblemText, readCustomModeProblem, type CustomModeProblem } from "../lib/custom-mode-problem";
+import { adoptedSince } from "../lib/session-clock";
 import { ladderProgress } from "../lib/ladder-progress";
 import { sessionLog } from "../lib/session-log";
 import { ProgressLine } from "../components/main/ProgressLine";
@@ -783,9 +785,10 @@ export function Dashboard({
   const [gamingTone, setGamingTone] = useState<ShownTone>("idle");
   const [gamingSummary, setGamingSummary] = useState<{ picked: number; resolver: string | null } | null>(null);
 
-  // Only set when *this* app instance brought the tunnel up. The helper
-  // service doesn't report a start time, so a tunnel adopted on launch
-  // has no honest duration to show and the timer stays blank rather than
+  // Set when *this* app instance brought the tunnel up, or -- for a tunnel
+  // adopted on launch -- from the age the service reports for its session
+  // (`sessionSecs`, lib/session-clock.ts). A service that does not say has
+  // no honest duration to show, and the timer stays blank rather than
   // inventing one from the moment the window opened.
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -824,7 +827,7 @@ export function Dashboard({
       })
       .catch(() => undefined);
   }, []);
-  const [splitTunnelProblem, setSplitTunnelProblem] = useState<string | null>(null);
+  const [splitTunnelProblem, setSplitTunnelProblem] = useState<CustomModeProblem | null>(null);
   // Whether the service asked for the tunnel's DNS rule and did not get
   // it. Read from the service, never derived: only it knows whether an
   // engine tried. `false` is "nothing was reported", not "DNS is
@@ -1154,7 +1157,7 @@ export function Dashboard({
     statusMissesRef.current = 0;
     noteStatus(status);
     setSplitTunnelActive(Boolean(status.splitTunnelActive));
-    setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+    setSplitTunnelProblem(readCustomModeProblem(status));
     setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
     setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
     setIpv6Blocked(Boolean(status.ipv6Blocked));
@@ -1209,6 +1212,14 @@ export function Dashboard({
     publishObserved(generation, settled);
     // The clock is only honest while something is up.
     if (settled === "disconnected") setConnectedAt(null);
+    else if (isTunnelUp(settled)) {
+      // A tunnel this window did not bring up -- found up at launch -- is
+      // timed from the age the service reports for its session, never from
+      // when the window opened; nothing when it says nothing. A stamp this
+      // window's own connect made stays.
+      const since = lastStatusRef.current ? adoptedSince(lastStatusRef.current, Date.now()) : null;
+      if (since !== null) setConnectedAt((own) => own ?? since);
+    }
     return settled;
   }
 
@@ -2142,7 +2153,7 @@ export function Dashboard({
       // yellow for one poll.
       const customMode = Boolean(status.splitTunnelActive);
       setSplitTunnelActive(customMode);
-      setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+      setSplitTunnelProblem(readCustomModeProblem(status));
       setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
       setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
       setIpv6Blocked(Boolean(status.ipv6Blocked));
@@ -4516,10 +4527,11 @@ export function Dashboard({
   }
   const notes = (
     <div className="nx-notes">
-      {/* The service's own words, from counters on the path the chosen
-          apps' packets travel: on and working are not the same thing. */}
+      {/* From the service's counters on the path the chosen apps' packets
+          travel -- on and working are not the same thing -- in the app's
+          words for its code (lib/custom-mode-problem.ts). */}
       {isTunnelUp(connectionState) && splitTunnelActive && splitTunnelProblem ? (
-        <Note tone="danger">{splitTunnelProblem}</Note>
+        <Note tone="danger">{customModeProblemText(splitTunnelProblem, t)}</Note>
       ) : null}
       {/* IPv6 observed reaching the internet while connected. Not in
           Custom mode, where the probe sees only this app's own, direct,

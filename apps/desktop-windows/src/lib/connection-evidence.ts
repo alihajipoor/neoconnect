@@ -132,6 +132,16 @@ export type VpnStatus = {
    * (lib/traffic-meter.ts, `readTraffic`). Absent whenever the service read
    * nothing -- never a zero standing for "unknown". */
   traffic?: unknown;
+  /** Which problem `splitTunnelProblem` is, as a code the app words in the
+   * customer's language (lib/custom-mode-problem.ts). Absent with no
+   * problem, or from an older service; a code this app does not know is
+   * shown as the service's own sentence. */
+  splitTunnelProblemCode?: string;
+  /** How long the live session's engine has been up, in whole seconds on
+   * the service's clock: the session timer for a tunnel this window did
+   * not bring up (lib/session-clock.ts, `adoptedSince`). Absent with
+   * no session or from an older service, and then no timer is shown. */
+  sessionSecs?: number;
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }

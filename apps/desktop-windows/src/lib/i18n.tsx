@@ -303,6 +303,17 @@ const en = {
   // saying only "restart it" would imply nothing is routed until they
   // do. What is covered and what is not are the two facts a customer
   // needs in order to decide whether to bother.
+  // Custom mode's own counters, as the service codes them
+  // (lib/custom-mode-problem.ts); the service's English sentence is the
+  // fallback for a code this app does not know.
+  "dash.customProblemInjectionRefused":
+    "Windows is refusing the redirected packets, so your chosen apps are not reaching the VPN. Restarting Neoxify usually clears this.",
+  "dash.customProblemNoReplies":
+    "Your chosen apps are being sent through the VPN but nothing is coming back, so their connections will hang. The tunnel is not carrying their traffic.",
+  "dash.customProblemNoAppTraffic":
+    "None of the apps you chose have sent any traffic. If one of them is running, the wrong program may have been picked — some apps run under a different program file.",
+  "dash.customProblemAdapterGone":
+    "The VPN adapter Custom mode was using disappeared, so it stopped redirecting and your chosen apps are using your ordinary connection. Reconnect to protect them again.",
   "dash.splitTunnelRestartNeeded":
     "{apps} was already open when you selected it. Connections it makes from now on go through the VPN, but the ones it already had do not — those cannot be moved without breaking them. Close it and open it again to route all of its traffic.",
   "voucher.title": "Have a voucher?",
@@ -1655,6 +1666,14 @@ const fa: Record<TranslationKey, string> = {
     "Neoxify نتوانست جلوی اتصال‌های دیگر این کامپیوتر را بگیرد که از کنار VPN عبور می‌کنند. برنامه‌هایی که مستقیماً از طریق شبکه شما ارسال می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است همچنان برای شبکه‌تان قابل مشاهده باشند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
   "dash.ipv4NotConfinedIkev2":
     "پروتکل Built-in از VPN خود این دستگاه استفاده می‌کند و Neoxify هنوز نمی‌تواند جلوی اتصال‌های دیگر این کامپیوتر را بگیرد که از کنار آن عبور می‌کنند. برنامه‌هایی که مستقیماً از طریق شبکه شما ارسال می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است همچنان برای شبکه‌تان قابل مشاهده باشند. برای محافظت کامل، از پروتکل دیگری استفاده کنید.",
+  "dash.customProblemInjectionRefused":
+    "ویندوز بسته‌های هدایت‌شده را نمی‌پذیرد، بنابراین برنامه‌های انتخابی شما به VPN نمی‌رسند. معمولاً بستن و باز کردن دوبارهٔ نئوکسیفای این مشکل را برطرف می‌کند.",
+  "dash.customProblemNoReplies":
+    "برنامه‌های انتخابی شما از طریق VPN فرستاده می‌شوند اما پاسخی برنمی‌گردد، بنابراین اتصال‌هایشان معطل می‌ماند. تونل ترافیک آن‌ها را منتقل نمی‌کند.",
+  "dash.customProblemNoAppTraffic":
+    "هیچ‌یک از برنامه‌هایی که انتخاب کرده‌اید ترافیکی نفرستاده است. اگر یکی از آن‌ها در حال اجراست، شاید برنامهٔ اشتباهی انتخاب شده باشد — بعضی برنامه‌ها با فایل اجرایی دیگری اجرا می‌شوند.",
+  "dash.customProblemAdapterGone":
+    "آداپتور VPN که حالت سفارشی از آن استفاده می‌کرد از بین رفت، بنابراین هدایت متوقف شد و برنامه‌های انتخابی شما از اتصال معمولی‌تان استفاده می‌کنند. برای محافظت دوباره، دوباره وصل شوید.",
   "dash.splitTunnelRestartNeeded":
     "‏{apps} پیش از انتخاب شما باز بود. اتصال‌هایی که از این پس برقرار می‌کند از VPN عبور می‌کنند، اما اتصال‌هایی که از قبل داشته عبور نمی‌کنند — این‌ها را نمی‌توان بدون قطع شدن جابه‌جا کرد. برای اینکه همه ترافیک آن از VPN عبور کند، برنامه را ببندید و دوباره باز کنید.",
   "voucher.title": "کد هدیه دارید؟",
