@@ -4222,7 +4222,8 @@ export function Dashboard({
             showNetworkWait(true);
             const waited = await waitForNetwork(
               {
-                wayOut: () => invoke<boolean>("network_way_out"),
+                // The service's own rule, toward this rung's server.
+                wayOut: () => invoke<boolean>("network_way_out", { payload: candidate }),
                 stopped: () =>
                   stopped() || sessionGeneration() !== sessionAtStart || ladderGenerationRef.current !== generation,
                 progress: () => {

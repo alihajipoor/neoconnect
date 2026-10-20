@@ -76,6 +76,12 @@ pub const PIPE_NAME: &str = r"\\.\pipe\neoconnect-service";
 /// working is never reported as a hang.
 pub const REPAIR_WORST_CASE: std::time::Duration = std::time::Duration::from_secs(885);
 
+/// What the service says when there is no way out at all -- a connect
+/// refused before any engine dials, or [`Request::WayOut`] answered "none".
+/// The same words for every engine; the app recognises them as no network,
+/// not as a server that did not answer (connection-errors.ts, `noNetwork`).
+pub const NO_NETWORK: &str = "no network connection with a gateway was found";
+
 /// Requests the app can make of the service. One JSON object per line.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -160,6 +166,21 @@ pub enum Request {
     /// live session, if it is one the hold covers.
     SetReconnectHold {
         enabled: bool,
+    },
+    /// Whether a connect of `profile` would find a way out now, by the rule
+    /// the connect itself is refused by before any engine dials: Windows'
+    /// best route toward the server's own address (any public one for a
+    /// name), on an up adapter that is not ours, or an up adapter with a
+    /// gateway. Nothing is dialled. Answered at once, without waiting for
+    /// whatever the service is doing: `Response::Ok` for a way out, an
+    /// `Error` with [`NO_NETWORK`] for none.
+    ///
+    /// What the app's wait for a network asks before it dials a refused
+    /// rung again, so the hint it waits on and the refusal it waits out are
+    /// one rule. An older service answers with an error of another kind,
+    /// and the app then reads Windows' tables itself.
+    WayOut {
+        profile: ConnectProfile,
     },
     Status,
     /// Replaces the Custom-mode selection: which applications, if any,
@@ -3132,6 +3153,17 @@ mod reconnect_hold_wire_tests {
             serde_json::from_str::<Request>(new).expect("parses"),
             Request::Connect { block_while_reconnecting: true, .. }
         ));
+    }
+
+    /// The way-out question, by the name the app sends, with the profile
+    /// a connect would send.
+    #[test]
+    fn the_way_out_request_is_named_on_the_wire() {
+        let profile = ConnectProfile::Ikev2(Ikev2Profile { server: "node.example.com".into(), username: "u".into(), password: "p".into() });
+        let json = serde_json::to_value(&Request::WayOut { profile }).unwrap();
+        assert_eq!(json["type"], "wayOut");
+        assert_eq!(json["profile"]["protocol"], "IKEV2");
+        assert!(matches!(serde_json::from_value::<Request>(json).unwrap(), Request::WayOut { .. }));
     }
 
     /// The three requests the hold adds, by the names the app sends.

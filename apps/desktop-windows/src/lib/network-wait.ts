@@ -13,11 +13,13 @@
  * when a network with a way out is back. The screen says "Waiting for a
  * network connection" meanwhile (`networkWait`).
  *
- * Whether there is a way out is asked of Windows' routing table by the
- * service's own rule (`network_way_out`: a route on an adapter that is up
- * and not one of ours, as its refusal takes one -- the best route alone,
- * wherever it led, said yes with the cable out and ended every wait at its
- * first look): soon after the refusal, and less often the longer the wait,
+ * Whether there is a way out is asked of the service, by the rule its
+ * refusal applies (`network_way_out`, `Request::WayOut`: the best route
+ * toward the rung's own server on an up adapter that is not ours, a
+ * leftover host route skipped, or an up adapter with a gateway -- the best
+ * route alone, wherever it led, said yes with the cable out and ended every
+ * wait at its first look; the app's own copy of the rule had drifted from
+ * the service's): soon after the refusal, and less often the longer the wait,
  * up to every `NETWORK_POLL_MS` (`nextLookIn`). That answer is only a hint
  * for when to try: the service
  * decides, and the rung is dialled again every `NETWORK_RETRY_ANYWAY_MS`

@@ -1787,9 +1787,10 @@ impl Engines {
     /// whose way out Windows names -- PPP's on-link next hop included --
     /// passes here as it does there.
     fn refuse_without_a_way_out(&self, profile: &ConnectProfile) -> Result<(), String> {
-        match (self.uplink_lookup)(way_out_probe(profile)) {
-            Ok(None) => Err(NO_NETWORK.to_string()),
-            Ok(Some(_)) | Err(_) => Ok(()),
+        if finds_a_way_out((self.uplink_lookup)(way_out_probe(profile))) {
+            Ok(())
+        } else {
+            Err(NO_NETWORK.to_string())
         }
     }
 
@@ -3537,7 +3538,25 @@ type UplinkLookup = Arc<dyn Fn(Ipv4Addr) -> std::io::Result<Option<adapters::Upl
 /// What a connect that found no way out says -- the same words for every
 /// engine, which the app recognises as no network rather than a server
 /// that did not answer (connection-errors.ts, `noNetwork`).
-pub(crate) const NO_NETWORK: &str = "no network connection with a gateway was found";
+pub(crate) const NO_NETWORK: &str = neoconnect_ipc::NO_NETWORK;
+
+/// Whether a connect of `profile` would find a way out now: the question
+/// `Engines::refuse_without_a_way_out` asks before any engine dials, asked
+/// of Windows as the machine's lookup asks it (`adapters::best_uplink_for`
+/// toward `way_out_probe`, ours aside). What the app's wait for a network
+/// asks (`Request::WayOut`), so the hint it waits on and the refusal it
+/// waits out are one rule -- its own reading of the routing table had
+/// drifted from this one before. Nothing is dialled.
+pub(crate) fn way_out_for(profile: &ConnectProfile) -> bool {
+    finds_a_way_out(adapters::best_uplink_for(way_out_probe(profile), &OUR_ADAPTER_NAMES))
+}
+
+/// A way-out lookup as the refusal reads it: none only when Windows said
+/// there is none. Adapters that could not be listed say nothing, and the
+/// connect goes on to find out.
+fn finds_a_way_out(lookup: std::io::Result<Option<adapters::Uplink>>) -> bool {
+    !matches!(lookup, Ok(None))
+}
 
 /// The address a connect's way out is asked about: the server's own when
 /// the profile names it by address, otherwise any public one -- the
@@ -6623,6 +6642,33 @@ mod helper_tests {
             end_test_session(&mut engines);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// The app's wait for a network asks the service (`Request::WayOut`)
+    /// where it used to read the routing table by a rule of its own -- the
+    /// best route toward 1.1.1.1, or any default route on an up adapter --
+    /// which had drifted from this one: the best route toward the rung's own
+    /// server, a leftover host route skipped, an up adapter with a gateway.
+    /// One rule now, read the same way by the refusal and the answer: none
+    /// only when Windows said none, and the same address asked about.
+    #[test]
+    fn the_way_out_the_app_waits_on_is_the_refusals_own() {
+        let uplink = adapters::Uplink { index: 7, next_hop: Ipv4Addr::new(192, 168, 1, 1) };
+        assert!(!finds_a_way_out(Ok(None)), "no way out said as one");
+        assert!(finds_a_way_out(Ok(Some(uplink))));
+        assert!(finds_a_way_out(Err(std::io::Error::other("the adapters could not be listed"))), "no answer said as no way out");
+        fn body<'a>(source: &'a str, signature: &str) -> &'a str {
+            let at = source.find(signature).unwrap_or_else(|| panic!("{signature}"));
+            let end = [source[at..].find("\n}\n"), source[at..].find("\n    }\n")].into_iter().flatten().min().expect("its end");
+            &source[at..at + end]
+        }
+        let source = include_str!("mod.rs");
+        let refusal = body(source, "    fn refuse_without_a_way_out(");
+        assert!(refusal.contains("finds_a_way_out((self.uplink_lookup)(way_out_probe(profile)))"), "{refusal}");
+        let answer = body(source, "pub(crate) fn way_out_for(");
+        assert!(answer.contains("finds_a_way_out(adapters::best_uplink_for(way_out_probe(profile), &OUR_ADAPTER_NAMES))"), "{answer}");
+        assert!(source.contains("uplink_lookup: Arc::new(|dest| adapters::best_uplink_for(dest, &OUR_ADAPTER_NAMES)),"));
+        assert_eq!(NO_NETWORK, neoconnect_ipc::NO_NETWORK);
     }
 
     /// With no way out at all -- no route anywhere, no adapter with a

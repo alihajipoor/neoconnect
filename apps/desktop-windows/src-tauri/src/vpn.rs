@@ -1859,8 +1859,45 @@ const OUR_ADAPTERS: [&str; 4] = ["neoconnect0", "neoconnect", "Neoxify-OpenVPN",
 /// that leads nowhere is found out by the dial, as ever. An error reads as
 /// no way out, which costs only a wait until the app tries again anyway --
 /// never a dial, and never a server named.
+///
+/// Asked of the service itself (`Request::WayOut`, with the rung's
+/// credential as a connect would send it): its answer is the very rule a
+/// connect is refused by -- the best route toward the rung's own server, a
+/// leftover host route skipped, an up adapter with a gateway -- where the
+/// reading below asked toward 1.1.1.1 and took any default route, and the
+/// two could drift. That reading is kept for a service too old to know the
+/// question, or none answering in time.
 #[tauri::command]
-pub fn network_way_out() -> bool {
+pub async fn network_way_out(payload: Option<ProtocolUserPayload>) -> bool {
+    if let Some(profile) = payload.and_then(|payload| payload.into_profile().ok()) {
+        if let Some(said) = way_out_said(call_within(&Request::WayOut { profile }, WAY_OUT_REPLY_TIMEOUT).await) {
+            return said;
+        }
+    }
+    local_way_out()
+}
+
+/// How long the service is given to answer the way-out question: Windows'
+/// tables, read off its owning thread, in milliseconds. A wait looks again
+/// every two seconds at most, and this is not to hold it up.
+const WAY_OUT_REPLY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The service's answer to `Request::WayOut`, as the wait reads it: `Ok` a
+/// way out; its no-network words none; anything else -- an older service
+/// that does not know the question, none answering -- says nothing, and the
+/// app reads Windows' tables itself (`local_way_out`).
+fn way_out_said(answer: Result<Response, String>) -> Option<bool> {
+    match answer {
+        Ok(Response::Ok) => Some(true),
+        Ok(Response::Error { message }) if message == neoconnect_ipc::NO_NETWORK => Some(false),
+        _ => None,
+    }
+}
+
+/// The app's own reading, for a service that cannot answer: Windows' best
+/// route toward a public address on an up adapter that is not ours, or a
+/// default route on one.
+fn local_way_out() -> bool {
     use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute, MIB_IPFORWARDROW};
 
     // SAFETY: `route` is a valid out-parameter for the call, and only the
@@ -1910,7 +1947,19 @@ fn interface_state(index: u32) -> Option<(bool, String)> {
 
 #[cfg(test)]
 mod way_out_tests {
-    use super::{usable_adapter, way_out_from};
+    use super::{usable_adapter, way_out_from, way_out_said};
+    use neoconnect_ipc::Response;
+
+    /// The service's answer decides, both ways; anything else -- an older
+    /// service that does not know the question, none answering -- leaves it
+    /// to the app's own reading.
+    #[test]
+    fn the_services_answer_decides_and_nothing_else_does() {
+        assert_eq!(way_out_said(Ok(Response::Ok)), Some(true));
+        assert_eq!(way_out_said(Ok(Response::Error { message: neoconnect_ipc::NO_NETWORK.to_string() })), Some(false));
+        assert_eq!(way_out_said(Ok(Response::Error { message: "unknown variant `wayOut`".to_string() })), None);
+        assert_eq!(way_out_said(Err("the background service is not running".to_string())), None);
+    }
 
     const ETHERNET: u32 = 7;
     const TUNNEL: u32 = 31;

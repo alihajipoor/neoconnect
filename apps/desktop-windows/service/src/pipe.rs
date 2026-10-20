@@ -1588,6 +1588,17 @@ async fn dispatch(
             }
             Response::Ok
         }
+        // Whether a connect of this profile would find a way out, by the
+        // rule a connect is refused by (`engines::way_out_for`): Windows'
+        // tables only, so answered without the owning thread, on the
+        // blocking pool. A lookup that could not run says nothing, as in the
+        // refusal: the app's wait then dials, and the service decides.
+        Request::WayOut { profile } => {
+            match tokio::task::spawn_blocking(move || crate::engines::way_out_for(&profile)).await {
+                Ok(false) => Response::Error { message: crate::engines::NO_NETWORK.to_string() },
+                Ok(true) | Err(_) => Response::Ok,
+            }
+        }
         // The setting changed. Off lets go and disarms at once; on arms the
         // live session, which needs the owning thread to plan, behind
         // whatever it is doing. On is also how the app says, as its
