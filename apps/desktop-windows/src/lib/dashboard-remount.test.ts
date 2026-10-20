@@ -299,7 +299,7 @@ describe("the Dashboard's wiring", () => {
       const load = fn(
         "  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<OfflineLoadOutcome> {",
       );
-      expect(load).toContain("showLoadedCredential(usersResult.data, chosen, shownWhileWaiting);");
+      expect(load).toMatch(/showLoadedCredential\(\s*usersResult\.data,\s*chosen,\s*shownWhileWaiting && /);
       expect(load).not.toContain("setProtocolUser(");
     });
 

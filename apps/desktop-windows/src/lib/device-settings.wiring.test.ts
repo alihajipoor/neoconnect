@@ -125,7 +125,8 @@ describe("the main page does what the rows say", () => {
 
   it("notifies from the calm tone, only with the setting on and the window not in front", () => {
     expect(dashboard).toContain("const step = notifyStep(notifyMemory.current(), {");
-    expect(dashboard).toContain('focused: typeof document !== "undefined" && document.hasFocus(),');
+    // Another page of the shell does not say the state: as for a window behind.
+    expect(dashboard).toContain('focused: typeof document !== "undefined" && document.hasFocus() && onMainPage,');
     expect(dashboard).toContain("if (step.say === null || !appPrefs.current().notifications) return;");
   });
 

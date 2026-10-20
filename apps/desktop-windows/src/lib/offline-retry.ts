@@ -76,8 +76,10 @@ export const RESUME_RETRY_GAP_MS = 10_000;
  * that never says how its switch ended cannot stop the retrying for good. */
 export const OWN_LOAD_EXPECTED_MS = 45_000;
 
-/** What started a background load. */
-export type OfflineRetryTrigger = "timer" | "online" | "resume" | "tunnel" | "answered";
+/** What started a background load. `returned`: the main page is in view
+ * again after another page of the shell, and what it holds is asked for
+ * anew behind it (`revalidate`). */
+export type OfflineRetryTrigger = "timer" | "online" | "resume" | "tunnel" | "answered" | "returned";
 
 /** What a background load came to. */
 export type OfflineLoadOutcome =
@@ -329,6 +331,21 @@ export class OfflineRetry {
       return;
     }
     this.run(why);
+  }
+
+  /** The main page is in view again after another page of the shell: what
+   * it shows -- the plan, the credentials, the list -- is asked for once
+   * more, in the background, so a plan bought or renewed meanwhile is on
+   * it, and nothing it holds is dropped while the answer comes
+   * (stale-while-revalidate). Not beside a load under way, which is the
+   * same question already asked; not while the app is hidden. On the
+   * snapshot it is one more background load of the retrying, and a failed
+   * one takes its place in the backoff; otherwise it is the only one, and
+   * nothing is scheduled after it. Says whether it asked. */
+  revalidate(): boolean {
+    if (!this.attached || this.loading() || this.deps.hidden()) return false;
+    this.run("returned");
+    return true;
   }
 
   /** Whether a load is under way, or one of the screen's own is about to

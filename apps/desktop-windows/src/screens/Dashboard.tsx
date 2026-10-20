@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Gamepad2, Globe, Repeat, Shield, Sparkles } from "lucide-react";
 import { describesTunnel, displayedProtocol, displayedRoute, displayedRouteId, heldListLook, showsAutomatic } from "../lib/displayed-route";
@@ -161,7 +161,7 @@ import {
 import { Banner, Note, PillButton, Presence, Segmented } from "../components/ui";
 import { Dialog, LocationSheet } from "../components/overlay";
 import { Page, PageScene } from "../components/shell/Page";
-import { AppShell } from "../components/shell/AppShell";
+import { AppShell, type ShellPage } from "../components/shell/AppShell";
 import { noteWayOut, planLineText, rememberShellProfile, takeLocationsRequest, type ShellPlan } from "../lib/shell-nav";
 import { MainView } from "../components/main/MainView";
 import { Decor, Hint, StateAnnouncer, StateLine, StatusChip, WayOut } from "../components/main/Hero";
@@ -515,6 +515,8 @@ export function Dashboard({
   onOpenSupport,
   onOpenActivity,
   update,
+  page = null,
+  onShowMain,
 }: {
   onLoggedOut: () => void;
   onBrowsePlans: () => void;
@@ -525,8 +527,19 @@ export function Dashboard({
   onOpenActivity?: () => void;
   /** The update notice, which the shell places. */
   update?: ReactNode;
+  /** Another page of the shell, drawn in this screen's own shell in place
+   * of the main page; null on the main page. This screen stays mounted
+   * under it -- its load, the service's word, the verified tunnel, the
+   * route list -- so coming back draws the main page as it was, never a
+   * load in front of it, and asks again only behind it (`revalidate`). */
+  page?: ShellPage | null;
+  /** Back to the main page from `page`, as a plain change of state: this
+   * screen's own nav makes it inside its transition (`showMainFrom`). */
+  onShowMain?: () => void;
 }) {
   const { t, language } = useI18n();
+  /** The main page itself is in view, not another page of the shell. */
+  const onMainPage = page === null;
   const [loading, setLoading] = useState(true);
   // The loading screen waits on three reads, each given up to twenty
   // seconds an address; past eight it says it is still trying.
@@ -534,10 +547,11 @@ export function Dashboard({
   // "Locations" pressed on another page of the shell: once this screen has
   // loaded, its Locations page is shown as if it had been pressed here.
   useEffect(() => {
-    if (!loading && takeLocationsRequest()) openLocationsPage();
-    // Once per load; openLocationsPage is this render's.
+    if (!loading && onMainPage && takeLocationsRequest()) openLocationsPage();
+    // Once per load, or per return to the main page; openLocationsPage is
+    // this render's.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading]);
+  }, [loading, onMainPage]);
   // Kept as it came, and worded as the screen renders (`ShownFailure`):
   // worded when it came in, it was in the language the app was in when the
   // load began, which country detection may have changed since.
@@ -855,14 +869,18 @@ export function Dashboard({
    * said "only the apps you chose go through Neoxify" for both, which
    * in "All except these" is the opposite of what is happening. */
   const [customExcept, setCustomExcept] = useState(false);
+  // Read whenever the main page comes into view -- at mount, and back from
+  // a page of the shell: Settings is where Custom mode is changed, and this
+  // screen stays mounted under it.
   useEffect(() => {
+    if (!onMainPage) return;
     loadSplitTunnel()
       .then((settings) => {
         setCustomConfigured(isEffective(settings));
         setCustomExcept(settings.mode === "allExcept");
       })
       .catch(() => undefined);
-  }, []);
+  }, [onMainPage]);
   const [splitTunnelProblem, setSplitTunnelProblem] = useState<CustomModeProblem | null>(null);
   // Whether the service asked for the tunnel's DNS rule and did not get
   // it. Read from the service, never derived: only it knows whether an
@@ -1834,14 +1852,24 @@ export function Dashboard({
       // the banner over a newer answer, and start the retrying again on a
       // screen that load may already have taken off its snapshot.
       const superseded = background && loadSeqRef.current !== load;
+      // Asked again on coming back to the main page, with the screen's own
+      // last answer on it rather than the snapshot (`revalidate`).
+      const keptAnswer = retry === "returned" && offlineSinceRef.current === null;
       unanswered?.(
         superseded
           ? `asked again in the background (${retry}); a load of the screen's own had begun meanwhile`
-          : cached
-            ? `${background ? `asked again in the background (${retry}); still ` : ""}showing the cached credentials, ${snapshotAge(cached.savedAt)}`
-            : "showed the load error, with nothing cached to show",
+          : keptAnswer
+            ? "asked again in the background on returning to the main page; still showing the screen's own last answer"
+            : cached
+              ? `${background ? `asked again in the background (${retry}); still ` : ""}showing the cached credentials, ${snapshotAge(cached.savedAt)}`
+              : "showed the load error, with nothing cached to show",
       );
       if (superseded) return "superseded";
+      // That answer stays on screen, under no banner: a load not answered
+      // now says nothing about it, and the next return, or the next load,
+      // asks again. Nothing is retried for it -- the screen is not on its
+      // snapshot.
+      if (keptAnswer) return "unanswered";
       // Said as what happened: nothing answered, or something answered
       // with an error (`offlineReason`) -- unless Neoxify has answered
       // something since this load began, which is the newer word on it.
@@ -1907,7 +1935,17 @@ export function Dashboard({
     // perhaps the one a tunnel is up on -- is replaced by its new copy, as
     // a refresh's are (`showLoadedCredential`).
     const chosen = preferRouteId ?? chosenRouteId;
-    showLoadedCredential(usersResult.data, chosen, shownWhileWaiting);
+    // Asked again on coming back to the main page: the credential held is
+    // replaced by its new copy as long as the answer still lists it, or a
+    // pass is dialling. One the answer no longer lists -- the plan changed
+    // on the Plans page -- is chosen again, as a load of the screen's own
+    // would, unless a tunnel is shown up on it (`showLoadedCredential`).
+    const heldListed = usersResult.data.some((u) => u.id === protocolUserRef.current?.id);
+    showLoadedCredential(
+      usersResult.data,
+      chosen,
+      shownWhileWaiting && (retry !== "returned" || heldListed || ladderInFlight()),
+    );
     // The tunnel outlives the app: the helper service keeps it up if the
     // window is closed, so on open the UI has to adopt whatever is
     // actually running rather than assuming disconnected -- and before
@@ -2044,6 +2082,26 @@ export function Dashboard({
       }),
     [],
   );
+
+  // Back on the main page from another page of the shell. This screen
+  // stayed mounted under that page, its polls with it, so nothing it holds
+  // went: the main page is drawn as it was -- verified, the route named,
+  // the list loaded -- with no load in front of it. What it shows is asked
+  // for again behind it (stale-while-revalidate): a plan bought or renewed
+  // on Plans, credentials refreshed meanwhile. The service is not asked
+  // here; the polls never stopped asking it. The VM showed what the old
+  // way cost: "Loading..." over the whole window for a second and a half,
+  // then "Connected, not confirmed", no route and no list for two to three
+  // seconds more, over a tunnel that never changed.
+  const onMainPageRef = useRef(onMainPage);
+  useEffect(() => {
+    const was = onMainPageRef.current;
+    onMainPageRef.current = onMainPage;
+    if (was || !onMainPage || loading) return;
+    offlineRetry.revalidate();
+    // On the return only; the retry is one per screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onMainPage]);
 
   // A tunnel verified: the path to Neoxify is a different one now, and on
   // a network that filters it, the likeliest one to be answered.
@@ -2746,7 +2804,9 @@ export function Dashboard({
       tone: notifyTone,
       reconnecting: reconnectRunning,
       holding,
-      focused: typeof document !== "undefined" && document.hasFocus(),
+      // In front, and on the main page: another page of the shell does not
+      // say the connection's state, so it is said as for a window behind.
+      focused: typeof document !== "undefined" && document.hasFocus() && onMainPage,
       gaming: appMode === "gaming",
     });
     notifyMemory.set(step.memory);
@@ -4380,6 +4440,20 @@ export function Dashboard({
     setView("locations");
   }
 
+  /** From another page of the shell to the main page, or to its Locations
+   * page: the page goes and the view comes in one change, animated as a
+   * change of page is (lib/view-transition.ts) -- never two transitions,
+   * the second cutting the first short. */
+  function showMainFrom(next: "overview" | "locations") {
+    swapView(() => {
+      setShowLocationPicker(false);
+      if (next === "locations") setLocSection(undefined);
+      viewRef.current = next;
+      setViewNow(next);
+      onShowMain?.();
+    }, "back");
+  }
+
   async function handleLogout() {
     if (signingOut) return;
     setSigningOut(true);
@@ -4474,7 +4548,11 @@ export function Dashboard({
   // while one runs.
   const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined, waitingForNetwork });
 
-  if (loading) {
+  // Only for the first load of a session, and only on the main page: a page
+  // of the shell opened before it ends (Plans, after a sign-up through the
+  // backup route) is drawn in the shell meanwhile, and a return from one
+  // never meets this -- the screen stayed mounted under it, loaded.
+  if (loading && onMainPage) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 pt-8">
         <div className="animate-breathe">
@@ -4963,20 +5041,25 @@ export function Dashboard({
   // What the other pages of the shell show under the avatar.
   rememberShellProfile({ email: me?.email ?? null, plan: shellPlan, network: evidenceCtx.network });
 
+  // One shell for the main page and every other page of it: the sidebar,
+  // the tabs and the phone's nav stay mounted across a change of page, and
+  // so does this screen under a page (`page`). A page wears the quiet look
+  // the pages always had: no tone, no sweep, no banner's room.
   return (
     <AppShell
-      active={view === "locations" ? "locations" : "overview"}
-      shown={calmTone}
-      busy={busy}
-      banner={bannerShowing}
+      active={page ? page.nav : view === "locations" ? "locations" : "overview"}
+      shown={page ? "idle" : calmTone}
+      busy={page ? false : busy}
+      banner={page ? false : bannerShowing}
       titlebar
       email={me?.email ?? null}
       planLine={planLine}
       onOverview={() => {
-        if (view !== "overview") setView("overview");
+        if (page) showMainFrom("overview");
+        else if (view !== "overview") setView("overview");
         else document.querySelector<HTMLElement>(".nx-hero")?.scrollTo({ top: 0 });
       }}
-      onLocations={() => openLocationsPage()}
+      onLocations={() => (page ? showMainFrom("locations") : openLocationsPage())}
       onOpenActivity={onOpenActivity ?? onOpenSettings}
       onOpenSettings={onOpenSettings}
       onBrowsePlans={onBrowsePlans}
@@ -4991,15 +5074,18 @@ export function Dashboard({
         </>
       }
       scene={
-        // A page speaks for no route: no lights behind the Locations page.
-        view === "locations" ? (
+        // A page speaks for no route: no lights behind the Locations page,
+        // or behind any other page of the shell.
+        page || view === "locations" ? (
           <PageScene />
         ) : (
           <HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} alert={mapAlert} />
         )
       }
     >
-      {view === "locations" ? (
+      {page ? (
+        <Fragment key={page.key}>{page.node}</Fragment>
+      ) : view === "locations" ? (
         <Page title={t("loc.panelTitle")} lede={t("loc.pageLede")} className="nx-locpg">
           {picker ?? <p className="nx-csub">{t("dash.noPlanHint")}</p>}
         </Page>
@@ -5108,7 +5194,7 @@ export function Dashboard({
         />
       )}
 
-      {layout === "narrow" && view === "overview" ? (
+      {layout === "narrow" && view === "overview" && !page ? (
         <LocationSheet
           open={showLocationPicker && subscription !== null}
           title={t("loc.panelTitle")}

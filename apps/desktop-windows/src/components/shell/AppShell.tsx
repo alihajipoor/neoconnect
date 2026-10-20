@@ -29,6 +29,18 @@ import { ShellContext } from "./Page";
 
 export type NavId = "overview" | "locations" | "activity" | "settings" | "none";
 
+/** Another page of the signed-in shell -- Activity, Settings, Plans,
+ * Support, Invite friends -- drawn inside the main page's own shell in
+ * place of the main page (the Dashboard's `page`). The shell, and the main
+ * page's screen with everything it has loaded and verified, stay mounted
+ * underneath: going back draws the main page as it was, with no load in
+ * front of it. `key` tells one page from the next. */
+export interface ShellPage {
+  nav: NavId;
+  key: string;
+  node: ReactNode;
+}
+
 export interface ShellProps {
   active: NavId;
   shown: ShownTone;

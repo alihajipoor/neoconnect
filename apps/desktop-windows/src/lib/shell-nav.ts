@@ -103,6 +103,25 @@ export async function currentNetwork(
   return now === seen ? said : null;
 }
 
+/** The screens of the signed-in shell, as the apps' screen machines name
+ * them: the main page and the pages drawn in its shell. */
+export const SIGNED_IN_SCREENS: readonly string[] = ["dashboard", "settings", "activity", "plans", "referrals", "support"];
+
+export function isSignedInScreen(screen: string): boolean {
+  return SIGNED_IN_SCREENS.includes(screen);
+}
+
+/** What the transition between screens (ScreenTransition) is keyed by:
+ * every screen of the signed-in shell as the main page. The main page's
+ * screen draws the others in its own shell and stays mounted under them,
+ * so a change between them is never a remount -- which put "Loading..."
+ * over the whole window, then "Connected, not confirmed", no route and no
+ * location list over a tunnel that had not changed (VM, 2026-10-20). The
+ * app animates those changes itself (`swapView`). */
+export function transitionKey(screen: string): string {
+  return isSignedInScreen(screen) ? "dashboard" : screen;
+}
+
 export function requestLocations(): void {
   locationsRequested = true;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Gamepad2, Globe, Repeat, Shield, Sparkles } from "lucide-react";
 import type { ConnectionState } from "../components/ConnectOrb";
 import { ConnectOrb } from "../components/ConnectOrb";
@@ -14,7 +14,9 @@ import { WorldMap } from "../components/main/WorldMap";
 import { MainView } from "../components/main/MainView";
 import { LocationCard, MetricCards, SessionTray, SummaryLine, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
 import { Dialog, LocationSheet } from "../components/overlay";
-import { AppShell } from "../components/shell/AppShell";
+import { AppShell, type ShellPage } from "../components/shell/AppShell";
+import { PageScene } from "../components/shell/Page";
+import { swapView } from "../lib/view-transition";
 import { Banner, Note, PillButton, Presence, Segmented } from "../components/ui";
 import { MARK_TONE, type LogoTone } from "../lib/logo-geometry";
 import { HEADLINE_HINTS, headlineFor, isTunnelUp } from "../lib/connection-evidence";
@@ -33,7 +35,7 @@ import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
 import { mapCountries, mapLights, ownWorkedAt, placesEvidence } from "../lib/map-lights";
 import type { SlotNotice } from "../lib/device-slot-notice";
 import type { RouteOption } from "../lib/types";
-import { PAGE_SCREENS, PreviewPage } from "./PreviewPages";
+import { PAGE_SCREENS, PREVIEW_NAV, PreviewPage } from "./PreviewPages";
 import { ProgressLineView } from "../components/main/ProgressLine";
 import { rearmCheckPop } from "../lib/check-pop";
 import { SpeedCard, SpeedSection } from "../components/main/TrafficSpeed";
@@ -42,12 +44,18 @@ import type { LadderRung } from "../lib/ladder-progress";
 import type { CountdownLine } from "../lib/reconnect-countdown";
 import type { HoldNoteKey } from "../lib/reconnect-hold";
 import { SAMPLE_SUBSCRIPTION } from "./mocks/customer";
-import { ScreenTransition } from "../components/ScreenTransition";
+import { ScreenTransition, screenDirection } from "../components/ScreenTransition";
 import { firstViews } from "../lib/motion";
 
 /** DEV ONLY: the preview's screens as the app's screen machine names them
  * (App.tsx), so a change of screen here slides the way it does there --
  * deeper forward, back back (ScreenTransition's depths). */
+/** DEV ONLY: whether the preview draws this screen in the main page's own
+ * shell, as the app does: the main page and the pages of its shell. */
+function inShell(screen: string): boolean {
+  return screen === "main" || screen in PREVIEW_NAV;
+}
+
 const APP_SCREEN: Record<string, string> = {
   main: "dashboard",
   locations: "dashboard:locations",
@@ -107,6 +115,10 @@ interface Scenario {
   /** A tunnel the screen found up and cannot name (`tunnelNamed`): back
    * from Settings, its last dial on another protocol. */
   unnamed?: boolean;
+  /** Played as a visit: Settings, then back to the main page through the
+   * shell's own transition -- the main page as it was, no load in front of
+   * it, the tunnel still verified (App.tsx `shellPage`). */
+  returned?: boolean;
 }
 
 const SCENARIOS: Record<string, Scenario> = {
@@ -116,6 +128,14 @@ const SCENARIOS: Record<string, Scenario> = {
   connected: { label: "Connected, verified", state: "connected", timed: true, failover: true, details: true },
   adopted: { label: "Connected, adopted at launch", state: "connected" },
   unnamed: { label: "Connected, route not known (back from Settings)", state: "connected", unnamed: true },
+  returned: {
+    label: "Connected, verified: Settings and back (nothing reloads)",
+    state: "connected",
+    timed: true,
+    failover: true,
+    details: true,
+    returned: true,
+  },
   unconfined: { label: "Connected, not confined", state: "connected", unconfined: true, caution: true, timed: true, leak: true },
   unverified: { label: "Connected, not confirmed", state: "unverified" },
   degraded: { label: "Not carrying traffic", state: "degraded" },
@@ -317,8 +337,34 @@ export function PreviewApp() {
   const [askOpen, setAskOpen] = useState(false);
   const [sheet, setSheet] = useState(false);
   /** The shell's nav works in the preview: each press changes the screen
-   * as the app does, through the same transition. */
-  const go = (next: string) => setScreen(next);
+   * as the app does. Between the main page and a page of its shell, by the
+   * app's own change of view (App.tsx `go`): the main page's shell, and
+   * the main page under the page, stay mounted. */
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+  const go = (next: string) => {
+    const from = screenRef.current;
+    if (from === next) return;
+    if (inShell(from) && inShell(next)) {
+      swapView(() => setScreen(next), screenDirection(APP_SCREEN[from] ?? from, APP_SCREEN[next] ?? next));
+      return;
+    }
+    setScreen(next);
+  };
+  // "Settings and back": the visit played, each way through the shell's
+  // own transition.
+  useEffect(() => {
+    if (!sc.returned) return;
+    setScreen("main");
+    const away = setTimeout(() => go("settings"), 700);
+    const back = setTimeout(() => go("main"), 2_100);
+    return () => {
+      clearTimeout(away);
+      clearTimeout(back);
+    };
+    // Once per choice of the state; go reads the screen through its ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sc]);
   const [replay, setReplay] = useState(0);
 
   useEffect(() => effects.setTheme(theme), [theme]);
@@ -450,9 +496,30 @@ export function PreviewApp() {
       >
         {/* The device's safe areas, which env() cannot report here. */}
         <style>{`[data-testid="frame"] .nx-app { --safe-t: var(--pv-safe-t); --safe-b: var(--pv-safe-b); }`}</style>
-        <ScreenTransition key={replay} screenKey={APP_SCREEN[screen] ?? screen} viewTransitions>
-          {screen === "main" ? (
+        <ScreenTransition key={replay} screenKey={inShell(screen) ? "dashboard" : (APP_SCREEN[screen] ?? screen)} viewTransitions>
+          {inShell(screen) ? (
             <Composed
+              page={
+                screen === "main"
+                  ? null
+                  : {
+                      nav: PREVIEW_NAV[screen] ?? "none",
+                      key: screen,
+                      node: (
+                        <PreviewPage
+                          hosted
+                          screen={screen}
+                          width={w}
+                          routes={pageRoutes}
+                          history={pageHistory}
+                          network={PREVIEW_NET}
+                          subscription={SAMPLE_SUBSCRIPTION}
+                          tunnel={sc.state}
+                          onNavigate={go}
+                        />
+                      ),
+                    }
+              }
               sc={sc}
               t={t}
               language={language}
@@ -502,7 +569,11 @@ function Composed({
   sheet,
   onSheet,
   onNavigate,
+  page = null,
 }: {
+  /** A page of the shell, drawn in this shell in place of the main page,
+   * as the Dashboard draws its pages (`page`). */
+  page?: ShellPage | null;
   sheet: boolean;
   onSheet: (open: boolean) => void;
   onNavigate: (screen: string) => void;
@@ -729,15 +800,15 @@ function Composed({
 
   return (
     <AppShell
-      active="overview"
-      shown={calmTone}
-      busy={pill.progress}
-      banner={Boolean(sc.offline || plan === "ended")}
+      active={page ? page.nav : "overview"}
+      shown={page ? "idle" : calmTone}
+      busy={page ? false : pill.progress}
+      banner={page ? false : Boolean(sc.offline || plan === "ended")}
       titlebar
       email="you@example.com"
       planLine={planLineText(plan === "none" ? null : { daysLeft, unlimited: cap === null }, t, language)}
-      onOverview={() => undefined}
-      onLocations={() => (layout === "narrow" ? onSheet(true) : onNavigate("locations"))}
+      onOverview={() => (page ? onNavigate("main") : undefined)}
+      onLocations={() => (layout === "narrow" && !page ? onSheet(true) : onNavigate("locations"))}
       onOpenActivity={() => onNavigate("activity")}
       onOpenSettings={() => onNavigate("settings")}
       onBrowsePlans={() => onNavigate("plans")}
@@ -745,9 +816,17 @@ function Composed({
       onOpenSupport={() => onNavigate("support")}
       onSignOut={() => undefined}
       signingOut={false}
-      scene={<HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} logo={logo} logoTone={logoTone} alert={mapAlert} />}
+      scene={
+        page ? (
+          <PageScene />
+        ) : (
+          <HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} logo={logo} logoTone={logoTone} alert={mapAlert} />
+        )
+      }
     >
-      {gaming ? (
+      {page ? (
+        <Fragment key={page.key}>{page.node}</Fragment>
+      ) : gaming ? (
         <MainView
           banner={banner}
           gaming={<GamingStatusPanel onOpenSettings={() => undefined} onTone={setGamingTone} />}
@@ -832,13 +911,13 @@ function Composed({
           announcer={<StateAnnouncer text={`${lineWords}. ${hintText}`} />}
         />
       )}
-      {layout === "narrow" ? (
+      {layout === "narrow" && !page ? (
         <LocationSheet open={sheet} title={t("loc.panelTitle")} closeLabel={t("loc.close")} onClose={() => onSheet(false)}>
           {panel}
         </LocationSheet>
       ) : null}
       <Dialog
-        open={askOpen}
+        open={askOpen && !page}
         title={t("sw.title", { place: `${placeLabel(ROUTES[2], language)} · ${customerProtocolLabel(ROUTES[2].protocol, ROUTES[2].transport)}` })}
         description={t("sw.body")}
         onClose={() => onAsk(false)}

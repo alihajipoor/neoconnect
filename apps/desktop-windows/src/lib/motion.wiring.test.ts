@@ -101,7 +101,10 @@ describe("overlays leave the way they came", () => {
 describe("every change of page or view slides", () => {
   it("the phone hands its screens to the View Transitions API, as the desktop does", () => {
     expect(read("../../../mobile/src/App.tsx")).toMatch(/<ScreenTransition screenKey=\{screen\} viewTransitions>/);
-    expect(read("../App.tsx")).toContain("<ScreenTransition screenKey={screen} viewTransitions>");
+    // The desktop keys every page of the signed-in shell as the main page:
+    // the Dashboard draws them in its own shell, stays mounted under them,
+    // and the change between them goes through swapView (shell-remount.test.ts).
+    expect(read("../App.tsx")).toContain("<ScreenTransition screenKey={transitionKey(screen)} viewTransitions>");
   });
 
   it("in-screen views go through swapView: the main page and Locations, Settings' pages, Support, the payment step", () => {

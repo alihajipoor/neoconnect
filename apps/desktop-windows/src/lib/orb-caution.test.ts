@@ -407,7 +407,8 @@ describe("the dashboard and the orb use the rule", () => {
     // is the control's own: orbTone over the held look and the held
     // caution, never the raw state.
     expect(dashboard).toMatch(/const calmTone: ShownTone = gaming\s*\?\s*gamingTone\s*:\s*shownTone\(orbTone\(orbState, cautionShown\), /);
-    expect(dashboard).toContain("shown={calmTone}");
+    // On the main page; another page of the shell wears the pages' quiet look.
+    expect(dashboard).toContain('shown={page ? "idle" : calmTone}');
     expect(dashboard).not.toMatch(/shownTone\(orbTone\(connectionState/);
   });
 

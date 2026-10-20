@@ -40,6 +40,14 @@ const DEPTH: Record<string, number> = {
   support: 2,
 };
 
+/** Which way a change from one screen to another goes: deeper forward,
+ * back back. For a change this component does not see -- one page of the
+ * signed-in shell to another, which App.tsx animates itself so the shell
+ * and the main page under it stay mounted (`swapView`). */
+export function screenDirection(from: string, to: string): "forward" | "back" {
+  return (DEPTH[to] ?? 0) < (DEPTH[from] ?? 0) ? "back" : "forward";
+}
+
 /** How long the leaving screen is kept: its exit (`--dur-exit`, 180ms;
  * theme.css `.screen-leave`) with room. The arriving one takes the snappy
  * spring, unhurried by this. */
@@ -81,7 +89,7 @@ export function ScreenTransition({
     if (showing.current === screenKey) return;
     const from = showing.current;
     showing.current = screenKey;
-    const goingBack = (DEPTH[screenKey] ?? 0) < (DEPTH[from] ?? 0);
+    const goingBack = screenDirection(from, screenKey) === "back";
     if (viewTransitions && viewTransitionsAvailable()) {
       withViewTransition(() => {
         setVia("vt");

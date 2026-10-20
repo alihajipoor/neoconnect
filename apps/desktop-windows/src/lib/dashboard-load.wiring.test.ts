@@ -70,7 +70,11 @@ describe.each(screens)("the %s dashboard's first load", (_name, path, signature)
     }
     // Windows: the same, and over a tunnel the screen shows up as well
     // (`showLoadedCredential`, pinned in dashboard-remount.test.ts).
-    expect(load).toContain("showLoadedCredential(usersResult.data, chosen, shownWhileWaiting);");
+    // A return to the main page chooses again only for a credential the
+    // answer no longer lists, with no pass dialling (`revalidate`).
+    expect(load).toMatch(
+      /showLoadedCredential\(\s*usersResult\.data,\s*chosen,\s*shownWhileWaiting && \(retry !== "returned" \|\| heldListed \|\| ladderInFlight\(\)\),\s*\);/,
+    );
     const begins = screen.indexOf("  function showLoadedCredential(");
     const shown = screen.slice(begins, screen.indexOf("\n  }\n", begins));
     expect(shown).toContain("if (keepHeld || describesTunnel(connectionStateRef.current)) {");

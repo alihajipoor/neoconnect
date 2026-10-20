@@ -65,7 +65,11 @@ export const PAGE_SCREENS: Record<string, string> = {
   referrals: "Invite friends",
 };
 
-const NAV: Record<string, NavId> = {
+/** The pages the app draws in the main page's own shell (App.tsx
+ * `shellPage`), with the nav item each belongs to. The preview draws them
+ * in the main page's shell too (PreviewApp `Composed`), so the shell keeps
+ * still across a change of page here as it does there. */
+export const PREVIEW_NAV: Record<string, NavId> = {
   locations: "locations",
   settings: "settings",
   pickGame: "settings",
@@ -187,7 +191,11 @@ export function PreviewPage({
   subscription,
   tunnel = "disconnected",
   onNavigate = noop,
+  hosted = false,
 }: {
+  /** Drawn inside the main page's shell (PreviewApp `Composed`), as the
+   * app draws its pages: the page alone, no shell of its own. */
+  hosted?: boolean;
   /** The tunnel state the scenario switcher has chosen, for the list. */
   tunnel?: string;
   /** The shell's nav, as the app wires it (App.tsx): another screen. */
@@ -354,9 +362,10 @@ export function PreviewPage({
       <Referrals onBack={noop} />
     ) : null;
 
+  if (hosted) return page;
   return (
     <AppShell
-      active={NAV[screen] ?? "none"}
+      active={PREVIEW_NAV[screen] ?? "none"}
       shown="idle"
       titlebar
       email="you@example.com"

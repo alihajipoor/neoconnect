@@ -14,16 +14,15 @@ import { Register } from "./screens/Register";
 import { VerifyEmail } from "./screens/VerifyEmail";
 import { ForgotPassword } from "./screens/ForgotPassword";
 import { Dashboard } from "./screens/Dashboard";
-import { ScreenTransition } from "./components/ScreenTransition";
+import { ScreenTransition, screenDirection } from "./components/ScreenTransition";
 import { Plans } from "./screens/Plans";
 import { Settings, type DeviceSettings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
 import { Support } from "./screens/Support";
 import { Activity } from "./screens/Activity";
-import { AppShell, type NavId } from "./components/shell/AppShell";
-import { PageScene } from "./components/shell/Page";
-import { CommunityLinks } from "./components/CommunityLinks";
-import { forgetShellProfile, planLineText, requestLocations, shellProfile } from "./lib/shell-nav";
+import type { NavId, ShellPage } from "./components/shell/AppShell";
+import { forgetShellProfile, isSignedInScreen, transitionKey } from "./lib/shell-nav";
+import { swapView } from "./lib/view-transition";
 import { CustomModeCard } from "./components/CustomModeCard";
 import { GamingModeCard } from "./components/GamingModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
@@ -83,6 +82,10 @@ type Screen =
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
+  /** The screen as of the last render, for a change of screen asked from a
+   * callback (`go`). */
+  const screenRef = useRef<Screen>(screen);
+  screenRef.current = screen;
   // Carries the just-submitted credentials from register/login into the
   // verify screen so it can auto-sign-in the moment the code is confirmed
   // -- see VerifyEmail's doc comment. Password is only ever held in
@@ -106,7 +109,7 @@ export default function App() {
   // cosmetic double-render.
   const handledDeepLinkUrls = useRef(new Set<string>());
   const endingRef = useRef(false);
-  const { t, language } = useI18n();
+  const { t } = useI18n();
   // Read through a ref by the deep-link handler, which is registered once
   // and would otherwise word its notice in the language of the first
   // render -- before the saved choice was read back from disk.
@@ -382,41 +385,82 @@ export default function App() {
   // in scope, which is why this build cuts between screens while
   // the mobile one animates -- the component lived here and only
   // mobile was ever wired into it.
-  /** One of the signed-in pages, in the same shell as the main page: the
-   * sidebar on a wide window, the tabs on a medium one, the bottom nav on
-   * a phone-sized one. `active` is the nav item it belongs to. */
-  const inShell = (active: NavId, content: ReactNode) => {
-    const profile = shellProfile();
-    return (
-      <AppShell
-        active={active}
-        shown="idle"
-        titlebar
-        email={profile.email}
-        planLine={planLineText(profile.plan, t, language)}
-        onOverview={() => setScreen("dashboard")}
-        onLocations={() => {
-          requestLocations();
-          setScreen("dashboard");
-        }}
-        onOpenActivity={() => setScreen("activity")}
-        onOpenSettings={() => setScreen("settings")}
-        onBrowsePlans={() => setScreen("plans")}
-        onOpenReferrals={() => setScreen("referrals")}
-        onOpenSupport={() => setScreen("support")}
-        onSignOut={() => void signOutFromPage()}
-        signingOut={pageSigningOut}
-        update={
-          <>
-            <UpdateBanner state={updateState} onRestart={() => void restartForUpdate()} busy={restarting} blocked={updateBlocked} />
-            <CommunityLinks />
-          </>
-        }
-        scene={<PageScene />}
-      >
-        {content}
-      </AppShell>
-    );
+  /** A change of screen. Between the main page and another page of the
+   * signed-in shell it is animated here, as a change of view
+   * (`swapView`): the transition below keeps one key for all of them
+   * (`transitionKey`), so the Dashboard -- and the shell it draws them in --
+   * stays mounted. Everything else goes through the transition below. */
+  const go = (next: Screen) => {
+    const from = screenRef.current;
+    if (from === next) return;
+    if (isSignedInScreen(from) && isSignedInScreen(next)) {
+      swapView(() => setScreen(next), screenDirection(from, next));
+      return;
+    }
+    setScreen(next);
+  };
+
+  /** One of the signed-in pages, drawn in the main page's own shell (the
+   * Dashboard's `page`): the sidebar on a wide window, the tabs on a medium
+   * one, the bottom nav on a phone-sized one. `nav` is the nav item it
+   * belongs to. Null on the main page and outside the shell. */
+  const shellPage = (): ShellPage | null => {
+    const page = (nav: NavId, node: ReactNode): ShellPage => ({ nav, key: screen, node });
+    if (screen === "settings") {
+      return page(
+        "settings",
+        <Settings
+          onBack={() => go("dashboard")}
+          onOpenReferrals={() => go("referrals")}
+          onOpenSupport={() => go("support")}
+          onLoggedOut={() => void handleLoggedOut()}
+          customSection={<CustomModeCard />}
+          // Supplied here rather than imported by the screen, the same way
+          // Custom mode is: gaming mode drives the Windows helper service
+          // and has no counterpart on the mobile build that shares this
+          // screen. Passing it is what makes its row exist.
+          gamingSection={<GamingModeCard />}
+          onOpenPlans={() => go("plans")}
+          onOpenActivity={() => go("activity")}
+          onSignOut={() => void signOutFromPage()}
+          platform="windows"
+          device={WINDOWS_DEVICE}
+        />,
+      );
+    }
+    if (screen === "activity") {
+      return page(
+        "activity",
+        <Activity
+          // The Windows helper's fingerprint of the network; and, for when it
+          // cannot be read (under a tunnel), the ways out, to tell whether the
+          // main page's network is still the one (`currentNetwork`).
+          readNetwork={() => invoke<string | null>("network_fingerprint")}
+          readWayOut={() => invoke<string | null>("network_uplinks")}
+          onOpenPlans={() => go("plans")}
+          // The main page records it here, so its switch is offered.
+          sessionLog
+        />,
+      );
+    }
+    if (screen === "referrals") {
+      // Back to Settings rather than the Dashboard: that is where the
+      // customer came from, and dropping them somewhere else is how a
+      // two-tap detour starts feeling like getting lost.
+      return page("none", <Referrals onBack={() => go("settings")} />);
+    }
+    if (screen === "support") {
+      // Same reasoning as Referrals: back where they came from.
+      return page("none", <Support onBack={() => go("settings")} />);
+    }
+    if (screen === "plans") {
+      const leavePlans = () => {
+        setPlansNotice(null);
+        go("dashboard");
+      };
+      return page("none", <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />);
+    }
+    return null;
   };
 
   const renderScreen = () => {
@@ -482,73 +526,25 @@ export default function App() {
       />
     );
   }
-  if (screen === "settings") {
-    return inShell(
-      "settings",
-      <Settings
-        onBack={() => setScreen("dashboard")}
-        onOpenReferrals={() => setScreen("referrals")}
-        onOpenSupport={() => setScreen("support")}
-        onLoggedOut={() => void handleLoggedOut()}
-        customSection={<CustomModeCard />}
-        // Supplied here rather than imported by the screen, the same way
-        // Custom mode is: gaming mode drives the Windows helper service
-        // and has no counterpart on the mobile build that shares this
-        // screen. Passing it is what makes its row exist.
-        gamingSection={<GamingModeCard />}
-        onOpenPlans={() => setScreen("plans")}
-        onOpenActivity={() => setScreen("activity")}
-        onSignOut={() => void signOutFromPage()}
-        platform="windows"
-        device={WINDOWS_DEVICE}
-      />,
-    );
-  }
-  if (screen === "activity") {
-    return inShell(
-      "activity",
-      <Activity
-        // The Windows helper's fingerprint of the network; and, for when it
-        // cannot be read (under a tunnel), the ways out, to tell whether the
-        // main page's network is still the one (`currentNetwork`).
-        readNetwork={() => invoke<string | null>("network_fingerprint")}
-        readWayOut={() => invoke<string | null>("network_uplinks")}
-        onOpenPlans={() => setScreen("plans")}
-        // The main page records it here, so its switch is offered.
-        sessionLog
-      />,
-    );
-  }
-  if (screen === "referrals") {
-    // Back to Settings rather than the Dashboard: that is where the
-    // customer came from, and dropping them somewhere else is how a
-    // two-tap detour starts feeling like getting lost.
-    return inShell("none", <Referrals onBack={() => setScreen("settings")} />);
-  }
-  if (screen === "support") {
-    // Same reasoning as Referrals: back where they came from.
-    return inShell("none", <Support onBack={() => setScreen("settings")} />);
-  }
-  if (screen === "plans") {
-    const leavePlans = () => {
-      setPlansNotice(null);
-      setScreen("dashboard");
-    };
-    return inShell("none", <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />);
-  }
   // The update notice rides on the Dashboard only -- in its sidebar, or
   // at the top of the hero on a narrower window. It is the screen people
   // sit on, and putting it on every screen would mean it appears over the
   // sign-in form, telling somebody who cannot get into their account yet
   // about a version number.
+  //
+  // The other pages of the shell are drawn by the Dashboard too, in its own
+  // shell, in place of the main page (`shellPage`): it stays mounted under
+  // them, with what it has loaded and verified.
   return (
     <Dashboard
       onLoggedOut={() => void handleLoggedOut()}
-      onBrowsePlans={() => setScreen("plans")}
-      onOpenSettings={() => setScreen("settings")}
-      onOpenReferrals={() => setScreen("referrals")}
-      onOpenSupport={() => setScreen("support")}
-      onOpenActivity={() => setScreen("activity")}
+      onBrowsePlans={() => go("plans")}
+      onOpenSettings={() => go("settings")}
+      onOpenReferrals={() => go("referrals")}
+      onOpenSupport={() => go("support")}
+      onOpenActivity={() => go("activity")}
+      page={shellPage()}
+      onShowMain={() => setScreen("dashboard")}
       update={
         <UpdateBanner
           state={updateState}
@@ -575,7 +571,7 @@ export default function App() {
   // headline (calm UI).
   return (
     <div className="relative h-full">
-      <ScreenTransition screenKey={screen} viewTransitions>
+      <ScreenTransition screenKey={transitionKey(screen)} viewTransitions>
         {framed(renderScreen())}
       </ScreenTransition>
       {/* In the title strip, clear of the caption buttons. */}
