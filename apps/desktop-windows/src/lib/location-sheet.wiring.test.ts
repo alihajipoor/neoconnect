@@ -19,7 +19,10 @@ describe("the location sheet while a switch is in flight", () => {
   });
 
   it("closes by none of its own ways out while it is held", () => {
-    expect(overlay).toContain('<div className="nx-scrim" aria-hidden onClick={dismissible ? onClose : undefined} />');
+    // The scrim: never while held, nor while the sheet is already leaving
+    // (it stays mounted for its exit, lib/motion.ts usePresence).
+    expect(overlay).toContain("onClick={dismissible && !closing ? onClose : undefined}");
+    expect(overlay).toContain("const handle = useSheetDrag(ref, scrim, onClose, dismissible, open);");
     expect(overlay).toContain("if (!sheet || event.button !== 0 || !dismissible) return;");
     expect(overlay).toMatch(/onClick=\{onClose\}\s*onPointerDown=\{\(event\) => event\.stopPropagation\(\)\}\s*disabled=\{!dismissible\}/);
   });

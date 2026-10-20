@@ -1,6 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Search as SearchIcon, X } from "lucide-react";
+import { curve, dragOutcome, motionReduced, play, scrimFor, usePresence } from "../lib/motion";
 import { cn } from "../lib/utils";
 
 /** Dialogs and menus, rendered through a portal at the document root.
@@ -9,7 +10,13 @@ import { cn } from "../lib/utils";
  * containing block for its `position: fixed` children, so an overlay drawn
  * inside one is clipped to it (GamePicker.tsx documents the same trap).
  * Each takes focus on open, keeps it inside, closes on Escape and gives
- * focus back to whatever had it. */
+ * focus back to whatever had it.
+ *
+ * Each also leaves the way it came (lib/motion.ts `usePresence`): kept
+ * for its exit, marked `data-state="closed"` and inert, so the scrim
+ * fades, a dialog or a menu shrinks back into place and a sheet slides
+ * down (motion.css) -- nothing vanishes in one frame. Focus goes back at
+ * once, when it closes, not when the exit ends. */
 
 const FOCUSABLE =
   'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
@@ -33,7 +40,11 @@ function useFocusTrap(
     const node = ref.current;
     // A field marked `data-autofocus` -- the location sheet's search -- before
     // the first control, which is the close button.
-    (initialFocus?.current ?? node?.querySelector<HTMLElement>("[data-autofocus]") ?? (node ? focusables(node)[0] : null) ?? node)?.focus();
+    // Without scrolling: an overlay is still arriving (a sheet starts below
+    // the edge), and focusing it must not scroll whatever is under it.
+    (initialFocus?.current ?? node?.querySelector<HTMLElement>("[data-autofocus]") ?? (node ? focusables(node)[0] : null) ?? node)?.focus({
+      preventScroll: true,
+    });
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
         if (!escapeRef.current) return;
@@ -101,12 +112,19 @@ export function Dialog({
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const descriptionId = useId();
+  const { mounted, closing } = usePresence(open);
   useFocusTrap(ref, open, onClose, initialFocus);
-  if (!open || typeof document === "undefined") return null;
+  if (!mounted || typeof document === "undefined") return null;
+  const state = closing ? "closed" : "open";
   return createPortal(
     <>
-      <div className="nx-scrim" aria-hidden onClick={onClose} />
-      <div className="nx-dlgwrap" onClick={(event) => event.target === event.currentTarget && onClose?.()}>
+      <div className="nx-scrim" data-state={state} aria-hidden onClick={closing ? undefined : onClose} />
+      <div
+        className="nx-dlgwrap"
+        data-state={state}
+        inert={closing || undefined}
+        onClick={(event) => !closing && event.target === event.currentTarget && onClose?.()}
+      >
         <div
           ref={ref}
           role={alert ? "alertdialog" : "dialog"}
@@ -158,12 +176,19 @@ export function PickerDialog({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  const { mounted, closing } = usePresence(open);
   useFocusTrap(ref, open, onClose);
-  if (!open || typeof document === "undefined") return null;
+  if (!mounted || typeof document === "undefined") return null;
+  const state = closing ? "closed" : "open";
   return createPortal(
     <>
-      <div className="nx-scrim" aria-hidden onClick={onClose} />
-      <div className="nx-dlgwrap" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="nx-scrim" data-state={state} aria-hidden onClick={closing ? undefined : onClose} />
+      <div
+        className="nx-dlgwrap"
+        data-state={state}
+        inert={closing || undefined}
+        onClick={(event) => !closing && event.target === event.currentTarget && onClose()}
+      >
         <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="nx-glass strong nx-dlg nx-pick">
           <div className="nx-pick-head">
             <h2 id={titleId}>{title}</h2>
@@ -217,25 +242,131 @@ export function BottomSheet({
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const scrim = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  const { mounted, closing } = usePresence(open);
+  // Drawn where it opened, and kept there while it slides away.
+  const held = useRef<Element | null>(null);
+  if (open) held.current = container ?? null;
   useFocusTrap(ref, open, onClose);
-  if (!open || typeof document === "undefined") return null;
+  const handle = useSheetDrag(ref, scrim, onClose, open, open);
+  if (!mounted || typeof document === "undefined") return null;
+  const state = closing ? "closed" : "open";
   return createPortal(
     <>
-      <div className="nx-scrim" aria-hidden onClick={onClose} />
-      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="nx-glass strong nx-sheet">
-        <div className="handle" aria-hidden />
-        <div className="nx-sheet-head">
+      <div ref={scrim} className="nx-scrim" data-state={state} aria-hidden onClick={closing ? undefined : onClose} />
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="nx-glass strong nx-sheet"
+        data-state={state}
+        inert={closing || undefined}
+      >
+        <div className="handle" aria-hidden {...handle} />
+        <div className="nx-sheet-head" {...handle}>
           <h2 id={titleId}>{title}</h2>
-          <button type="button" className="nx-ibtn" onClick={onClose} aria-label={closeLabel} title={closeLabel}>
+          <button
+            type="button"
+            className="nx-ibtn"
+            onClick={onClose}
+            onPointerDown={(event) => event.stopPropagation()}
+            aria-label={closeLabel}
+            title={closeLabel}
+          >
             <X aria-hidden />
           </button>
         </div>
         <div className="nx-sheet-body">{children}</div>
       </div>
     </>,
-    container ?? document.body,
+    held.current ?? container ?? document.body,
   );
+}
+
+/** A sheet's handle and head follow the finger down. Let go past 120px, or
+ * flung faster than .6px/ms, and it goes the rest of the way at about the
+ * speed it was going; otherwise it springs back on the snappy spring
+ * (design-system.md 6.1). The scrim thins as it goes. Under reduced motion
+ * it still follows the finger -- that is the customer moving it, not the
+ * app -- but closes or returns at once. Never while it may not close
+ * (`dismissible`: a switch in flight). */
+function useSheetDrag(
+  sheetRef: RefObject<HTMLDivElement | null>,
+  scrimRef: RefObject<HTMLDivElement | null>,
+  onClose: () => void,
+  dismissible: boolean,
+  open: boolean,
+) {
+  const drag = useRef<{ y0: number; t0: number; dy: number; id: number; h: number } | null>(null);
+  /** A flick's way out, held at its end: let go if the sheet is opened
+   * again before its exit is over, or it would stay out of sight. */
+  const away = useRef<Animation[]>([]);
+  useEffect(() => {
+    if (!open) return;
+    away.current.forEach((a) => a.cancel());
+    away.current = [];
+  }, [open]);
+  function onDown(event: React.PointerEvent<HTMLElement>) {
+    const sheet = sheetRef.current;
+    if (!sheet || event.button !== 0 || !dismissible) return;
+    drag.current = { y0: event.clientY, t0: performance.now(), dy: 0, id: event.pointerId, h: sheet.getBoundingClientRect().height };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    sheet.dataset.drag = "1";
+  }
+  function onMove(event: React.PointerEvent<HTMLElement>) {
+    const sheet = sheetRef.current;
+    const d = drag.current;
+    if (!sheet || !d || d.id !== event.pointerId) return;
+    d.dy = Math.max(0, event.clientY - d.y0);
+    sheet.style.transform = `translateY(${d.dy}px)`;
+    if (scrimRef.current) scrimRef.current.style.opacity = String(scrimFor(d.dy, d.h));
+  }
+  function onUp(event: React.PointerEvent<HTMLElement>) {
+    const sheet = sheetRef.current;
+    const d = drag.current;
+    drag.current = null;
+    if (!sheet || !d || d.id !== event.pointerId) return;
+    delete sheet.dataset.drag;
+    const scrim = scrimRef.current;
+    const reduce = motionReduced();
+    const elapsed = Math.max(1, performance.now() - d.t0);
+    const settle = () => {
+      sheet.style.transform = "";
+      if (scrim) scrim.style.opacity = "";
+    };
+    if (dragOutcome(d.dy, elapsed) === "close") {
+      if (reduce) {
+        settle();
+        onClose();
+        return;
+      }
+      const rest = Math.max(0, d.h - d.dy);
+      const ms = Math.round(Math.min(240, Math.max(140, rest / Math.max(0.8, d.dy / elapsed))));
+      const out = { duration: ms, easing: "cubic-bezier(0.4, 0, 1, 1)", fill: "forwards" as const };
+      settle();
+      for (const a of [
+        play(sheet, [{ transform: `translateY(${d.dy}px)` }, { transform: "translateY(110%)" }], out),
+        scrim ? play(scrim, [{ opacity: scrimFor(d.dy, d.h) }, { opacity: 0 }], out) : null,
+      ]) {
+        if (a) away.current.push(a);
+      }
+      setTimeout(onClose, ms);
+      return;
+    }
+    if (reduce || d.dy === 0) {
+      settle();
+      return;
+    }
+    const back = curve("snappy");
+    const scrimFrom = scrimFor(d.dy, d.h);
+    settle();
+    play(sheet, [{ transform: `translateY(${d.dy}px)` }, { transform: "translateY(0)" }], back);
+    if (scrim) play(scrim, [{ opacity: scrimFrom }, { opacity: 1 }], back);
+  }
+  return { onPointerDown: onDown, onPointerMove: onMove, onPointerUp: onUp, onPointerCancel: onUp };
 }
 
 /** A menu that springs from its trigger: arrows, Home and End move focus,
@@ -261,6 +392,7 @@ export function Menu({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [style, setStyle] = useState<React.CSSProperties>({ visibility: "hidden" });
+  const { mounted, closing } = usePresence(open);
   useFocusTrap(ref, open, onClose);
 
   useLayoutEffect(() => {
@@ -308,9 +440,18 @@ export function Menu({
     else if (event.key === "End") go(items.length - 1);
   }
 
-  if (!open || typeof document === "undefined") return null;
+  if (!mounted || typeof document === "undefined") return null;
   return createPortal(
-    <div ref={ref} role="menu" aria-label={label} className={cn("nx-glass strong nx-menu")} style={style} onKeyDown={onKeyDown}>
+    <div
+      ref={ref}
+      role="menu"
+      aria-label={label}
+      className={cn("nx-glass strong nx-menu")}
+      data-state={closing ? "closed" : "open"}
+      inert={closing || undefined}
+      style={style}
+      onKeyDown={onKeyDown}
+    >
       {children}
     </div>,
     document.body,
@@ -348,59 +489,33 @@ export function LocationSheet({
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const scrim = useRef<HTMLDivElement>(null);
   const anchor = useRef<HTMLSpanElement>(null);
   const [container, setContainer] = useState<Element | null>(null);
   const titleId = useId();
-  const drag = useRef<{ y0: number; t0: number; dy: number; id: number } | null>(null);
+  const { mounted, closing } = usePresence(open);
   useFocusTrap(ref, open && container !== null, undefined);
 
   useLayoutEffect(() => {
     if (open) setContainer(anchor.current?.closest(".nx-app") ?? document.body);
   }, [open]);
 
-  function onDown(event: React.PointerEvent<HTMLElement>) {
-    const sheet = ref.current;
-    if (!sheet || event.button !== 0 || !dismissible) return;
-    drag.current = { y0: event.clientY, t0: performance.now(), dy: 0, id: event.pointerId };
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    sheet.style.transition = "none";
-  }
-  function onMove(event: React.PointerEvent<HTMLElement>) {
-    const sheet = ref.current;
-    const d = drag.current;
-    if (!sheet || !d || d.id !== event.pointerId) return;
-    d.dy = Math.max(0, event.clientY - d.y0);
-    sheet.style.transform = `translateY(${d.dy}px)`;
-  }
-  function onUp(event: React.PointerEvent<HTMLElement>) {
-    const sheet = ref.current;
-    const d = drag.current;
-    drag.current = null;
-    if (!sheet || !d || d.id !== event.pointerId) return;
-    const speed = d.dy / Math.max(1, performance.now() - d.t0);
-    const reduce = document.documentElement.dataset.motion === "reduce";
-    if (d.dy > 120 || speed > 0.6) {
-      if (reduce) {
-        onClose();
-        return;
-      }
-      sheet.style.transition = "transform 220ms cubic-bezier(.4,0,1,1)";
-      sheet.style.transform = "translateY(110%)";
-      setTimeout(onClose, 220);
-      return;
-    }
-    sheet.style.transition = reduce ? "none" : "transform var(--dur-snappy) var(--spring-snappy)";
-    sheet.style.transform = "";
-  }
-  const handle = { onPointerDown: onDown, onPointerMove: onMove, onPointerUp: onUp, onPointerCancel: onUp };
+  const handle = useSheetDrag(ref, scrim, onClose, dismissible, open);
+  const state = closing ? "closed" : "open";
 
   return (
     <>
       <span ref={anchor} hidden />
-      {open && container
+      {mounted && container
         ? createPortal(
             <>
-              <div className="nx-scrim" aria-hidden onClick={dismissible ? onClose : undefined} />
+              <div
+                ref={scrim}
+                className="nx-scrim"
+                data-state={state}
+                aria-hidden
+                onClick={dismissible && !closing ? onClose : undefined}
+              />
               <div
                 ref={ref}
                 role="dialog"
@@ -408,6 +523,8 @@ export function LocationSheet({
                 aria-labelledby={titleId}
                 tabIndex={-1}
                 className="nx-glass strong nx-sheet nx-locsheet"
+                data-state={state}
+                inert={closing || undefined}
               >
                 <div className="handle" aria-hidden {...handle} />
                 <div className="nx-sheet-head" {...handle}>
