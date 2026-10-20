@@ -34,21 +34,6 @@ describe("the reconnect hold's gate", () => {
     expect(test).toContain("VITE_RECONNECT_HOLD: ${{ inputs.reconnect_hold && '1' || '' }}");
   });
 
-  it("compiles the service's VM test switches into the test installer that offers it, and into nothing else", () => {
-    // reconnect_hold::TestSwitches: filters refused, a WireGuard server
-    // unnamed -- what gate 1b needs forced. Read from a file the guest
-    // writes, and only in a build that set this at compile time.
-    for (const workflow of [".github/workflows/release-desktop-windows.yml", ".github/workflows/ci.yml"]) {
-      expect(repo(workflow)).not.toContain("NEOXIFY_RECONNECT_HOLD_TEST");
-    }
-    const test = repo(".github/workflows/build-test-installer.yml");
-    expect(test.match(/NEOXIFY_RECONNECT_HOLD_TEST:/g)).toHaveLength(1);
-    expect(test).toContain("NEOXIFY_RECONNECT_HOLD_TEST: ${{ inputs.reconnect_hold && '1' || '' }}");
-    const hold = repo("apps/desktop-windows/service/src/engines/reconnect_hold.rs");
-    expect(hold).toContain('match option_env!("NEOXIFY_RECONNECT_HOLD_TEST") {');
-    expect(hold).toContain("Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',");
-  });
-
   it("hears the service's word from the very read that finds the drop", () => {
     // The liveness poll found drops and dropped the read: the screen kept
     // the "armed" from before and said traffic was going out without
