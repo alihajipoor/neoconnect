@@ -242,6 +242,16 @@ describe("reduced motion", () => {
   });
 });
 
+describe("motion.css changes no layout of its own", () => {
+  it("never sets a position, a size or a display on the shell's frame", () => {
+    // A `position: relative` on the phone's nav once took it out of its
+    // docked place and cost the main page 106px (the phone fit check).
+    for (const d of declarations(sheets.motion, /^(?:position|width|height|display|inset|top|bottom|left|right|margin|padding)$/)) {
+      expect(d.selector, `${d.selector} { ${d.value} }`).not.toMatch(/\.nx-(?:mnav|mtabs|side|nav|mhead|main|view|shell|hero|ov|tray|panel)(?:$|,|\s*\{)/);
+    }
+  });
+});
+
 describe("motion.css is loaded everywhere the screens are drawn, last", () => {
   it("by the desktop, the phone and the web portal's signed-in pages", () => {
     const desktop = read("../globals.css");

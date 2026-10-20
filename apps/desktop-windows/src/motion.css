@@ -231,6 +231,10 @@
     animation: nx-fade var(--dur-smooth) var(--spring-smooth) both;
     animation-delay: calc((min(var(--i, 0), 7) + 1 + min(var(--r, 0), 7)) * var(--stagger));
   }
+  /* The first set too, so it never inherits a count from further out. */
+  :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars, .nx-loclist) > :first-child {
+    --r: 0;
+  }
   :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars, .nx-loclist) > :nth-child(2) {
     --r: 1;
   }
@@ -259,6 +263,9 @@
   .nx-ov[data-enter] .nx-hero-copy > * {
     animation: nx-rise var(--dur-smooth) var(--spring-smooth) both;
     animation-delay: calc(min(var(--r, 0), 7) * var(--stagger));
+  }
+  .nx-hero-copy > :first-child {
+    --r: 0;
   }
   .nx-hero-copy > :nth-child(2) {
     --r: 1;
@@ -598,10 +605,8 @@
   .nx-nav > button:nth-of-type(4) {
     view-transition-name: nxnav4;
   }
-  .nx-mtabs,
-  .nx-mnav {
-    position: relative;
-  }
+  /* Inside the selected item (positioned below), never the nav itself:
+     the phone's nav is docked by its own absolute position (pearl.css). */
   .nx-tabpill {
     position: absolute;
     z-index: 0;
