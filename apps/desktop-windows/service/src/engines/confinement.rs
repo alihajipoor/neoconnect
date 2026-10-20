@@ -2764,9 +2764,18 @@ mod tests {
         assert_eq!((key(a.provider), key(a.sublayer)), (key(CAPTURE_PROVIDER_KEY), key(CAPTURE_SUBLAYER_KEY)));
         assert!(a.weight < 0xFFFF && b.weight < 0xFFFF && a.weight != b.weight);
         let source = include_str!("confinement.rs");
-        let body = &source[source.find("fn install_specs(").expect("install_specs")..];
-        let body = &body[..body.find("\n}\n").expect("its end")];
-        let probed = body.find("free_keys(engine)").expect("the free pair asked for");
+        let body_of = |signature: &str| {
+            let body = &source[source.find(signature).unwrap_or_else(|| panic!("{signature}"))..];
+            &body[..body.find("\n}\n").expect("its end")]
+        };
+        // The confinement installs under its own two pairs, through the
+        // install every filter set of this kind shares.
+        assert!(
+            body_of("fn install_specs(").contains("install_specs_with(specs, &CAPTURE_KEYS,"),
+            "the confinement installs under another pool"
+        );
+        let body = body_of("pub(super) fn install_specs_with(");
+        let probed = body.find("free_keys_of(engine, pool)").expect("the free pair asked for");
         assert!(probed < body.find("build(engine, keys, specs, &apps)").expect("and built under"));
     }
 
