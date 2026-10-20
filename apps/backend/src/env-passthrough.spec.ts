@@ -17,6 +17,7 @@ const OPTIONAL_KNOBS = [
   "RELAY_TRUSTED_PEERS",
   "ADMIN_SESSION_IDLE",
   "ADMIN_SESSION_MAX",
+  "HEARTBEAT_GAP_PAGE_MINUTES",
 ];
 
 const COMPOSE = readFileSync(join(__dirname, "..", "..", "..", "infra", "docker-compose.prod.yml"), "utf8");

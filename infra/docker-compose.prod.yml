@@ -106,6 +106,9 @@ services:
       # Unset, every SUPERADMIN in admin_users is mailed, which is the
       # right default because it needs no maintenance.
       REACHABILITY_ALERT_EMAILS: ${REACHABILITY_ALERT_EMAILS:-}
+      # Minutes without a heartbeat before the owner is paged (webhook and
+      # email). Blank = 10; 0 = off.
+      HEARTBEAT_GAP_PAGE_MINUTES: ${HEARTBEAT_GAP_PAGE_MINUTES:-}
       # Per-ISP recommendations: an offline IP-to-ASN table (iptoasn.com,
       # public domain), downloaded once a day. All optional and on by
       # default. ASN_LOOKUP_ENABLED=false turns the feature off (no tags,

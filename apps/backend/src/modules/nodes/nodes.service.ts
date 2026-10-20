@@ -1,6 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AlertingService } from "../alerting/alerting.service";
+import { HourlyBudget, PagerService } from "../alerting/pager.service";
 import { CreateNodeDto } from "./dto/create-node.dto";
 
 /** How long between repeat alerts for a node that is still OFFLINE.
@@ -17,6 +19,14 @@ import { CreateNodeDto } from "./dto/create-node.dto";
  * team learns to filter. See docs/journal/log.md, 2026-08-30. */
 const STILL_OFFLINE_REMINDER_MS = 6 * 60 * 60 * 1000;
 
+/** A gap older than this when first seen is not paged: it began before
+ * the backend was watching (a restart, a deploy) or belongs to a node
+ * long gone, and the six-hourly webhook reminder already covers it. */
+const HEARTBEAT_GAP_PAGE_HORIZON_MS = 24 * 60 * 60 * 1000;
+/** Heartbeat-gap pages an hour, across the fleet, so a fault of ours that
+ * drops every node at once is a handful of mails, not one per node. */
+const HEARTBEAT_GAP_PAGES_PER_HOUR = 4;
+
 @Injectable()
 export class NodesService {
   /** nodeId -> when we last said it was still offline. In memory on
@@ -24,10 +34,14 @@ export class NodesService {
    * everything currently down, which is the right thing to do after a
    * restart rather than a bug. */
   private readonly lastOfflineReminderAt = new Map<string, number>();
+  private readonly logger = new Logger(NodesService.name);
+  private readonly gapBudget = new HourlyBudget(HEARTBEAT_GAP_PAGES_PER_HOUR);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly alerting: AlertingService,
+    private readonly pager: PagerService,
+    private readonly config: ConfigService,
   ) {}
 
   list() {
@@ -92,7 +106,10 @@ export class NodesService {
    * so a redundant call -- e.g. the sweep and a stream-close event both
    * racing to mark the same node OFFLINE -- doesn't double-alert). */
   async setStatus(id: string, status: "ONLINE" | "OFFLINE", extra?: { agentVersion?: string }) {
-    const previous = await this.prisma.node.findUnique({ where: { id }, select: { status: true, name: true } });
+    const previous = await this.prisma.node.findUnique({
+      where: { id },
+      select: { status: true, name: true, heartbeatGapPagedAt: true, lastHeartbeatAt: true },
+    });
 
     await this.prisma.node.update({
       where: { id },
@@ -110,6 +127,65 @@ export class NodesService {
         nodeId: id,
         nodeName: previous.name,
       });
+    }
+
+    // The owner was paged that this node went quiet: say it is back, once.
+    if (status === "ONLINE" && previous?.heartbeatGapPagedAt) {
+      await this.prisma.node.update({ where: { id }, data: { heartbeatGapPagedAt: null } });
+      const minutes = previous.lastHeartbeatAt
+        ? Math.max(1, Math.round((Date.now() - previous.lastHeartbeatAt.getTime()) / 60_000))
+        : null;
+      await this.pager.page({
+        subject: `[Neoxify] ${previous.name} is heartbeating again`,
+        webhook: `[node] ${previous.name} is heartbeating again${minutes ? ` after ~${minutes} min` : ""}`,
+        context: { event: "heartbeat_gap_ended", nodeName: previous.name },
+        text:
+          `The agent on ${previous.name} has connected again${minutes ? `, after about ${minutes} minutes without a heartbeat` : ""}. ` +
+          "Its customers' credentials and routes are being re-sent to it now.",
+      });
+    }
+  }
+
+  /** Pages the owner (webhook and every SUPERADMIN's mailbox) when a node
+   * has sent no heartbeat for HEARTBEAT_GAP_PAGE_MINUTES: once per gap,
+   * and once more when it comes back (setStatus). The transition and
+   * six-hourly alerts go to the webhook only; this is the one that is
+   * meant to reach a person. A gap is an outage, not a block.
+   *
+   * Never throws. Called by the stale-node sweep. */
+  async pageHeartbeatGaps(now: number = Date.now()): Promise<void> {
+    try {
+      // Blank (an unset knob arrives through Compose as "") is the default.
+      const raw = String(this.config.get<string | number>("heartbeatGapPageMinutes") ?? "").trim();
+      const minutes = raw === "" ? 10 : Number(raw);
+      if (!Number.isFinite(minutes) || minutes <= 0) return;
+      const quiet = await this.prisma.node.findMany({
+        where: {
+          status: "OFFLINE",
+          heartbeatGapPagedAt: null,
+          lastHeartbeatAt: { lte: new Date(now - minutes * 60_000), gt: new Date(now - HEARTBEAT_GAP_PAGE_HORIZON_MS) },
+        },
+        select: { id: true, name: true, lastHeartbeatAt: true },
+        orderBy: { lastHeartbeatAt: "asc" },
+      });
+      for (const node of quiet) {
+        if (!this.gapBudget.take(now)) break;
+        const since = node.lastHeartbeatAt!;
+        const gap = Math.round((now - since.getTime()) / 60_000);
+        const delivery = await this.pager.page({
+          subject: `[Neoxify] ${node.name} has stopped heartbeating`,
+          webhook: `[node] ${node.name}: no heartbeat for ${gap} min (since ${since.toISOString()})`,
+          context: { event: "heartbeat_gap", nodeName: node.name, since: since.toISOString() },
+          text:
+            `The agent on ${node.name} has sent no heartbeat for ${gap} minutes, since ${since.toISOString()}. ` +
+            "Its customers may be cut off. This is an outage -- the server, its network or the agent -- not a block.\n\n" +
+            "You will hear once more when it is back. Nothing has been changed automatically.",
+        });
+        if (delivery.error) this.logger.warn(`Heartbeat-gap page for ${node.name}: ${delivery.error}`);
+        await this.prisma.node.update({ where: { id: node.id }, data: { heartbeatGapPagedAt: new Date(now) } });
+      }
+    } catch (err) {
+      this.logger.warn(`Heartbeat-gap paging failed: ${(err as Error).message}`);
     }
   }
 

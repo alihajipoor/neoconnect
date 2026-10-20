@@ -168,6 +168,10 @@ export default () => ({
     // precisely because it needs no maintenance.
     recipients: process.env.REACHABILITY_ALERT_EMAILS,
   },
+  // Minutes without a heartbeat before the owner is paged (webhook and
+  // email) that a node has gone quiet, once per gap. 0 turns it off; the
+  // webhook-only offline alerts are unaffected.
+  heartbeatGapPageMinutes: process.env.HEARTBEAT_GAP_PAGE_MINUTES ?? "10",
   asn: {
     // Which network (autonomous system) a caller is on, for the per-ISP
     // recommendations in the location picker. See modules/network-identity.

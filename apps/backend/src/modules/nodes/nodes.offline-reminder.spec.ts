@@ -30,7 +30,7 @@ describe("NodesService still-offline reminders", () => {
         return Promise.resolve();
       }),
     };
-    const service = new NodesService(prisma as never, alerting as never);
+    const service = new NodesService(prisma as never, alerting as never, {} as never, { get: () => undefined } as never);
     return { service, sent, prisma };
   }
 

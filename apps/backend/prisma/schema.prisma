@@ -651,6 +651,11 @@ model Node {
   realityDestReachable Boolean?
   realityDestCheckedAt DateTime?
 
+  /// When the owner was paged that this node had stopped heartbeating.
+  /// Set once per gap and cleared when the node is back, so a gap pages
+  /// once and its end is told only if its start was.
+  heartbeatGapPagedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
