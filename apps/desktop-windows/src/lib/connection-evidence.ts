@@ -122,6 +122,16 @@ export type VpnStatus = {
   /** Why not, when `ipv4Confined` is false. English, for support; never
    * the words the customer is shown. */
   confinementProblem?: string;
+  /** "Block the internet while reconnecting": armed, holding, or not held
+   * and why -- facts the app words (lib/reconnect-hold.ts, `readHold`).
+   * Absent when the setting is off, nothing is armed, or the service is
+   * older. Read through `readHold`, which says nothing for a shape it does
+   * not know. */
+  reconnectHold?: unknown;
+  /** The tunnel adapter's own counters this session, from Windows
+   * (lib/traffic-meter.ts, `readTraffic`). Absent whenever the service read
+   * nothing -- never a zero standing for "unknown". */
+  traffic?: unknown;
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }

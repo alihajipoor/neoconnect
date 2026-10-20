@@ -72,6 +72,32 @@ export function formatDate(when: Date | number | string, language: Language): st
   }
 }
 
+/** A calendar day as the server sends it ("2026-10-19", already a day in
+ * the reader's own time zone): "19 Oct", or the same day in the Solar
+ * Hijri calendar. Read at noon UTC and formatted in UTC, so no zone can
+ * move it to the day before. */
+export function formatDay(day: string, language: Language): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!match) return localDigits(day, language);
+  const at = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12);
+  try {
+    return new Intl.DateTimeFormat(dateLocale(language), { day: "numeric", month: "short", timeZone: "UTC" }).format(at);
+  } catch {
+    return localDigits(day, language);
+  }
+}
+
+/** The time of day alone: "14:05", in Persian digits in Persian. */
+export function formatTime(when: Date | number | string, language: Language): string {
+  const date = new Date(when);
+  if (Number.isNaN(date.getTime())) return "—";
+  try {
+    return new Intl.DateTimeFormat(language === "fa" ? "fa-IR" : "en-GB", { hour: "2-digit", minute: "2-digit" }).format(date);
+  } catch {
+    return localDigits(date.toISOString().slice(11, 16), language);
+  }
+}
+
 /** The same with the time of day. */
 export function formatDateTime(when: Date | number | string, language: Language): string {
   const date = new Date(when);

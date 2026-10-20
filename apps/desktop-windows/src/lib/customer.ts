@@ -57,6 +57,43 @@ export const redeemVoucher = (code: string) =>
   });
 export const getReferrals = () => apiRequest<ReferralOverview>("/customer/referrals");
 
+/** One device signed in to the account (docs/account-activity.md). `id` is
+ * opaque, never a session id. `inUse` is only ever a yes: null says
+ * nothing, and with `inUseKnown` false nothing is known either way. */
+export interface AccountDevice {
+  id: string;
+  thisDevice: boolean;
+  label: string | null;
+  platform: string | null;
+  signedInAt: string;
+  lastSeenAt: string | null;
+  inUse: { since: string; lastSeen: string } | null;
+}
+
+export interface AccountDevices {
+  inUseKnown: boolean;
+  devices: AccountDevice[];
+}
+
+/** The account's devices, for Activity. Not on the relay: nothing about
+ * connecting needs it (the backend keeps it off the relay's allowlist). */
+export const getDevices = () => apiRequest<AccountDevices>("/customer/devices");
+
+/** Data used per day, every device together, over the whole account --
+ * not per subscription, which would start again at every purchase. Byte
+ * counts are decimal strings: a day can pass 2^53. */
+export interface DailyUsage {
+  subscriptionId: string | null;
+  timeZone: string;
+  from: string;
+  to: string;
+  asOf: string;
+  days: { date: string; bytesUp: string; bytesDown: string }[];
+}
+
+export const getDailyUsage = (days: number, timeZone: string) =>
+  apiRequest<DailyUsage>(`/customer/usage?days=${days}&tz=${encodeURIComponent(timeZone)}`);
+
 // Carries this device's network attestation, so each route comes back
 // tagged with what other people on the same network recently got
 // through on. See network-identity.ts.
