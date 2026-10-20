@@ -15,7 +15,7 @@ import { MainView } from "../components/main/MainView";
 import { LocationCard, MetricCards, SessionTray, SummaryLine, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
 import { Dialog, LocationSheet } from "../components/overlay";
 import { AppShell } from "../components/shell/AppShell";
-import { Banner, Note, PillButton, Segmented } from "../components/ui";
+import { Banner, Note, PillButton, Presence, Segmented } from "../components/ui";
 import { MARK_TONE, type LogoTone } from "../lib/logo-geometry";
 import { HEADLINE_HINTS, headlineFor, isTunnelUp } from "../lib/connection-evidence";
 import { heldListLook } from "../lib/displayed-route";
@@ -640,20 +640,25 @@ function Composed({
 
   const banner: ReactNode = (
     <>
-      {sc.offline ? (
-        <Banner>
-          <b>{t("dash.offlineTitle")}</b>
-          <span>{t("dash.offlineHint", { when: formatDateTime(Date.now() - 86_400_000 * 2, language) })}</span>
-        </Banner>
-      ) : null}
-      {plan === "ended" ? (
-        <Banner title={t("dash.planExpired")}>
-          <span>{t("dash.renewHint")}</span>
-          <PillButton size="sm" className="mt-2 self-start">
-            {t("dash.renewCta")}
-          </PillButton>
-        </Banner>
-      ) : null}
+      {/* As the main page's: each leaves the way it came (Presence). */}
+      <Presence show={Boolean(sc.offline)}>
+        {sc.offline ? (
+          <Banner>
+            <b>{t("dash.offlineTitle")}</b>
+            <span>{t("dash.offlineHint", { when: formatDateTime(Date.now() - 86_400_000 * 2, language) })}</span>
+          </Banner>
+        ) : null}
+      </Presence>
+      <Presence show={plan === "ended"}>
+        {plan === "ended" ? (
+          <Banner title={t("dash.planExpired")}>
+            <span>{t("dash.renewHint")}</span>
+            <PillButton size="sm" className="mt-2 self-start">
+              {t("dash.renewCta")}
+            </PillButton>
+          </Banner>
+        ) : null}
+      </Presence>
     </>
   );
 

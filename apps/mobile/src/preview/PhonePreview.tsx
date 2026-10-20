@@ -19,7 +19,7 @@ import { ScreenTransition } from "@shared/components/ScreenTransition";
 import { swapView } from "@shared/lib/view-transition";
 import { heldListLook } from "@shared/lib/displayed-route";
 import { Page, PageScene } from "@shared/components/shell/Page";
-import { Banner, Note, PillButton } from "@shared/components/ui";
+import { Banner, Note, PillButton, Presence } from "@shared/components/ui";
 import { Login } from "@shared/screens/Login";
 import { Register } from "@shared/screens/Register";
 import { ForgotPassword } from "@shared/screens/ForgotPassword";
@@ -619,25 +619,32 @@ function Composed({
 
   const banner: ReactNode = (
     <>
-      {sc.offline ? (
-        <Banner>
-          <b>{t("dash.offlineTitle")}</b>
-          <span>{t("dash.offlineHint", { when: formatDateTime(Date.now() - 86_400_000 * 2, language) })}</span>
-        </Banner>
-      ) : null}
-      {plan === "ended" ? (
-        <Banner title={t("dash.planExpired")}>
-          <span>{t("dash.renewHint")}</span>
-          <PillButton size="sm" className="mt-2 self-start">
-            {t("dash.renewCta")}
-          </PillButton>
-        </Banner>
-      ) : null}
-      {!subscribed ? (
-        <Banner title={t("dash.noSubscription")}>
-          <span>{t("dash.noPlanHint")}</span>
-        </Banner>
-      ) : null}
+      {/* As the main page's: each leaves the way it came (Presence). */}
+      <Presence show={Boolean(sc.offline)}>
+        {sc.offline ? (
+          <Banner>
+            <b>{t("dash.offlineTitle")}</b>
+            <span>{t("dash.offlineHint", { when: formatDateTime(Date.now() - 86_400_000 * 2, language) })}</span>
+          </Banner>
+        ) : null}
+      </Presence>
+      <Presence show={plan === "ended"}>
+        {plan === "ended" ? (
+          <Banner title={t("dash.planExpired")}>
+            <span>{t("dash.renewHint")}</span>
+            <PillButton size="sm" className="mt-2 self-start">
+              {t("dash.renewCta")}
+            </PillButton>
+          </Banner>
+        ) : null}
+      </Presence>
+      <Presence show={!subscribed}>
+        {!subscribed ? (
+          <Banner title={t("dash.noSubscription")}>
+            <span>{t("dash.noPlanHint")}</span>
+          </Banner>
+        ) : null}
+      </Presence>
     </>
   );
   const bannerShowing = Boolean(sc.offline || plan === "ended" || !subscribed);
