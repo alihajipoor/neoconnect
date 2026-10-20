@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { useI18n, type Language, type TranslationKey } from "../../lib/i18n";
-import { formatSize } from "../../lib/locale-format";
+import { formatRate } from "../../lib/locale-format";
 import { sparkPoints, trafficMeter, type TrafficMeter, type TrafficView } from "../../lib/traffic-meter";
 
 /** Download and upload, as Windows counted them on the tunnel's adapter
@@ -26,12 +26,18 @@ function useTrafficView(meter: TrafficMeter): TrafficView | null {
   return view;
 }
 
-function rate(
-  value: number | null,
-  language: Language,
-  t: (key: TranslationKey, vars?: Record<string, string | number>) => string,
-): string {
-  return value === null ? "—" : t("tr.perSec", { size: formatSize(value, language) });
+type Say = (key: TranslationKey, vars?: Record<string, string | number>) => string;
+
+/** A reading as the row shows it: three figures at most, and "/s" in
+ * English; Persian says "per second" once, in the section's label, so the
+ * figure and its unit fit the tray in both languages (`formatRate`). */
+export function rateShown(value: number | null, language: Language, t: Say): string {
+  return value === null ? "—" : t("tr.perSec", { size: formatRate(value, language) });
+}
+
+/** The same, as a screen reader hears it: per second in words. */
+function rateSpoken(value: number | null, language: Language, t: Say): string {
+  return value === null ? "—" : t("tr.perSecSpoken", { size: formatRate(value, language) });
 }
 
 function Spark({ series }: { series: readonly number[] }) {
@@ -49,15 +55,15 @@ function Rows({ view }: { view: TrafficView }) {
     <>
       <span className="nx-srow">
         <ArrowDown aria-hidden />
-        <span className="nx-sval" aria-label={`${t("tr.down")}: ${rate(view.rxPerSec, language, t)}`}>
-          {rate(view.rxPerSec, language, t)}
+        <span className="nx-sval" aria-label={`${t("tr.down")}: ${rateSpoken(view.rxPerSec, language, t)}`}>
+          {rateShown(view.rxPerSec, language, t)}
         </span>
         <Spark series={view.rxSeries} />
       </span>
       <span className="nx-srow">
         <ArrowUp aria-hidden />
-        <span className="nx-sval" aria-label={`${t("tr.up")}: ${rate(view.txPerSec, language, t)}`}>
-          {rate(view.txPerSec, language, t)}
+        <span className="nx-sval" aria-label={`${t("tr.up")}: ${rateSpoken(view.txPerSec, language, t)}`}>
+          {rateShown(view.txPerSec, language, t)}
         </span>
         <Spark series={view.txSeries} />
       </span>

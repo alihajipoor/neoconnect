@@ -2150,6 +2150,18 @@
     flex-direction: column;
     gap: 3px;
     min-width: 0;
+    /* Its own width decides whether the sparkline has room (below). */
+    container: nxspeed / inline-size;
+  }
+  /* The reading first: where the section cannot hold the arrow, the widest
+     reading in either language ("999 KB/s", "۹۹۹ گیگابایت", about 80px) and
+     the 56px sparkline, the sparkline steps aside -- the compact-wide tray
+     at 940x700 and the fitted 922x648 leave the reading about 40px beside
+     it. Checked at every desktop size by check-phone-fit.mjs --desktop. */
+  @container nxspeed (max-width: 165.98px) {
+    .nx-spark {
+      display: none;
+    }
   }
   .nx-srow {
     display: flex;

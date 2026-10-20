@@ -39,6 +39,32 @@ export function formatSize(bytes: number | string, language: Language): string {
   return `${localDigits(value, language)} ${BYTE_UNITS_FA[unit] ?? unit}`;
 }
 
+/** The units a rate climbs through, 1024 apart. */
+const RATE_UNITS = ["B", "KB", "MB", "GB", "TB"];
+
+/** A measured rate, as the tray's speed section shows it: three figures at
+ * most -- "7.2", "72", "720" -- in the unit that keeps it under a thousand,
+ * so it never outgrows its room. The section is about ninety pixels wide
+ * at 1180x760, and "۵۸۵٫۹ کیلوبایت/ثانیه" was cut to "کیلوبایت…" there
+ * (VM, 2026-10-20). Per second is the caller's to say: English as "/s",
+ * Persian in the section's label ("tr.perSec", "tr.speed"). */
+export function formatRate(bytesPerSec: number, language: Language): string {
+  let value = Number.isFinite(bytesPerSec) && bytesPerSec > 0 ? bytesPerSec : 0;
+  let exp = 0;
+  let figure = "0";
+  for (;;) {
+    // One decimal below ten of a unit above bytes; whole figures otherwise.
+    // Below 9.95, so the rounding never makes "10.0" -- four figures.
+    figure = exp > 0 && value < 9.95 ? value.toFixed(1) : String(Math.round(value));
+    if (Number(figure) < 1000 || exp === RATE_UNITS.length - 1) break;
+    value /= 1024;
+    exp += 1;
+  }
+  const unit = RATE_UNITS[exp];
+  if (language !== "fa") return `${figure} ${unit}`;
+  return `${localDigits(figure, language)} ${BYTE_UNITS_FA[unit] ?? unit}`;
+}
+
 /** The figure and its unit apart, for a layout that sets the unit small. */
 export function sizeParts(bytes: number | string, language: Language): { value: string; unit: string } {
   const [value, unit] = formatSize(bytes, language).split(" ");

@@ -106,7 +106,7 @@ interface Scenario {
    * failover line names both countries. */
   crossed?: boolean;
   /** The tunnel's counters are being read: the tray's speed section. */
-  speed?: boolean;
+  speed?: boolean | "widest";
   /** The line under the state: the ladder's rung, the reconnect's
    * countdown, and why it connects when nobody pressed. */
   progress?: { rung?: [index: number, total: number]; count?: CountdownLine; auto?: boolean };
@@ -164,6 +164,7 @@ const SCENARIOS: Record<string, Scenario> = {
   none: { label: "No subscription", state: "disconnected", plan: "none" },
   switch: { label: "Switch location while connected", state: "connected", timed: true, switchDialog: true },
   speed: { label: "Connected, live speed", state: "connected", timed: true, speed: true },
+  speedWidest: { label: "Connected, live speed at its widest (999 KB/s, 999 GB/s)", state: "connected", timed: true, speed: "widest" },
   ladder: { label: "Connecting, trying 3 of 8", state: "connecting", pressed: true, progress: { rung: [2, 8] } },
   autoConnect: { label: "Connecting on start (setting on)", state: "connecting", progress: { rung: [0, 8], auto: true } },
   reconnectCountdown: {
@@ -311,8 +312,10 @@ const SAMPLE_RATES = Array.from({ length: 60 }, (_, i) => [
   Math.round(600_000 + 450_000 * Math.sin(i / 4) + 200_000 * Math.sin(i / 1.7)),
   Math.round(40_000 + 25_000 * Math.sin(i / 3)),
 ]);
-function feedPreviewMeter(step: number): void {
-  const [rx, tx] = SAMPLE_RATES[step % SAMPLE_RATES.length];
+function feedPreviewMeter(step: number, widest = false): void {
+  // The widest readings the tray can show (`formatRate`): "999 KB/s" and
+  // "999 GB/s", "۹۹۹ کیلوبایت" and "۹۹۹ گیگابایت" -- for the fit check.
+  const [rx, tx] = widest ? [999 * 1024, 999 * 1024 ** 3] : SAMPLE_RATES[step % SAMPLE_RATES.length];
   PREVIEW_METER.observe({ rx_bytes: 1_250_000_000 + step * rx, tx_bytes: 84_000_000 + step * tx, rx_per_sec: rx, tx_per_sec: tx, window_ms: 1000 });
 }
 
@@ -594,8 +597,9 @@ function Composed({
     PREVIEW_METER.reset();
     if (!sc.speed) return;
     let step = 0;
-    for (; step < SAMPLE_RATES.length; step += 1) feedPreviewMeter(step);
-    const id = setInterval(() => feedPreviewMeter(step++), 1_000);
+    const widest = sc.speed === "widest";
+    for (; step < SAMPLE_RATES.length; step += 1) feedPreviewMeter(step, widest);
+    const id = setInterval(() => feedPreviewMeter(step++, widest), 1_000);
     return () => clearInterval(id);
   }, [sc]);
   const gaming = sc.gaming !== undefined;
