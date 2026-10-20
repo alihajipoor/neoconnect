@@ -555,7 +555,7 @@ const en = {
   "dash.offlineHint":
     "Using your saved servers. Data usage and expiry were last updated {when} and may be out of date.",
   "dash.androidWireguardOnly":
-    "{protocol} isn't in the mobile app yet, so it will connect with Fast instead.",
+    "{protocol} isn't offered in the mobile app, so it will connect with Fast instead.",
   "settings.customAllApps": "No apps chosen yet, so every app uses the VPN. Pick one to route just that app.",
   "settings.customHintNative": "Send only the apps you choose through the VPN. Everything else uses your normal connection.",
   "settings.customSearch": "Search apps",
@@ -1694,7 +1694,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.offlineHint":
     "از سرورهای ذخیره‌شده استفاده می‌شود. مصرف داده و تاریخ انقضا آخرین بار در {when} به‌روز شده و ممکن است دقیق نباشد.",
   "dash.androidWireguardOnly":
-    "پروتکل {protocol} هنوز در نسخه موبایل نیست، بنابراین با Fast متصل می‌شود.",
+    "پروتکل {protocol} در نسخهٔ موبایل ارائه نمی‌شود، بنابراین با Fast متصل می‌شود.",
   "settings.customAllApps":
     "هنوز برنامه‌ای انتخاب نشده، پس همه برنامه‌ها از VPN عبور می‌کنند. برای عبور فقط یک برنامه، آن را انتخاب کنید.",
   "settings.customHintNative":
