@@ -8,6 +8,7 @@ import { InvoicesModule } from "../invoices/invoices.module";
 import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
 import { ClientAttemptsModule } from "../client-attempts/client-attempts.module";
 import { ReachabilityModule } from "../reachability/reachability.module";
+import { BlockWatchModule } from "../block-watch/block-watch.module";
 import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
 import { ReferralsModule } from "../referrals/referrals.module";
 import { ProtocolUsersModule } from "../protocol-users/protocol-users.module";
@@ -49,6 +50,9 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
     // For the half-hourly Iran reachability probe. No cycle: the
     // reachability module pulls in Prisma, email and alerting only.
     ReachabilityModule,
+    // For the block watch. No cycle: it pulls in alerting and network
+    // identity only.
+    BlockWatchModule,
     // For the device-credential sweep. No cycle: protocol-users pulls in
     // Prisma and the agent gateway only.
     ProtocolUsersModule,

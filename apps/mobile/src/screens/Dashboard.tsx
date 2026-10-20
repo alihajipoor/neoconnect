@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Globe, Repeat, Sparkles } from "lucide-react";
 import { displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "@shared/lib/displayed-route";
+import { credentialOnTunnel, tunnelCredential } from "@shared/lib/tunnel-credential";
 import {
   ispTagsOf,
   lastGoodFor,
@@ -420,13 +421,29 @@ export function Dashboard({
   const [protocolUser, setProtocolUser] = useState<ProtocolUser | null>(null);
   const [protocolUsers, setProtocolUsers] = useState<ProtocolUser[]>([]);
   const [chosenRouteId, setChosenRouteId] = useState<string | null>(null);
+  /** A tunnel the platform kept up whose credential this app cannot name:
+   * no pass of this process has said which it is (`passTunnel`), and the
+   * last dial recorded on disk is not one this screen holds
+   * (`credentialOnTunnel`). The tiles then name no route rather than the
+   * pin `protocolUser` holds for the next connect. Cleared once a pass of
+   * this app has an engine up, which it names itself, or once
+   * `adoptPlatform` names the tunnel it found.
+   *
+   * True to begin with, and again whenever a load puts the pin on screen:
+   * a tunnel that comes to be shown up by any way that does not name it is
+   * then named as nothing, never as the pin, as on Windows. While nothing
+   * is up it changes nothing on screen. */
+  const [tunnelRouteUnknown, setTunnelRouteUnknown] = useState(true);
+  /** The same, as the tiles' rule takes it (`settledKnown` in
+   * displayed-route.ts). */
+  const tunnelNamed = !tunnelRouteUnknown;
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   /** Counts a session that keeps passing its health checks, once, for the
    * per-ISP tags. See session-report.ts. */
   const sessionTrackerRef = useRef(createSessionTracker());
   /** The route the tunnel is on, for the health poll's interval. */
   const settledRouteRef = useRef<string | null>(null);
-  settledRouteRef.current = protocolUser?.routeId ?? null;
+  settledRouteRef.current = tunnelRouteUnknown ? null : (protocolUser?.routeId ?? null);
   // A pass already under way as this screen mounts -- started by a
   // dashboard that unmounted when Settings opened -- is shown as one from
   // the first frame, so a press means stop rather than a second connect.
@@ -859,6 +876,8 @@ export function Dashboard({
         cached.protocolUsers[0] ??
         null,
     );
+    // The pin is never taken for a tunnel's route (`tunnelRouteUnknown`).
+    setTunnelRouteUnknown(true);
     setOfflineSince(cached.savedAt);
     setOfflineReason(reason);
     setError(null);
@@ -1028,6 +1047,9 @@ export function Dashboard({
           usersResult.data[0] ??
           null,
       );
+      // The pin is never taken for a tunnel's route: `adoptPlatform` below,
+      // or the pass that lands one, names it (`tunnelRouteUnknown`).
+      setTunnelRouteUnknown(true);
     }
     setLoading(false);
     shownOnceRef.current = true;
@@ -1180,6 +1202,12 @@ export function Dashboard({
     sub: Subscription | null,
     ready: () => void = () => undefined,
   ) {
+    // The last dial this app recorded, for a tunnel no pass of this
+    // process can name -- the app opened again over a VPN the platform
+    // kept (`tunnelCredential`). Read first, so that nothing below -- the
+    // checks for a pass or a press, the stamps, the platform's answer -- is
+    // taken before a wait.
+    const dial = passTunnel.current === null ? await tunnelCredential.last() : null;
     // A press of Connect still on its way to its pass is shown as one too,
     // and read again once it settles: read now, between the pass it waited
     // on and its own, the platform said nothing was up -- "You're not
@@ -1220,12 +1248,16 @@ export function Dashboard({
      * protected" over a rung the pass had just rejected, and arming it
      * ended the episode's remaining attempts. */
     let leftOver = false;
+    /** The protocol the platform says is up, where it says one. */
+    let platformProtocol: string | null = null;
     try {
       // Bounded, as every question a load waits on must be: unanswered for
       // good, the load never said it was ready, and an attempt held for it
       // said "Reconnecting..." with nothing ever going to dial. A question
       // that times out is one nobody answered.
-      adopted = stateFromStatus(await withTimeout(vpnStatus(), "vpn_status"));
+      const status = await withTimeout(vpnStatus(), "vpn_status");
+      adopted = stateFromStatus(status);
+      platformProtocol = status.protocol;
       answered = true;
       if (overtaken()) return;
       leftOver = adopted !== "disconnected" && !tearingDown && passTunnel.current === "unproven";
@@ -1262,10 +1294,18 @@ export function Dashboard({
       // network, the route that does not work here. Only one this screen
       // holds itself: a landing from before a sign-out, whose teardown
       // could not be confirmed, is not the next account's to name.
+      //
+      // No pass of this process has said when the app was opened again
+      // over a tunnel the platform kept -- swiped away on Android, ended
+      // on iOS. The last dial recorded on disk names it then, unless the
+      // platform names another protocol; and when nothing can, no route is
+      // named, rather than the pin this screen loaded.
       const left = passTunnel.current;
       const landed = left === "unproven" ? null : left;
-      const on = landed === null ? null : (users.find((u) => u.id === landed.id) ?? null);
+      const landedOn = landed === null ? null : (users.find((u) => u.id === landed.id) ?? null);
+      const on = landedOn ?? (left === null ? credentialOnTunnel(dial, platformProtocol, users) : null);
       if (on !== null) setProtocolUser(on);
+      setTunnelRouteUnknown(on === null);
       // One to reconnect if it drops. Led, if it does, by the ladder's
       // ordinary order -- the customer's choice first -- not by the route
       // it is on: a location chosen over it since is to lead (see
@@ -1278,7 +1318,7 @@ export function Dashboard({
       // a restart has no honest "before". Nor for a tunnel no pass of this
       // app landed: proven against whatever baseline is held, its success
       // would be credited to a route nobody knows it is on.
-      setBaselineIp(on !== null ? ladderPass.baseline.current : null);
+      setBaselineIp(landedOn !== null ? ladderPass.baseline.current : null);
     }
     ready();
 
@@ -2531,6 +2571,16 @@ export function Dashboard({
         }
       }
 
+      // Which credential the tunnel about to come up is on, on disk, for an
+      // app opened later over a tunnel the platform kept, which no pass of
+      // its own can name (`tunnelCredential`). Before the dial: an app
+      // ended while the engine comes up leaves the tunnel up, and a record
+      // still on the dial before would name it. Ahead of the check below,
+      // so nothing is awaited between it and the dial; a record of a dial
+      // the check then stops names nothing -- the stop stands down what is
+      // up, and the next dial records its own first.
+      await tunnelCredential.dialling(candidate);
+
       // Asked again right before dialling: the waits above -- the last
       // rung's teardown, a baseline walk -- run to seconds each, and a
       // stop or a sign-out pressed during them used to be noticed only
@@ -2591,6 +2641,7 @@ export function Dashboard({
           return reportCancelled();
         }
         setProtocolUser(candidate);
+        setTunnelRouteUnknown(false);
         setConnectedAt(Date.now());
         setConnectionState("verifying");
 
@@ -2898,8 +2949,9 @@ export function Dashboard({
         protocolUser?.routeId,
         chosenRouteId,
         protocolUser?.routeId,
+        tunnelNamed,
       ),
-    [routes, protocolUser, chosenRouteId, connectionState],
+    [routes, protocolUser, chosenRouteId, connectionState, tunnelNamed],
   );
   /** Nothing pinned and no settled tunnel yet: the next connect's server
    * is "Automatic", not whichever route happens to be provisioned. */
@@ -2946,13 +2998,16 @@ export function Dashboard({
   const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: false, reconnecting });
   /** The route the list marks as current: the pin while nothing is up, the
    * route the tunnel is on once one is -- the one the location card names
-   * (`displayedRouteId`), so the two never disagree. */
-  const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
+   * (`displayedRouteId`), so the two never disagree. None over a tunnel
+   * this app cannot name (`tunnelNamed`): no row says "Connected here"
+   * then, where the pin the screen loaded would be the 0.2.29 misnaming. */
+  const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);
   /** And the protocol the card names: the credential a connect dials first
    * while nothing is up, the one the tunnel is on once one is
    * (`displayedProtocol`) -- not whichever credential the screen holds,
-   * which after a failover is the one the last session ended on. */
-  const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes);
+   * which after a failover is the one the last session ended on. None,
+   * like the place, over a tunnel this app cannot name. */
+  const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes, tunnelNamed);
 
   if (loading) {
     return (

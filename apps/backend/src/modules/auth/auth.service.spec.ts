@@ -27,6 +27,8 @@ function buildAdmin(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+const nowSeconds = () => Math.floor(Date.now() / 1000);
+
 describe("AuthService", () => {
   let service: AuthService;
   let prisma: {
@@ -239,12 +241,77 @@ describe("AuthService", () => {
     });
 
     it("issues a fresh token pair for a valid, unrevoked refresh token", async () => {
-      jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", tokenVersion: 0 });
+      jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", tokenVersion: 0, ast: nowSeconds() - 60 });
       prisma.adminUser.findUnique.mockResolvedValue(buildAdmin({ tokenVersion: 0 }));
       jwt.signAsync.mockResolvedValueOnce("access-token-2").mockResolvedValueOnce("refresh-token-2");
 
       const result = await service.refresh("token");
       expect(result).toEqual({ accessToken: "access-token-2", refreshToken: "refresh-token-2" });
+    });
+  });
+
+  /** Short, sliding admin sessions: an hour idle, twelve from the
+   * sign-in at most, unless the settings say otherwise. */
+  describe("session length", () => {
+    const HOUR = 3_600;
+    const refreshSigned = () => jwt.signAsync.mock.calls[1] as [Record<string, unknown>, { expiresIn: number }];
+    const accessSigned = () => jwt.signAsync.mock.calls[0] as [Record<string, unknown>, { expiresIn: number }];
+
+    beforeEach(() => {
+      prisma.adminUser.findUnique.mockResolvedValue(buildAdmin({ tokenVersion: 0 }));
+      jwt.signAsync.mockResolvedValue("token");
+    });
+
+    it("a sign-in starts the session now: 15-minute access, an hour's refresh", async () => {
+      await service.login("admin@example.com", PASSWORD);
+      expect(accessSigned()[1].expiresIn).toBe(15 * 60);
+      expect(refreshSigned()[1].expiresIn).toBe(HOUR);
+      expect(Math.abs((refreshSigned()[0].ast as number) - nowSeconds())).toBeLessThanOrEqual(1);
+    });
+
+    it("a refresh slides the idle limit but keeps the session's start", async () => {
+      const start = nowSeconds() - 3 * HOUR;
+      jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", tokenVersion: 0, ast: start, iat: nowSeconds() - 600 });
+      await service.refresh("token");
+      expect(refreshSigned()[0].ast).toBe(start);
+      expect(refreshSigned()[1].expiresIn).toBe(HOUR);
+    });
+
+    it("never issues tokens that outlive the cap", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", tokenVersion: 0, ast: nowSeconds() - 12 * HOUR + 300 });
+      await service.refresh("token");
+      expect(refreshSigned()[1].expiresIn).toBeLessThanOrEqual(300);
+      expect(accessSigned()[1].expiresIn).toBeLessThanOrEqual(300);
+    });
+
+    it("refuses to renew past the cap: only signing in again works", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", tokenVersion: 0, ast: nowSeconds() - 12 * HOUR - 1 });
+      await expect(service.refresh("token")).rejects.toThrow(UnauthorizedException);
+      expect(jwt.signAsync).not.toHaveBeenCalled();
+    });
+
+    /** Issued before this change, for seven days. */
+    it("counts an old token without a start from when it was issued", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", tokenVersion: 0, iat: nowSeconds() - 2 * 86_400 });
+      await expect(service.refresh("token")).rejects.toThrow(UnauthorizedException);
+
+      const issued = nowSeconds() - HOUR;
+      jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", tokenVersion: 0, iat: issued });
+      await service.refresh("token");
+      expect(refreshSigned()[0].ast).toBe(issued);
+    });
+
+    it("takes the lengths from the settings", async () => {
+      config.get.mockImplementation((key: string) =>
+        ({ "adminSession.idle": "30m", "adminSession.max": "2h", "jwt.accessTtl": "10m" })[key],
+      );
+      jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", tokenVersion: 0, ast: nowSeconds() - HOUR });
+      await service.refresh("token");
+      expect(accessSigned()[1].expiresIn).toBe(600);
+      expect(refreshSigned()[1].expiresIn).toBe(1_800);
+
+      jwt.verifyAsync.mockResolvedValue({ sub: "admin-1", tokenVersion: 0, ast: nowSeconds() - 2 * HOUR - 1 });
+      await expect(service.refresh("token")).rejects.toThrow(UnauthorizedException);
     });
   });
 

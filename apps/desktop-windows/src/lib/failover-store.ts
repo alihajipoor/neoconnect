@@ -119,3 +119,35 @@ export async function saveConnectHistory(history: ConnectHistory): Promise<void>
     // Intentionally silent -- see above.
   }
 }
+
+const TUNNEL_DIAL_KEY = "tunnelDial";
+
+/** The credential the last connect dialled, by id and protocol: what names
+ * a tunnel the service kept up while the app was closed
+ * (`tunnel-credential.ts`). Not a preference like the rest of this file,
+ * but the same kind of best-effort memory, and kept beside them so a
+ * sign-out leaves it be -- an id from another account names nothing.
+ * Null when there is none, or it cannot be read. */
+export async function loadTunnelDial(): Promise<{ id: string; protocol: string } | null> {
+  try {
+    const store = await getStore();
+    const kept = await store.get<unknown>(TUNNEL_DIAL_KEY);
+    if (kept === null || typeof kept !== "object") return null;
+    const { id, protocol } = kept as { id?: unknown; protocol?: unknown };
+    return typeof id === "string" && typeof protocol === "string" ? { id, protocol } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort, as everything here: a record that fails to persist costs
+ * only the name of a tunnel the app finds up after a restart. */
+export async function saveTunnelDial(dial: { id: string; protocol: string }): Promise<void> {
+  try {
+    const store = await getStore();
+    await store.set(TUNNEL_DIAL_KEY, dial);
+    await store.save();
+  } catch {
+    // Intentionally silent -- see above.
+  }
+}

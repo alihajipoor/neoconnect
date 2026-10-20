@@ -62,9 +62,19 @@ describe.each(screens)("the %s dashboard's first load", (_name, path, signature)
     expect(failed).toMatch(
       /if \(shownWhileWaiting\) \{(\s*\/\/[^\n]*\n)+\s*setOfflineReason\(reason\);\s*offlineRetry\.start\(\);\s*return "unanswered";\s*\}/,
     );
-    expect(load).toContain(
-      "setProtocolUser((current) => usersResult.data.find((u) => u.id === current?.id) ?? current);",
-    );
+    if (_name === "phone") {
+      expect(load).toContain(
+        "setProtocolUser((current) => usersResult.data.find((u) => u.id === current?.id) ?? current);",
+      );
+      return;
+    }
+    // Windows: the same, and over a tunnel the screen shows up as well
+    // (`showLoadedCredential`, pinned in dashboard-remount.test.ts).
+    expect(load).toContain("showLoadedCredential(usersResult.data, chosen, shownWhileWaiting);");
+    const begins = screen.indexOf("  function showLoadedCredential(");
+    const shown = screen.slice(begins, screen.indexOf("\n  }\n", begins));
+    expect(shown).toContain("if (keepHeld || describesTunnel(connectionStateRef.current)) {");
+    expect(shown).toContain("setProtocolUser((current) => users.find((u) => u.id === current?.id) ?? current);");
   });
 });
 
@@ -74,7 +84,7 @@ describe("the Windows dashboard's load that answers after the snapshot went up",
   const load = screen.slice(start, screen.indexOf("\n  }\n", start));
 
   it("does not ask the service again, or capture baselines over a tunnel the screen may have brought up", () => {
-    expect(load).toContain("const adopted = shownWhileWaiting ? null : await adoptServiceState(sub);");
+    expect(load).toContain("const adopted = shownWhileWaiting ? null : await adoptServiceState(sub, usersResult.data);");
     expect(load).toContain('if (adopted === "disconnected") await captureBaselinesWhileDown(usersResult.data);');
   });
 });

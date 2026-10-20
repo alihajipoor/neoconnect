@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Gamepad2, Globe, Repeat, Shield, Sparkles } from "lucide-react";
-import { displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
+import { describesTunnel, displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
@@ -114,6 +114,7 @@ import {
 } from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
+import { credentialOnTunnel, tunnelCredential, type TunnelDial } from "../lib/tunnel-credential";
 import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "../lib/api-endpoints";
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
@@ -553,13 +554,29 @@ export function Dashboard({
   /** The server the customer picked from the list, if any. Tried
    * first; deliberately does not disable the others. */
   const [chosenRouteId, setChosenRouteId] = useState<string | null>(null);
+  /** A tunnel this screen found up -- back from Settings, or after a
+   * restart -- whose credential it cannot name: the service reports a
+   * protocol, and the last dial is not the tunnel's
+   * (`credentialOnTunnel`). The tiles then name no route rather than the
+   * pin `protocolUser` holds for the next connect. Cleared once a pass of
+   * this screen has an engine up, which it names itself, or once a read
+   * of the service names the tunnel it found up (`nameFoundTunnel`).
+   *
+   * True to begin with, and again whenever a load puts the pin on screen:
+   * a tunnel that comes to be shown up by any way that does not name it is
+   * then named as nothing, never as the pin. While nothing is up it
+   * changes nothing on screen. */
+  const [tunnelRouteUnknown, setTunnelRouteUnknown] = useState(true);
+  /** The same, as the tiles' rule takes it (`settledKnown` in
+   * displayed-route.ts). */
+  const tunnelNamed = !tunnelRouteUnknown;
   /** Counts a session that keeps passing its health checks, once, for
    * the per-ISP tags. See session-report.ts. */
   const sessionTrackerRef = useRef(createSessionTracker());
   /** The route the tunnel is on, readable from inside the health poll's
    * interval without depending on which render created it. */
   const settledRouteRef = useRef<string | null>(null);
-  settledRouteRef.current = protocolUser?.routeId ?? null;
+  settledRouteRef.current = tunnelRouteUnknown ? null : (protocolUser?.routeId ?? null);
   /** The route the tunnel was on the last time traffic was verified, for
    * the world map's connected light. Drawn only while the screen wears the
    * verified tone (`mapLights`), so it holds through a brief gap exactly as
@@ -1210,9 +1227,13 @@ export function Dashboard({
    *
    * Returns what it settled on so a caller can act on the answer rather
    * than on the state it was hoping for.
+   *
+   * `under`: the stamp, for a caller that took it before a wait of its own
+   * (`syncNamingTunnel`), so a press made during that wait still makes the
+   * answer old news.
    */
-  async function syncFromService(): Promise<ConnectionState> {
-    const generation = intentRef.current.generation;
+  async function syncFromService(under?: number): Promise<ConnectionState> {
+    const generation = under ?? intentRef.current.generation;
     const settled = await readServiceState();
     publishObserved(generation, settled);
     // The clock is only honest while something is up.
@@ -1409,8 +1430,26 @@ export function Dashboard({
    * that unmounted when Settings opened; see `lib/ladder-pass`), the
    * screen adopts it: it says "Connecting...", a press means stop, and
    * when the pass ends the screen asks the service what it left.
+   *
+   * A tunnel found up is named as the route it is on, from the last dial
+   * (`tunnelCredential`), among `users`, the credentials this load put on
+   * screen -- or as no route, when that cannot be said. The screen's own
+   * credential at this point is its load's, the pin, which the ladder may
+   * have walked past: named as the tunnel's, it said the UK and Stealth
+   * Web over a tunnel exiting in Singapore on Stealth, after Settings and
+   * back, on the VM.
    */
-  async function adoptServiceState(sub: Subscription | null): Promise<ConnectionState | null> {
+  async function adoptServiceState(
+    sub: Subscription | null,
+    users: readonly ProtocolUser[],
+  ): Promise<ConnectionState | null> {
+    // Which credential the last dial was on, read first, so that nothing
+    // below -- the check for a pass, the stamps, the service's answer -- is
+    // taken before a wait: the state the service answers and the route it
+    // is on then land on screen together. A pass begun while the service is
+    // asked names its own candidate, and is left to (`passAtStart`).
+    const passAtStart = ladderGenerationRef.current;
+    const dial = await tunnelCredential.last();
     if (ladderInFlight()) {
       if (ladderGenerationRef.current !== ownPassRef.current && adoptedPassIntentRef.current === null) {
         const intent = beginIntent("connect");
@@ -1434,6 +1473,7 @@ export function Dashboard({
     const generation = intentRef.current.generation;
     const mark = statusDisturbances.mark();
     const adopted = await syncFromService();
+    nameFoundTunnel(adopted, dial, passAtStart, users);
     if (
       adopted === "disconnected" &&
       droppedUnseen(vouched, intentRef.current.intent, lastStatusRef.current, statusDisturbances.since(mark))
@@ -1457,6 +1497,51 @@ export function Dashboard({
       autoReconnect.tunnelUp({ routeId: null, stamp: reconnectStamp });
     }
     return adopted;
+  }
+
+  /** Names the route of a tunnel a read of the service found up outside a
+   * pass: the last dial's credential among `users`, when the service's
+   * protocol agrees with it, and no route when that cannot be said
+   * (`credentialOnTunnel`) -- never the credential the screen holds, which
+   * after a load is the pin.
+   *
+   * Every read that can move the screen to a tunnel up from outside a
+   * pass names it here: `adoptServiceState`, and `syncNamingTunnel` for the
+   * rest. Named only in the first, the screen was still wrong by another
+   * way: a load whose own read of the service failed or timed out went to
+   * "unknown" over the pin, and the recheck of "unknown" eight seconds
+   * later put "connected" under it -- the UK and Stealth Web over a
+   * tunnel to Singapore, as before.
+   *
+   * `dial` and `passAtStart` are taken before the service is asked. A pass
+   * begun since, or still under way, names its own candidate, and is left
+   * to. */
+  function nameFoundTunnel(
+    found: ConnectionState,
+    dial: TunnelDial | null,
+    passAtStart: number,
+    users: readonly ProtocolUser[],
+  ): void {
+    if (!isTunnelUp(found) || ladderGenerationRef.current !== passAtStart || ladderInFlight()) return;
+    const on = credentialOnTunnel(dial, lastStatusRef.current?.protocol, users);
+    if (on !== null) setProtocolUser(on);
+    setTunnelRouteUnknown(on === null);
+  }
+
+  /** `syncFromService` for a read outside a pass that can find a tunnel up
+   * -- the recheck of "unknown" and of a state past its deadline, a press
+   * that buys an answer, a connect declined for a pass in the way -- with
+   * what it finds named (`nameFoundTunnel`) against the credentials on
+   * screen. Stamped before the dial is read, as `adoptServiceState` is, so
+   * nothing is taken after a wait: a press during the read overrules the
+   * answer, and a pass begun during it names its own. */
+  async function syncNamingTunnel(): Promise<ConnectionState> {
+    const generation = intentRef.current.generation;
+    const passAtStart = ladderGenerationRef.current;
+    const dial = await tunnelCredential.last();
+    const settled = await syncFromService(generation);
+    nameFoundTunnel(settled, dial, passAtStart, protocolUsersRef.current);
+    return settled;
   }
 
   /** The IPv4 and IPv6 baselines, once the service has said nothing is
@@ -1553,6 +1638,32 @@ export function Dashboard({
     void updateSnapshotRoutes(sub, list, () => sessionGeneration() === sessionAtStart);
   }
 
+  /** Which of a load's credentials the screen holds from here: the one on
+   * `routeId` -- the pin, which Connect dials first -- or the first.
+   *
+   * Not chosen again over one the screen may be using: when it has been in
+   * use on the cached snapshot while the load waited (`keepHeld`), or
+   * shows a tunnel up, the credential it holds is replaced by its new copy,
+   * by id, as a refresh's are. That may be the one the tunnel is on.
+   *
+   * And the pin is never taken for a tunnel's route: from here a tunnel
+   * shown up is named by the read that finds it (`nameFoundTunnel`) or the
+   * pass that lands it, and otherwise as no route at all
+   * (`tunnelRouteUnknown`). The pin named so was the UK and Stealth Web
+   * over a tunnel to Singapore, after Settings and back. */
+  function showLoadedCredential(
+    users: readonly ProtocolUser[],
+    routeId: string | null | undefined,
+    keepHeld: boolean,
+  ): void {
+    if (keepHeld || describesTunnel(connectionStateRef.current)) {
+      setProtocolUser((current) => users.find((u) => u.id === current?.id) ?? current);
+      return;
+    }
+    setProtocolUser(users.find((u) => u.routeId === routeId) ?? users[0] ?? null);
+    setTunnelRouteUnknown(true);
+  }
+
   /** Puts a cached snapshot on screen, for a load that has nothing fresher
    * to show: one that failed, or one still waiting past the point where it
    * used to give up (`loadAll`). `reason` is what the banner says
@@ -1576,14 +1687,14 @@ export function Dashboard({
     };
     setRouteListLoaded(true);
     const preferred = preferRouteId ?? chosenRouteId;
-    setProtocolUser(cached.protocolUsers.find((u) => u.routeId === preferred) ?? cached.protocolUsers[0] ?? null);
+    showLoadedCredential(cached.protocolUsers, preferred, false);
     setOfflineSince(cached.savedAt);
     setOfflineReason(reason);
     setError(null);
     // The service, before the screen claims anything. This path is the one
     // that matters most: our API unreachable is the ordinary state of a
     // censored network, tunnel or no tunnel.
-    const adopted = await adoptServiceState(cached.subscription);
+    const adopted = await adoptServiceState(cached.subscription, cached.protocolUsers);
     setLoading(false);
     shownOnceRef.current = true;
     loadRouteMemory();
@@ -1773,21 +1884,18 @@ export function Dashboard({
     // itself honoured the choice.
     //
     // Not when the screen has been in use on the cached snapshot while
-    // this waited: the credential it holds -- perhaps the one a tunnel is
-    // up on -- is replaced by its new copy, as a refresh's are.
+    // this waited, or shows a tunnel up: the credential it holds --
+    // perhaps the one a tunnel is up on -- is replaced by its new copy, as
+    // a refresh's are (`showLoadedCredential`).
     const chosen = preferRouteId ?? chosenRouteId;
-    if (shownWhileWaiting) {
-      setProtocolUser((current) => usersResult.data.find((u) => u.id === current?.id) ?? current);
-    } else {
-      setProtocolUser(usersResult.data.find((u) => u.routeId === chosen) ?? usersResult.data[0] ?? null);
-    }
+    showLoadedCredential(usersResult.data, chosen, shownWhileWaiting);
     // The tunnel outlives the app: the helper service keeps it up if the
     // window is closed, so on open the UI has to adopt whatever is
     // actually running rather than assuming disconnected -- and before
     // the screen is drawn, not after the route list below has answered.
     // Asked already, with the snapshot on screen, if that went first: the
     // screen has been watching the service since.
-    const adopted = shownWhileWaiting ? null : await adoptServiceState(sub);
+    const adopted = shownWhileWaiting ? null : await adoptServiceState(sub, usersResult.data);
     setLoading(false);
     shownOnceRef.current = true;
     if (!shownWhileWaiting) loadRouteMemory();
@@ -1938,7 +2046,7 @@ export function Dashboard({
         adoptedPassIntentRef.current = null;
         if (!isCurrent(intentRef.current, adopted)) return;
         endIntent(adopted);
-        void adoptServiceState(subscriptionRef.current);
+        void adoptServiceState(subscriptionRef.current, protocolUsersRef.current);
       }),
     [],
   );
@@ -1983,6 +2091,10 @@ export function Dashboard({
   runLadderRef.current = runLadder;
   const protocolUserRef = useRef(protocolUser);
   protocolUserRef.current = protocolUser;
+  /** The credentials on screen, for an adopted pass's end, which is heard
+   * by a listener registered once (`adoptServiceState`). */
+  const protocolUsersRef = useRef(protocolUsers);
+  protocolUsersRef.current = protocolUsers;
   useEffect(() => {
     if (loading || !routeMemoryLoaded || !routeListLoaded) return;
     return autoReconnect.bind(async (attempt) => {
@@ -2389,6 +2501,25 @@ export function Dashboard({
   // runs: the probe is started by the health poll after its own status
   // returns, so one can begin while this look is already waiting on the
   // service -- and the answer is then discarded, by the mark taken here.
+  //
+  // A page timer, so it stops when the page's timers do -- seen on the VM
+  // (2026-10-19, 0.9.51 and the redesign alike): 5 to 21 s at a time,
+  // every two or three minutes, idle and connected, this poll and the
+  // health poll with it, while the page stayed visible and focused. No
+  // visibilitychange, no freeze, no long task, the same with every CSS
+  // animation off, and a separate process on the guest ran on throughout.
+  // So not Chromium's background, occlusion or freezing throttling, each
+  // of which hides or freezes the page first; what is left is the
+  // renderer not running at all, most likely on the VM's software-drawn
+  // display (VBoxSVGA, 3D off, the DevTools port open). Not seen on real
+  // hardware, and unverified there. It stays here anyway: what it changes
+  // is this page, so a poll driven from Rust would wait on the same
+  // renderer, and Tauri cannot turn throttling off on Windows (wry:
+  // unsupported). What keeps traffic in the tunnel -- the confinement, the
+  // IPv6 block, the DNS rule -- is the service's own and needs no page. A
+  // stall delays what the screen says, a dead tunnel's "You're protected"
+  // included, and the reconnect, by its length; the first look after it
+  // catches up.
   useEffect(() => {
     if (!isTunnelUp(connectionState)) return;
 
@@ -2703,8 +2834,10 @@ export function Dashboard({
       // the polls use -- the screen was saying it could not tell, or was
       // mid-operation -- so a tunnel the reconnect was armed for is
       // forgotten rather than left for the next screen to mount to call
-      // a drop it missed.
-      void syncFromService().then((settled) => {
+      // a drop it missed. A tunnel it finds up is named as the route it is
+      // on, or as none (`syncNamingTunnel`): from "unknown" after a load
+      // whose own read failed, the screen held the pin.
+      void syncNamingTunnel().then((settled) => {
         if (settled === "disconnected") autoReconnect.forget();
       });
     }, recheckMs);
@@ -2927,8 +3060,9 @@ export function Dashboard({
       // and the next press means what it says.
       case "recheck": {
         // As the transient recheck does: an answer that says nothing is
-        // running here was not a drop, so nothing is left armed for one.
-        if ((await syncFromService()) === "disconnected") autoReconnect.forget();
+        // running here was not a drop, so nothing is left armed for one;
+        // and a tunnel it finds up is named, or named as none.
+        if ((await syncNamingTunnel()) === "disconnected") autoReconnect.forget();
         return;
       }
 
@@ -2974,7 +3108,7 @@ export function Dashboard({
         messageKey: "err.connectBusy",
         detail: "a connection attempt was already running",
       });
-      await syncFromService();
+      await syncNamingTunnel();
     }
   }
 
@@ -3386,7 +3520,7 @@ export function Dashboard({
       // Connect -- landing on the very server just chosen -- was told it had
       // moved off the old one: "Your usual protocol didn't get through"
       // about a route it never dialled.
-      const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
+      const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);
 
       // Every rung that failed, with what it did with its route: whether
       // the route on screen was actually dialled before we settled
@@ -3438,6 +3572,16 @@ export function Dashboard({
       // When this rung was first refused for want of a network, while it
       // waits for one (`network-wait.ts`). Cleared once the ladder moves on.
       let noNetworkSince: number | null = null;
+      // And how many times it has waited, each wait ended by a dial the
+      // service refused again: each puts the next dial further off
+      // (`nextLookIn`), so a hint it keeps refusing is never hammered.
+      let noNetworkRounds = 0;
+      // The rung about to be dialled is one dialled again after a wait for
+      // a network: nothing of ours is up -- the service refused the dial
+      // before starting anything, and any earlier rung's routes were proven
+      // gone by this rung's own settle before that -- so its IPv6 baseline
+      // can be taken beside the settle rather than after it.
+      let redialAfterWait = false;
       // Over an index, not an iterator: a rung the service refused for want
       // of a network is dialled again, on the same server, once there is one.
       for (let index = 0; index < candidates.length; index += 1) {
@@ -3485,6 +3629,16 @@ export function Dashboard({
         // before then could go into it -- and just before this one is
         // dialled, as the engine is about to.
         const settleServer = literalTunnelServer(candidate, "windows");
+        // Beside the settle after a wait for a network (`redialAfterWait`).
+        // After it, on the VM, the probe waited out its timeout (about two
+        // seconds) on a network with IPv6 addresses and no IPv6 route,
+        // the settle's half second before it. Beside it saves only that
+        // half second -- the dial still waits for the probe below. By the
+        // VM's R3d timings a four-second blip is still verified about
+        // 1.7 s past the screen's ten-second calm hold: shortened, and
+        // still amber, not fixed.
+        const ipv6Beside = redialAfterWait && ipv6BaselineRef.current === null ? captureIpv6Baseline() : null;
+        redialAfterWait = false;
         // Fresh every attempt, and taken only once plain networking is
         // confirmed working. See settleAndCaptureBaseline.
         baselineIpRef.current = await settleAndCaptureBaseline(
@@ -3503,7 +3657,7 @@ export function Dashboard({
         // information. Taken here rather than before the loop so it
         // still lands after the previous engine's routes are gone.
         if (ipv6BaselineRef.current === null) {
-          ipv6BaselineRef.current = await captureIpv6Baseline();
+          ipv6BaselineRef.current = await (ipv6Beside ?? captureIpv6Baseline());
         }
 
         try {
@@ -3526,6 +3680,16 @@ export function Dashboard({
                 splitTunnelSettings.apps,
               )
             : [];
+          // Which credential the tunnel about to come up is on, for a screen
+          // mounted while it is up -- back from Settings, or the app opened
+          // again -- which the service cannot tell (`tunnelCredential`). On
+          // disk before the dial: an app that exits while the engine comes
+          // up leaves the tunnel up, and a record still on the dial before
+          // would name it. Recorded ahead of the check below, which nothing
+          // may be awaited after before the dial; a record of a dial the
+          // check then stops names nothing -- the stop takes down what is up,
+          // and a newer pass records its own before dialling.
+          await tunnelCredential.dialling(candidate);
           // Asked again right before the connect. The settle, the names and
           // the IPv6 baseline above run to seventeen seconds or so, and a
           // stop that landed in them -- "Stop reconnecting", a location
@@ -3567,6 +3731,7 @@ export function Dashboard({
           // after the loop takes the engine down.
           if (stopped()) break;
           setProtocolUser(candidate);
+          setTunnelRouteUnknown(false);
           setConnectedAt(Date.now());
 
           // Egress first. WireGuard does not handshake until it has
@@ -3941,13 +4106,16 @@ export function Dashboard({
                 now: () => Date.now(),
               },
               noNetworkSince,
+              noNetworkRounds,
             );
+            noNetworkRounds += 1;
             if (waited === "back" || waited === "retry") {
               // The same rung again, from its settle: the baseline is taken
               // afresh on the network that is back -- the IPv6 one too,
               // which a pass begun with no network took on none at all.
               // Still said on screen until the service takes the dial.
               ipv6BaselineRef.current = null;
+              redialAfterWait = true;
               // Rungs this pass dialled before the network went may have
               // failed for that, not for their servers: fi timed out as
               // Wi-Fi left, sg waited, and the pass went on to sg once the
@@ -3983,6 +4151,7 @@ export function Dashboard({
         }
 
         noNetworkSince = null;
+        noNetworkRounds = 0;
         // Always tear down before moving on, or the next engine inherits
         // this one's routes and fails for a reason that has nothing to
         // do with it. Keeping the hold between rungs, when it is kept.
@@ -4219,16 +4388,16 @@ export function Dashboard({
    * `displayedRoute`, which holds the decision so the two clients cannot
    * drift and so it can be tested without an unreachable server. */
   const currentRoute = useMemo(
-    () => displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId),
-    [routes, protocolUser, chosenRouteId, connectionState],
+    () => displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed),
+    [routes, protocolUser, chosenRouteId, connectionState, tunnelNamed],
   );
   /** The same route, by id, for the location picker's "current" row, and
    * its protocol for the PROTOCOL tile. Both used to read the credential
    * the screen holds, which after an automatic switch is the one the
    * session ended on: the idle screen then named a protocol, and marked a
    * row, that Connect does not dial first. See `displayedProtocol`. */
-  const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);
-  const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes);
+  const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);
+  const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes, tunnelNamed);
   /** Nothing pinned and no settled tunnel yet: the honest name for the
    * next connect's server is "Automatic", not whichever route happens to
    * be provisioned. */

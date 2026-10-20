@@ -20,7 +20,15 @@ export default () => ({
     accessSecret: process.env.JWT_ACCESS_SECRET,
     refreshSecret: process.env.JWT_REFRESH_SECRET,
     accessTtl: process.env.JWT_ACCESS_TTL ?? "15m",
-    refreshTtl: process.env.JWT_REFRESH_TTL ?? "7d",
+  },
+  // How long an admin panel session lasts. Sliding: each renewal moves
+  // the idle limit out again, up to the cap counted from the sign-in.
+  // Replaces JWT_REFRESH_TTL (7 days, renewable for ever), which is no
+  // longer read. Durations like "45m", "1h", "12h"; anything else is the
+  // default.
+  adminSession: {
+    idle: process.env.ADMIN_SESSION_IDLE ?? "1h",
+    max: process.env.ADMIN_SESSION_MAX ?? "12h",
   },
   // Deliberately separate secrets from `jwt` above, not just a different
   // payload shape on the same secret (unlike the MFA challenge token) --
@@ -160,6 +168,22 @@ export default () => ({
     // precisely because it needs no maintenance.
     recipients: process.env.REACHABILITY_ALERT_EMAILS,
   },
+  // Watching for servers that look blocked from the country above, and
+  // telling the owner (modules/block-watch). It never changes a server.
+  // off (the default), record (panel only), digest (plus a daily digest,
+  // no pages) or notify (pages too). Anything else is off.
+  blockWatch: {
+    mode: process.env.BLOCK_WATCH ?? "off",
+    // Its thresholds, as name=value pairs (block-signals.ts, parseTuning).
+    // The values in use are private, set in infra/.env; blank is the
+    // fallbacks in the code.
+    tuning: process.env.BLOCK_WATCH_TUNING ?? "",
+  },
+  // Minutes without a heartbeat before the owner is paged (webhook and
+  // email) that a node has gone quiet, once per gap. Blank or 0 is off,
+  // the default: paging a person is opted into. The webhook-only offline
+  // alerts are unaffected.
+  heartbeatGapPageMinutes: process.env.HEARTBEAT_GAP_PAGE_MINUTES ?? "",
   asn: {
     // Which network (autonomous system) a caller is on, for the per-ISP
     // recommendations in the location picker. See modules/network-identity.

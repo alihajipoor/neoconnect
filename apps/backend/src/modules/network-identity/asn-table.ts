@@ -83,6 +83,7 @@ export class AsnTableBuilder {
   private readonly v4: Array<[number, number, number, number]> = [];
   private readonly v6: Array<[bigint, bigint, number, number]> = [];
   private readonly orgs = new Map<number, string>();
+  private readonly asnCountries = new Map<number, number>();
 
   /** Adds one line. Returns false for anything it could not use --
    * headers, blanks, malformed rows, and AS 0, which is the dataset's
@@ -106,6 +107,7 @@ export class AsnTableBuilder {
       this.v6.push([v6Start, v6End, asn, country]);
     }
     if (!this.orgs.has(asn)) this.orgs.set(asn, (description ?? "").trim().slice(0, MAX_ORG_LENGTH));
+    if (country !== 0 && !this.asnCountries.has(asn)) this.asnCountries.set(asn, country);
     return true;
   }
 
@@ -126,6 +128,7 @@ export class AsnTableBuilder {
       new Map(this.orgs),
       Uint16Array.from(this.v4, (r) => r[3]),
       Uint16Array.from(this.v6, (r) => r[3]),
+      new Map(this.asnCountries),
     );
   }
 }
@@ -148,6 +151,9 @@ export class AsnTable {
      * 16-bit value, 0 where the dataset had none. */
     private readonly v4Country: Uint16Array = new Uint16Array(v4Start.length),
     private readonly v6Country: Uint16Array = new Uint16Array(v6Start.length),
+    /** Each ASN's registered country, packed the same way: the first one
+     * the dataset gave for any of its ranges. */
+    private readonly asnCountries: Map<number, number> = new Map(),
   ) {}
 
   static fromLines(lines: Iterable<string>): AsnTable {
@@ -163,6 +169,13 @@ export class AsnTable {
   /** The registered name of an ASN, if the dataset has one. */
   orgOf(asn: number): string | null {
     return this.orgs.get(asn) || null;
+  }
+
+  /** The country an ASN is registered in, upper-case alpha-2, or null.
+   * For reports that carry a network and no address. Registered, not
+   * located, as countryOf. */
+  countryOfAsn(asn: number): string | null {
+    return unpackCountry(this.asnCountries.get(asn) ?? 0);
   }
 
   lookup(rawIp: string): AsnInfo | null {

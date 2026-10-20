@@ -1,9 +1,9 @@
 import "server-only";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { ACCESS_COOKIE, REFRESH_COOKIE, cookieOptions, decodeJwtPayload } from "./session-tokens";
 
-export const ACCESS_COOKIE = "neoxify_access";
-export const REFRESH_COOKIE = "neoxify_refresh";
+export { ACCESS_COOKIE, REFRESH_COOKIE };
 
 export type AdminRole = "SUPERADMIN" | "SUPPORT" | "BILLING" | "RESELLER";
 
@@ -11,19 +11,6 @@ export interface SessionAdmin {
   sub: string;
   email: string;
   role: AdminRole;
-}
-
-/** Decodes the JWT payload without verifying the signature -- fine for UX
- * decisions like "should we redirect to /login", since the backend always
- * re-verifies the signature on every request regardless. */
-function decodeJwtPayload<T>(token: string): T | null {
-  try {
-    const payload = token.split(".")[1];
-    const json = Buffer.from(payload, "base64url").toString("utf8");
-    return JSON.parse(json) as T;
-  } catch {
-    return null;
-  }
 }
 
 export async function getSession(): Promise<SessionAdmin | null> {
@@ -68,25 +55,14 @@ export async function getAccessToken(): Promise<string | null> {
   return store.get(ACCESS_COOKIE)?.value ?? null;
 }
 
-/** Only callable from a Server Action or Route Handler. */
+/** Only callable from a Server Action or Route Handler. Each cookie lives
+ * as long as its token: the backend decides the session's length, and the
+ * proxy (src/proxy.ts) renews it while it is in use. */
 export async function setSessionCookies(tokens: { accessToken: string; refreshToken: string }) {
   const store = await cookies();
   const secure = process.env.NODE_ENV === "production";
-
-  store.set(ACCESS_COOKIE, tokens.accessToken, {
-    httpOnly: true,
-    secure,
-    sameSite: "lax",
-    path: "/",
-    maxAge: 60 * 15,
-  });
-  store.set(REFRESH_COOKIE, tokens.refreshToken, {
-    httpOnly: true,
-    secure,
-    sameSite: "lax",
-    path: "/",
-    maxAge: 60 * 60 * 24 * 7,
-  });
+  store.set(ACCESS_COOKIE, tokens.accessToken, cookieOptions(tokens.accessToken, secure));
+  store.set(REFRESH_COOKIE, tokens.refreshToken, cookieOptions(tokens.refreshToken, secure));
 }
 
 /** Only callable from a Server Action or Route Handler. */

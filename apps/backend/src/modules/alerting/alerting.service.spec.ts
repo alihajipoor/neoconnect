@@ -1,6 +1,6 @@
 import { ConfigService } from "@nestjs/config";
 
-import { AlertingService } from "./alerting.service";
+import { AlertingService, WEBHOOK_TIMEOUT_MS } from "./alerting.service";
 
 /** The Discord webhook contract is the reason this file exists: Discord reads
  * "content" and rejects a body without it (50006, "Cannot send an empty
@@ -48,6 +48,29 @@ describe("AlertingService", () => {
 
     const body = bodyOf();
     expect(body).toMatchObject({ content: "heartbeat missed", nodeId: "n_1", missed: 3 });
+  });
+
+  it("gives up on a webhook that never answers, and says it was not delivered", async () => {
+    // A fetch that only ends when its signal fires, as a hung endpoint
+    // would; the timeout's signal stands in already fired.
+    fetchMock.mockImplementation(
+      (_url: string, init: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          const fail = () => reject(new Error("aborted", { cause: init.signal.reason }));
+          if (init.signal.aborted) fail();
+          init.signal.addEventListener("abort", fail);
+        }),
+    );
+    const fired = AbortSignal.abort(new Error("The operation was aborted due to timeout"));
+    const timeout = jest.spyOn(AbortSignal, "timeout").mockReturnValue(fired);
+    try {
+      const delivered = await new AlertingService(configWith("https://example.test/hook")).deliver("hung");
+      expect(timeout).toHaveBeenCalledWith(WEBHOOK_TIMEOUT_MS);
+      expect(fetchMock.mock.calls[0][1].signal).toBe(fired);
+      expect(delivered).toBe(false);
+    } finally {
+      timeout.mockRestore();
+    }
   });
 
   it("never throws when delivery fails", async () => {

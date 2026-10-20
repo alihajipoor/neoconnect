@@ -728,3 +728,78 @@ export interface NodeReachability {
    * told about must not look like one that is merely unacknowledged. */
   alertDelivered: boolean | null;
 }
+
+/** Block watch (backend modules/block-watch). */
+export type BlockWatchMode = "off" | "record" | "digest" | "notify";
+export type BlockVerdict = "SUSPECT" | "LIKELY_BLOCKED";
+export type BlockIncidentStatus = "OPEN" | "CLEARED" | "REPLACED" | "RETIRED";
+export type BlockFamily = "client" | "traffic" | "probe";
+export type BlockType = "address" | "protocol" | "tunnel";
+
+export interface BlockNetworkFinding {
+  asn: number;
+  org: string | null;
+  tried: number;
+  failed: number;
+  baseline: number | null;
+  failing: boolean;
+}
+
+export interface BlockFamilyResult {
+  family: BlockFamily;
+  firing: boolean;
+  thin: boolean;
+  /** Positive evidence the server works, for what this signal measures. */
+  healthy?: boolean;
+  summary: string;
+  networks: BlockNetworkFinding[];
+}
+
+export interface BlockEvidence {
+  evaluatedAt: string;
+  current: BlockVerdict | null;
+  reason: string | null;
+  since: Partial<Record<BlockFamily, string>>;
+  families: BlockFamilyResult[];
+  outage: string | null;
+  blockType: BlockType | null;
+  thinResidential: boolean;
+  country: string;
+  /** With nothing firing: shown working again (on the way to clearing),
+   * or held open for want of evidence either way. */
+  clearing?: string | null;
+}
+
+export interface BlockIncident {
+  id: string;
+  nodeId: string;
+  status: BlockIncidentStatus;
+  /** The strongest verdict reached; the latest is evidenceJson.current. */
+  verdict: BlockVerdict;
+  openedAt: string;
+  lastSeenAt: string;
+  likelyAt: string | null;
+  closedAt: string | null;
+  /** Came back soon after clearing and was opened again (not paged again). */
+  reopenedAt: string | null;
+  evidenceJson: BlockEvidence;
+  /** Set only once a page reached somebody; pageAttempts counts the tries. */
+  pagedAt: string | null;
+  pageError: string | null;
+  pageAttempts: number;
+  remindedAt: string | null;
+  recoveryNotifiedAt: string | null;
+  keptAt: string | null;
+  snoozedUntil: string | null;
+  actedBy: string | null;
+  actionNote: string | null;
+  node: { name: string; region: string; status: string };
+}
+
+export interface BlockWatchOverview {
+  mode: BlockWatchMode;
+  country: string;
+  lastCycleAt: string | null;
+  open: BlockIncident[];
+  closed: BlockIncident[];
+}

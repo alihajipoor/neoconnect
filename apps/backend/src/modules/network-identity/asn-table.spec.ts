@@ -85,6 +85,20 @@ describe("AsnTable.countryOf", () => {
     expect(odd.countryOf("198.51.100.1")).toBeNull();
     expect(odd.countryOf("198.51.100.200")).toBe("IR");
   });
+
+  /** For reports that carry a network and never an address. */
+  it("answers an ASN's registered country, and null for one it does not know", () => {
+    expect(table.countryOfAsn(64500)).toBe("IR");
+    expect(table.countryOfAsn(64501)).toBe("DE");
+    expect(table.countryOfAsn(64502)).toBe("IR");
+    expect(table.countryOfAsn(1)).toBeNull();
+    const odd = AsnTable.fromLines([
+      "198.51.100.0\t198.51.100.127\t64510\tNone\tEXAMPLE-ODD",
+      "198.51.100.128\t198.51.100.255\t64510\tIR\tEXAMPLE-ODD",
+    ]);
+    // A range without a country does not hide the one that has it.
+    expect(odd.countryOfAsn(64510)).toBe("IR");
+  });
 });
 
 describe("address parsing", () => {

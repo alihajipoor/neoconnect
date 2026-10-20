@@ -2,6 +2,7 @@ import { ReachabilityVerdict } from "@prisma/client";
 import { ReachabilityService, medianOf } from "./reachability.service";
 import type { ProbeOutcome, ProbeResult } from "./check-host.client";
 import type { PrismaService } from "../../prisma/prisma.service";
+import { HELD_FOR_BLOCK_WATCH } from "../block-watch/block-watch.mode";
 
 const probe = (over: Partial<ProbeResult> = {}): ProbeResult => ({
   vantage: "ir1",
@@ -54,6 +55,7 @@ const build = (over: Record<string, unknown> = {}) => {
       update: alertUpdate,
     },
     adminUser: { findMany: jest.fn().mockResolvedValue([{ email: "ops@example.com" }]) },
+    blockIncident: { count: jest.fn().mockResolvedValue(0) },
   };
 
   const service = new ReachabilityService(
@@ -123,6 +125,8 @@ describe("ReachabilityService.verdictFor", () => {
   });
 });
 
+const HOUR_MS = 3_600_000;
+
 describe("ReachabilityService alerting", () => {
   const node = { id: "n1", name: "turkey-1", publicIp: "203.0.113.10" };
 
@@ -156,6 +160,43 @@ describe("ReachabilityService alerting", () => {
     expect(t.alertCreate).toHaveBeenCalledTimes(1);
     expect(t.sendMail).toHaveBeenCalledTimes(1);
     expect(t.sendMail.mock.calls[0][0].subject).toContain("turkey-1");
+  });
+
+  it("leaves the telling to the block watch when it is paging and has the server open", async () => {
+    const t = build({ "blockWatch.mode": "notify" });
+    t.prisma.blockIncident.count.mockResolvedValue(1);
+    t.checkFindMany.mockResolvedValue([
+      { verdict: ReachabilityVerdict.UNREACHABLE },
+      { verdict: ReachabilityVerdict.UNREACHABLE },
+    ]);
+    await runOneNode(t, allFailing);
+    expect(t.alertCreate).toHaveBeenCalledTimes(1);
+    expect(t.sendMail).not.toHaveBeenCalled();
+    expect(t.alertingSend).not.toHaveBeenCalled();
+    expect(t.alertUpdate).toHaveBeenCalledWith({ where: { id: "alert-1" }, data: { notifyError: HELD_FOR_BLOCK_WATCH } });
+    expect(t.prisma.blockIncident.count.mock.calls[0][0].where).toEqual({ nodeId: "n1", status: "OPEN", country: "ir" });
+  });
+
+  it("alerts as before when the block watch is not paging, or has nothing open", async () => {
+    for (const [mode, open] of [["digest", 1], ["notify", 0]] as const) {
+      const t = build({ "blockWatch.mode": mode });
+      t.prisma.blockIncident.count.mockResolvedValue(open);
+      t.checkFindMany.mockResolvedValue([
+        { verdict: ReachabilityVerdict.UNREACHABLE },
+        { verdict: ReachabilityVerdict.UNREACHABLE },
+      ]);
+      await runOneNode(t, allFailing);
+      expect(t.sendMail).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("does not tell the end of an outage it never told", async () => {
+    const t = build({ "blockWatch.mode": "notify" });
+    t.alertFindFirst.mockResolvedValue({ id: "alert-1", openedAt: new Date(Date.now() - HOUR_MS), notifyError: HELD_FOR_BLOCK_WATCH });
+    await runOneNode(t, [probe(), probe({ vantage: "ir2" })]);
+    expect(t.alertUpdate).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "alert-1" } }));
+    expect(t.sendMail).not.toHaveBeenCalled();
+    expect(t.alertingSend).not.toHaveBeenCalled();
   });
 
   /** Without this the operator gets the same mail every half hour until

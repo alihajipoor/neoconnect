@@ -127,6 +127,9 @@ class NeoxifyVpnPlugin: Plugin {
             let config: String
             let dns: String
             let mtu: Int
+            /// The client's name for it, XRAY_VLESS_REALITY and the like:
+            /// what `status` reports while this configuration is up.
+            let `protocol`: String?
         }
         Task {
             do {
@@ -138,11 +141,17 @@ class NeoxifyVpnPlugin: Plugin {
                 // Carried in the profile rather than only in the start
                 // options, so a tunnel the system restarts on its own --
                 // on demand, or after a crash -- still has its config.
-                proto.providerConfiguration = [
+                // And the protocol, which the extension does not read:
+                // `status` reports it (`providerProtocol`).
+                var stored: [String: Any] = [
                     "config": args.config,
                     "dns": args.dns,
                     "mtu": args.mtu,
                 ]
+                if let named = args.protocol, !named.isEmpty {
+                    stored[providerProtocolKey] = named
+                }
+                proto.providerConfiguration = stored
                 manager.protocolConfiguration = proto
                 manager.isEnabled = true
                 try await manager.saveToPreferences()
@@ -201,8 +210,9 @@ class NeoxifyVpnPlugin: Plugin {
                 // Only the WireGuard key, and the Xray one cleared. Both
                 // present would leave the extension to guess, and a
                 // stale Xray config from the previous connection is
-                // exactly what it would find.
-                proto.providerConfiguration = ["wireguard": json]
+                // exactly what it would find. The protocol beside it is
+                // for `status`; the extension does not read it.
+                proto.providerConfiguration = ["wireguard": json, providerProtocolKey: "WIREGUARD"]
                 manager.protocolConfiguration = proto
                 manager.isEnabled = true
                 try await manager.saveToPreferences()
@@ -546,7 +556,25 @@ class NeoxifyVpnPlugin: Plugin {
             // tunnel-provider state unconditionally would report a live
             // IKEv2 session as disconnected.
             let state = up(tunnel) ? tunnel : (up(ikev2) ? ikev2 : tunnel)
-            var answer: JsonObject = ["connected": up(state), "state": String(describing: state)]
+            // And which protocol, as Android says it: the app names the
+            // route of a tunnel it finds up from its last dial, and a dial
+            // on another protocol than this is not the tunnel's. Without
+            // it, an IKEv2 dial named whatever the tunnel provider ran --
+            // its configuration started from iOS Settings, on an earlier
+            // Xray rung -- as the IKEv2 dial's country.
+            let running: Any
+            if up(tunnel) {
+                running = providerProtocol(managers.first)
+            } else if up(ikev2) {
+                running = "IKEV2"
+            } else {
+                running = NSNull()
+            }
+            var answer: JsonObject = [
+                "connected": up(state),
+                "state": String(describing: state),
+                "protocol": running,
+            ]
             // How long the live connection has been up, from the system's
             // own record of it, for the timer on a screen that finds it
             // already running. None where it is not up or not dated.
@@ -727,6 +755,22 @@ enum TunnelNotices {
             return "enabled"
         }
     }
+}
+
+/// Where a tunnel-provider configuration keeps the protocol it was last
+/// started with, beside the engine's own keys, for `status`.
+private let providerProtocolKey = "protocol"
+
+/// The protocol a tunnel-provider configuration was last started with,
+/// in the client's names. A configuration saved before the protocol was
+/// kept -- an Xray one, since a WireGuard one says so by its key -- is
+/// reported as a name no dial carries: it is not IKEv2, and which Xray
+/// rung it holds is not known, so no dial is taken for its route.
+private func providerProtocol(_ manager: NETunnelProviderManager?) -> String {
+    let stored = (manager?.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+    if let named = stored?[providerProtocolKey] as? String, !named.isEmpty { return named }
+    if stored?["wireguard"] != nil { return "WIREGUARD" }
+    return "UNRECORDED"
 }
 
 /// Waiting for the packet-tunnel extension to say how its start went.
