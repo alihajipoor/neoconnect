@@ -4,7 +4,7 @@ import { isTunnelUp } from "@shared/lib/connection-evidence";
 import { appPrefs } from "@shared/lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch, type AutoConnectSkip } from "@shared/lib/auto-connect";
 import { adoptedSince } from "@shared/lib/session-clock";
-import { createRecordBytes, movedRoute, sessionLog } from "@shared/lib/session-log";
+import { createRecordBytes, loggedCredential, movedRoute, sessionLog } from "@shared/lib/session-log";
 import { trafficMeter, type TrafficView } from "@shared/lib/traffic-meter";
 import type { VpnAccess, VpnStatus } from "./vpn";
 
@@ -135,10 +135,15 @@ export interface PhoneMainExtrasInput {
   connectedAt: number | null;
   /** The screen says the tunnel was lost (not disconnected by the customer). */
   tunnelDropped: boolean;
-  /** The credential the tunnel is on, read when it is needed -- null over
-   * a tunnel the page cannot name (`tunnelNamed`), never the pin its load
-   * holds: pass it through `loggedCredential` (lib/session-log.ts). */
-  current: () => { routeId: string | null; protocol: string | null; transport?: string } | null;
+  /** The credential the page holds, read when it is needed. Not yet the
+   * tunnel's: over a tunnel the page cannot name it is the pin its load
+   * holds, which may be another country. */
+  held: () => { routeId: string | null; protocol: string | null; transport?: string } | null;
+  /** Whether the page can name the tunnel up (`tunnelNamed`). The hook puts
+   * `held` through `loggedCredential` with it, so the call site cannot
+   * skip the guard: a tunnel nobody can name is logged as no route, never
+   * as the pin -- the 0.2.29 misnaming, in a log the customer keeps. */
+  named: () => boolean;
   /** The rest of `autoConnectDecision`'s input, as the page knows it. */
   screen: () => {
     passRunning: boolean;
@@ -286,7 +291,7 @@ export function usePhoneMainExtras(input: PhoneMainExtrasInput): { autoConnectin
   }, []);
   useEffect(() => {
     if (!input.ready) return;
-    const user = input.current();
+    const user = loggedCredential(input.held(), input.named());
     const open = sessionLog.openRecord();
     const close = (ended: "disconnected" | "lost", bytes: { rx: number; tx: number } | null) => {
       const end = ended === "lost" ? lostSessionEnd(now(), hiddenWhileUpAt.current, visibleAgainAt.current) : now();

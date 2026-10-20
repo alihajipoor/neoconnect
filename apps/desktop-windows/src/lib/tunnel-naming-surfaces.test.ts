@@ -204,6 +204,21 @@ describe("both main pages feed their surfaces the tunnel's naming", () => {
     expect(phoneExtras).toContain("const moved = movedRoute(open, user);");
   });
 
+  it("phone: the log's hook applies the naming guard itself, so the page cannot leave it out", () => {
+    // The obvious wiring of a hook that took the credential ready-made --
+    // `current: () => protocolUserRef.current` -- passed every test and
+    // logged the loaded pin ("UK · Stealth Web") for a Singapore session.
+    expect(phoneExtras).toContain("const user = loggedCredential(input.held(), input.named());");
+    expect(phoneExtras).not.toMatch(/const user = input\.\w+\(\);/);
+    expect(phoneExtras).toMatch(/named: \(\) => boolean;/);
+    // Once the phone's main page calls it, it hands over whether the tunnel
+    // is named -- the page's own `tunnelNamed`, or a ref of it.
+    if (phone.includes("usePhoneMainExtras(")) {
+      const call = phone.slice(phone.indexOf("usePhoneMainExtras("), phone.indexOf("usePhoneMainExtras(") + 4000);
+      expect(call).toMatch(/named: \(\) => tunnelNamed(?:Ref\.current)?\b/);
+    }
+  });
+
   it("the log says a record with no route as the card does, not as a place no longer listed", () => {
     expect(activity).toContain('const place = route ? placeLabel(route, language) : record.routeId === null ? "—" : t("act.unlisted");');
   });
