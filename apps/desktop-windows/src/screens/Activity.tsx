@@ -623,7 +623,9 @@ function LogRow({ record, routes, language }: { record: SessionRecord; routes: r
   const { t } = useI18n();
   const route = record.routeId ? routes.find((r) => r.id === record.routeId) : undefined;
   const protocol = record.protocol ? customerProtocolLabel(record.protocol as RouteOption["protocol"], record.transport) : null;
-  const place = route ? placeLabel(route, language) : t("act.unlisted");
+  // No route recorded: a tunnel the screen could not name, said as the
+  // location card says it -- not "no longer listed", which claims a place.
+  const place = route ? placeLabel(route, language) : record.routeId === null ? "—" : t("act.unlisted");
   const label = protocol ? `${place} · ${protocol}` : place;
   const range = t("act.logRange", {
     day: formatDate(record.start, language),

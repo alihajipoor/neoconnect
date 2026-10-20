@@ -16,6 +16,8 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 import {
   closeLeftOpen,
   createRecordBytes,
+  loggedCredential,
+  movedRoute,
   prune,
   PRUNE_EVERY_MS,
   readLog,
@@ -204,5 +206,51 @@ describe("the session log", () => {
     await sessionLog.finish({ end: NOW + 1000, rxBytes: null, txBytes: null, ended: "disconnected" }, NOW + 1000);
     const keys = Object.keys((saved.get("log") as { records: Record<string, unknown>[] }).records[0]).sort();
     expect(keys).toEqual(["end", "ended", "id", "open", "protocol", "routeId", "rxBytes", "start", "txBytes"]);
+  });
+});
+
+/* Seen on the VM against 0.9.51: Singapore on Stealth, then Settings and
+ * back, and the screen named the pin -- the UK on Stealth Web. The screen
+ * holds the pin's credential after every load; only a pass, or a read of
+ * the service that names the tunnel (lib/tunnel-credential.ts), says which
+ * credential the tunnel is on. The log reads the same credential as the
+ * location card, so it takes the same rule. */
+describe("the session log names the tunnel the screen can name, and nothing else", () => {
+  const ukWeb = { id: "pu-uk-web", routeId: "uk-web", protocol: "XRAY_VLESS_TLS", connection: { transport: "WS" } };
+  const sgStealth = { id: "pu-sg", routeId: "sg-reality", protocol: "XRAY_VLESS_REALITY" };
+  const deStealth = { id: "pu-de", routeId: "de-reality", protocol: "XRAY_VLESS_REALITY" };
+
+  it("takes the held credential only while the screen names the tunnel", () => {
+    expect(loggedCredential(sgStealth, true)).toBe(sgStealth);
+    // Back from Settings: the screen holds the pin, and cannot name the tunnel.
+    expect(loggedCredential(ukWeb, false)).toBeNull();
+    expect(loggedCredential(null, true)).toBeNull();
+    expect(loggedCredential(undefined, true)).toBeNull();
+  });
+
+  it("keeps a session's record over a remount that cannot name the tunnel, rather than closing it as lost and opening one on the pin", () => {
+    const open = { routeId: sgStealth.routeId };
+    expect(movedRoute(open, loggedCredential(ukWeb, false))).toBe(false);
+    // 0.9.51's comparison, against the credential held: the session ended
+    // as "Lost" and a new one on the UK began.
+    expect(open.routeId !== ukWeb.routeId).toBe(true);
+    // And once the service's read names it again, it is the same session.
+    expect(movedRoute(open, loggedCredential(sgStealth, true))).toBe(false);
+  });
+
+  it("counts a move only between two routes it knows", () => {
+    // A failover or a switch, both named: the record closes, the next begins.
+    expect(movedRoute({ routeId: sgStealth.routeId }, deStealth)).toBe(true);
+    // A record begun over a tunnel nobody could name, named later: the same tunnel.
+    expect(movedRoute({ routeId: null }, sgStealth)).toBe(false);
+    expect(movedRoute(null, sgStealth)).toBe(false);
+    expect(movedRoute({ routeId: sgStealth.routeId }, null)).toBe(false);
+  });
+
+  it("records a tunnel it cannot name with no place and no protocol", async () => {
+    await sessionLog.setEnabled(true);
+    const user = loggedCredential(ukWeb, false);
+    await sessionLog.begin({ start: NOW, routeId: user?.routeId ?? null, protocol: user?.protocol ?? null }, NOW);
+    expect(sessionLog.openRecord()).toMatchObject({ open: true, routeId: null, protocol: null });
   });
 });

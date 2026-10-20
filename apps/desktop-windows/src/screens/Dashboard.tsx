@@ -128,7 +128,7 @@ import { trafficMeter } from "../lib/traffic-meter";
 import { customModeProblemText, readCustomModeProblem, type CustomModeProblem } from "../lib/custom-mode-problem";
 import { adoptedSince } from "../lib/session-clock";
 import { ladderProgress } from "../lib/ladder-progress";
-import { createRecordBytes, sessionLog } from "../lib/session-log";
+import { createRecordBytes, loggedCredential, movedRoute, sessionLog } from "../lib/session-log";
 import { ProgressLine } from "../components/main/ProgressLine";
 import { SpeedCard, SpeedSection, useTrafficShown } from "../components/main/TrafficSpeed";
 import {
@@ -570,6 +570,9 @@ export function Dashboard({
   /** The same, as the tiles' rule takes it (`settledKnown` in
    * displayed-route.ts). */
   const tunnelNamed = !tunnelRouteUnknown;
+  /** The same, for effects that read it as they run (the session log). */
+  const tunnelNamedRef = useRef(tunnelNamed);
+  tunnelNamedRef.current = tunnelNamed;
   /** Counts a session that keeps passing its health checks, once, for
    * the per-ISP tags. See session-report.ts. */
   const sessionTrackerRef = useRef(createSessionTracker());
@@ -2757,13 +2760,15 @@ export function Dashboard({
   useEffect(() => {
     if (loading) return;
     const up = connectionState === "connected" || connectionState === "unverified" || connectionState === "degraded";
-    const user = protocolUserRef.current;
+    // The credential the tunnel is on, or none when the screen cannot name
+    // it -- never the pin a load put on screen (`loggedCredential`).
+    const user = loggedCredential(protocolUserRef.current, tunnelNamedRef.current);
     const open = sessionLog.openRecord();
     const close = (ended: "disconnected" | "lost", bytes: { rx: number; tx: number } | null) => {
       void sessionLog.finish({ end: Date.now(), rxBytes: bytes?.rx ?? null, txBytes: bytes?.tx ?? null, ended });
     };
     if (up && appModeRef.current !== "gaming") {
-      const moved = open !== null && user !== null && user !== undefined && open.routeId !== user.routeId;
+      const moved = movedRoute(open, user);
       if (moved) close("lost", loggedBytesRef.current.split());
       else if (open === null) loggedBytesRef.current.restart();
       if (open === null || moved) {

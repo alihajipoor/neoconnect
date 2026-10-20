@@ -4,7 +4,7 @@ import { isTunnelUp } from "@shared/lib/connection-evidence";
 import { appPrefs } from "@shared/lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch, type AutoConnectSkip } from "@shared/lib/auto-connect";
 import { adoptedSince } from "@shared/lib/session-clock";
-import { createRecordBytes, sessionLog } from "@shared/lib/session-log";
+import { createRecordBytes, movedRoute, sessionLog } from "@shared/lib/session-log";
 import { trafficMeter, type TrafficView } from "@shared/lib/traffic-meter";
 import type { VpnAccess, VpnStatus } from "./vpn";
 
@@ -135,7 +135,9 @@ export interface PhoneMainExtrasInput {
   connectedAt: number | null;
   /** The screen says the tunnel was lost (not disconnected by the customer). */
   tunnelDropped: boolean;
-  /** The credential the tunnel is on, read when it is needed. */
+  /** The credential the tunnel is on, read when it is needed -- null over
+   * a tunnel the page cannot name (`tunnelNamed`), never the pin its load
+   * holds: pass it through `loggedCredential` (lib/session-log.ts). */
   current: () => { routeId: string | null; protocol: string | null; transport?: string } | null;
   /** The rest of `autoConnectDecision`'s input, as the page knows it. */
   screen: () => {
@@ -292,7 +294,7 @@ export function usePhoneMainExtras(input: PhoneMainExtrasInput): { autoConnectin
       void sessionLog.finish({ end, rxBytes: bytes?.rx ?? null, txBytes: bytes?.tx ?? null, ended });
     };
     if (up) {
-      const moved = open !== null && user !== null && user !== undefined && open.routeId !== user.routeId;
+      const moved = movedRoute(open, user);
       if (moved) close("lost", lastBytes.current.split());
       else if (open === null) lastBytes.current.restart();
       if (open === null || moved) {

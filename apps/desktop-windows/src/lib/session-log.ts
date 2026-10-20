@@ -81,6 +81,37 @@ export function closeRecord(
   return records.map((r) => (r.id === id && r.open ? { ...r, open: false, end: Math.max(r.start, end), rxBytes, txBytes, ended } : r));
 }
 
+/** A credential as a record names it. */
+export interface LoggedCredential {
+  readonly routeId: string | null;
+  readonly protocol: string | null;
+  readonly transport?: string;
+}
+
+/** The credential a record is about: the one the tunnel is on, or none.
+ *
+ * The screen holds a credential at all times -- after a load, the pin, for
+ * the next connect -- and says which tunnel it is on only once a pass or a
+ * read of the service has named it (`tunnelNamed`, lib/tunnel-credential.ts).
+ * Over a tunnel it cannot name, the record names nothing, as the location
+ * card does ("—"): the pin there wrote "UK · Stealth Web" for a session to
+ * Singapore -- the 0.9.51 misnaming after Settings and back, in a log the
+ * customer keeps. */
+export function loggedCredential<T extends { routeId: string | null }>(held: T | null | undefined, named: boolean): T | null {
+  return named ? (held ?? null) : null;
+}
+
+/** Whether the tunnel moved to another route under an open record -- a
+ * failover, a switch -- so the record closes and the next begins: only
+ * between two routes both known. A record begun over a tunnel nobody could
+ * name, named later, is the same tunnel; and a tunnel that has stopped being
+ * nameable has not moved anywhere the screen can say. Before, any
+ * difference counted, and a screen back from Settings over a tunnel it
+ * could not name closed the session as lost and began one on the pin. */
+export function movedRoute(open: { routeId: string | null } | null, now: { routeId: string | null } | null): boolean {
+  return open !== null && now !== null && open.routeId !== null && now.routeId !== null && open.routeId !== now.routeId;
+}
+
 /** What a record's tunnel sessions carried, all of them.
  *
  * The meter's totals are one session's, from nothing (lib/traffic-meter.ts,
