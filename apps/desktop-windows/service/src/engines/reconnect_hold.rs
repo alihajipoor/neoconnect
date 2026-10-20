@@ -21,6 +21,26 @@
 //! it, and the tunnel each brings up is put in its plan as soon as the
 //! connect returns, so that tunnel carries.
 //!
+//! Whichever of the service's watchers sees the end first -- the engine
+//! watch's report, the status poll finding the engine dead, the poll
+//! finding the tunnel adapter gone -- installs the hold before it lets go
+//! of anything of the session's own. The install is one WFP transaction,
+//! made under the hold's lock: a second watcher waits for it and finds it
+//! in. Only then does the session's confinement go.
+//!
+//! A WireGuard session's own protection is not the service's to hold:
+//! wireguard.exe's kill switch lives in that process's WFP session and goes
+//! the instant it dies, before any watch can see the death (measured on the
+//! VM: traffic out 0.22 s after the kill, with the hold armed). So an armed
+//! WireGuard session keeps the hold's filters *standing* in force for as
+//! long as it is up ([`stands_while_up`]): they permit its tunnel, its
+//! server and Neoxify's programs, so the tunnel carries as before, and when
+//! wireguard.exe's filters go the hold's block is already there. Its drop
+//! is then held with nothing to install. Letting go of a hold over a
+//! WireGuard tunnel a reconnect brought up leaves them standing for that
+//! tunnel; disarming -- the customer's Disconnect, the setting off, a
+//! connect of theirs -- takes them out.
+//!
 //! # What it lets through
 //!
 //! Loopback; our tunnel adapters, by LUID; Neoxify's own programs anywhere
@@ -66,10 +86,12 @@
 //!
 //! # What has not been measured
 //!
-//! None of this has carried a packet. That traffic actually stops while it
-//! holds, that every engine still dials under it -- WireGuard's kernel
-//! socket above all -- and that every release path lets go, is the VM's
-//! capture (`pktmon --comp nics`) to show.
+//! The VM's capture (`pktmon --comp nics`, 2026-10-20) showed every engine
+//! dialling and carrying under it, and every release path letting go; it
+//! also showed the three gaps the ordering above and the standing filters
+//! close (an Xray adapter-gone check letting go of the confinement first,
+//! WireGuard's own filters dying before the hold went in). That those are
+//! closed has not carried a packet yet: it is the next capture's to show.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
@@ -99,6 +121,20 @@ pub fn covers(profile: &ConnectProfile, passive: bool) -> bool {
             | P::Shadowsocks(_)
             | P::Openvpn(_) => true,
         }
+}
+
+/// Whether an armed session of this profile keeps the hold's filters
+/// standing in force while it is up, not only from its drop: WireGuard,
+/// whose own kill switch dies with wireguard.exe (see the module's
+/// comment). The other engines' sessions are confined by this service,
+/// whose filters it lets go of only after the hold is in.
+///
+/// Standing, the filters refuse nothing the tunnel carries -- they permit
+/// its adapter, its server and Neoxify's programs, the plan a WireGuard
+/// tunnel was measured dialling and carrying under -- and what they refuse
+/// beside it, WireGuard's kill switch refuses too.
+pub fn stands_while_up(profile: &ConnectProfile) -> bool {
+    matches!(profile, ConnectProfile::Wireguard(_))
 }
 
 /// The longest it holds with no tunnel up. An auto-reconnect waits at
@@ -193,6 +229,23 @@ impl Plan {
     /// resolvers not having been read.
     pub fn dns_anywhere(&self) -> bool {
         self.dns.is_empty()
+    }
+
+    /// This plan, permitting as well every tunnel, program and server
+    /// `other` does: what arming a session again keeps -- the setting said
+    /// again as a reconnect begins re-arms the live session with no servers
+    /// of the connect's to hand -- so a plan made again with less to go on
+    /// never narrows what that session's tunnel needs. Standing under a
+    /// WireGuard tunnel, a narrower one would refuse its own server.
+    pub fn widened_by(self, other: &Plan) -> Plan {
+        let dns = self.dns.clone();
+        let mut tunnels = self.tunnels;
+        tunnels.extend(other.tunnels.iter().copied());
+        let mut programs = self.programs;
+        programs.extend(other.programs.iter().cloned());
+        let mut nodes = self.nodes;
+        nodes.extend(other.nodes.iter().copied());
+        Plan::new(tunnels, programs, nodes, self.lan, self.dhcp_servers).with_dns(dns)
     }
 }
 
@@ -587,17 +640,28 @@ pub struct Hold {
 struct State {
     /// The setting, as the app last said it.
     wanted: bool,
-    /// The session a drop would be held for, and its plan.
-    armed: Option<(u64, Plan)>,
-    /// The WFP session holding it; 0 while nothing is held.
+    /// The session a drop would be held for, its plan, and whether that
+    /// plan stands in force while the session is up (`stands_while_up`).
+    armed: Option<(u64, Plan, bool)>,
+    /// The WFP session in force -- a hold, or filters standing for the
+    /// armed session -- 0 while none is.
     engine: isize,
     filters: usize,
-    /// The plan installed, while one is.
+    /// The plan in force, while one is.
     held: Option<Plan>,
+    /// The armed session the filters in force stand for while it is up:
+    /// they hold no drop yet. `None` while they hold one, and while nothing
+    /// is in force. Only ever the armed session's.
+    standing: Option<u64>,
     /// When it began holding.
     since: Option<Instant>,
-    /// The session whose ending began this hold.
+    /// The session whose ending this hold is for: the drop that began it,
+    /// or a later one it went on holding through.
     engaged_by: Option<u64>,
+    /// How many drops it has held, counting one it was already holding
+    /// through: a retraction lets go only of a hold no drop has reached
+    /// since it looked (`Hold::release_if_engaged_by`).
+    engagements: u64,
     /// Why it is not holding when it should be. Cleared when it holds
     /// again, and when it is let go of on purpose.
     problem: Option<(ReconnectHoldProblem, String)>,
@@ -605,8 +669,24 @@ struct State {
     /// (`NO_FOLLOW_UP`).
     awaiting_follow_up: bool,
     /// When the LAN, the DHCP servers and the resolvers are next read
-    /// again while it holds (`Hold::reread`).
+    /// again while filters are in force (`Hold::reread`).
     reread_at: Option<Instant>,
+}
+
+impl State {
+    /// Holding a drop: filters in force that are not standing for a
+    /// session that is up.
+    fn holding(&self) -> bool {
+        self.engine != 0 && self.standing.is_none()
+    }
+}
+
+/// Whether `held` lets through everything `plan` does that a tunnel needs
+/// to carry: its tunnels, its servers and Neoxify's programs.
+fn permits_all_of(held: &Plan, plan: &Plan) -> bool {
+    plan.tunnels.iter().all(|t| held.tunnels.contains(t))
+        && plan.nodes.iter().all(|n| held.nodes.contains(n))
+        && plan.programs.iter().all(|p| held.programs.contains(p))
 }
 
 impl Hold {
@@ -638,62 +718,196 @@ impl Hold {
         self.lock().wanted
     }
 
-    /// The setting turned off: lets go of a hold and forgets the plan for
-    /// one. Returns whether a hold was let go of.
+    /// The setting turned off: lets go of a hold, takes out filters
+    /// standing for a session, and forgets the plan for either. Returns
+    /// whether anything was in force.
     pub fn turn_off(&self) -> bool {
         let mut state = self.lock();
         state.wanted = false;
         state.armed = None;
-        self.release_locked(state, Release::Asked("the setting was turned off"))
+        state.problem = None;
+        self.close_locked(state, "the setting was turned off")
     }
 
     /// Arms the session `generation` with `plan`, if the setting is on.
-    pub fn arm(&self, generation: u64, plan: Plan) -> bool {
+    ///
+    /// While a hold is held -- the tunnel a reconnect has just brought up
+    /// -- the hold is moved onto this plan here, under the same lock, the
+    /// new in before the old is closed, so that tunnel carries; a plan that
+    /// will not go in lets go of the hold rather than block it.
+    ///
+    /// Otherwise, `stands`: the plan goes in now and stays in force while
+    /// the session is up (`stands_while_up`), in place of filters standing
+    /// for any other, the new in before the old is closed. One that will
+    /// not go in is said in the log, and the session is armed as any other
+    /// is: its drop is held from the watch's report. Not `stands`: filters
+    /// standing for another session are taken out.
+    pub fn arm(&self, generation: u64, plan: Plan, stands: bool) -> bool {
         let mut state = self.lock();
         if !state.wanted || generation == 0 {
             return false;
         }
-        state.armed = Some((generation, plan));
+        // The same session armed again: never narrower than before.
+        let plan = match &state.armed {
+            Some((armed, before, _)) if *armed == generation => plan.widened_by(before),
+            _ => plan,
+        };
+        state.armed = Some((generation, plan.clone(), stands));
+        if state.holding() {
+            if state.held.as_ref() == Some(&plan) {
+                return true;
+            }
+            match self.ops.install(&plan) {
+                Ok(installed) => {
+                    let old = std::mem::replace(&mut state.engine, installed.engine);
+                    state.filters = installed.filters;
+                    state.held = Some(plan);
+                    let err = self.ops.close(old);
+                    drop(state);
+                    if err != 0 {
+                        self.note(&format!("the plan before was closed with {err:#010x}; its session ends with the process"));
+                    }
+                    self.note(&format!("holding, moved onto the tunnel that came up: {} filters", installed.filters));
+                }
+                Err(e) => {
+                    self.release_locked(
+                        state,
+                        Release::Failed(
+                            ReconnectHoldProblem::TunnelNotPermitted,
+                            format!("the tunnel that came up could not be put in the hold's plan, so the hold was let go of: {e}"),
+                        ),
+                    );
+                }
+            }
+            return true;
+        }
+        if !stands {
+            if state.engine != 0 {
+                self.close_locked(state, "the session armed now keeps nothing standing");
+            }
+            return true;
+        }
+        if state.engine != 0 && state.standing == Some(generation) && state.held.as_ref() == Some(&plan) {
+            return true;
+        }
+        match self.ops.install(&plan) {
+            Ok(installed) => {
+                let old = std::mem::replace(&mut state.engine, installed.engine);
+                state.filters = installed.filters;
+                state.held = Some(plan);
+                state.standing = Some(generation);
+                state.reread_at = None;
+                let err = if old == 0 { 0 } else { self.ops.close(old) };
+                drop(state);
+                if err != 0 {
+                    self.note(&format!("the filters standing before were closed with {err:#010x}; their session ends with the process"));
+                }
+                self.note(&format!(
+                    "standing: {} filters in force while the tunnel is up, so its drop is held from the first moment",
+                    installed.filters
+                ));
+            }
+            Err(e) => {
+                if state.engine != 0 {
+                    self.close_locked(state, "the filters for the session armed now would not go in");
+                } else {
+                    drop(state);
+                }
+                self.note(&format!("could not stand in force while the tunnel is up, so its drop is held from the watch's report: {e}"));
+                crate::cleanup_log::note("keep the hold standing while the tunnel is up", &format!("not standing: {e}"));
+            }
+        }
         true
     }
 
-    /// Forgets the plan for a drop.
+    /// Forgets the plan for a drop, and takes out filters standing for the
+    /// session it was for. A hold held stays: letting go of one is asked
+    /// for on its own (`release`).
     pub fn disarm(&self) {
-        self.lock().armed = None;
+        let mut state = self.lock();
+        state.armed = None;
+        if state.standing.is_some() {
+            self.close_locked(state, "the session they stood for is not to be held");
+        }
     }
 
     /// Whether a drop of `generation` would be held.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn armed_for(&self, generation: u64) -> bool {
         let state = self.lock();
-        state.wanted && state.armed.as_ref().is_some_and(|(armed, _)| *armed == generation)
+        state.wanted && state.armed.as_ref().is_some_and(|(armed, _, _)| *armed == generation)
+    }
+
+    /// Whether filters stand in force for `generation` while it is up.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn standing_for(&self, generation: u64) -> bool {
+        let state = self.lock();
+        state.engine != 0 && state.standing == Some(generation)
     }
 
     /// Holds, with the plan armed for `generation`, because that session is
     /// ending in a way that is not the customer's own. Returns whether it
     /// is holding now -- already, or from this call.
+    ///
+    /// Filters standing for that session are in force already, and simply
+    /// become the hold: nothing is installed, so nothing passes between the
+    /// tunnel's end and the hold. Otherwise the plan goes in as one WFP
+    /// transaction, under the lock: whichever watcher gets here first
+    /// installs it, and every other waits for that and finds it in. A
+    /// caller lets go of the session's own protection only after this has
+    /// returned.
     pub fn engage(&self, generation: u64, why: &str) -> bool {
         let mut state = self.lock();
-        if state.engine != 0 {
+        if state.holding() {
+            // Another drop while it holds -- the tunnel a reconnect brought
+            // up, gone too, or the app's own teardown of it: the hold is
+            // that one's now.
+            if state.armed.as_ref().is_some_and(|(armed, _, _)| *armed == generation) {
+                state.engaged_by = Some(generation);
+                state.engagements += 1;
+            }
             return true;
         }
         if !state.wanted {
             return false;
         }
+        if state.engine != 0 && state.standing == Some(generation) {
+            state.standing = None;
+            state.since = Some(Instant::now());
+            state.engaged_by = Some(generation);
+            state.engagements += 1;
+            state.problem = None;
+            state.awaiting_follow_up = true;
+            state.reread_at = None;
+            let filters = state.filters;
+            drop(state);
+            self.note(&format!(
+                "holding: the {filters} filters standing for the tunnel were in force when it ended, so nothing passed between ({why})"
+            ));
+            return true;
+        }
         let plan = match &state.armed {
-            Some((armed, plan)) if *armed == generation => plan.clone(),
+            Some((armed, plan, _)) if *armed == generation => plan.clone(),
             _ => return false,
         };
         match self.ops.install(&plan) {
             Ok(installed) => {
-                state.engine = installed.engine;
+                // Nothing standing can be in force here -- only ever the
+                // armed session's, which is this one -- but a session is
+                // never left open behind one that replaced it.
+                let old = std::mem::replace(&mut state.engine, installed.engine);
                 state.filters = installed.filters;
                 state.held = Some(plan);
+                state.standing = None;
                 state.since = Some(Instant::now());
                 state.engaged_by = Some(generation);
+                state.engagements += 1;
                 state.problem = None;
                 state.awaiting_follow_up = true;
                 state.reread_at = None;
+                if old != 0 {
+                    self.ops.close(old);
+                }
                 drop(state);
                 self.note(&format!("holding: {} filters, nothing but Neoxify reaches the network outside a tunnel ({why})", installed.filters));
                 true
@@ -708,11 +922,18 @@ impl Hold {
         }
     }
 
-    /// Puts `plan` in place of the one held, the new one in before the old
-    /// is closed so nothing passes between them. `needed`: the new plan is
-    /// what lets a tunnel that has just come up carry, so one that will not
-    /// go in lets go of the hold altogether rather than block that tunnel.
-    /// Otherwise the plan held stays. Nothing held, nothing done.
+    /// How many drops it has held so far: what a retraction reads before
+    /// the engine's watch starts again (`release_if_engaged_by`).
+    pub fn engagements(&self) -> u64 {
+        self.lock().engagements
+    }
+
+    /// Puts `plan` in place of the one in force, the new one in before the
+    /// old is closed so nothing passes between them. `needed`: the new plan
+    /// is what lets a tunnel that has just come up carry, so one that will
+    /// not go in lets go of the hold altogether rather than block that
+    /// tunnel. Otherwise the plan in force stays. Nothing in force, nothing
+    /// done.
     pub fn replan(&self, plan: Plan, needed: bool) -> bool {
         let mut state = self.lock();
         if state.engine == 0 {
@@ -726,12 +947,13 @@ impl Hold {
                 let old = std::mem::replace(&mut state.engine, installed.engine);
                 state.filters = installed.filters;
                 state.held = Some(plan);
+                let what = if state.standing.is_some() { "standing" } else { "holding" };
                 let err = self.ops.close(old);
                 drop(state);
                 if err != 0 {
                     self.note(&format!("the plan before was closed with {err:#010x}; its session ends with the process"));
                 }
-                self.note(&format!("holding, with a new plan: {} filters", installed.filters));
+                self.note(&format!("{what}, with a new plan: {} filters", installed.filters));
                 true
             }
             Err(e) if needed => {
@@ -746,7 +968,7 @@ impl Hold {
             }
             Err(e) => {
                 drop(state);
-                self.note(&format!("a new plan would not go in, so the one held stays: {e}"));
+                self.note(&format!("a new plan would not go in, so the one in force stays: {e}"));
                 false
             }
         }
@@ -761,13 +983,29 @@ impl Hold {
     }
 
     /// Lets go of the hold, if one is held. Returns whether this call let
-    /// go of it. Safe from any thread, any number of times.
+    /// go of it. Safe from any thread, any number of times. Filters
+    /// standing for a live session are not a hold, and stay
+    /// (`let_go_locked`).
     pub fn release(&self, why: Release) -> bool {
         let state = self.lock();
-        self.release_locked(state, why)
+        self.let_go_locked(state, why, false)
     }
 
-    fn release_locked(&self, mut state: MutexGuard<'_, State>, why: Release) -> bool {
+    fn release_locked(&self, state: MutexGuard<'_, State>, why: Release) -> bool {
+        self.let_go_locked(state, why, false)
+    }
+
+    /// Lets go of the hold held, if one is. `retracted`: the drop it was
+    /// begun for was not one -- its engine runs.
+    ///
+    /// Let go of on purpose over a session armed to keep its filters
+    /// standing -- the WireGuard tunnel a reconnect brought up, or the one
+    /// whose drop was taken back -- they stay in force, standing for it, as
+    /// they are: taken out and put back there would be a moment with
+    /// neither them nor wireguard.exe's own. Otherwise they are closed.
+    /// Filters standing with no hold held are left alone: disarming takes
+    /// them out.
+    fn let_go_locked(&self, mut state: MutexGuard<'_, State>, why: Release, retracted: bool) -> bool {
         let reason = match &why {
             Release::Asked(reason) => {
                 state.problem = None;
@@ -778,10 +1016,45 @@ impl Hold {
                 detail.clone()
             }
         };
+        if !state.holding() {
+            return false;
+        }
+        let stand_for = match (&why, &state.armed, &state.held) {
+            (Release::Asked(_), Some((armed, plan, true)), Some(held))
+                if (retracted || state.engaged_by != Some(*armed)) && permits_all_of(held, plan) =>
+            {
+                Some(*armed)
+            }
+            _ => None,
+        };
+        if let Some(generation) = stand_for {
+            let held_for = state.since.map_or_else(String::new, |since| format!(" after {}s", since.elapsed().as_secs()));
+            state.standing = Some(generation);
+            state.since = None;
+            state.engaged_by = None;
+            state.awaiting_follow_up = false;
+            state.reread_at = None;
+            drop(state);
+            self.note(&format!("let go of{held_for}: its filters stay standing for the tunnel that is up ({reason})"));
+            return true;
+        }
+        let failed = matches!(why, Release::Failed(..));
+        let closed = self.close_locked(state, &reason);
+        if failed {
+            crate::cleanup_log::note("let go of the hold while reconnecting", &reason);
+        }
+        closed
+    }
+
+    /// Takes out whatever is in force -- a hold, or filters standing -- and
+    /// forgets both. Returns whether anything was.
+    fn close_locked(&self, mut state: MutexGuard<'_, State>, reason: &str) -> bool {
+        let holding = state.holding();
         let engine = std::mem::take(&mut state.engine);
         let filters = state.filters;
         let held_for = state.since.map(|since| since.elapsed());
         state.held = None;
+        state.standing = None;
         state.since = None;
         state.engaged_by = None;
         state.awaiting_follow_up = false;
@@ -791,35 +1064,81 @@ impl Hold {
         }
         let err = self.ops.close(engine);
         drop(state);
+        let what = if holding { "let go of" } else { "standing filters taken out" };
         let held_for = held_for.map_or_else(String::new, |d| format!(" after {}s", d.as_secs()));
         if err == 0 {
-            self.note(&format!("let go of{held_for}: {filters} filters removed ({reason})"));
+            self.note(&format!("{what}{held_for}: {filters} filters removed ({reason})"));
         } else {
-            self.note(&format!("let go of{held_for}; removal reported {err:#010x}, the session ends with the process ({reason})"));
-        }
-        if matches!(why, Release::Failed(..)) {
-            crate::cleanup_log::note("let go of the hold while reconnecting", &reason);
+            self.note(&format!("{what}{held_for}; removal reported {err:#010x}, the session ends with the process ({reason})"));
         }
         true
     }
 
-    /// The engine a drop report named turned out to be running: a hold
-    /// that report began is let go of. One begun otherwise stays.
-    pub fn release_if_engaged_by(&self, generation: u64) -> bool {
+    /// The engine a drop report named turned out to be running: a hold that
+    /// report began is let go of -- unless a drop has been held since
+    /// `seen` (`engagements`, read when the report was taken back): that
+    /// hold is a new drop's, and stays. Filters standing for the session
+    /// stay standing, read again at once for its adapter -- a tunnel service
+    /// started again can come back on another. One begun otherwise stays.
+    pub fn release_if_engaged_by(&self, generation: u64, seen: u64) -> bool {
         let state = self.lock();
-        if state.engine == 0 || state.engaged_by != Some(generation) {
+        if !state.holding() || state.engaged_by != Some(generation) || state.engagements != seen {
             return false;
         }
-        self.release_locked(state, Release::Asked("the engine reported gone is running"))
+        let let_go = self.let_go_locked(state, Release::Asked("the engine reported gone is running"), true);
+        let standing = {
+            let mut state = self.lock();
+            let standing = state.engine != 0 && state.standing.is_some();
+            if standing {
+                state.reread_at = None;
+            }
+            standing
+        };
+        if standing {
+            self.reread(Instant::now());
+        }
+        let_go
     }
 
-    /// What every status poll does to it, from whichever thread answers:
-    /// lets go of a hold nothing followed or that has held too long, and
-    /// reads the network again while it holds.
-    pub fn tend(&self, tunnel_up: bool) {
+    /// What every status poll does to it, from whichever thread answers,
+    /// with the session up now, if any: settles filters standing for a
+    /// session that is no longer it (`settle_standing`); lets go of a hold
+    /// nothing followed or that has held too long with no tunnel -- the
+    /// session whose drop it holds, still up while it is taken down, is no
+    /// tunnel -- and reads the network again while filters are in force.
+    pub fn tend(&self, live: Option<u64>) {
+        self.settle_standing(live);
+        let tunnel_up = live.is_some() && live != self.lock().engaged_by;
         if !self.expire_if_due(tunnel_up, HOLD_LONGEST) {
             self.reread(Instant::now());
         }
+    }
+
+    /// Filters standing for a session that is no longer the one up. None
+    /// up -- it ended, and nothing said so to the hold -- they hold its
+    /// drop, as the watch's report would have, and the status and the
+    /// backstops see it. Another up, which they were not made for: taken
+    /// out rather than block its tunnel. Returns whether anything changed.
+    pub fn settle_standing(&self, live: Option<u64>) -> bool {
+        let mut state = self.lock();
+        let Some(generation) = state.standing else { return false };
+        if state.engine == 0 || live == Some(generation) {
+            return false;
+        }
+        if live.is_some() || !state.wanted {
+            self.close_locked(state, "the session they stood for is no longer the one up");
+            return true;
+        }
+        state.standing = None;
+        state.since = Some(Instant::now());
+        state.engaged_by = Some(generation);
+        state.engagements += 1;
+        state.problem = None;
+        state.awaiting_follow_up = true;
+        state.reread_at = None;
+        drop(state);
+        self.note("holding: the session the filters stood for ended with no word to the hold, so its drop is held");
+        true
     }
 
     /// Lets go of a hold a drop began that no reconnect has followed
@@ -828,7 +1147,7 @@ impl Hold {
     /// screen that has moved on.
     pub fn let_go_if_unfollowed(&self, tunnel_up: bool, within: Duration) -> bool {
         let state = self.lock();
-        let due = state.engine != 0
+        let due = state.holding()
             && !tunnel_up
             && state.awaiting_follow_up
             && state.since.is_some_and(|since| since.elapsed() >= within);
@@ -844,11 +1163,14 @@ impl Hold {
         )
     }
 
-    /// The LAN, the DHCP servers and the resolvers read again while it
-    /// holds, at most every [`REREAD_EVERY`], and the plan moved onto them
-    /// when they have changed: a laptop that roamed during the wait gets
-    /// its new network's LAN, not the old one's. A plan that will not go
-    /// in leaves the one held in place, and is not tried again for
+    /// The LAN, the DHCP servers and the resolvers read again while filters
+    /// are in force, at most every [`REREAD_EVERY`], and the plan moved onto
+    /// them when they have changed: a laptop that roamed during the wait
+    /// gets its new network's LAN, not the old one's. Our tunnel adapters
+    /// are read again too, and any new one is permitted beside those held:
+    /// a tunnel service started again under filters standing for it can
+    /// come back on an adapter of another LUID. A plan that will not go in
+    /// leaves the one in force, and is not tried again for
     /// [`REREAD_AFTER_REFUSAL`]. Resolvers that cannot be read this time
     /// keep the ones held. Returns whether the plan moved.
     pub fn reread(&self, now: Instant) -> bool {
@@ -865,12 +1187,14 @@ impl Hold {
         };
         let Some((lan, dhcp_servers)) = self.ops.lan() else { return false };
         let dns = self.ops.dns_servers().unwrap_or_else(|| held.dns.clone());
-        let next = Plan::new(held.tunnels.clone(), held.programs.clone(), held.nodes.clone(), lan, dhcp_servers).with_dns(dns);
+        let mut tunnels = held.tunnels.clone();
+        tunnels.extend(self.ops.our_tunnels().unwrap_or_default());
+        let next = Plan::new(tunnels, held.programs.clone(), held.nodes.clone(), lan, dhcp_servers).with_dns(dns);
         if next == held {
             return false;
         }
         if self.replan(next, false) {
-            self.note("the network changed while holding, so the LAN and resolvers it permits were read again");
+            self.note("the network changed while filters were in force, so the LAN, resolvers and tunnels they permit were read again");
             return true;
         }
         let mut state = self.lock();
@@ -888,7 +1212,7 @@ impl Hold {
             return true;
         }
         let state = self.lock();
-        let due = state.engine != 0 && !tunnel_up && state.since.is_some_and(|since| since.elapsed() >= longest);
+        let due = state.holding() && !tunnel_up && state.since.is_some_and(|since| since.elapsed() >= longest);
         if !due {
             return false;
         }
@@ -901,38 +1225,49 @@ impl Hold {
         )
     }
 
+    /// Whether a drop is being held. Filters standing for a session that is
+    /// up are not.
     pub fn holding(&self) -> bool {
-        self.lock().engine != 0
+        self.lock().holding()
     }
 
-    /// The plan held, while one is.
+    /// The plan in force, while one is.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn held_plan(&self) -> Option<Plan> {
         self.lock().held.clone()
     }
 
     /// What the status poll says of it. `live`: the session up now, if any
-    /// -- "armed" is said only of the session that is.
+    /// -- "armed" is said only of the session that is, and a hold is said
+    /// to have `landed` only under a session that came up after the drop
+    /// it holds for and is armed: its tunnel in the plan, the gap over.
+    /// The dropped session itself, still in the slot while it is taken
+    /// down, is not one.
     pub fn report(&self, live: Option<u64>) -> Option<Report> {
         let state = self.lock();
-        if state.engine != 0 {
+        if state.holding() {
             let held_secs = state.since.map_or(0, |since| since.elapsed().as_secs());
             let dns_anywhere = state.held.as_ref().is_some_and(Plan::dns_anywhere);
-            return Some(Report::Holding { held_secs, dns_anywhere });
+            let landed = live.is_some()
+                && live != state.engaged_by
+                && state.armed.as_ref().is_some_and(|(armed, _, _)| live == Some(*armed));
+            return Some(Report::Holding { held_secs, dns_anywhere, landed });
         }
         if let Some((problem, detail)) = &state.problem {
             return Some(Report::NotHeld { problem: *problem, detail: Some(detail.clone()) });
         }
-        let armed = state.armed.as_ref().is_some_and(|(armed, _)| live == Some(*armed));
+        let armed = state.armed.as_ref().is_some_and(|(armed, _, _)| live == Some(*armed));
         (state.wanted && armed).then_some(Report::Armed)
     }
 }
 
-/// The last holder letting go closes it too: the path nobody wrote. The
-/// process ending closes the session whatever happens here.
+/// The last holder letting go closes it too, standing filters and all: the
+/// path nobody wrote. The process ending closes the session whatever
+/// happens here.
 impl Drop for Hold {
     fn drop(&mut self) {
-        self.release(Release::Asked("the service let go of it"));
+        let state = self.lock();
+        self.close_locked(state, "the service let go of it");
     }
 }
 
@@ -1221,11 +1556,11 @@ mod tests {
 
         let (hold, _fake) = held_by_fake();
         hold.set_wanted(true);
-        hold.arm(7, plan());
+        hold.arm(7, plan(), false);
         hold.engage(7, "a drop");
         assert!(matches!(hold.report(None), Some(Report::Holding { dns_anywhere: true, .. })));
         hold.release(Release::Asked("the app proved a tunnel"));
-        hold.arm(7, plan().with_dns(resolvers()));
+        hold.arm(7, plan().with_dns(resolvers()), false);
         hold.engage(7, "a drop");
         assert!(matches!(hold.report(None), Some(Report::Holding { dns_anywhere: false, .. })));
     }
@@ -1361,7 +1696,7 @@ mod tests {
     #[test]
     fn off_it_never_holds() {
         let (hold, fake) = held_by_fake();
-        assert!(!hold.arm(7, plan()), "armed with the setting off");
+        assert!(!hold.arm(7, plan(), false), "armed with the setting off");
         assert!(!hold.engage(7, "a drop"));
         assert!(fake.installs.lock().unwrap().is_empty());
         assert_eq!(hold.report(Some(7)), None, "the status says nothing while it is off");
@@ -1373,7 +1708,7 @@ mod tests {
     fn an_armed_sessions_drop_holds_and_another_sessions_does_not() {
         let (hold, fake) = held_by_fake();
         hold.set_wanted(true);
-        assert!(hold.arm(7, plan()));
+        assert!(hold.arm(7, plan(), false));
         assert_eq!(hold.report(Some(7)), Some(Report::Armed));
         assert_eq!(hold.report(Some(8)), None, "armed is said only of the live session");
         assert!(!hold.engage(6, "an older session's report"), "held for a session that was not armed");
@@ -1392,7 +1727,7 @@ mod tests {
     fn a_hold_that_will_not_go_in_says_so() {
         let (hold, fake) = held_by_fake();
         hold.set_wanted(true);
-        hold.arm(7, plan());
+        hold.arm(7, plan(), false);
         fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(!hold.engage(7, "a drop"));
         assert!(!hold.holding());
@@ -1412,7 +1747,7 @@ mod tests {
     fn a_new_plan_goes_in_before_the_old_is_closed() {
         let (hold, fake) = held_by_fake();
         hold.set_wanted(true);
-        hold.arm(7, plan());
+        hold.arm(7, plan(), false);
         hold.engage(7, "a drop");
         let next = Plan { tunnels: vec![TUNNEL, 0x0035_0000_0300_0000], ..plan() };
         assert!(hold.replan(next.clone(), true));
@@ -1441,7 +1776,7 @@ mod tests {
     fn turning_it_off_lets_go_and_disarms() {
         let (hold, fake) = held_by_fake();
         hold.set_wanted(true);
-        hold.arm(7, plan());
+        hold.arm(7, plan(), false);
         hold.engage(7, "a drop");
         assert!(hold.turn_off());
         assert!(!hold.holding());
@@ -1457,11 +1792,11 @@ mod tests {
     fn a_retracted_drop_lets_go_of_the_hold_it_began() {
         let (hold, _fake) = held_by_fake();
         hold.set_wanted(true);
-        hold.arm(7, plan());
+        hold.arm(7, plan(), false);
         hold.engage(7, "a drop");
-        assert!(!hold.release_if_engaged_by(6));
+        assert!(!hold.release_if_engaged_by(6, hold.engagements()));
         assert!(hold.holding());
-        assert!(hold.release_if_engaged_by(7));
+        assert!(hold.release_if_engaged_by(7, hold.engagements()));
         assert!(!hold.holding());
         assert_eq!(hold.report(Some(7)), Some(Report::Armed), "still armed for the live session");
     }
@@ -1472,7 +1807,7 @@ mod tests {
     fn held_too_long_without_a_tunnel_it_lets_go() {
         let (hold, _fake) = held_by_fake();
         hold.set_wanted(true);
-        hold.arm(7, plan());
+        hold.arm(7, plan(), false);
         hold.engage(7, "a drop");
         assert!(!hold.expire_if_due(false, HOLD_LONGEST), "let go of at once");
         assert!(!hold.expire_if_due(true, Duration::ZERO), "let go of under a live tunnel");
@@ -1488,7 +1823,7 @@ mod tests {
     fn a_hold_nothing_followed_is_let_go_of() {
         let (hold, _fake) = held_by_fake();
         hold.set_wanted(true);
-        hold.arm(7, plan());
+        hold.arm(7, plan(), false);
         hold.engage(7, "a drop");
         assert!(!hold.expire_if_due(false, HOLD_LONGEST), "let go of before NO_FOLLOW_UP");
         assert!(!hold.let_go_if_unfollowed(true, Duration::ZERO), "let go of under a live tunnel");
@@ -1496,7 +1831,7 @@ mod tests {
         assert!(!hold.holding());
         assert!(matches!(hold.report(None), Some(Report::NotHeld { problem: ReconnectHoldProblem::Other, .. })));
 
-        hold.arm(7, plan());
+        hold.arm(7, plan(), false);
         hold.engage(7, "a drop");
         hold.followed();
         assert!(!hold.let_go_if_unfollowed(false, Duration::ZERO), "let go of though a reconnect followed");
@@ -1517,7 +1852,7 @@ mod tests {
         let t0 = Instant::now();
         assert!(!hold.reread(t0), "read with nothing held");
         hold.set_wanted(true);
-        hold.arm(7, plan());
+        hold.arm(7, plan(), false);
         hold.engage(7, "a drop");
 
         let roamed = Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24);
@@ -1567,7 +1902,7 @@ mod tests {
         for _round in 0..20 {
             let (hold, fake) = held_by_fake();
             hold.set_wanted(true);
-            hold.arm(7, plan());
+            hold.arm(7, plan(), false);
             let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
             let handles: Vec<_> = (0..AT_ONCE)
                 .map(|i| {
@@ -1585,7 +1920,7 @@ mod tests {
                                 hold.replan(Plan { tunnels: vec![i as u64 + 1], ..plan() }, i % 8 == 2);
                             }
                             _ => {
-                                hold.release_if_engaged_by(7);
+                                hold.release_if_engaged_by(7, hold.engagements());
                             }
                         }
                     })
@@ -1602,15 +1937,257 @@ mod tests {
         }
     }
 
+    /// WireGuard keeps the hold's filters standing in force while it is up;
+    /// no other engine's session does -- theirs are confined by the service.
+    #[test]
+    fn only_wireguard_keeps_its_filters_standing() {
+        for (profile, _) in profiles() {
+            assert_eq!(stands_while_up(&profile), matches!(profile, ConnectProfile::Wireguard(_)), "{profile:?}");
+        }
+    }
+
+    /// Armed to stand, the plan goes in at once and stays in force while the
+    /// session is up -- said as armed, not as holding -- and its drop is held
+    /// with nothing to install: the filters that hold it were in before the
+    /// tunnel ended. wireguard.exe's own die with it, and on the VM traffic
+    /// left 0.22 s after the kill while a hold went in after the drop. Armed
+    /// not to stand, nothing is in force until the drop, as before.
+    #[test]
+    fn a_standing_sessions_drop_is_held_with_nothing_to_install() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        assert!(hold.arm(7, plan(), true));
+        assert_eq!(fake.installs.lock().unwrap().len(), 1, "nothing in force while the tunnel is up");
+        assert!(hold.standing_for(7));
+        assert!(!hold.holding(), "standing is not holding");
+        assert_eq!(hold.report(Some(7)), Some(Report::Armed));
+        assert!(hold.engage(7, "wireguard.exe died"));
+        assert!(hold.holding());
+        assert!(!hold.standing_for(7));
+        assert_eq!(fake.installs.lock().unwrap().len(), 1, "a hold installed after the drop: a gap");
+        assert!(fake.closed.lock().unwrap().is_empty(), "the filters in force were taken out at the drop");
+        assert!(matches!(hold.report(None), Some(Report::Holding { landed: false, .. })));
+        // Given up with no tunnel back: closed, nothing left standing.
+        assert!(hold.release(Release::Asked("the reconnect gave up")));
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000]);
+        assert!(!hold.standing_for(7));
+
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        assert!(hold.arm(7, plan(), false));
+        assert!(fake.installs.lock().unwrap().is_empty(), "filters standing for a session that keeps none");
+        assert!(hold.engage(7, "xray.exe died"));
+        assert_eq!(fake.installs.lock().unwrap().len(), 1);
+    }
+
+    /// A tunnel a reconnect brings up while it holds is put in the plan as
+    /// it is armed, under the same lock, and the hold is said to have landed
+    /// -- never over the dropped session itself. Letting go then leaves the
+    /// filters standing for the new tunnel, in force as they were, never
+    /// taken out and put back. A release with nothing held leaves them;
+    /// disarming takes them out.
+    #[test]
+    fn letting_go_over_a_standing_tunnel_that_came_up_leaves_its_filters_in_force() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), true);
+        hold.engage(7, "wireguard.exe died");
+        assert!(
+            matches!(hold.report(Some(7)), Some(Report::Holding { landed: false, .. })),
+            "the dropped session, still in the slot, is no tunnel landed"
+        );
+        let next = Plan { tunnels: vec![TUNNEL, 0x0035_0000_0300_0000], ..plan() };
+        assert!(hold.arm(8, next.clone(), true));
+        assert_eq!(fake.installs.lock().unwrap().clone(), vec![plan(), next.clone()], "the new tunnel was not put in the plan");
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000], "the old plan, after the new");
+        assert!(hold.holding());
+        assert!(matches!(hold.report(Some(8)), Some(Report::Holding { landed: true, .. })));
+        assert!(hold.release(Release::Asked("the app let go of it")));
+        assert!(!hold.holding());
+        assert!(hold.standing_for(8), "the filters for the tunnel that came up were taken out");
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000], "taken out and put back: a moment with neither");
+        assert_eq!(hold.report(Some(8)), Some(Report::Armed));
+        assert!(!hold.release(Release::Asked("the app let go of it")), "a release with nothing held");
+        assert!(hold.standing_for(8));
+        hold.disarm();
+        assert!(!hold.standing_for(8));
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000, 5001]);
+    }
+
+    /// The setting off takes standing filters out with any hold; arming a
+    /// session that keeps none takes out what stood for the last; arming
+    /// one that keeps its own puts the new in before the old is closed.
+    #[test]
+    fn turning_it_off_or_arming_another_session_settles_standing_filters() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), true);
+        assert!(hold.turn_off());
+        assert!(!hold.standing_for(7));
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000]);
+
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), true);
+        hold.arm(8, plan(), false);
+        assert!(!hold.standing_for(7) && !hold.standing_for(8));
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000]);
+        hold.arm(9, plan(), true);
+        hold.arm(10, Plan { tunnels: vec![0x0035_0000_0400_0000], ..plan() }, true);
+        assert!(hold.standing_for(10));
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000, 5001], "the old ones, each after its successor");
+    }
+
+    /// Standing filters that will not go in leave the session armed as any
+    /// other: its drop is still held, from the report.
+    #[test]
+    fn standing_filters_that_will_not_go_in_leave_the_drop_held_from_the_report() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(hold.arm(7, plan(), true));
+        assert!(!hold.standing_for(7));
+        assert!(hold.armed_for(7));
+        fake.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(hold.engage(7, "wireguard.exe died"));
+        assert_eq!(fake.installs.lock().unwrap().len(), 1);
+    }
+
+    /// Filters standing for a session that is no longer up: none up -- it
+    /// ended and nothing said so -- they hold its drop, said, and the
+    /// backstops reach it; another up, they are taken out rather than block
+    /// its tunnel. With the one they stand for up, nothing changes.
+    #[test]
+    fn standing_filters_outliving_their_session_hold_its_drop_or_go() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), true);
+        assert!(!hold.settle_standing(Some(7)));
+        assert!(hold.standing_for(7));
+        assert!(hold.settle_standing(None));
+        assert!(hold.holding());
+        assert!(matches!(hold.report(None), Some(Report::Holding { .. })));
+        assert!(hold.let_go_if_unfollowed(false, Duration::ZERO), "the backstop does not reach it");
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000]);
+
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), true);
+        assert!(hold.settle_standing(Some(9)));
+        assert!(!hold.holding() && !hold.standing_for(7));
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000]);
+    }
+
+    /// A drop report the engine contradicts lets go of the hold it began --
+    /// but not of one a newer drop has reached since the report was taken
+    /// back: that is the engine dying a moment after it was found alive,
+    /// and letting go would leave its drop unheld. Filters standing for the
+    /// session stay standing.
+    #[test]
+    fn a_retraction_lets_go_only_of_a_hold_no_drop_has_reached_since() {
+        let (hold, _fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), false);
+        hold.engage(7, "a report");
+        let seen = hold.engagements();
+        hold.engage(7, "the new watch's report: it died after all");
+        assert!(!hold.release_if_engaged_by(7, seen), "a real drop's hold let go of");
+        assert!(hold.holding());
+        assert!(hold.release_if_engaged_by(7, hold.engagements()));
+        assert!(!hold.holding());
+
+        let (hold, fake) = held_by_fake();
+        *fake.lan.lock().unwrap() = (plan().lan, plan().dhcp_servers);
+        hold.set_wanted(true);
+        hold.arm(7, plan(), true);
+        hold.engage(7, "the tunnel service stopped");
+        assert!(hold.release_if_engaged_by(7, hold.engagements()));
+        assert!(hold.standing_for(7), "the filters standing for a tunnel that runs were taken out");
+        assert!(fake.closed.lock().unwrap().is_empty());
+    }
+
+    /// Thirty-two threads at once arming to stand, engaging, letting go,
+    /// settling and disarming one hold, as the watches, the owning thread
+    /// and the pipe can: every WFP session it opens is closed exactly once,
+    /// and none is left open.
+    #[test]
+    fn thirty_two_racing_callers_with_standing_filters_close_each_session_exactly_once() {
+        const AT_ONCE: usize = 32;
+        for _round in 0..20 {
+            let (hold, fake) = held_by_fake();
+            hold.set_wanted(true);
+            hold.arm(7, plan(), true);
+            let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+            let handles: Vec<_> = (0..AT_ONCE)
+                .map(|i| {
+                    let (hold, start) = (Arc::clone(&hold), Arc::clone(&start));
+                    std::thread::spawn(move || {
+                        start.wait();
+                        match i % 6 {
+                            0 => {
+                                hold.engage(7, "wireguard.exe died");
+                            }
+                            1 => {
+                                hold.release(Release::Asked("the app let go of it"));
+                            }
+                            2 => {
+                                hold.arm(8 + (i as u64 % 3), Plan { tunnels: vec![i as u64 + 1], ..plan() }, i % 4 == 2);
+                            }
+                            3 => {
+                                hold.settle_standing(if i % 12 == 3 { None } else { Some(7) });
+                            }
+                            4 => {
+                                hold.release_if_engaged_by(7, hold.engagements());
+                            }
+                            _ => {
+                                hold.disarm();
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("a caller panicked");
+            }
+            drop(hold);
+            let opened: Vec<isize> = (0..fake.installs.lock().unwrap().len() as isize).map(|i| 5000 + i).collect();
+            let mut closed = fake.closed.lock().unwrap().clone();
+            closed.sort_unstable();
+            assert_eq!(closed, opened, "a session closed twice, or left open");
+        }
+    }
+
+    /// The same session armed again -- the setting said again as a
+    /// reconnect begins, with none of the connect's servers to hand -- is
+    /// never armed narrower: standing under a WireGuard tunnel, a plan
+    /// without its server would refuse it. Another session's is its own.
+    #[test]
+    fn arming_the_same_session_again_never_narrows_its_plan() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), true);
+        hold.arm(7, Plan { nodes: Vec::new(), ..plan() }, true);
+        assert_eq!(fake.installs.lock().unwrap().len(), 1, "the same plan put in again");
+        assert_eq!(hold.held_plan().map(|p| p.nodes), Some(plan().nodes), "the session's servers were dropped");
+        hold.arm(8, Plan { nodes: Vec::new(), ..plan() }, true);
+        assert!(hold.held_plan().is_some_and(|p| p.nodes.is_empty()));
+        assert!(hold.standing_for(8));
+    }
+
     /// The hold's filters against the real filtering engine, inside a
     /// transaction that is then aborted: WFP checks every filter as it is
     /// added, so a structure it would refuse is found here rather than on
-    /// a customer's drop, where it would read as "could not hold". Nothing
-    /// stays in force. Skipped without administrator rights -- but not on
-    /// CI: GitHub's Windows runners have them, and a skip there, which
-    /// `cargo test` would not show, would leave nothing having checked the
-    /// hold against the real platform. What it cannot show is that traffic
-    /// stops -- that is the VM's capture.
+    /// a customer's drop, where it would read as "could not hold" -- or,
+    /// standing under a WireGuard tunnel, as filters that never went in.
+    /// Nothing stays in force.
+    ///
+    /// Never skipped silently. An engine that will not open -- no
+    /// administrator rights -- fails it, unless whoever runs it has said by
+    /// name that they cannot run it elevated (`NEOXIFY_SKIP_WFP_TESTS=1`),
+    /// which CI never may: GitHub's Windows runners are administrators, and
+    /// a skip there would leave nothing having checked the hold against the
+    /// real platform. What it cannot show is that traffic stops -- that is
+    /// the VM's capture.
     #[test]
     fn wfp_accepts_the_hold_then_aborts() {
         let exe = std::env::current_exe().expect("the test binary");
@@ -1625,10 +2202,16 @@ mod tests {
         .with_dns(resolvers());
         let specs = specs(&real);
         match confinement::add_then_abort(&specs, &HOLD_KEYS) {
-            None if std::env::var_os("GITHUB_ACTIONS").is_some() => {
-                panic!("the filtering engine would not open on CI, so the hold was never checked against it")
+            None => {
+                let on_ci = std::env::var_os("GITHUB_ACTIONS").is_some();
+                let skipped_on_purpose = std::env::var("NEOXIFY_SKIP_WFP_TESTS").is_ok_and(|v| v == "1");
+                assert!(
+                    skipped_on_purpose && !on_ci,
+                    "the filtering engine would not open, so the hold was never checked against it: run the tests as \
+                     administrator (or, off CI, set NEOXIFY_SKIP_WFP_TESTS=1 to skip this on purpose)"
+                );
+                eprintln!("SKIPPED ON PURPOSE (NEOXIFY_SKIP_WFP_TESTS=1): the hold was not checked against the filtering platform");
             }
-            None => eprintln!("skipped: the filtering engine would not open (needs administrator)"),
             Some(Ok(blocks)) => assert_eq!(blocks, 4, "one block per layer"),
             Some(Err(e)) => panic!("the Windows Filtering Platform rejected the hold: {e}"),
         }

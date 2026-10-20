@@ -668,8 +668,9 @@ impl Ledger {
             (state.reconnect_hold.clone(), state.live)
         };
         let hold = hold?;
-        hold.tend(live != 0);
-        hold.report((live != 0).then_some(live))
+        let live = (live != 0).then_some(live);
+        hold.tend(live);
+        hold.report(live)
     }
 }
 

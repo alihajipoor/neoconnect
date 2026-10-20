@@ -800,7 +800,7 @@ impl Engines {
     /// up, and reading the network again while it holds (`Hold::tend`).
     pub fn reconnect_hold_status(&self) -> Option<neoconnect_ipc::ReconnectHold> {
         let live = self.active.peek().map(|s| s.generation);
-        self.reconnect_hold.tend(live.is_some());
+        self.reconnect_hold.tend(live);
         self.reconnect_hold.report(live)
     }
 
@@ -893,6 +893,13 @@ impl Engines {
             if let Some(plan) = self.reconnect_hold_plan(None, &server) {
                 hold.replan(plan, false);
             }
+        } else {
+            // Nothing held: a connect of the customer's own, or the first of
+            // a session. It begins no hold, so filters standing for the
+            // session it replaces go before that session's teardown -- a
+            // connect that then fails must not leave the machine blocked
+            // with nothing armed to say so.
+            hold.disarm();
         }
     }
 
@@ -915,11 +922,12 @@ impl Engines {
             .tunnel_luid(adapter_name_for(profile))
             .and_then(|tunnel| self.reconnect_hold_plan(Some(tunnel), &servers));
         match plan {
+            // While a hold is held, arming moves it onto this tunnel under
+            // the hold's own lock -- a release racing it cannot find the
+            // session armed and the plan not yet moved -- and a WireGuard
+            // session's plan stands in force from now (`stands_while_up`).
             Some(plan) => {
-                hold.arm(generation, plan.clone());
-                if hold.holding() {
-                    hold.replan(plan, true);
-                }
+                hold.arm(generation, plan, reconnect_hold::stands_while_up(profile));
             }
             None => {
                 hold.disarm();
@@ -1090,6 +1098,16 @@ impl Engines {
     /// carries anything is the app's egress check's to judge, as ever. An
     /// adapter list that cannot be read is no evidence, and changes
     /// nothing. Asked only while a confinement is held.
+    ///
+    /// An armed session is held first ("Block the internet while
+    /// reconnecting"): its tunnel is as good as dropped -- usually it is
+    /// the engine dying, its adapter gone a moment before the process is
+    /// signalled -- and this check can get there before the engine watch's
+    /// report. On the VM it did, in 4 of about 14 kills, and with the
+    /// confinement let go of first traffic left at the NIC 0.39 s after the
+    /// kill. Whichever of the two runs first installs the hold, in one WFP
+    /// transaction under the hold's lock; the other waits for it and finds
+    /// it in; and only then does the confinement go.
     fn let_go_if_the_tunnel_adapter_is_gone(&mut self) {
         let ops = Arc::clone(&self.confinement_ops);
         let Some(session) = self.active.peek() else { return };
@@ -1100,6 +1118,7 @@ impl Engines {
         if ops.tunnel_present(adapter) != Some(false) {
             return;
         }
+        self.reconnect_hold.engage(session.generation, "the tunnel adapter is gone");
         let why = format!(
             "the tunnel adapter {adapter} is gone while its engine still runs, so the IPv4 confinement was let go of"
         );
@@ -2386,9 +2405,9 @@ impl Engines {
             return true;
         }
         let retracted = self.ledger.retract(generation);
-        // A reconnect hold that report began goes too: the tunnel it was
-        // holding for is running, and the app never saw a drop to end.
-        self.reconnect_hold.release_if_engaged_by(generation);
+        // How many drops the reconnect hold has held so far, before the new
+        // watch can report another: see the end of this function.
+        let engagements = self.reconnect_hold.engagements();
         // The report let go of the confinement on the watch's thread; the
         // engine is alive, so it goes back. Its hold is re-armed *before*
         // the new watch starts: a report from that watch -- the engine
@@ -2408,6 +2427,14 @@ impl Engines {
         if owed {
             self.confine_again();
         }
+        // A reconnect hold that report began goes too -- the tunnel it was
+        // holding for is running, and the app never saw a drop to end -- and
+        // only now, with the confinement back: let go of before it, the
+        // session was neither held nor confined meanwhile. Not if the new
+        // watch has reported the engine dying since (`engagements`): that
+        // hold is a real drop's, and letting go of it would let traffic
+        // out. A WireGuard session's filters stay standing.
+        self.reconnect_hold.release_if_engaged_by(generation, engagements);
         false
     }
 
@@ -7070,7 +7097,7 @@ mod helper_tests {
         // Armed before the watch's first look: the generation is the next
         // one the ledger gives.
         let g = engines.begin_test_session_watched_by("XRAY_VLESS_REALITY", engine_stand_in(), Box::new(SaysGone(Some(1066))));
-        engines.reconnect_hold.arm(g, plan);
+        engines.reconnect_hold.arm(g, plan, false);
         // The report may have come before the arm; the poll's teardown
         // path is not taken here, so engage as the watch would have.
         engines.reconnect_hold.engage(g, "the watch's report");
@@ -7080,6 +7107,178 @@ mod helper_tests {
         assert!(!engines.reconnect_hold.holding(), "a running tunnel was left held");
         assert_eq!(hold.closed(), vec![7000]);
         end_test_session(&mut engines);
+    }
+
+    /// The status poll finding the tunnel adapter gone lets go of the
+    /// confinement -- and holds an armed session first. On the VM that
+    /// check got there before the engine watch's report in 4 of about 14
+    /// kills, let go of the confinement with no hold in, and traffic left
+    /// at the NIC 0.39 s after the kill, until the watch's hold went in.
+    /// The dropped session, still in the slot, is not a tunnel landed.
+    #[test]
+    fn a_tunnel_adapter_gone_under_an_armed_session_is_held_before_the_confinement_goes() {
+        let (mut engines, fake, hold, _g) = armed_session();
+        fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = engines.status();
+        assert_eq!(engines.ipv4_confined(), Some(false), "held over a tunnel adapter that is gone");
+        assert_eq!(fake.closed(), vec![1000]);
+        assert_eq!(hold.installs().len(), 1, "the confinement went with no hold put in");
+        assert_eq!(
+            hold.confinements_closed_at_install.lock().unwrap().clone(),
+            vec![0],
+            "the confinement went before the hold was in"
+        );
+        assert!(engines.reconnect_hold.holding());
+        assert!(
+            matches!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Holding { landed: false, .. })),
+            "the dropped session was said to be a tunnel landed"
+        );
+        engines.release_reconnect_hold("the customer disconnected", true);
+        assert_eq!(hold.closed(), vec![7000]);
+        end_test_session(&mut engines);
+    }
+
+    /// The same race for real, thirty-two armed sessions at once: each
+    /// engine killed with its tunnel adapter gone, the engine watch's report
+    /// and the adapter-gone check racing to let go of the confinement.
+    /// Whichever wins, the hold is in first, it goes in once, and the
+    /// confinement and the hold are each closed once.
+    #[test]
+    fn thirty_two_kills_racing_the_adapter_check_never_let_the_confinement_go_first() {
+        const AT_ONCE: usize = 32;
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE));
+        let handles: Vec<_> = (0..AT_ONCE)
+            .map(|i| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let (mut engines, fake, hold, g) = armed_session();
+                    fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    start.wait();
+                    kill_engine_behind_its_back(&mut engines);
+                    // At a different moment for each, around the report.
+                    std::thread::sleep(Duration::from_millis((i % 4) as u64));
+                    engines.let_go_if_the_tunnel_adapter_is_gone();
+                    assert!(
+                        wait_for(Duration::from_secs(5), || fake.closed() == vec![1000]),
+                        "session {i}: the confinement was not let go of exactly once: {:?}",
+                        fake.closed()
+                    );
+                    assert!(wait_for(Duration::from_secs(5), || recorded(&engines, g)), "session {i}: the watch never reported");
+                    assert_eq!(hold.installs().len(), 1, "session {i}: held {} times", hold.installs().len());
+                    assert_eq!(
+                        hold.confinements_closed_at_install.lock().unwrap().clone(),
+                        vec![0],
+                        "session {i}: the confinement went before the hold was in"
+                    );
+                    assert!(engines.end_dead_session(g));
+                    assert!(engines.reconnect_hold.holding(), "session {i}: the teardown of a drop let go of the hold");
+                    engines.release_reconnect_hold("the customer disconnected", true);
+                    assert_eq!(hold.closed(), vec![7000], "session {i}");
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("a session's thread panicked");
+        }
+    }
+
+    /// WireGuard's kill switch is wireguard.exe's own, and goes with it the
+    /// instant it dies: on the VM, UDP left 0.22 s and a whole HTTPS
+    /// exchange 0.50 s after the kill, before the hold the watch's report
+    /// put in. So an armed WireGuard session keeps the hold's filters
+    /// standing from its connect -- its tunnel, its server permitted -- and
+    /// its drop is held with nothing to install. A tunnel a reconnect brings
+    /// up under the hold is moved into the plan; letting go then leaves the
+    /// filters standing for it, never out and back in; the customer's
+    /// Disconnect takes them out.
+    #[test]
+    fn a_wireguard_sessions_hold_stands_before_its_drop_so_nothing_passes() {
+        use wireguard::ScmView;
+        let mut service_process = engine_stand_in();
+        let scm = Arc::new(std::sync::Mutex::new(ScmView::Running(Some(service_process.id()))));
+        let script = Arc::clone(&scm);
+        let hold = FakeHold::new(None);
+        let mut engines = engines_for_test();
+        engines.set_reconnect_hold_ops_for_test(hold.clone());
+        engines.reconnect_hold.set_wanted(true);
+        let g = engines.begin_test_wireguard_session(move || *script.lock().unwrap());
+        engines.arm_reconnect_hold(&wireguard_profile(), false, &[]);
+        assert_eq!(hold.installs().len(), 1, "nothing in force under the WireGuard tunnel before its drop");
+        assert!(engines.reconnect_hold.standing_for(g));
+        assert!(!engines.reconnect_hold.holding(), "standing under a live tunnel is not holding");
+        assert_eq!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Armed));
+        let standing = hold.installs()[0].clone();
+        assert!(standing.tunnels.contains(&HELD_TUNNEL), "the tunnel it stands under is not permitted: it would carry nothing");
+        assert!(standing.nodes.contains(&Ipv4Addr::new(203, 0, 113, 1)), "WireGuard's server is not permitted");
+        assert_eq!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Armed), "a status poll moved it");
+        assert_eq!(hold.installs().len(), 1);
+
+        // wireguard.exe dies, and its own filters with it.
+        *scm.lock().unwrap() = ScmView::Stopped(Some(1066));
+        service_process.kill().expect("killing the stand-in");
+        let _ = service_process.wait();
+        assert!(wait_for(Duration::from_secs(5), || recorded(&engines, g)), "the stopped tunnel service was not noticed");
+        assert!(engines.reconnect_hold.holding(), "the drop was not held");
+        assert_eq!(hold.installs().len(), 1, "the hold went in after the drop: a gap");
+        assert!(hold.closed().is_empty(), "the standing filters were taken out at the drop");
+        assert!(engines.end_dead_session(g));
+        assert!(engines.reconnect_hold.holding(), "the teardown of a drop let go of the hold");
+
+        // The reconnect's tunnel, on an adapter of its own.
+        let next_tunnel = 0x0035_0000_0200_0000;
+        *hold.tunnel.lock().unwrap() = Some(next_tunnel);
+        *hold.tunnels.lock().unwrap() = Some(vec![next_tunnel]);
+        let mut next_process = engine_stand_in();
+        let next_pid = next_process.id();
+        let g2 = engines.begin_test_wireguard_session(move || ScmView::Running(Some(next_pid)));
+        engines.arm_reconnect_hold(&wireguard_profile(), false, &[]);
+        assert_eq!(hold.installs().len(), 2, "the hold was not moved onto the new tunnel");
+        assert!(hold.installs()[1].tunnels.contains(&next_tunnel), "the new tunnel is not permitted: it would carry nothing");
+        assert_eq!(hold.closed(), vec![7000], "the old plan, after the new");
+        assert!(matches!(
+            engines.reconnect_hold_status(),
+            Some(neoconnect_ipc::ReconnectHold::Holding { landed: true, .. })
+        ));
+
+        // The app has proved it: the hold goes, its filters stay standing.
+        engines.release_reconnect_hold("the app proved a tunnel", false);
+        assert!(!engines.reconnect_hold.holding());
+        assert!(engines.reconnect_hold.standing_for(g2), "the new tunnel was left with nothing standing");
+        assert_eq!(hold.closed(), vec![7000], "taken out and put back: a moment with neither");
+        assert_eq!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Armed));
+
+        // The customer's Disconnect.
+        engines.release_reconnect_hold("the customer disconnected", true);
+        assert!(!engines.reconnect_hold.standing_for(g2));
+        assert_eq!(hold.closed(), vec![7000, 7001]);
+        end_test_session(&mut engines);
+        let _ = next_process.kill();
+        let _ = next_process.wait();
+    }
+
+    /// A connect of the customer's own over a WireGuard session -- another
+    /// location, picked while connected -- begins no hold: the filters
+    /// standing for the session it replaces go before its teardown, so a
+    /// connect that then fails leaves nothing blocked.
+    #[test]
+    fn a_customers_connect_over_a_standing_session_takes_its_filters_out_first() {
+        use wireguard::ScmView;
+        let mut service_process = engine_stand_in();
+        let pid = service_process.id();
+        let hold = FakeHold::new(None);
+        let mut engines = engines_for_test();
+        engines.set_reconnect_hold_ops_for_test(hold.clone());
+        engines.reconnect_hold.set_wanted(true);
+        let g = engines.begin_test_wireguard_session(move || ScmView::Running(Some(pid)));
+        engines.arm_reconnect_hold(&wireguard_profile(), false, &[]);
+        assert!(engines.reconnect_hold.standing_for(g));
+        engines.hold_through_connect(&wireguard_profile(), &[]);
+        assert!(!engines.reconnect_hold.standing_for(g), "a press of Connect left the machine held");
+        assert!(!engines.reconnect_hold.holding());
+        assert_eq!(hold.closed(), vec![7000]);
+        end_test_session(&mut engines);
+        let _ = service_process.kill();
+        let _ = service_process.wait();
     }
 
     /// Thirty-two armed sessions dying at once, each torn down while the

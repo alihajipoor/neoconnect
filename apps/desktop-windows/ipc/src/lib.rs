@@ -1459,6 +1459,14 @@ pub enum ReconnectHold {
         held_secs: u64,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dns_anywhere: bool,
+        /// A tunnel is up that came up after the drop this holds for, and
+        /// the hold's plan is that tunnel's: the gap it was for is over.
+        /// Never for the dropped session itself, which a status can still
+        /// report as connected for a moment while it is taken down -- so
+        /// `connected` beside a hold is no proof that anything landed.
+        /// Absent from an older service, which the app reads as not landed.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        landed: bool,
     },
     /// It should be holding and is not, and why. The internet is not
     /// blocked: the service fails open rather than strand the machine or
@@ -3174,11 +3182,15 @@ mod reconnect_hold_wire_tests {
         };
         assert_eq!(round(ReconnectHold::Armed), serde_json::json!({"state": "armed"}));
         assert_eq!(
-            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: false }),
+            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: false, landed: false }),
             serde_json::json!({"state": "holding", "held_secs": 12})
         );
         assert_eq!(
-            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: true }),
+            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: false, landed: true }),
+            serde_json::json!({"state": "holding", "held_secs": 12, "landed": true})
+        );
+        assert_eq!(
+            round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: true, landed: false }),
             serde_json::json!({"state": "holding", "held_secs": 12, "dns_anywhere": true})
         );
         assert_eq!(
