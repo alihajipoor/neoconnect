@@ -20,7 +20,7 @@
 
 use std::path::PathBuf;
 
-use tauri::utils::config::WindowConfig;
+use tauri::utils::config::{Color, WindowConfig};
 use tauri::{LogicalSize, Manager, PhysicalPosition, PhysicalSize};
 
 /// The main window's label (the config's window has none, so it is the
@@ -89,7 +89,26 @@ pub fn fit_main_window(app: &tauri::App) {
         return;
     };
     size_main_window(app, &window);
+    paint_base(&window);
     let _ = window.show();
+}
+
+/// The theme's base colour (theme.css `--base`), Pearl and Smoked.
+const BASE_LIGHT: Color = Color(0xf1, 0xf3, 0xf6, 255);
+const BASE_DARK: Color = Color(0x0b, 0x0e, 0x15, 255);
+
+/// The window is shown before the page has painted, and until it has, the
+/// first frame is the webview's own background -- white, for somebody whose
+/// Windows is dark. Painted the theme's base colour first, by the system's
+/// theme, which the app follows unless told otherwise (unverified on
+/// hardware; check on the PC and the VM, light and dark). A failure leaves
+/// the default: the window is shown either way.
+fn paint_base(window: &tauri::WebviewWindow) {
+    let base = match window.theme() {
+        Ok(tauri::Theme::Dark) => BASE_DARK,
+        _ => BASE_LIGHT,
+    };
+    let _ = window.set_background_color(Some(base));
 }
 
 fn size_main_window(app: &tauri::App, window: &tauri::WebviewWindow) {

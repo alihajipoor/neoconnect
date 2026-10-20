@@ -28,7 +28,7 @@ describe("the first-launch window is shown only once it is sized", () => {
 
   it("is sized and placed, then shown -- whatever the sizing did", () => {
     const body = fit.slice(fit.indexOf("pub fn fit_main_window"), fit.indexOf("fn size_main_window"));
-    expect(body).toMatch(/size_main_window\(app, &window\);\s*let _ = window\.show\(\);/);
+    expect(body).toMatch(/size_main_window\(app, &window\);\s*paint_base\(&window\);\s*let _ = window\.show\(\);/);
     const sizing = fit.slice(fit.indexOf("fn size_main_window"), fit.indexOf("/// Keeps the size the window is closed at"));
     expect(sizing).toContain("window.set_size(");
     expect(sizing).toContain("window.set_position(");
@@ -41,6 +41,23 @@ describe("the first-launch window is shown only once it is sized", () => {
     expect(firstCall).toBeGreaterThan(0);
     expect(firstCall).toBeLessThan(setup.indexOf("app.deep_link().register"));
     expect(firstCall).toBeLessThan(setup.indexOf("tauri::async_runtime::spawn"));
+  });
+
+  it("its first frame, before the page paints, is the theme's base colour, not the webview's white", () => {
+    const paint = fit.slice(fit.indexOf("fn paint_base"), fit.indexOf("}", fit.indexOf("set_background_color")) + 1);
+    expect(paint).toContain("window.theme()");
+    expect(paint).toContain("Ok(tauri::Theme::Dark) => BASE_DARK,");
+    expect(paint).toContain("let _ = window.set_background_color(Some(base));");
+    // The same colours as theme.css's --base, light and dark.
+    const theme = read("../theme.css");
+    const hex = (name: "BASE_LIGHT" | "BASE_DARK") => {
+      const m = new RegExp(`const ${name}: Color = Color\\(0x(\\w\\w), 0x(\\w\\w), 0x(\\w\\w), 255\\);`).exec(fit);
+      expect(m, name).not.toBeNull();
+      return `#${m![1]}${m![2]}${m![3]}`;
+    };
+    const bases = [...theme.matchAll(/--base: (#[0-9a-f]{6});/g)].map((m) => m[1]);
+    expect(bases[0]).toBe(hex("BASE_LIGHT"));
+    expect(bases.slice(1)).toEqual([hex("BASE_DARK"), hex("BASE_DARK")]);
   });
 
   it("the single-instance hand-off still shows and focuses it", () => {
