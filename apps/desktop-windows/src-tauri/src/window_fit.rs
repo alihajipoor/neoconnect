@@ -9,14 +9,23 @@
 //!   monitor's work area: a 1920x1080 laptop at 150% has about 688 logical
 //!   pixels above the taskbar, so a 700px window does not fit at all.
 //!
-//! The window is created from the config before `setup()` runs, so the
-//! first resize may visibly jump; hiding it until sized would need a config
-//! change, which is ruled out. Whether it does is unverified until checked
-//! on the PC.
+//! The window is created from the config before `setup()` runs, so it was
+//! seen at the config's 940x700 for about 0.28 s before the resize
+//! (observed on the PC, 2026-10-20). It is now created hidden --
+//! `start_hidden`, which changes the config the app was built with in
+//! memory, in `run()`, and leaves tauri.conf.json alone -- and shown by
+//! `fit_main_window` once it has its size and place. Shown whatever
+//! happens: a sizing that fails leaves it at the config's size, never
+//! hidden.
 
 use std::path::PathBuf;
 
+use tauri::utils::config::WindowConfig;
 use tauri::{LogicalSize, Manager, PhysicalPosition, PhysicalSize};
+
+/// The main window's label (the config's window has none, so it is the
+/// default).
+const MAIN: &str = "main";
 
 /// The smallest window the layout is designed for (the medium layout).
 const MIN_W: f64 = 720.0;
@@ -62,12 +71,28 @@ fn size_file(dir: Result<PathBuf, tauri::Error>) -> Option<PathBuf> {
     dir.ok().map(|dir| dir.join(SIZE_FILE))
 }
 
-/// Sizes and centres the main window on the monitor it opened on. Any
-/// failure leaves the window as the config made it.
+/// Creates the main window hidden: it is shown once `fit_main_window` has
+/// sized it, so the config's size is never seen. In memory only -- the
+/// config file is not touched.
+pub fn start_hidden(windows: &mut [WindowConfig]) {
+    for window in windows.iter_mut().filter(|w| w.label == MAIN) {
+        window.visible = false;
+    }
+}
+
+/// Sizes and centres the main window on the monitor it opened on, then
+/// shows it -- after the size and the place are set, so the first frame
+/// anybody sees is the right one. Any failure in the sizing leaves the
+/// window as the config made it, and shows it all the same.
 pub fn fit_main_window(app: &tauri::App) {
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = app.get_webview_window(MAIN) else {
         return;
     };
+    size_main_window(app, &window);
+    let _ = window.show();
+}
+
+fn size_main_window(app: &tauri::App, window: &tauri::WebviewWindow) {
     let Ok(Some(monitor)) = window.current_monitor() else {
         return;
     };
@@ -164,6 +189,16 @@ mod tests {
         let ((w, h), _) = opening_size(None, (1280.0, 688.0));
         assert!((w - 1152.0).abs() < 1e-6);
         assert!((h - 619.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn creates_the_main_window_hidden_and_no_other() {
+        let mut windows = vec![WindowConfig::default(), WindowConfig::default()];
+        windows[1].label = "other".into();
+        assert!(windows.iter().all(|w| w.visible), "a window is visible by default");
+        start_hidden(&mut windows);
+        assert!(!windows[0].visible, "the main window waits to be sized");
+        assert!(windows[1].visible, "only the main window is held back");
     }
 
     #[test]

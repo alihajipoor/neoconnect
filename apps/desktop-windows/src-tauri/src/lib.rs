@@ -54,6 +54,13 @@ fn build_platform() -> &'static str {
 pub fn run() {
     let launch_url = std::env::args().find(|a| a.starts_with("neoconnect://"));
 
+    // The main window is created hidden and shown once `setup()` has sized
+    // it (window_fit.rs): it was seen at the config's size for a moment
+    // before. The config the app was built with is changed in memory here;
+    // tauri.conf.json is not.
+    let mut context = tauri::generate_context!();
+    window_fit::start_hidden(&mut context.config_mut().app.windows);
+
     tauri::Builder::default()
         // Must be registered first, so a duplicate launch is turned away
         // before it initialises anything else.
@@ -98,6 +105,12 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(LaunchDeepLink(launch_url))
         .setup(|app| {
+            // Wide on the redesign's first launch, as it was left after
+            // that, and never larger than the screen -- and only then shown.
+            // At runtime rather than in tauri.conf.json; see window_fit.rs.
+            // First, so nothing below can leave the window unshown.
+            window_fit::fit_main_window(app);
+
             // Static scheme registration in tauri.conf.json alone doesn't
             // actually take effect with the NSIS installer target this
             // project uses (a documented Tauri bug -- MSI is unaffected,
@@ -111,12 +124,6 @@ pub fn run() {
             // this app is Windows-only for now.
             #[cfg(desktop)]
             app.deep_link().register("neoconnect")?;
-
-            // Wide on the redesign's first launch, as it was left after
-            // that, and never larger than the screen. At runtime rather than
-            // in tauri.conf.json; see window_fit.rs.
-            window_fit::fit_main_window(app);
-
             // Tells the service this app is still here.
             //
             // The service tears a tunnel down when it has heard nothing
@@ -249,6 +256,6 @@ pub fn run() {
                 let _ = tauri::async_runtime::block_on(vpn::gaming_disarm());
             }
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
