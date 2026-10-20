@@ -41,7 +41,7 @@ import {
   type ClassifiedError,
 } from "@shared/lib/connection-errors";
 import { orderCandidates } from "@shared/lib/failover";
-import { Banner, Note, PillButton } from "@shared/components/ui";
+import { Banner, Note, PillButton, Presence } from "@shared/components/ui";
 import { Dialog, LocationSheet } from "@shared/components/overlay";
 import {
   ConnectOrb,
@@ -122,6 +122,7 @@ import {
 } from "@shared/lib/credential-cache";
 import { onLateConfig, refreshConnectionConfig } from "@shared/lib/connection-config";
 import { useRefreshOnResume } from "@shared/lib/resume";
+import { swapView } from "@shared/lib/view-transition";
 import {
   failedDial,
   outcomeFromError,
@@ -721,7 +722,17 @@ export function Dashboard({
   const appRootRef = useRef<HTMLDivElement>(null);
   const layout = useAppLayout(appRootRef);
   /** The main page, or the Locations page the nav opens. */
-  const [view, setView] = useState<"overview" | "locations">("overview");
+  const [view, setViewNow] = useState<"overview" | "locations">("overview");
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  /** The main page or the Locations page: the change slides like a change
+   * of page (lib/view-transition.ts), and asking for the one on screen
+   * changes nothing. */
+  const setView = (next: "overview" | "locations") => {
+    if (viewRef.current === next) return;
+    viewRef.current = next;
+    swapView(() => setViewNow(next), next === "locations" ? "forward" : "back");
+  };
   const [locSection, setLocSection] = useState<"explain" | undefined>(undefined);
   /** Flashes the tablet's locations panel when a press asks for the list. */
   const [panelFlash, setPanelFlash] = useState(0);
@@ -3239,35 +3250,43 @@ export function Dashboard({
   // none. Each neutral: the customer can still act.
   const banner = (
     <>
-      {error ? (
-        <Banner title={error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}>
-          <PillButton variant="ghost" size="sm" className="mt-2 self-start" onClick={() => void loadAll()}>
-            {t("dash.retry")}
-          </PillButton>
-        </Banner>
-      ) : null}
+      {/* Each rises in when it is needed and fades when it is not
+          (Presence): none of them says anything about the tunnel. */}
+      <Presence show={Boolean(error)}>
+        {error ? (
+          <Banner title={error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}>
+            <PillButton variant="ghost" size="sm" className="mt-2 self-start" onClick={() => void loadAll()}>
+              {t("dash.retry")}
+            </PillButton>
+          </Banner>
+        ) : null}
+      </Presence>
       {/* The numbers on screen are old, and connecting still works. */}
-      {!error && offlineSince !== null ? (
-        <Banner>
-          {offlineText(offlineReason, t).title !== null ? (
-            <b>{offlineText(offlineReason, t).title}</b>
-          ) : null}
-          {offlineText(offlineReason, t).detail !== null ? <span>{offlineText(offlineReason, t).detail}</span> : null}
-          <span>{t("dash.offlineHint", { when: formatDateTime(offlineSince, language) })}</span>
-        </Banner>
-      ) : null}
+      <Presence show={!error && offlineSince !== null}>
+        {!error && offlineSince !== null ? (
+          <Banner>
+            {offlineText(offlineReason, t).title !== null ? (
+              <b>{offlineText(offlineReason, t).title}</b>
+            ) : null}
+            {offlineText(offlineReason, t).detail !== null ? <span>{offlineText(offlineReason, t).detail}</span> : null}
+            <span>{t("dash.offlineHint", { when: formatDateTime(offlineSince, language) })}</span>
+          </Banner>
+        ) : null}
+      </Presence>
       {/* The plan has stopped working: said here, not only in the error a
           connect attempt produced, with the one thing to do about it. */}
-      {!error && endedState ? (
-        <Banner title={t(endedState.titleKey)}>
-          <span>{t(endedState.bodyKey)}</span>
-          {endedState.showPlansButton ? (
-            <PillButton size="sm" className="mt-2 self-start" onClick={onBrowsePlans}>
-              {t("dash.renewCta")}
-            </PillButton>
-          ) : null}
-        </Banner>
-      ) : null}
+      <Presence show={!error && Boolean(endedState)}>
+        {!error && endedState ? (
+          <Banner title={t(endedState.titleKey)}>
+            <span>{t(endedState.bodyKey)}</span>
+            {endedState.showPlansButton ? (
+              <PillButton size="sm" className="mt-2 self-start" onClick={onBrowsePlans}>
+                {t("dash.renewCta")}
+              </PillButton>
+            ) : null}
+          </Banner>
+        ) : null}
+      </Presence>
       {/* No plan. A store build cannot sell, and cannot point at where to
           buy either; what it must not do is leave the customer on a
           screen that explains nothing, so it says what state the account

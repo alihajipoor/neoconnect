@@ -11,8 +11,10 @@ import {
 import { collectDiagnostics, diagnosticsToText } from "../lib/repair";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
+import { swapView } from "../lib/view-transition";
+import { motionReduced } from "../lib/motion";
 import { formatDate, formatDateTime } from "../lib/locale-format";
-import { Card, CardHead, Message, PillButton, Tag } from "../components/ui";
+import { Card, CardHead, Message, PillButton, Skeleton, Tag } from "../components/ui";
 import { Page } from "../components/shell/Page";
 import { StillTrying } from "../components/StillTrying";
 import { cn } from "../lib/utils";
@@ -34,7 +36,9 @@ export function Support({ onBack }: { onBack: () => void }) {
   const { t } = useI18n();
   const [overview, setOverview] = useState<SupportOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<View>({ kind: "list" });
+  const [view, setShown] = useState<View>({ kind: "list" });
+  /** A conversation or a new message slides in; the list slides back. */
+  const setView = (next: View) => swapView(() => setShown(next), next.kind === "list" ? "back" : "forward");
 
   const load = useCallback(async () => {
     const result = await getSupportOverview();
@@ -64,6 +68,7 @@ export function Support({ onBack }: { onBack: () => void }) {
         <div className="flex flex-col items-center gap-3 py-10">
           <span className="nx-spin" aria-hidden />
           <StillTrying waiting={!error} />
+          {error ? null : <Skeleton card rows={2} className="w-full max-w-md" />}
         </div>
       ) : view.kind === "thread" ? (
         <ThreadView id={view.id} onChanged={load} />
@@ -215,8 +220,10 @@ function DiagnosticsCard() {
           </pre>
           <div className="nx-row2">
             <PillButton size="sm" onClick={() => void copy()}>
-              {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
-              {copied ? t("diag.copied") : t("diag.copy")}
+              {copied ? <Check className="nx-done-in" aria-hidden /> : <Copy aria-hidden />}
+              <span key={copied ? "done" : "copy"} className="nx-swap">
+                {copied ? t("diag.copied") : t("diag.copy")}
+              </span>
             </PillButton>
             <PillButton variant="ghost" size="sm" onClick={() => void collect()} disabled={busy} aria-busy={busy || undefined}>
               {t("diag.collect")}
@@ -349,6 +356,11 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  /** The messages the thread opened with. Any after them -- a reply sent,
+   * one a poll brought in -- arrives with a rise from its own side. */
+  const firstIds = useRef<Set<string> | null>(null);
+  if (thread && firstIds.current === null) firstIds.current = new Set(thread.messages.map((message) => message.id));
+  const scrolled = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -368,8 +380,11 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
 
   // Newest message in view whenever the count changes -- on open, and
   // when a poll brings a reply in.
+  // On open at once; a message that arrives after, smoothly.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
+    if (!thread) return;
+    bottomRef.current?.scrollIntoView({ block: "end", behavior: scrolled.current && !motionReduced() ? "smooth" : "auto" });
+    scrolled.current = true;
   }, [thread?.messages.length]);
 
   async function send() {
@@ -399,6 +414,7 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
           <>
             <span className="nx-spin" aria-hidden />
             <StillTrying waiting />
+            <Skeleton rows={3} className="w-full max-w-md" />
           </>
         )}
       </div>
@@ -415,7 +431,10 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
 
         <div className="nx-thread">
           {thread.messages.map((message) => (
-            <div key={message.id} className={cn("nx-bubble", message.fromAdmin ? "them" : "me")}>
+            <div
+              key={message.id}
+              className={cn("nx-bubble", message.fromAdmin ? "them" : "me", firstIds.current && !firstIds.current.has(message.id) && "nx-new")}
+            >
               <p dir="auto">{message.body}</p>
               <small>
                 {message.fromAdmin ? t("support.team") : t("support.you")} · {formatDateTime(message.createdAt, language)}

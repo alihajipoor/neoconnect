@@ -493,7 +493,13 @@ export default function App() {
         <BackupRouteChip />
       </div>
       <div className="nx-screen min-h-0 flex-1">
-        <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>
+        {/* Through the View Transitions API where the WebView has it
+            (Android's Chromium WebView; WKWebView from iOS 18), so the
+            bottom nav keeps still and its pill travels while the page
+            slides; the CSS slide where it does not. */}
+        <ScreenTransition screenKey={screen} viewTransitions>
+          {renderScreen()}
+        </ScreenTransition>
       </div>
     </div>
   );

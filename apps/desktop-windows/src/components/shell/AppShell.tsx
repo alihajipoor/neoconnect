@@ -175,6 +175,9 @@ export function AppShell(props: ShellProps) {
             <div className="nx-mtabs" role="group" aria-label={t("nav.main")}>
               {items.map((item) => (
                 <button key={item.id} type="button" aria-current={item.id === active ? "page" : undefined} onClick={item.go}>
+                  {/* The selected tab's pill: one at a time, and carried to
+                      the next tab across a page change (motion.css). */}
+                  {item.id === active ? <span className="nx-tabpill" aria-hidden /> : null}
                   {item.label}
                 </button>
               ))}
@@ -200,6 +203,7 @@ export function AppShell(props: ShellProps) {
           <Glass as="nav" strong className="nx-mnav" aria-label={t("nav.main")}>
             {items.map((item) => (
               <button key={item.id} type="button" aria-current={item.id === active ? "page" : undefined} onClick={item.go}>
+                {item.id === active ? <span className="nx-tabpill" aria-hidden /> : null}
                 {item.icon}
                 {item.id === "overview" ? t("nav.home") : item.label}
               </button>

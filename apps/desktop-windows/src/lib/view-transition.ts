@@ -27,6 +27,37 @@ export function viewTransitionsAvailable(doc: Document | undefined = typeof docu
   return typeof vt === "function" && doc.documentElement.dataset.motion !== "reduce" && doc.visibilityState !== "hidden";
 }
 
+/** How long the fallback's mark stays on <html>: the snappy spring, with
+ * room. */
+export const VIEW_IN_MS = 600;
+
+/** A change of view inside a screen -- the main page to the Locations page,
+ * Settings to one of its pages, Support's list to a conversation, a plan to
+ * its payment -- animated like a change of screen: by a view transition
+ * where the engine has one, and otherwise by marking <html> for one frame's
+ * worth of CSS (`data-view-in`, motion.css), which slides the new view in
+ * from the side it logically comes from, or fades it under reduced motion.
+ * The update always runs, at once. */
+export function swapView(update: () => void, direction: "forward" | "back" = "forward"): void {
+  if (viewTransitionsAvailable()) {
+    withViewTransition(update, direction);
+    return;
+  }
+  if (typeof document === "undefined") {
+    update();
+    return;
+  }
+  const root = document.documentElement;
+  // Off first, so a second change inside the window starts its own slide.
+  delete root.dataset.viewIn;
+  void root.offsetWidth;
+  root.dataset.viewIn = direction;
+  flushSync(update);
+  setTimeout(() => {
+    if (root.dataset.viewIn === direction) delete root.dataset.viewIn;
+  }, VIEW_IN_MS);
+}
+
 /** Runs `update` inside a view transition, or at once. `direction` is
  * which way the new view arrives from ("forward" toward the inline end). */
 export function withViewTransition(update: () => void, direction: "forward" | "back" = "forward"): void {

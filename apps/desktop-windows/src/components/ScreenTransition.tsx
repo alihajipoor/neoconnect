@@ -40,8 +40,9 @@ const DEPTH: Record<string, number> = {
   support: 2,
 };
 
-/** Matches the CSS below. Long enough to read as movement, short enough
- * that it never feels like waiting for the app. */
+/** How long the leaving screen is kept: its exit (`--dur-exit`, 180ms;
+ * theme.css `.screen-leave`) with room. The arriving one takes the snappy
+ * spring, unhurried by this. */
 const DURATION_MS = 220;
 
 export function ScreenTransition({
@@ -54,8 +55,8 @@ export function ScreenTransition({
   /** Hand the change to the View Transitions API where the engine has it
    * (lib/view-transition.ts): the outgoing screen is a snapshot, so it is
    * not kept mounted, and the incoming one slides in on the snappy spring.
-   * The CSS below stays the fallback. Off for the phone until its own
-   * phase of the redesign. */
+   * The CSS below stays the fallback. On for the desktop and, since the
+   * motion pass, the phone. */
   viewTransitions?: boolean;
 }) {
   const [current, setCurrent] = useState({ key: screenKey, node: children });
@@ -115,13 +116,12 @@ export function ScreenTransition({
         // Absolutely positioned so the two screens overlap for the
         // handover instead of stacking and shoving the layout down.
         // aria-hidden and inert: it is on its way out, and a screen
-        // reader or a stray tap should not reach it.
+        // reader or a stray tap should not reach it. A boolean: React 19
+        // reads `inert=""` as false, which left it reachable.
         <div
           key={leaving.key}
           aria-hidden="true"
-          // @ts-expect-error -- `inert` is valid HTML that React's types
-          // have not caught up with on this version.
-          inert=""
+          inert
           className={`absolute inset-0 h-full ${back ? "screen-leave-back" : "screen-leave"}`}
         >
           {leaving.node}

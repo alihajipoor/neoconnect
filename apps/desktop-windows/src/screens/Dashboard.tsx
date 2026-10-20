@@ -91,6 +91,7 @@ import {
 import { sessionGeneration } from "../lib/session-end";
 import { onLateConfig, refreshConnectionConfig } from "../lib/connection-config";
 import { useRefreshOnResume } from "../lib/resume";
+import { swapView } from "../lib/view-transition";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
@@ -156,7 +157,7 @@ import {
   type IntentState,
   type PressAction,
 } from "../lib/connect-intent";
-import { Banner, Note, PillButton, Segmented } from "../components/ui";
+import { Banner, Note, PillButton, Presence, Segmented } from "../components/ui";
 import { Dialog, LocationSheet } from "../components/overlay";
 import { Page, PageScene } from "../components/shell/Page";
 import { AppShell } from "../components/shell/AppShell";
@@ -788,7 +789,17 @@ export function Dashboard({
    * protocol's hint and what the evidence means (design-system.md 4.8).
    * Drawn by this screen, so a pick there goes through the same
    * confirmation and the same wiring as one in the panel. */
-  const [view, setView] = useState<"overview" | "locations">("overview");
+  const [view, setViewNow] = useState<"overview" | "locations">("overview");
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  /** The main page or the Locations page: the change slides like a change
+   * of page (lib/view-transition.ts), and asking for the one on screen
+   * changes nothing. */
+  const setView = (next: "overview" | "locations") => {
+    if (viewRef.current === next) return;
+    viewRef.current = next;
+    swapView(() => setViewNow(next), next === "locations" ? "forward" : "back");
+  };
   const [locSection, setLocSection] = useState<"explain" | undefined>(undefined);
   /** The switch confirmation open, and how it is answered (`confirmPick`). */
   const [switchAsk, setSwitchAsk] = useState<{
@@ -4766,33 +4777,41 @@ export function Dashboard({
   const banner = (
     <>
       {update ? <div className="nx-upd-hero">{update}</div> : null}
-      {error ? (
-        <Banner title={error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}>
-          <PillButton variant="ghost" size="sm" className="mt-2 self-start" onClick={() => void loadAll()}>
-            {t("dash.retry")}
-          </PillButton>
-        </Banner>
-      ) : null}
-      {/* The numbers on screen are old, and connecting still works. */}
-      {offlineSince !== null ? (
-        <Banner>
-          {offlineText(offlineReason, t).title !== null ? (
-            <b>{offlineText(offlineReason, t).title}</b>
-          ) : null}
-          {offlineText(offlineReason, t).detail !== null ? <span>{offlineText(offlineReason, t).detail}</span> : null}
-          <span>{t("dash.offlineHint", { when: formatDateTime(offlineSince, language) })}</span>
-        </Banner>
-      ) : null}
-      {endedState ? (
-        <Banner title={t(endedState.titleKey)}>
-          <span>{t(endedState.bodyKey)}</span>
-          {endedState.showPlansButton ? (
-            <PillButton size="sm" className="mt-2 self-start" onClick={onBrowsePlans}>
-              {t("dash.renewCta")}
+      {/* Each rises in when it is needed and fades when it is not
+          (Presence): none of them says anything about the tunnel. */}
+      <Presence show={Boolean(error)}>
+        {error ? (
+          <Banner title={error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}>
+            <PillButton variant="ghost" size="sm" className="mt-2 self-start" onClick={() => void loadAll()}>
+              {t("dash.retry")}
             </PillButton>
-          ) : null}
-        </Banner>
-      ) : null}
+          </Banner>
+        ) : null}
+      </Presence>
+      {/* The numbers on screen are old, and connecting still works. */}
+      <Presence show={offlineSince !== null}>
+        {offlineSince !== null ? (
+          <Banner>
+            {offlineText(offlineReason, t).title !== null ? (
+              <b>{offlineText(offlineReason, t).title}</b>
+            ) : null}
+            {offlineText(offlineReason, t).detail !== null ? <span>{offlineText(offlineReason, t).detail}</span> : null}
+            <span>{t("dash.offlineHint", { when: formatDateTime(offlineSince, language) })}</span>
+          </Banner>
+        ) : null}
+      </Presence>
+      <Presence show={Boolean(endedState)}>
+        {endedState ? (
+          <Banner title={t(endedState.titleKey)}>
+            <span>{t(endedState.bodyKey)}</span>
+            {endedState.showPlansButton ? (
+              <PillButton size="sm" className="mt-2 self-start" onClick={onBrowsePlans}>
+                {t("dash.renewCta")}
+              </PillButton>
+            ) : null}
+          </Banner>
+        ) : null}
+      </Presence>
     </>
   );
   const bannerShowing = Boolean(error || offlineSince !== null || endedState);

@@ -3,13 +3,14 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Copy, CreditCard, Gauge, HardDrive, MonitorSmartphone, Wallet } from "lucide-react";
 import { createSubscription, getPlans, getSubscriptions, startPayment } from "../lib/customer";
 import type { PaymentProvider, PaymentStart, Subscription, SubscriptionPlan } from "../lib/types";
-import { Card, Message, PillButton, Tag } from "../components/ui";
+import { Card, Message, PillButton, Skeleton, Tag } from "../components/ui";
 import { Page } from "../components/shell/Page";
 import { RedeemVoucher } from "../components/RedeemVoucher";
 import { formatAgo, formatDate, formatNumber, formatPrice, formatSize } from "../lib/locale-format";
 import { loadSnapshot } from "../lib/credential-cache";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
+import { swapView } from "../lib/view-transition";
 import { StillTrying } from "../components/StillTrying";
 import { useRelayMode } from "../components/BackupRoute";
 
@@ -151,7 +152,8 @@ export function Plans({
         setError(t("plans.browserFailed"));
       }
     }
-    setStage({ name: "awaiting", payment: payment.data });
+    // The payment step slides in, the way a step forward does.
+    swapView(() => setStage({ name: "awaiting", payment: payment.data }), "forward");
   }
 
   /** Retry the browser handoff, reporting failure instead of swallowing
@@ -203,8 +205,10 @@ export function Plans({
                   <b dir="ltr">{payment.payAddress}</b>
                 </div>
                 <PillButton variant="ghost" size="sm" onClick={() => void copyAddress(payment.payAddress)}>
-                  {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
-                  {copied ? t("plans.copied") : t("plans.copyAddress")}
+                  {copied ? <Check className="nx-done-in" aria-hidden /> : <Copy aria-hidden />}
+                  <span key={copied ? "done" : "copy"} className="nx-swap">
+                    {copied ? t("plans.copied") : t("plans.copyAddress")}
+                  </span>
                 </PillButton>
               </>
             )}
@@ -278,10 +282,19 @@ export function Plans({
           whichever plan came first, the cheapest, which said nothing true. */}
       <div className="nx-plans">
         {limited ? null : plans === null ? (
-          <div>
-            <p className="nx-csub">{t("plans.loading")}</p>
-            <StillTrying waiting={error === null} className="mt-2 text-left" />
-          </div>
+          <>
+            <div>
+              <p className="nx-csub">{t("plans.loading")}</p>
+              <StillTrying waiting={error === null} className="mt-2 text-left" />
+            </div>
+            {/* The shape of the plans to come, while they are read. */}
+            {error === null ? (
+              <>
+                <Skeleton card rows={2} />
+                <Skeleton card rows={2} />
+              </>
+            ) : null}
+          </>
         ) : plans.length === 0 ? (
           <Card>
             <p className="nx-csub">{t("plans.none")}</p>

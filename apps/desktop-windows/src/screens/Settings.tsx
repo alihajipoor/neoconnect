@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { changePassword, deleteAccount } from "../lib/auth";
 import { getMe } from "../lib/customer";
+import { swapView } from "../lib/view-transition";
 import type { Customer } from "../lib/types";
 import {
   BackupRouteSection,
@@ -171,6 +172,9 @@ export function Settings({
 }) {
   const { t, language, setLanguage } = useI18n();
   const [sub, setSub] = useState<SubView | null>(null);
+  /** One of Settings' own pages, slid in from the side it lies on; back
+   * slides the other way (lib/view-transition.ts). */
+  const openSub = (next: SubView | null) => swapView(() => setSub(next), next === null ? "back" : "forward");
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [version, setVersion] = useState<string | null>(null);
   const [askSignOut, setAskSignOut] = useState(false);
@@ -219,7 +223,7 @@ export function Settings({
       repair: t("repair.title"),
     };
     return (
-      <Page title={titles[sub]} back={() => setSub(null)} backAlways backLabel={t("settings.title")} data-settings-sub={sub}>
+      <Page title={titles[sub]} back={() => openSub(null)} backAlways backLabel={t("settings.title")} data-settings-sub={sub}>
         <div className="nx-sub">
           <div className="nx-stack">
             {sub === "gaming" ? gamingSection : null}
@@ -311,7 +315,7 @@ export function Settings({
                 label={t("set.gaming")}
                 tag={<span className="nx-ntag">{t("set.beta")}</span>}
                 hint={t("set.gamingHint")}
-                onClick={() => setSub("gaming")}
+                onClick={() => openSub("gaming")}
               />
             ) : null}
             {customSection ? (
@@ -320,7 +324,7 @@ export function Settings({
                 label={platform === "android" ? t("set.perApp") : t("set.custom")}
                 tag={windows ? <span className="nx-ntag">{t("set.beta")}</span> : undefined}
                 hint={t("set.customHint")}
-                onClick={() => setSub("custom")}
+                onClick={() => openSub("custom")}
               />
             ) : platform === "ios" ? (
               // Said plainly, not hidden: the system decides this on iPhone.
@@ -420,7 +424,7 @@ export function Settings({
             icon={<KeyRound />}
             label={socialOnly ? t("setpw.title") : t("set.password")}
             value={socialOnly ? undefined : t("set.change")}
-            onClick={() => setSub("password")}
+            onClick={() => openSub("password")}
           />
           {customer !== null && customer.hasRecoveryCode !== undefined ? (
             <Row
@@ -428,7 +432,7 @@ export function Settings({
               label={t("set.recovery")}
               hint={customer.hasRecoveryCode ? t("recovery.has") : t("recovery.none")}
               value={customer.hasRecoveryCode ? undefined : t("set.create")}
-              onClick={() => setSub("recovery")}
+              onClick={() => openSub("recovery")}
             />
           ) : null}
           {onOpenPlans ? (
@@ -449,7 +453,7 @@ export function Settings({
         </ListGroup>
 
         <ListGroup title={t("set.troubleshoot")}>
-          {windows ? <Row icon={<Wrench />} label={t("set.repair")} hint={t("set.repairHint")} onClick={() => setSub("repair")} /> : null}
+          {windows ? <Row icon={<Wrench />} label={t("set.repair")} hint={t("set.repairHint")} onClick={() => openSub("repair")} /> : null}
           <Row icon={<LifeBuoy />} label={t("support.title")} hint={t("set.supportHint")} onClick={onOpenSupport} />
         </ListGroup>
 
