@@ -23,6 +23,9 @@ import { planLineText } from "../lib/shell-nav";
 import type { RouteOption, Subscription } from "../lib/types";
 import type { ShownFailure } from "../lib/failure-text";
 import type { SocialProvider } from "../lib/social-auth";
+import type { DeviceSettings } from "../screens/Settings";
+import type { AccountDevices, DailyUsage } from "../lib/customer";
+import type { SessionRecord } from "../lib/session-log";
 
 /** DEV ONLY: the screens of phase 2 in the preview -- sign-in and its steps,
  * and the signed-in pages in the shell -- each drawn by the real component.
@@ -48,6 +51,8 @@ export const PAGE_SCREENS: Record<string, string> = {
   verify: "Verify email",
   settings: "Settings",
   activity: "Activity",
+  activityLog: "Activity, session log on",
+  activityFailed: "Activity, account not reached",
   activityEmpty: "Activity, network unknown",
   plans: "Plans",
   support: "Support",
@@ -58,6 +63,8 @@ const NAV: Record<string, NavId> = {
   locations: "locations",
   settings: "settings",
   activity: "activity",
+  activityLog: "activity",
+  activityFailed: "activity",
   activityEmpty: "activity",
   plans: "none",
   support: "none",
@@ -65,6 +72,46 @@ const NAV: Record<string, NavId> = {
 };
 
 const noop = () => undefined;
+
+/** DEV ONLY: Windows' device rows, answered here (Settings' `DeviceSettings`). */
+const PREVIEW_DEVICE: DeviceSettings = {
+  autostart: { read: async () => true, write: async (on) => on },
+  autoConnect: true,
+  notifications: { setting: async () => "enabled" },
+  reconnectHold: { apply: async () => undefined },
+};
+
+const DAY_MS = 86_400_000;
+const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+/** DEV ONLY: the account's devices and a fortnight of usage, in the
+ * backend's shapes (docs/account-activity.md). */
+const SAMPLE_DEVICES: AccountDevices = {
+  inUseKnown: true,
+  devices: [
+    { id: "d1", thisDevice: true, label: null, platform: "windows", signedInAt: isoAgo(17 * DAY_MS), lastSeenAt: isoAgo(60_000), inUse: { since: isoAgo(3_600_000), lastSeen: isoAgo(30_000) } },
+    { id: "d2", thisDevice: false, label: "Pixel 7", platform: "android", signedInAt: isoAgo(21 * DAY_MS), lastSeenAt: isoAgo(5 * 3_600_000), inUse: null },
+    { id: "d3", thisDevice: false, label: null, platform: "ios", signedInAt: isoAgo(3 * DAY_MS), lastSeenAt: isoAgo(DAY_MS), inUse: null },
+  ],
+};
+
+function sampleUsage(): DailyUsage {
+  const days = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date(Date.now() - (13 - i) * DAY_MS).toISOString().slice(0, 10);
+    const down = i === 4 ? 0 : Math.round((0.4 + 0.6 * Math.abs(Math.sin(i * 1.3))) * 1.6e9);
+    return { date: d, bytesDown: String(down), bytesUp: String(Math.round(down / 14)) };
+  });
+  return { subscriptionId: null, timeZone: "Asia/Tehran", from: days[0].date, to: days[13].date, asOf: isoAgo(90_000), days };
+}
+
+function sampleLog(): SessionRecord[] {
+  const at = (h: number) => Date.now() - h * 3_600_000;
+  return [
+    { id: "s1", start: at(50), end: at(48.5), open: false, routeId: "de-stealth", protocol: "XRAY_VLESS_TLS", transport: "WS", rxBytes: 1.4e9, txBytes: 6.1e7, ended: "disconnected" },
+    { id: "s2", start: at(26), end: null, open: false, routeId: "fi-reality", protocol: "XRAY_VLESS_REALITY", rxBytes: null, txBytes: null, ended: null },
+    { id: "s3", start: at(3), end: at(2.2), open: false, routeId: "de-wg", protocol: "WIREGUARD", rxBytes: 3.2e8, txBytes: 1.2e7, ended: "lost" },
+  ];
+}
 
 /** The failures a blocked network gives sign-in, the longest of each kind:
  * the network's block page, and nothing answering, the backup server
@@ -193,9 +240,28 @@ export function PreviewPage({
         onOpenActivity={noop}
         onSignOut={noop}
         platform={phone ? "android" : "windows"}
+        device={phone ? undefined : PREVIEW_DEVICE}
       />
-    ) : screen === "activity" || screen === "activityEmpty" ? (
-      <ActivityView data={activity} onOpenPlans={noop} />
+    ) : screen === "activity" || screen === "activityEmpty" || screen === "activityLog" || screen === "activityFailed" ? (
+      <ActivityView
+        data={activity}
+        devices={screen === "activityFailed" ? { state: "failed", noAnswer: true } : { state: "ok", data: SAMPLE_DEVICES }}
+        usage={screen === "activityFailed" ? { state: "failed", noAnswer: false } : { state: "ok", data: sampleUsage() }}
+        log={
+          phone
+            ? undefined
+            : {
+                enabled: screen === "activityLog",
+                loaded: true,
+                records: screen === "activityLog" ? sampleLog() : [],
+                onEnabled: noop,
+                onClear: noop,
+              }
+        }
+        onRetryDevices={noop}
+        onRetryUsage={noop}
+        onOpenPlans={noop}
+      />
     ) : screen === "plans" ? (
       <Plans onActivated={noop} onBack={noop} />
     ) : screen === "support" ? (
