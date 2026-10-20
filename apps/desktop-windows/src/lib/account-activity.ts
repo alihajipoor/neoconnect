@@ -76,9 +76,35 @@ export interface UsageChart {
   readonly today: UsageBar | null;
 }
 
-/** A decimal string from the server, exactly; anything else is 0n. */
+const DECIMAL = /^\d+$/;
+
+/** A decimal string from the server, exactly; anything else is 0n -- which
+ * is why no day reaches here that `usageReadable` has not passed. */
 export function bytesOf(value: string): bigint {
-  return /^\d+$/.test(value) ? BigInt(value) : 0n;
+  return DECIMAL.test(value) ? BigInt(value) : 0n;
+}
+
+/** Whether every day of a usage answer says its date and both counts as
+ * the contract has them. One that does not -- null, a number, an error
+ * string from something in between -- would otherwise be drawn as a day
+ * of 0 bytes and lower the total, a number nothing measured. */
+export function usageReadable(usage: unknown): usage is DailyUsage {
+  if (usage === null || typeof usage !== "object") return false;
+  const days = (usage as { days?: unknown }).days;
+  if (!Array.isArray(days)) return false;
+  return days.every((day: unknown) => {
+    if (day === null || typeof day !== "object") return false;
+    const { date, bytesDown, bytesUp } = day as Record<string, unknown>;
+    return typeof date === "string" && typeof bytesDown === "string" && DECIMAL.test(bytesDown) && typeof bytesUp === "string" && DECIMAL.test(bytesUp);
+  });
+}
+
+/** The usage card's data: an answer with any day it cannot read is the
+ * card's "could not be read", never a chart. */
+export function usageLoadable(result: ApiResult<DailyUsage>): Loadable<DailyUsage> {
+  const loaded = loadableFrom(result);
+  if (loaded.state === "ok" && !usageReadable(loaded.data)) return { state: "failed", noAnswer: false };
+  return loaded;
 }
 
 export function usageChart(usage: DailyUsage): UsageChart {

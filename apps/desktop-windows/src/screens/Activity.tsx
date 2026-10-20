@@ -28,6 +28,7 @@ import {
   loadableFrom,
   USAGE_DAYS,
   usageChart,
+  usageLoadable,
   type DeviceSignOutOutcome,
   type Loadable,
 } from "../lib/account-activity";
@@ -169,7 +170,7 @@ async function readUsage(): Promise<Loadable<DailyUsage>> {
   const zone = deviceTimeZone();
   let result = await getDailyUsage(USAGE_DAYS, zone);
   if (!result.ok && result.code === "UNKNOWN_TIME_ZONE" && zone !== "UTC") result = await getDailyUsage(USAGE_DAYS, "UTC");
-  return loadableFrom(result);
+  return usageLoadable(result);
 }
 
 /** The session log, where this platform records it. */

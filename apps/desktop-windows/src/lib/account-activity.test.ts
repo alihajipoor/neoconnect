@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
-import { bytesOf, deviceKind, deviceSignOutOutcome, loadableFrom, usageChart } from "./account-activity";
+import { bytesOf, deviceKind, deviceSignOutOutcome, loadableFrom, usageChart, usageLoadable, usageReadable } from "./account-activity";
 import type { AccountDevices, DailyUsage } from "./customer";
 import { I18nProvider } from "./i18n";
 import { formatDay } from "./locale-format";
@@ -72,6 +72,18 @@ describe("daily usage", () => {
   it("reads anything but a decimal string as nothing", () => {
     expect(bytesOf("-5")).toBe(0n);
     expect(bytesOf("1e9")).toBe(0n);
+  });
+
+  it("calls an answer with one malformed day unreadable, never a 0-byte day", () => {
+    expect(usageLoadable({ ok: true, data: USAGE })).toEqual({ state: "ok", data: USAGE });
+    for (const bad of [null, 5, "error", "-1", "1e9", undefined]) {
+      const days = [USAGE.days[0], { ...USAGE.days[1], bytesDown: bad }, USAGE.days[2]];
+      const data = { ...USAGE, days } as unknown as typeof USAGE;
+      expect(usageReadable(data), String(bad)).toBe(false);
+      expect(usageLoadable({ ok: true, data }), String(bad)).toEqual({ state: "failed", noAnswer: false });
+    }
+    expect(usageReadable({ days: "none" })).toBe(false);
+    expect(usageReadable({ ...USAGE, days: [null] })).toBe(false);
   });
 
   it("names days in the reader's calendar without moving them across midnight", () => {
