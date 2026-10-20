@@ -29,10 +29,22 @@ describe("the phone names the route a tunnel found up is on", () => {
   const adopt = body("async function adoptPlatform(\n    sessionAtStart: number,");
   const walk = body("async function walkLadder(pass: PhonePass, options: LadderOptions): Promise<LadderOutcome> {");
 
-  it("records each dial where an app opened later can find it, before the engine can come up", () => {
-    const recorded = walk.indexOf("tunnelCredential.dialling(candidate);");
-    expect(recorded).toBeGreaterThan(walk.indexOf('passTunnel.current = "unproven";'));
-    expect(recorded).toBeLessThan(walk.indexOf("await connectIkev2({"));
+  it("records each dial where an app opened later can find it, on disk before the engine can come up", () => {
+    // Awaited: an app ended while the engine came up leaves the tunnel up,
+    // and a record still on the dial before would name it.
+    const recorded = walk.indexOf("await tunnelCredential.dialling(candidate);");
+    expect(recorded).toBeGreaterThan(0);
+    expect(dashboard.split("tunnelCredential.dialling(").length - 1).toBe(1);
+    // Ahead of the last check for a stop or a sign-out, so nothing is
+    // awaited between that check and the dial.
+    const check = walk.indexOf('if (sessionGeneration() !== sessionAtStart) return "failed";', recorded);
+    const unproven = walk.indexOf('passTunnel.current = "unproven";', recorded);
+    const dial = walk.indexOf("await connectIkev2({", recorded);
+    expect(check).toBeGreaterThan(recorded);
+    expect(walk.slice(recorded, check)).not.toContain("pass.stopped()");
+    expect(unproven).toBeGreaterThan(check);
+    expect(dial).toBeGreaterThan(unproven);
+    expect(walk.slice(unproven, dial)).not.toContain("await ");
   });
 
   it("fails closed: a load that puts the pin on screen names no tunnel by it", () => {

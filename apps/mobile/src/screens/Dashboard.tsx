@@ -2397,6 +2397,16 @@ export function Dashboard({
         }
       }
 
+      // Which credential the tunnel about to come up is on, on disk, for an
+      // app opened later over a tunnel the platform kept, which no pass of
+      // its own can name (`tunnelCredential`). Before the dial: an app
+      // ended while the engine comes up leaves the tunnel up, and a record
+      // still on the dial before would name it. Ahead of the check below,
+      // so nothing is awaited between it and the dial; a record of a dial
+      // the check then stops names nothing -- the stop stands down what is
+      // up, and the next dial records its own first.
+      await tunnelCredential.dialling(candidate);
+
       // Asked again right before dialling: the waits above -- the last
       // rung's teardown, a baseline walk -- run to seconds each, and a
       // stop or a sign-out pressed during them used to be noticed only
@@ -2412,9 +2422,6 @@ export function Dashboard({
       // Whatever the platform has up from here is this rung's engine, and
       // unproven until the egress check says otherwise (`passTunnel`).
       passTunnel.current = "unproven";
-      // And on disk, for an app opened later over a tunnel the platform
-      // kept, which no pass of its own can name.
-      tunnelCredential.dialling(candidate);
       try {
         // From here a tunnel to this server may be up; the health poll
         // needs to know how its endpoints are reached.

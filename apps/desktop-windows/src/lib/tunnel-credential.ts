@@ -16,14 +16,25 @@
  * app like the ladder's guard (`ladder-pass.ts`), and on disk as well,
  * because the service keeps a tunnel up when the window is closed and
  * the next start would otherwise name the pin over it just the same.
- * Only the ladder calls `vpn_connect`, and it records before calling, so
- * a tunnel the service reports up is the last recorded dial's -- unless
- * the service says otherwise, which it can about the protocol: a dial on
- * another protocol than the service is running is not the tunnel's, and
- * then no route is named at all (`credentialOnTunnel`).
+ * On disk before the dial goes out, not beside it: an app that exits or
+ * crashes while the engine comes up leaves the service's tunnel up, and a
+ * record still on the dial before -- the UK on Stealth, say, under a
+ * tunnel to Singapore on Stealth -- passes the protocol check below and
+ * names the wrong country at the next start.
  *
- * The phone keeps its own (`passTunnel` in apps/mobile's phone-pass.ts),
- * which its screen already adopts on return from Settings. */
+ * Only the ladder calls `vpn_connect`, and it records before calling, so
+ * a tunnel the service reports up is, nearly always, the last recorded
+ * dial's. Not always: the service refuses a dial that fails validation,
+ * or one cancelled as it begins, before it takes the old engine down, so
+ * a tunnel up when such a dial is made outlives a record that is not its
+ * own until the ladder tears it down. And the service can say otherwise
+ * about the protocol: a dial on another protocol than the service is
+ * running is not the tunnel's, and then no route is named at all
+ * (`credentialOnTunnel`).
+ *
+ * The phone keeps its own in memory (`passTunnel` in apps/mobile's
+ * phone-pass.ts), which its screen adopts on return from Settings, and
+ * this record for an app opened again over a tunnel the platform kept. */
 
 import { loadTunnelDial, saveTunnelDial } from "./failover-store";
 
@@ -36,14 +47,28 @@ export interface TunnelDial {
 /** The last dial this process made; null in an app just started. */
 const lastDial: { current: TunnelDial | null } = { current: null };
 
+/** The longest a dial waits for its record to reach the disk. A write
+ * takes milliseconds against a connect's seconds; a store that does not
+ * answer costs the name of a tunnel found up after a restart, never the
+ * dial. */
+export const DIAL_RECORD_WAIT_MS = 1_000;
+
 export const tunnelCredential = {
   /** A pass is about to dial `credential`: from here a tunnel the service
-   * reports up is on it. Kept in memory at once and written to disk in the
-   * background. */
-  dialling(credential: { id: string; protocol: string }): void {
+   * reports up is on it. Kept in memory at once -- a screen that asks from
+   * here on is told -- and settled once the record is on disk, or after
+   * `DIAL_RECORD_WAIT_MS`; the dial waits for that. Never rejects. */
+  async dialling(credential: { id: string; protocol: string }): Promise<void> {
     const dial = { id: credential.id, protocol: credential.protocol };
     lastDial.current = dial;
-    void saveTunnelDial(dial);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      saveTunnelDial(dial),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, DIAL_RECORD_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
   },
 
   /** The last dial: this process's own, or, in an app just started, the

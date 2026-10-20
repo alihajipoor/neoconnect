@@ -3317,6 +3317,16 @@ export function Dashboard({
                 splitTunnelSettings.apps,
               )
             : [];
+          // Which credential the tunnel about to come up is on, for a screen
+          // mounted while it is up -- back from Settings, or the app opened
+          // again -- which the service cannot tell (`tunnelCredential`). On
+          // disk before the dial: an app that exits while the engine comes
+          // up leaves the tunnel up, and a record still on the dial before
+          // would name it. Recorded ahead of the check below, which nothing
+          // may be awaited after before the dial; a record of a dial the
+          // check then stops names nothing -- the stop takes down what is up,
+          // and a newer pass records its own before dialling.
+          await tunnelCredential.dialling(candidate);
           // Asked again right before the connect. The settle, the names and
           // the IPv6 baseline above run to seventeen seconds or so, and a
           // stop that landed in them -- "Stop reconnecting", a location
@@ -3333,10 +3343,6 @@ export function Dashboard({
           // which endpoints it reaches around it.
           ladderPass.tunnelServer.current = tunnelServer;
           setEndpointTunnelServer(tunnelServer);
-          // And which credential it is on, for a screen mounted while it is
-          // up -- back from Settings, or the app opened again -- which the
-          // service cannot tell (`tunnelCredential`).
-          tunnelCredential.dialling(candidate);
           await invoke("vpn_connect", {
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),

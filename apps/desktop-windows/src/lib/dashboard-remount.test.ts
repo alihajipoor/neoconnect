@@ -207,10 +207,21 @@ describe("the Dashboard's wiring", () => {
     const name = fn("  function nameFoundTunnel(");
     const syncNaming = fn("  async function syncNamingTunnel(): Promise<ConnectionState> {");
 
-    it("records each dial outside the screen, before the engine can come up", () => {
-      const dialled = dashboard.indexOf("tunnelCredential.dialling(candidate);");
+    it("records each dial outside the screen, on disk, before the engine can come up", () => {
+      // Awaited: an app that exits while the engine comes up leaves the
+      // tunnel up, and a record still on the dial before -- two routes on
+      // one protocol pass the protocol check -- names the wrong country.
+      const dialled = dashboard.indexOf("await tunnelCredential.dialling(candidate);");
       expect(dialled).toBeGreaterThan(0);
-      expect(dialled).toBeLessThan(dashboard.indexOf('await invoke("vpn_connect", {'));
+      expect(dashboard.split("tunnelCredential.dialling(").length - 1).toBe(1);
+      // Ahead of the last check for a stop, which nothing may be awaited
+      // after before the dial (auto-reconnect.wiring.test.ts).
+      const check = dashboard.indexOf(
+        "if (stopped() || sessionGeneration() !== sessionAtStart || ladderGenerationRef.current !== generation) break;",
+        dialled,
+      );
+      expect(check).toBeGreaterThan(dialled);
+      expect(check).toBeLessThan(dashboard.indexOf('await invoke("vpn_connect", {'));
     });
 
     it("names the credential of the last dial when the service's protocol agrees, and no route when it cannot", () => {

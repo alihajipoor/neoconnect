@@ -29,7 +29,7 @@ const fileNamed = (name: string) => {
   }
   return data;
 };
-const store = { failing: false };
+const store = { failing: false, saved: null as Promise<void> | null };
 const unavailable = () => {
   if (store.failing) throw new Error("store unavailable");
 };
@@ -41,15 +41,19 @@ vi.mock("@tauri-apps/plugin-store", () => ({
       get: async (key: string) => (unavailable(), kept.get(key)),
       set: async (key: string, value: unknown) => (unavailable(), void kept.set(key, value)),
       delete: async (key: string) => (unavailable(), void kept.delete(key)),
-      save: async () => unavailable(),
+      save: async () => {
+        unavailable();
+        // A write still on its way to the disk, while a test holds it.
+        if (store.saved) await store.saved;
+      },
     };
   },
 }));
 
-const { credentialOnTunnel, tunnelCredential } = await import("./tunnel-credential");
+const { DIAL_RECORD_WAIT_MS, credentialOnTunnel, tunnelCredential } = await import("./tunnel-credential");
 const { displayedProtocol, displayedRoute, routeNameable } = await import("./displayed-route");
 
-/** Lets a fire-and-forget write land. */
+/** Lets whatever is ready run: a write that could land, would. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const ukWeb = {
@@ -86,6 +90,7 @@ const loadedCredential = (users: readonly (typeof ukWeb | typeof sgStealth)[]) =
 beforeEach(() => {
   for (const data of files.values()) data.clear();
   store.failing = false;
+  store.saved = null;
   tunnelCredential.reset();
 });
 
@@ -96,8 +101,8 @@ afterEach(() => {
 describe("a Dashboard mounted over a tunnel the ladder moved off the pin", () => {
   it("names the route the tunnel is on, not the pin, once back from Settings", async () => {
     // The pass: the pin first, refused; Singapore on Stealth next, landed.
-    tunnelCredential.dialling(ukWeb);
-    tunnelCredential.dialling(sgStealth);
+    await tunnelCredential.dialling(ukWeb);
+    await tunnelCredential.dialling(sgStealth);
     // Settings opened and closed: a new screen, which loads the pin's
     // credential and asks the service.
     let shown = loadedCredential(held);
@@ -154,11 +159,58 @@ describe("a Dashboard mounted over a tunnel the ladder moved off the pin", () =>
 
 describe("a fresh app over a tunnel the service kept up", () => {
   it("names the last dial, which outlives the process", async () => {
-    tunnelCredential.dialling(sgStealth);
-    await settle();
+    // On disk once the dial's record has settled -- nothing to wait for
+    // after it.
+    await tunnelCredential.dialling(sgStealth);
     // The window closed and opened again: nothing in memory.
     tunnelCredential.reset();
     expect(credentialOnTunnel(await tunnelCredential.last(), "XRAY_VLESS_REALITY", held)).toBe(sgStealth);
+  });
+
+  it("holds the dial until its record is on disk, so a crash during the connect leaves the right one", async () => {
+    // UK on Stealth recorded; then Singapore on Stealth dialled. Had the
+    // dial gone out before the write, an app that died while the engine
+    // came up would leave the tunnel to Singapore and the UK on disk --
+    // the same protocol, so nothing would catch it.
+    const ukStealth = { id: "pu-uk-reality", routeId: "uk-reality", protocol: "XRAY_VLESS_REALITY" as const };
+    await tunnelCredential.dialling(ukStealth);
+    let release!: () => void;
+    store.saved = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let dialled = false;
+    const recording = tunnelCredential.dialling(sgStealth).then(() => {
+      dialled = true;
+    });
+    // In memory at once: a screen asking now is told.
+    expect(await tunnelCredential.last()).toEqual({ id: sgStealth.id, protocol: sgStealth.protocol });
+    await settle();
+    expect(dialled).toBe(false);
+    release();
+    await recording;
+    expect(dialled).toBe(true);
+    tunnelCredential.reset();
+    expect(await tunnelCredential.last()).toEqual({ id: sgStealth.id, protocol: sgStealth.protocol });
+  });
+
+  it("never holds a dial longer than DIAL_RECORD_WAIT_MS for a store that does not answer", async () => {
+    vi.useFakeTimers();
+    try {
+      store.saved = new Promise<void>(() => undefined);
+      let dialled = false;
+      const recording = tunnelCredential.dialling(sgStealth).then(() => {
+        dialled = true;
+      });
+      await vi.advanceTimersByTimeAsync(DIAL_RECORD_WAIT_MS - 1);
+      expect(dialled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await recording;
+      expect(dialled).toBe(true);
+      // This process still knows what it dialled.
+      expect(await tunnelCredential.last()).toEqual({ id: sgStealth.id, protocol: sgStealth.protocol });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("names nothing when nothing was ever recorded", async () => {
@@ -168,8 +220,7 @@ describe("a fresh app over a tunnel the service kept up", () => {
 
   it("names nothing, and does not throw, when the record cannot be read or written", async () => {
     store.failing = true;
-    expect(() => tunnelCredential.dialling(sgStealth)).not.toThrow();
-    await settle();
+    await expect(tunnelCredential.dialling(sgStealth)).resolves.toBeUndefined();
     tunnelCredential.reset();
     expect(await tunnelCredential.last()).toBeNull();
   });
