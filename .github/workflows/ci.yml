@@ -83,6 +83,13 @@ jobs:
       - name: Dockerfiles copy what pnpm install reads
         run: node scripts/check-docker-install-inputs.mjs
 
+      # The copies of the signed endpoint lists go to a public repository
+      # that the apps will trust only as far as the signatures do. A copy
+      # that does not verify, or that walks a version back, is an outage
+      # for whoever fetches it. A stand-in panel and throwaway checkouts.
+      - name: Endpoint-list copies verify, never go backwards, hold nothing else
+        run: node --test scripts/endpoints/publish-copies.test.mjs
+
       - run: pnpm --filter @neoxify/backend prisma:generate
 
       # The one place a migration meets a real Postgres before production.
