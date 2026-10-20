@@ -788,6 +788,17 @@ pub struct VpnStatus {
     /// read -- the UI shows no number then, never a zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     traffic: Option<neoconnect_ipc::TunnelTraffic>,
+    /// Which problem `split_tunnel_problem` is, as a code the UI words in
+    /// both languages ("injectionRefused", "noReplies", "noAppTraffic",
+    /// "adapterGone", or "other" from a newer service, for which the UI
+    /// shows the service's own sentence). Absent with no problem.
+    #[serde(rename = "splitTunnelProblemCode", skip_serializing_if = "Option::is_none")]
+    split_tunnel_problem_code: Option<neoconnect_ipc::SplitTunnelProblemCode>,
+    /// How long the live session's engine has been up, in whole seconds:
+    /// the session timer for a tunnel this window did not bring up. Absent
+    /// with no session, or from an older service -- never a guess.
+    #[serde(rename = "sessionSecs", skip_serializing_if = "Option::is_none")]
+    session_secs: Option<u64>,
 }
 
 /// How long to wait for a server to answer before calling it unreachable.
@@ -1172,6 +1183,8 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             confinement_problem,
             reconnect_hold,
             traffic,
+            split_tunnel_problem_code,
+            session_secs,
         } => Ok(VpnStatus {
             connected,
             protocol,
@@ -1185,6 +1198,8 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             confinement_problem,
             reconnect_hold,
             traffic,
+            split_tunnel_problem_code,
+            session_secs,
         }),
         Response::Error { message } => Err(message),
         Response::Ok
@@ -1353,6 +1368,8 @@ mod gaming_contract {
             confinement_problem: None,
             reconnect_hold,
             traffic,
+            split_tunnel_problem_code: None,
+            session_secs: None,
         };
         let json = serde_json::to_value(status(
             Some(neoconnect_ipc::ReconnectHold::Holding { held_secs: 3 }),
@@ -1363,6 +1380,34 @@ mod gaming_contract {
         assert_eq!(json["traffic"], serde_json::json!({"rx_bytes": 10, "tx_bytes": 2}));
         let quiet = serde_json::to_value(status(None, None)).unwrap();
         assert!(quiet.get("reconnectHold").is_none() && quiet.get("traffic").is_none(), "{quiet}");
+    }
+
+    /// Custom mode's problem code and the session's age reach the webview
+    /// by the names the UI reads, and are absent when the service said
+    /// nothing -- never a code without its problem, never a zero age.
+    #[test]
+    fn the_problem_code_and_session_age_reach_the_webview_by_their_agreed_names() {
+        let status = |split_tunnel_problem_code, session_secs| VpnStatus {
+            connected: true,
+            protocol: Some("XRAY_VLESS_REALITY".into()),
+            health: TunnelHealth::Unknown,
+            split_tunnel_active: true,
+            split_tunnel_problem: Some("an English sentence".into()),
+            ipv6_blocked: false,
+            tunnel_dns_unprotected: false,
+            split_tunnel_restart_needed: Vec::new(),
+            ipv4_confined: None,
+            confinement_problem: None,
+            reconnect_hold: None,
+            traffic: None,
+            split_tunnel_problem_code,
+            session_secs,
+        };
+        let json = serde_json::to_value(status(Some(neoconnect_ipc::SplitTunnelProblemCode::NoReplies), Some(3_725))).unwrap();
+        assert_eq!(json["splitTunnelProblemCode"], "noReplies");
+        assert_eq!(json["sessionSecs"], 3_725);
+        let quiet = serde_json::to_value(status(None, None)).unwrap();
+        assert!(quiet.get("splitTunnelProblemCode").is_none() && quiet.get("sessionSecs").is_none(), "{quiet}");
     }
 
     /// `unknown` must survive the trip as itself. Folding it into `off`

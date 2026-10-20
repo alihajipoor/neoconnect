@@ -323,6 +323,8 @@ fn state_after_a_drop(ledger: &Ledger) -> Option<Response> {
         // thread is busy with the teardown.
         reconnect_hold: ledger.reconnect_hold_status(),
         traffic: None,
+        split_tunnel_problem_code: None,
+        session_secs: None,
     })
 }
 
@@ -1244,6 +1246,8 @@ fn fallback_state(ledger: &Ledger, seen: (bool, Option<String>, TunnelHealth), s
         reconnect_hold: ledger.reconnect_hold_status(),
         // Not read without the owning thread: nothing rather than a guess.
         traffic: None,
+        split_tunnel_problem_code: None,
+        session_secs: None,
     }
 }
 
@@ -1284,12 +1288,18 @@ async fn dispatch(
                 STATUS_LOCK_WAIT,
                 engines.run(|engines: &mut Engines, _| {
                     let (connected, protocol, health) = engines.status();
+                    // The code and the sentence from one look at the
+                    // counters, so they never disagree.
+                    let (split_tunnel_problem_code, split_tunnel_problem) = match engines.split_tunnel_complaint() {
+                        Some((code, sentence)) => (Some(code), Some(sentence)),
+                        None => (None, None),
+                    };
                     Response::State {
                         connected,
                         protocol,
                         health,
                         split_tunnel_active: engines.split_tunnel_running(),
-                        split_tunnel_problem: engines.split_tunnel_complaint(),
+                        split_tunnel_problem,
                         ipv6_blocked: engines.ipv6_blocked(),
                         tunnel_dns_unprotected: engines.tunnel_dns_unprotected(),
                         split_tunnel_restart_needed: engines.split_tunnel_restart_needed(),
@@ -1297,6 +1307,9 @@ async fn dispatch(
                         confinement_problem: engines.confinement_problem(),
                         reconnect_hold: engines.reconnect_hold_status(),
                         traffic: engines.traffic(),
+                        split_tunnel_problem_code,
+                        // Only over a session the status just found up.
+                        session_secs: if connected { engines.session_secs() } else { None },
                     }
                 }),
             )

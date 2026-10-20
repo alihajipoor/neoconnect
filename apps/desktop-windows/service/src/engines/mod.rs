@@ -346,6 +346,9 @@ struct Session {
     /// What the tunnel's adapter has carried since the session began, read
     /// on each status poll (`Engines::traffic`).
     traffic: traffic::SessionTraffic,
+    /// When the session was installed, its engine up: how long it has been
+    /// up, for an app that opens over it (`Engines::session_secs`).
+    began: Instant,
 }
 
 impl Session {
@@ -364,6 +367,7 @@ impl Session {
             rescan: None,
             lan_refused: None,
             traffic: traffic::SessionTraffic::default(),
+            began: Instant::now(),
         }
     }
 }
@@ -1518,9 +1522,17 @@ impl Engines {
     }
 
     /// What Custom mode's packet counters say is wrong, for the status
-    /// poll. `None` while it is healthy or not running.
-    pub fn split_tunnel_complaint(&self) -> Option<String> {
+    /// poll: the code the app words it by and the service's English
+    /// sentence, read together. `None` while it is healthy or not running.
+    pub fn split_tunnel_complaint(&self) -> Option<(neoconnect_ipc::SplitTunnelProblemCode, String)> {
         self.split_tunnel.complaint()
+    }
+
+    /// How long the live session's engine has been up, in whole seconds on
+    /// the monotonic clock -- for an app that opens over a tunnel it did
+    /// not bring up. `None` with no session.
+    pub fn session_secs(&self) -> Option<u64> {
+        self.active.peek().map(|s| s.began.elapsed().as_secs())
     }
 
     /// Where each selected application's traffic is leaving from. See
@@ -4136,6 +4148,20 @@ mod helper_tests {
             "ending a session left the redirect loop running -- this is the field bug"
         );
         assert!(slot.is_empty());
+    }
+
+    /// How long a session has been up is that session's own: nothing with
+    /// none, counted from its install, and gone with it -- an app opening
+    /// over the next one must never be handed the last one's age.
+    #[test]
+    fn session_age_is_the_sessions_own() {
+        let mut engines = Engines::new(PathBuf::new(), PathBuf::new());
+        assert_eq!(engines.session_secs(), None, "no session, no age");
+        engines.active.fill(test_session());
+        assert!(matches!(engines.session_secs(), Some(secs) if secs < 5), "counted from the install");
+        assert!(engines.end_session().is_some());
+        assert_eq!(engines.session_secs(), None, "the age outlived its session");
+        engines.unblock_ipv6();
     }
 
     /// What the session type is for: nothing that belongs to a session

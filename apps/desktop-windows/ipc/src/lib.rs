@@ -1326,6 +1326,20 @@ pub enum Response {
         /// service -- and never a made-up zero.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         traffic: Option<TunnelTraffic>,
+        /// Which of Custom mode's problems `split_tunnel_problem` is, as a
+        /// fact the app words in the customer's language -- the sentence
+        /// beside it is English, for support and for an app too old to
+        /// know the code. `None` exactly when `split_tunnel_problem` is,
+        /// and from a service too old to say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        split_tunnel_problem_code: Option<SplitTunnelProblemCode>,
+        /// How long the live session's engine has been up, in whole
+        /// seconds, on the service's monotonic clock: so an app that opens
+        /// over a tunnel it did not bring up can show how long it has
+        /// really been up rather than nothing. `None` with no session, or
+        /// from a service too old to say -- never a guess.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_secs: Option<u64>,
     },
     /// Where each selected application's traffic is leaving from.
     ///
@@ -1465,6 +1479,30 @@ pub enum ReconnectHoldProblem {
     /// mode -- so it was let go of before that one dialled.
     NotCovered,
     /// A reason this app does not know yet, from a newer service.
+    #[serde(other)]
+    Other,
+}
+
+/// What Custom mode's own counters say is wrong, as a code. The app has
+/// the words for each in both languages; the service's sentence travels
+/// beside it in English (`split_tunnel_problem`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SplitTunnelProblemCode {
+    /// Windows refused to inject the redirected packets, so the chosen
+    /// applications are not reaching the tunnel.
+    InjectionRefused,
+    /// The chosen applications' packets are redirected into the tunnel and
+    /// nothing comes back.
+    NoReplies,
+    /// The machine has traffic and none of it is from a chosen
+    /// application: usually the wrong executable was picked.
+    NoAppTraffic,
+    /// The tunnel adapter went away, the backstop switched interception
+    /// off, and the chosen applications are on the ordinary connection.
+    AdapterGone,
+    /// A problem this app does not know yet, from a newer service: the app
+    /// shows the service's own sentence.
     #[serde(other)]
     Other,
 }
@@ -2581,6 +2619,8 @@ mod tests {
             confinement_problem: None,
             reconnect_hold: None,
             traffic: None,
+            split_tunnel_problem_code: None,
+            session_secs: None,
         };
         let text = serde_json::to_string(&unsaid).unwrap();
         assert!(!text.contains("ipv4_confined") && !text.contains("confinement_problem"), "{text}");
@@ -3108,6 +3148,8 @@ mod reconnect_hold_wire_tests {
             confinement_problem: None,
             reconnect_hold: None,
             traffic: None,
+            split_tunnel_problem_code: None,
+            session_secs: None,
         };
         let json = serde_json::to_value(&quiet).unwrap();
         assert!(json.get("reconnect_hold").is_none() && json.get("traffic").is_none(), "{json}");
@@ -3152,5 +3194,70 @@ mod reconnect_hold_wire_tests {
         assert_eq!(json["rx_per_sec"], 2_000);
         assert_eq!(json["window_ms"], 1_000);
         assert_eq!(serde_json::from_value::<TunnelTraffic>(json).unwrap(), later);
+    }
+}
+
+#[cfg(test)]
+mod problem_code_and_session_age_wire_tests {
+    use super::*;
+
+    fn state(code: Option<SplitTunnelProblemCode>, session_secs: Option<u64>) -> Response {
+        Response::State {
+            connected: true,
+            protocol: Some("XRAY_VLESS_REALITY".into()),
+            health: TunnelHealth::Unknown,
+            split_tunnel_active: code.is_some(),
+            split_tunnel_problem: code.map(|_| "an English sentence".to_string()),
+            split_tunnel_restart_needed: Vec::new(),
+            ipv6_blocked: false,
+            tunnel_dns_unprotected: false,
+            ipv4_confined: None,
+            confinement_problem: None,
+            reconnect_hold: None,
+            traffic: None,
+            split_tunnel_problem_code: code,
+            session_secs,
+        }
+    }
+
+    /// The codes by the names the app's dictionary is keyed on.
+    #[test]
+    fn the_problem_codes_are_named_on_the_wire() {
+        for (code, word) in [
+            (SplitTunnelProblemCode::InjectionRefused, "injectionRefused"),
+            (SplitTunnelProblemCode::NoReplies, "noReplies"),
+            (SplitTunnelProblemCode::NoAppTraffic, "noAppTraffic"),
+            (SplitTunnelProblemCode::AdapterGone, "adapterGone"),
+        ] {
+            let json = serde_json::to_value(state(Some(code), Some(42))).unwrap();
+            assert_eq!(json["split_tunnel_problem_code"], word);
+            assert_eq!(json["session_secs"], 42);
+        }
+    }
+
+    /// A code a newer service adds reaches an older app as "other", with
+    /// the rest of the status intact; an older service's status says
+    /// nothing of either -- never a zero-second session.
+    #[test]
+    fn unknown_codes_read_as_other_and_older_statuses_say_nothing() {
+        let newer = r#"{"status":"state","connected":true,"split_tunnel_active":true,"split_tunnel_problem":"x","split_tunnel_problem_code":"somethingNew","session_secs":7}"#;
+        match serde_json::from_str::<Response>(newer).expect("parses") {
+            Response::State { split_tunnel_problem_code, session_secs, split_tunnel_active, .. } => {
+                assert_eq!(split_tunnel_problem_code, Some(SplitTunnelProblemCode::Other));
+                assert_eq!(session_secs, Some(7));
+                assert!(split_tunnel_active);
+            }
+            other => panic!("{other:?}"),
+        }
+        let older = r#"{"status":"state","connected":true,"protocol":"WIREGUARD"}"#;
+        match serde_json::from_str::<Response>(older).expect("parses") {
+            Response::State { split_tunnel_problem_code, session_secs, .. } => {
+                assert_eq!(split_tunnel_problem_code, None);
+                assert_eq!(session_secs, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        let quiet = serde_json::to_value(state(None, None)).unwrap();
+        assert!(quiet.get("split_tunnel_problem_code").is_none() && quiet.get("session_secs").is_none(), "{quiet}");
     }
 }
