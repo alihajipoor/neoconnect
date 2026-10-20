@@ -8,36 +8,47 @@ import { describe, expect, it } from "vitest";
 
 const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
 
-describe("the first-launch window is shown only once it is sized", () => {
+describe("the first-launch window is created at its size and place, and shown only then", () => {
   const lib = read("../../src-tauri/src/lib.rs");
   const fit = read("../../src-tauri/src/window_fit.rs");
   const conf = read("../../src-tauri/tauri.conf.json");
 
-  it("is created hidden, in memory, from the config the app was built with", () => {
+  it("is left out of the windows Tauri makes before setup, in memory, from the config the app was built with", () => {
     expect(lib).toContain("let mut context = tauri::generate_context!();");
-    expect(lib).toContain("window_fit::start_hidden(&mut context.config_mut().app.windows);");
-    expect(lib.indexOf("window_fit::start_hidden(")).toBeLessThan(lib.indexOf("tauri::Builder::default()"));
+    expect(lib).toContain("window_fit::defer_main_window(&mut context.config_mut().app.windows);");
+    expect(lib.indexOf("window_fit::defer_main_window(")).toBeLessThan(lib.indexOf("tauri::Builder::default()"));
     expect(lib).toContain(".run(context)");
     expect(lib).not.toContain(".run(tauri::generate_context!())");
-    expect(fit).toMatch(/pub fn start_hidden\(windows: &mut \[WindowConfig\]\) \{\s*for window in windows\.iter_mut\(\)\.filter\(\|w\| w\.label == MAIN\) \{\s*window\.visible = false;/);
+    expect(fit).toMatch(
+      /pub fn defer_main_window\(windows: &mut \[WindowConfig\]\) \{\s*for window in windows\.iter_mut\(\)\.filter\(\|w\| w\.label == MAIN\) \{\s*window\.create = false;\s*window\.visible = false;/,
+    );
   });
 
-  it("does not touch tauri.conf.json: no `visible` there", () => {
+  it("does not touch tauri.conf.json: no `visible` or `create` there", () => {
     expect(conf).not.toMatch(/"visible"/);
+    expect(conf).not.toMatch(/"create"/);
   });
 
-  it("is sized and placed, then shown -- whatever the sizing did", () => {
-    const body = fit.slice(fit.indexOf("pub fn fit_main_window"), fit.indexOf("fn size_main_window"));
-    expect(body).toMatch(/size_main_window\(app, &window\);\s*paint_base\(&window\);\s*let _ = window\.show\(\);/);
-    const sizing = fit.slice(fit.indexOf("fn size_main_window"), fit.indexOf("/// Keeps the size the window is closed at"));
-    expect(sizing).toContain("window.set_size(");
-    expect(sizing).toContain("window.set_position(");
-    expect(sizing).not.toContain("show()");
+  // The VM: in 3 of 13 launches the window, sized and placed before it was
+  // shown, appeared at the config's centred place and moved 0.12-0.39 s
+  // later. A move of a window that exists is not promised to have landed
+  // when it is shown (SWP_ASYNCWINDOWPOS); a window made at its place is.
+  it("is made with its size, minimum and place in it, never moved after, then painted and shown", () => {
+    const create = fit.slice(fit.indexOf("pub fn create_main_window"), fit.indexOf("fn main_opening"));
+    expect(create).toMatch(
+      /let config = placed\(&config, main_opening\(app\)\);\s*let window = tauri::WebviewWindowBuilder::from_config\(app\.handle\(\), &config\)\?\.build\(\)\?;\s*paint_base\(&window\);\s*let _ = window\.show\(\);/,
+    );
+    const placing = fit.slice(fit.indexOf("fn placed("), fit.indexOf("pub fn create_main_window"));
+    for (const field of ["config.width = ", "config.height = ", "config.min_width = ", "config.min_height = ", "config.x = ", "config.y = ", "config.center = false;", "config.visible = false;"]) {
+      expect(placing, field).toContain(field);
+    }
+    // Nothing sizes or moves the window once it exists.
+    expect(fit).not.toMatch(/\.set_size\(|\.set_position\(|\.set_min_size\(|\.center\(\)/);
   });
 
-  it("is fitted first in setup, so nothing before it can leave the window unshown", () => {
+  it("is made first in setup, so nothing before it can leave the window unmade or unshown", () => {
     const setup = lib.slice(lib.indexOf(".setup(|app| {"));
-    const firstCall = setup.indexOf("window_fit::fit_main_window(app);");
+    const firstCall = setup.indexOf("window_fit::create_main_window(app)?;");
     expect(firstCall).toBeGreaterThan(0);
     expect(firstCall).toBeLessThan(setup.indexOf("app.deep_link().register"));
     expect(firstCall).toBeLessThan(setup.indexOf("tauri::async_runtime::spawn"));

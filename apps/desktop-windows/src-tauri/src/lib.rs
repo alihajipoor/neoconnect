@@ -54,12 +54,13 @@ fn build_platform() -> &'static str {
 pub fn run() {
     let launch_url = std::env::args().find(|a| a.starts_with("neoconnect://"));
 
-    // The main window is created hidden and shown once `setup()` has sized
-    // it (window_fit.rs): it was seen at the config's size for a moment
-    // before. The config the app was built with is changed in memory here;
-    // tauri.conf.json is not.
+    // The main window is created by `setup()`, at its size and place, and
+    // shown once painted (window_fit.rs): created from the config before
+    // it, it was seen at the config's size, and then at the config's place,
+    // for a moment. The config the app was built with is changed in memory
+    // here; tauri.conf.json is not.
     let mut context = tauri::generate_context!();
-    window_fit::start_hidden(&mut context.config_mut().app.windows);
+    window_fit::defer_main_window(&mut context.config_mut().app.windows);
 
     tauri::Builder::default()
         // Must be registered first, so a duplicate launch is turned away
@@ -106,10 +107,11 @@ pub fn run() {
         .manage(LaunchDeepLink(launch_url))
         .setup(|app| {
             // Wide on the redesign's first launch, as it was left after
-            // that, and never larger than the screen -- and only then shown.
-            // At runtime rather than in tauri.conf.json; see window_fit.rs.
-            // First, so nothing below can leave the window unshown.
-            window_fit::fit_main_window(app);
+            // that, and never larger than the screen: created at that size
+            // and place, and only then shown. At runtime rather than in
+            // tauri.conf.json; see window_fit.rs. First, so nothing below can
+            // leave the window unmade or unshown.
+            window_fit::create_main_window(app)?;
 
             // Static scheme registration in tauri.conf.json alone doesn't
             // actually take effect with the NSIS installer target this
