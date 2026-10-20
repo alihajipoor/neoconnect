@@ -694,7 +694,7 @@ describe("the phone dashboard's wiring", () => {
     expect(adopt).toContain('setConnectionState(leftOver ? "disconnected" : slotTeardownShown(tearingDown, adopted));');
     expect(adopt).toContain('if (adopted !== "disconnected" && !tearingDown && !leftOver) {');
     expect(adopt).toContain("if (on !== null) setProtocolUser(on);");
-    expect(adopt).toContain("setBaselineIp(on !== null ? ladderPass.baseline.current : null);");
+    expect(adopt).toContain("setBaselineIp(landedOn !== null ? ladderPass.baseline.current : null);");
     // Armed on the stamp taken before the platform was asked.
     expect(adopt.indexOf("const reconnectStamp = autoReconnect.stamp();")).toBeLessThan(
       adopt.indexOf("await withTimeout(vpnStatus()"),
@@ -742,7 +742,7 @@ describe("the phone dashboard's wiring", () => {
     // An answer overtaken while it was asked is not written.
     expect(adopt.split("if (overtaken()) return;").length - 1).toBe(3);
     // The adopted tunnel keeps the pass's baseline, so it can be proven.
-    expect(adopt).toContain("setBaselineIp(on !== null ? ladderPass.baseline.current : null);");
+    expect(adopt).toContain("setBaselineIp(landedOn !== null ? ladderPass.baseline.current : null);");
     expect(body("async function loadScreen(preferRouteId: string | undefined, ready: () => void, retry: OfflineRetryTrigger | null = null): Promise<OfflineLoadOutcome> {")).toContain(
       "await adoptPlatform(sessionAtStart, usersResult.data, sub, ready);",
     );

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /** The HTTP plugin's own `fetch`, as pnpm installs it -- with the patch in
  * `patches/@tauri-apps__plugin-http@2.5.9.patch` applied -- against a
@@ -24,6 +24,14 @@ let chunks: number[][] = [];
 /** When set, `fetch_send` answers only once it settles: an answer still on
  * its way when the request is aborted. */
 let answerArrives: Promise<void> | null = null;
+/** The Rust side's resource table, as far as these requests go: the
+ * request's abort sender, taken by the first `fetch_cancel`, and the
+ * response, closed by a read that reaches the end of the body or by
+ * `fetch_cancel_body`. Asked for once gone, Tauri rejects the call with
+ * "The resource id N is invalid." -- as the plugin's commands do
+ * (tauri-plugin-http 2.5.9, commands.rs). */
+const open = { abortSender: false, response: false };
+const gone = (rid: number) => Promise.reject(`The resource id ${rid} is invalid.`);
 
 // Stood in at the bottom of `@tauri-apps/api`, where the real `invoke`
 // hands every call to the webview -- not by mocking a module, because the
@@ -35,15 +43,27 @@ vi.stubGlobal("window", {
       calls.push({ command, args });
       switch (command) {
         case "plugin:http|fetch":
+          open.abortSender = true;
           return 7;
         case "plugin:http|fetch_send":
           if (answerArrives) await answerArrives;
+          open.response = true;
           return { status, statusText: "", url: "https://api.example.test/x", headers: [], rid: 42 };
-        case "plugin:http|fetch_read_body":
-          // The plugin's framing: a chunk ends in 0, the end of the body is [1].
-          return chunks.shift() ?? [1];
+        case "plugin:http|fetch_read_body": {
+          if (!open.response) return gone(42);
+          // The plugin's framing: a chunk ends in 0, the end of the body is
+          // [1], and reaching it closes the response.
+          const chunk = chunks.shift() ?? [1];
+          if (chunk.length === 1 && chunk[0] === 1) open.response = false;
+          return chunk;
+        }
         case "plugin:http|fetch_cancel_body":
+          if (!open.response) return gone(42);
+          open.response = false;
+          return null;
         case "plugin:http|fetch_cancel":
+          if (!open.abortSender) return gone(8);
+          open.abortSender = false;
           return null;
         default:
           throw new Error(`unexpected ${command}`);
@@ -68,6 +88,8 @@ afterEach(() => {
   chunks = [];
   status = 204;
   answerArrives = null;
+  open.abortSender = false;
+  open.response = false;
 });
 
 describe("the HTTP plugin's fetch", () => {
@@ -136,5 +158,92 @@ describe("the HTTP plugin's fetch", () => {
         { command: "plugin:http|fetch_cancel_body", args: { rid: 42 } },
       ]);
     }
+  });
+});
+
+/** Seen on the VM after every race of the API's addresses: "The resource
+ * id N is invalid." as an unhandled rejection, one per race. The race
+ * aborts every request's controller once it is decided, the winner's too,
+ * whose body has by then been read to its end -- which closed it on the
+ * Rust side. The plugin's abort listener on the body then asked to close
+ * it again, fire-and-forget, and the rejection reached nobody. Its other
+ * fire-and-forget calls can be refused the same way. A release that is
+ * refused because the thing is already gone has nothing left to do. */
+describe("a release the Rust side has already made", () => {
+  const unhandled: unknown[] = [];
+  const heard = (reason: unknown) => void unhandled.push(reason);
+  /** Long enough for a rejection nobody handled to be reported. */
+  const reported = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  beforeEach(() => {
+    unhandled.length = 0;
+    process.on("unhandledRejection", heard);
+  });
+  afterEach(() => {
+    process.off("unhandledRejection", heard);
+  });
+
+  it("an abort after the body was read to its end leaves no rejection unhandled", async () => {
+    status = 200;
+    chunks = [[104, 105, 0], [1]];
+    const controller = new AbortController();
+    const res = await fetch("https://api.example.test/x", { signal: controller.signal });
+    expect(await res.text()).toBe("hi");
+    // The race decided: every controller aborted, this one's included.
+    controller.abort();
+    await reported();
+    expect(unhandled).toEqual([]);
+    // It was still asked: an answer that was not read to its end is freed
+    // by exactly this call.
+    expect(cancels()).toHaveLength(1);
+  });
+
+  it("an abort during a read leaves no rejection unhandled", async () => {
+    status = 200;
+    // The body's first read is still on its way when the abort lands, and
+    // then finds the response gone.
+    let release: () => void = () => undefined;
+    const readHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    chunks = [[104, 105, 0], [1]];
+    const controller = new AbortController();
+    const res = await fetch("https://api.example.test/x", { signal: controller.signal });
+    const original = (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__;
+    const invoke = original.invoke;
+    original.invoke = async (command, args) => {
+      if (command === "plugin:http|fetch_read_body") {
+        calls.push({ command, args });
+        await readHeld;
+        return open.response ? (chunks.shift() ?? [1]) : gone(42);
+      }
+      return invoke(command, args);
+    };
+    try {
+      const text = res.text().catch((e: unknown) => e);
+      await settle();
+      controller.abort();
+      release();
+      await text;
+      await reported();
+      expect(unhandled).toEqual([]);
+    } finally {
+      original.invoke = invoke;
+    }
+  });
+
+  it("an abort after the request was already cancelled leaves no rejection unhandled", async () => {
+    status = 200;
+    chunks = [[104, 105, 0], [1]];
+    const controller = new AbortController();
+    const res = await fetch("https://api.example.test/x", { signal: controller.signal });
+    expect(await res.text()).toBe("hi");
+    // Its abort sender taken already -- by a cancel the plugin's caller
+    // could not see.
+    open.abortSender = false;
+    controller.abort();
+    await reported();
+    expect(unhandled).toEqual([]);
   });
 });
