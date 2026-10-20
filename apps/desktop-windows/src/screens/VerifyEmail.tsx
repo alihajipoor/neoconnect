@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { verifyEmailByCode, resendVerification, login } from "../lib/auth";
-import { Button, Card, Input, Label } from "../components/ui";
-import { Logo } from "../components/Logo";
+import { Message, PillButton, TextField, TextLink } from "../components/ui";
+import { AuthFrame, AuthHead } from "../components/auth/AuthFrame";
+import { SLOT, Slotted } from "../components/Slotted";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { StillTrying } from "../components/StillTrying";
@@ -113,63 +114,53 @@ export function VerifyEmail({
 
     const result = await resendVerification(email);
     setResending(false);
-    setNotice(result.ok ? "Sent! Check your inbox (and spam folder)." : null);
+    setNotice(result.ok ? t("verify.resent") : null);
     if (!result.ok) setError(failureText(result, t));
   }
 
   return (
-    <div className="glow-backdrop flex h-full flex-col items-center justify-center gap-8 overflow-hidden p-6">
-      <Logo className="scale-110" />
-      <Card className="w-full max-w-xs">
-        <h1 className="mb-1 text-lg font-semibold">{t("verify.title")}</h1>
-        <p className="mb-4 text-sm text-muted-foreground">
-          We sent a 6-digit code to <span className="text-foreground">{email}</span>. Enter it below to activate
-          your account.
-        </p>
-        <form onSubmit={handleVerify} className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="code">{t("verify.code")}</Label>
-            <Input
-              id="code"
-              type="text"
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              maxLength={6}
-              pattern="[0-9]{6}"
-              required
-              autoFocus
-              value={code}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-              className="text-center text-lg tracking-[0.5em]"
-            />
-          </div>
-          {error ? (
-            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {error}
-            </p>
-          ) : null}
-          {notice ? <p className="text-xs text-success">{notice}</p> : null}
-          <Button type="submit" disabled={pending || code.length !== 6} className="mt-1 w-full">
-            {pending ? t("verify.confirming") : t("verify.confirm")}
-          </Button>
-          <StillTrying waiting={pending || resending} />
-        </form>
-        <button
-          type="button"
-          onClick={() => void handleResend()}
-          disabled={resending}
-          className="mt-4 w-full text-center text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
-        >
+    <AuthFrame step="verify">
+      <AuthHead
+        title={t("verify.title")}
+        lead={
+          <Slotted text={t("verify.lead", { email: SLOT })}>
+            <bdi dir="ltr" className="nx-strong">
+              {email}
+            </bdi>
+          </Slotted>
+        }
+      />
+      <form onSubmit={handleVerify} className="nx-form">
+        <TextField
+          id="code"
+          label={t("verify.code")}
+          type="text"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          maxLength={6}
+          pattern="[0-9]{6}"
+          required
+          autoFocus
+          dir="ltr"
+          value={code}
+          onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+          className="nx-code"
+        />
+        {error ? <Message tone="danger">{error}</Message> : null}
+        {notice ? <Message tone="ok">{notice}</Message> : null}
+        <PillButton type="submit" disabled={pending || code.length !== 6} aria-busy={pending || undefined} className="nx-auth-submit">
+          {pending ? t("verify.confirming") : t("verify.confirm")}
+        </PillButton>
+        <StillTrying waiting={pending || resending} />
+      </form>
+      <div className="nx-auth-after">
+        <TextLink onClick={() => void handleResend()} disabled={resending}>
           {resending ? t("verify.sending") : t("verify.noCode")}
-        </button>
-        <button
-          type="button"
-          onClick={onGoLogin}
-          className="mt-2 w-full text-center text-xs text-muted-foreground hover:text-foreground"
-        >
-          Back to sign in
-        </button>
-      </Card>
-    </div>
+        </TextLink>
+        <TextLink strong onClick={onGoLogin}>
+          {t("forgot.backToSignIn")}
+        </TextLink>
+      </div>
+    </AuthFrame>
   );
 }

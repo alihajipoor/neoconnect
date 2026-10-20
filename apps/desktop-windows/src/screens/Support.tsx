@@ -1,18 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import {
-  ArrowLeft,
-  Check,
-  ClipboardList,
-  Clock,
-  Copy,
-  Loader2,
-  LifeBuoy,
-  MessagesSquare,
-  Plus,
-  Send,
-} from "lucide-react";
+import { Check, ClipboardList, Copy, LifeBuoy, MessagesSquare, Plus, Send } from "lucide-react";
 import {
   getSupportOverview,
   getSupportThread,
@@ -22,7 +11,11 @@ import {
 import { collectDiagnostics, diagnosticsToText } from "../lib/repair";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
-import { Button, Card, Input, Label } from "../components/ui";
+import { swapView } from "../lib/view-transition";
+import { motionReduced } from "../lib/motion";
+import { formatDate, formatDateTime } from "../lib/locale-format";
+import { Card, CardHead, Message, PillButton, Skeleton, Tag } from "../components/ui";
+import { Page } from "../components/shell/Page";
 import { StillTrying } from "../components/StillTrying";
 import { cn } from "../lib/utils";
 import type { SupportOverview, SupportThread, SupportTicketSummary } from "../lib/types";
@@ -43,7 +36,9 @@ export function Support({ onBack }: { onBack: () => void }) {
   const { t } = useI18n();
   const [overview, setOverview] = useState<SupportOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<View>({ kind: "list" });
+  const [view, setShown] = useState<View>({ kind: "list" });
+  /** A conversation or a new message slides in; the list slides back. */
+  const setView = (next: View) => swapView(() => setShown(next), next.kind === "list" ? "back" : "forward");
 
   const load = useCallback(async () => {
     const result = await getSupportOverview();
@@ -60,32 +55,20 @@ export function Support({ onBack }: { onBack: () => void }) {
   }, [load]);
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-3xl flex-col gap-5 p-5">
-      <header className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <h1 className="text-base font-semibold">{t("support.title")}</h1>
-          <p className="text-xs text-muted-foreground">{t("support.subtitle")}</p>
-        </div>
-        <Button
-          variant="ghost"
-          onClick={() => (view.kind === "list" ? onBack() : setView({ kind: "list" }))}
-          className="shrink-0 gap-2 border border-white/10"
-        >
-          <ArrowLeft className="size-4" />
-          {t("nav.back")}
-        </Button>
-      </header>
-
-      {error && (
-        <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {error}
-        </p>
-      )}
+    <Page
+      title={t("support.title")}
+      lede={t("support.subtitle")}
+      back={() => (view.kind === "list" ? onBack() : setView({ kind: "list" }))}
+      backAlways
+      data-support
+    >
+      {error ? <Message tone="danger">{error}</Message> : null}
 
       {!overview ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3">
-          <Loader2 className="size-5 animate-spin text-muted-foreground" />
+        <div className="flex flex-col items-center gap-3 py-10">
+          <span className="nx-spin" aria-hidden />
           <StillTrying waiting={!error} />
+          {error ? null : <Skeleton card rows={2} className="w-full max-w-md" />}
         </div>
       ) : view.kind === "thread" ? (
         <ThreadView id={view.id} onChanged={load} />
@@ -104,7 +87,7 @@ export function Support({ onBack }: { onBack: () => void }) {
           onNew={() => setView({ kind: "new" })}
         />
       )}
-    </div>
+    </Page>
   );
 }
 
@@ -120,46 +103,38 @@ function TicketList({
   const { t } = useI18n();
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
-      {overview.acceptingTickets ? (
-        <Button onClick={onNew} className="gap-2 self-start">
-          <Plus className="size-4" />
-          {t("support.new")}
-        </Button>
-      ) : (
-        /* Says why, rather than hiding the button and leaving them
-           hunting for it. The away message is the operator's own
-           wording when they set one. */
-        <Card className="flex items-start gap-3">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-white/8 text-muted-foreground">
-            <Clock className="size-4" />
+    <div className="nx-cols">
+      <Card className="flex flex-col gap-3">
+        <CardHead icon={<MessagesSquare />} title={t("support.conversations")} />
+        {overview.tickets.length === 0 ? (
+          <div className="flex flex-col gap-1 py-2">
+            <p className="nx-strong m-0">{t("support.empty")}</p>
+            <p className="nx-csub">{t("support.emptyHint")}</p>
           </div>
-          <div>
-            <p className="text-sm font-semibold">{t("support.closedTitle")}</p>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              {overview.awayMessage?.trim() || t("support.closed")}
-            </p>
+        ) : (
+          <div className="nx-alist">
+            {overview.tickets.map((ticket) => (
+              <TicketRow key={ticket.id} ticket={ticket} onOpen={() => onOpen(ticket.id)} />
+            ))}
           </div>
-        </Card>
-      )}
+        )}
+        {overview.acceptingTickets ? (
+          <PillButton size="sm" onClick={onNew} className="self-start">
+            <Plus aria-hidden />
+            {t("support.new")}
+          </PillButton>
+        ) : (
+          /* Says why, rather than hiding the button and leaving them
+             hunting for it. The away message is the operator's own
+             wording when they set one. */
+          <Message tone="neutral">
+            <p className="nx-strong">{t("support.closedTitle")}</p>
+            <p>{overview.awayMessage?.trim() || t("support.closed")}</p>
+          </Message>
+        )}
+      </Card>
 
       <DiagnosticsCard />
-
-      {overview.tickets.length === 0 ? (
-        <Card className="flex flex-col items-center gap-2 py-10 text-center">
-          <div className="flex size-10 items-center justify-center rounded-xl bg-primary/15 text-primary">
-            <MessagesSquare className="size-5" />
-          </div>
-          <p className="text-sm font-medium">{t("support.empty")}</p>
-          <p className="text-xs text-muted-foreground">{t("support.emptyHint")}</p>
-        </Card>
-      ) : (
-        <div className="flex min-h-0 flex-col gap-2 overflow-y-auto">
-          {overview.tickets.map((ticket) => (
-            <TicketRow key={ticket.id} ticket={ticket} onOpen={() => onOpen(ticket.id)} />
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -231,55 +206,44 @@ function DiagnosticsCard() {
 
   return (
     <Card className="flex flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-highlight/15 text-highlight">
-          <ClipboardList className="size-4" />
-        </div>
-        <div className="min-w-0">
-          <p className="text-sm font-semibold">{t("diag.title")}</p>
-          <p className="text-xs text-muted-foreground">{t("diag.subtitle")}</p>
-        </div>
-      </div>
+      <CardHead icon={<ClipboardList />} title={t("diag.title")} hint={t("diag.subtitle")} />
 
-      <p className="text-xs text-muted-foreground">{t("diag.privacy")}</p>
+      <p className="nx-csub m-0">{t("diag.privacy")}</p>
 
       {text ? (
         <>
           {/* Forced left-to-right: it is machine text with Windows paths
               in it, and a right-to-left paragraph reorders those into
               something that no longer matches the customer's machine. */}
-          <pre
-            className="max-h-56 overflow-auto rounded-lg border border-white/8 bg-black/30 p-2.5 font-mono text-[10px] leading-relaxed whitespace-pre-wrap text-muted-foreground"
-            data-ltr
-            dir="ltr"
-          >
+          <pre className="nx-diagtext" data-ltr dir="ltr">
             {text}
           </pre>
-          <div className="flex gap-2">
-            <Button onClick={() => void copy()} className="gap-2">
-              {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
-              {copied ? t("diag.copied") : t("diag.copy")}
-            </Button>
-            <Button variant="ghost" onClick={() => void collect()} disabled={busy} className="gap-2 border border-white/10">
-              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+          <div className="nx-row2">
+            <PillButton size="sm" onClick={() => void copy()}>
+              {copied ? <Check className="nx-done-in" aria-hidden /> : <Copy aria-hidden />}
+              <span key={copied ? "done" : "copy"} className="nx-swap">
+                {copied ? t("diag.copied") : t("diag.copy")}
+              </span>
+            </PillButton>
+            <PillButton variant="ghost" size="sm" onClick={() => void collect()} disabled={busy} aria-busy={busy || undefined}>
               {t("diag.collect")}
-            </Button>
+            </PillButton>
           </div>
         </>
       ) : (
-        <Button onClick={() => void collect()} disabled={busy} className="gap-2 self-start">
-          {busy ? <Loader2 className="size-4 animate-spin" /> : <ClipboardList className="size-4" />}
+        <PillButton variant="ghost" size="sm" onClick={() => void collect()} disabled={busy} aria-busy={busy || undefined} className="self-start">
+          {busy ? <span className="nx-spin" aria-hidden /> : <ClipboardList aria-hidden />}
           {busy ? t("diag.collecting") : t("diag.collect")}
-        </Button>
+        </PillButton>
       )}
 
-      {failed ? <p className="text-xs text-destructive">{t("diag.failed")}</p> : null}
+      {failed ? <Message tone="neutral">{t("diag.failed")}</Message> : null}
     </Card>
   );
 }
 
 function TicketRow({ ticket, onOpen }: { ticket: SupportTicketSummary; onOpen: () => void }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const statusLabel =
     ticket.status === "OPEN"
       ? t("support.statusOpen")
@@ -288,24 +252,16 @@ function TicketRow({ ticket, onOpen }: { ticket: SupportTicketSummary; onOpen: (
         : t("support.statusResolved");
 
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="press flex items-center gap-3 rounded-xl border border-white/8 bg-white/3 px-3.5 py-3 text-start transition-colors hover:border-white/15 hover:bg-white/6"
-    >
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{ticket.subject}</p>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          {statusLabel} · {new Date(ticket.lastMessageAt).toLocaleDateString()}
-        </p>
-      </div>
+    <button type="button" onClick={onOpen} className="nx-li nx-ticket">
+      <span className="t">
+        <span className="n">{ticket.subject}</span>
+        <span className="s">
+          {statusLabel} · {formatDate(ticket.lastMessageAt, language)}
+        </span>
+      </span>
       {/* Only an unread reply gets a marker. A badge on every row is a
           badge on none. */}
-      {ticket.unread && ticket.status === "ANSWERED" && (
-        <span className="shrink-0 rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-medium text-primary">
-          {t("support.unread")}
-        </span>
-      )}
+      {ticket.unread && ticket.status === "ANSWERED" ? <Tag>{t("support.unread")}</Tag> : null}
     </button>
   );
 }
@@ -338,65 +294,73 @@ function NewTicket({
   }
 
   return (
-    <Card className="flex flex-col gap-4">
-      <div className="flex items-center gap-2">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
-          <LifeBuoy className="size-4" />
-        </div>
-        <div>
-          <p className="text-sm font-semibold">{t("support.newTitle")}</p>
-          {/* Reads as a day rather than "within 24 hours" at the
-              default, because that is how people think about it -- and
-              an exact hour count implies a precision nobody measures. */}
-          <p className="text-xs text-muted-foreground">
-            {!replyWithinHours || replyWithinHours === 24
+    <div className="nx-stack">
+      <Card className="flex flex-col gap-4">
+        {/* Reads as a day rather than "within 24 hours" at the default,
+            because that is how people think about it -- and an exact hour
+            count implies a precision nobody measures. */}
+        <CardHead
+          icon={<LifeBuoy />}
+          title={t("support.newTitle")}
+          hint={
+            !replyWithinHours || replyWithinHours === 24
               ? t("support.replyWithinDay")
-              : t("support.replyWithin", { hours: replyWithinHours })}
-          </p>
-        </div>
-      </div>
+              : t("support.replyWithin", { hours: replyWithinHours })
+          }
+        />
 
-      <form onSubmit={submit} className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="subject">{t("support.subject")}</Label>
-          <Input
-            id="subject"
-            value={subject}
-            maxLength={140}
-            onChange={(e) => setSubject(e.target.value)}
-            placeholder={t("support.subjectHint")}
-          />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="body">{t("support.message")}</Label>
-          <textarea
-            id="body"
-            rows={5}
-            value={body}
-            maxLength={5000}
-            onChange={(e) => setBody(e.target.value)}
-            placeholder={t("support.messageHint")}
-            className="w-full resize-none rounded-lg border border-white/10 bg-white/4 px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus:border-primary/50"
-          />
-        </div>
-        {error && <p className="text-xs text-destructive">{error}</p>}
-        <Button type="submit" disabled={busy || !subject.trim() || !body.trim()} className="gap-2 self-start">
-          {busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-          {busy ? t("support.sending") : t("support.send")}
-        </Button>
-        <StillTrying waiting={busy} className="text-left" />
-      </form>
-    </Card>
+        <form onSubmit={submit} className="nx-form">
+          <div className="nx-field">
+            <label htmlFor="subject" className="nx-label">
+              {t("support.subject")}
+            </label>
+            <input
+              id="subject"
+              className="nx-input"
+              value={subject}
+              maxLength={140}
+              onChange={(e) => setSubject(e.target.value)}
+              placeholder={t("support.subjectHint")}
+            />
+          </div>
+          <div className="nx-field">
+            <label htmlFor="body" className="nx-label">
+              {t("support.message")}
+            </label>
+            <textarea
+              id="body"
+              rows={5}
+              value={body}
+              maxLength={5000}
+              onChange={(e) => setBody(e.target.value)}
+              placeholder={t("support.messageHint")}
+              className="nx-textarea"
+            />
+          </div>
+          {error ? <Message tone="danger">{error}</Message> : null}
+          <PillButton type="submit" size="sm" disabled={busy || !subject.trim() || !body.trim()} aria-busy={busy || undefined} className="self-start">
+            <Send className="nx-mir" aria-hidden />
+            {busy ? t("support.sending") : t("support.send")}
+          </PillButton>
+          <StillTrying waiting={busy} className="text-left" />
+        </form>
+      </Card>
+    </div>
   );
 }
 
 function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [thread, setThread] = useState<SupportThread | null>(null);
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  /** The messages the thread opened with. Any after them -- a reply sent,
+   * one a poll brought in -- arrives with a rise from its own side. */
+  const firstIds = useRef<Set<string> | null>(null);
+  if (thread && firstIds.current === null) firstIds.current = new Set(thread.messages.map((message) => message.id));
+  const scrolled = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -416,8 +380,11 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
 
   // Newest message in view whenever the count changes -- on open, and
   // when a poll brings a reply in.
+  // On open at once; a message that arrives after, smoothly.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
+    if (!thread) return;
+    bottomRef.current?.scrollIntoView({ block: "end", behavior: scrolled.current && !motionReduced() ? "smooth" : "auto" });
+    scrolled.current = true;
   }, [thread?.messages.length]);
 
   async function send() {
@@ -440,81 +407,78 @@ function ThreadView({ id, onChanged }: { id: string; onChanged: () => void }) {
 
   if (!thread) {
     return (
-      <div className="flex flex-1 items-center justify-center">
+      <div className="flex flex-col items-center gap-3 py-10">
         {error ? (
-          <p className="text-xs text-destructive">{error}</p>
+          <Message tone="danger">{error}</Message>
         ) : (
-          <div className="flex flex-col items-center gap-3">
-            <Loader2 className="size-5 animate-spin text-muted-foreground" />
+          <>
+            <span className="nx-spin" aria-hidden />
             <StillTrying waiting />
-          </div>
+            <Skeleton rows={3} className="w-full max-w-md" />
+          </>
         )}
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div>
-        <p className="text-sm font-semibold">{thread.subject}</p>
-        <p className="text-xs text-muted-foreground">{t("support.notLive")}</p>
-      </div>
+    <div className="nx-stack">
+      <Card className="flex flex-col gap-3">
+        <div>
+          <h2 className="nx-ctitle">{thread.subject}</h2>
+          <p className="nx-csub">{t("support.notLive")}</p>
+        </div>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto rounded-xl border border-white/8 bg-white/2 p-3">
-        {thread.messages.map((message) => (
-          <div
-            key={message.id}
-            className={cn("flex", message.fromAdmin ? "justify-start" : "justify-end")}
-          >
+        <div className="nx-thread">
+          {thread.messages.map((message) => (
             <div
-              className={cn(
-                "max-w-[82%] rounded-2xl px-3.5 py-2.5",
-                message.fromAdmin
-                  ? "rounded-bl-md bg-white/8"
-                  : "rounded-br-md bg-primary/20",
-              )}
+              key={message.id}
+              className={cn("nx-bubble", message.fromAdmin ? "them" : "me", firstIds.current && !firstIds.current.has(message.id) && "nx-new")}
             >
-              <p className="text-sm whitespace-pre-wrap">{message.body}</p>
-              <p className="mt-1 text-[10px] text-muted-foreground">
-                {message.fromAdmin ? t("support.team") : t("support.you")} ·{" "}
-                {new Date(message.createdAt).toLocaleString()}
-              </p>
+              <p dir="auto">{message.body}</p>
+              <small>
+                {message.fromAdmin ? t("support.team") : t("support.you")} · {formatDateTime(message.createdAt, language)}
+              </small>
             </div>
-          </div>
-        ))}
-        <div ref={bottomRef} />
-      </div>
+          ))}
+          <div ref={bottomRef} />
+        </div>
 
-      {error && <p className="text-xs text-destructive">{error}</p>}
+        {error ? <Message tone="danger">{error}</Message> : null}
 
-      {/* Shown even when new conversations are closed: this one is
-          already open, and cutting somebody off mid-exchange is worse
-          than declining to start. */}
-      <div className="flex items-end gap-2">
-        <textarea
-          rows={2}
-          value={body}
-          maxLength={5000}
-          onChange={(e) => setBody(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void send();
-            }
-          }}
-          placeholder={t("support.reply")}
-          className="w-full resize-none rounded-lg border border-white/10 bg-white/4 px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus:border-primary/50"
-        />
-        <Button
-          onClick={() => void send()}
-          disabled={busy || !body.trim()}
-          className="size-10 shrink-0 justify-center p-0"
-          aria-label={t("support.send")}
-        >
-          {busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-        </Button>
-      </div>
-      <StillTrying waiting={busy} />
+        {/* Shown even when new conversations are closed: this one is
+            already open, and cutting somebody off mid-exchange is worse
+            than declining to start. */}
+        <div className="nx-compose">
+          <textarea
+            rows={2}
+            value={body}
+            maxLength={5000}
+            aria-label={t("support.reply")}
+            onChange={(e) => setBody(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+            placeholder={t("support.reply")}
+            className="nx-textarea"
+          />
+          <button
+            type="button"
+            onClick={() => void send()}
+            disabled={busy || !body.trim()}
+            className="nx-ibtn"
+            aria-label={t("support.send")}
+            aria-busy={busy || undefined}
+          >
+            {busy ? <span className="nx-spin" aria-hidden /> : <Send className="nx-mir" aria-hidden />}
+          </button>
+        </div>
+        <StillTrying waiting={busy} />
+      </Card>
     </div>
   );
 }
+

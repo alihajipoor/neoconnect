@@ -135,6 +135,26 @@ export function scoreFor(
   return weighted / total;
 }
 
+/** The newest attempt for this combination, or `null` when there is none.
+ *
+ * The array is newest-last as written, but this does not rely on it: a
+ * store merged from an older client, or a clock that moved, could leave
+ * the order otherwise. For the main page's map (`map-lights.ts`), which
+ * asks a narrower question than `scoreFor` -- did the latest try here
+ * carry traffic -- rather than a weighted average. */
+export function latestAttempt(
+  history: ConnectHistory,
+  network: string | null,
+  routeId: string,
+  protocol: Protocol,
+): Attempt | null {
+  const attempts = history[keyFor(network, routeId, protocol)];
+  if (!attempts || attempts.length === 0) return null;
+  let newest = attempts[0];
+  for (const attempt of attempts) if (attempt.at >= newest.at) newest = attempt;
+  return newest;
+}
+
 /** Forgets everything recorded against one network.
  *
  * For the case where the customer knows the situation changed and the

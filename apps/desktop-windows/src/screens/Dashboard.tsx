@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronRight, Clock, Gamepad2, Globe, MapPin, Settings as SettingsIcon, Shield, Sparkles, Tag } from "lucide-react";
-import { describesTunnel, displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
+import { Gamepad2, Globe, Repeat, Shield, Sparkles } from "lucide-react";
+import { describesTunnel, displayedProtocol, displayedRoute, displayedRouteId, heldListLook, showsAutomatic } from "../lib/displayed-route";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
-import { formatBytes } from "../lib/utils";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import { concurrentExitsFor } from "../lib/concurrent-exits";
 import { settleAndCaptureBaseline } from "../lib/baseline-settle";
@@ -28,6 +27,7 @@ import {
   droppedUnseen,
   fullTunnelPollState,
   handshakeEvidence,
+  HEADLINE_HINTS,
   headlineFor,
   isTunnelUp,
   LIVENESS_POLL_MS,
@@ -35,13 +35,12 @@ import {
   rungJudgedByHandshake,
   showsIpv6Escape,
   stateFromStatus,
-  type HeadlineTone,
   type VpnStatus,
   unconfinedByChoice,
   unconfinedLine,
   warnsUnconfined,
 } from "../lib/connection-evidence";
-import { orbCaution, orbHold, orbTone, type OrbTone } from "../lib/orb-caution";
+import { orbCaution, orbHold, orbTone } from "../lib/orb-caution";
 import { networkWait, waitForNetwork } from "../lib/network-wait";
 import {
   NEW_UPLINK_WATCH,
@@ -73,6 +72,7 @@ import {
 } from "../lib/split-tunnel";
 import { exitOfRoute } from "../lib/exit-options";
 import { gamingDisarm, loadGaming, saveGaming, type AppMode } from "../lib/gaming";
+import type { TranslationKey as HintKey } from "../lib/i18n";
 import {
   cachedRoutesFor,
   loadSnapshot,
@@ -91,6 +91,8 @@ import {
 import { sessionGeneration } from "../lib/session-end";
 import { onLateConfig, refreshConnectionConfig } from "../lib/connection-config";
 import { useRefreshOnResume } from "../lib/resume";
+import { swapView } from "../lib/view-transition";
+import { rearmCheckPop } from "../lib/check-pop";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
@@ -119,6 +121,30 @@ import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } f
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
+import { appPrefs } from "../lib/app-prefs";
+import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
+import {
+  createStatusRelease,
+  gapTraffic,
+  gapWord,
+  HOLD_HINTS,
+  HOLD_WORD_GRACE_MS,
+  holdHint,
+  holdNotes,
+  holdService,
+  holdStore,
+  holdWanted,
+  passTeardown,
+} from "../lib/reconnect-hold";
+import { NOTIFY_TEXT, notifyMemory, notifyStep } from "../lib/connection-notify";
+import { showNotification } from "../lib/notify";
+import { trafficMeter } from "../lib/traffic-meter";
+import { customModeProblemText, readCustomModeProblem, type CustomModeProblem } from "../lib/custom-mode-problem";
+import { adoptedSince } from "../lib/session-clock";
+import { ladderProgress } from "../lib/ladder-progress";
+import { createRecordBytes, loggedCredential, movedRoute, sessionLog } from "../lib/session-log";
+import { ProgressLine } from "../components/main/ProgressLine";
+import { SpeedCard, SpeedSection, useTrafficShown } from "../components/main/TrafficSpeed";
 import {
   asReconnectReport,
   autoReconnect,
@@ -144,12 +170,49 @@ import {
   type IntentState,
   type PressAction,
 } from "../lib/connect-intent";
-import { Button, Card, Stat } from "../components/ui";
+import { Banner, Note, PillButton, Presence, Segmented } from "../components/ui";
+import { Dialog, LocationSheet } from "../components/overlay";
+import { Page, PageScene } from "../components/shell/Page";
+import { AppShell, type ShellPage } from "../components/shell/AppShell";
+import { noteWayOut, planLineText, rememberShellProfile, takeLocationsRequest, type ShellPlan } from "../lib/shell-nav";
+import { MainView } from "../components/main/MainView";
+import { Decor, Hint, StateAnnouncer, StateLine, StatusChip, WayOut } from "../components/main/Hero";
+import { LocationCard, MetricCards, SessionTray, SummaryLine, type TrayLocation, type TrayPlan } from "../components/main/SessionTray";
+import { HeroArt } from "../components/main/HeroArt";
+import { SLOT, Slotted } from "../components/Slotted";
+import { MapLegend } from "../components/main/MapLegend";
+import { WorldMap } from "../components/main/WorldMap";
+import { mapCountries, mapLights, ownWorkedAt, placesEvidence, type EvidenceContext } from "../lib/map-lights";
+import {
+  IDLE_WAY_OUT_POLL_MS,
+  NO_ROAM,
+  idleWayOut,
+  mapNetwork,
+  tagsCurrent,
+  tunnelWayOut,
+  withoutTags,
+  type NetworkFreshness,
+} from "../lib/map-network";
+import { currentNetwork } from "../lib/network-identity";
+import {
+  chipFor,
+  hintTone,
+  ipFor,
+  lineFor,
+  pillFor,
+  planCaution,
+  secondaryFor,
+  shownTone,
+  type ShownTone,
+} from "../lib/hero-model";
+import { useWindowLayout } from "../lib/layout-mode";
+import { formatDateTime, formatNumber, formatSize, sizeParts } from "../lib/locale-format";
+import { describeSlotNotice, slotNoticeShown } from "../lib/device-slot-notice";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { GamingStatusPanel } from "../components/GamingStatusPanel";
 import { Logo } from "../components/Logo";
 import { RouteFlag } from "../components/Flag";
-import { exitCountryName, placeKey, placeLabel, routePlace } from "../lib/route-place";
+import { placeKey, placeLabel, routePlace } from "../lib/route-place";
 import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { RepairNetwork } from "../components/RepairNetwork";
@@ -200,36 +263,6 @@ function serviceStatus(): Promise<VpnStatus> {
 function serviceDisconnect(): Promise<void> {
   return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect");
 }
-
-/** The headline's colour for each tone `headlineFor` can ask for. Full
- * class names, so the stylesheet build can see them. */
-/** The status dot beside the account, by the orb's own look (`orbTone`):
- * the one thing read from across a room, so it says what the orb says and
- * changes when the orb does -- not on a reading of a moment. */
-const DOT_CLASS: Record<OrbTone, string> = {
-  success: "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]",
-  // Connected, not fully protected, long enough to say so in colour
-  // (`orb-caution.ts`).
-  caution: "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]",
-  // Lit, because an engine really is up -- but not in the success green,
-  // which from across a room is the claim itself.
-  highlight: "size-1.5 shrink-0 rounded-full bg-highlight shadow-[0_0_8px_var(--highlight)]",
-  warning: "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]",
-  // Neither lit nor plainly off: both of the others would answer a question
-  // the app cannot answer.
-  muted: "size-1.5 shrink-0 animate-pulse rounded-full bg-muted-foreground",
-  busy: "size-1.5 shrink-0 rounded-full bg-muted-foreground/50",
-  idle: "size-1.5 shrink-0 rounded-full bg-muted-foreground/50",
-};
-
-const HEADLINE_TONE: Record<HeadlineTone, string> = {
-  success: "text-success",
-  highlight: "text-highlight",
-  warning: "text-warning",
-  muted: "text-muted-foreground",
-  plain: "text-foreground",
-  destructive: "text-destructive",
-};
 
 /** How often to re-check a live tunnel.
  *
@@ -486,31 +519,51 @@ function usableSubscription(all: Subscription[]): Subscription | null {
   return real.find((s) => s.status === "ACTIVE") ?? real[0] ?? null;
 }
 
-function formatDuration(totalSeconds: number) {
-  // Clamped so a clock adjustment mid-session can never render a
-  // negative duration -- the sign would leak into every field.
-  const seconds = Math.max(0, totalSeconds);
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
-}
-
 export function Dashboard({
   onLoggedOut,
   onBrowsePlans,
   onOpenSettings,
+  onOpenReferrals,
+  onOpenSupport,
+  onOpenActivity,
+  update,
+  page = null,
+  onShowMain,
 }: {
   onLoggedOut: () => void;
   onBrowsePlans: () => void;
   onOpenSettings: () => void;
+  onOpenReferrals?: () => void;
+  onOpenSupport?: () => void;
+  /** The Activity page, in the shell's nav. */
+  onOpenActivity?: () => void;
+  /** The update notice, which the shell places. */
+  update?: ReactNode;
+  /** Another page of the shell, drawn in this screen's own shell in place
+   * of the main page; null on the main page. This screen stays mounted
+   * under it -- its load, the service's word, the verified tunnel, the
+   * route list -- so coming back draws the main page as it was, never a
+   * load in front of it, and asks again only behind it (`revalidate`). */
+  page?: ShellPage | null;
+  /** Back to the main page from `page`, as a plain change of state: this
+   * screen's own nav makes it inside its transition (`showMainFrom`). */
+  onShowMain?: () => void;
 }) {
   const { t, language } = useI18n();
+  /** The main page itself is in view, not another page of the shell. */
+  const onMainPage = page === null;
   const [loading, setLoading] = useState(true);
   // The loading screen waits on three reads, each given up to twenty
   // seconds an address; past eight it says it is still trying.
   const loadingLong = useStillTrying(loading);
+  // "Locations" pressed on another page of the shell: once this screen has
+  // loaded, its Locations page is shown as if it had been pressed here.
+  useEffect(() => {
+    if (!loading && onMainPage && takeLocationsRequest()) openLocationsPage();
+    // Once per load, or per return to the main page; openLocationsPage is
+    // this render's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, onMainPage]);
   // Kept as it came, and worded as the screen renders (`ShownFailure`):
   // worded when it came in, it was in the language the app was in when the
   // load began, which country detection may have changed since.
@@ -545,16 +598,36 @@ export function Dashboard({
   /** The same, as the tiles' rule takes it (`settledKnown` in
    * displayed-route.ts). */
   const tunnelNamed = !tunnelRouteUnknown;
+  /** The same, for effects that read it as they run (the session log). */
+  const tunnelNamedRef = useRef(tunnelNamed);
+  tunnelNamedRef.current = tunnelNamed;
   /** Counts a session that keeps passing its health checks, once, for
    * the per-ISP tags. See session-report.ts. */
   const sessionTrackerRef = useRef(createSessionTracker());
+  /** The reads a hold may be let go of on from status alone
+   * (`createStatusRelease`): two, apart, each of a tunnel landed under it. */
+  const statusReleaseRef = useRef(createStatusRelease());
   /** The route the tunnel is on, readable from inside the health poll's
    * interval without depending on which render created it. */
   const settledRouteRef = useRef<string | null>(null);
   settledRouteRef.current = tunnelRouteUnknown ? null : (protocolUser?.routeId ?? null);
+  /** The route the tunnel was on the last time traffic was verified, for
+   * the world map's connected light. Drawn only while the screen wears the
+   * verified tone (`mapLights`), so it holds through a brief gap exactly as
+   * the chip's colour does and never stands for an unconfirmed tunnel. */
+  const verifiedRouteRef = useRef<RouteOption | null>(null);
+  /** The route the location list named the last time the session was
+   * settled, for its row in use through a brief gap (`heldListLook`): null
+   * for a tunnel it could not name. */
+  const listSettledRef = useRef<string | null>(null);
   /** Which network we are on, so "what worked here last time" means
    * here and not somewhere else. Null when it cannot be determined. */
   const [networkId, setNetworkId] = useState<string | null>(null);
+  /** When the way out last changed under this screen, and when the network
+   * id and the route list's per-network tags were last read: whether the
+   * map's evidence still describes the network the device is on
+   * (`lib/map-network.ts`). */
+  const [netFresh, setNetFresh] = useState<NetworkFreshness>(NO_ROAM);
   const [lastGood, setLastGood] = useState<LastGoodMap>({});
   /** Per route and protocol, how recent attempts went on this network.
    * Richer than `lastGood`, which holds one route and no outcome. */
@@ -716,6 +789,19 @@ export function Dashboard({
    * says nothing to the next sign-in. */
   const reconnect = useSyncExternalStore(autoReconnect.subscribe, autoReconnect.current);
   const reconnecting = reconnectingView(reconnect, sessionGeneration());
+  /** The same, for the switch confirmation, which reads it after an await. */
+  const reconnectingRef = useRef(reconnecting);
+  reconnectingRef.current = reconnecting;
+  /** What the service last said about "Block the internet while
+   * reconnecting" (lib/reconnect-hold.ts), and the device's preferences
+   * (lib/app-prefs.ts). */
+  const hold = useSyncExternalStore(holdStore.subscribe, holdStore.current, holdStore.current);
+  const prefs = useSyncExternalStore(appPrefs.subscribe, appPrefs.current, appPrefs.current);
+  /** Whether the tray has a measured speed to show (lib/traffic-meter.ts). */
+  const trafficShown = useTrafficShown();
+  /** The run's own connect at launch is under way, and says why
+   * (lib/auto-connect.ts). */
+  const [autoConnecting, setAutoConnecting] = useState(false);
   /** How the last ladder pass ended, beyond its outcome: which route it
    * landed on, or the kind of error it stopped on. Read by the reconnect
    * runner, which has to tell "the plan said no" from "the network did". */
@@ -724,10 +810,50 @@ export function Dashboard({
     errorKind: null,
   });
   const [showLocationPicker, setShowLocationPicker] = useState(false);
+  /** A server's switch request is out, from the pick until it is answered
+   * (`onPicking` to `onSwitched` or `onPickFailed`): the phone's sheet does
+   * not close meanwhile (`LocationSheet`'s `dismissible`). */
+  const [switchInFlight, setSwitchInFlight] = useState(false);
+  /** Which of the three layouts the window is in: where the one location
+   * list lives -- the panel, or a sheet on a phone-sized window. */
+  const layout = useWindowLayout();
+  /** Bumped to flash the locations panel when it is asked for. */
+  const [panelFlash, setPanelFlash] = useState(0);
+  /** The main page, or its Locations page: the full list, with each
+   * protocol's hint and what the evidence means (design-system.md 4.8).
+   * Drawn by this screen, so a pick there goes through the same
+   * confirmation and the same wiring as one in the panel. */
+  const [view, setViewNow] = useState<"overview" | "locations">("overview");
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  /** The main page or the Locations page: the change slides like a change
+   * of page (lib/view-transition.ts), and asking for the one on screen
+   * changes nothing. */
+  const setView = (next: "overview" | "locations") => {
+    if (viewRef.current === next) return;
+    viewRef.current = next;
+    swapView(() => setViewNow(next), next === "locations" ? "forward" : "back");
+  };
+  const [locSection, setLocSection] = useState<"explain" | undefined>(undefined);
+  /** The switch confirmation open, and how it is answered (`confirmPick`). */
+  const [switchAsk, setSwitchAsk] = useState<{
+    place: string | null;
+    protocol: string | null;
+    tunnelUp: boolean;
+    resolve: (go: boolean) => void;
+  } | null>(null);
+  const stayRef = useRef<HTMLButtonElement>(null);
+  /** A confirmed switch owes a connect once the pick has landed. */
+  const connectAfterSwitchRef = useRef(false);
+  const [switchConnect, setSwitchConnect] = useState(0);
+  /** Gaming mode's own calm tone and summary, from its panel. */
+  const [gamingTone, setGamingTone] = useState<ShownTone>("idle");
+  const [gamingSummary, setGamingSummary] = useState<{ picked: number; resolver: string | null } | null>(null);
 
-  // Only set when *this* app instance brought the tunnel up. The helper
-  // service doesn't report a start time, so a tunnel adopted on launch
-  // has no honest duration to show and the timer stays blank rather than
+  // Set when *this* app instance brought the tunnel up, or -- for a tunnel
+  // adopted on launch -- from the age the service reports for its session
+  // (`sessionSecs`, lib/session-clock.ts). A service that does not say has
+  // no honest duration to show, and the timer stays blank rather than
   // inventing one from the moment the window opened.
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -758,15 +884,19 @@ export function Dashboard({
    * said "only the apps you chose go through Neoxify" for both, which
    * in "All except these" is the opposite of what is happening. */
   const [customExcept, setCustomExcept] = useState(false);
+  // Read whenever the main page comes into view -- at mount, and back from
+  // a page of the shell: Settings is where Custom mode is changed, and this
+  // screen stays mounted under it.
   useEffect(() => {
+    if (!onMainPage) return;
     loadSplitTunnel()
       .then((settings) => {
         setCustomConfigured(isEffective(settings));
         setCustomExcept(settings.mode === "allExcept");
       })
       .catch(() => undefined);
-  }, []);
-  const [splitTunnelProblem, setSplitTunnelProblem] = useState<string | null>(null);
+  }, [onMainPage]);
+  const [splitTunnelProblem, setSplitTunnelProblem] = useState<CustomModeProblem | null>(null);
   // Whether the service asked for the tunnel's DNS rule and did not get
   // it. Read from the service, never derived: only it knows whether an
   // engine tried. `false` is "nothing was reported", not "DNS is
@@ -803,24 +933,46 @@ export function Dashboard({
    * owner's rule: a few seconds of not being connected -- a reconnect, a
    * rung, an engine restarted, a drop's gap -- must not change the colour.
    * The headline's words follow `ipv4NotConfined` at once, as before. */
-  const [cautionShown, setCautionShown] = useState(() => orbCaution.current());
+  const [cautionShown, setCautionShown] = useState(() => orbHold.caution());
   /** The state the orb and the status dot are drawn as: a confirmed
    * session's, held over a short "degraded" / "unverified" / "unknown"
    * (`orbHold`). The headline still follows `connectionState`. */
   const [orbState, setOrbState] = useState<ConnectionState>(() => orbHold.current());
   const unconfinedChosen = unconfinedByChoice(unconfinedKey);
+  /** A press of the customer's is in flight -- Connect, Disconnect, Stop,
+   * Check again, a switch of location -- from the press until the state
+   * settles. Nothing is held over one (`orbHold`), and a busy it started
+   * wears the quiet glass fill rather than the held cobalt (`pillFor`). */
+  const [pressed, setPressed] = useState(false);
+  useEffect(() => {
+    if (connectionState !== "connecting" && connectionState !== "verifying" && connectionState !== "disconnecting") setPressed(false);
+  }, [connectionState]);
+  const reconnectRunning = reconnecting !== null;
   useEffect(() => {
     const look = () => {
-      setOrbState(orbHold.observe(connectionState));
-      setCautionShown(orbCaution.observe({ state: connectionState, unconfined: ipv4NotConfined, byChoice: unconfinedChosen }));
+      const caution = orbCaution.observe({ state: connectionState, unconfined: ipv4NotConfined, byChoice: unconfinedChosen });
+      setOrbState(
+        orbHold.observe(connectionState, {
+          // Read from the store as it is now rather than as this render
+          // saw it: a drop publishes "disconnected" and starts its
+          // reconnect in one go, and the hold has to see both.
+          reconnecting: reconnectingView(autoReconnect.current(), sessionGeneration()) !== null,
+          pressed,
+          caution,
+        }),
+      );
+      setCautionShown(orbHold.caution());
     };
     look();
-    // Looked at every second while up, so a condition that holds is seen to
-    // hold whether or not anything else renders.
-    if (connectionState !== "connected" && connectionState !== "degraded" && connectionState !== "unverified" && connectionState !== "unknown") return;
+    // Looked at every second while up, or while a look is held over a gap,
+    // so a condition that holds is seen to hold -- and a hold ends on time
+    // -- whether or not anything else renders.
+    const up =
+      connectionState === "connected" || connectionState === "degraded" || connectionState === "unverified" || connectionState === "unknown";
+    if (!up && !orbHold.holding() && !reconnectRunning) return;
     const id = setInterval(look, 1_000);
     return () => clearInterval(id);
-  }, [connectionState, ipv4NotConfined, unconfinedChosen]);
+  }, [connectionState, ipv4NotConfined, unconfinedChosen, pressed, reconnectRunning]);
   /** A pass waiting on its rung for a network to dial over
    * (`network-wait.ts`), from whichever screen started it. */
   const waitingForNetwork = useSyncExternalStore(networkWait.subscribe, networkWait.current);
@@ -965,8 +1117,13 @@ export function Dashboard({
     // customer's other device away as "in use" until it goes stale. Kept
     // while a reconnect runs, whose claim renews it -- and given back by
     // the episode itself if it ends before a pass of it claimed
-    // (`slotIdle`).
-    if (autoReconnect.dropped({ exclusion: reconnectExclusion() }) === "lost") void deviceSlot.release();
+    // (`slotIdle`). And the reconnect hold, which the service began the
+    // moment the engine died: with nothing to reconnect, nothing is to be
+    // held -- whatever phase the drop found (lib/reconnect-hold.ts).
+    if (autoReconnect.dropped({ exclusion: reconnectExclusion() }) === "lost") {
+      void deviceSlot.release();
+      if (holdWanted(appPrefs.current().blockWhileReconnecting)) void holdService.release();
+    }
     return true;
   }
 
@@ -1072,8 +1229,9 @@ export function Dashboard({
 
     lastStatusRef.current = status;
     statusMissesRef.current = 0;
+    noteStatus(status);
     setSplitTunnelActive(Boolean(status.splitTunnelActive));
-    setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+    setSplitTunnelProblem(readCustomModeProblem(status));
     setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
     setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
     setIpv6Blocked(Boolean(status.ipv6Blocked));
@@ -1083,6 +1241,24 @@ export function Dashboard({
     const observed = stateFromStatus(status);
     followTunnelForEndpoints(observed);
     return observed;
+  }
+
+  /** What every status read says beyond the tunnel's state: the reconnect
+   * hold (lib/reconnect-hold.ts) and the tunnel's own counters
+   * (lib/traffic-meter.ts). And a hold the service still reports over a
+   * tunnel that landed under it, verified, with no pass of ours keeping it,
+   * is let go of -- the gap it was for is over -- but never on one read,
+   * nor on a read that contradicts it (`createStatusRelease`). */
+  function noteStatus(status: VpnStatus): void {
+    holdStore.observe(status.reconnectHold);
+    if (status.connected) trafficMeter.observe(status.traffic);
+    const release = statusReleaseRef.current.see({
+      hold: holdStore.current(),
+      status,
+      passRunning: ladderInFlight(),
+      now: Date.now(),
+    });
+    if (release) void holdService.release();
   }
 
   /** Tells the control plane's endpoint order what the service just said
@@ -1119,6 +1295,14 @@ export function Dashboard({
     publishObserved(generation, settled);
     // The clock is only honest while something is up.
     if (settled === "disconnected") setConnectedAt(null);
+    else if (isTunnelUp(settled)) {
+      // A tunnel this window did not bring up -- found up at launch -- is
+      // timed from the age the service reports for its session, never from
+      // when the window opened; nothing when it says nothing. A stamp this
+      // window's own connect made stays.
+      const since = lastStatusRef.current ? adoptedSince(lastStatusRef.current, Date.now()) : null;
+      if (since !== null) setConnectedAt((own) => own ?? since);
+    }
     return settled;
   }
 
@@ -1270,14 +1454,14 @@ export function Dashboard({
     adoptRefreshed(refreshed.protocolUsers);
   });
 
-  // Ticks for as long as the screen is mounted, not just while connected.
-  // Two reasons: the days-remaining badge would otherwise freeze at
-  // whatever it was when the screen loaded, and gating the interval on
-  // connectedAt left `now` older than the connection start for a full
-  // second, which rendered the session as "-1:-51".
+  // Ticks for as long as the screen is mounted, for the days left, which
+  // would otherwise freeze at whatever they were when the screen loaded.
+  // Every half minute: the session timer keeps its own second-by-second
+  // clock (`SessionTimer`), so the whole screen is not re-rendered every
+  // second.
   useEffect(() => {
     setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(id);
   }, []);
 
@@ -1465,12 +1649,36 @@ export function Dashboard({
    * history with its own single entry. */
   function loadRouteMemory(): void {
     void Promise.all([
-      invoke<string | null>("network_fingerprint")
-        .then(setNetworkId)
-        .catch(() => setNetworkId(null)),
+      readNetworkId(),
       loadLastGood().then(setLastGood),
       loadConnectHistory().then(setHistory),
     ]).finally(() => setRouteMemoryLoaded(true));
+  }
+
+  /** Which network this is, asked again. `keepOnNull` is for a tunnel that
+   * is up: with one owning the default route the fingerprint cannot be
+   * read at all, and that is no reason to take the ladder's memory away
+   * from a reconnect -- the id is asked again once the tunnel is down. */
+  function readNetworkId(keepOnNull = false): Promise<void> {
+    const askedAt = Date.now();
+    return invoke<string | null>("network_fingerprint")
+      .catch(() => null)
+      .then((id) => {
+        if (id === null && keepOnNull) return;
+        setNetworkId(id);
+        setNetFresh((fresh) => ({ ...fresh, idReadAt: Math.max(fresh.idReadAt, askedAt) }));
+      });
+  }
+
+  /** The way out changed under the window, or went altogether: until the
+   * network id and the route list are read again, the map does without
+   * them (`lib/map-network.ts`). A different way out under a live tunnel
+   * asks for the id at once; a lost one does not -- whichever network comes
+   * back is asked about once the tunnel is down. */
+  function noteRoam(reread: "now" | "tunnelUp" | "later") {
+    const at = Date.now();
+    setNetFresh((fresh) => ({ ...fresh, roamedAt: at }));
+    if (reread !== "later") void readNetworkId(reread === "tunnelUp");
   }
 
   /** The server list's own answer, newer than anything this screen holds:
@@ -1664,14 +1872,24 @@ export function Dashboard({
       // the banner over a newer answer, and start the retrying again on a
       // screen that load may already have taken off its snapshot.
       const superseded = background && loadSeqRef.current !== load;
+      // Asked again on coming back to the main page, with the screen's own
+      // last answer on it rather than the snapshot (`revalidate`).
+      const keptAnswer = retry === "returned" && offlineSinceRef.current === null;
       unanswered?.(
         superseded
           ? `asked again in the background (${retry}); a load of the screen's own had begun meanwhile`
-          : cached
-            ? `${background ? `asked again in the background (${retry}); still ` : ""}showing the cached credentials, ${snapshotAge(cached.savedAt)}`
-            : "showed the load error, with nothing cached to show",
+          : keptAnswer
+            ? "asked again in the background on returning to the main page; still showing the screen's own last answer"
+            : cached
+              ? `${background ? `asked again in the background (${retry}); still ` : ""}showing the cached credentials, ${snapshotAge(cached.savedAt)}`
+              : "showed the load error, with nothing cached to show",
       );
       if (superseded) return "superseded";
+      // That answer stays on screen, under no banner: a load not answered
+      // now says nothing about it, and the next return, or the next load,
+      // asks again. Nothing is retried for it -- the screen is not on its
+      // snapshot.
+      if (keptAnswer) return "unanswered";
       // Said as what happened: nothing answered, or something answered
       // with an error (`offlineReason`) -- unless Neoxify has answered
       // something since this load began, which is the newer word on it.
@@ -1737,7 +1955,17 @@ export function Dashboard({
     // perhaps the one a tunnel is up on -- is replaced by its new copy, as
     // a refresh's are (`showLoadedCredential`).
     const chosen = preferRouteId ?? chosenRouteId;
-    showLoadedCredential(usersResult.data, chosen, shownWhileWaiting);
+    // Asked again on coming back to the main page: the credential held is
+    // replaced by its new copy as long as the answer still lists it, or a
+    // pass is dialling. One the answer no longer lists -- the plan changed
+    // on the Plans page -- is chosen again, as a load of the screen's own
+    // would, unless a tunnel is shown up on it (`showLoadedCredential`).
+    const heldListed = usersResult.data.some((u) => u.id === protocolUserRef.current?.id);
+    showLoadedCredential(
+      usersResult.data,
+      chosen,
+      shownWhileWaiting && (retry !== "returned" || heldListed || ladderInFlight()),
+    );
     // The tunnel outlives the app: the helper service keeps it up if the
     // window is closed, so on open the UI has to adopt whatever is
     // actually running rather than assuming disconnected -- and before
@@ -1765,6 +1993,10 @@ export function Dashboard({
         // wait can outlast: a Disconnect pressed meanwhile breaks the
         // request, and its report must not say nothing was being dialled.
         const routeList = traceRequests("dashboard route list", () => connectionStateRef.current);
+        // Which network the list's per-network tags will be about: the
+        // reading the request carries, or without one the request's own
+        // address, now (`lib/map-network.ts`).
+        const tagsAt = currentNetwork()?.at ?? Date.now();
         const routesResult = await getAvailableRoutes(sub.id, routeList.trace("routes"));
         const routesUnanswered = routeList.settle({ routes: routesResult });
         if (routesResult.ok) {
@@ -1774,6 +2006,7 @@ export function Dashboard({
           if (takesRouteList(routesShownRef.current, load)) {
             setRoutes(currentRoutes);
             routesShownRef.current = { plan: planOf(sub), load, routes: currentRoutes, answered: true };
+            setNetFresh((fresh) => ({ ...fresh, tagsReadAt: Math.max(fresh.tagsReadAt, tagsAt) }));
           }
         } else {
           // Everything else answered and the list did not, so the list
@@ -1869,6 +2102,26 @@ export function Dashboard({
       }),
     [],
   );
+
+  // Back on the main page from another page of the shell. This screen
+  // stayed mounted under that page, its polls with it, so nothing it holds
+  // went: the main page is drawn as it was -- verified, the route named,
+  // the list loaded -- with no load in front of it. What it shows is asked
+  // for again behind it (stale-while-revalidate): a plan bought or renewed
+  // on Plans, credentials refreshed meanwhile. The service is not asked
+  // here; the polls never stopped asking it. The VM showed what the old
+  // way cost: "Loading..." over the whole window for a second and a half,
+  // then "Connected, not confirmed", no route and no list for two to three
+  // seconds more, over a tunnel that never changed.
+  const onMainPageRef = useRef(onMainPage);
+  useEffect(() => {
+    const was = onMainPageRef.current;
+    onMainPageRef.current = onMainPage;
+    if (was || !onMainPage || loading) return;
+    offlineRetry.revalidate();
+    // On the return only; the retry is one per screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onMainPage]);
 
   // A tunnel verified: the path to Neoxify is a different one now, and on
   // a network that filters it, the likeliest one to be answered.
@@ -2087,6 +2340,7 @@ export function Dashboard({
         return false;
       }
       statusMissesRef.current = 0;
+      noteStatus(status);
 
       // The plan's device limit, renewed on this poll every
       // `renewEverySec` (four polls at the contract's sixty seconds);
@@ -2113,7 +2367,7 @@ export function Dashboard({
       // yellow for one poll.
       const customMode = Boolean(status.splitTunnelActive);
       setSplitTunnelActive(customMode);
-      setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+      setSplitTunnelProblem(readCustomModeProblem(status));
       setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
       setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
       setIpv6Blocked(Boolean(status.ipv6Blocked));
@@ -2378,6 +2632,13 @@ export function Dashboard({
       try {
         const status = await serviceStatus().catch(() => null);
         const disturbed = statusDisturbances.since(mark);
+        // Every read's word on the hold, the drop's own included: the read
+        // that finds the tunnel gone is the one that says whether the
+        // service is holding the internet for it. Left unread, the screen
+        // went on with the "armed" from before the drop and said traffic
+        // was going out without Neoxify while the service held it (the
+        // VM, 0.25 to 0.5 s at every reconnect's start).
+        if (status !== null) noteStatus(status);
         if (!droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) return;
         publishDrop(generation);
       } finally {
@@ -2421,9 +2682,14 @@ export function Dashboard({
       uplinkInFlightRef.current = true;
       try {
         const seen = await invoke<string | null>("network_uplinks").catch(() => null);
+        noteWayOut(seen);
+        const before = uplinkRef.current.seen;
         const [next, step] = nextUplink(uplinkRef.current, seen);
         uplinkRef.current = next;
         if (step === "same") return;
+        // For the map: another network's evidence is not this one's.
+        const moved = tunnelWayOut(before, step, next.seen);
+        if (moved !== null) noteRoam(moved === "moved" ? "tunnelUp" : "later");
         // Stamped as every writer here is: a press landing meanwhile
         // makes what follows old news.
         const generation = intentRef.current.generation;
@@ -2450,6 +2716,195 @@ export function Dashboard({
     const id = setInterval(() => void look(), UPLINK_POLL_MS);
     return () => clearInterval(id);
   }, [connectionState]);
+
+  // The same question while nothing is up, slower, for the map alone: a
+  // roam with the window open and disconnected is noticed, and the network
+  // asked about again (`lib/map-network.ts`). Only while "disconnected":
+  // a connect installs routes of its own, which would read as a roam. And a
+  // roam seen under a tunnel is asked about here, once it is down.
+  useEffect(() => {
+    if (connectionState !== "disconnected") return;
+    if (netFresh.roamedAt !== null && netFresh.idReadAt < netFresh.roamedAt) void readNetworkId();
+    let seen: string | null = null;
+    let asking = false;
+    const look = async () => {
+      if (asking) return;
+      asking = true;
+      try {
+        const now = await invoke<string | null>("network_uplinks").catch(() => null);
+        noteWayOut(now);
+        const step = idleWayOut(seen, now);
+        seen = step.next;
+        if (step.roamed) noteRoam("now");
+      } finally {
+        asking = false;
+      }
+    };
+    void look();
+    const id = setInterval(() => void look(), IDLE_WAY_OUT_POLL_MS);
+    return () => clearInterval(id);
+    // The roam check reads the freshness as it was when the state settled.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionState]);
+
+  // The speeds belong to the session they were read in: none while no
+  // tunnel is up, and the next one starts from nothing.
+  useEffect(() => {
+    if (!isTunnelUp(connectionState)) trafficMeter.reset();
+  }, [connectionState]);
+
+  // While an automatic reconnect runs, or after a drop nothing reconnects,
+  // nothing else asks the service, so its word on the reconnect hold is
+  // asked here -- at once, then every two seconds -- for the line and the
+  // notification that say the internet is blocked, or why it is not
+  // (`gapTraffic`): until it answers they say neither. Only with the
+  // setting on: off, there is nothing to say.
+  const gapDropped = tunnelDropped || reconnectLost(reconnect, sessionGeneration());
+  const inHoldGap = reconnectRunning || gapDropped;
+  useEffect(() => {
+    if (!inHoldGap || !holdWanted(prefs.blockWhileReconnecting)) return;
+    let asking = false;
+    const look = () => {
+      if (asking) return;
+      asking = true;
+      serviceStatus()
+        .then((status) => holdStore.observe(status.reconnectHold), () => undefined)
+        .finally(() => {
+          asking = false;
+        });
+    };
+    look();
+    const id = setInterval(look, 2_000);
+    return () => clearInterval(id);
+  }, [inHoldGap, prefs.blockWhileReconnecting]);
+
+  // "Connect when Neoxify starts" (lib/auto-connect.ts): once per run, at
+  // the first main page of a run that opened signed in, and only over
+  // nothing the service has up -- the customer's own Connect, pressed for
+  // them, which never takes the device slot from another device. Waits for
+  // what a pass reads (the route memory and the list, as the reconnect's
+  // attempt does), for the preference itself and for the mode the app was
+  // left in: a default is never acted on.
+  const connectNowRef = useRef(connectNow);
+  connectNowRef.current = connectNow;
+  useEffect(() => {
+    if (loading || !routeMemoryLoaded || !routeListLoaded || !autoConnectLatch.armed()) return;
+    let alive = true;
+    void Promise.all([appPrefs.load(), loadGaming()]).then(([loadedPrefs, gamingSaved]) => {
+      if (!alive || !autoConnectLatch.take()) return;
+      const decision = autoConnectDecision({
+        enabled: loadedPrefs.autoConnect,
+        mode: gamingSaved.mode,
+        state: connectionStateRef.current,
+        passRunning: ladderInFlight(),
+        reconnecting: reconnectingView(autoReconnect.current(), sessionGeneration()) !== null,
+        hasCredential: protocolUserRef.current !== null,
+        subscriptionStatus: subscriptionRef.current?.status,
+        deviceLimitNotice: slotNoticeStore.current() !== null || slotLostRef.current,
+      });
+      if (!decision.go) return;
+      setAutoConnecting(true);
+      void connectNowRef.current().finally(() => setAutoConnecting(false));
+    });
+    return () => {
+      alive = false;
+    };
+    // Once the screen has what a pass reads; the latch keeps it to once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, routeMemoryLoaded, routeListLoaded]);
+
+  // "Notify me when the connection changes" (lib/connection-notify.ts):
+  // read off the calm tone the screen wears, which holds through a short
+  // gap, so a few seconds' gap is never a notification -- as it is never a
+  // colour. Words in the app's language; nothing while the window is in
+  // front, where the screen says it.
+  const notifyTone: ShownTone =
+    appMode === "gaming"
+      ? "idle"
+      : shownTone(orbTone(orbState, cautionShown), {
+          reconnecting: reconnectRunning,
+          dropped: gapDropped,
+        });
+  /** Where other traffic goes in the gap, as the service has said: the
+   * same source the sentence under the state reads (`holdHint`). */
+  const gap = gapTraffic(hold, holdWanted(prefs.blockWhileReconnecting));
+  // The service's word, given HOLD_WORD_GRACE_MS in the gap before it is said
+  // not to have come: it answers within about half a second, and "checking"
+  // then "blocked" was a sentence changing twice at every short reconnect.
+  // The hint's room stays empty meanwhile, and no notification goes.
+  const holdWordAwaited = (inHoldGap || waitingForNetwork) && gap === "unconfirmed";
+  const [holdWordLate, setHoldWordLate] = useState(false);
+  useEffect(() => {
+    setHoldWordLate(false);
+    if (!holdWordAwaited) return;
+    const id = setTimeout(() => setHoldWordLate(true), HOLD_WORD_GRACE_MS);
+    return () => clearTimeout(id);
+  }, [holdWordAwaited]);
+  const gapSaid = gapWord(gap, holdWordLate);
+  useEffect(() => {
+    if (loading) return;
+    const step = notifyStep(notifyMemory.current(), {
+      tone: notifyTone,
+      reconnecting: reconnectRunning,
+      gap: gapSaid,
+      // In front, and on the main page: another page of the shell does not
+      // say the connection's state, so it is said as for a window behind.
+      focused: typeof document !== "undefined" && document.hasFocus() && onMainPage,
+      gaming: appMode === "gaming",
+    });
+    notifyMemory.set(step.memory);
+    if (step.say === null || !appPrefs.current().notifications) return;
+    const text = NOTIFY_TEXT[step.say];
+    void showNotification(t(text.title), t(text.body), language).catch(() => undefined);
+    // On a change of what is said, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, notifyTone, reconnectRunning, appMode, gapSaid]);
+
+  // The session log (lib/session-log.ts), only when the customer has
+  // turned it on: a record opens when the screen first shows a tunnel up
+  // and closes when it shows it gone -- lost, or ended -- with what the
+  // tunnel's adapter counted, if it counted -- every session of it, a
+  // reconnect onto the same route included (`createRecordBytes`). A tunnel
+  // the failover moved to another route is a new record: the old one
+  // stopped carrying.
+  const loggedBytesRef = useRef(createRecordBytes());
+  useEffect(
+    () =>
+      trafficMeter.subscribe(() => {
+        const view = trafficMeter.view();
+        loggedBytesRef.current.see(trafficMeter.generation(), view ? { rx: view.rxBytes, tx: view.txBytes } : null);
+      }),
+    [],
+  );
+  useEffect(() => {
+    if (loading) return;
+    const up = connectionState === "connected" || connectionState === "unverified" || connectionState === "degraded";
+    // The credential the tunnel is on, or none when the screen cannot name
+    // it -- never the pin a load put on screen (`loggedCredential`).
+    const user = loggedCredential(protocolUserRef.current, tunnelNamedRef.current);
+    const open = sessionLog.openRecord();
+    const close = (ended: "disconnected" | "lost", bytes: { rx: number; tx: number } | null) => {
+      void sessionLog.finish({ end: Date.now(), rxBytes: bytes?.rx ?? null, txBytes: bytes?.tx ?? null, ended });
+    };
+    if (up && appModeRef.current !== "gaming") {
+      const moved = movedRoute(open, user);
+      if (moved) close("lost", loggedBytesRef.current.split());
+      else if (open === null) loggedBytesRef.current.restart();
+      if (open === null || moved) {
+        void sessionLog.begin({
+          start: connectedAt ?? Date.now(),
+          routeId: user?.routeId ?? null,
+          protocol: user?.protocol ?? null,
+          transport: user?.connection?.transport,
+        });
+      }
+    } else if (connectionState === "disconnected" && open !== null) {
+      close(tunnelDropped ? "lost" : "disconnected", loggedBytesRef.current.total());
+      loggedBytesRef.current.restart();
+    }
+    // On a change of what the screen shows; the credential is read as it is.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, connectionState, tunnelDropped]);
 
   // "Connection lost" describes the moment a tunnel went, and only for as
   // long as nothing has happened since. Any other state -- a connect
@@ -2634,7 +3089,12 @@ export function Dashboard({
    */
   async function handleConnectToggle(action: PressAction) {
     if (!protocolUser) return;
+    setPressed(true);
     setConnectionError(null);
+    // A press of the customer's own supersedes the connect a confirmed
+    // switch still owes (`connectAfterSwitch`): it does what it says, and
+    // nothing dials after it on the switch's behalf.
+    connectAfterSwitchRef.current = false;
     // Whatever the press does next, the screen is no longer describing
     // the moment the last tunnel went.
     setTunnelDropped(false);
@@ -2667,6 +3127,9 @@ export function Dashboard({
           await slotTeardown.retry(tearDownForSlotOnce);
           return;
         }
+        // The customer ends this session: their next verified connection
+        // is a new one, and its check bounces again (lib/check-pop.ts).
+        rearmCheckPop();
         const generation = beginIntent("disconnect");
         // This device stops using one of the plan's devices. Released
         // fire and forget, within a second and a half, and never in
@@ -2743,6 +3206,7 @@ export function Dashboard({
     // The customer's own connect, from the orb or the device-limit card:
     // an automatic reconnect under way, or waiting, ends here.
     autoReconnect.cancel("customer");
+    setPressed(true);
     // "Use on this device instead" can be pressed while the device limit's
     // teardown is still owed -- a takeover's card shows over a tunnel
     // still up. That tunnel comes down first, on the service's word, and
@@ -2922,6 +3386,17 @@ export function Dashboard({
      * old order behind a repair or a new location and landed on the old
      * server. Asked wherever the flag used to be. See `passStopped`. */
     const stopped = () => passStopped(cancelRef.current, options.reconnect);
+    /** "Block the internet while reconnecting": whether this pass keeps the
+     * service's hold through its own teardowns -- an automatic pass, or a
+     * press made while the hold is holding -- or lets go of it, as a press
+     * from a quiet screen always has (`passTeardown`). */
+    const holdThrough =
+      passTeardown({
+        setting: holdWanted(appPrefs.current().blockWhileReconnecting),
+        automatic: options.automatic === true,
+        holding: holdStore.current()?.state === "holding",
+      }) === "keepHold";
+    const takeDown = (): Promise<void> => (holdThrough ? holdService.disconnectKeepingHold() : serviceDisconnect());
     /** Whether this pass brought a tunnel up. One of the app's own
      * automatic passes that did not -- the mid-session failover -- has
      * just taken the tunnel the episode was armed for down on purpose,
@@ -3011,7 +3486,7 @@ export function Dashboard({
       } else {
         // Obligation 9: down first, so the question does not go into a
         // tunnel that may be held, then four seconds to ask.
-        await serviceDisconnect().catch(() => undefined);
+        await takeDown().catch(() => undefined);
         const standing = await deviceSlot.checkStanding();
         if (standing.kind === "unanswered") {
           // Said, and then the ladder runs as usual: a limit that could
@@ -3078,7 +3553,10 @@ export function Dashboard({
       // exactly that way when a live WireGuard tunnel was blocked.
       //
       // Harmless from the Connect button, where nothing is up.
-      await serviceDisconnect().catch(() => undefined);
+      //
+      // An automatic pass keeps the reconnect hold through it, if it is on:
+      // the gap between the dead tunnel and the next is the one it blocks.
+      await takeDown().catch(() => undefined);
 
       // Re-sent on every pass, not only when the setting changes. The
       // helper is a Windows service with its own lifetime: it can be
@@ -3248,6 +3726,14 @@ export function Dashboard({
         // while it was still dialling.
         ladderPass.progress(generation);
         options.reconnect?.progress();
+        ladderProgress.rung({
+          pass: generation,
+          index,
+          total: candidates.length,
+          routeId: candidate.routeId,
+          protocol: candidate.protocol,
+          transport: candidate.connection?.transport,
+        });
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
 
@@ -3351,6 +3837,9 @@ export function Dashboard({
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
             knownNodes,
+            // "Block the internet while reconnecting": the service arms this
+            // session when it is on (lib/reconnect-hold.ts).
+            blockWhileReconnecting: holdWanted(appPrefs.current().blockWhileReconnecting),
           });
           showNetworkWait(false);
           // The session this pass was started under ended while the
@@ -3545,6 +4034,9 @@ export function Dashboard({
           // calling it "protected".
           if (verdict === "connected" || verdict === "unverified") {
             publishObserved(intent, verdict);
+            // A tunnel is up: whatever the reconnect hold was holding is
+            // over. Asked of the service at once; nothing waits on it.
+            if (holdWanted(appPrefs.current().blockWhileReconnecting)) void holdService.release();
             // Which exit this session actually leaves from, sent now
             // that a route has come up rather than guessed before one
             // had.
@@ -3730,7 +4222,8 @@ export function Dashboard({
             showNetworkWait(true);
             const waited = await waitForNetwork(
               {
-                wayOut: () => invoke<boolean>("network_way_out"),
+                // The service's own rule, toward this rung's server.
+                wayOut: () => invoke<boolean>("network_way_out", { payload: candidate }),
                 stopped: () =>
                   stopped() || sessionGeneration() !== sessionAtStart || ladderGenerationRef.current !== generation,
                 progress: () => {
@@ -3789,8 +4282,8 @@ export function Dashboard({
         noNetworkRounds = 0;
         // Always tear down before moving on, or the next engine inherits
         // this one's routes and fails for a reason that has nothing to
-        // do with it.
-        await invoke("vpn_disconnect").catch(() => undefined);
+        // do with it. Keeping the hold between rungs, when it is kept.
+        await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);
         if (!isLast) publishObserved(intent, "connecting");
       }
 
@@ -3852,7 +4345,11 @@ export function Dashboard({
       // standing. `phaseFor` enforces it rather than this comment: while
       // the intent is "connect", nothing published can render as a
       // teardown.
-      await serviceDisconnect().catch(() => undefined);
+      //
+      // A reconnect's attempt that failed keeps the hold for the next one;
+      // any other pass that failed lets go -- nothing is reconnecting after
+      // it, and the product fails open.
+      await (options.reconnect && holdThrough ? holdService.disconnectKeepingHold() : serviceDisconnect()).catch(() => undefined);
       // The outcome is now known, so the wording rule is lifted before
       // the answer is asked for -- otherwise the settled "disconnected"
       // below would come back out as "connecting" and the spinner would
@@ -3877,6 +4374,8 @@ export function Dashboard({
       endIntent(intent);
       // A wait for a network ends with its pass, however it ended.
       showNetworkWait(false);
+      // And the line saying which rung it was on.
+      ladderProgress.ended(generation);
       // Only the pass that still owns the guard may release it. One that
       // outlived its deadline has already been replaced, and clearing
       // the guard here would unlock a newer pass that is still running.
@@ -3894,6 +4393,109 @@ export function Dashboard({
       // it left. This screen, if it is still the one mounted, ignores it.
       if (ladderGenerationRef.current === generation) ladderPass.ended();
     }
+  }
+
+  /** Decision 3 of the redesign (owner, 2026-10-19): a location picked
+   * while a tunnel is up -- or while a connect or an automatic reconnect is
+   * under way -- is confirmed first, because switching takes the tunnel
+   * down. On "Switch" this takes it down the way Disconnect does, and only
+   * once the service says nothing is up does the list go on to its own
+   * pick (`onPicking`, the switch request, `onSwitched`), after which
+   * `connectAfterSwitch` connects again. Every state on the way is the
+   * service's: the chip says "Disconnecting", then "Connecting", then what
+   * the new connection proves.
+   *
+   * With nothing up, the pick goes ahead as it always has. */
+  async function confirmPick(route: RouteOption | null): Promise<boolean> {
+    const state = connectionStateRef.current;
+    const live =
+      state === "connected" || state === "unverified" || state === "degraded" || state === "connecting" || state === "verifying";
+    if (!live && reconnectingRef.current === null) return true;
+    const go = await new Promise<boolean>((resolve) =>
+      setSwitchAsk({
+        place: route ? placeLabel(route, language) : null,
+        protocol: route ? customerProtocolLabel(route.protocol, route.transport) : null,
+        tunnelUp: isTunnelUp(state),
+        resolve,
+      }),
+    );
+    setSwitchAsk(null);
+    if (!go) return false;
+    const now = connectionStateRef.current;
+    if (now === "connected" || now === "unverified" || now === "degraded") await handleConnectToggle("disconnect");
+    else if (now === "connecting" || now === "verifying") await handleConnectToggle("cancelConnect");
+    // The service's word that nothing is up, not the screen's: a teardown
+    // that did not finish leaves the pick undone and says why. The service
+    // is asked once more; if that one question goes unanswered -- busy
+    // just after a teardown -- the answer the teardown itself settled on
+    // (`confirmTornDown`, now the screen's state) stands in for it.
+    const status = await serviceStatus().catch(() => null);
+    const down = status ? !status.connected : connectionStateRef.current === "disconnected";
+    if (!down) {
+      setConnectionError({ kind: "serviceUnavailable", messageKey: "sw.notSwitched", detail: status ? "still connected after the switch's teardown" : "no answer after the switch's teardown" });
+      return false;
+    }
+    connectAfterSwitchRef.current = true;
+    return true;
+  }
+
+  /** The other half of `confirmPick`: once the pick has landed -- for a
+   * server, once the load it starts has settled -- or its switch request
+   * failed, which leaves the previous choice, the customer is connected
+   * again, as the confirmation said. The connect runs from the render the
+   * count lands in, so it dials the new pin. A press of the customer's own
+   * meanwhile cancels it (`handleConnectToggle`). */
+  function connectAfterSwitch() {
+    if (!connectAfterSwitchRef.current) return;
+    connectAfterSwitchRef.current = false;
+    setSwitchConnect((n) => n + 1);
+  }
+  useEffect(() => {
+    if (switchConnect === 0) return;
+    if (connectionStateRef.current !== "disconnected") return;
+    void handleConnectToggle("connect");
+    // Once per landed switch; the handler is this render's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [switchConnect]);
+
+  /** "Try another location" and the tray's change button: the panel beside
+   * the hero, flashed and with its current row focused, or the sheet on a
+   * phone-sized window. */
+  function showLocations() {
+    if (view !== "overview") setView("overview");
+    if (layout === "narrow") {
+      setShowLocationPicker(true);
+      return;
+    }
+    setPanelFlash((n) => n + 1);
+    requestAnimationFrame(() => {
+      const row =
+        document.querySelector<HTMLElement>('.nx-panel .nx-row[tabindex="0"]') ??
+        document.querySelector<HTMLElement>(".nx-panel .nx-row");
+      row?.focus();
+    });
+  }
+
+  /** "Locations" in the nav, and "Open the full list" in the panel's menu:
+   * the Locations page. */
+  function openLocationsPage(section?: "explain") {
+    setShowLocationPicker(false);
+    setLocSection(section);
+    setView("locations");
+  }
+
+  /** From another page of the shell to the main page, or to its Locations
+   * page: the page goes and the view comes in one change, animated as a
+   * change of page is (lib/view-transition.ts) -- never two transitions,
+   * the second cutting the first short. */
+  function showMainFrom(next: "overview" | "locations") {
+    swapView(() => {
+      setShowLocationPicker(false);
+      if (next === "locations") setLocSection(undefined);
+      viewRef.current = next;
+      setViewNow(next);
+      onShowMain?.();
+    }, "back");
   }
 
   async function handleLogout() {
@@ -3984,16 +4586,19 @@ export function Dashboard({
   // Between an automatic reconnect's attempts the press is the
   // customer's own connect, now, and says so.
   const press = pressFor(connectionState, { reconnectWaiting: reconnecting?.waiting === true });
-  const connectLabel = t(press.labelKey);
   // The same discipline for the headline: one table, one render. "VPN
   // connection lost" is this screen's own word at the drop, or the
   // episode's once it has stopped without a tunnel; "Reconnecting..."
   // while one runs.
   const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined, waitingForNetwork });
 
-  if (loading) {
+  // Only for the first load of a session, and only on the main page: a page
+  // of the shell opened before it ends (Plans, after a sign-up through the
+  // backup route) is drawn in the shell meanwhile, and a return from one
+  // never meets this -- the screen stayed mounted under it, loaded.
+  if (loading && onMainPage) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-3">
+      <div className="flex h-full flex-col items-center justify-center gap-3 pt-8">
         <div className="animate-breathe">
           <Logo />
         </div>
@@ -4005,741 +4610,680 @@ export function Dashboard({
     );
   }
 
-  return (
-    <div className="relative mx-auto flex h-full w-full max-w-xl flex-col gap-3 p-4">
-      <header className="flex items-center justify-between">
-        <Logo />
-        <div className="flex items-center gap-1">
-          {/* Left of the gear, and only for links the operator has
-              actually set -- see CommunityLinks. */}
-          <CommunityLinks />
-          <Button
-            variant="ghost"
-            onClick={onOpenSettings}
-            aria-label={t("nav.settings")}
-            title={t("nav.settings")}
-            className="size-8 justify-center px-0"
-          >
-            <SettingsIcon className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => void handleLogout()}
-            disabled={signingOut}
-            className="h-8 px-2 text-xs"
-          >
-            {signingOut ? t("nav.signingOut") : t("nav.signOut")}
-          </Button>
+  // --- The Pearl Glass main page (design-system.md, sections 3 and 4) ---
+  //
+  // Every fact below comes from the tables above it -- `headlineFor`,
+  // `pressFor` and the held look (`orbState`, `cautionShown`) -- through
+  // lib/hero-model.ts. The words change at once; the colour the screen
+  // wears is the calm tone, held through a short gap.
+  const gaming = appMode === "gaming";
+  const dropped = tunnelDropped || reconnectLost(reconnect, sessionGeneration());
+  /** The colour the status chip, the ambient glow and the sentence wear:
+   * the control's own held tone (`orbTone(orbState, cautionShown)`), and
+   * the two the control has no colour for -- a reconnect past its hold,
+   * and a drop. */
+  const calmTone: ShownTone = gaming
+    ? gamingTone
+    : shownTone(orbTone(orbState, cautionShown), { reconnecting: reconnecting !== null, dropped });
+  const chip = chipFor(connectionState, headline, { teardownShowing: slotTeardownShowing });
+  const line = lineFor(connectionState, headline, { connectedAt, teardownShowing: slotTeardownShowing });
+  const lineWords = t(line.kind === "words" ? line.key : headline.title);
+  const pill = pillFor(connectionState, press, {
+    pressed,
+    waitingForNetwork,
+    teardownShowing: slotTeardownShowing,
+    failed: connectionError !== null,
+  });
+  const secondary = secondaryFor(press, {
+    reconnecting: reconnecting !== null,
+    failed: connectionError !== null,
+    teardownShowing: slotTeardownShowing,
+  });
+  /** The reconnect hold, in the gap it is for: the sentence under the
+   * state while it holds (the internet is not going out "without
+   * Neoxify" then, and saying so would be false), a note when it should
+   * and does not (`holdNote`). */
+  const holdSetting = holdWanted(prefs.blockWhileReconnecting);
+  const heldNotes = holdNotes(hold, { inGap: reconnecting !== null || dropped, setting: holdSetting });
+  // A pass waiting for a network under the hold is a reconnect's gap too:
+  // its headline's "your traffic is not protected" would be false. Only in
+  // the gap itself: over a tunnel that is up -- a reconnect's attempt that
+  // has landed, before its episode ends -- the headline's own sentence
+  // stands, whatever the hold's last word.
+  const heldHint = isTunnelUp(connectionState)
+    ? null
+    : holdHint(hold, { reconnecting: reconnecting !== null || waitingForNetwork, dropped, setting: holdSetting, wordLate: holdWordLate });
+  const hintText = slotTeardownShowing
+    ? ""
+    : connectionError
+      ? t(connectionError.messageKey)
+      : heldHint === "pending"
+        ? ""
+        : heldHint !== null
+          ? t(heldHint)
+          : t(headline.hint);
+  /** Every sentence the hint can say, for the room it keeps: the hold's
+   * only where the setting can make it say them. */
+  const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, ...HOLD_HINTS] : HEADLINE_HINTS;
+  const slotShowing = slotNotice !== null && slotNoticeShown(slotNotice, connectionState === "disconnected");
+  /** The device limit's card carries its own primary press ("Use on this
+   * device instead") and its way out: with nothing up, the pill steps aside
+   * for it rather than offering a second Connect beside it. */
+  const slotChoice =
+    slotShowing &&
+    slotNotice !== null &&
+    connectionState === "disconnected" &&
+    (() => {
+      const copy = describeSlotNotice(slotNotice, { t, language, tunnelDown: true });
+      return copy.useHere !== null || copy.dismiss !== null;
+    })();
+  const busy = pill.progress;
+
+  // The tray's facts. A pinned server's place, Automatic until a tunnel has
+  // settled with nothing pinned, and the protocol the next connect dials.
+  const protocolName = shownProtocol ? customerProtocolLabel(shownProtocol.protocol, shownProtocol.transport) : null;
+  const landedAutomatically = !chosenRouteId && !automaticPending;
+  const trayLocation: TrayLocation = gaming
+    ? {
+        flag: (
+          <span className="nx-flagbox auto">
+            <Gamepad2 aria-hidden />
+          </span>
+        ),
+        name: t("gaming.games"),
+        sub: gamingSummary
+          ? t("tr.gamesChosen", { n: formatNumber(gamingSummary.picked, language) }) +
+            (gamingSummary.resolver ? ` · ${t("gaming.resolver")} ${gamingSummary.resolver}` : "")
+          : null,
+        onChange: onOpenSettings,
+      }
+    : {
+        flag: automaticPending ? (
+          <span className="nx-flagbox auto">
+            <Sparkles aria-hidden />
+          </span>
+        ) : currentRoute ? (
+          <RouteFlag
+            region={routePlace(currentRoute).entry}
+            exitRegion={routePlace(currentRoute).exit}
+            label={placeLabel(currentRoute, language)}
+            size="lg"
+          />
+        ) : (
+          <Globe className="size-5 text-ink-2" aria-hidden />
+        ),
+        name: automaticPending ? t("loc.automaticShort") : currentRoute ? placeLabel(currentRoute, language) : "—",
+        sub: automaticPending
+          ? null
+          : landedAutomatically && protocolName
+            ? `${t("loc.automaticShort")} · ${protocolName}`
+            : protocolName,
+        onChange: subscription ? showLocations : undefined,
+      };
+
+  const usedFraction = usage && usage.cap !== null ? usage.used / usage.cap : null;
+  const caution = planCaution(usedFraction, daysLeft);
+  const used = sizeParts(usage ? usage.used : Number(subscription?.dataUsedBytes ?? 0), language);
+  const trayPlan: TrayPlan | null = subscription
+    ? {
+        label: usage && usage.cap === null ? t("tr.planUnl") : t("dash.dataUsed"),
+        value: (
+          <>
+            {used.value}
+            <small>
+              {usage && usage.cap !== null
+                ? `${used.unit} ${t("tr.ofCap", { cap: formatSize(usage.cap, language) })}`
+                : t("tr.used", { size: used.unit })}
+            </small>
+          </>
+        ),
+        meter: usedFraction !== null ? { fraction: usedFraction, caution: caution.meter } : null,
+        days:
+          daysLeft !== null
+            ? {
+                text: t(daysLeft === 1 ? "tr.dayLeft" : "tr.daysLeft", { n: formatNumber(daysLeft, language) }),
+                caution: caution.days,
+              }
+            : null,
+        // No Renew while Neoxify cannot be reached; "Plans" on a store build.
+        renew:
+          offlineSince === null
+            ? { label: IS_STORE_BUILD ? t("nav.plansStore") : t("tr.renew"), onClick: onBrowsePlans }
+            : null,
+      }
+    : null;
+  const ip = ipFor(connectionState, exitIp, { gaming });
+
+  // The world map's lights (lib/map-lights.ts): one per country in the
+  // list, twinkling only on evidence that traffic was carried on this
+  // network lately -- this device's own verified connects, or the server's
+  // per-network tags -- and never on a latency number. Recomputed from the
+  // route list, the connect history and the network, which change only
+  // when evidence settles (a pass ends, the list arrives), and from the
+  // minute, so evidence expires; never per rung of the ladder.
+  if (!gaming && connectionState === "connected" && currentRoute) verifiedRouteRef.current = currentRoute;
+  // The arc's route: the pin while nothing has settled, the route the
+  // tunnel settled on once one has.
+  const settledNow = connectionState === "connected" || connectionState === "unverified" || connectionState === "degraded";
+  const arcRoute = gaming ? null : settledNow ? currentRoute : chosenRouteId ? (routes.find((r) => r.id === chosenRouteId) ?? null) : null;
+  // The verified place holds through a brief gap, as the chip's colour
+  // does -- but not once the tunnel has settled somewhere else: a
+  // reconnect that landed unconfirmed on France while the hold ran would
+  // otherwise keep "your verified connection leaves from" on Germany.
+  const verifiedShown =
+    gaming || (settledNow && verifiedRouteRef.current?.id !== currentRoute?.id) ? null : verifiedRouteRef.current;
+  // Evidence about the network the device is on now: after a roam, this
+  // device's history and the list's tags wait to be read again
+  // (`lib/map-network.ts`).
+  const mapRoutes = tagsCurrent(netFresh) ? routes : withoutTags(routes);
+  const evidenceCtx: EvidenceContext = { history, network: mapNetwork(networkId, netFresh), now: Math.floor(now / 60_000) * 60_000 };
+  const mapScene = mapLights({
+    routes: mapRoutes,
+    ...evidenceCtx,
+    verified: verifiedShown,
+    tone: calmTone,
+    shown: arcRoute,
+    up: gaming || !settledNow ? null : currentRoute,
+  });
+  const mapPlaces = mapCountries(routes);
+  // What the list says beside each place, from the same evidence.
+  const workedPlaces = new Set<string>();
+  for (const [key, evidence] of placesEvidence(mapRoutes, evidenceCtx)) if (evidence.look === "live") workedPlaces.add(key);
+  const listEvidence = {
+    places: placesEvidence(mapRoutes, evidenceCtx),
+    worked: workedPlaces,
+    ownAt: (route: RouteOption) => ownWorkedAt(route, evidenceCtx),
+    tags: tagsCurrent(netFresh),
+  };
+
+  // The sidebar's line under the email (`planLineText`): the days left,
+  // then "Unlimited" when the plan has no cap.
+  const shellPlan: ShellPlan | null = subscription ? { daysLeft, unlimited: Boolean(usage && usage.cap === null) } : null;
+  const planLine = planLineText(shellPlan, t, language);
+
+  // The mode switch: refused while a tunnel is up, as the location list
+  // once was -- a mode cannot be retrofitted onto a live session -- and
+  // saying why rather than doing nothing. Its line says what the chosen
+  // half does, conditionally while nothing is up: never a present-tense
+  // claim about a tunnel that is not there.
+  const modeHint =
+    appMode === "gaming"
+      ? t("mode.gamingHintShort")
+      : (isTunnelUp(connectionState) ? splitTunnelActive : customConfigured)
+        ? t(customExcept ? "dash.modeCustomExceptHint" : "dash.modeCustomHint")
+        : !isTunnelUp(connectionState)
+          ? t("mode.vpnHintIdle")
+          : // Beside the warning that some connections go around a
+            // tunnel not confined, not contradicting it.
+            t(isTunnelUp(connectionState) && ipv4NotConfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint");
+  const modeBar = subscription ? (
+    <div className="nx-modebar">
+      <Segmented
+        label={t("mode.label")}
+        value={appMode}
+        onChange={(value) => void changeMode(value)}
+        locked={connectionState !== "disconnected"}
+        lockedReason={t("mode.locked")}
+        options={[
+          { value: "vpn", label: t("dash.modeVpn"), icon: <Shield aria-hidden /> },
+          { value: "gaming", label: t("dash.modeGaming"), icon: <Gamepad2 aria-hidden /> },
+        ]}
+      />
+      {/* Clamped to two lines beside the hero; the whole sentence is the title. */}
+      <p className="nx-modehint" title={modeHint}>
+        {modeHint}
+      </p>
+    </div>
+  ) : null;
+
+  // What only applies while a tunnel is up, below the button. Red only for
+  // real leaks, always in the column; the informational lines fold behind
+  // a counted disclosure (MainView), or into the summary's sheet on a phone.
+  const details: ReactNode[] = [];
+  if (isTunnelUp(connectionState) && splitTunnelActive && !splitTunnelProblem) {
+    details.push(<Note key="custom" tone="info">{t("dash.customActive")}</Note>);
+  }
+  // Only when the service reports the block installed -- never derived
+  // from the protocol. Not in Custom mode, whose line says what happens
+  // to IPv6 there.
+  if (isTunnelUp(connectionState) && !splitTunnelActive && ipv6Blocked) {
+    details.push(<Note key="v6" tone="info">{t("dash.fullTunnelIpv6Blocked")}</Note>);
+  }
+  // Not an error: the customer has simply got less than they would assume
+  // from silence. The list is the service's; the sentence is local.
+  if (restartNeeded.length > 0) {
+    details.push(
+      <Note key="restart">
+        {t("dash.splitTunnelRestartNeeded", { apps: restartNeeded.join(language === "fa" ? "، " : ", ") })}
+      </Note>,
+    );
+  }
+  const notes = (
+    <div className="nx-notes">
+      {/* From the service's counters on the path the chosen apps' packets
+          travel -- on and working are not the same thing -- in the app's
+          words for its code (lib/custom-mode-problem.ts). */}
+      {isTunnelUp(connectionState) && splitTunnelActive && splitTunnelProblem ? (
+        <Note tone="danger">{customModeProblemText(splitTunnelProblem, t)}</Note>
+      ) : null}
+      {/* IPv6 observed reaching the internet while connected. Not in
+          Custom mode, where the probe sees only this app's own, direct,
+          traffic -- see `showsIpv6Escape`. */}
+      {showsIpv6Escape(connectionState, { customMode: splitTunnelActive, escaping: ipv6Escaping }) ? (
+        <Note tone="danger">{t("dash.ipv6Escaping")}</Note>
+      ) : null}
+      {/* The tunnel is up and name lookups are not pinned to it: shown
+          rather than refused, for someone who may have no other protocol
+          that works. */}
+      {isTunnelUp(connectionState) && tunnelDnsUnprotected ? <Note tone="danger">{t("dash.tunnelDnsUnforced")}</Note> : null}
+      {/* This computer's other IPv4 connections are not held to the
+          tunnel. In Built-in's own words on IKEv2 (`unconfinedLine`).
+          Never in Custom mode or on WireGuard (`warnsUnconfined`). */}
+      {isTunnelUp(connectionState) && ipv4NotConfined ? (
+        <Note tone="danger">{t(unconfinedKey)}</Note>
+      ) : null}
+      {/* The reconnect hold should be blocking and is not, or let go so a
+          new tunnel could carry: the service's own reason, in words. */}
+      {heldNotes
+        .filter((note) => note !== "hold.holding")
+        .map((note) => (
+          <Note key={note} tone={note === "hold.tunnelNotPermitted" ? "info" : "caution"}>
+            {t(note)}
+          </Note>
+        ))}
+    </div>
+  );
+
+  // The way out of a failed connect: the raw engine text out of the way,
+  // and the repair offered only where a repair of this machine could help
+  // -- never for a plan's limit or state. Reserved for real errors.
+  const errorBlock = (
+    <>
+      {/* The device limit ended this session and the tunnel is not
+          confirmed down yet: said, and kept while the recheck tries. */}
+      {slotTeardownState === "stuck" ? <Note tone="danger">{t("slots.teardownStuck")}</Note> : null}
+      {connectionError ? (
+        <div className="flex flex-col items-start gap-1">
+          <details className="nx-errdetail">
+            <summary>{t("err.showDetail")}</summary>
+            <p data-ltr>{connectionError.detail}</p>
+          </details>
+          {NOT_THE_NETWORK.has(connectionError.kind) ? null : <RepairNetwork variant="inline" />}
         </div>
-      </header>
+      ) : null}
+    </>
+  );
 
-      {error ? (
-        <Card className="animate-rise">
-          <p className="text-sm text-destructive">{error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}</p>
-          <Button onClick={() => void loadAll()} className="mt-3">
-            {t("dash.retry")}
-          </Button>
-        </Card>
-      ) : (
-        <>
-          {/* Identity strip: a live status dot beside the account, so the
-              single most important fact is legible before reading a word. */}
-          {/* Says plainly that the numbers below are old, and that
-              connecting still works. Without this the screen shows a
-              stale data total and expiry date as though they were
-              today's -- the same class of quiet wrongness as a false
-              "Connected". */}
-          {offlineSince !== null ? (
-            <div className="animate-rise rounded-lg border border-warning/30 bg-warning/10 px-3 py-2">
-              {offlineText(offlineReason, t).title !== null ? (
-                <p className="text-xs font-medium text-warning">{offlineText(offlineReason, t).title}</p>
-              ) : null}
-              {offlineText(offlineReason, t).detail !== null ? (
-                <p className="mt-0.5 text-[11px] text-muted-foreground">{offlineText(offlineReason, t).detail}</p>
-              ) : null}
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                {t("dash.offlineHint", { when: new Date(offlineSince).toLocaleString() })}
-              </p>
-            </div>
-          ) : null}
+  // The banner at the top of the hero: the update notice on a narrower
+  // window, the offline notice, and a plan that has stopped working. Each
+  // neutral: the customer can still act.
+  const banner = (
+    <>
+      {update ? <div className="nx-upd-hero">{update}</div> : null}
+      {/* Each rises in when it is needed and fades when it is not
+          (Presence): none of them says anything about the tunnel. */}
+      <Presence show={Boolean(error)}>
+        {error ? (
+          <Banner title={error === "loadFailed" ? t("dash.loadFailed") : failureText(error, t)}>
+            <PillButton variant="ghost" size="sm" className="mt-2 self-start" onClick={() => void loadAll()}>
+              {t("dash.retry")}
+            </PillButton>
+          </Banner>
+        ) : null}
+      </Presence>
+      {/* The numbers on screen are old, and connecting still works. */}
+      <Presence show={offlineSince !== null}>
+        {offlineSince !== null ? (
+          <Banner>
+            {offlineText(offlineReason, t).title !== null ? (
+              <b>{offlineText(offlineReason, t).title}</b>
+            ) : null}
+            {offlineText(offlineReason, t).detail !== null ? <span>{offlineText(offlineReason, t).detail}</span> : null}
+            <span>{t("dash.offlineHint", { when: formatDateTime(offlineSince, language) })}</span>
+          </Banner>
+        ) : null}
+      </Presence>
+      <Presence show={Boolean(endedState)}>
+        {endedState ? (
+          <Banner title={t(endedState.titleKey)}>
+            <span>{t(endedState.bodyKey)}</span>
+            {endedState.showPlansButton ? (
+              <PillButton size="sm" className="mt-2 self-start" onClick={onBrowsePlans}>
+                {t("dash.renewCta")}
+              </PillButton>
+            ) : null}
+          </Banner>
+        ) : null}
+      </Presence>
+    </>
+  );
+  const bannerShowing = Boolean(error || offlineSince !== null || endedState);
+  /** A message the customer must read: the compact window's band of lights,
+   * and a phone's map, give way to it. */
+  const mapAlert = bannerShowing || slotShowing || connectionError !== null;
+  /** Medium and phone windows: the map in the hero's column. */
+  const mapStage =
+    layout !== "wide" ? (
+      <WorldMap host="stage" lights={mapScene.lights} arc={mapScene.arc} countries={mapPlaces} alert={mapAlert} />
+    ) : null;
 
-          {/* The mode selector, above everything it changes the meaning
-              of. Two segments and no sliding marker: the chosen half is
-              carried by its own background, which is the one thing on
-              this control that must never be misread. A marker positioned
-              physically is how the Custom toggle's knob came to sit under
-              "off" in Persian while the mode was on -- if one is ever
-              added here it animates `inset-inline-start`, never `left`.
+  /** The list's row in use and its words, held through a brief gap with
+   * the chip's colour, the button's fill and the map's light: "Connected
+   * here" stays on the row the session settled on until the hold ends
+   * (`heldListLook`). */
+  if (settledNow) listSettledRef.current = screenRouteId;
+  const listLook = heldListLook({ state: connectionState, look: orbState, routeId: screenRouteId, settledRouteId: listSettledRef.current });
 
-              Refused while a tunnel is up, the same way the location
-              picker is: a mode cannot be retrofitted onto a live
-              session, and a control that silently did nothing would be
-              worse than one that says why. */}
-          <div className="animate-rise flex flex-col gap-1">
-            <div className="flex gap-1 rounded-lg border border-white/8 bg-white/[0.025] p-1">
-              {(
-                [
-                  ["vpn", t("dash.modeVpn"), Shield],
-                  ["gaming", t("dash.modeGaming"), Gamepad2],
-                ] as [AppMode, string, typeof Shield][]
-              ).map(([value, label, Icon]) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={appMode === value}
-                  disabled={connectionState !== "disconnected"}
-                  title={
-                    connectionState !== "disconnected" ? t("dash.disconnectToChange") : undefined
-                  }
-                  onClick={() => void changeMode(value)}
-                  className={[
-                    "press flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
-                    "inline-flex items-center justify-center gap-1.5",
-                    "disabled:pointer-events-none disabled:opacity-50",
-                    appMode === value
-                      ? "bg-[linear-gradient(120deg,var(--primary),var(--highlight))] text-white shadow-[0_2px_10px_-4px_var(--primary)]"
-                      : "text-muted-foreground hover:bg-white/8 hover:text-foreground",
-                  ].join(" ")}
-                >
-                  <Icon className="size-3.5" />
-                  {label}
-                </button>
-              ))}
-            </div>
-            {/* One sentence saying what the chosen half actually does.
-                The gaming line names the limit rather than the promise:
-                only the services you chose are carried, and the game
-                itself is left on the direct path. */}
-            <p className="text-[11px] text-muted-foreground">
-              {appMode === "gaming"
-                ? t("dash.modeGamingHint")
-                : (isTunnelUp(connectionState) ? splitTunnelActive : customConfigured)
-                  ? t(customExcept ? "dash.modeCustomExceptHint" : "dash.modeCustomHint")
-                  : // Beside the warning that some connections go around a
-                    // tunnel not confined, not contradicting it.
-                    t(isTunnelUp(connectionState) && ipv4NotConfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint")}
-            </p>
-          </div>
+  // The one location list: the panel beside the hero, or a sheet on a
+  // phone-sized window. One element either way.
+  const picker = subscription ? (
+    <LocationPicker
+      subscriptionId={subscription.id}
+      // What the tray names: the pin while nothing is up, the route the
+      // tunnel is on once one is (`screenRouteId`), held through a brief
+      // gap (`listLook`).
+      currentRouteId={listLook.routeId ?? undefined}
+      lookState={listLook.state}
+      // Latency cannot be measured from inside the tunnel; anything but
+      // "disconnected" means routes are installed.
+      tunnelActive={connectionState !== "disconnected"}
+      // As it changes, for the report on a list nothing answered.
+      connectionState={connectionState}
+      // Already loaded here, so the list shows real content at once.
+      initialRoutes={routes}
+      // And what its own request is answered with comes back here.
+      onRoutes={adoptPickerRoutes}
+      // Nothing pinned is Automatic, and it is what a new install starts
+      // on. Choosing it clears the pin on this device; no server call.
+      automatic={!chosenRouteId}
+      // The pick, as it is made: a reconnect under way ends there, not
+      // once a server's switch request has answered.
+      onPicking={(routeId) => {
+        if (routeId !== null) setSwitchInFlight(true);
+        pickingLocation(routeId);
+      }}
+      // A switch that failed chose nothing: the reconnect leads with what
+      // it led with before the pick.
+      onPickFailed={() => {
+        setSwitchInFlight(false);
+        autoReconnect.pickFailed();
+        switchLoadSettled();
+        connectAfterSwitch();
+      }}
+      onChooseAutomatic={() => {
+        // A new choice while a reconnect waits ends the reconnect: its
+        // next attempt would lead with the old route regardless.
+        chooseLocation(null);
+        setChosenRouteId(null);
+        void saveChosenRoute(null);
+        connectAfterSwitch();
+      }}
+      onClose={() => {
+        setShowLocationPicker(false);
+        // A pick on the Locations page lands on the main page, where the
+        // connection's state is said.
+        setView("overview");
+      }}
+      // Re-reads the provisioned connection rather than adopting the
+      // switch response directly: that payload carries no `connection`.
+      onSwitched={(routeId) => {
+        setSwitchInFlight(false);
+        // As for Automatic, above.
+        const shown = chooseLocation(routeId ?? null);
+        // Their choice leads the order; it does not disable failover.
+        setChosenRouteId(routeId ?? null);
+        // Persisted, so the pin outlives the process.
+        void saveChosenRoute(routeId ?? null);
+        // Passed explicitly: the state set above has not landed yet when
+        // loadAll reads it. Over a tunnel that stays up, the route it is
+        // on.
+        //
+        // The connect a confirmed switch owes waits for this load, as the
+        // customer's own press used to: it takes the screen to "Loading..."
+        // (seconds on a filtered network), where a ladder dialling beneath
+        // would have no state, no chip and no Stop on screen -- and the
+        // load's answer would put the chosen credential back over the
+        // candidate the ladder had moved on to.
+        void loadAll(shown ?? undefined).finally(connectAfterSwitch);
+        // Begun: the wait for it is over, and nothing in the background
+        // starts beside it.
+        switchLoadSettled();
+      }}
+      evidence={listEvidence}
+      variant={view === "locations" ? "page" : layout === "narrow" ? "sheet" : "panel"}
+      confirmPick={confirmPick}
+      onOpenFull={openLocationsPage}
+      focusSection={view === "locations" ? locSection : undefined}
+    />
+  ) : null;
 
-          <div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">
-            <span className={DOT_CLASS[orbTone(orbState, cautionShown)]} />
-            <span className="truncate">{me?.email}</span>
-          </div>
-
-          {subscription ? (
-            <>
-              {appMode === "gaming" ? (
-                /* Its own hero, not a re-labelled version of the tunnel
-                   one. Gaming mode installs DNS rules and brings up no
-                   tunnel and no adapter, so it has its own five-value
-                   state, its own words, and no exit-IP pill -- the
-                   machine's address is unchanged by design and showing
-                   one would be a plain lie about what the product did. */
-                <GamingStatusPanel onOpenSettings={onOpenSettings} />
-              ) : (
-              <div className="flex flex-1 flex-col items-center justify-center gap-4">
-                {!protocolUser ? (
-                  <Card className="w-full text-center">
-                    <p className="text-sm text-muted-foreground">
-                      No connection provisioned on your subscription yet.
-                    </p>
-                  </Card>
-                ) : (
-                  <>
-                    <ConnectOrb
-                      state={orbState}
-                      caution={cautionShown}
-                      // The action travels with the press, decided in the
-                      // same render as the label above it.
-                      onToggle={() => void handleConnectToggle(press.action)}
-                      label={connectLabel}
-                    />
-
-                    {/* Says in words what the orb says in colour. The
-                        orb alone leaves "am I actually protected right
-                        now?" to be inferred from a hue, which is the one
-                        question this screen exists to answer. */}
-                    <div className="px-4 text-center">
-                      {/* The answer to the only question this screen
-                          exists to answer, and it was set at the same
-                          size and weight as a form label. It is the
-                          headline; it now looks like one. */}
-                      {/* "Not protected" is a claim, and it only gets
-                          made where the service has actually said so --
-                          see `headlineFor`, which holds the whole table,
-                          including the dropped tunnel, so it can be
-                          tested without a window. The device limit's
-                          teardown sits above it: while the service still
-                          reports the tunnel up after a refusal, the honest
-                          headline is that it is still being disconnected. */}
-                      <p className={`text-base font-semibold tracking-tight ${HEADLINE_TONE[slotTeardownShowing ? "plain" : headline.tone]}`}>
-                        {slotTeardownShowing ? t("dash.disconnecting") : t(headline.title)}
-                      </p>
-                      {/* text-pretty rather than a raw wrap: these hints
-                          run two lines in English and three in Persian,
-                          and a one-word last line under the hero control
-                          is the thing that made the block look thrown
-                          together. */}
-                      {/* Nothing to add while the device limit's teardown
-                          runs: the line below says what is happening once
-                          an attempt has not finished. */}
-                      <p className="mt-1 text-xs text-pretty text-muted-foreground">
-                        {slotTeardownShowing ? null : t(headline.hint)}
-                      </p>
-                      {/* The way out of an automatic reconnect that is
-                          not the orb: the orb between attempts connects
-                          now, and during one stops only that pass. This
-                          stops the reconnecting itself, and the headline
-                          then says the connection was lost. */}
-                      {reconnecting !== null && !slotTeardownShowing ? (
-                        <Button
-                          variant="ghost"
-                          onClick={() => void stopReconnecting()}
-                          className="mt-1 h-7 px-2 text-xs text-muted-foreground"
-                        >
-                          {t("dash.reconnectStop")}
-                        </Button>
-                      ) : null}
-                      {/* The proof, shown rather than just acted on: this
-                          is the address the outside world actually saw,
-                          which is what makes "protected" verifiable
-                          instead of a claim. */}
-                      {connectionState === "connected" && exitIp ? (
-                        // Set as a chip rather than a third sentence.
-                        // It is evidence, not prose, and running it on
-                        // in the same grey as the hint above buried the
-                        // one line on the screen a customer can check
-                        // against a what-is-my-ip page.
-                        <p className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-success/25 bg-success/10 px-2.5 py-1 text-[11px] text-muted-foreground">
-                          {t("dash.yourIp")}
-                          <span className="tabular-nums font-semibold text-success">{exitIp}</span>
-                        </p>
-                      ) : null}
-
-                      {/* Says so when the protocol in use is not the one
-                          we set out to use. Quietly landing somewhere
-                          else is the same class of dishonesty as a false
-                          "Connected" -- and a customer who is told which
-                          transport got through has something useful to
-                          report when none of them do. */}
-                      {isTunnelUp(connectionState) && failedOverTo
-                        ? (() => {
-                            // Which sentence depends on whether the server
-                            // on screen was ever dialled. "Couldn't reach
-                            // it" is a claim about the server, and it must
-                            // not be made about one we skipped, nor about
-                            // one there was no network to dial
-                            // (`failoverText`).
-                            const said = failoverText(failedOverTo);
-                            return (
-                              <p className="mt-1 text-xs text-amber-400/90">
-                                {said.trailingLabel ? (
-                                  <>
-                                    {t(said.key, said.vars)}{" "}
-                                    <span className="font-medium">{said.trailingLabel}</span>
-                                  </>
-                                ) : (
-                                  t(said.key, said.vars)
-                                )}
-                              </p>
-                            );
-                          })()
-                        : null}
-
-                      {/* Custom mode changes what "protected" covers, so
-                          the same word must not stand for both. Read
-                          from the service rather than from the setting:
-                          only the service knows whether this tunnel was
-                          actually brought up to carry one app or all of
-                          them. */}
-                      {isTunnelUp(connectionState) && splitTunnelActive ? (
-                        splitTunnelProblem ? (
-                          /* The service's own words, from counters taken
-                             on the path the chosen apps' packets travel.
-                             It outranks "Custom mode is on", because on
-                             and working are not the same thing and a
-                             tester spent three sessions believing they
-                             were -- his traffic was being redirected into
-                             a tunnel that answered none of it while this
-                             line said everything was fine. */
-                          <p className="mt-1 text-xs text-destructive">{splitTunnelProblem}</p>
-                        ) : (
-                          <p className="mt-1 text-xs text-highlight">{t("dash.customActive")}</p>
-                        )
-                      ) : null}
-
-                      {/* The full-tunnel counterpart, in the same place
-                          and the same voice. Shown only when the service
-                          reports a block is actually installed -- never
-                          derived from the protocol -- because this is a
-                          statement about the machine's state and the
-                          rule on this screen is that it does not make
-                          those without evidence.
-
-                          Not shown in Custom mode: the line above
-                          already describes what happens to IPv6 there,
-                          and it is a different thing (per app, not
-                          machine-wide). */}
-                      {isTunnelUp(connectionState) && !splitTunnelActive && ipv6Blocked ? (
-                        <p className="mt-1 text-xs text-highlight">
-                          {t("dash.fullTunnelIpv6Blocked")}
-                        </p>
-                      ) : null}
-
-                      {/* And the case both of the above are meant to
-                          make impossible: IPv6 observed still reaching
-                          the internet while connected. Destructive
-                          styling and no hedging -- their IPv4 may be
-                          perfectly tunnelled and their IPv6 is going out
-                          in the clear, which is the exact combination
-                          that made this leak invisible for so long.
-                          Not in Custom mode, where the probe measures
-                          only this app's own, deliberately direct,
-                          traffic -- see `showsIpv6Escape`. */}
-                      {showsIpv6Escape(connectionState, { customMode: splitTunnelActive, escaping: ipv6Escaping }) ? (
-                        <p className="mt-1 text-xs text-destructive">{t("dash.ipv6Escaping")}</p>
-                      ) : null}
-
-                      {/* The tunnel is up and the machine's name lookups
-                          are not pinned to it.
-
-                          Destructive styling, next to the IPv6 leak,
-                          because it is the same shape of problem: the
-                          traffic is tunnelled and one channel around it
-                          is not. In Iran that channel is the one that
-                          decides whether a site opens at all -- the ISP
-                          resolver answers first and answers wrongly for
-                          exactly the domains the customer connected in
-                          order to reach.
-
-                          Shown rather than refused. The engines used to
-                          disagree about this: one failed the connect and
-                          one carried on silently, and both are bad for
-                          someone who may have no other protocol that
-                          works. They bring the tunnel up and say this
-                          instead. */}
-                      {isTunnelUp(connectionState) && tunnelDnsUnprotected ? (
-                        <p className="mt-1 text-xs text-destructive">{t("dash.tunnelDnsUnforced")}</p>
-                      ) : null}
-
-                      {/* The tunnel is up and this computer's other IPv4
-                          connections are not held to it: the service's
-                          confinement would not go in, or the engine was
-                          refused by it and it was let go of. One way
-                          around the tunnel open, like the DNS line above,
-                          so the same styling -- but it claims nothing
-                          about the tunnel carrying traffic, because it
-                          shows in "not confirmed" and "not carrying" too.
-                          The headline says "not fully protected" with it
-                          when verified; this says what is not covered -- in Built-in's
-                          own words on IKEv2, which is not confined by
-                          choice (`unconfinedLine`). Never in Custom mode
-                          or on WireGuard (`warnsUnconfined`). */}
-                      {isTunnelUp(connectionState) && ipv4NotConfined ? (
-                        <p className="mt-1 text-xs text-destructive">{t(unconfinedKey)}</p>
-                      ) : null}
-
-                      {/* Not an error, and deliberately not styled as
-                          one: nothing has gone wrong, the customer has
-                          simply got less than they would assume from
-                          silence. The list is the service's -- the app
-                          does not decide what is running -- and the
-                          sentence around it is local, so it arrives in
-                          the customer's own language rather than as
-                          English prose over the pipe. */}
-                      {restartNeeded.length > 0 ? (
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {t("dash.splitTunnelRestartNeeded", { apps: restartNeeded.join(language === "fa" ? "، " : ", ") })}
-                        </p>
-                      ) : null}
-                    </div>
-
-                    {/* The plan's device limit, when it is why this
-                        device is not connected: where Neoxify is in use,
-                        and the one press that moves it here. */}
-                    {slotNotice ? (
-                      <DeviceSlotCard
-                        notice={slotNotice}
-                        // "Disconnected:" is a claim about the tunnel, so
-                        // it waits for the service to have said so.
-                        tunnelDown={connectionState === "disconnected"}
-                        onUseHere={(takeover) => void connectNow(takeover)}
-                        onDismiss={() => setSlotNotice(null)}
-                      />
-                    ) : null}
-
-                    {/* Reserved space either way, so the layout doesn't
-                        jump when an error appears or clears. */}
-                    <div className="min-h-4 px-2 text-center">
-                      {/* The device limit ended this session and the
-                          tunnel is not confirmed down yet. Said rather than
-                          left to the orb, and kept while the recheck
-                          keeps trying; a refusal's card waits for the
-                          tunnel to be down. */}
-                      {slotTeardownState === "stuck" ? (
-                        <p className="text-xs text-destructive">{t("slots.teardownStuck")}</p>
-                      ) : null}
-                      {connectionError ? (
-                        <>
-                          <p className="text-xs text-destructive">{t(connectionError.messageKey)}</p>
-                          {/* The raw engine text stays available but out
-                              of the way: useless to a customer, essential
-                              to whoever they send it to. */}
-                          <details className="mt-1">
-                            <summary className="cursor-pointer text-[10px] text-muted-foreground select-none">
-                              {t("err.showDetail")}
-                            </summary>
-                            <p className="mt-1 font-mono text-[10px] break-words text-muted-foreground" data-ltr>
-                              {connectionError.detail}
-                            </p>
-                          </details>
-                          {/* The moment the repair is worth offering.
-                              Leftover state from a previous session --
-                              an NRPT rule pointing at an unreachable
-                              resolver, routes on an adapter whose engine
-                              is gone, a stranded tunnel service holding
-                              the default route -- presents exactly like
-                              this: a connect that will not complete. Put
-                              here rather than only in Settings because
-                              somebody who cannot connect is already
-                              looking at this line, and asking them to go
-                              hunting for a fix is how a fix goes unused.
-
-                              Collapsed until asked for. Most connect
-                              failures are a blocked server, not a broken
-                              machine, and a repair offered as the first
-                              answer to every failure would train people
-                              to reach for it instead of switching
-                              location.
-
-                              No state is set here when it finishes: the
-                              repair disconnects, and the status poll a
-                              few seconds later is what observes that.
-                              Writing "disconnected" from here would be
-                              this screen asserting a tunnel state it had
-                              not checked.
-
-                              Not for a plan's limit or state, which no
-                              repair of this machine can change. */}
-                          {NOT_THE_NETWORK.has(connectionError.kind) ? null : <RepairNetwork variant="inline" />}
-                        </>
-                      ) : null}
-                    </div>
-                  </>
-                )}
-              </div>
-              )}
-
-              {/* What the connection actually is. These three answer the
-                  questions a customer asks while looking at the orb. */}
-
-              {/* The plan has stopped working. Until now this said so
-                  only in the error a connect attempt produced -- text
-                  that told the customer to "upgrade or wait for it to
-                  renew" on a screen with nothing to press. */}
-              {endedState ? (
-                <Card className="ring-brand animate-rise flex flex-col gap-2 text-center">
-                  <p className="text-sm font-semibold">{t(endedState.titleKey)}</p>
-                  <p className="text-xs text-muted-foreground">{t(endedState.bodyKey)}</p>
-                  {endedState.showPlansButton ? (
-                    <Button onClick={onBrowsePlans} className="mt-2 w-full justify-center gap-2">
-                      <Tag className="size-4" />
-                      {t("dash.renewCta")}
-                    </Button>
-                  ) : null}
-                </Card>
-              ) : null}
-              {/* Server, protocol and session length are facts about a
-                  tunnel. In gaming mode there is none, so rather than
-                  show three tiles describing something that is not
-                  running, the gaming panel shows the two facts that are
-                  true there. */}
-              {appMode === "gaming" ? null : (
-              <div className="animate-rise grid grid-cols-3 gap-2">
-                {/* Both open the same picker, because a customer asking
-                    to "change the protocol" and one asking to "change the
-                    server" are choosing from the same list -- a location
-                    and the protocol it speaks are one choice here. Two
-                    entry points because people look for the word they
-                    have in mind. */}
-                {/* With nothing pinned the tiles say "Automatic" until a
-                    tunnel has settled, then name where it landed with the
-                    caption saying it was the app's pick. See
-                    `showsAutomatic` for which states count as settled. */}
-                <Stat
-                  icon={
-                    automaticPending ? (
-                      <Sparkles className="size-3" />
-                    ) : currentRoute ? (
-                      <RouteFlag
-                        region={routePlace(currentRoute).entry}
-                        exitRegion={routePlace(currentRoute).exit}
-                        label={placeLabel(currentRoute, language)}
-                        size="sm"
-                      />
-                    ) : (
-                      <Globe className="size-3" />
-                    )
-                  }
-                  label={t(!chosenRouteId && !automaticPending ? "dash.serverAuto" : "dash.server")}
-                  // The country the traffic leaves from -- a relay's exit,
-                  // with Iran on the flag's badge. The whole "Iran →
-                  // Germany" does not fit a third of the window; the
-                  // server list spells it out.
-                  value={
-                    automaticPending ? (
-                      t("loc.automaticShort")
-                    ) : currentRoute ? (
-                      <span title={placeLabel(currentRoute, language)}>{exitCountryName(currentRoute, language)}</span>
-                    ) : (
-                      "—"
-                    )
-                  }
-                  onClick={() => setShowLocationPicker(true)}
-                  actionLabel={t("dash.change")}
-                  disabledReason={
-                    connectionState === "disconnected" ? undefined : t("dash.disconnectToChange")
-                  }
-                />
-                <Stat
-                  icon={<Shield className="size-3" />}
-                  label={t("dash.protocol")}
-                  value={
-                    automaticPending
-                      ? t("loc.automaticShort")
-                      : shownProtocol
-                        ? customerProtocolLabel(shownProtocol.protocol, shownProtocol.transport)
-                        : "—"
-                  }
-                  onClick={() => setShowLocationPicker(true)}
-                  actionLabel={t("dash.change")}
-                  disabledReason={
-                    connectionState === "disconnected" ? undefined : t("dash.disconnectToChange")
-                  }
-                />
-                <Stat
-                  icon={<Clock className="size-3" />}
-                  label={t("dash.session")}
-                  value={
-                    connectedAt !== null ? (
-                      <span className="tabular-nums">{formatDuration(Math.floor((now - connectedAt) / 1000))}</span>
-                    ) : (
-                      "—"
-                    )
-                  }
-                />
-              </div>
-              )}
-
-              <Card className="animate-rise flex flex-col gap-2.5 py-3">
-                <div className="flex items-baseline justify-between gap-2">
-                  {/* Same caption treatment as the tiles directly above,
-                      so the two blocks read as one column rather than as
-                      two cards that happened to land together. */}
-                  <span className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
-                    {t("dash.dataUsed")}
-                  </span>
-                  {/* The figure carries the card; the cap is context for
-                      it. Setting both at one size made a customer read
-                      the whole string to find out how much was left. */}
-                  <span className="tabular-nums text-sm font-semibold">
-                    {usage ? (
-                      <>
-                        {formatBytes(usage.used)}
-                        <span className="text-xs font-normal text-muted-foreground">
-                          {" "}
-                          / {usage.cap === null ? t("dash.unlimited") : formatBytes(usage.cap)}
-                        </span>
-                      </>
-                    ) : (
-                      formatBytes(Number(subscription.dataUsedBytes))
-                    )}
-                  </span>
-                </div>
-
-                {/* A bar rather than a second line of text: proportion is
-                    the whole point of a quota, and it's the one thing a
-                    number alone can't show at a glance. Turns amber past
-                    80% so running low is noticed before it bites. */}
-                {usage && usage.cap !== null ? (
-                  // The track is inset rather than painted on: a flat
-                  // white/8 strip looked like a divider somebody had
-                  // thickened, where a recessed groove reads as a gauge.
-                  <div className="h-2 w-full overflow-hidden rounded-full bg-black/40 ring-1 ring-white/8 ring-inset">
-                    <div
-                      className="h-full rounded-full transition-[width] duration-700"
-                      style={{
-                        width: `${Math.max(usage.percent, 1.5)}%`,
-                        background:
-                          usage.percent >= 80
-                            ? "linear-gradient(90deg, #f59e0b, #ef4444)"
-                            : "linear-gradient(90deg, var(--primary), var(--highlight))",
-                        // The fill carries its own light, which is what
-                        // separates the app's own accent from a generic
-                        // progress bar at this size.
-                        boxShadow:
-                          usage.percent >= 80
-                            ? "0 0 10px -1px rgba(239,68,68,0.7)"
-                            : "0 0 10px -1px color-mix(in oklab, var(--highlight) 70%, transparent)",
-                      }}
-                    />
-                  </div>
-                ) : null}
-
-                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                  <span>
-                    {t("dash.expires")}{" "}
-                    <span className="tabular-nums text-foreground">
-                      {new Date(subscription.expireAt).toLocaleDateString()}
-                    </span>
-                  </span>
-                  {daysLeft !== null ? (
-                    <span
-                      className={
-                        daysLeft <= 3
-                          ? "rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-semibold text-destructive"
-                          : "rounded-full bg-white/6 px-2 py-0.5 text-[10px] font-semibold text-muted-foreground"
-                      }
-                    >
-                      <span className="tabular-nums">{daysLeft}</span> {t("dash.daysLeft")}
-                    </span>
-                  ) : null}
-                </div>
-              </Card>
-
-              {/* Deliberately not a second copy of the server name.
-                  This button used to show the same region as the Server
-                  tile above while being the only one that worked, which
-                  is precisely what made customers report the app broken:
-                  they pressed the thing displaying their server, nothing
-                  happened, and the working control looked like a repeat
-                  of it. The tile is now the control; this stays only as
-                  the plainly-worded way in, and says what it does rather
-                  than what is currently set. */}
-              {/* Hidden in gaming mode: there is no location in use to
-                  change. The resolver's region is named on the gaming
-                  panel instead, where it is a fact rather than a
-                  control. */}
-              {appMode === "gaming" ? null : (
-              <>
-              <Button
-                variant="outline"
-                onClick={() => setShowLocationPicker(true)}
-                disabled={connectionState !== "disconnected"}
-                className="w-full justify-between px-3"
-                title={connectionState !== "disconnected" ? t("dash.disconnectToChange") : undefined}
-              >
-                <span className="flex items-center gap-2">
-                  <MapPin className="size-4 text-primary" />
-                  {t("dash.changeLocation")}
-                </span>
-                {/* Points the way the language reads. */}
-                <ChevronRight className="size-4 text-muted-foreground rtl:rotate-180" />
-              </Button>
-              {connectionState !== "disconnected" ? (
-                <p className="-mt-1 text-center text-xs text-muted-foreground">
-                  {t("dash.disconnectToChange")}
-                </p>
-              ) : null}
-              </>
-              )}
-            </>
-          ) : (
-            // Previously a dead end: a customer with no subscription --
-            // which is everyone, now that trial mode can be turned off --
-            // was told they had nothing and given no way to get one.
-            <div className="flex flex-1 flex-col items-center justify-center gap-4">
-              <Card className="ring-brand w-full text-center">
-                <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-full bg-primary/15 text-primary">
-                  <Tag className="size-5" />
-                </div>
-                <p className="text-sm font-semibold">{t("dash.noSubscription")}</p>
-                <p className="mt-1 text-xs text-muted-foreground">Choose a plan to start using Neoxify.</p>
-                <Button onClick={onBrowsePlans} className="mt-4 w-full justify-center gap-2">
-                  <Tag className="size-4" />
-                  {t("dash.viewPlans")}
-                </Button>
-              </Card>
-            </div>
-          )}
-        </>
-      )}
-
-      {showLocationPicker && subscription ? (
-        <LocationPicker
-          subscriptionId={subscription.id}
-          // What the SERVER tile names: the pin while nothing is up, the
-          // route the tunnel is on once one is (`screenRouteId`).
-          currentRouteId={screenRouteId ?? undefined}
-          // Latency cannot be measured from inside the tunnel; see
-          // the prop's own note. Anything but "disconnected" means
-          // routes are installed, including the verifying and
-          // degraded states where a tunnel exists but is not
-          // trusted yet.
-          tunnelActive={connectionState !== "disconnected"}
-          // As it changes, for the report on a list nothing answered: its
-          // probe must not run across a connect or a disconnect.
-          connectionState={connectionState}
-          // Already loaded here, so the picker opens on real content
-          // instead of a spinner.
-          initialRoutes={routes}
-          // And what its own request is answered with comes back here.
-          onRoutes={adoptPickerRoutes}
-          // Nothing pinned is Automatic, and it is what a new install
-          // starts on. Choosing it clears the pin on this device; there is
-          // no server call, because every route's credential is already
-          // provisioned and the ladder chooses among them at connect time.
-          automatic={!chosenRouteId}
-          // The pick, as it is made: a reconnect under way ends there,
-          // not once a server's switch request has answered.
-          onPicking={pickingLocation}
-          // A switch that failed chose nothing: the reconnect leads with
-          // what it led with before the pick.
-          onPickFailed={() => {
-            autoReconnect.pickFailed();
-            switchLoadSettled();
-          }}
-          onChooseAutomatic={() => {
-            // A new choice while a reconnect waits ends the reconnect:
-            // its next attempt would lead with the old route regardless.
-            // Connect then dials the new choice. One dialling is stopped,
-            // and a tunnel already back is left as it is.
-            chooseLocation(null);
-            setChosenRouteId(null);
-            void saveChosenRoute(null);
-          }}
-          onClose={() => setShowLocationPicker(false)}
-          // Re-reads the provisioned connection rather than adopting the
-          // switch response directly. Two reasons, one of which was a
-          // real bug: the switch endpoint's payload didn't carry the
-          // `connection` field that listing does, so switching servers
-          // left the app holding credentials with no server address and
-          // Connect failed. Re-fetching also means an app running
-          // against an older backend still works, instead of depending
-          // on that endpoint's exact shape.
-          onSwitched={(routeId) => {
-            // As for Automatic, above.
-            const shown = chooseLocation(routeId ?? null);
-            // Their choice leads the order. It used to be the only
-            // candidate, which quietly disabled failover for anyone who
-            // had ever opened this list.
-            setChosenRouteId(routeId ?? null);
-            // Persisted, so the pin outlives the process. Without this
-            // the dashboard kept showing the chosen server after a
-            // restart while the ladder no longer honoured it.
-            void saveChosenRoute(routeId ?? null);
-            // Passed explicitly: the state set above has not landed yet
-            // when loadAll reads it, which is why the screen kept
-            // showing the previous choice. Over a tunnel that stays up,
-            // the route it is on: naming the choice there would name a
-            // server the traffic is not leaving from.
-            void loadAll(shown ?? undefined);
-            // Begun: the wait for it is over, and nothing in the background
-            // starts beside it.
-            switchLoadSettled();
-          }}
-        />
+  const actions = protocolUser ? (
+    <div className="nx-actions">
+      <ConnectOrb
+        state={orbState}
+        caution={cautionShown}
+        // The action travels with the press, decided in the same render
+        // as the label on it (`pressFor`).
+        onToggle={() => void handleConnectToggle(press.action)}
+        label={t(pill.labelKey)}
+        // "Connecting..." stops the connect when pressed: said so to
+        // assistive technology, which would otherwise hear only the label.
+        pressLabel={press.action === "cancelConnect" ? t("btn.stop") : undefined}
+        look="pill"
+        pill={pill}
+      />
+      {/* The way out of an automatic reconnect that is not the pill: the
+          pill between attempts connects now, and during one stops only
+          that pass. This stops the reconnecting itself. */}
+      {secondary === "stopReconnecting" ? (
+        <WayOut label={t("dash.reconnectStop")} short={t("btn.stopShort")} onClick={() => void stopReconnecting()} />
+      ) : secondary === "stopConnecting" ? (
+        <WayOut label={t("btn.stop")} short={t("btn.stopShort")} onClick={() => void handleConnectToggle(press.action)} />
+      ) : secondary === "tryAnother" && subscription ? (
+        <WayOut label={t("btn.tryAnother")} short={t("btn.tryAnotherShort")} onClick={showLocations} />
       ) : null}
     </div>
+  ) : subscription ? (
+    <p className="nx-hint">{t("dash.noProvision")}</p>
+  ) : (
+    // No subscription: a dead end no longer -- the way to get one.
+    <div className="nx-actions">
+      <PillButton onClick={onBrowsePlans}>{t("dash.viewPlans")}</PillButton>
+    </div>
+  );
+
+  // The state in words for a screen reader, once it has settled.
+  const announcement = gaming ? "" : `${lineWords}. ${hintText}`;
+
+  // What the other pages of the shell show under the avatar.
+  rememberShellProfile({ email: me?.email ?? null, plan: shellPlan, network: evidenceCtx.network });
+
+  // One shell for the main page and every other page of it: the sidebar,
+  // the tabs and the phone's nav stay mounted across a change of page, and
+  // so does this screen under a page (`page`). A page wears the quiet look
+  // the pages always had: no tone, no sweep, no banner's room.
+  return (
+    <AppShell
+      active={page ? page.nav : view === "locations" ? "locations" : "overview"}
+      shown={page ? "idle" : calmTone}
+      busy={page ? false : busy}
+      banner={page ? false : bannerShowing}
+      titlebar
+      email={me?.email ?? null}
+      planLine={planLine}
+      onOverview={() => {
+        if (page) showMainFrom("overview");
+        else if (view !== "overview") setView("overview");
+        else document.querySelector<HTMLElement>(".nx-hero")?.scrollTo({ top: 0 });
+      }}
+      onLocations={() => (page ? showMainFrom("locations") : openLocationsPage())}
+      onOpenActivity={onOpenActivity ?? onOpenSettings}
+      onOpenSettings={onOpenSettings}
+      onBrowsePlans={onBrowsePlans}
+      onOpenReferrals={onOpenReferrals}
+      onOpenSupport={onOpenSupport}
+      onSignOut={() => void handleLogout()}
+      signingOut={signingOut}
+      update={
+        <>
+          {update}
+          <CommunityLinks />
+        </>
+      }
+      scene={
+        // A page speaks for no route: no lights behind the Locations page,
+        // or behind any other page of the shell.
+        page || view === "locations" ? (
+          <PageScene />
+        ) : (
+          <HeroArt tone={calmTone} layout={layout} map={mapScene} countries={mapPlaces} alert={mapAlert} />
+        )
+      }
+    >
+      {page ? (
+        <Fragment key={page.key}>{page.node}</Fragment>
+      ) : view === "locations" ? (
+        <Page title={t("loc.panelTitle")} lede={t("loc.pageLede")} className="nx-locpg">
+          {picker ?? <p className="nx-csub">{t("dash.noPlanHint")}</p>}
+        </Page>
+      ) : gaming && subscription && !error ? (
+        <MainView
+          banner={banner}
+          gaming={
+            /* Its own hero, not a re-labelled tunnel one: gaming mode
+               brings up no tunnel and no adapter, so it has its own five
+               states, its own words, and no exit IP. */
+            <GamingStatusPanel onOpenSettings={onOpenSettings} onTone={setGamingTone} onSummary={setGamingSummary} />
+          }
+          modeBar={modeBar}
+          locationCard={<LocationCard location={trayLocation} />}
+          metrics={<MetricCards plan={trayPlan} ip={ip} />}
+          summary={<SummaryLine plan={trayPlan} ip={ip} />}
+          mapStage={mapStage}
+          tray={<SessionTray label={t("tr.location")} location={trayLocation} plan={trayPlan} ip={ip} />}
+        />
+      ) : (
+        <MainView
+          banner={banner}
+          chip={error ? null : <StatusChip glyph={chip.glyph} label={t(chip.labelKey)} />}
+          line={
+            error ? null : (
+              <StateLine
+                line={line}
+                words={lineWords}
+                decor={<Decor keys={["decor.browse", "decor.stream", "decor.work", "decor.anywhere"]} />}
+              />
+            )
+          }
+          hint={
+            error ? null : (
+              <Hint tone={hintTone(calmTone, { failed: connectionError !== null })} reserve={hintReserve}>
+                {hintText}
+              </Hint>
+            )
+          }
+          slot={
+            slotShowing && slotNotice ? (
+              /* The plan's device limit, when it is why this device is not
+                 connected: where Neoxify is in use, and the one press that
+                 moves it here. "Disconnected:" waits for the service. */
+              <DeviceSlotCard
+                notice={slotNotice}
+                tunnelDown={connectionState === "disconnected"}
+                onUseHere={(takeover) => void connectNow(takeover)}
+                onDismiss={() => setSlotNotice(null)}
+              />
+            ) : undefined
+          }
+          subline={
+            // Which protocol, and where, when it is not the one set out
+            // for. Neutral: it is information, not a fault. Which sentence
+            // depends on whether the server on screen was ever dialled
+            // (`failoverText`).
+            isTunnelUp(connectionState) && failedOverTo
+              ? (() => {
+                  const said = failoverText(failedOverTo);
+                  return (
+                    <p className="nx-subline">
+                      <Repeat aria-hidden />
+                      <span>
+                        <Slotted text={t(said.key, { ...said.vars, protocol: SLOT })}>
+                          <bdi className="font-medium text-ink">{said.vars.protocol}</bdi>
+                        </Slotted>
+                      </span>
+                    </p>
+                  );
+                })()
+              : !isTunnelUp(connectionState)
+                ? // The ladder's rung, the reconnect's attempt and countdown,
+                  // and why it is connecting when nobody pressed.
+                  <ProgressLine routes={routes} autoConnecting={autoConnecting} />
+                : null
+          }
+          // A failover that crossed a border says why the exit is not the
+          // country chosen: a phone keeps it in the column.
+          sublineStays={Boolean(failedOverTo?.fromRegion)}
+          actions={error || slotChoice ? null : actions}
+          error={errorBlock}
+          notes={notes}
+          details={details}
+          modeBar={modeBar}
+          locationCard={subscription ? <LocationCard location={trayLocation} /> : null}
+          metrics={subscription ? <MetricCards plan={trayPlan} ip={ip} speed={trafficShown ? <SpeedCard /> : undefined} /> : null}
+          summary={subscription ? <SummaryLine plan={trayPlan} ip={ip} /> : null}
+          panel={layout !== "narrow" ? picker : null}
+          panelLabel={t("loc.panelTitle")}
+          panelFlash={panelFlash}
+          legend={routes.length > 0 ? <MapLegend /> : null}
+          mapStage={mapStage}
+          tray={
+            <SessionTray
+              label={t("tr.location")}
+              location={trayLocation}
+              plan={trayPlan}
+              ip={ip}
+              // Download and upload, only while Windows' counters for the
+              // tunnel are being read (lib/traffic-meter.ts).
+              speed={trafficShown ? <SpeedSection /> : undefined}
+            />
+          }
+          announcer={<StateAnnouncer text={announcement} />}
+        />
+      )}
+
+      {layout === "narrow" && view === "overview" && !page ? (
+        <LocationSheet
+          open={showLocationPicker && subscription !== null}
+          title={t("loc.panelTitle")}
+          closeLabel={t("loc.close")}
+          onClose={() => setShowLocationPicker(false)}
+          dismissible={!switchInFlight}
+        >
+          {picker}
+        </LocationSheet>
+      ) : null}
+
+      <Dialog
+        open={switchAsk !== null}
+        title={
+          switchAsk?.place
+            ? t("sw.title", { place: switchAsk.protocol ? `${switchAsk.place} · ${switchAsk.protocol}` : switchAsk.place })
+            : t("sw.titleAuto")
+        }
+        description={t("sw.body")}
+        onClose={() => switchAsk?.resolve(false)}
+        initialFocus={stayRef}
+        actions={
+          <>
+            <PillButton ref={stayRef} variant="ghost" size="sm" onClick={() => switchAsk?.resolve(false)}>
+              {switchAsk?.tunnelUp ? t("sw.stay") : t("btn.cancel")}
+            </PillButton>
+            <PillButton size="sm" onClick={() => switchAsk?.resolve(true)}>
+              {t("sw.go")}
+            </PillButton>
+          </>
+        }
+      />
+    </AppShell>
   );
 }

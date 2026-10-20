@@ -11,14 +11,14 @@
 //! one.
 
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
     GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
 };
-use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6};
 
 use crate::engines::route_table::RouteRow;
 
@@ -593,5 +593,136 @@ mod vpn_detection_tests {
         ] {
             assert!(!looks_like_vpn(d), "{d} must NOT be treated as a rival VPN");
         }
+    }
+}
+
+/// The DNS servers configured on the adapters that are up, other than
+/// those `exclude` names (ours), IPv4 and IPv6, each once.
+///
+/// What Windows' resolver asks while no tunnel of ours is up: the
+/// reconnect hold permits name lookups to these alone
+/// (`engines::reconnect_hold`). A walk of its own rather than `list`'s,
+/// which asks for IPv4 only and skips the DNS servers.
+pub fn dns_servers(exclude: &[&str]) -> io::Result<Vec<IpAddr>> {
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
+    let mut size: u32 = 15_000;
+    let mut buffer: Vec<u64> = Vec::new();
+    let mut listed = false;
+    for _ in 0..3 {
+        buffer.resize((size as usize).div_ceil(8), 0);
+        // SAFETY: as in `list` -- the allocation is at least `size` bytes
+        // and 8-byte aligned; the API writes a linked list within it.
+        let ret = unsafe {
+            GetAdaptersAddresses(
+                u32::from(AF_UNSPEC),
+                flags,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+                &mut size,
+            )
+        };
+        if ret == ERROR_SUCCESS {
+            listed = true;
+            break;
+        }
+        if ret != ERROR_BUFFER_OVERFLOW {
+            return Err(io::Error::from_raw_os_error(ret as i32));
+        }
+    }
+    if !listed {
+        return Err(io::Error::other("the adapter list kept growing while it was read"));
+    }
+
+    let mut found: Vec<(String, bool, Vec<IpAddr>)> = Vec::new();
+    let mut current = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+    while !current.is_null() {
+        // SAFETY: `current` points into `buffer` at a valid entry, which
+        // the API laid out; Next is either another entry or null.
+        let entry = unsafe { &*current };
+        let mut servers = Vec::new();
+        let mut dns = entry.FirstDnsServerAddress;
+        while !dns.is_null() {
+            // SAFETY: the same linked-list guarantee.
+            let d = unsafe { &*dns };
+            if let Some(addr) = socket_address_ip(d.Address.lpSockaddr) {
+                servers.push(addr);
+            }
+            dns = d.Next;
+        }
+        found.push((wide_to_string(entry.FriendlyName), entry.OperStatus == IF_OPER_STATUS_UP, servers));
+        current = entry.Next;
+    }
+    Ok(resolvers_of(&found, exclude))
+}
+
+/// The address in a sockaddr the API wrote, IPv4 or IPv6; `None` for a
+/// null pointer or another family.
+fn socket_address_ip(sa: *const SOCKADDR) -> Option<IpAddr> {
+    if sa.is_null() {
+        return None;
+    }
+    // SAFETY: non-null, written by GetAdaptersAddresses; every sockaddr
+    // begins with its family.
+    let family = unsafe { (*sa).sa_family };
+    match family {
+        AF_INET => {
+            // SAFETY: the family says this is a SOCKADDR_IN; reading the
+            // union's IPv4 representation, valid for one.
+            let octets = unsafe { (*(sa as *const SOCKADDR_IN)).sin_addr.S_un.S_addr }.to_ne_bytes();
+            Some(IpAddr::V4(Ipv4Addr::from(octets)))
+        }
+        AF_INET6 => {
+            // SAFETY: the family says this is a SOCKADDR_IN6; reading the
+            // union's byte representation, valid for any IN6_ADDR.
+            let bytes = unsafe { (*(sa as *const SOCKADDR_IN6)).sin6_addr.u.Byte };
+            Some(IpAddr::V6(Ipv6Addr::from(bytes)))
+        }
+        _ => None,
+    }
+}
+
+/// The resolvers of the adapters that are up and not ours, each once, in
+/// the order Windows lists them. Not the unspecified or loopback address,
+/// and not the deprecated site-local fec0::/10 defaults Windows fills in
+/// for an adapter with no IPv6 resolver, which answer nowhere.
+fn resolvers_of(adapters: &[(String, bool, Vec<IpAddr>)], exclude: &[&str]) -> Vec<IpAddr> {
+    let mut kept: Vec<IpAddr> = Vec::new();
+    for (name, up, servers) in adapters {
+        if !*up || exclude.iter().any(|ours| name.eq_ignore_ascii_case(ours)) {
+            continue;
+        }
+        for server in servers {
+            let site_local = matches!(server, IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfec0);
+            if server.is_unspecified() || server.is_loopback() || site_local || kept.contains(server) {
+                continue;
+            }
+            kept.push(*server);
+        }
+    }
+    kept
+}
+
+#[cfg(test)]
+mod dns_server_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_the_resolvers_of_adapters_that_are_up_and_not_ours() {
+        let router: IpAddr = "192.168.1.1".parse().unwrap();
+        let isp_v6: IpAddr = "2001:db8::53".parse().unwrap();
+        let adapters = vec![
+            ("Wi-Fi".to_string(), true, vec![router, isp_v6, "fec0:0:0:ffff::1".parse().unwrap(), router]),
+            ("Ethernet".to_string(), false, vec!["198.51.100.53".parse().unwrap()]),
+            ("Neoxify".to_string(), true, vec!["10.66.0.1".parse().unwrap()]),
+            ("Loopback".to_string(), true, vec!["127.0.0.1".parse().unwrap(), "0.0.0.0".parse().unwrap()]),
+        ];
+        assert_eq!(resolvers_of(&adapters, &["neoxify"]), vec![router, isp_v6]);
+    }
+
+    #[test]
+    fn reads_this_machines_resolvers() {
+        let found = dns_servers(&[]).expect("the adapters should list");
+        println!("  resolvers: {found:?}");
+        assert!(found.iter().all(|a| !a.is_unspecified() && !a.is_loopback()));
     }
 }

@@ -1,4 +1,4 @@
-import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from "react";
+import { Component, Suspense, lazy, useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 import { getTokens } from "@shared/lib/session";
 import { AuthShell, type AuthScreen } from "./auth/AuthShell";
 import { PortalLogin } from "./auth/PortalLogin";
@@ -6,6 +6,7 @@ import { PortalRegister } from "./auth/PortalRegister";
 import { PortalVerifyEmail } from "./auth/PortalVerifyEmail";
 import { PortalForgotPassword } from "./auth/PortalForgotPassword";
 import { useCopy } from "./auth/copy";
+import { setSurface } from "./surface";
 
 /**
  * The screens behind sign-in, each in its own file the page asks for only
@@ -15,13 +16,21 @@ import { useCopy } from "./auth/copy";
  * script. Once the sign-in card is drawn they are fetched in the
  * background (prefetchSignedInScreens), so signing in rarely waits for
  * them either.
+ *
+ * Their stylesheet with them (signed-in.css: Pearl Glass, most of the
+ * page's CSS), which the sign-in steps do not use: each screen arrives
+ * once both have.
  */
+const withStyles =
+  <T,>(load: () => Promise<T>) =>
+  (): Promise<T> =>
+    Promise.all([load(), import("./signed-in-styles")]).then(([screen]) => screen);
 const SIGNED_IN = {
-  account: () => import("./screens/Account"),
-  plans: () => import("@shared/screens/Plans"),
-  settings: () => import("@shared/screens/Settings"),
-  referrals: () => import("@shared/screens/Referrals"),
-  support: () => import("@shared/screens/Support"),
+  account: withStyles(() => import("./screens/Account")),
+  plans: withStyles(() => import("@shared/screens/Plans")),
+  settings: withStyles(() => import("@shared/screens/Settings")),
+  referrals: withStyles(() => import("@shared/screens/Referrals")),
+  support: withStyles(() => import("@shared/screens/Support")),
 };
 const Account = lazy(() => SIGNED_IN.account().then((m) => ({ default: m.Account })));
 const Plans = lazy(() => SIGNED_IN.plans().then((m) => ({ default: m.Plans })));
@@ -122,8 +131,8 @@ export default function App() {
 
   let content: React.ReactNode;
 
-  // The sign-in steps wear the new look (./auth); the account screens
-  // keep the apps' dark one until their own redesign. Worked out from what
+  // The sign-in steps wear the website's own look (./auth); the screens
+  // behind sign-in are the apps' shared ones. Worked out from what
   // actually renders below, so the two cannot disagree.
   const authScreen: AuthScreen | null =
     screen === "loading" || screen === "login" || screen === "register" || screen === "forgot"
@@ -133,9 +142,11 @@ export default function App() {
         : null;
 
   // The canvas and map in index.html, and this surface's colours, follow
-  // the same switch.
-  useEffect(() => {
-    document.documentElement.dataset.surface = authScreen ? "auth" : "app";
+  // the same switch; so does the theme chosen in Settings, which is the
+  // shared screens' alone (surface.ts). Before the paint, so neither look
+  // is drawn for a frame in the other's colours.
+  useLayoutEffect(() => {
+    setSurface(authScreen ? "auth" : "app");
   }, [authScreen]);
 
   // Once a sign-in step is on screen, fetch what comes after it.

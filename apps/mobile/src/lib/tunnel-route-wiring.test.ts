@@ -124,9 +124,21 @@ describe("the phone names the route a tunnel found up is on", () => {
     expect(dashboard).toMatch(
       /displayedRoute\(\s*routes,\s*connectionState,\s*protocolUser\?\.routeId,\s*chosenRouteId,\s*protocolUser\?\.routeId,\s*tunnelNamed,\s*\)/,
     );
-    expect(dashboard).toContain("const routeNamed = routeNameable(connectionState, tunnelNamed);");
-    expect(dashboard).toMatch(/: protocolUser && routeNamed\s*\?\s*customerProtocolLabel\(/);
-    expect(dashboard).toContain("currentRouteId={routeNamed ? protocolUser?.routeId : undefined}");
+    // The location card's protocol and the list's current row ("Connected
+    // here") by the same rule as the place (displayed-route.ts), not from
+    // the credential the screen holds, which after a load is the pin.
+    expect(dashboard).toContain(
+      "const screenRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);",
+    );
+    expect(dashboard).toContain(
+      "const shownProtocol = displayedProtocol(connectionState, protocolUser, chosenRouteId, protocolUsers, routes, tunnelNamed);",
+    );
+    // Held through a brief gap with the chip's colour (`heldListLook`): the
+    // route named while settled, null for a tunnel it could not name.
+    expect(dashboard).toContain("currentRouteId={listLook.routeId ?? undefined}");
+    expect(dashboard).toContain("routeId: screenRouteId, settledRouteId: listSettledRef.current");
+    expect(dashboard).toContain("if (settledNow) listSettledRef.current = screenRouteId;");
+    expect(dashboard).not.toMatch(/currentRouteId=\{protocolUser/);
     // And credits no route with a session it cannot name.
     expect(dashboard).toContain("settledRouteRef.current = tunnelRouteUnknown ? null : (protocolUser?.routeId ?? null);");
   });

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useI18n } from "../lib/i18n";
 
 /** The window's own title bar, drawn by the app instead of by Windows.
  *
@@ -18,9 +19,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
  * They are granted in `capabilities/default.json`.
  *
  * Height is 32px to match what Windows 11 draws for a compact caption
- * bar, so the content below sits where it did before.
+ * bar. It is a transparent strip over the window rather than a bar above
+ * it: the redesigned shell runs its scene to the top edge and keeps the
+ * strip in its own top padding, and the screens not yet redesigned are
+ * given the same 32px by App.tsx. The buttons stay on the physical right
+ * in both languages -- they follow Windows, not the app's language.
  */
 export function TitleBar() {
+  const { t } = useI18n();
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -49,40 +55,26 @@ export function TitleBar() {
   const win = getCurrentWindow();
 
   return (
-    <div
-      data-tauri-drag-region
-      className="flex h-8 shrink-0 select-none items-center justify-between border-b border-white/5 bg-background/80 pl-3"
-    >
-      {/* Also a drag target: a bar you can only move by its empty middle
-          is a bar people think is stuck. */}
-      <span data-tauri-drag-region className="text-xs text-muted-foreground">
-        Neoxify
-      </span>
+    <div data-tauri-drag-region className="nx-tbar">
+      <CaptionButton label={t("tb.minimize")} onClick={() => void win.minimize()}>
+        <line x1="3" y1="8" x2="13" y2="8" />
+      </CaptionButton>
 
-      <div className="flex items-center">
-        <CaptionButton label="Minimize" onClick={() => void win.minimize()}>
-          <line x1="3" y1="8" x2="13" y2="8" />
-        </CaptionButton>
+      <CaptionButton label={maximized ? t("tb.restore") : t("tb.maximize")} onClick={() => void win.toggleMaximize()}>
+        {maximized ? (
+          <>
+            <rect x="3.5" y="5.5" width="7" height="7" />
+            <polyline points="5.5,5.5 5.5,3.5 12.5,3.5 12.5,10.5 10.5,10.5" />
+          </>
+        ) : (
+          <rect x="3.5" y="3.5" width="9" height="9" />
+        )}
+      </CaptionButton>
 
-        <CaptionButton
-          label={maximized ? "Restore" : "Maximize"}
-          onClick={() => void win.toggleMaximize()}
-        >
-          {maximized ? (
-            <>
-              <rect x="3.5" y="5.5" width="7" height="7" />
-              <polyline points="5.5,5.5 5.5,3.5 12.5,3.5 12.5,10.5 10.5,10.5" />
-            </>
-          ) : (
-            <rect x="3.5" y="3.5" width="9" height="9" />
-          )}
-        </CaptionButton>
-
-        <CaptionButton label="Close" onClick={() => void win.close()} danger>
-          <line x1="4" y1="4" x2="12" y2="12" />
-          <line x1="12" y1="4" x2="4" y2="12" />
-        </CaptionButton>
-      </div>
+      <CaptionButton label={t("tb.close")} onClick={() => void win.close()} danger>
+        <line x1="4" y1="4" x2="12" y2="12" />
+        <line x1="12" y1="4" x2="4" y2="12" />
+      </CaptionButton>
     </div>
   );
 }
@@ -115,9 +107,7 @@ function CaptionButton({
       aria-label={label}
       title={label}
       onClick={onClick}
-      className={`grid h-8 w-[46px] place-items-center text-muted-foreground transition-colors hover:text-foreground ${
-        danger ? "hover:bg-red-600 hover:text-white" : "hover:bg-white/10"
-      }`}
+      className={danger ? "x" : undefined}
     >
       <svg
         width="16"

@@ -76,12 +76,12 @@ export function failoverNotice(input: {
   return { label: input.label, fromRegion: input.fromRegion, toRegion: input.toRegion, shown, noNetworkOnly, dialledFailed };
 }
 
-/** The sentence for a notice: a key and its values, and the protocol to
- * set after it when the sentence ends by naming one. */
+/** The sentence for a notice: a key and its values. Every sentence names
+ * the protocol as `{protocol}`, wherever its language puts it -- Persian
+ * puts it mid-sentence -- so the screen can set it apart. */
 export interface FailoverText {
   key: TranslationKey;
-  vars?: Record<string, string>;
-  trailingLabel?: string;
+  vars: Record<string, string> & { protocol: string };
 }
 
 export function failoverText(notice: FailoverNotice): FailoverText {
@@ -102,6 +102,6 @@ export function failoverText(notice: FailoverNotice): FailoverText {
   // was dialled: then only where the connection is.
   return {
     key: notice.dialledFailed ? "dash.switchedTo" : notice.noNetworkOnly ? "dash.switchedToNoNetwork" : "dash.nowUsing",
-    trailingLabel: notice.label,
+    vars: { protocol: notice.label },
   };
 }

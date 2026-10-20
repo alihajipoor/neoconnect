@@ -1,0 +1,316 @@
+/* The phone's own screens in Pearl Glass: the first-run disclosure, drawn in
+   the sign-in frame (AuthFrame), and the per-app card under Settings ›
+   Per-app routing. Everything else the phone draws is the shared system
+   (pearl.css, pages.css). Tokens only: both themes, both directions. */
+
+@layer components {
+  /* ---------- the safe areas on a tablet, and a phone on its side ----------
+     The phone draws edge to edge (globals.css). The narrow layout keeps the
+     status bar and the home indicator clear itself (--safe-t, --safe-b in
+     pearl.css and pages.css); the medium and wide layouts pad their top by
+     the Windows title strip (--tb) alone, which a phone does not have. So
+     here the status bar's inset stands in for the strip -- every header,
+     the sidebar, the wide overview and the sign-in clear it -- and the foot
+     of each layout clears the home indicator or the button bar. After
+     pearl.css and pages.css in the same layer, so these win. */
+  .nx-app {
+    --tb: var(--safe-t);
+  }
+  @container app (min-width: 640px) {
+    .nx-auth-scroll {
+      padding-bottom: var(--safe-b);
+    }
+  }
+  @container app (min-width: 640px) and (max-width: 899.98px) {
+    .nx-ov {
+      padding-bottom: calc(16px + var(--safe-b));
+    }
+    /* Placed from the overview's padding edge, which the padding above
+       does not move. */
+    .nx-morecue {
+      bottom: calc(10px + var(--safe-b));
+    }
+    .nx-pinner {
+      padding-bottom: calc(28px + var(--safe-b));
+    }
+  }
+  @container app (min-width: 900px) {
+    .nx-side {
+      padding-bottom: calc(14px + var(--safe-b));
+    }
+    .nx-ov {
+      padding-bottom: calc(18px + var(--safe-b));
+    }
+    .nx-pinner {
+      padding-bottom: calc(32px + var(--safe-b));
+    }
+  }
+  /* A phone on its side: the locations panel is shorter than its heading,
+     search, filters and legend together, so the list had no room left and
+     the legend spilled out of the panel's foot (an Android phone at
+     915 x 412). Under 560px tall the panel scrolls as one, the legend at
+     its end, and nothing is cut. No tablet is this short. */
+  @container app (min-width: 640px) and (max-height: 559.98px) {
+    .nx-panel {
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+    }
+    .nx-panel .nx-loclist {
+      flex: none;
+      overflow: visible;
+      content-visibility: visible;
+      -webkit-mask-image: none;
+      mask-image: none;
+    }
+    /* The sidebar: the wordmark closer to the nav, so the profile stays
+       above the gesture bar with the backup-route chip's row over it too;
+       and never cut if even that is not enough. */
+    .nx-side {
+      overflow-y: auto;
+      scrollbar-width: none;
+    }
+    .nx-side .nx-wm {
+      margin-bottom: 16px;
+    }
+  }
+
+  /* ---------- the prominent disclosure (ProminentDisclosure.tsx) ---------- */
+  .nx-auth[data-step="disclosure"] .nx-auth-card {
+    /* Longer than any sign-in step: room for the lines to stay readable. */
+    max-width: 520px;
+  }
+  .nx-auth[data-step="disclosure"] .nx-auth-main {
+    /* Read from the top: it is longer than the screen. */
+    align-content: start;
+  }
+  /* On a phone the wordmark and the mark in the header are the brand; the
+     tagline and the glass mark under them would only push the text down. */
+  @container app (max-width: 639.98px) {
+    .nx-auth[data-step="disclosure"] .nx-auth-hero {
+      display: none;
+    }
+  }
+  .nx-dsc-sec {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .nx-dsc-sec h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--ink);
+  }
+  .nx-dsc-sec p,
+  .nx-dsc-list li {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  html[lang="fa"] .nx-dsc-sec p,
+  html[lang="fa"] .nx-dsc-list li {
+    line-height: 1.85;
+  }
+  .nx-dsc-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .nx-dsc-list li {
+    position: relative;
+    padding-inline-start: 16px;
+  }
+  .nx-dsc-list li::before {
+    content: "";
+    position: absolute;
+    inset-inline-start: 2px;
+    top: 0.62em;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--cobalt);
+  }
+  html[lang="fa"] .nx-dsc-list li::before {
+    top: 0.8em;
+  }
+  .nx-dsc-link {
+    align-self: flex-start;
+    font-size: 14px;
+  }
+
+  /* ---------- the per-app card (PerAppCard.tsx) ---------- */
+  .nx-perapp {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .nx-perapp-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .nx-perapp-head > .nx-chead {
+    flex: 1;
+    min-width: 0;
+  }
+  .nx-perapp-head > .nx-sw {
+    flex: none;
+    margin-top: 2px;
+  }
+  .nx-perapp-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .nx-perapp-wait {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    padding: 8px 2px;
+    color: var(--ink-2);
+    font-size: 13.5px;
+  }
+  .nx-perapp-wait svg {
+    width: 16px;
+    height: 16px;
+  }
+  .nx-perapp-search {
+    position: relative;
+  }
+  .nx-perapp-search > svg {
+    position: absolute;
+    inset-inline-start: 13px;
+    top: 50%;
+    width: 16px;
+    height: 16px;
+    transform: translateY(-50%);
+    color: var(--ink-3);
+    pointer-events: none;
+  }
+  .nx-perapp-search > .nx-input {
+    width: 100%;
+    padding-inline-start: 38px;
+  }
+  .nx-perapp-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 22rem;
+    margin: 0;
+    padding: 4px;
+    list-style: none;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-radius: 16px;
+    background: var(--field);
+  }
+  .nx-perapp-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 52px;
+    padding: 6px 10px;
+    border-radius: 12px;
+    text-align: start;
+    color: var(--ink);
+    transition: background-color var(--dur-quick) var(--spring-quick);
+  }
+  .nx-perapp-row:hover {
+    background: var(--select-row);
+  }
+  .nx-perapp-row[aria-checked="true"] {
+    background: var(--select);
+  }
+  .nx-perapp-row .ico {
+    width: 36px;
+    height: 36px;
+    flex: none;
+    border-radius: 10px;
+  }
+  .nx-perapp-row .ico.none {
+    display: grid;
+    place-items: center;
+    background: var(--chip-bg);
+    color: var(--ink-2);
+  }
+  .nx-perapp-row .ico.none svg {
+    width: 18px;
+    height: 18px;
+  }
+  .nx-perapp-row .t {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .nx-perapp-row .n {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .nx-perapp-row .s {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink-2);
+    font-size: 12px;
+    text-align: left;
+  }
+  /* The package name is Latin and left to right; under Persian it lines up
+     with the label above it, on the right. */
+  html[dir="rtl"] .nx-perapp-row .s {
+    text-align: right;
+  }
+  /* The box the check sits in: its outline says "can be chosen" without
+     colour, the cobalt fill and the check say "chosen". The outline is a
+     control's edge, so it takes the fields' outline (pages.css), at least
+     3:1 against the list in both themes (WCAG 1.4.11); --ink-3 was about
+     2.8:1 on the light list. */
+  .nx-perapp-row .box {
+    width: 22px;
+    height: 22px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 7px;
+    box-shadow: inset 0 0 0 1.5px var(--field-line);
+    color: var(--on-cobalt);
+  }
+  .nx-perapp-row[aria-checked="true"] .box {
+    background: var(--cobalt);
+    box-shadow: none;
+  }
+  .nx-perapp-row .box svg {
+    width: 15px;
+    height: 15px;
+    stroke-width: 3;
+  }
+  .nx-perapp-none {
+    padding: 12px 10px;
+    color: var(--ink-2);
+    font-size: 13.5px;
+  }
+  .nx-perapp-clear {
+    align-self: flex-start;
+  }
+  .nx-perapp-note {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  html[lang="fa"] .nx-perapp-note {
+    font-size: 13px;
+    line-height: 1.8;
+  }
+}

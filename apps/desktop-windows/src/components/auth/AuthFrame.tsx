@@ -1,0 +1,150 @@
+import { useRef, type ReactNode } from "react";
+import type { ShownFailure } from "../../lib/failure-text";
+import type { SocialProvider } from "../../lib/social-auth";
+import mapSvg from "../../assets/world-map.svg?raw";
+import { LANGUAGES, useI18n, type Language } from "../../lib/i18n";
+import { MARK_TONE } from "../../lib/logo-geometry";
+import { LogoMark } from "../Logo";
+import { GlassLogo } from "../main/GlassLogo";
+import { PearlScope } from "../ui";
+
+/** The page around sign-in, registration, password reset and email
+ * verification (design-system.md 4.14), matching the website's sign-in
+ * that went out first: the wordmark and a language switch at the top; on
+ * a wide window the glass Neoxify mark and the tagline on the start side
+ * and the strong-glass card on the end side; one column on a phone, where
+ * the card is the page and it fits one screen.
+ *
+ * The world map is behind it, with no lights: before sign-in there is no
+ * route list to speak for (5.3), so nothing on this page may look like a
+ * location working. The mark wears its resting look -- frosted, unlit --
+ * because there is no tunnel to be verified. Decorative throughout.
+ *
+ * The page's own column scrolls only as a last resort, for text scaled
+ * past what the screen can hold; at every phone, window and tablet size the
+ * preview offers, in both languages, each screen fits
+ * (`pnpm check:phone-fit`) -- with a failure, the intranet's note, the
+ * backup route's offer, and an iPhone's three providers too. A message on
+ * a short screen tightens the card (pages.css) rather than scrolling it.
+ *
+ * The card is named by its step's heading (`AuthHead`). A step drawn
+ * without one -- the recovery code shown once after a sign-up or a reset --
+ * passes `label` instead, so the card's name never points at nothing. */
+export function AuthFrame({ step, label, children }: { step: string; label?: string; children: ReactNode }) {
+  const { t } = useI18n();
+  // Which way a step arrives: from the inline end going on (an address to
+  // a code, a code to the recovery code), from the start going back. The
+  // first step of a screen rises in (motion.css).
+  const last = useRef(step);
+  const dir = useRef<"forward" | "back" | undefined>(undefined);
+  if (last.current !== step) {
+    dir.current = stepDirection(last.current, step);
+    last.current = step;
+  }
+  return (
+    <PearlScope>
+      <div className="nx-app nx-auth" data-step={step}>
+        <div className="nx-auth-scene" aria-hidden>
+          <div className="nx-auth-map" dangerouslySetInnerHTML={{ __html: mapSvg }} />
+        </div>
+        <div className="nx-auth-scroll">
+          <header className="nx-auth-top">
+            {/* The brand stays Latin and left to right in both languages. */}
+            <p className="nx-auth-brand" lang="en" dir="ltr">
+              <LogoMark className="nx-auth-logo drop-shadow-none" />
+              <span>NEOXIFY</span>
+            </p>
+            <LanguageSwitch />
+          </header>
+          <main className="nx-auth-main">
+            <div className="nx-auth-hero" aria-hidden>
+              <div className="nx-auth-mark">
+                <GlassLogo x={0} y={0} size={180} tone={MARK_TONE} />
+              </div>
+              <p className="nx-auth-tag wide">
+                <span>{t("tagline.line1")}</span>
+                <span>{t("tagline.line2")}</span>
+              </p>
+              <p className="nx-auth-tag mob">
+                <span>{t("tagline.mobile1")}</span>
+                <span>{t("tagline.mobile2")}</span>
+              </p>
+            </div>
+            <section className="nx-glass strong nx-auth-card" aria-labelledby={label ? undefined : "nx-auth-title"} aria-label={label}>
+              {/* Keyed, so each step rises in on its own. */}
+              <div className="nx-auth-step" key={step} data-dir={dir.current}>
+                {children}
+              </div>
+            </section>
+          </main>
+        </div>
+      </div>
+    </PearlScope>
+  );
+}
+
+/** The order a customer moves through the steps in. */
+const STEP_ORDER = [
+  "login",
+  "register",
+  "register-relay",
+  "register-recovery",
+  "forgot",
+  "forgot-recovery",
+  "forgot-code",
+  "forgot-recovered",
+  "verify",
+];
+
+/** Forward when `to` comes after `from` in the steps' order, back when it
+ * comes before. */
+export function stepDirection(from: string, to: string): "forward" | "back" {
+  const a = STEP_ORDER.indexOf(from);
+  const b = STEP_ORDER.indexOf(to);
+  return a >= 0 && b >= 0 && b < a ? "back" : "forward";
+}
+
+/** English or Persian, before anyone has signed in: the same switch the app
+ * keeps in Settings (`setLanguage`), remembered on this device. */
+function LanguageSwitch() {
+  const { t, language, setLanguage } = useI18n();
+  return (
+    <div className="nx-langsw" role="group" aria-label={t("settings.language")}>
+      {(Object.keys(LANGUAGES) as Language[]).map((code) => (
+        <button
+          key={code}
+          type="button"
+          lang={code}
+          dir={LANGUAGES[code].dir}
+          aria-pressed={language === code}
+          onClick={() => {
+            if (language !== code) setLanguage(code);
+          }}
+        >
+          {LANGUAGES[code].nativeLabel}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** DEV ONLY: a state a sign-in screen reaches by itself -- a failure, the
+ * intranet's note, the backup route's offer, the providers an iPhone gets --
+ * drawn at once, for the dev preview and the phone fit check
+ * (src/preview, scripts/check-phone-fit.mjs). The app never passes one. */
+export interface AuthSeed {
+  error?: ShownFailure;
+  intranet?: boolean;
+  relayOffered?: boolean;
+  providers?: SocialProvider[];
+}
+
+/** The card's heading and the sentence under it. */
+export function AuthHead({ title, lead }: { title: ReactNode; lead?: ReactNode }) {
+  return (
+    <div className="nx-auth-head">
+      <h1 id="nx-auth-title">{title}</h1>
+      {lead ? <p>{lead}</p> : null}
+    </div>
+  );
+}

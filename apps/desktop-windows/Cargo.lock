@@ -2721,6 +2721,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "webpki-roots",
+ "windows 0.61.3",
  "windows-registry 0.6.1",
  "windows-sys 0.59.0",
 ]

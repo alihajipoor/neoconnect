@@ -51,6 +51,24 @@ cargo test --workspace     # the service: ~390 tests
 pnpm test                  # the client: ~385 tests
 ```
 
+**`cargo test --workspace` needs an elevated shell** (or one deliberate
+opt-out). `wfp_accepts_the_hold_then_aborts` hands the reconnect hold's
+filters to the real Windows Filtering Platform inside a transaction it
+then aborts, and adding filters needs administrator rights. Without them
+the test fails rather than skips -- an engine that will not open, or adds
+refused as access denied, say "run the tests as administrator" -- because
+a silent skip is how nothing would ever check the hold against the
+platform. Either run the tests from an administrator PowerShell, or, when
+you cannot, skip that one test on purpose, by name:
+
+```powershell
+$env:NEOXIFY_SKIP_WFP_TESTS = '1'
+cargo test --workspace
+```
+
+CI never may: GitHub's Windows runners are administrators, and the test
+fails there whatever the variable says.
+
 **Use `pnpm test`, not `npx vitest`.** A `pretest` hook patches
 generated files first — the seed bundle and the capability allowlist —
 and running vitest directly skips it. The symptom is

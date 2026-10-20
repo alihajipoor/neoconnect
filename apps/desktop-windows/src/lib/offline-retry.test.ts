@@ -663,3 +663,60 @@ describe("which answers ask for the load again at once", () => {
     ]);
   });
 });
+
+/** Back on the main page from another page of the shell (the Dashboard's
+ * `revalidate`): the screen stayed mounted, so what it shows is asked for
+ * again behind it, once, and never beside a load already under way. */
+describe("asking again on coming back to the main page", () => {
+  it("asks once, in the background, and schedules nothing after it off the snapshot", async () => {
+    const h = harness();
+    expect(h.retry.revalidate()).toBe(true);
+    expect(h.loads.map((l) => l.why)).toEqual(["returned"]);
+    await h.answer(false);
+    // Not on the snapshot: one unanswered ask starts no retrying.
+    expect(h.pending()).toBe(0);
+    await h.advance(10 * OFFLINE_RETRY_EVERY_MS);
+    expect(h.loads).toHaveLength(1);
+  });
+
+  it("is not made beside a load of the screen's own, or a background one", async () => {
+    const h = harness();
+    const mount = h.own();
+    expect(h.retry.revalidate()).toBe(false);
+    await mount.succeed();
+    h.retry.start();
+    await h.advance(OFFLINE_RETRY_BACKOFF_MS[0]);
+    expect(h.loads.map((l) => l.why)).toEqual(["timer"]);
+    expect(h.retry.revalidate()).toBe(false);
+    expect(h.loads).toHaveLength(1);
+  });
+
+  it("is not made while the app is hidden, or once the screen has gone", () => {
+    const hidden = harness({ hidden: true });
+    expect(hidden.retry.revalidate()).toBe(false);
+    expect(hidden.loads).toHaveLength(0);
+    const gone = harness();
+    gone.retry.detach();
+    expect(gone.retry.revalidate()).toBe(false);
+    expect(gone.loads).toHaveLength(0);
+  });
+
+  it("on the snapshot it is one more load of the retrying: answered, the retrying ends", async () => {
+    const h = harness();
+    h.retry.start();
+    expect(h.retry.revalidate()).toBe(true);
+    await h.answer(true);
+    expect(h.retry.isActive()).toBe(false);
+    expect(h.pending()).toBe(0);
+  });
+
+  it("on the snapshot, unanswered, it takes its place in the backoff", async () => {
+    const h = harness();
+    h.retry.start();
+    expect(h.retry.revalidate()).toBe(true);
+    await h.answer(false);
+    expect(h.retry.isActive()).toBe(true);
+    await h.advance(OFFLINE_RETRY_BACKOFF_MS[1]);
+    expect(h.loads.map((l) => l.why)).toEqual(["returned", "timer"]);
+  });
+});

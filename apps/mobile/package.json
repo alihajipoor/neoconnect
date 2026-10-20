@@ -15,7 +15,8 @@
     "ios:project": "pnpm exec tauri ios init --ci && node scripts/add-tunnel-extension.mjs",
     "ios:build": "bash scripts/build-ios.sh --",
     "ios:assert-store": "node scripts/assert-store-bundle.mjs dist",
-    "ios:device": "bash scripts/run-on-device.sh"
+    "ios:device": "bash scripts/run-on-device.sh",
+    "check:phone-fit": "node ../desktop-windows/scripts/check-phone-fit.mjs --app mobile"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

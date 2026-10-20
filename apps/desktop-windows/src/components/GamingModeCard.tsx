@@ -145,7 +145,7 @@ export function GamingModeCard() {
 
       {profileFailed ? (
         <div className="flex flex-col gap-2">
-          <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+          <p className="rounded-md border border-[color-mix(in_oklab,var(--warn)_35%,transparent)] bg-[var(--warn-tint)] px-3 py-2 text-xs text-[var(--warn-ink)]">
             {t("gaming.profileFailed")}
           </p>
           <Button variant="outline" onClick={() => void loadProfile()} className="justify-center">
@@ -153,7 +153,7 @@ export function GamingModeCard() {
           </Button>
         </div>
       ) : unavailable ? (
-        <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+        <div className="rounded-md border border-[color-mix(in_oklab,var(--warn)_35%,transparent)] bg-[var(--warn-tint)] px-3 py-2 text-xs text-[var(--warn-ink)]">
           <p>{t(unavailable)}</p>
           {/* "Not available yet" on its own leaves the switch above it
               looking like it would still do something. It would not.
@@ -172,7 +172,7 @@ export function GamingModeCard() {
           and saying so is the whole point. Going silent here would leave
           a customer looking at a card with no button and no reason. */}
       {!canAdd && picked.length === 0 && !unavailable && !profileFailed && profile ? (
-        <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+        <p className="rounded-md border border-[color-mix(in_oklab,var(--warn)_35%,transparent)] bg-[var(--warn-tint)] px-3 py-2 text-xs text-[var(--warn-ink)]">
           {t("gaming.noneRedirectable")}
         </p>
       ) : null}
@@ -184,7 +184,7 @@ export function GamingModeCard() {
           </p>
 
           {picked.length === 0 ? (
-            <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <p className="rounded-md border border-[color-mix(in_oklab,var(--warn)_35%,transparent)] bg-[var(--warn-tint)] px-3 py-2 text-xs text-[var(--warn-ink)]">
               {t("gaming.noGames")}
             </p>
           ) : (
@@ -192,7 +192,7 @@ export function GamingModeCard() {
               {picked.map((game) => (
                 <li
                   key={game.slug}
-                  className="group flex items-center gap-2.5 rounded-lg border border-white/8 bg-white/[0.04] px-2.5 py-2 transition-colors hover:border-white/14 hover:bg-white/[0.07]"
+                  className="group flex items-center gap-2.5 rounded-lg border border-[var(--hairline-2)] bg-[var(--field)] px-2.5 py-2 transition-colors hover:border-[var(--ink-3)] hover:bg-[var(--field)]"
                 >
                   <GameTile game={game} />
                   <div className="min-w-0 flex-1">
@@ -250,7 +250,7 @@ export function GamingModeCard() {
           a details pane: somebody deciding whether to run a game
           through a VPN is exactly who needs it, and they are deciding
           here. */}
-      <div className="rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2">
+      <div className="rounded-lg border border-[var(--hairline-2)] bg-[var(--field)] px-3 py-2">
         <p className="text-[11px] font-semibold">{t("gaming.accountRisk")}</p>
         <p className="mt-0.5 text-[11px] text-muted-foreground">{t("gaming.accountRiskBody")}</p>
       </div>

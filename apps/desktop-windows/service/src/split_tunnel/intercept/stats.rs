@@ -3,6 +3,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use neoconnect_ipc::SplitTunnelProblemCode;
+
 /// What the loop has actually done, for diagnosis.
 ///
 /// Not telemetry and not sent anywhere -- it is written to a log file
@@ -267,6 +269,12 @@ impl Stats {
     /// a question the rig has to answer first. Until it has, this
     /// function does not speak on their behalf.
     pub fn complaint(&self, session_age: Duration) -> Option<String> {
+        self.finding(session_age).map(|(_, sentence)| sentence)
+    }
+
+    /// [`Self::complaint`] with the code the app words it by, from one look
+    /// at the counters, so the code and the sentence can never disagree.
+    pub fn finding(&self, session_age: Duration) -> Option<(SplitTunnelProblemCode, String)> {
         // Nothing is wrong yet, by definition: the redirect has not
         // had time to be wrong. See WARMUP.
         if session_age < WARMUP {
@@ -281,20 +289,22 @@ impl Stats {
         // Injections the driver refused. The packets are not going where
         // every other counter implies, so say that before anything else.
         if rejected > 0 && rejected >= redirected {
-            return Some(
+            return Some((
+                SplitTunnelProblemCode::InjectionRefused,
                 "Windows is refusing the redirected packets, so your chosen apps are not \
                  reaching the VPN. Restarting the app usually clears this."
                     .into(),
-            );
+            ));
         }
 
         // The tester's exact signature: traffic going out, nothing back.
         if redirected >= SILENT_AFTER && returned == 0 {
-            return Some(
+            return Some((
+                SplitTunnelProblemCode::NoReplies,
                 "Your chosen apps are being sent through the VPN but nothing is coming back, \
                  so their connections will hang. The tunnel is not carrying their traffic."
                     .into(),
-            );
+            ));
         }
 
         // Intercepting the machine's traffic and recognising none of it.
@@ -302,12 +312,13 @@ impl Stats {
         // than the program, or a browser that was not running when the
         // list was taken.
         if seen >= 500 && matched == 0 {
-            return Some(
+            return Some((
+                SplitTunnelProblemCode::NoAppTraffic,
                 "None of the apps you chose have sent any traffic. If one of them is running, \
                  the wrong program may have been picked -- some apps launch under a different \
                  executable."
                     .into(),
-            );
+            ));
         }
 
         None

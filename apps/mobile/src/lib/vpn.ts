@@ -19,13 +19,22 @@ import { tearDownForSignOut, type TeardownDeps } from "@shared/lib/tunnel-teardo
 export interface VpnStatus {
   connected: boolean;
   protocol: string | null;
-  /** Bytes since the tunnel came up, or null where the platform will
-   * not say. Android reads them from the engine; iOS has none to read,
-   * because the tunnel runs in a separate extension process and
-   * NEVPNConnection exposes no totals to the app. Null rather than zero,
-   * so nothing later reads "not known" as "nothing was carried". */
+  /** Bytes since the tunnel came up, or null where nothing counted them.
+   * The engines' own counts: WireGuard's (the library's totals on Android,
+   * wireguard-go's on iOS) and Xray's (xray-core's count of the bytes
+   * through the server -- on Android published by the tunnel's process
+   * only while the app is in front, on iOS asked of the extension). IKEv2
+   * is the platform's own client on both and counts nothing the app can
+   * read. Null rather than zero, so nothing later reads "not known" as
+   * "nothing was carried". */
   rxBytes: number | null;
   txBytes: number | null;
+  /** How long the live tunnel has been up, in seconds, where its start was
+   * recorded: Android's WireGuard and Xray, and iOS's connections (the
+   * system's connectedDate). Null for Android's IKEv2 and from an older
+   * plugin. For the timer on a screen that finds the tunnel already up
+   * (adoptedSince, lib/session-clock.ts). */
+  sessionSecs?: number | null;
   /** Seconds since the last WireGuard handshake, or null when the
    * active protocol has no equivalent. The same evidence the Windows
    * client uses to tell "engine running" from "traffic flowing", which
@@ -144,6 +153,10 @@ export const tunnelGone = () =>
   invoke<{ gone: boolean }>("vpn_tunnel_gone").then((r) => r.gone);
 
 export const vpnStatus = () => invoke<VpnStatus>("vpn_status");
+/** The status with the byte totals, for the speeds alone: on iOS each is a
+ * round trip to the tunnel extension, which the ladder's waits and the
+ * health checks are not to pay for. */
+export const vpnStatusWithTotals = () => invoke<VpnStatus>("vpn_status", { totals: true });
 
 /** Stops every engine and removes what the platform keeps in its own
  * VPN settings -- see `vpn_forget_profiles`. Sign-out only. */

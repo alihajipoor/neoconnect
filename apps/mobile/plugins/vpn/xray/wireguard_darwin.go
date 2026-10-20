@@ -38,6 +38,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
@@ -266,4 +268,62 @@ func WireGuardRunning() bool {
 	wgMu.Lock()
 	defer wgMu.Unlock()
 	return wgDevice != nil
+}
+
+// WireGuardReceived is the bytes the running tunnel has received from its
+// peers, from wireguard-go's own counters, or -1 when no tunnel is
+// running or the device would not say. Never 0 for "not known": the app
+// shows a speed only from a real count.
+func WireGuardReceived() int64 {
+	rx, _ := wireGuardTotals()
+	return rx
+}
+
+// WireGuardSent is WireGuardReceived's other direction.
+func WireGuardSent() int64 {
+	_, tx := wireGuardTotals()
+	return tx
+}
+
+func wireGuardTotals() (rx, tx int64) {
+	wgMu.Lock()
+	defer wgMu.Unlock()
+	if wgDevice == nil {
+		return -1, -1
+	}
+	uapi, err := wgDevice.IpcGet()
+	if err != nil {
+		return -1, -1
+	}
+	return sumTotals(uapi)
+}
+
+// sumTotals adds up every peer's rx_bytes and tx_bytes in wireguard-go's
+// configuration text (the format `wg showconf` reads). No counter at all
+// is -1, not 0.
+func sumTotals(uapi string) (rx, tx int64) {
+	rx, tx = -1, -1
+	for _, line := range strings.Split(uapi, "\n") {
+		key, value, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || n < 0 {
+			continue
+		}
+		switch key {
+		case "rx_bytes":
+			if rx < 0 {
+				rx = 0
+			}
+			rx += n
+		case "tx_bytes":
+			if tx < 0 {
+				tx = 0
+			}
+			tx += n
+		}
+	}
+	return rx, tx
 }

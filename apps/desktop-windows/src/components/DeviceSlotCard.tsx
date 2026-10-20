@@ -1,4 +1,4 @@
-import { Button, Card } from "./ui";
+import { PillButton } from "./ui";
 import { useI18n } from "../lib/i18n";
 import { describeSlotNotice, slotNoticeShown, type SlotNotice } from "../lib/device-slot-notice";
 
@@ -30,33 +30,28 @@ export function DeviceSlotCard({
   if (!slotNoticeShown(notice, tunnelDown)) return null;
   const copy = describeSlotNotice(notice, { t, language, tunnelDown });
 
-  // A note rather than a choice: one line, in the error line's place.
-  if (!copy.useHere && !copy.dismiss) {
-    return <p className="text-xs text-pretty text-muted-foreground">{copy.lines.join(" ")}</p>;
-  }
-
+  // A note rather than a choice: one line, in the sentence's place.
+  if (!copy.useHere && !copy.dismiss) return <p className="nx-hint">{copy.lines.join(" ")}</p>;
+  // The main page's: the hint's place, a bold lead, and the pill buttons.
   return (
-    // Compact on purpose: it shares a fixed 400x640 window with the orb,
-    // the tiles and the usage card, and nothing on that screen scrolls.
-    // The buttons sit side by side for the same reason.
-    <Card className="ring-brand animate-rise flex w-full flex-col gap-1.5 text-center">
+    <div className="nx-slot" role="status">
       {copy.lines.map((line, i) => (
-        <p key={i} className={i === 0 ? "text-sm font-semibold text-pretty" : "text-xs text-pretty text-muted-foreground"}>
+        <p key={i} className={i === 0 ? "lead" : undefined}>
           {line}
         </p>
       ))}
-      <div className="mt-1.5 flex justify-center gap-2">
-        {copy.dismiss ? (
-          <Button variant="ghost" onClick={onDismiss} className="shrink-0 justify-center px-3">
-            {copy.dismiss}
-          </Button>
-        ) : null}
+      <div className="nx-actions">
         {copy.useHere ? (
-          <Button onClick={() => onUseHere(copy.useHere?.takeover ?? [])} className="flex-1 justify-center px-3">
+          <PillButton size="sm" onClick={() => onUseHere(copy.useHere?.takeover ?? [])}>
             {copy.useHere.label}
-          </Button>
+          </PillButton>
+        ) : null}
+        {copy.dismiss ? (
+          <PillButton variant="ghost" size="sm" onClick={onDismiss}>
+            {copy.dismiss}
+          </PillButton>
         ) : null}
       </div>
-    </Card>
+    </div>
   );
 }

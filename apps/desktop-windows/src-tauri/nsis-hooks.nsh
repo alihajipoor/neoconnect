@@ -197,6 +197,19 @@
   ${EndIf}
 !macroend
 
+; The session log (the app's lib/session-log.ts) is a record of when this
+; PC used the VPN, kept only if the customer turned it on. It is not a
+; preference, so it goes on every uninstall, whatever the "delete app
+; data" box said -- not on an update, which runs this uninstaller too and
+; must keep it. Where the store plugin writes it: the app data directory,
+; named by the bundle identifier.
+!macro NSIS_HOOK_POSTUNINSTALL
+  ${If} $UpdateMode <> 1
+    SetShellVarContext current
+    Delete "$APPDATA\${BUNDLEID}\session-log.json"
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
   ; Stop and delete before files are removed -- a running service holds
   ; its own executable open, which would otherwise leave the install

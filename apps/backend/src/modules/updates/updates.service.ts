@@ -103,6 +103,11 @@ export type UpdateCheck =
   | { status: "current" }
   | { status: "unknown" };
 
+/** The same three answers for the Android app, which has no updater to
+ * hand a manifest to: only the newer version, for a notice whose
+ * Download opens /updates/installer/android. */
+export type AndroidUpdateCheck = { status: "update"; version: string } | { status: "current" } | { status: "unknown" };
+
 interface AndroidBuild {
   tag: string;
   asset: string;
@@ -153,6 +158,20 @@ export class UpdatesService {
         },
       },
     };
+  }
+
+  /** Whether a newer Android APK than `currentVersion` is published, for
+   * the direct-download app's update notice.
+   *
+   * Compared on the version in the APK's filename, as everything else
+   * here is. A feed that could not be read is `unknown`, never `current`:
+   * the Android check was a flat "current" for every version until this
+   * existed, which nothing had verified. */
+  async checkAndroid(currentVersion: string): Promise<AndroidUpdateCheck> {
+    const newest = await this.newestAndroidBuild();
+    if (!newest) return { status: "unknown" };
+    if (compareVersions(newest.version, currentVersion) <= 0) return { status: "current" };
+    return { status: "update", version: newest.version };
   }
 
   /** The branded installer a human downloads, from the newest release.

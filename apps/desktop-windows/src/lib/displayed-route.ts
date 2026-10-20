@@ -130,6 +130,35 @@ export function displayedRoute<T extends RouteLike>(
  *
  * A pin is always named -- it is the customer's own choice, and the rule
  * above already handles it. */
+/** The location list's row in use, and the state its words are drawn
+ * for, through a brief gap.
+ *
+ * The chip's colour, the button's fill and the map's connected light hold
+ * a settled session's look over a short reconnect, a rung, a lapsed
+ * reading (`orbHold`, ui-state-calm). The list read the service's state
+ * instead, so every such gap took "Connected here" off the row in use and
+ * put the selection back on the pin -- and gave it back a few seconds
+ * later. Now it holds with them: while the look is held, the row the
+ * session last settled on keeps its selection and its words, and when the
+ * hold ends, or a press ends it, the list says what the state says.
+ *
+ * `settledRouteId` is the route the list named while the session was last
+ * settled -- null for a tunnel it could not name, which stays unnamed
+ * through the gap rather than naming the pin. */
+export function heldListLook(input: {
+  /** The service's state now. */
+  state: ConnectionState;
+  /** The look the control wears (`orbHold`): `state`, or a settled look
+   * held over a gap. */
+  look: ConnectionState;
+  /** `displayedRouteId` for `state`. */
+  routeId: string | null;
+  settledRouteId: string | null;
+}): { state: ConnectionState; routeId: string | null } {
+  const holding = input.look !== input.state && (input.look === "connected" || input.look === "unverified");
+  return holding ? { state: input.look, routeId: input.settledRouteId } : { state: input.state, routeId: input.routeId };
+}
+
 export function showsAutomatic(connectionState: ConnectionState, pinnedRouteId: string | null | undefined): boolean {
   if (pinnedRouteId) return false;
   return !SETTLED.has(connectionState);

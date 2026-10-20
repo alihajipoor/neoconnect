@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
-import { createPortal } from "react-dom";
-import { Search, X } from "lucide-react";
+import { Check } from "lucide-react";
 import { useI18n } from "../lib/i18n";
 import type { GameProfileSummary } from "../lib/customer";
 import { GAME_PAGE_SIZE, rankGames } from "../lib/game-apps";
-import { Button } from "./ui";
+import { PickerDialog } from "./overlay";
+import { Message, PillButton } from "./ui";
 
 /** Pick a game from the operator's curated list.
  *
@@ -32,6 +32,13 @@ import { Button } from "./ui";
  * prop. Gaming mode redirects hostnames; Custom mode routes programs.
  * A row that said "launcher, login and updates" in both places would be
  * false in one of them.
+ *
+ * A proper dialog (`PickerDialog`): labelled, modal, focus in the search
+ * and kept inside, Escape to close, drawn in the app's own glass in both
+ * themes. It is rendered at the document root, never inside the glass card
+ * that opens it -- `position: fixed` is measured against an ancestor with
+ * a backdrop filter, which once clipped a picker's header and Cancel off
+ * the top of the screen.
  */
 export function GamePicker({
   games,
@@ -77,128 +84,87 @@ export function GamePicker({
   const matches = useMemo(() => rankGames(games, query), [games, query]);
 
   // Only the first page is rendered. The catalogue runs to well over a
-  // thousand rows, and mounting all of them inside a backdrop-blurred card
-  // is the kind of thing that makes a picker feel broken on the low-end
-  // machines a lot of these customers have. The count below says how many
-  // matched, so a truncated list never reads as "my game is not there".
+  // thousand rows, and mounting all of them inside a blurred dialog is the
+  // kind of thing that makes a picker feel broken on the low-end machines
+  // a lot of these customers have. The count below says how many matched,
+  // so a truncated list never reads as "my game is not there".
   const shown = matches.slice(0, GAME_PAGE_SIZE);
   const hidden = matches.length - shown.length;
 
-  // Rendered into the body rather than where it sits in the tree.
-  // `position: fixed` is measured against the nearest ancestor with a
-  // transform or filter rather than the viewport, and the Card this
-  // lives inside has backdrop-blur -- which clipped the sibling picker's
-  // header and Cancel button off the top of the screen.
-  return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="flex max-h-[80vh] w-full max-w-md flex-col gap-3 rounded-xl border border-white/10 bg-popover p-4 shadow-xl">
-        <div className="flex items-center gap-2">
-          <p className="flex-1 text-sm font-semibold">{t("gaming.pickerTitle")}</p>
-          <button
-            type="button"
-            aria-label={t("gaming.cancel")}
-            onClick={onClose}
-            className="press flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-white/8 hover:text-foreground"
-          >
-            <X className="size-4" />
-          </button>
-        </div>
-
-        <div className="relative">
-          {/* Logical inset, so the glyph sits at the edge the text starts
-              from -- a physical `left` put it on top of the first thing
-              typed under Persian. */}
-          <Search className="pointer-events-none absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={t("gaming.search")}
-            className="w-full rounded-lg border border-white/8 bg-white/[0.03] py-1.5 pe-2 ps-8 text-xs outline-none placeholder:text-muted-foreground focus:border-white/20"
-          />
-        </div>
-
-        {/* What a row in this list is, and is not. A catalogue of 1,480
-            entries reads as a compatibility list -- as though each one had
-            been tried -- and none of them has. Said here, once, at the
-            moment somebody is choosing, rather than buried in a settings
-            screen they will never open. */}
-        <p className="text-[10px] leading-relaxed text-muted-foreground">
-          {t("gaming.pickerMeaning")}
-        </p>
-
-        {shown.length === 0 ? (
-          <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {query.trim() ? t("gaming.searchEmpty") : (emptyLabel ?? t("gaming.listEmpty"))}
-          </p>
-        ) : (
-          <ul className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
-            {shown.map((game) => {
-              const picked = already.has(game.slug);
-              return (
-                <li key={game.slug}>
-                  <button
-                    type="button"
-                    disabled={picked}
-                    onClick={() => onPick(game.slug)}
-                    className={[
-                      "flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-start",
-                      picked
-                        ? "cursor-default border-white/5 bg-white/[0.015] opacity-50"
-                        : "press border-white/8 bg-white/[0.025] hover:bg-white/[0.05]",
-                    ].join(" ")}
-                  >
-                    <GameTile game={game} />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs font-semibold">{game.displayName}</p>
-                      {/* What choosing this row actually buys, spelled
-                          out on the row. In this mode it is exactly the
-                          launcher, login and updates -- the game's own
-                          connection is left on the direct path by
-                          construction, and a row that implied otherwise
-                          would be selling something we do not do. */}
-                      <p className="truncate text-[10px] text-muted-foreground">
-                        {subtitle ? subtitle(game) : t("gaming.redirects")}
-                        {game.publisher ? ` · ${game.publisher}` : ""}
-                      </p>
-                    </div>
-                  </button>
-                </li>
-              );
-            })}
-            {hidden > 0 ? (
-              // Stated rather than left to be inferred. A list that just stops
-              // reads as "my game is not supported", which is the one
-              // conclusion this picker must not accidentally produce.
-              //
-              // Two strings, because one could not be true in both states.
-              // On first open nothing has been typed and nothing has
-              // "matched" -- the other 1,420 rows are simply the rest of the
-              // catalogue -- so telling somebody to "keep typing to narrow it
-              // down" is wrong twice over. Numbers are localised here rather
-              // than interpolated raw: `t()` substitutes with String(), which
-              // would put Latin digits inside a right-to-left sentence and no
-              // thousands separator in either language.
-              <li
-                aria-live="polite"
-                className="px-2.5 py-2 text-center text-[10px] text-muted-foreground"
-              >
-                {query.trim()
-                  ? t("gaming.searchMore", { count: format(hidden) })
-                  : t("gaming.listMore", {
-                      shown: format(shown.length),
-                      count: format(matches.length),
-                    })}
-              </li>
-            ) : null}
-          </ul>
-        )}
-
-        <Button variant="outline" onClick={onClose} className="w-full justify-center">
+  return (
+    <PickerDialog
+      open
+      title={t("gaming.pickerTitle")}
+      onClose={onClose}
+      closeLabel={t("gaming.cancel")}
+      search={{ value: query, onChange: setQuery, placeholder: t("gaming.search") }}
+      // What a row in this list is, and is not. A catalogue of 1,480
+      // entries reads as a compatibility list -- as though each one had
+      // been tried -- and none of them has. Said here, once, at the moment
+      // somebody is choosing, rather than buried in a settings screen they
+      // will never open.
+      note={t("gaming.pickerMeaning")}
+      foot={
+        <PillButton variant="ghost" size="sm" onClick={onClose}>
           {t("gaming.cancel")}
-        </Button>
-      </div>
-    </div>,
-    document.body,
+        </PillButton>
+      }
+    >
+      {shown.length === 0 ? (
+        <Message tone="neutral">{query.trim() ? t("gaming.searchEmpty") : (emptyLabel ?? t("gaming.listEmpty"))}</Message>
+      ) : (
+        <ul className="nx-pick-list">
+          {shown.map((game) => {
+            const picked = already.has(game.slug);
+            return (
+              <li key={game.slug}>
+                <button type="button" className="nx-pick-row" disabled={picked} onClick={() => onPick(game.slug)}>
+                  <GameTile game={game} />
+                  <span className="t">
+                    <span className="n">{game.displayName}</span>
+                    {/* What choosing this row actually buys, spelled out on
+                        the row. In this mode it is exactly the launcher,
+                        login and updates -- the game's own connection is
+                        left on the direct path by construction, and a row
+                        that implied otherwise would be selling something we
+                        do not do. */}
+                    <span className="s">
+                      {subtitle ? subtitle(game) : t("gaming.redirects")}
+                      {game.publisher ? ` · ${game.publisher}` : ""}
+                    </span>
+                  </span>
+                  {picked ? (
+                    <span className="tag">
+                      <Check aria-hidden />
+                      {t("pick.added")}
+                    </span>
+                  ) : null}
+                </button>
+              </li>
+            );
+          })}
+          {hidden > 0 ? (
+            // Stated rather than left to be inferred. A list that just stops
+            // reads as "my game is not supported", which is the one
+            // conclusion this picker must not accidentally produce.
+            //
+            // Two strings, because one could not be true in both states. On
+            // first open nothing has been typed and nothing has "matched" --
+            // the other 1,420 rows are simply the rest of the catalogue -- so
+            // telling somebody to "keep typing to narrow it down" is wrong
+            // twice over. Numbers are localised here rather than
+            // interpolated raw: `t()` substitutes with String(), which would
+            // put Latin digits inside a right-to-left sentence and no
+            // thousands separator in either language.
+            <li aria-live="polite" className="nx-pick-more">
+              {query.trim()
+                ? t("gaming.searchMore", { count: format(hidden) })
+                : t("gaming.listMore", { shown: format(shown.length), count: format(matches.length) })}
+            </li>
+          ) : null}
+        </ul>
+      )}
+    </PickerDialog>
   );
 }
 
@@ -212,8 +178,8 @@ export function GamePicker({
  * Exported so the chosen-list rows on the card look like the picker's. */
 export function GameTile({ game }: { game: GameProfileSummary }) {
   return (
-    <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-white/10 bg-[linear-gradient(120deg,color-mix(in_oklab,var(--primary)_35%,transparent),color-mix(in_oklab,var(--highlight)_25%,transparent))] text-[11px] font-bold text-foreground">
+    <span className="nx-pick-tile" aria-hidden>
       {game.displayName.slice(0, 1).toUpperCase()}
-    </div>
+    </span>
   );
 }

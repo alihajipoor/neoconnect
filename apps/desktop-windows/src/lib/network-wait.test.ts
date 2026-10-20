@@ -168,7 +168,7 @@ describe("the Windows ladder waits on the same rung", () => {
     const waiting = caught.slice(caught.indexOf('if (classified.kind === "noNetwork"'), caught.indexOf("index -= 1;"));
     expect(waiting).toContain("showNetworkWait(true);");
     expect(waiting).toContain("ladderPass.progress(generation);");
-    expect(waiting).toContain('invoke<boolean>("network_way_out")');
+    expect(waiting).toContain('invoke<boolean>("network_way_out", { payload: candidate })');
     // One place says it, to the store and to the reconnect, both ways.
     const helper = ladder.slice(ladder.indexOf("const showNetworkWait = (on: boolean) => {"));
     expect(helper.slice(0, 600)).toContain("networkWait.set(on);");
@@ -253,7 +253,63 @@ describe("the Windows ladder waits on the same rung", () => {
     const lib = readFileSync(new URL("../../src-tauri/src/lib.rs", import.meta.url), "utf8");
     expect(lib).toContain("vpn::network_way_out,");
     const vpn = readFileSync(new URL("../../src-tauri/src/vpn.rs", import.meta.url), "utf8");
-    expect(vpn).toMatch(/#\[tauri::command\]\s+pub fn network_way_out\(\) -> bool \{/);
+    expect(vpn).toMatch(/#\[tauri::command\]\s+pub async fn network_way_out\(payload: Option<ProtocolUserPayload>\) -> bool \{/);
+  });
+
+  // 2026-10-20 review: the app's rule was a copy of the service's, and had
+  // drifted -- GetBestRoute toward 1.1.1.1 and any default route on an up
+  // adapter, where the service asks toward the rung's own server, skips a
+  // leftover host route and needs an up adapter with a gateway. The hint is
+  // now the service's answer, its copy kept only for a service that cannot
+  // give one.
+  it("asks the service, toward the rung's own server, before reading the tables itself", () => {
+    const vpn = readFileSync(new URL("../../src-tauri/src/vpn.rs", import.meta.url), "utf8");
+    const command = vpn.slice(vpn.indexOf("pub async fn network_way_out("), vpn.indexOf("const WAY_OUT_REPLY_TIMEOUT"));
+    const asked = command.indexOf("call_within(&Request::WayOut { profile }, WAY_OUT_REPLY_TIMEOUT)");
+    expect(asked).toBeGreaterThan(0);
+    expect(command.indexOf("local_way_out()")).toBeGreaterThan(asked);
+    const pipe = readFileSync(new URL("../../service/src/pipe.rs", import.meta.url), "utf8");
+    expect(pipe).toContain("Request::WayOut { profile } => {");
+    expect(pipe).toContain("crate::engines::way_out_for(&profile)");
+    const engines = readFileSync(new URL("../../service/src/engines/mod.rs", import.meta.url), "utf8");
+    expect(engines).toContain("finds_a_way_out(adapters::best_uplink_for(way_out_probe(profile), &OUR_ADAPTER_NAMES))");
+  });
+
+  // The VM, cable out for 25 s: the hint said there was a way out at every
+  // first look while the service refused every dial for want of one, so
+  // each wait ended at once and each round cost a settle of two to four
+  // seconds and a refused dial -- and after a 3 s unplug the dial again came
+  // 4.4 s after the refusal, the quarter-second look having said yes too
+  // soon. The hint asked for Windows' best route alone, wherever it led;
+  // the service takes a route only on an adapter that is up and not one of
+  // ours (adapters::choose_uplink).
+  it("asks the service's question: a route only on an adapter that is up and not one of ours", () => {
+    const vpn = readFileSync(new URL("../../src-tauri/src/vpn.rs", import.meta.url), "utf8");
+    const hint = vpn.slice(vpn.indexOf("fn local_way_out() -> bool {"), vpn.indexOf("#[cfg(test)]\nmod way_out_tests"));
+    expect(hint).toContain("way_out_from(best, &defaults, |index| interface_state(index).is_some_and(|(up, alias)| usable_adapter(up, &alias)))");
+    expect(hint).toMatch(/fn way_out_from\(best: Option<u32>, defaults: &\[\(u32, u32\)\], usable: impl Fn\(u32\) -> bool\) -> bool \{\s*if best\.is_some_and\(&usable\) \{\s*return true;\s*\}\s*defaults\.iter\(\)\.any\(\|&\(index, _\)\| usable\(index\)\)/);
+    expect(hint).toContain("up && !OUR_ADAPTERS.contains(&alias)");
+    // Up as the service reads it: the NDIS operational state.
+    expect(hint).toContain("row.OperStatus == IfOperStatusUp");
+    const adapters = readFileSync(new URL("../../service/src/adapters.rs", import.meta.url), "utf8");
+    expect(adapters).toContain("is_up: entry.OperStatus == IF_OPER_STATUS_UP,");
+    expect(adapters).toMatch(/adapter\.is_some_and\(\|a\| a\.is_up && !exclude\.contains\(&a\.name\.as_str\(\)\)\)/);
+    // Ours, by the names the service gives them.
+    const engine = (file: string, name: string) => {
+      const source = readFileSync(new URL(`../../service/src/engines/${file}`, import.meta.url), "utf8");
+      const found = new RegExp(`pub const ${name}: &str = "([^"]+)";`).exec(source);
+      expect(found, `${file} ${name}`).not.toBeNull();
+      return found![1];
+    };
+    const ours = [
+      engine("xray.rs", "ADAPTER_NAME"),
+      engine("wireguard.rs", "TUNNEL_NAME"),
+      engine("openvpn.rs", "ADAPTER_NAME"),
+      engine("ikev2.rs", "ENTRY_NAME"),
+    ];
+    expect(vpn).toContain(`const OUR_ADAPTERS: [&str; 4] = [${ours.map((n) => `"${n}"`).join(", ")}];`);
+    const mod = readFileSync(new URL("../../service/src/engines/mod.rs", import.meta.url), "utf8");
+    expect(mod).toMatch(/const OUR_ADAPTER_NAMES: \[&str; 4\] =\s*\[xray::ADAPTER_NAME, wireguard::TUNNEL_NAME, openvpn::ADAPTER_NAME, ikev2::ENTRY_NAME\];/);
   });
 
   it("puts the words on screen while it waits", () => {

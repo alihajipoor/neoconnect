@@ -53,7 +53,10 @@ const PAIRS: [apps: string, portal: string, lines: string[]][] = [
       "const { active: relayActive, status: relayStatus } = useRelayMode();",
       "relayActive && relayStatus?.intranet",
       't("relay.intranetLimits")',
-      "<SocialSignIn onSuccess={onSuccess} disabled={pending} />",
+      // The apps pass a preview seed's providers too, and Login its own
+      // placement; what both must share is where a sign-in leads.
+      "<SocialSignIn ",
+      "onSuccess={onSuccess} disabled={pending}",
       "failureText(error, t)",
       't("common.stillTrying")',
     ],
@@ -73,7 +76,10 @@ const PAIRS: [apps: string, portal: string, lines: string[]][] = [
       "const result = await relayRegister(email.trim(), emailAgain.trim(), password);",
       "if (result.ok) setRecoveryCode(result.data.recoveryCode);",
       "<RecoveryCodeNotice code={recoveryCode} onSaved={() => (onRelaySignedUp ?? onSuccess)()} />",
-      "<SocialSignIn onSuccess={onSuccess} disabled={pending} />",
+      // The apps pass a preview seed's providers too, and Login its own
+      // placement; what both must share is where a sign-in leads.
+      "<SocialSignIn ",
+      "onSuccess={onSuccess} disabled={pending}",
       't("relay.signupNote")',
       't("relay.offerSignup")',
       "const pendingLong = useStillTrying(pending);",

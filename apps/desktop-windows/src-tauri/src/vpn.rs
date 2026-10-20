@@ -507,10 +507,14 @@ pub struct ExitPayload {
 /// through for the service to remove host routes to them that an earlier
 /// session left on the physical adapter. Optional on the same terms:
 /// absent, nothing is purged.
+///
+/// `block_while_reconnecting` is the customer's "Block the internet while
+/// reconnecting" setting, off unless they turned it on; absent is off.
 pub async fn vpn_connect(
     payload: ProtocolUserPayload,
     exits: Option<Vec<ExitPayload>>,
     known_nodes: Option<Vec<String>>,
+    block_while_reconnecting: Option<bool>,
 ) -> Result<(), String> {
     let profile = payload.into_profile()?;
     // Dropped here rather than sent and ignored, because the service
@@ -535,12 +539,39 @@ pub async fn vpn_connect(
     } else {
         Vec::new()
     };
-    call_expecting_ok(&Request::Connect { profile, exits, known_nodes: known_nodes.unwrap_or_default() }).await
+    call_expecting_ok(&Request::Connect {
+        profile,
+        exits,
+        known_nodes: known_nodes.unwrap_or_default(),
+        block_while_reconnecting: block_while_reconnecting.unwrap_or(false),
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn vpn_disconnect() -> Result<(), String> {
     call_expecting_ok(&Request::Disconnect).await
+}
+
+/// Takes the tunnel down for a reconnect: the auto-reconnect pass clearing
+/// the decks, or a tunnel found not carrying. With the setting on, the gap
+/// is held; otherwise the same as `vpn_disconnect`. See
+/// `Request::DisconnectForReconnect`.
+#[tauri::command]
+pub async fn vpn_disconnect_for_reconnect() -> Result<(), String> {
+    call_expecting_ok(&Request::DisconnectForReconnect).await
+}
+
+/// Lets go of the reconnect hold: a tunnel proved, or the reconnect over.
+#[tauri::command]
+pub async fn vpn_release_reconnect_hold() -> Result<(), String> {
+    call_expecting_ok(&Request::ReleaseReconnectHold).await
+}
+
+/// The "Block the internet while reconnecting" setting changed.
+#[tauri::command]
+pub async fn vpn_set_reconnect_hold(enabled: bool) -> Result<(), String> {
+    call_expecting_ok(&Request::SetReconnectHold { enabled }).await
 }
 
 /// Asks the service to prove the tunnel is carrying traffic, over a
@@ -744,6 +775,30 @@ pub struct VpnStatus {
     /// Why not, in English, for support -- never shown as the warning.
     #[serde(rename = "confinementProblem", skip_serializing_if = "Option::is_none")]
     confinement_problem: Option<String>,
+    /// "Block the internet while reconnecting": `{"state":"armed"}`,
+    /// `{"state":"holding","held_secs":n}`, or `{"state":"notHeld",
+    /// "problem":...}` -- facts the UI words in both languages. Absent
+    /// when the setting is off or nothing is armed, or from an older
+    /// service.
+    #[serde(rename = "reconnectHold", skip_serializing_if = "Option::is_none")]
+    reconnect_hold: Option<neoconnect_ipc::ReconnectHold>,
+    /// What the tunnel's adapter has carried this session, from Windows'
+    /// own counters: `rx_bytes`, `tx_bytes`, and `rx_per_sec`,
+    /// `tx_per_sec`, `window_ms` once measured. Absent whenever it was not
+    /// read -- the UI shows no number then, never a zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    traffic: Option<neoconnect_ipc::TunnelTraffic>,
+    /// Which problem `split_tunnel_problem` is, as a code the UI words in
+    /// both languages ("injectionRefused", "noReplies", "noAppTraffic",
+    /// "adapterGone", or "other" from a newer service, for which the UI
+    /// shows the service's own sentence). Absent with no problem.
+    #[serde(rename = "splitTunnelProblemCode", skip_serializing_if = "Option::is_none")]
+    split_tunnel_problem_code: Option<neoconnect_ipc::SplitTunnelProblemCode>,
+    /// How long the live session's engine has been up, in whole seconds:
+    /// the session timer for a tunnel this window did not bring up. Absent
+    /// with no session, or from an older service -- never a guess.
+    #[serde(rename = "sessionSecs", skip_serializing_if = "Option::is_none")]
+    session_secs: Option<u64>,
 }
 
 /// How long to wait for a server to answer before calling it unreachable.
@@ -1126,6 +1181,10 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             split_tunnel_restart_needed,
             ipv4_confined,
             confinement_problem,
+            reconnect_hold,
+            traffic,
+            split_tunnel_problem_code,
+            session_secs,
         } => Ok(VpnStatus {
             connected,
             protocol,
@@ -1137,6 +1196,10 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             split_tunnel_restart_needed,
             ipv4_confined,
             confinement_problem,
+            reconnect_hold,
+            traffic,
+            split_tunnel_problem_code,
+            session_secs,
         }),
         Response::Error { message } => Err(message),
         Response::Ok
@@ -1285,6 +1348,66 @@ mod gaming_contract {
         // side knowing is caught rather than shipped.
         let keys: Vec<&String> = json.as_object().unwrap().keys().collect();
         assert_eq!(keys.len(), 6, "{json}");
+    }
+
+    /// The reconnect hold and the tunnel's counters reach the webview under
+    /// the names the UI reads, and say nothing when there is nothing --
+    /// never a "not held" or a zero the service did not send.
+    #[test]
+    fn the_hold_and_the_counters_reach_the_webview_by_their_agreed_names() {
+        let status = |reconnect_hold, traffic| VpnStatus {
+            connected: true,
+            protocol: Some("WIREGUARD".into()),
+            health: TunnelHealth::Unknown,
+            split_tunnel_active: false,
+            split_tunnel_problem: None,
+            ipv6_blocked: true,
+            tunnel_dns_unprotected: false,
+            split_tunnel_restart_needed: Vec::new(),
+            ipv4_confined: None,
+            confinement_problem: None,
+            reconnect_hold,
+            traffic,
+            split_tunnel_problem_code: None,
+            session_secs: None,
+        };
+        let json = serde_json::to_value(status(
+            Some(neoconnect_ipc::ReconnectHold::Holding { held_secs: 3, dns_anywhere: false, landed: false, standing_refused: false }),
+            Some(neoconnect_ipc::TunnelTraffic { rx_bytes: 10, tx_bytes: 2, ..Default::default() }),
+        ))
+        .unwrap();
+        assert_eq!(json["reconnectHold"], serde_json::json!({"state": "holding", "held_secs": 3}));
+        assert_eq!(json["traffic"], serde_json::json!({"rx_bytes": 10, "tx_bytes": 2}));
+        let quiet = serde_json::to_value(status(None, None)).unwrap();
+        assert!(quiet.get("reconnectHold").is_none() && quiet.get("traffic").is_none(), "{quiet}");
+    }
+
+    /// Custom mode's problem code and the session's age reach the webview
+    /// by the names the UI reads, and are absent when the service said
+    /// nothing -- never a code without its problem, never a zero age.
+    #[test]
+    fn the_problem_code_and_session_age_reach_the_webview_by_their_agreed_names() {
+        let status = |split_tunnel_problem_code, session_secs| VpnStatus {
+            connected: true,
+            protocol: Some("XRAY_VLESS_REALITY".into()),
+            health: TunnelHealth::Unknown,
+            split_tunnel_active: true,
+            split_tunnel_problem: Some("an English sentence".into()),
+            ipv6_blocked: false,
+            tunnel_dns_unprotected: false,
+            split_tunnel_restart_needed: Vec::new(),
+            ipv4_confined: None,
+            confinement_problem: None,
+            reconnect_hold: None,
+            traffic: None,
+            split_tunnel_problem_code,
+            session_secs,
+        };
+        let json = serde_json::to_value(status(Some(neoconnect_ipc::SplitTunnelProblemCode::NoReplies), Some(3_725))).unwrap();
+        assert_eq!(json["splitTunnelProblemCode"], "noReplies");
+        assert_eq!(json["sessionSecs"], 3_725);
+        let quiet = serde_json::to_value(status(None, None)).unwrap();
+        assert!(quiet.get("splitTunnelProblemCode").is_none() && quiet.get("sessionSecs").is_none(), "{quiet}");
     }
 
     /// `unknown` must survive the trip as itself. Folding it into `off`
@@ -1710,31 +1833,171 @@ pub fn network_fingerprint() -> Option<String> {
     }
 }
 
-/// Whether this machine has a way out to the internet right now: Windows'
-/// best route toward a public address exists, through a gateway or
-/// on-link (a PPP line has no next hop and is a way out all the same).
+/// Our own adapters, by the names the service gives them
+/// (`OUR_ADAPTER_NAMES` in service/src/engines/mod.rs: Xray's, WireGuard's,
+/// OpenVPN's and IKEv2's). A route on one of them is never a way out.
+const OUR_ADAPTERS: [&str; 4] = ["neoconnect0", "neoconnect", "Neoxify-OpenVPN", "Neoxify"];
+
+/// Whether this machine has a way out to the internet right now, by the
+/// service's own rule -- the one its refusal applies (`NO_NETWORK`,
+/// `refuse_without_a_way_out`, `adapters::choose_uplink`): Windows' best
+/// route toward a public address, through a gateway or on-link (a PPP line
+/// has no next hop and is a way out all the same), on an adapter that is up
+/// and is not one of ours; or else a default route on such an adapter.
 ///
 /// What a connect the service refused for want of a network waits on
-/// before it dials the same server again (`lib/network-wait.ts`): the
-/// service's refusal (`NO_NETWORK`, `refuse_without_a_way_out`) asks the
-/// same table. No tunnel of ours is up while it is asked -- the refused
-/// rung was torn down -- so a route found is the machine's own.
+/// before it dials the same server again (`lib/network-wait.ts`). It used
+/// to be the best route alone, wherever it led, and on the VM it said yes
+/// at every look while the cable was out for 25 s -- a route the service,
+/// which reads the adapters' state, would not take -- so each wait ended at
+/// its first look, and each round was a settle of two to four seconds of
+/// failing requests and a dial refused again: the dials came every 3.5-5 s,
+/// and after a 3 s unplug the dial again 4.4 s after the refusal, the
+/// outage 13.6 s.
 ///
 /// A hint for when to try again, no more: the service decides, and a route
 /// that leads nowhere is found out by the dial, as ever. An error reads as
 /// no way out, which costs only a wait until the app tries again anyway --
 /// never a dial, and never a server named.
+///
+/// Asked of the service itself (`Request::WayOut`, with the rung's
+/// credential as a connect would send it): its answer is the very rule a
+/// connect is refused by -- the best route toward the rung's own server, a
+/// leftover host route skipped, an up adapter with a gateway -- where the
+/// reading below asked toward 1.1.1.1 and took any default route, and the
+/// two could drift. That reading is kept for a service too old to know the
+/// question, or none answering in time.
 #[tauri::command]
-pub fn network_way_out() -> bool {
+pub async fn network_way_out(payload: Option<ProtocolUserPayload>) -> bool {
+    if let Some(profile) = payload.and_then(|payload| payload.into_profile().ok()) {
+        if let Some(said) = way_out_said(call_within(&Request::WayOut { profile }, WAY_OUT_REPLY_TIMEOUT).await) {
+            return said;
+        }
+    }
+    local_way_out()
+}
+
+/// How long the service is given to answer the way-out question: Windows'
+/// tables, read off its owning thread, in milliseconds. A wait looks again
+/// every two seconds at most, and this is not to hold it up.
+const WAY_OUT_REPLY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The service's answer to `Request::WayOut`, as the wait reads it: `Ok` a
+/// way out; its no-network words none; anything else -- an older service
+/// that does not know the question, none answering -- says nothing, and the
+/// app reads Windows' tables itself (`local_way_out`).
+fn way_out_said(answer: Result<Response, String>) -> Option<bool> {
+    match answer {
+        Ok(Response::Ok) => Some(true),
+        Ok(Response::Error { message }) if message == neoconnect_ipc::NO_NETWORK => Some(false),
+        _ => None,
+    }
+}
+
+/// The app's own reading, for a service that cannot answer: Windows' best
+/// route toward a public address on an up adapter that is not ours, or a
+/// default route on one.
+fn local_way_out() -> bool {
     use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute, MIB_IPFORWARDROW};
 
     // SAFETY: `route` is a valid out-parameter for the call, and only the
     // call's result is read.
-    let err = unsafe {
+    let best = unsafe {
         let mut route: MIB_IPFORWARDROW = std::mem::zeroed();
-        GetBestRoute(u32::from_ne_bytes([1, 1, 1, 1]), 0, &mut route)
+        (GetBestRoute(u32::from_ne_bytes([1, 1, 1, 1]), 0, &mut route) == 0).then_some(route.dwForwardIfIndex)
     };
-    err == 0
+    let defaults = default_routes().unwrap_or_default();
+    way_out_from(best, &defaults, |index| interface_state(index).is_some_and(|(up, alias)| usable_adapter(up, &alias)))
+}
+
+/// The decision behind [`network_way_out`], on facts already gathered:
+/// the interface of Windows' best route (none when there is no route), the
+/// default routes as `(interface, next hop)`, and whether an interface is
+/// one a way out may leave by.
+fn way_out_from(best: Option<u32>, defaults: &[(u32, u32)], usable: impl Fn(u32) -> bool) -> bool {
+    if best.is_some_and(&usable) {
+        return true;
+    }
+    defaults.iter().any(|&(index, _)| usable(index))
+}
+
+/// An adapter a way out may leave by: up, and not one of ours.
+fn usable_adapter(up: bool, alias: &str) -> bool {
+    up && !OUR_ADAPTERS.contains(&alias)
+}
+
+/// Whether an interface is up, as the service reads it (the NDIS
+/// operational state: `IfOperStatusUp`), and its name. None when it cannot
+/// be read.
+fn interface_state(index: u32) -> Option<(bool, String)> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetIfEntry2, MIB_IF_ROW2};
+    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+
+    // SAFETY: all-zero is a valid row to ask with; the index names the
+    // interface, and the call fills the rest.
+    let mut row: MIB_IF_ROW2 = unsafe { std::mem::zeroed() };
+    row.InterfaceIndex = index;
+    // SAFETY: `row` is a live, initialised row of the declared type.
+    if unsafe { GetIfEntry2(&mut row) } != 0 {
+        return None;
+    }
+    let len = row.Alias.iter().position(|&c| c == 0).unwrap_or(row.Alias.len());
+    Some((row.OperStatus == IfOperStatusUp, String::from_utf16_lossy(&row.Alias[..len])))
+}
+
+#[cfg(test)]
+mod way_out_tests {
+    use super::{usable_adapter, way_out_from, way_out_said};
+    use neoconnect_ipc::Response;
+
+    /// The service's answer decides, both ways; anything else -- an older
+    /// service that does not know the question, none answering -- leaves it
+    /// to the app's own reading.
+    #[test]
+    fn the_services_answer_decides_and_nothing_else_does() {
+        assert_eq!(way_out_said(Ok(Response::Ok)), Some(true));
+        assert_eq!(way_out_said(Ok(Response::Error { message: neoconnect_ipc::NO_NETWORK.to_string() })), Some(false));
+        assert_eq!(way_out_said(Ok(Response::Error { message: "unknown variant `wayOut`".to_string() })), None);
+        assert_eq!(way_out_said(Err("the background service is not running".to_string())), None);
+    }
+
+    const ETHERNET: u32 = 7;
+    const TUNNEL: u32 = 31;
+    const GATEWAY: u32 = 0x0101_a8c0;
+
+    #[test]
+    fn a_best_route_on_an_up_adapter_is_a_way_out() {
+        assert!(way_out_from(Some(ETHERNET), &[(ETHERNET, GATEWAY)], |i| i == ETHERNET));
+        // On-link, with no default route listed: a PPP line.
+        assert!(way_out_from(Some(ETHERNET), &[], |i| i == ETHERNET));
+    }
+
+    /// The VM, cable out: a route still answered for a public address, on
+    /// an adapter the service would not take -- down, or ours -- and no
+    /// default route on one it would.
+    #[test]
+    fn a_route_on_an_adapter_the_service_would_not_take_is_none() {
+        assert!(!way_out_from(Some(ETHERNET), &[(ETHERNET, GATEWAY)], |_| false));
+        assert!(!way_out_from(Some(TUNNEL), &[], |i| i == ETHERNET));
+        assert!(!way_out_from(None, &[], |_| true));
+    }
+
+    #[test]
+    fn a_default_route_on_an_up_adapter_is_a_way_out_whatever_the_best_route() {
+        // The best route on a tunnel of ours not yet gone; the Ethernet up.
+        assert!(way_out_from(Some(TUNNEL), &[(ETHERNET, GATEWAY)], |i| i == ETHERNET));
+        assert!(way_out_from(None, &[(ETHERNET, GATEWAY)], |i| i == ETHERNET));
+    }
+
+    #[test]
+    fn only_an_up_adapter_that_is_not_ours() {
+        assert!(usable_adapter(true, "Ethernet"));
+        assert!(usable_adapter(true, "Wi-Fi"));
+        assert!(!usable_adapter(false, "Ethernet"));
+        for ours in ["neoconnect0", "neoconnect", "Neoxify-OpenVPN", "Neoxify"] {
+            assert!(!usable_adapter(true, ours), "{ours}");
+        }
+    }
 }
 
 /// The machine's ways out, as a string that changes when they do: every

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 
 import { AppleIcon, FacebookIcon, GoogleIcon } from "./BrandIcons";
-import { useI18n } from "../lib/i18n";
-import { failureText } from "../lib/failure-text";
+import { useI18n, type TranslationKey } from "../lib/i18n";
+import { failureText, type ShownFailure } from "../lib/failure-text";
 import { socialSignIn } from "../lib/auth";
 import {
   appleSignInAvailable,
@@ -30,11 +30,23 @@ export function availableSocialProviders(): SocialProvider[] {
     : ["google", "facebook"];
 }
 
+/** What the sign-in screen says for a provider sign-in that failed: the
+ * sentence the flow wrote for this customer -- no Apple Account on the
+ * iPhone, a provider that is not available, the backend's own reason
+ * (social-auth.ts) -- and the generic line only when there is none. */
+export function socialFailureText(result: ShownFailure, t: (key: TranslationKey) => string): string {
+  return failureText(result, t) || t("auth.socialFailed");
+}
+
 /** The provider buttons, above the email form on Login and Register.
  *
  * Above rather than below on purpose. These exist for people who do not
  * want to fill in a form, so putting them under the form they are
  * avoiding is the one placement that fails the audience they are for.
+ * The exception is a declared national intranet, when the note above the
+ * form says these may not work and to sign in with the password: there
+ * Login puts them after the form, without the "or use email" line
+ * (`divider`).
  *
  * Which providers appear is decided by the caller, not here. Apple is
  * offered only where the native sheet exists, because Sign in with
@@ -46,8 +58,11 @@ export function SocialSignIn({
   providers = availableSocialProviders(),
   onSuccess,
   disabled,
+  divider = true,
 }: {
   providers?: SocialProvider[];
+  /** The "or use email" line under the buttons, for when the form follows. */
+  divider?: boolean;
   /** Called once a session exists and is stored. Everything before that
    * -- the provider trip, the exchange, storing the tokens -- is the
    * same for Login and Register, so it lives in socialSignIn() rather
@@ -95,13 +110,18 @@ export function SocialSignIn({
       if (result === null) return;
       setCloudflareNote(false);
       if (!result.ok) {
-        setError(failureText(result, t) || t("auth.socialFailed"));
+        setError(socialFailureText(result, t));
         return;
       }
       onSuccess();
-    } catch (err) {
+    } catch {
       setCloudflareNote(false);
-      setError(err instanceof Error ? err.message : t("auth.socialFailed"));
+      // Never the exception's own text. What reaches here is not the
+      // provider trip -- its refusals come back as a result, above, in the
+      // customer's words -- but what throws after it, such as a store that
+      // would not save the session: the platform's English, which says
+      // nothing they can act on.
+      setError(t("auth.socialFailed"));
     } finally {
       if (flow.current === controller) flow.current = null;
       setBusy(null);
@@ -118,34 +138,41 @@ export function SocialSignIn({
     apple: <AppleIcon className="size-5 shrink-0" />,
     facebook: <FacebookIcon className="size-5 shrink-0 text-[#1877F2]" />,
   };
+  // The provider's own name, for a phone, where the buttons sit side by
+  // side to keep the sign-in on one screen; the full words stay the
+  // button's accessible name.
+  const brand: Record<SocialProvider, string> = { google: "Google", apple: "Apple", facebook: "Facebook" };
 
   return (
-    <div className="animate-rise">
-      <div className="flex flex-col gap-2">
+    <div className="nx-social">
+      <div className="nx-social-row" data-count={providers.length}>
         {providers.map((p) => (
           <button
             key={p}
             type="button"
             onClick={() => void start(p)}
             disabled={disabled || busy !== null}
-            // A neutral surface rather than the app's violet gradient:
-            // the gradient is the primary action, and three of them
-            // competing with "Sign in" would leave no primary action at
-            // all. The provider's own mark carries the recognition.
-            className="press flex w-full items-center justify-center gap-3 rounded-lg border border-white/12 bg-white/[0.04] px-4 py-3 text-sm font-medium text-foreground hover:border-white/20 hover:bg-white/[0.07] disabled:opacity-50"
+            aria-label={label[p]}
+            aria-busy={busy === p || undefined}
+            // A neutral surface rather than the primary fill: the primary
+            // is "Sign in", and three of them competing with it would leave
+            // no primary action at all. The provider's own mark carries
+            // the recognition.
+            className="nx-btn ghost nx-soc"
           >
-            {busy === p ? (
-              <span className="size-5 shrink-0 animate-spin-slow rounded-full border-2 border-white/25 border-t-white/80" />
-            ) : (
-              icon[p]
-            )}
-            <span>{label[p]}</span>
+            {busy === p ? <span className="nx-spin" aria-hidden /> : icon[p]}
+            <span className="full" aria-hidden>
+              {label[p]}
+            </span>
+            <span className="short" aria-hidden lang="en" dir="ltr">
+              {brand[p]}
+            </span>
           </button>
         ))}
       </div>
 
       {cloudflareNote ? (
-        <p role="status" className="mt-2 text-xs text-muted-foreground">
+        <p role="status" className="nx-auth-fine">
           {t("auth.socialNeedsCloudflare")}
         </p>
       ) : null}
@@ -153,17 +180,13 @@ export function SocialSignIn({
       {/* Windows only: a phone's sign-in sheet is the system's, and closing
           it ends the wait by itself. */}
       {busy !== null && !isMobile() ? (
-        <button
-          type="button"
-          onClick={() => flow.current?.abort()}
-          className="mt-2 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
-        >
+        <button type="button" onClick={() => flow.current?.abort()} className="nx-tlnk">
           {t("auth.socialCancel")}
         </button>
       ) : null}
 
       {error ? (
-        <p role="alert" className="mt-2 text-xs text-destructive">
+        <p role="alert" className="nx-msg" data-tone="danger">
           {error}
         </p>
       ) : null}
@@ -171,13 +194,11 @@ export function SocialSignIn({
       {/* The divider says what the form below is for, rather than a bare
           rule that leaves the reader to work out why there are two ways
           to do the same thing. */}
-      <div className="my-5 flex items-center gap-3">
-        <span className="h-px flex-1 bg-border" />
-        <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
-          {t("auth.orUseEmail")}
-        </span>
-        <span className="h-px flex-1 bg-border" />
-      </div>
+      {divider ? (
+        <div className="nx-or">
+          <span>{t("auth.orUseEmail")}</span>
+        </div>
+      ) : null}
     </div>
   );
 }

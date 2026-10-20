@@ -234,7 +234,7 @@ fn signal_for(pid: u32, spawned: bool, answer: Option<bool>) -> ExitSignal {
 
 /// The desktop app's executable, as the installer lays it down: beside
 /// the `resources` directory the service runs from.
-const APP_EXE: &str = "neoconnect-desktop.exe";
+pub(crate) const APP_EXE: &str = "neoconnect-desktop.exe";
 
 /// Whether the process at the other end of the pipe is Neoxify's own app.
 ///

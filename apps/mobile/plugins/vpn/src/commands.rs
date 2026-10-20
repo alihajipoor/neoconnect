@@ -6,8 +6,8 @@
 //! Tauri plugins put their commands in a submodule for the same reason.
 
 use crate::{
-    AppleIdentity, Apps, Empty, Granted, IapProducts, IapPurchase, IapUnfinished, Ikev2Profile,
-    TunnelGone, VpnStatus, WireGuardProfile, XrayProfile,
+    AppleIdentity, Apps, Empty, Granted, IapProducts, IapPurchase, IapUnfinished, Ikev2Profile, Notices,
+    NotificationState, TunnelGone, VpnStatus, WireGuardProfile, XrayProfile,
 };
 // Only the mobile branch of vpn_open_auth_session names this; the
 // desktop fallback returns an error without ever building one.
@@ -212,13 +212,94 @@ pub async fn vpn_tunnel_gone<R: Runtime>(app: AppHandle<R>) -> Result<TunnelGone
     }
 }
 
+/// What a status asks for beyond the tunnel's state. `totals`: the byte
+/// totals, which on iOS are a round trip to the tunnel extension (up to
+/// half a second, and a wake of a process with a 50 MB ceiling) -- asked
+/// only by the speeds, never by the ladder's waits or the health checks.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[derive(serde::Serialize)]
+struct StatusArgs {
+    totals: bool,
+}
+
 #[tauri::command]
-pub async fn vpn_status<R: Runtime>(app: AppHandle<R>) -> Result<VpnStatus, String> {
+pub async fn vpn_status<R: Runtime>(app: AppHandle<R>, totals: Option<bool>) -> Result<VpnStatus, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         handle(&app)?
             .0
-            .run_mobile_plugin::<VpnStatus>("status", ())
+            .run_mobile_plugin::<VpnStatus>("status", StatusArgs { totals: totals.unwrap_or(false) })
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = (app, totals);
+        Err(unavailable())
+    }
+}
+
+/// The words and the setting for the tunnel's own notifications
+/// (`Notices`), saved where the native side reads them when it posts.
+#[tauri::command]
+pub async fn vpn_set_notices<R: Runtime>(app: AppHandle<R>, notices: Notices) -> Result<Empty, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<Empty>("setNotices", notices)
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = (app, notices);
+        Err(unavailable())
+    }
+}
+
+/// Whether the system shows this app's notifications.
+#[tauri::command]
+pub async fn vpn_notification_state<R: Runtime>(app: AppHandle<R>) -> Result<NotificationState, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<NotificationState>("notificationState", ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = app;
+        Err(unavailable())
+    }
+}
+
+/// Raises the system's own question about notifications, where it can
+/// still be asked; otherwise answers with the state and shows nothing.
+/// Only ever from the customer's press in Settings.
+#[tauri::command]
+pub async fn vpn_request_notifications<R: Runtime>(app: AppHandle<R>) -> Result<NotificationState, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<NotificationState>("requestNotifications", ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = app;
+        Err(unavailable())
+    }
+}
+
+/// The system's settings page for this app's notifications.
+#[tauri::command]
+pub async fn vpn_open_notification_settings<R: Runtime>(app: AppHandle<R>) -> Result<Empty, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<Empty>("openNotificationSettings", ())
             .map_err(|e| e.to_string())
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]

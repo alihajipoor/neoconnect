@@ -46,6 +46,7 @@ import { IspRecommendationsModule } from "./modules/isp-recommendations/isp-reco
 import { DeviceSlotsModule } from "./modules/device-slots/device-slots.module";
 import { RelayAuthModule } from "./modules/relay-auth/relay-auth.module";
 import { AdminAuditModule } from "./modules/admin-audit/admin-audit.module";
+import { AccountActivityModule } from "./modules/account-activity/account-activity.module";
 
 @Module({
   imports: [
@@ -109,6 +110,9 @@ import { AdminAuditModule } from "./modules/admin-audit/admin-audit.module";
     RelayAuthModule,
     // Every change an admin makes, logged; GET /admin/audit for the owner.
     AdminAuditModule,
+    // The Activity screen: GET/DELETE /customer/devices, GET
+    // /customer/usage and GET /customer/subscriptions/:id/usage.
+    AccountActivityModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ClientThrottlerGuard }],
 })

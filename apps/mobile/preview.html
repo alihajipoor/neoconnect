@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Neoxify phone preview</title>
+  </head>
+  <!--
+    DEV ONLY. Served by `pnpm dev` at /preview.html so the phone's main page,
+    its first-run disclosure and its per-app card can be looked at, measured
+    and screenshotted in an ordinary browser with mocked state and no Tauri
+    (`pnpm check:phone-fit`). Not an input of `vite build` (only index.html
+    is), so none of it reaches the app. See src/preview/main.tsx.
+  -->
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/preview/main.tsx"></script>
+  </body>
+</html>
