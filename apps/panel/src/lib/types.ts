@@ -749,6 +749,8 @@ export interface BlockFamilyResult {
   family: BlockFamily;
   firing: boolean;
   thin: boolean;
+  /** Positive evidence the server works, for what this signal measures. */
+  healthy?: boolean;
   summary: string;
   networks: BlockNetworkFinding[];
 }
@@ -763,6 +765,9 @@ export interface BlockEvidence {
   blockType: BlockType | null;
   thinResidential: boolean;
   country: string;
+  /** With nothing firing: shown working again (on the way to clearing),
+   * or held open for want of evidence either way. */
+  clearing?: string | null;
 }
 
 export interface BlockIncident {
@@ -775,9 +780,13 @@ export interface BlockIncident {
   lastSeenAt: string;
   likelyAt: string | null;
   closedAt: string | null;
+  /** Came back soon after clearing and was opened again (not paged again). */
+  reopenedAt: string | null;
   evidenceJson: BlockEvidence;
+  /** Set only once a page reached somebody; pageAttempts counts the tries. */
   pagedAt: string | null;
   pageError: string | null;
+  pageAttempts: number;
   remindedAt: string | null;
   recoveryNotifiedAt: string | null;
   keptAt: string | null;

@@ -35,7 +35,7 @@ const TYPES: Record<BlockType, string> = {
 };
 
 const STATUS_WORDS: Record<string, string> = {
-  CLEARED: "cleared by itself",
+  CLEARED: "cleared: shown working again",
   REPLACED: "marked replaced",
   RETIRED: "marked retired",
 };
@@ -153,13 +153,19 @@ function IncidentCard({ incident, canAct }: { incident: BlockIncident; canAct: b
               {likely ? "Likely blocked" : "Suspect"}
             </Badge>
             {e.current === null && !e.outage ? (
-              <span className="text-xs text-muted-foreground">quiet now; clears if it stays quiet</span>
+              <span className="text-xs text-muted-foreground">{e.clearing ?? "quiet now"}</span>
             ) : null}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
             {incident.node.region} · opened {ago(incident.openedAt)} · last signal {ago(incident.lastSeenAt)}
+            {incident.reopenedAt ? ` · came back ${ago(incident.reopenedAt)}` : ""}
             {incident.pagedAt ? ` · paged ${ago(incident.pagedAt)}` : ""}
-            {incident.pageError ? <span className="text-red-400"> · page problem: {incident.pageError}</span> : null}
+            {incident.pageError ? (
+              <span className="text-red-400">
+                {" "}
+                · {incident.pagedAt ? "page problem" : `page not delivered (${incident.pageAttempts} tries)`}: {incident.pageError}
+              </span>
+            ) : null}
             {incident.keptAt ? " · kept" : ""}
             {snoozed ? ` · snoozed until ${new Date(incident.snoozedUntil!).toLocaleString()}` : ""}
           </div>
@@ -202,7 +208,7 @@ function IncidentCard({ incident, canAct }: { incident: BlockIncident; canAct: b
           <Confirm
             label="Replace"
             title={`Mark ${incident.node.name} replaced?`}
-            description="Closes this incident. Evidence from before now stops counting for this server, so a new address starts with a clean slate. Nothing is changed on any server."
+            description="For a server that has moved to a new address: accepted once the node has it (until then, snooze). Closes this incident, and evidence from before now stops counting for this server. Nothing is changed on any server."
             disabled={pending}
             onConfirm={() => answer("replaced")}
           />
