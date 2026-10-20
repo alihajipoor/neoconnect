@@ -9,7 +9,7 @@ function play(looks: Partial<NotifyInput & { tone: ShownTone }>[], memory: Notif
   const said: (NotifyKind | null)[] = [];
   let m = memory;
   for (const look of looks) {
-    const step = notifyStep(m, { tone: "idle", reconnecting: false, holding: false, focused: false, gaming: false, ...look });
+    const step = notifyStep(m, { tone: "idle", reconnecting: false, gap: "open", focused: false, gaming: false, ...look });
     m = step.memory;
     said.push(step.say);
   }
@@ -42,7 +42,35 @@ describe("what is worth a notification", () => {
   });
 
   it("says the internet is blocked meanwhile when the service is holding it", () => {
-    expect(play([{ tone: "ok" }, { tone: "warn", reconnecting: true, holding: true }])).toEqual(["connected", "lostHeld"]);
+    expect(play([{ tone: "ok" }, { tone: "warn", reconnecting: true, gap: "blocked" }])).toEqual(["connected", "lostHeld"]);
+  });
+
+  it("says neither until the service has said whether the internet is held", () => {
+    // Its last word "armed": the drop not seen yet, or the session's own
+    // confinement still standing. "Not protected" would be false the moment
+    // the hold is in; "blocked" is not confirmed.
+    expect(
+      play([
+        { tone: "ok" },
+        { tone: "warn", reconnecting: true, gap: "unconfirmed" },
+        { tone: "warn", reconnecting: true, gap: "blocked" },
+      ]),
+    ).toEqual(["connected", null, "lostHeld"]);
+    expect(
+      play([{ tone: "ok" }, { tone: "warn", reconnecting: true, gap: "unconfirmed" }, { tone: "warn", reconnecting: true }]),
+    ).toEqual(["connected", null, "lost"]);
+  });
+
+  it("never says not protected on a stale word after a drop nothing reconnects: the third quick death", () => {
+    // On the VM the toast came 10 ms after the release was asked for, off a
+    // screen still holding the "armed" from before the drop, while the
+    // service held the internet: 0.3 s before the release took effect.
+    expect(play([{ tone: "ok" }, { tone: "danger", gap: "unconfirmed" }, { tone: "danger", gap: "blocked" }, { tone: "danger" }])).toEqual([
+      "connected",
+      null,
+      null,
+      "dropped",
+    ]);
   });
 
   it("says it is gone when nothing is reconnecting it", () => {
@@ -54,9 +82,9 @@ describe("what is worth a notification", () => {
     // "Your traffic is not protected" while other connections are still
     // blocked would be false.
     expect(
-      play([{ tone: "ok" }, { tone: "warn", reconnecting: true, holding: true }, { tone: "danger", holding: true }, { tone: "danger" }]),
+      play([{ tone: "ok" }, { tone: "warn", reconnecting: true, gap: "blocked" }, { tone: "danger", gap: "blocked" }, { tone: "danger" }]),
     ).toEqual(["connected", "lostHeld", null, "dropped"]);
-    expect(play([{ tone: "ok" }, { tone: "danger", holding: true }, { tone: "danger", holding: true }, { tone: "danger" }])).toEqual([
+    expect(play([{ tone: "ok" }, { tone: "danger", gap: "blocked" }, { tone: "danger", gap: "blocked" }, { tone: "danger" }])).toEqual([
       "connected",
       null,
       null,

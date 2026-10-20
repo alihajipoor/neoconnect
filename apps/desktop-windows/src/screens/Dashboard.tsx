@@ -123,7 +123,17 @@ import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
 import { appPrefs } from "../lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
-import { createStatusRelease, holdHint, holdNote, holdService, holdStore, holdWanted, passTeardown } from "../lib/reconnect-hold";
+import {
+  createStatusRelease,
+  gapTraffic,
+  HOLD_HINTS,
+  holdHint,
+  holdNote,
+  holdService,
+  holdStore,
+  holdWanted,
+  passTeardown,
+} from "../lib/reconnect-hold";
 import { NOTIFY_TEXT, notifyMemory, notifyStep } from "../lib/connection-notify";
 import { showNotification } from "../lib/notify";
 import { trafficMeter } from "../lib/traffic-meter";
@@ -2620,10 +2630,14 @@ export function Dashboard({
       try {
         const status = await serviceStatus().catch(() => null);
         const disturbed = statusDisturbances.since(mark);
-        if (!droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) {
-          if (status?.connected) noteStatus(status);
-          return;
-        }
+        // Every read's word on the hold, the drop's own included: the read
+        // that finds the tunnel gone is the one that says whether the
+        // service is holding the internet for it. Left unread, the screen
+        // went on with the "armed" from before the drop and said traffic
+        // was going out without Neoxify while the service held it (the
+        // VM, 0.25 to 0.5 s at every reconnect's start).
+        if (status !== null) noteStatus(status);
+        if (!droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) return;
         publishDrop(generation);
       } finally {
         livenessInFlightRef.current = false;
@@ -2737,12 +2751,16 @@ export function Dashboard({
     if (!isTunnelUp(connectionState)) trafficMeter.reset();
   }, [connectionState]);
 
-  // While an automatic reconnect runs nothing else asks the service, so its
-  // word on the reconnect hold is asked here, every two seconds, for the
-  // line that says the internet is blocked -- or why it is not. Only with
-  // the setting on: off, there is nothing to say.
+  // While an automatic reconnect runs, or after a drop nothing reconnects,
+  // nothing else asks the service, so its word on the reconnect hold is
+  // asked here -- at once, then every two seconds -- for the line and the
+  // notification that say the internet is blocked, or why it is not
+  // (`gapTraffic`): until it answers they say neither. Only with the
+  // setting on: off, there is nothing to say.
+  const gapDropped = tunnelDropped || reconnectLost(reconnect, sessionGeneration());
+  const inHoldGap = reconnectRunning || gapDropped;
   useEffect(() => {
-    if (!reconnectRunning || !holdWanted(prefs.blockWhileReconnecting)) return;
+    if (!inHoldGap || !holdWanted(prefs.blockWhileReconnecting)) return;
     let asking = false;
     const look = () => {
       if (asking) return;
@@ -2756,7 +2774,7 @@ export function Dashboard({
     look();
     const id = setInterval(look, 2_000);
     return () => clearInterval(id);
-  }, [reconnectRunning, prefs.blockWhileReconnecting]);
+  }, [inHoldGap, prefs.blockWhileReconnecting]);
 
   // "Connect when Neoxify starts" (lib/auto-connect.ts): once per run, at
   // the first main page of a run that opened signed in, and only over
@@ -2803,15 +2821,17 @@ export function Dashboard({
       ? "idle"
       : shownTone(orbTone(orbState, cautionShown), {
           reconnecting: reconnectRunning,
-          dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()),
+          dropped: gapDropped,
         });
-  const holding = holdWanted(prefs.blockWhileReconnecting) && hold?.state === "holding";
+  /** Where other traffic goes in the gap, as the service has said: the
+   * same source the sentence under the state reads (`holdHint`). */
+  const gap = gapTraffic(hold, holdWanted(prefs.blockWhileReconnecting));
   useEffect(() => {
     if (loading) return;
     const step = notifyStep(notifyMemory.current(), {
       tone: notifyTone,
       reconnecting: reconnectRunning,
-      holding,
+      gap,
       // In front, and on the main page: another page of the shell does not
       // say the connection's state, so it is said as for a window behind.
       focused: typeof document !== "undefined" && document.hasFocus() && onMainPage,
@@ -2823,7 +2843,7 @@ export function Dashboard({
     void showNotification(t(text.title), t(text.body), language).catch(() => undefined);
     // On a change of what is said, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, notifyTone, reconnectRunning, appMode, holding]);
+  }, [loading, notifyTone, reconnectRunning, appMode, gap]);
 
   // The session log (lib/session-log.ts), only when the customer has
   // turned it on: a record opens when the screen first shows a tunnel up
@@ -4609,7 +4629,9 @@ export function Dashboard({
    * and does not (`holdNote`). */
   const holdSetting = holdWanted(prefs.blockWhileReconnecting);
   const heldNote = holdNote(hold, { inGap: reconnecting !== null || dropped, setting: holdSetting });
-  const heldHint = holdHint(hold, { reconnecting: reconnecting !== null, dropped, setting: holdSetting });
+  // A pass waiting for a network under the hold is a reconnect's gap too:
+  // its headline's "your traffic is not protected" would be false.
+  const heldHint = holdHint(hold, { reconnecting: reconnecting !== null || waitingForNetwork, dropped, setting: holdSetting });
   const hintText = slotTeardownShowing
     ? ""
     : connectionError
@@ -4619,7 +4641,7 @@ export function Dashboard({
         : t(headline.hint);
   /** Every sentence the hint can say, for the room it keeps: the hold's
    * only where the setting can make it say them. */
-  const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, "hold.holding", "hold.heldAfterDrop"] : HEADLINE_HINTS;
+  const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, ...HOLD_HINTS] : HEADLINE_HINTS;
   const slotShowing = slotNotice !== null && slotNoticeShown(slotNotice, connectionState === "disconnected");
   /** The device limit's card carries its own primary press ("Use on this
    * device instead") and its way out: with nothing up, the pill steps aside

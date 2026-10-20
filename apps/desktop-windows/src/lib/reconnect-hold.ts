@@ -20,11 +20,14 @@
  *    reconnect's attempt, the mid-session failover -- and a press made
  *    while the hold is holding keep it through their teardowns; a press
  *    from a quiet screen lets go, as Disconnect always has;
- *  - when to let go (`shouldRelease`, `episodeEndReleases`): a pass that
- *    landed a tunnel, an episode that ended without one, a drop that began
- *    none, and a hold the service still reports over a tunnel that is up;
- *  - what the screen says about it (`holdNote`, `holdHint`), from the
- *    service's own facts -- never from the setting alone. */
+ *  - when to let go (`episodeEndReleases`, `createStatusRelease`): a pass
+ *    that landed a tunnel, an episode that ended without one, a drop that
+ *    began none -- and, from status reads alone, only a tunnel the service
+ *    says landed under the hold, verified, on two reads a second apart;
+ *  - what the screen and the notifications say about the customer's other
+ *    traffic in the gap (`gapTraffic`, `holdHint`, `holdNote`), from the
+ *    service's own facts -- never from the setting alone, and never "going
+ *    out without Neoxify" while the service may be blocking it. */
 
 import { invoke } from "@tauri-apps/api/core";
 import type { ReconnectPhase, ReconnectStop } from "./auto-reconnect";
@@ -222,22 +225,60 @@ export function holdNote(hold: ReconnectHold | null, { inGap, setting }: { inGap
   return null;
 }
 
-/** The sentence under the state, when the hold is what it has to say.
+/** Where the customer's other traffic goes in a gap -- a reconnect
+ * running, or a tunnel dropped with nothing reconnecting it -- as far as
+ * the service has said. The one source every sentence and notification
+ * about it reads (`holdHint`, `notifyStep`):
  *
- * While a reconnect runs and the service holds: blocked until Neoxify
- * reconnects. After a drop that nothing is reconnecting, while the service
- * still says it holds -- between the drop and the release reaching it, or
- * a service that has not answered the release -- the internet is not
- * "going out without Neoxify", and saying so would be false: it is blocked
- * until the block is lifted. Null leaves the headline's own hint. Off the
- * service's own word, never the setting alone. */
+ *  - `blocked`: the service says it holds the internet;
+ *  - `unconfirmed`: the setting is on and the service's last word is
+ *    "armed" -- it has not yet said the hold is in, or why not. Its drop
+ *    not seen yet, or the session's own confinement still standing over a
+ *    tunnel whose way out has gone: either way not "going out without
+ *    Neoxify", which is false the moment the hold is in -- measured on the
+ *    VM, said for 0.25 to 2.3 s while the service already held -- nor
+ *    "blocked", which nothing has confirmed;
+ *  - `open`: the setting off, nothing armed or held, or the service says
+ *    it is not holding and why. */
+export type GapTraffic = "blocked" | "unconfirmed" | "open";
+
+export function gapTraffic(hold: ReconnectHold | null, setting: boolean): GapTraffic {
+  if (!setting || hold === null) return "open";
+  if (hold.state === "holding") return "blocked";
+  if (hold.state === "armed") return "unconfirmed";
+  return "open";
+}
+
+export type HoldHintKey = "hold.holding" | "hold.heldAfterDrop" | "hold.unconfirmed";
+
+/** Every sentence `holdHint` can put under the line, for the room the
+ * hint keeps where the setting can make it say them. */
+export const HOLD_HINTS: readonly HoldHintKey[] = ["hold.holding", "hold.heldAfterDrop", "hold.unconfirmed"];
+
+/** The sentence under the state, when the hold is what it has to say
+ * (`gapTraffic`).
+ *
+ * While a reconnect runs -- or a pass waits for a network -- and the
+ * service holds: blocked until Neoxify reconnects. After a drop that
+ * nothing is reconnecting, while the service still says it holds --
+ * between the drop and the release reaching it, or a service that has not
+ * answered the release -- blocked until the block is lifted. In the gap
+ * with the service's word not in yet: neither. Null leaves the headline's
+ * own hint, which says the traffic is going out without Neoxify -- only
+ * ever when the service has said nothing is held. */
 export function holdHint(
   hold: ReconnectHold | null,
   { reconnecting, dropped, setting }: { reconnecting: boolean; dropped: boolean; setting: boolean },
-): "hold.holding" | "hold.heldAfterDrop" | null {
-  if (!setting || hold?.state !== "holding") return null;
-  if (reconnecting) return "hold.holding";
-  return dropped ? "hold.heldAfterDrop" : null;
+): HoldHintKey | null {
+  if (!reconnecting && !dropped) return null;
+  switch (gapTraffic(hold, setting)) {
+    case "blocked":
+      return reconnecting ? "hold.holding" : "hold.heldAfterDrop";
+    case "unconfirmed":
+      return "hold.unconfirmed";
+    case "open":
+      return null;
+  }
 }
 
 // --- the service's half, and the one answer every screen reads ----------

@@ -12,12 +12,15 @@
  *  - `connected`: a tunnel verified, from not being up;
  *  - `lost` / `lostHeld`: a verified tunnel gone and Neoxify reconnecting
  *    past the hold -- the second when the service is holding the internet
- *    while it does ("Block the internet while reconnecting");
+ *    while it does ("Block the internet while reconnecting") -- once the
+ *    service has said which (`gapTraffic`): not before;
  *  - `back`: verified again after `lost` was said;
  *  - `dropped`: gone, and nothing is reconnecting it (the episode gave up,
- *    or none could start) -- once the service no longer holds the internet
- *    for it: "not protected" while other connections are still blocked
- *    would be false, so it waits for the release to be confirmed.
+ *    or none could start) -- once the service has said it no longer holds
+ *    the internet for it: "not protected" while other connections are
+ *    still blocked, or may be, would be false, so it waits for the
+ *    service's word that nothing is held. Measured on the VM: said 0.3 s
+ *    before the release took effect, off a stale "armed".
  * Nothing for the customer's own Disconnect, nothing in Gaming mode, and
  * nothing while the window is in front: the screen already says it. A
  * change seen on screen counts as said, so "back" after a loss the
@@ -29,6 +32,7 @@
 
 import type { ShownTone } from "./hero-model";
 import type { TranslationKey } from "./i18n";
+import type { GapTraffic } from "./reconnect-hold";
 
 export type NotifyKind = "connected" | "connectedPartial" | "lost" | "lostHeld" | "back" | "dropped";
 
@@ -47,8 +51,10 @@ export interface NotifyInput {
   readonly tone: ShownTone;
   /** An automatic reconnect is under way. */
   readonly reconnecting: boolean;
-  /** The service says it is holding the internet. */
-  readonly holding: boolean;
+  /** Where other traffic goes in the gap, as the service has said
+   * (`gapTraffic` in reconnect-hold.ts): the one source the main page's
+   * sentence reads too. */
+  readonly gap: GapTraffic;
   /** The window is in front: the screen says it already. */
   readonly focused: boolean;
   readonly gaming: boolean;
@@ -72,12 +78,15 @@ export function notifyStep(memory: NotifyMemory, input: NotifyInput): { memory: 
     // amber is the failover's to fix, and says nothing new.
     case "warn":
       if (input.reconnecting && memory.up && !memory.lostSaid) {
-        return say(input.holding ? "lostHeld" : "lost", { up: true, lostSaid: true });
+        // Which of the two is the service's to say first.
+        if (input.gap === "unconfirmed") return { memory, say: null };
+        return say(input.gap === "blocked" ? "lostHeld" : "lost", { up: true, lostSaid: true });
       }
       return { memory, say: null };
-    // Gone, and nothing reconnecting -- said once the hold has gone too.
+    // Gone, and nothing reconnecting -- said once the service has said
+    // nothing is held.
     case "danger":
-      if (input.holding) return { memory, say: null };
+      if (input.gap !== "open") return { memory, say: null };
       if (memory.up || memory.lostSaid) return say("dropped", FRESH_MEMORY);
       return { memory, say: null };
     // Nothing up by the customer's own hand, or a press under way.

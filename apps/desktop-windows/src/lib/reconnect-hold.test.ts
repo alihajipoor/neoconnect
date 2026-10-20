@@ -12,6 +12,8 @@ import { AutoReconnect, QUICK_DEATHS_TO_STOP, type Episode, type ReconnectPhase 
 import {
   createStatusRelease,
   episodeEndReleases,
+  gapTraffic,
+  HOLD_HINTS,
   holdHint,
   holdNote,
   holdService,
@@ -182,6 +184,18 @@ describe("letting go on status reads alone", () => {
     for (let now = 0; now < 10_000; now += 500) {
       expect(release.see({ hold: HOLDING, status: CONFINED, passRunning: false, now })).toBe(false);
     }
+  });
+});
+
+describe("where other traffic goes in the gap", () => {
+  it("is the service's word, and neither until it has said", () => {
+    expect(gapTraffic(HOLDING, true)).toBe("blocked");
+    expect(gapTraffic({ state: "armed" }, true)).toBe("unconfirmed");
+    expect(gapTraffic({ state: "notHeld", problem: "timedOut" }, true)).toBe("open");
+    expect(gapTraffic(null, true)).toBe("open");
+    // The setting off: nothing is held, whatever a stale word says.
+    expect(gapTraffic(HOLDING, false)).toBe("open");
+    expect(gapTraffic({ state: "armed" }, false)).toBe("open");
   });
 });
 
@@ -440,9 +454,20 @@ describe("the sentence under the state", () => {
     expect(holdHint(HOLDING, { reconnecting: false, dropped: true, setting: true })).toBe("hold.heldAfterDrop");
   });
 
-  it("leaves the headline's own hint when the service does not hold, or the setting is off", () => {
-    expect(holdHint({ state: "armed" }, { reconnecting: false, dropped: true, setting: true })).toBeNull();
+  it("says neither in the gap before the service has said whether the hold is in", () => {
+    // Its last word "armed": on the VM the screen said "going out without
+    // Neoxify" for 0.25 to 0.5 s at every reconnect's start, and 2.3 s after
+    // a network cut, while the service already held.
+    expect(holdHint({ state: "armed" }, { reconnecting: true, dropped: false, setting: true })).toBe("hold.unconfirmed");
+    expect(holdHint({ state: "armed" }, { reconnecting: false, dropped: true, setting: true })).toBe("hold.unconfirmed");
+    expect(holdHint({ state: "armed" }, { reconnecting: false, dropped: false, setting: true })).toBeNull();
+    expect(HOLD_HINTS).toEqual(["hold.holding", "hold.heldAfterDrop", "hold.unconfirmed"]);
+  });
+
+  it("leaves the headline's own hint when the service says nothing is held, or the setting is off", () => {
     expect(holdHint(null, { reconnecting: true, dropped: false, setting: true })).toBeNull();
+    expect(holdHint({ state: "notHeld", problem: "filtersRefused" }, { reconnecting: true, dropped: false, setting: true })).toBeNull();
+    expect(holdHint({ state: "armed" }, { reconnecting: true, dropped: false, setting: false })).toBeNull();
     expect(holdHint(HOLDING, { reconnecting: false, dropped: true, setting: false })).toBeNull();
     expect(holdHint(HOLDING, { reconnecting: false, dropped: false, setting: true })).toBeNull();
   });

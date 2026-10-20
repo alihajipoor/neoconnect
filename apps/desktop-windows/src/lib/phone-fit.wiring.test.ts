@@ -139,13 +139,13 @@ describe("a phone's main page is one screen", () => {
     expect(hero).toContain('<span className="rsv" aria-hidden>');
     expect(preview).toContain("reserve={hintReserve}");
     expect(preview).toContain(
-      'const hintReserve: readonly TranslationKey[] = sc.hold ? [...HEADLINE_HINTS, "hold.holding", "hold.heldAfterDrop"] : HEADLINE_HINTS;',
+      "const hintReserve: readonly TranslationKey[] = sc.hold ? [...HEADLINE_HINTS, ...HOLD_HINTS] : HEADLINE_HINTS;",
     );
     // The main page's: the same, and the reconnect hold's sentence where the
     // setting can make the hint say it (lib/reconnect-hold.ts).
     expect(dash).toContain("reserve={hintReserve}");
     expect(dash).toContain(
-      'const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, "hold.holding", "hold.heldAfterDrop"] : HEADLINE_HINTS;',
+      "const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, ...HOLD_HINTS] : HEADLINE_HINTS;",
     );
   });
 

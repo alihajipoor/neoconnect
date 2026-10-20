@@ -1272,6 +1272,10 @@ const en = {
   "hold.holding": "Other connections on this computer are blocked until Neoxify reconnects, as you set. Your local network still works, and name lookups still go out.",
   "hold.dnsAnywhere": "This computer's DNS servers couldn't be read, so while other connections are blocked, anything sent to port 53 still goes out, not only name lookups.",
   "hold.heldAfterDrop": "Other connections on this computer are still blocked, as you set, until Neoxify lifts the block. Connect again to get back online.",
+  // In the gap before the service has said whether the block is in: no
+  // claim either way -- not "going out without Neoxify", which is false the
+  // moment it is in, nor "blocked", which nothing has confirmed yet.
+  "hold.unconfirmed": "The tunnel closed. Neoxify is checking whether other connections on this computer are blocked, as you set.",
   "hold.filtersRefused": "The internet could not be blocked while reconnecting: Windows refused the filters. Your traffic goes out without Neoxify until it's back.",
   "hold.tunnelNotPermitted": "Stopped blocking the internet so the new connection could carry traffic.",
   "hold.timedOut": "Stopped blocking the internet after 40 minutes of reconnecting, so this computer isn't left offline. Your traffic goes out without Neoxify until it's back.",
@@ -2278,6 +2282,7 @@ const fa: Record<TranslationKey, string> = {
   "hold.holding": "طبق تنظیم شما، تا اتصال دوبارهٔ نئوکسیفای، اتصال‌های دیگر این رایانه مسدود هستند. شبکهٔ محلی شما کار می‌کند و درخواست‌های نام همچنان ارسال می‌شوند.",
   "hold.dnsAnywhere": "سرورهای DNS این رایانه خوانده نشد؛ برای همین تا وقتی اتصال‌های دیگر مسدود هستند، هر چیزی که به درگاه ۵۳ فرستاده شود همچنان ارسال می‌شود، نه فقط درخواست‌های نام.",
   "hold.heldAfterDrop": "طبق تنظیم شما، اتصال‌های دیگر این رایانه هنوز مسدود هستند تا نئوکسیفای این مسدودسازی را بردارد. برای برگشتن به اینترنت، دوباره وصل شوید.",
+  "hold.unconfirmed": "تونل بسته شد. نئوکسیفای در حال بررسی است که آیا اتصال‌های دیگر این رایانه، طبق تنظیم شما، مسدود هستند یا نه.",
   "hold.filtersRefused": "هنگام اتصال دوباره نمی‌شد اینترنت را مسدود کرد: ویندوز فیلترها را نپذیرفت. تا برگشتن اتصال، ترافیک شما بدون نئوکسیفای ارسال می‌شود.",
   "hold.tunnelNotPermitted": "مسدودسازی اینترنت متوقف شد تا اتصال جدید بتواند ترافیک را عبور دهد.",
   "hold.timedOut": "پس از ۴۰ دقیقه تلاش برای اتصال دوباره، مسدودسازی اینترنت متوقف شد تا این رایانه بدون اینترنت نماند. تا برگشتن اتصال، ترافیک شما بدون نئوکسیفای ارسال می‌شود.",

@@ -42,7 +42,7 @@ import { SpeedCard, SpeedSection } from "../components/main/TrafficSpeed";
 import { createTrafficMeter } from "../lib/traffic-meter";
 import type { LadderRung } from "../lib/ladder-progress";
 import type { CountdownLine } from "../lib/reconnect-countdown";
-import type { HoldNoteKey } from "../lib/reconnect-hold";
+import { HOLD_HINTS, type HoldNoteKey } from "../lib/reconnect-hold";
 import { SAMPLE_SUBSCRIPTION } from "./mocks/customer";
 import { ScreenTransition, screenDirection } from "../components/ScreenTransition";
 import { firstViews } from "../lib/motion";
@@ -622,7 +622,7 @@ function Composed({
   const hintText = sc.failed ? t("err.allProtocolsFailed") : sc.hold === "hold.holding" ? t("hold.holding") : t(headline.hint);
   /** As the main page's: the hold's sentences only where the setting is on
    * -- here, the states that show the hold. */
-  const hintReserve: readonly TranslationKey[] = sc.hold ? [...HEADLINE_HINTS, "hold.holding", "hold.heldAfterDrop"] : HEADLINE_HINTS;
+  const hintReserve: readonly TranslationKey[] = sc.hold ? [...HEADLINE_HINTS, ...HOLD_HINTS] : HEADLINE_HINTS;
   const sample = EVIDENCE[evidence] ?? EVIDENCE.mixed;
   const routes = useMemo(() => sample.routes(ROUTES), [sample]);
   const history = useMemo(() => sampleHistory(routes, sample.own), [routes, sample]);

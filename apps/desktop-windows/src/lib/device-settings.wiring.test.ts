@@ -120,7 +120,9 @@ describe("the main page does what the rows say", () => {
 
   it("reads the hold and the counters from every status it takes", () => {
     expect(dashboard.match(/noteStatus\(status\);/g)?.length).toBe(3);
-    expect(dashboard).toContain("if (status?.connected) noteStatus(status);");
+    // The read that finds a drop included: it is the one that says whether
+    // the service holds the internet for it.
+    expect(dashboard).toContain("if (status !== null) noteStatus(status);");
   });
 
   it("notifies from the calm tone, only with the setting on and the window not in front", () => {

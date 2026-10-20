@@ -34,6 +34,33 @@ describe("the reconnect hold's gate", () => {
     expect(test).toContain("VITE_RECONNECT_HOLD: ${{ inputs.reconnect_hold && '1' || '' }}");
   });
 
+  it("hears the service's word from the very read that finds the drop", () => {
+    // The liveness poll found drops and dropped the read: the screen kept
+    // the "armed" from before and said traffic was going out without
+    // Neoxify while the service held it.
+    const dash = source("../screens/Dashboard.tsx");
+    const look = dash.slice(dash.indexOf("const status = await serviceStatus().catch(() => null);"));
+    const noted = look.indexOf("if (status !== null) noteStatus(status);");
+    const dropped = look.indexOf("publishDrop(generation);");
+    expect(noted).toBeGreaterThan(-1);
+    expect(dropped).toBeGreaterThan(noted);
+  });
+
+  it("says where traffic goes in the gap from one source, on screen and in notifications", () => {
+    const dash = source("../screens/Dashboard.tsx");
+    expect(dash).toContain("const gap = gapTraffic(hold, holdWanted(prefs.blockWhileReconnecting));");
+    expect(dash).toContain("      gap,\n");
+    expect(dash).toContain("const heldHint = holdHint(hold, {");
+    // No sentence about the hold picked by hand, and no release on a
+    // single status read.
+    expect(dash).not.toMatch(/t\("hold\./);
+    expect(dash).not.toContain("shouldRelease");
+    expect(dash).toContain("statusReleaseRef.current.see({");
+    const notify = source("./connection-notify.ts");
+    expect(notify).toContain("readonly gap: GapTraffic;");
+    expect(notify).not.toMatch(/readonly holding|input\.holding/);
+  });
+
   it("is read through holdWanted wherever the preference decides what is held or said", () => {
     for (const path of ["../App.tsx", "../screens/Dashboard.tsx", "../screens/Settings.tsx"]) {
       const lines = source(path)
@@ -45,7 +72,7 @@ describe("the reconnect hold's gate", () => {
         // effect's dependency list read the preference as saved;
         // everything else goes through the gate.
         if (line.includes("checked={prefs.value.blockWhileReconnecting}")) continue;
-        if (line.includes("}, [reconnectRunning, prefs.blockWhileReconnecting]);")) continue;
+        if (line.includes("}, [inHoldGap, prefs.blockWhileReconnecting]);")) continue;
         const reads = line.split(".blockWhileReconnecting").length - 1;
         const gated = line.match(/holdWanted\((?:appPrefs\.current\(\)|prefs|prefs\.value)\.blockWhileReconnecting\)/g)?.length ?? 0;
         expect(gated, `${path}: ${line.trim()}`).toBe(reads);
