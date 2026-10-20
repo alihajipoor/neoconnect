@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronRight, Clock, Gamepad2, Globe, MapPin, Settings as SettingsIcon, Shield, Sparkles, Tag } from "lucide-react";
-import { displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
+import { describesTunnel, displayedProtocol, displayedRoute, displayedRouteId, showsAutomatic } from "../lib/displayed-route";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
@@ -114,7 +114,7 @@ import {
 } from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
-import { credentialOnTunnel, tunnelCredential } from "../lib/tunnel-credential";
+import { credentialOnTunnel, tunnelCredential, type TunnelDial } from "../lib/tunnel-credential";
 import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "../lib/api-endpoints";
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
@@ -534,8 +534,14 @@ export function Dashboard({
    * protocol, and the last dial is not the tunnel's
    * (`credentialOnTunnel`). The tiles then name no route rather than the
    * pin `protocolUser` holds for the next connect. Cleared once a pass of
-   * this screen has an engine up, which it names itself. */
-  const [tunnelRouteUnknown, setTunnelRouteUnknown] = useState(false);
+   * this screen has an engine up, which it names itself, or once a read
+   * of the service names the tunnel it found up (`nameFoundTunnel`).
+   *
+   * True to begin with, and again whenever a load puts the pin on screen:
+   * a tunnel that comes to be shown up by any way that does not name it is
+   * then named as nothing, never as the pin. While nothing is up it
+   * changes nothing on screen. */
+  const [tunnelRouteUnknown, setTunnelRouteUnknown] = useState(true);
   /** The same, as the tiles' rule takes it (`settledKnown` in
    * displayed-route.ts). */
   const tunnelNamed = !tunnelRouteUnknown;
@@ -1102,9 +1108,13 @@ export function Dashboard({
    *
    * Returns what it settled on so a caller can act on the answer rather
    * than on the state it was hoping for.
+   *
+   * `under`: the stamp, for a caller that took it before a wait of its own
+   * (`syncNamingTunnel`), so a press made during that wait still makes the
+   * answer old news.
    */
-  async function syncFromService(): Promise<ConnectionState> {
-    const generation = intentRef.current.generation;
+  async function syncFromService(under?: number): Promise<ConnectionState> {
+    const generation = under ?? intentRef.current.generation;
     const settled = await readServiceState();
     publishObserved(generation, settled);
     // The clock is only honest while something is up.
@@ -1336,11 +1346,7 @@ export function Dashboard({
     const generation = intentRef.current.generation;
     const mark = statusDisturbances.mark();
     const adopted = await syncFromService();
-    if (isTunnelUp(adopted) && ladderGenerationRef.current === passAtStart && !ladderInFlight()) {
-      const on = credentialOnTunnel(dial, lastStatusRef.current?.protocol, users);
-      if (on !== null) setProtocolUser(on);
-      setTunnelRouteUnknown(on === null);
-    }
+    nameFoundTunnel(adopted, dial, passAtStart, users);
     if (
       adopted === "disconnected" &&
       droppedUnseen(vouched, intentRef.current.intent, lastStatusRef.current, statusDisturbances.since(mark))
@@ -1364,6 +1370,51 @@ export function Dashboard({
       autoReconnect.tunnelUp({ routeId: null, stamp: reconnectStamp });
     }
     return adopted;
+  }
+
+  /** Names the route of a tunnel a read of the service found up outside a
+   * pass: the last dial's credential among `users`, when the service's
+   * protocol agrees with it, and no route when that cannot be said
+   * (`credentialOnTunnel`) -- never the credential the screen holds, which
+   * after a load is the pin.
+   *
+   * Every read that can move the screen to a tunnel up from outside a
+   * pass names it here: `adoptServiceState`, and `syncNamingTunnel` for the
+   * rest. Named only in the first, the screen was still wrong by another
+   * way: a load whose own read of the service failed or timed out went to
+   * "unknown" over the pin, and the recheck of "unknown" eight seconds
+   * later put "connected" under it -- the UK and Stealth Web over a
+   * tunnel to Singapore, as before.
+   *
+   * `dial` and `passAtStart` are taken before the service is asked. A pass
+   * begun since, or still under way, names its own candidate, and is left
+   * to. */
+  function nameFoundTunnel(
+    found: ConnectionState,
+    dial: TunnelDial | null,
+    passAtStart: number,
+    users: readonly ProtocolUser[],
+  ): void {
+    if (!isTunnelUp(found) || ladderGenerationRef.current !== passAtStart || ladderInFlight()) return;
+    const on = credentialOnTunnel(dial, lastStatusRef.current?.protocol, users);
+    if (on !== null) setProtocolUser(on);
+    setTunnelRouteUnknown(on === null);
+  }
+
+  /** `syncFromService` for a read outside a pass that can find a tunnel up
+   * -- the recheck of "unknown" and of a state past its deadline, a press
+   * that buys an answer, a connect declined for a pass in the way -- with
+   * what it finds named (`nameFoundTunnel`) against the credentials on
+   * screen. Stamped before the dial is read, as `adoptServiceState` is, so
+   * nothing is taken after a wait: a press during the read overrules the
+   * answer, and a pass begun during it names its own. */
+  async function syncNamingTunnel(): Promise<ConnectionState> {
+    const generation = intentRef.current.generation;
+    const passAtStart = ladderGenerationRef.current;
+    const dial = await tunnelCredential.last();
+    const settled = await syncFromService(generation);
+    nameFoundTunnel(settled, dial, passAtStart, protocolUsersRef.current);
+    return settled;
   }
 
   /** The IPv4 and IPv6 baselines, once the service has said nothing is
@@ -1436,6 +1487,32 @@ export function Dashboard({
     void updateSnapshotRoutes(sub, list, () => sessionGeneration() === sessionAtStart);
   }
 
+  /** Which of a load's credentials the screen holds from here: the one on
+   * `routeId` -- the pin, which Connect dials first -- or the first.
+   *
+   * Not chosen again over one the screen may be using: when it has been in
+   * use on the cached snapshot while the load waited (`keepHeld`), or
+   * shows a tunnel up, the credential it holds is replaced by its new copy,
+   * by id, as a refresh's are. That may be the one the tunnel is on.
+   *
+   * And the pin is never taken for a tunnel's route: from here a tunnel
+   * shown up is named by the read that finds it (`nameFoundTunnel`) or the
+   * pass that lands it, and otherwise as no route at all
+   * (`tunnelRouteUnknown`). The pin named so was the UK and Stealth Web
+   * over a tunnel to Singapore, after Settings and back. */
+  function showLoadedCredential(
+    users: readonly ProtocolUser[],
+    routeId: string | null | undefined,
+    keepHeld: boolean,
+  ): void {
+    if (keepHeld || describesTunnel(connectionStateRef.current)) {
+      setProtocolUser((current) => users.find((u) => u.id === current?.id) ?? current);
+      return;
+    }
+    setProtocolUser(users.find((u) => u.routeId === routeId) ?? users[0] ?? null);
+    setTunnelRouteUnknown(true);
+  }
+
   /** Puts a cached snapshot on screen, for a load that has nothing fresher
    * to show: one that failed, or one still waiting past the point where it
    * used to give up (`loadAll`). `reason` is what the banner says
@@ -1459,7 +1536,7 @@ export function Dashboard({
     };
     setRouteListLoaded(true);
     const preferred = preferRouteId ?? chosenRouteId;
-    setProtocolUser(cached.protocolUsers.find((u) => u.routeId === preferred) ?? cached.protocolUsers[0] ?? null);
+    showLoadedCredential(cached.protocolUsers, preferred, false);
     setOfflineSince(cached.savedAt);
     setOfflineReason(reason);
     setError(null);
@@ -1656,14 +1733,11 @@ export function Dashboard({
     // itself honoured the choice.
     //
     // Not when the screen has been in use on the cached snapshot while
-    // this waited: the credential it holds -- perhaps the one a tunnel is
-    // up on -- is replaced by its new copy, as a refresh's are.
+    // this waited, or shows a tunnel up: the credential it holds --
+    // perhaps the one a tunnel is up on -- is replaced by its new copy, as
+    // a refresh's are (`showLoadedCredential`).
     const chosen = preferRouteId ?? chosenRouteId;
-    if (shownWhileWaiting) {
-      setProtocolUser((current) => usersResult.data.find((u) => u.id === current?.id) ?? current);
-    } else {
-      setProtocolUser(usersResult.data.find((u) => u.routeId === chosen) ?? usersResult.data[0] ?? null);
-    }
+    showLoadedCredential(usersResult.data, chosen, shownWhileWaiting);
     // The tunnel outlives the app: the helper service keeps it up if the
     // window is closed, so on open the UI has to adopt whatever is
     // actually running rather than assuming disconnected -- and before
@@ -2429,8 +2503,10 @@ export function Dashboard({
       // the polls use -- the screen was saying it could not tell, or was
       // mid-operation -- so a tunnel the reconnect was armed for is
       // forgotten rather than left for the next screen to mount to call
-      // a drop it missed.
-      void syncFromService().then((settled) => {
+      // a drop it missed. A tunnel it finds up is named as the route it is
+      // on, or as none (`syncNamingTunnel`): from "unknown" after a load
+      // whose own read failed, the screen held the pin.
+      void syncNamingTunnel().then((settled) => {
         if (settled === "disconnected") autoReconnect.forget();
       });
     }, recheckMs);
@@ -2648,8 +2724,9 @@ export function Dashboard({
       // and the next press means what it says.
       case "recheck": {
         // As the transient recheck does: an answer that says nothing is
-        // running here was not a drop, so nothing is left armed for one.
-        if ((await syncFromService()) === "disconnected") autoReconnect.forget();
+        // running here was not a drop, so nothing is left armed for one;
+        // and a tunnel it finds up is named, or named as none.
+        if ((await syncNamingTunnel()) === "disconnected") autoReconnect.forget();
         return;
       }
 
@@ -2694,7 +2771,7 @@ export function Dashboard({
         messageKey: "err.connectBusy",
         detail: "a connection attempt was already running",
       });
-      await syncFromService();
+      await syncNamingTunnel();
     }
   }
 

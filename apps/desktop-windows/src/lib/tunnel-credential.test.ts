@@ -122,8 +122,31 @@ describe("a Dashboard mounted over a tunnel the ladder moved off the pin", () =>
     });
   });
 
+  it("names no route over a tunnel adopted without a name, and the route once a read of the service names it", async () => {
+    // The pass landed on Singapore; Settings and back. The load puts the
+    // pin on screen, and with it no name for a tunnel (`showLoadedCredential`).
+    await tunnelCredential.dialling(ukWeb);
+    await tunnelCredential.dialling(sgStealth);
+    let shown = loadedCredential(held);
+    let known = false;
+    // Its own read of the service timed out: "unknown", where the tiles
+    // describe the next connect, as on any screen with nothing up.
+    expect(displayedRoute(routes, "unknown", shown?.routeId, pin, shown?.routeId, known)?.label).toBe("UK");
+    // Whatever then puts "connected" on screen without naming the tunnel
+    // names it as nothing -- not the UK on Stealth Web.
+    expect(displayedRoute(routes, "connected", shown?.routeId, pin, shown?.routeId, known)).toBeNull();
+    expect(displayedProtocol("connected", shown, pin, held, routes, known)).toBeNull();
+    // The recheck of "unknown", eight seconds on, reads "connected" and
+    // names it from the last dial, as adoption does (`syncNamingTunnel`).
+    const on = credentialOnTunnel(await tunnelCredential.last(), "XRAY_VLESS_REALITY", held);
+    if (on !== null) shown = on;
+    known = on !== null;
+    expect(displayedRoute(routes, "connected", shown?.routeId, pin, shown?.routeId, known)?.label).toBe("Singapore");
+    expect(displayedProtocol("connected", shown, pin, held, routes, known)).toEqual({ protocol: "XRAY_VLESS_REALITY" });
+  });
+
   it("uses the credential as the screen now holds it, by id", async () => {
-    tunnelCredential.dialling(sgStealth);
+    await tunnelCredential.dialling(sgStealth);
     const refreshed = { ...sgStealth, connection: { serverName: "renewed" } };
     expect(credentialOnTunnel(await tunnelCredential.last(), "XRAY_VLESS_REALITY", [ukWeb, refreshed])).toBe(refreshed);
   });

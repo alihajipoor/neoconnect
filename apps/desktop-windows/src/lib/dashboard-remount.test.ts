@@ -199,6 +199,14 @@ describe("the Dashboard's wiring", () => {
     const start = dashboard.indexOf("async function adoptServiceState(");
     const adopt = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
 
+    const fn = (signature: string) => {
+      const at = dashboard.indexOf(signature);
+      expect(at, signature).toBeGreaterThan(0);
+      return dashboard.slice(at, dashboard.indexOf("\n  }\n", at));
+    };
+    const name = fn("  function nameFoundTunnel(");
+    const syncNaming = fn("  async function syncNamingTunnel(): Promise<ConnectionState> {");
+
     it("records each dial outside the screen, before the engine can come up", () => {
       const dialled = dashboard.indexOf("tunnelCredential.dialling(candidate);");
       expect(dialled).toBeGreaterThan(0);
@@ -214,12 +222,74 @@ describe("the Dashboard's wiring", () => {
       expect(read).toBeLessThan(adopt.indexOf("if (ladderInFlight()) {"));
       expect(read).toBeLessThan(adopt.indexOf("const reconnectStamp = autoReconnect.stamp();"));
       expect(read).toBeLessThan(adopt.indexOf("await syncFromService()"));
-      expect(adopt).toContain("const on = credentialOnTunnel(dial, lastStatusRef.current?.protocol, users);");
-      expect(adopt).toContain("if (on !== null) setProtocolUser(on);");
-      expect(adopt).toContain("setTunnelRouteUnknown(on === null);");
-      // Not over a pass begun while the service was asked: that pass names
-      // its own candidate.
-      expect(adopt).toContain("if (isTunnelUp(adopted) && ladderGenerationRef.current === passAtStart && !ladderInFlight()) {");
+      const named = adopt.indexOf("nameFoundTunnel(adopted, dial, passAtStart, users);");
+      expect(named).toBeGreaterThan(adopt.indexOf("const adopted = await syncFromService();"));
+      expect(name).toContain("const on = credentialOnTunnel(dial, lastStatusRef.current?.protocol, users);");
+      expect(name).toContain("if (on !== null) setProtocolUser(on);");
+      expect(name).toContain("setTunnelRouteUnknown(on === null);");
+      // Not over a pass begun while the service was asked, or one still
+      // under way: that pass names its own candidate.
+      expect(name).toContain(
+        "if (!isTunnelUp(found) || ladderGenerationRef.current !== passAtStart || ladderInFlight()) return;",
+      );
+    });
+
+    // A load puts the pin on screen, then asks the service. When that read
+    // fails or times out the screen goes to "unknown", nothing is named,
+    // and the recheck of "unknown" eight seconds later read "connected" by
+    // `syncFromService` alone: the tiles, the picker and the per-ISP tags
+    // named the pin -- the UK and Stealth Web over a tunnel to Singapore --
+    // after Settings and back, after a restart, and under a background
+    // reload. The same for a press's recheck and a declined connect's.
+    it("names a tunnel the recheck of \"unknown\", a press's recheck or a declined connect finds up", () => {
+      const recheck = dashboard.slice(
+        dashboard.indexOf("const recheckMs = TRANSIENT_RECHECK_MS[connectionState];"),
+        dashboard.indexOf("}, [connectionState]);", dashboard.indexOf("const recheckMs = TRANSIENT_RECHECK_MS[connectionState];")),
+      );
+      expect(recheck).toContain("void syncNamingTunnel().then((settled) => {");
+      expect(dashboard).toContain('if ((await syncNamingTunnel()) === "disconnected") autoReconnect.forget();');
+      const declined = fn("  async function connectNow(takeover?: string[]) {");
+      expect(declined).toContain("await syncNamingTunnel();");
+      // Outside a pass, the service's word moves the screen to a tunnel up
+      // through these two only, and both name it.
+      expect(dashboard.split("syncFromService(").length - 1).toBe(3);
+      expect(dashboard).toContain("async function syncFromService(under?: number): Promise<ConnectionState> {");
+      expect(adopt).toContain("const adopted = await syncFromService();");
+      expect(syncNaming).toContain("const settled = await syncFromService(generation);");
+    });
+
+    it("stamps the recheck and reads the dial before the service is asked, and names from the credentials on screen", () => {
+      const stamped = syncNaming.indexOf("const generation = intentRef.current.generation;");
+      const passAt = syncNaming.indexOf("const passAtStart = ladderGenerationRef.current;");
+      const read = syncNaming.indexOf("const dial = await tunnelCredential.last();");
+      expect(stamped).toBeGreaterThan(0);
+      expect(passAt).toBeGreaterThan(0);
+      expect(read).toBeGreaterThan(Math.max(stamped, passAt));
+      expect(read).toBeLessThan(syncNaming.indexOf("await syncFromService(generation)"));
+      expect(syncNaming).toContain("nameFoundTunnel(settled, dial, passAtStart, protocolUsersRef.current);");
+      // And the stamp is the one the answer is published under.
+      const sync = fn("  async function syncFromService(under?: number): Promise<ConnectionState> {");
+      expect(sync).toContain("const generation = under ?? intentRef.current.generation;");
+    });
+
+    it("fails closed: a tunnel shown up without being named is named as no route, never as the pin", () => {
+      expect(dashboard).toContain("const [tunnelRouteUnknown, setTunnelRouteUnknown] = useState(true);");
+      const shown = fn("  function showLoadedCredential(");
+      // The pin, and with it no name for a tunnel; over a tunnel the screen
+      // shows up, the credential it holds, by id.
+      expect(shown).toContain("setProtocolUser(users.find((u) => u.routeId === routeId) ?? users[0] ?? null);");
+      const pin = shown.indexOf("setProtocolUser(users.find((u) => u.routeId === routeId)");
+      expect(shown.slice(pin, pin + 160)).toContain("setTunnelRouteUnknown(true);");
+      expect(shown.indexOf("if (keepHeld || describesTunnel(connectionStateRef.current)) {")).toBeLessThan(pin);
+      // Every load takes its credential this way.
+      const cached = fn("  async function showCached(");
+      expect(cached).toContain("showLoadedCredential(cached.protocolUsers, preferred, false);");
+      expect(cached).not.toContain("setProtocolUser(");
+      const load = fn(
+        "  async function loadScreen(preferRouteId: string | undefined, retry: OfflineRetryTrigger | null): Promise<OfflineLoadOutcome> {",
+      );
+      expect(load).toContain("showLoadedCredential(usersResult.data, chosen, shownWhileWaiting);");
+      expect(load).not.toContain("setProtocolUser(");
     });
 
     it("is given the credentials each load put on screen, and the current ones when an adopted pass ends", () => {

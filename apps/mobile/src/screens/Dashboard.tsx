@@ -397,8 +397,14 @@ export function Dashboard({
    * last dial recorded on disk is not one this screen holds
    * (`credentialOnTunnel`). The tiles then name no route rather than the
    * pin `protocolUser` holds for the next connect. Cleared once a pass of
-   * this app has an engine up, which it names itself. */
-  const [tunnelRouteUnknown, setTunnelRouteUnknown] = useState(false);
+   * this app has an engine up, which it names itself, or once
+   * `adoptPlatform` names the tunnel it found.
+   *
+   * True to begin with, and again whenever a load puts the pin on screen:
+   * a tunnel that comes to be shown up by any way that does not name it is
+   * then named as nothing, never as the pin, as on Windows. While nothing
+   * is up it changes nothing on screen. */
+  const [tunnelRouteUnknown, setTunnelRouteUnknown] = useState(true);
   /** The same, as the tiles' rule takes it (`settledKnown` in
    * displayed-route.ts). */
   const tunnelNamed = !tunnelRouteUnknown;
@@ -706,6 +712,8 @@ export function Dashboard({
         cached.protocolUsers[0] ??
         null,
     );
+    // The pin is never taken for a tunnel's route (`tunnelRouteUnknown`).
+    setTunnelRouteUnknown(true);
     setOfflineSince(cached.savedAt);
     setOfflineReason(reason);
     setError(null);
@@ -875,6 +883,9 @@ export function Dashboard({
           usersResult.data[0] ??
           null,
       );
+      // The pin is never taken for a tunnel's route: `adoptPlatform` below,
+      // or the pass that lands one, names it (`tunnelRouteUnknown`).
+      setTunnelRouteUnknown(true);
     }
     setLoading(false);
     shownOnceRef.current = true;

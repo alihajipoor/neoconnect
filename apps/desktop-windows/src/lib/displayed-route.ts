@@ -74,7 +74,15 @@ export function displayedRouteId(
  * reads its credential directly -- the phone's PROTOCOL tile and current
  * row -- rather than through the functions here. */
 export function routeNameable(connectionState: ConnectionState, settledKnown: boolean): boolean {
-  return settledKnown || !TUNNEL_UP.has(connectionState);
+  return settledKnown || !describesTunnel(connectionState);
+}
+
+/** Whether the screen is describing a tunnel up, whose route the tiles
+ * name, rather than the next connect: an engine running (`TUNNEL_UP`). A
+ * load does not put the pin in place of the credential such a tunnel is
+ * on. */
+export function describesTunnel(connectionState: ConnectionState): boolean {
+  return TUNNEL_UP.has(connectionState);
 }
 
 /** The same decision, resolved against the route list the screen holds.

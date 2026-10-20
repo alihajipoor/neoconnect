@@ -65,7 +65,7 @@ describe("where an episode begins", () => {
     expect(ladder.split("autoReconnect.forget();").length - 1).toBe(1);
     // "Nothing is running", found by a recheck, was not a drop either.
     expect(dashboard).toContain('if (settled === "disconnected") autoReconnect.forget();');
-    expect(dashboard).toContain('if ((await syncFromService()) === "disconnected") autoReconnect.forget();');
+    expect(dashboard).toContain('if ((await syncNamingTunnel()) === "disconnected") autoReconnect.forget();');
   });
 
   it("begins only at the screen's own drop, after the rule has agreed it is one", () => {

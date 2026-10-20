@@ -35,6 +35,18 @@ describe("the phone names the route a tunnel found up is on", () => {
     expect(recorded).toBeLessThan(walk.indexOf("await connectIkev2({"));
   });
 
+  it("fails closed: a load that puts the pin on screen names no tunnel by it", () => {
+    expect(dashboard).toContain("const [tunnelRouteUnknown, setTunnelRouteUnknown] = useState(true);");
+    const cached = body("  async function showCached(");
+    expect(cached.indexOf("setTunnelRouteUnknown(true);")).toBeGreaterThan(cached.indexOf("cached.protocolUsers.find((u) => u.routeId === preferred)"));
+    expect(cached.indexOf("setTunnelRouteUnknown(true);")).toBeLessThan(cached.indexOf("await adoptPlatform("));
+    const load = body("  async function loadScreen(");
+    const pin = load.indexOf("usersResult.data.find((u) => u.routeId === chosen)");
+    expect(pin).toBeGreaterThan(0);
+    expect(load.indexOf("setTunnelRouteUnknown(true);", pin)).toBeGreaterThan(pin);
+    expect(load.indexOf("setTunnelRouteUnknown(true);", pin)).toBeLessThan(load.indexOf("await adoptPlatform("));
+  });
+
   it("asks the record only when no pass of this app has said, first", () => {
     const read = adopt.indexOf("const dial = passTunnel.current === null ? await tunnelCredential.last() : null;");
     expect(read).toBeGreaterThan(0);
