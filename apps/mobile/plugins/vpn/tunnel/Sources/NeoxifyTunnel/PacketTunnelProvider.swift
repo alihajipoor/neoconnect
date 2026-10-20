@@ -1,6 +1,7 @@
 import NetworkExtension
 import NeoxifyXray
 import os
+import UserNotifications
 
 /// The iOS packet tunnel, running the same xray-core the nodes run.
 ///
@@ -270,6 +271,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // For the app, which cannot otherwise tell another app's VPN taking
         // the device from a crash; see `LastStop`.
         LastStop.record(reason)
+        // Said while the app may well be in the background: the system, or
+        // another VPN, ended a tunnel the customer did not end in Neoxify.
+        // Waited for below, briefly, so the request reaches the system
+        // before this process is torn down.
+        let noticed = DispatchSemaphore(value: 0)
+        TunnelNotice.post(for: reason) { noticed.signal() }
         // Both engines, unconditionally. stopTunnel does not say which
         // one was started, the provider may have been restarted since,
         // and each stop is a no-op when that engine is not running --
@@ -283,6 +290,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         if let error = WireGuardEngine.stop() {
             log.error("WireGuard did not stop cleanly: \(error.localizedDescription)")
         }
+        _ = noticed.wait(timeout: .now() + 1)
         completionHandler()
     }
 
@@ -375,6 +383,56 @@ enum TunnelError: LocalizedError {
 /// provider; `superceded` (Apple's spelling) is another configuration
 /// taking over. Read from Apple's documentation of NEProviderStopReason,
 /// not observed on a device.
+/// "Notify me when the connection changes", from the extension: the one
+/// process of ours that is running when the system stops the tunnel with
+/// the app in the background. The words are the app's, in its language,
+/// saved in the app group (`TunnelNotices` in the plugin, same suite and
+/// keys); nothing is said with the setting off, before the app has saved
+/// them, or for a stop the app itself asked for in the last ten seconds.
+/// iOS does not show it as a banner over the app in front.
+///
+/// Two kinds of stop, from NEProviderStopReason as Apple documents it --
+/// not observed on a device:
+///  - turned off: another configuration took over (`superceded`, Apple's
+///    spelling), or the configuration was disabled or removed in Settings;
+///  - stopped on its own: the provider failed, the connection failed, or
+///    the network went or changed past recovery.
+/// Anything else -- the customer's own disconnect, sleep, an app update --
+/// says nothing.
+enum TunnelNotice {
+    /// `done` runs once, whether or not anything was posted.
+    static func post(for reason: NEProviderStopReason, done: @escaping () -> Void) {
+        guard let defaults = UserDefaults(suiteName: LastStop.suite),
+              defaults.bool(forKey: "notices.enabled") else { return done() }
+        if Date().timeIntervalSince1970 < defaults.double(forKey: "notices.ownStopUntil") { return done() }
+        let titleKey: String
+        let bodyKey: String
+        switch reason {
+        case .superceded, .configurationDisabled, .configurationRemoved, .providerDisabled:
+            titleKey = "notices.offTitle"
+            bodyKey = "notices.offBody"
+        case .providerFailed, .connectionFailed, .noNetworkAvailable, .unrecoverableNetworkChange:
+            titleKey = "notices.stoppedTitle"
+            bodyKey = "notices.stoppedBody"
+        default:
+            return done()
+        }
+        guard let title = defaults.string(forKey: titleKey), !title.isEmpty,
+              let body = defaults.string(forKey: bodyKey), !body.isEmpty else { return done() }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        let request = UNNotificationRequest(identifier: "neoxify.tunnel.stopped", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger(subsystem: "com.neoxify.mobile", category: "tunnel")
+                    .error("could not post the stop notice: \(error.localizedDescription)")
+            }
+            done()
+        }
+    }
+}
+
 enum LastStop {
     static let suite = "group.com.neoxify.mobile"
     static let key = "tunnelLastStopReason"
