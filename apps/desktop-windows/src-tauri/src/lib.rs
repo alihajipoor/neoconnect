@@ -1,6 +1,8 @@
+mod autostart;
 mod bundle_scope;
 mod control_plane_probe;
 mod health_ip;
+mod notify;
 mod relay_http;
 mod vpn;
 mod window_fit;
@@ -205,7 +207,16 @@ pub fn run() {
             relay_http::relay_request,
             // The HTTP scope for the hosts of a signed endpoint bundle,
             // checked here before it is widened. See bundle_scope.rs.
-            bundle_scope::grant_bundle_scope
+            bundle_scope::grant_bundle_scope,
+            // "Open Neoxify when I sign in to Windows": the current user's
+            // Run key, read back from Windows each time (autostart.rs).
+            autostart::autostart_state,
+            autostart::set_autostart,
+            autostart::launched_at_sign_in,
+            // "Notify me when the connection changes": a toast, in words
+            // the app chose, and whether Windows lets them show (notify.rs).
+            notify::notify_show,
+            notify::notify_setting
         ])
         // Closing the window is an instruction, and it has to be acted
         // on rather than inferred.
