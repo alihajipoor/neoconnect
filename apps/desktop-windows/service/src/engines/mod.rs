@@ -349,6 +349,10 @@ struct Session {
     /// When the session was installed, its engine up: how long it has been
     /// up, for an app that opens over it (`Engines::session_secs`).
     began: Instant,
+    /// Its tunnel adapter was found gone while its engine still ran
+    /// (`Engines::let_go_if_the_tunnel_adapter_is_gone`): the tunnel carries
+    /// nothing, and the status says it ended.
+    adapter_gone: bool,
 }
 
 impl Session {
@@ -368,6 +372,7 @@ impl Session {
             lan_refused: None,
             traffic: traffic::SessionTraffic::default(),
             began: Instant::now(),
+            adapter_gone: false,
         }
     }
 }
@@ -1127,9 +1132,16 @@ impl Engines {
     /// kill. Whichever of the two runs first installs the hold, in one WFP
     /// transaction under the hold's lock; the other waits for it and finds
     /// it in; and only then does the confinement go.
+    ///
+    /// And the tunnel is said to have ended (`Session::adapter_gone`, read by
+    /// `status`): with its adapter gone it carries nothing, whatever its
+    /// engine is doing. Said as running, the screen stayed "Connected" over
+    /// a machine held for a drop -- or, with the hold off or let go of,
+    /// over traffic leaving in the clear -- until the app's own egress
+    /// check noticed; said as ended, the app reconnects at once.
     fn let_go_if_the_tunnel_adapter_is_gone(&mut self) {
         let ops = Arc::clone(&self.confinement_ops);
-        let Some(session) = self.active.peek() else { return };
+        let Some(session) = self.active.peek_mut() else { return };
         if session.confinement.confined() != Some(true) {
             return;
         }
@@ -1138,6 +1150,7 @@ impl Engines {
             return;
         }
         self.reconnect_hold.engage(session.generation, "the tunnel adapter is gone");
+        session.adapter_gone = true;
         let why = format!(
             "the tunnel adapter {adapter} is gone while its engine still runs, so the IPv4 confinement was let go of"
         );
@@ -1525,7 +1538,9 @@ impl Engines {
         self.active.peek().map_or(0, |s| s.generation)
     }
 
-    #[cfg(test)]
+    /// Whether a session is in the slot -- one the status may say has ended
+    /// while its engine still runs (`Session::adapter_gone`), which a
+    /// teardown still has to reach.
     pub(crate) fn has_session(&self) -> bool {
         !self.active.is_empty()
     }
@@ -3141,6 +3156,15 @@ impl Engines {
             Verdict::Reported(up, protocol, health) => {
                 if up {
                     self.let_go_if_the_tunnel_adapter_is_gone();
+                    // A tunnel whose adapter is gone has ended, though its
+                    // engine runs on: said as that -- what the app reads as
+                    // a drop, and reconnects from at once -- not as a tunnel
+                    // up while the machine is held for its drop, or while
+                    // traffic leaves in the clear. The session stays in the
+                    // slot for the reconnect's teardown, or the customer's.
+                    if self.active.peek().is_some_and(|s| s.adapter_gone) {
+                        return (false, None, TunnelHealth::Down);
+                    }
                     self.follow_the_lan();
                 }
                 // OpenVPN's own log is the one measurement of its link this
@@ -6000,16 +6024,22 @@ mod helper_tests {
     /// refuses it: the whole machine offline, held by a filter whose
     /// tunnel permit names an interface that no longer exists, until the
     /// app's failover got round to it. The status poll that finds the
-    /// adapter gone lets go of the confinement for good and says why; the
-    /// tunnel's own fate is the app's egress check's to judge. An adapter
-    /// list that cannot be read says nothing.
+    /// adapter gone lets go of the confinement for good and says why -- and
+    /// says the tunnel ended: with its adapter gone it carries nothing, and
+    /// "Connected" over it stood until the app's egress check noticed, with
+    /// traffic leaving in the clear meanwhile. Said as ended, the app reads
+    /// a drop and reconnects at once. The session stays in the slot for that
+    /// reconnect's teardown. An adapter list that cannot be read says
+    /// nothing.
     #[test]
     fn a_tunnel_adapter_gone_under_a_live_engine_lets_go_of_the_confinement() {
         let (mut engines, fake, _) = confined_session();
         assert!(engines.status().0);
         assert_eq!(engines.ipv4_confined(), Some(true), "the adapter is there: nothing changes");
         fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = engines.status();
+        assert_eq!(engines.status(), (false, None, TunnelHealth::Down), "a tunnel with no adapter said to be up");
+        assert!(engines.has_session(), "the session is the reconnect's teardown's to take down");
+        assert_eq!(engines.status(), (false, None, TunnelHealth::Down), "said once, then up again");
         assert_eq!(engines.ipv4_confined(), Some(false), "held over a tunnel adapter that is gone");
         assert_eq!(fake.closed(), vec![1000]);
         assert!(engines.confinement_problem().is_some_and(|p| p.contains("adapter")), "{:?}", engines.confinement_problem());
@@ -7138,7 +7168,9 @@ mod helper_tests {
     fn a_tunnel_adapter_gone_under_an_armed_session_is_held_before_the_confinement_goes() {
         let (mut engines, fake, hold, _g) = armed_session();
         fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = engines.status();
+        // Said as ended, so the app reconnects at once: "Connected" stood
+        // over the held machine until NO_FOLLOW_UP let go, fail-open.
+        assert_eq!(engines.status(), (false, None, TunnelHealth::Down), "a tunnel with no adapter said to be up");
         assert_eq!(engines.ipv4_confined(), Some(false), "held over a tunnel adapter that is gone");
         assert_eq!(fake.closed(), vec![1000]);
         assert_eq!(hold.installs().len(), 1, "the confinement went with no hold put in");

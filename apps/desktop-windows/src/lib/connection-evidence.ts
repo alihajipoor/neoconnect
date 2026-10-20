@@ -47,6 +47,7 @@ import type { ReconnectingView } from "./auto-reconnect";
 import type { Intent } from "./connect-intent";
 import type { EgressVerdict } from "./egress";
 import type { TranslationKey } from "./i18n";
+import { readHold } from "./reconnect-hold";
 
 /** What the helper service reports about the far end.
  *
@@ -433,7 +434,9 @@ export function noTunnelVerified(status: Pick<VpnStatus, "connected" | "health">
  *    did not may go and do something they would not otherwise have done.
  *
  *  - **It is the service's verified "no tunnel"** (`noTunnelVerified`),
- *    not the fallback's guess while it was busy.
+ *    not the fallback's guess while it was busy -- or the service holding
+ *    the internet for the drop of the very session it calls connected
+ *    (`heldOverItsDrop`).
  *
  *  - **Nothing of ours is changing the tunnel.** A connect tears down
  *    before it dials and a disconnect tears down because it was asked
@@ -451,7 +454,7 @@ export function noTunnelVerified(status: Pick<VpnStatus, "connected" | "health">
 export function droppedFromPoll(
   shown: ConnectionState,
   intent: Intent,
-  status: Pick<VpnStatus, "connected" | "health"> | null,
+  status: Pick<VpnStatus, "connected" | "health" | "reconnectHold"> | null,
   disturbed: boolean,
 ): boolean {
   return droppedUnseen(isTunnelUp(shown), intent, status, disturbed);
@@ -471,14 +474,32 @@ export function droppedFromPoll(
 export function droppedUnseen(
   vouching: boolean,
   intent: Intent,
-  status: Pick<VpnStatus, "connected" | "health"> | null,
+  status: Pick<VpnStatus, "connected" | "health" | "reconnectHold"> | null,
   disturbed: boolean,
 ): boolean {
   if (status === null) return false;
   if (intent !== "idle") return false;
   if (disturbed) return false;
   if (!vouching) return false;
-  return noTunnelVerified(status);
+  return noTunnelVerified(status) || heldOverItsDrop(status);
+}
+
+/** Whether a status says "connected" about a session the service is
+ * holding the internet for the drop of ("Block the internet while
+ * reconnecting"): holding, and no tunnel landed under the hold -- the
+ * service's word that the session it calls connected is the dropped one,
+ * still in its slot (lib/reconnect-hold.ts, `landedUnderHold`). With no
+ * pass of ours running (`droppedUnseen`) nothing of ours is taking it
+ * down, so it is a drop, and the reconnect starts now. Read as connected,
+ * the screen said "Connected" over a machine refusing everything but
+ * Neoxify until the service's two-minute backstop let go -- and then over
+ * traffic in the clear. A current service also says such a session
+ * ended (its tunnel adapter gone); this is the same rule from the hold's
+ * side, for whatever else leaves one in the slot. */
+export function heldOverItsDrop(status: Pick<VpnStatus, "connected" | "reconnectHold">): boolean {
+  if (!status.connected) return false;
+  const hold = readHold(status.reconnectHold);
+  return hold?.state === "holding" && hold.landed !== true;
 }
 
 /** Whether the screen must say that this tunnel's IPv4 is not confined to

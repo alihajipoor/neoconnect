@@ -59,6 +59,13 @@ a packet:
   of the hold, so the reconnect ran fail-open under "Stopped blocking the
   internet so the new connection could carry traffic". The session whose
   drop is held is now never armed again.
+- **"Connected" over a held machine.** After the adapter-gone check held
+  a drop, the status still said connected: the screen said "Connected"
+  while everything but Neoxify was refused, nothing reconnected, and after
+  `NO_FOLLOW_UP` the hold let go into the clear, still under "Connected".
+  A session whose tunnel adapter is gone is now said to have ended (with
+  the hold on or off), and the app reads "holding, nothing landed" over a
+  connected read as a drop.
 
 None of these fixes has carried a packet. Items 1, 2 and 5 below are to
 be run again for every engine, with the additions marked **(new)**.

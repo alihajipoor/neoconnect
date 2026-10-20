@@ -1754,8 +1754,10 @@ fn spawn_idle_watchdog(engines: Supervisor<Engines>, last_seen: Arc<Mutex<Instan
                 // is when a hold is holding the whole machine.
                 engines.release_reconnect_hold("the app went silent", true);
 
+                // A session whose tunnel adapter is gone is said to have
+                // ended, and its engine still runs: torn down all the same.
                 let (up, _, _) = engines.status();
-                if !up {
+                if !up && !engines.has_session() {
                     return;
                 }
                 eprintln!("app silent for {IDLE_GRACE:?} with a tunnel up -- tearing it down");
