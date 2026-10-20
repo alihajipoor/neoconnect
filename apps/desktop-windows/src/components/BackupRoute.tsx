@@ -133,8 +133,10 @@ export function RecoveryCodeNotice({
       </p>
       <div className="flex gap-2">
         <Button variant="ghost" onClick={() => void copy()} className="gap-2 border border-[var(--hairline-2)]">
-          {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
-          {copied ? t("recovery.copied") : t("recovery.copy")}
+          {copied ? <Check className="size-4 nx-done-in" /> : <Copy className="size-4" />}
+          <span key={copied ? "done" : "copy"} className="nx-swap">
+            {copied ? t("recovery.copied") : t("recovery.copy")}
+          </span>
         </Button>
         <Button onClick={onSaved} className="flex-1 justify-center">
           {t("recovery.saved")}

@@ -69,11 +69,18 @@ export function ProgressLineView({
           ? t("rc.now", { n: n(count.attempt), max: n(count.max) })
           : t("rc.attempt", { n: n(count.attempt), max: n(count.max) });
 
+  // The words swap (a short rise) when the step changes -- the next rung,
+  // the next attempt -- and never with the countdown's second, which is
+  // simply rewritten (design-system.md 6.3). The reconnect's arrow turns
+  // while an attempt is under way, and only then.
+  const step = rung ? `${rung.pass}:${rung.index}` : "-";
   if (countText !== null) {
     return (
-      <p className="nx-subline" data-progress="reconnect">
+      <p className="nx-subline" data-progress="reconnect" data-now={count?.kind === "now" ? "" : undefined}>
         <RotateCw aria-hidden />
-        <span>{count?.kind === "attempt" && rungText ? `${countText} · ${rungText}` : countText}</span>
+        <span key={`rc:${count?.kind === "next" ? "next" : "go"}:${count?.attempt}:${count?.kind === "attempt" ? step : "-"}`} className="nx-swap">
+          {count?.kind === "attempt" && rungText ? `${countText} · ${rungText}` : countText}
+        </span>
       </p>
     );
   }
@@ -81,7 +88,9 @@ export function ProgressLineView({
     return (
       <p className="nx-subline" data-progress="auto">
         <Play aria-hidden />
-        <span>{rungText ? `${t("dash.autoConnecting")} ${rungText}` : t("dash.autoConnecting")}</span>
+        <span key={`auto:${step}`} className="nx-swap">
+          {rungText ? `${t("dash.autoConnecting")} ${rungText}` : t("dash.autoConnecting")}
+        </span>
       </p>
     );
   }
@@ -89,7 +98,9 @@ export function ProgressLineView({
     return (
       <p className="nx-subline" data-progress="ladder">
         <Route aria-hidden />
-        <span>{rungText}</span>
+        <span key={`lad:${step}`} className="nx-swap">
+          {rungText}
+        </span>
       </p>
     );
   }

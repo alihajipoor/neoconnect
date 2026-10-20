@@ -2,6 +2,7 @@ import { createContext, useContext, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
 import mapSvg from "../../assets/world-map.svg?raw";
 import { useI18n } from "../../lib/i18n";
+import { useStagger } from "../../lib/motion";
 import { cn } from "../../lib/utils";
 import { PearlScope } from "../ui";
 
@@ -25,10 +26,27 @@ export function PageScene() {
   );
 }
 
+/** Which page this is, for its first entrance (lib/motion.ts): the data
+ * attribute that marks it -- `data-settings`, `data-settings-sub="custom"`,
+ * `data-plans-awaiting` -- which every page carries for its tests, or its
+ * class. Stable across languages, so changing the language is not a first
+ * view. */
+export function pageKey(rest: Record<string, unknown>, className?: string): string | null {
+  const marks = Object.entries(rest)
+    .filter(([name]) => name.startsWith("data-"))
+    .map(([name, value]) => (value === true || value === "" || value === undefined ? name : `${name}=${String(value)}`));
+  if (marks.length > 0) return `page:${marks.join("&")}`;
+  return className ? `page.${className}` : null;
+}
+
 /** One of the signed-in pages -- Settings, Activity, Plans, Support, Invite
  * friends -- in the Pearl Glass system: a title and its sentence, then
  * content cards, in a column that scrolls inside its own panel (only the
  * page scrolls, never the window).
+ *
+ * The first time a page is shown in a session its header, cards and groups
+ * rise in order and their rows fade in after them (motion.css); never
+ * again until the app is opened anew.
  *
  * `back` is drawn where nothing else leads back: always for the pages one
  * level down (Plans, Support, Invite friends), and for Settings and
@@ -57,9 +75,10 @@ export function Page({
   const { t } = useI18n();
   const inShell = useInShell();
   const showBack = back !== undefined && (backAlways || !inShell);
+  const { ref, enter } = useStagger<HTMLDivElement>(pageKey(rest, className));
   const page = (
     <PearlScope>
-      <div className={cn("nx-page", wide && "wide", className)} {...rest}>
+      <div ref={ref} className={cn("nx-page", wide && "wide", className)} data-enter={enter ? "" : undefined} {...rest}>
         <div className="nx-pscroll">
           <div className="nx-pinner">
             <header className="nx-phead">

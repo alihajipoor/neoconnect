@@ -189,8 +189,10 @@ export function RepairNetwork({
             disabled={!command}
             className="justify-center gap-2"
           >
-            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-            {copied ? t("repair.copied") : t("repair.copyCommand")}
+            {copied ? <Check className="size-3.5 nx-done-in" /> : <Copy className="size-3.5" />}
+            <span key={copied ? "done" : "copy"} className="nx-swap">
+              {copied ? t("repair.copied") : t("repair.copyCommand")}
+            </span>
           </Button>
           <details>
             <summary className="cursor-pointer text-[10px] text-muted-foreground select-none">

@@ -1,10 +1,12 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { Check, ChevronDown, Gauge, Info, Loader2, MapPin, MoreHorizontal, Search, Sparkles, TriangleAlert, X } from "lucide-react";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import { formatAgo, formatNumber } from "../lib/locale-format";
 import { bestLatency, buildList, listEmpty, listKey, routeWorked, rowEvidence, udpOnly, type ListFilter, type ListPlace } from "../lib/location-list";
 import type { PlaceEvidence } from "../lib/map-lights";
 import { customerProtocolLabel } from "../lib/protocol-labels";
+import { flipList, revealBelow, snapshotRows, useFirstView, type RowSnapshot } from "../lib/motion";
 import { countryCode, placeLabel, routePlace } from "../lib/route-place";
 import type { Protocol, RouteOption } from "../lib/types";
 import { cn } from "../lib/utils";
@@ -53,6 +55,9 @@ export function protocolHintKey(route: Pick<RouteOption, "protocol" | "transport
 }
 
 const protocolOf = (route: Pick<RouteOption, "protocol" | "transport">) => customerProtocolLabel(route.protocol, route.transport);
+/** What moves when a search or a filter changes the list: the rows, and
+ * the headings and the foot between them. */
+const FLIP_ROWS = "[data-row], [data-flip]";
 
 /** Rings a place's light on the main page's map while its row is hovered
  * or focused (design-system.md 5.3). A mark on the light's own element:
@@ -173,6 +178,20 @@ export function LocationList({
   const headId = useId();
   const explainId = useId();
   const rtl = language === "fa";
+  const listRef = useRef<HTMLDivElement>(null);
+  /** The list's rows fade in the first time it is drawn in a session. */
+  const listEnter = useFirstView(status ? null : `locations:${variant}`);
+  /** Where each row was before a search or a filter changed the list: the
+   * rows that stay slide from there, the new ones fade in, the ones that
+   * went fade where they stood (lib/motion.ts). */
+  const flipFrom = useRef<Map<string, RowSnapshot> | null>(null);
+  const rememberRows = () => {
+    if (listRef.current) flipFrom.current = snapshotRows(listRef.current, FLIP_ROWS);
+  };
+  /** A country being opened (its protocols' box, once laid out), and the
+   * ones closing: drawn sliding out from under the country and back. */
+  const revealing = useRef<string | null>(null);
+  const closing = useRef(new Set<string>());
 
   // A place the customer closed opens again for the next search that finds
   // it by a protocol.
@@ -204,6 +223,38 @@ export function LocationList({
   const empty = listEmpty({ ...model, automatic: withAutomatic });
   const isOpen = (place: ListPlace) => opened.get(place.key) ?? place.open;
   const setOpen = (key: string, open: boolean) => setOpened((prev) => new Map(prev).set(key, open));
+  const accIdOf = (place: ListPlace) => `${headId}-${place.key.replace(/[^a-z0-9]/gi, "")}`;
+  /** Opens or closes a country: in layout at once and drawn sliding out
+   * from under it, the rows after it moving down with it; closed, the
+   * reverse, and only then taken out of the layout. */
+  function toggle(place: ListPlace, open: boolean) {
+    if (closing.current.has(place.key)) return;
+    if (!open) {
+      revealing.current = accIdOf(place);
+      setOpen(place.key, true);
+      return;
+    }
+    const panel = document.getElementById(accIdOf(place));
+    if (!panel) {
+      setOpen(place.key, false);
+      return;
+    }
+    closing.current.add(place.key);
+    revealBelow(panel, false, {
+      boundary: listRef.current,
+      done: () => {
+        closing.current.delete(place.key);
+        flushSync(() => setOpen(place.key, false));
+      },
+    });
+  }
+  useLayoutEffect(() => {
+    const id = revealing.current;
+    if (!id) return;
+    revealing.current = null;
+    const panel = document.getElementById(id);
+    if (panel) revealBelow(panel, true, { boundary: listRef.current });
+  });
 
   // The rows in the order they are drawn, for the keys that move between
   // them: a closed country's protocols are not among them.
@@ -267,8 +318,8 @@ export function LocationList({
           if (!place) return;
           const open = isOpen(place);
           event.preventDefault();
-          if (forward && !open) setOpen(place.key, true);
-          else if (!forward && open) setOpen(place.key, false);
+          if (forward && !open) toggle(place, false);
+          else if (!forward && open) toggle(place, true);
           else if (forward && open) focusRow(`r:${place.shown[0]?.id}`);
         } else if (key.startsWith("r:") && !forward) {
           const route = routes.find((r) => `r:${r.id}` === key);
@@ -462,7 +513,7 @@ export function LocationList({
     const where = routePlace(first);
     const name = placeLabel(first, language);
     const holds = pinned !== undefined && place.routes.some((route) => route.id === pinned.id);
-    const accId = `${headId}-${place.key.replace(/[^a-z0-9]/gi, "")}`;
+    const accId = accIdOf(place);
     const light = lightOf(place);
     return (
       <div key={place.key} className="nx-place">
@@ -472,7 +523,7 @@ export function LocationList({
           className={cn("nx-row nx-crow", holds && !open && "sel")}
           aria-expanded={open}
           aria-controls={accId}
-          onClick={() => setOpen(place.key, !open)}
+          onClick={() => toggle(place, open)}
           onPointerEnter={() => ringLight(light)}
           onPointerLeave={() => ringLight(null)}
           onFocusCapture={() => ringLight(light)}
@@ -526,10 +577,18 @@ export function LocationList({
   ) : null;
 
   const reset = () => {
+    rememberRows();
     setQuery("");
     setFilter("all");
     searchRef.current?.focus();
   };
+
+  // After a search or a filter changed what is listed: the rows move.
+  useLayoutEffect(() => {
+    const before = flipFrom.current;
+    flipFrom.current = null;
+    if (before && listRef.current) flipList(listRef.current, before, FLIP_ROWS);
+  }, [query, shownFilter]);
 
   const foot = tunnelActive
     ? t("loc.pausedNote")
@@ -540,7 +599,7 @@ export function LocationList({
         : t("loc.notMeasuredNote");
 
   const rows = empty ? (
-    <div className="nx-lempty" role="status">
+    <div className="nx-lempty" role="status" data-flip="empty">
       <Search aria-hidden />
       <b>
         {query.trim()
@@ -557,16 +616,26 @@ export function LocationList({
   ) : (
     <>
       {automaticRow}
-      {model.countries.length > 0 ? <h3 className="nx-lgrp">{t("loc.countries")}</h3> : null}
+      {model.countries.length > 0 ? (
+        <h3 className="nx-lgrp" data-flip="countries">
+          {t("loc.countries")}
+        </h3>
+      ) : null}
       {model.countries.map(placeRows)}
       {model.relays.length > 0 ? (
         <>
-          <h3 className="nx-lgrp">{t("loc.backup")}</h3>
-          {page ? <p className="nx-lgrph">{t("loc.backupHint")}</p> : null}
+          <h3 className="nx-lgrp" data-flip="backup">
+            {t("loc.backup")}
+          </h3>
+          {page ? (
+            <p className="nx-lgrph" data-flip="backup-hint">
+              {t("loc.backupHint")}
+            </p>
+          ) : null}
         </>
       ) : null}
       {model.relays.map(placeRows)}
-      <p className="nx-lfoot">
+      <p className="nx-lfoot" data-flip="foot">
         <Info aria-hidden />
         <span>{foot}</span>
         {!tunnelActive && !measuring && !page ? (
@@ -585,7 +654,10 @@ export function LocationList({
         ref={searchRef}
         type="search"
         value={query}
-        onChange={(event) => setQuery(event.target.value)}
+        onChange={(event) => {
+          rememberRows();
+          setQuery(event.target.value);
+        }}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown") {
             event.preventDefault();
@@ -594,6 +666,7 @@ export function LocationList({
             // Clears the search first; a second Escape closes the sheet.
             event.preventDefault();
             event.stopPropagation();
+            rememberRows();
             setQuery("");
           }
         }}
@@ -611,6 +684,7 @@ export function LocationList({
           aria-label={t("loc.clear")}
           title={t("loc.clear")}
           onClick={() => {
+            rememberRows();
             setQuery("");
             searchRef.current?.focus();
           }}
@@ -627,7 +701,10 @@ export function LocationList({
         size="sm"
         label={t("loc.filters")}
         value={shownFilter}
-        onChange={setFilter}
+        onChange={(next) => {
+          rememberRows();
+          setFilter(next);
+        }}
         options={[
           { value: "all", label: t("loc.fAll") },
           { value: "worked", label: t("loc.fWorked"), long: t("loc.fWorkedLong") },
@@ -639,7 +716,9 @@ export function LocationList({
 
   const list = (
     <div
+      ref={listRef}
       className={cn("nx-loclist", page && "page")}
+      data-enter={listEnter ? "" : undefined}
       role="group"
       aria-labelledby={variant === "panel" ? headId : undefined}
       aria-label={variant === "panel" ? undefined : t("loc.panelTitle")}

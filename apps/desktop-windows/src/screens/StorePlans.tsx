@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Check, HardDrive } from "lucide-react";
 
 import { buyIapPlan, iapAvailable, loadIapPlans, type IapPlan } from "../lib/iap";
-import { Card, Message, PillButton } from "../components/ui";
+import { Card, Message, PillButton, Skeleton } from "../components/ui";
 import { Page } from "../components/shell/Page";
 import { formatNumber, formatSize } from "../lib/locale-format";
 import { useI18n } from "../lib/i18n";
@@ -81,6 +81,7 @@ export function StorePlans({
             {t("plans.loading")}
           </p>
           <StillTrying waiting />
+          <Skeleton card rows={2} className="mt-2" />
         </div>
       ) : plans.length === 0 ? (
         <Card>

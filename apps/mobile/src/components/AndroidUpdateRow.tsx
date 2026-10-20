@@ -46,6 +46,8 @@ export function AndroidUpdateRow() {
 
   return (
     <Row
+      // It arrives after the check answers: it rises in (motion.css).
+      className="nx-arrive"
       icon={<Download />}
       label={t("update.androidAvailable", { version: update.version })}
       hint={failed ? <span className="nx-osset">{t("update.androidOpenFailed")}</span> : t("update.androidHint")}

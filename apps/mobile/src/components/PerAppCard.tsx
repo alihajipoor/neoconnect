@@ -118,7 +118,7 @@ export function PerAppCard() {
       </div>
 
       {settings.enabled ? (
-        <div className="nx-perapp-body">
+        <div className="nx-perapp-body nx-arrive">
           {/* On with nothing chosen routes everything, and says so: an
               empty allow-list would route nothing, which looks identical
               to a broken tunnel. Information, not a fault. */}
@@ -148,7 +148,7 @@ export function PerAppCard() {
                 />
               </div>
 
-              <ul className="nx-perapp-list">
+              <ul className="nx-perapp-list nx-loaded">
                 {visible.map((app) => {
                   const on = selected.has(app.packageName);
                   return (

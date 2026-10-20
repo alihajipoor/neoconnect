@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { formatNumber } from "../../lib/locale-format";
+import { useFirstView } from "../../lib/motion";
 import { Disclosure, Glass } from "../ui";
 import { BottomSheet } from "../overlay";
 import { Tagline } from "./Hero";
@@ -86,6 +87,10 @@ export function MainView(slots: MainSlots) {
   const [flash, setFlash] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
   const details = slots.details ?? [];
+  // The first look of a session: the copy column top to bottom, then the
+  // panel and the tray (motion.css). The words say the state from the
+  // first frame; only where they stand moves, and only this once.
+  const enter = useFirstView("main");
 
   // "More below": shown only while the column has more than it shows.
   useEffect(() => {
@@ -168,6 +173,7 @@ export function MainView(slots: MainSlots) {
     <div
       ref={rootRef}
       className={slots.panel ? "nx-ov" : "nx-ov nopanel"}
+      data-enter={enter ? "" : undefined}
       data-more={more ? "1" : undefined}
       data-scrolled={scrolled ? "1" : undefined}
     >
