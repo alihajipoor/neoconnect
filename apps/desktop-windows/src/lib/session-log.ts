@@ -15,7 +15,13 @@ import { load, type Store } from "@tauri-apps/plugin-store";
  * A record opens when the main page first shows a tunnel up and closes
  * when it shows it gone, saying whether the customer ended it or it was
  * lost. One the app could not close -- the app ended first -- has no end
- * rather than a made-up one. */
+ * rather than a made-up one.
+ *
+ * Seven days is kept by the app: at each start, and every hour while it
+ * runs (`keepPruned`). A record past its week on a machine where the app
+ * has not run since stays until it next does, which Settings says; the
+ * Windows uninstaller deletes the file whatever its "delete app data" box
+ * says (nsis-hooks.nsh), since it is not a preference. */
 
 export interface SessionRecord {
   readonly id: string;
@@ -40,6 +46,8 @@ export interface SessionLogState {
 
 export const RETENTION_MS = 7 * 86_400_000;
 export const MAX_RECORDS = 500;
+/** How often the log is pruned while the app runs. */
+export const PRUNE_EVERY_MS = 60 * 60 * 1000;
 
 export const EMPTY_LOG: SessionLogState = { enabled: false, records: [] };
 
@@ -71,6 +79,77 @@ export function closeRecord(
   { end, rxBytes, txBytes, ended }: { end: number; rxBytes: number | null; txBytes: number | null; ended: "disconnected" | "lost" },
 ): SessionRecord[] {
   return records.map((r) => (r.id === id && r.open ? { ...r, open: false, end: Math.max(r.start, end), rxBytes, txBytes, ended } : r));
+}
+
+/** What a record's tunnel sessions carried, all of them.
+ *
+ * The meter's totals are one session's, from nothing (lib/traffic-meter.ts,
+ * reset whenever no tunnel is up), and a record can outlast a session: an
+ * automatic reconnect onto the same route keeps it open. Its numbers were
+ * the last session's alone -- a measured number attached to the wrong
+ * span. So each session's last reading is banked when it ends -- the meter
+ * reset, or its totals going backwards, which only a new session's do --
+ * and the record closes with the banked sessions and the one up now. */
+export interface RecordBytes {
+  /** What the meter shows now: its reset count, and its totals (null when
+   * it shows nothing -- reset, or a reading gone stale, which is no
+   * session boundary). */
+  see(generation: number, totals: { rx: number; tx: number } | null): void;
+  /** Every session of the record so far; null when nothing was counted. */
+  total(): { rx: number; tx: number } | null;
+  /** The route moved, and the record with it: what the record being
+   * closed carried, and the counting goes on for the next one. Sessions
+   * up to the last boundary are the old record's; the one begun at that
+   * boundary is the new one's. With no boundary since the record began,
+   * everything counted is the old record's and the next starts from
+   * nothing. */
+  split(): { rx: number; tx: number } | null;
+  /** A record closed, or begun with none open: nothing banked. The
+   * session up now, if one is, carries on in its own readings. */
+  restart(): void;
+}
+
+export function createRecordBytes(): RecordBytes {
+  type Totals = { rx: number; tx: number };
+  let generation: number | null = null;
+  let banked: Totals | null = null;
+  let current: Totals | null = null;
+  let boundary = false;
+  const add = (a: Totals | null, b: Totals | null): Totals | null =>
+    a === null ? b : b === null ? a : { rx: a.rx + b.rx, tx: a.tx + b.tx };
+  const bank = () => {
+    if (current !== null) banked = add(banked, current);
+    current = null;
+    boundary = true;
+  };
+  return {
+    see(next, totals) {
+      if (generation !== null && next !== generation) bank();
+      generation = next;
+      if (totals === null) return;
+      if (current !== null && (totals.rx < current.rx || totals.tx < current.tx)) bank();
+      current = totals;
+    },
+    total() {
+      return add(banked, current);
+    },
+    split() {
+      if (!boundary) {
+        const all = add(banked, current);
+        banked = null;
+        current = null;
+        return all;
+      }
+      const before = banked;
+      banked = null;
+      boundary = false;
+      return before;
+    },
+    restart() {
+      banked = null;
+      boundary = false;
+    },
+  };
 }
 
 /** What a stored value holds, read defensively: anything that is not a
@@ -222,6 +301,28 @@ export const sessionLog = {
     if (id === null || !state.enabled) return;
     publish({ enabled: true, records: prune(closeRecord(state.records, id, outcome), now) });
     await persist();
+  },
+
+  /** Drops what is past its seven days now, not only at the next start. */
+  async pruneNow(now = Date.now()): Promise<void> {
+    await sessionLog.load(now);
+    if (!state.enabled) return;
+    const kept = prune(state.records, now);
+    if (kept.length === state.records.length) return;
+    if (openId !== null && !kept.some((r) => r.id === openId)) openId = null;
+    publish({ enabled: true, records: kept });
+    await persist();
+  },
+
+  /** Prunes every `PRUNE_EVERY_MS` for as long as the app runs, so a run
+   * that lasts does not keep a record past its week. Returns the stop. */
+  keepPruned(
+    every: (fn: () => void, ms: number) => () => void = (fn, ms) => {
+      const id = setInterval(fn, ms);
+      return () => clearInterval(id);
+    },
+  ): () => void {
+    return every(() => void sessionLog.pruneNow(), PRUNE_EVERY_MS);
   },
 
   /** The record open in this run, if any. */

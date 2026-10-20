@@ -127,7 +127,7 @@ import { trafficMeter } from "../lib/traffic-meter";
 import { customModeProblemText, readCustomModeProblem, type CustomModeProblem } from "../lib/custom-mode-problem";
 import { adoptedSince } from "../lib/session-clock";
 import { ladderProgress } from "../lib/ladder-progress";
-import { sessionLog } from "../lib/session-log";
+import { createRecordBytes, sessionLog } from "../lib/session-log";
 import { ProgressLine } from "../components/main/ProgressLine";
 import { SpeedCard, SpeedSection, useTrafficShown } from "../components/main/TrafficSpeed";
 import {
@@ -2610,14 +2610,16 @@ export function Dashboard({
   // The session log (lib/session-log.ts), only when the customer has
   // turned it on: a record opens when the screen first shows a tunnel up
   // and closes when it shows it gone -- lost, or ended -- with what the
-  // tunnel's adapter counted, if it counted. A tunnel the failover moved to
-  // another route is a new record: the old one stopped carrying.
-  const loggedBytesRef = useRef<{ rx: number; tx: number } | null>(null);
+  // tunnel's adapter counted, if it counted -- every session of it, a
+  // reconnect onto the same route included (`createRecordBytes`). A tunnel
+  // the failover moved to another route is a new record: the old one
+  // stopped carrying.
+  const loggedBytesRef = useRef(createRecordBytes());
   useEffect(
     () =>
       trafficMeter.subscribe(() => {
         const view = trafficMeter.view();
-        if (view) loggedBytesRef.current = { rx: view.rxBytes, tx: view.txBytes };
+        loggedBytesRef.current.see(trafficMeter.generation(), view ? { rx: view.rxBytes, tx: view.txBytes } : null);
       }),
     [],
   );
@@ -2626,15 +2628,14 @@ export function Dashboard({
     const up = connectionState === "connected" || connectionState === "unverified" || connectionState === "degraded";
     const user = protocolUserRef.current;
     const open = sessionLog.openRecord();
-    const close = (ended: "disconnected" | "lost") => {
-      const bytes = loggedBytesRef.current;
-      loggedBytesRef.current = null;
+    const close = (ended: "disconnected" | "lost", bytes: { rx: number; tx: number } | null) => {
       void sessionLog.finish({ end: Date.now(), rxBytes: bytes?.rx ?? null, txBytes: bytes?.tx ?? null, ended });
     };
     if (up && appModeRef.current !== "gaming") {
-      if (open !== null && user && open.routeId !== user.routeId) close("lost");
-      if (open === null || (user && open.routeId !== user.routeId)) {
-        loggedBytesRef.current = null;
+      const moved = open !== null && user !== null && user !== undefined && open.routeId !== user.routeId;
+      if (moved) close("lost", loggedBytesRef.current.split());
+      else if (open === null) loggedBytesRef.current.restart();
+      if (open === null || moved) {
         void sessionLog.begin({
           start: connectedAt ?? Date.now(),
           routeId: user?.routeId ?? null,
@@ -2643,7 +2644,8 @@ export function Dashboard({
         });
       }
     } else if (connectionState === "disconnected" && open !== null) {
-      close(tunnelDropped ? "lost" : "disconnected");
+      close(tunnelDropped ? "lost" : "disconnected", loggedBytesRef.current.total());
+      loggedBytesRef.current.restart();
     }
     // On a change of what the screen shows; the credential is read as it is.
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -4,7 +4,7 @@ import { isTunnelUp } from "@shared/lib/connection-evidence";
 import { appPrefs } from "@shared/lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch, type AutoConnectSkip } from "@shared/lib/auto-connect";
 import { adoptedSince } from "@shared/lib/session-clock";
-import { sessionLog } from "@shared/lib/session-log";
+import { createRecordBytes, sessionLog } from "@shared/lib/session-log";
 import { trafficMeter, type TrafficView } from "@shared/lib/traffic-meter";
 import type { VpnAccess, VpnStatus } from "./vpn";
 
@@ -218,13 +218,13 @@ export function usePhoneMainExtras(input: PhoneMainExtrasInput): { autoConnectin
   // when the meter says it changed (a reading, or one going stale), and the
   // totals kept for the session log.
   const [traffic, setTraffic] = useState<TrafficView | null>(null);
-  const lastBytes = useRef<{ rx: number; tx: number } | null>(null);
+  const lastBytes = useRef(createRecordBytes());
   useEffect(
     () =>
       trafficMeter.subscribe(() => {
         const view = trafficMeter.view(now());
         setTraffic(view);
-        if (view) lastBytes.current = { rx: view.rxBytes, tx: view.txBytes };
+        lastBytes.current.see(trafficMeter.generation(), view ? { rx: view.rxBytes, tx: view.txBytes } : null);
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -283,17 +283,16 @@ export function usePhoneMainExtras(input: PhoneMainExtrasInput): { autoConnectin
     if (!input.ready) return;
     const user = input.current();
     const open = sessionLog.openRecord();
-    const close = (ended: "disconnected" | "lost") => {
-      const bytes = lastBytes.current;
-      lastBytes.current = null;
+    const close = (ended: "disconnected" | "lost", bytes: { rx: number; tx: number } | null) => {
       const end = ended === "lost" ? lostSessionEnd(now(), hiddenWhileUpAt.current, visibleAgainAt.current) : now();
       hiddenWhileUpAt.current = null;
       void sessionLog.finish({ end, rxBytes: bytes?.rx ?? null, txBytes: bytes?.tx ?? null, ended });
     };
     if (up) {
-      if (open !== null && user && open.routeId !== user.routeId) close("lost");
-      if (open === null || (user && open.routeId !== user.routeId)) {
-        lastBytes.current = null;
+      const moved = open !== null && user !== null && user !== undefined && open.routeId !== user.routeId;
+      if (moved) close("lost", lastBytes.current.split());
+      else if (open === null) lastBytes.current.restart();
+      if (open === null || moved) {
         void sessionLog.begin({
           start: input.connectedAt ?? now(),
           routeId: user?.routeId ?? null,
@@ -302,7 +301,8 @@ export function usePhoneMainExtras(input: PhoneMainExtrasInput): { autoConnectin
         });
       }
     } else if (input.connectionState === "disconnected" && open !== null) {
-      close(input.tunnelDropped ? "lost" : "disconnected");
+      close(input.tunnelDropped ? "lost" : "disconnected", lastBytes.current.total());
+      lastBytes.current.restart();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input.ready, input.connectionState, input.tunnelDropped]);

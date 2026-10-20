@@ -61,6 +61,9 @@ export interface TrafficMeter {
   available(at?: number): boolean;
   /** No tunnel: the next session starts from nothing. */
   reset(): void;
+  /** Counts the resets that cleared something: a reading under a
+   * different number belongs to a different session. */
+  generation(): number;
   subscribe(listener: () => void): () => void;
 }
 
@@ -75,6 +78,7 @@ export function createTrafficMeter(
   let rxSeries: number[] = [];
   let txSeries: number[] = [];
   let staleTimer: unknown = null;
+  let resets = 0;
   const listeners = new Set<() => void>();
   const notify = () => {
     for (const listener of [...listeners]) listener();
@@ -119,12 +123,16 @@ export function createTrafficMeter(
     },
     reset() {
       if (last === null && rxSeries.length === 0 && txSeries.length === 0) return;
+      resets += 1;
       last = null;
       rxSeries = [];
       txSeries = [];
       if (staleTimer !== null) timers.clear(staleTimer);
       staleTimer = null;
       notify();
+    },
+    generation() {
+      return resets;
     },
     subscribe(listener) {
       listeners.add(listener);

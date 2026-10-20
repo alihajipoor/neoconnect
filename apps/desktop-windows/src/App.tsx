@@ -130,6 +130,10 @@ export default function App() {
       });
   }, []);
 
+  // The session log keeps seven days while the app runs, not only at
+  // each start (lib/session-log.ts).
+  useEffect(() => sessionLog.keepPruned(), []);
+
   // "Block the internet while reconnecting": the service's hold is let go
   // of when the reconnect it was for ends -- landed, given up, or ended by
   // something other than a press whose own pass decides -- from whichever

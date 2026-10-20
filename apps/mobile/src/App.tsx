@@ -121,6 +121,10 @@ export default function App() {
     };
   }, []);
 
+  // The session log keeps seven days while the app runs, not only at each
+  // start (lib/session-log.ts).
+  useEffect(() => sessionLog.keepPruned(), []);
+
   // The tunnel's own notifications (lib/phone-notices.ts) in the app's
   // language, with the customer's setting: handed to the native side now
   // and whenever either changes, so what it posts in the background is

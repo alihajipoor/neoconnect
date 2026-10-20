@@ -13,7 +13,16 @@ vi.mock("@tauri-apps/plugin-store", () => ({
     }),
 }));
 
-import { closeLeftOpen, prune, readLog, RETENTION_MS, sessionLog, type SessionRecord } from "./session-log";
+import {
+  closeLeftOpen,
+  createRecordBytes,
+  prune,
+  PRUNE_EVERY_MS,
+  readLog,
+  RETENTION_MS,
+  sessionLog,
+  type SessionRecord,
+} from "./session-log";
 
 const DAY = 86_400_000;
 const NOW = 1_800_000_000_000;
@@ -36,7 +45,94 @@ beforeEach(() => {
   sessionLog.resetForTests();
 });
 
+describe("what a record carried", () => {
+  it("adds up a drop and a reconnect onto the same route: both sessions, not the last", () => {
+    const bytes = createRecordBytes();
+    bytes.see(0, { rx: 1_000, tx: 100 });
+    bytes.see(0, { rx: 5_000, tx: 400 });
+    // The drop: no tunnel, the meter reset.
+    bytes.see(1, null);
+    // The reconnect's session, from nothing.
+    bytes.see(1, { rx: 300, tx: 30 });
+    bytes.see(1, { rx: 2_000, tx: 90 });
+    expect(bytes.total()).toEqual({ rx: 7_000, tx: 490 });
+  });
+
+  it("takes totals going backwards for a new session's, and a stale gap for none", () => {
+    const bytes = createRecordBytes();
+    bytes.see(0, { rx: 5_000, tx: 400 });
+    bytes.see(0, null); // gone stale: the same session, read again later
+    bytes.see(0, { rx: 6_000, tx: 450 });
+    bytes.see(0, { rx: 200, tx: 10 }); // an engine restarted under the same screen
+    expect(bytes.total()).toEqual({ rx: 6_200, tx: 460 });
+  });
+
+  it("closes a record the route moved from with its own sessions, and goes on counting the new one", () => {
+    const bytes = createRecordBytes();
+    bytes.see(0, { rx: 5_000, tx: 400 });
+    bytes.see(1, null);
+    // The new route's first reading came before the screen moved the record.
+    bytes.see(1, { rx: 700, tx: 70 });
+    expect(bytes.split()).toEqual({ rx: 5_000, tx: 400 });
+    bytes.see(1, { rx: 900, tx: 80 });
+    expect(bytes.total()).toEqual({ rx: 900, tx: 80 });
+  });
+
+  it("gives everything to the old record when the route moved before any new session was read", () => {
+    const bytes = createRecordBytes();
+    bytes.see(0, { rx: 5_000, tx: 400 });
+    expect(bytes.split()).toEqual({ rx: 5_000, tx: 400 });
+    expect(bytes.total()).toBeNull();
+    bytes.see(1, null);
+    bytes.see(1, { rx: 50, tx: 5 });
+    expect(bytes.total()).toEqual({ rx: 50, tx: 5 });
+  });
+
+  it("starts a record from nothing banked, keeping the session already up", () => {
+    const bytes = createRecordBytes();
+    bytes.see(0, { rx: 5_000, tx: 400 });
+    bytes.see(1, null);
+    bytes.see(1, { rx: 10, tx: 1 });
+    bytes.restart();
+    bytes.see(1, { rx: 20, tx: 2 });
+    expect(bytes.total()).toEqual({ rx: 20, tx: 2 });
+  });
+});
+
 describe("the session log", () => {
+  it("drops a record past its seven days on the hourly tick, while the app runs", async () => {
+    saved.set("log", { enabled: true, records: [record("old", NOW - 6 * DAY - 23 * 3_600_000), record("new", NOW - DAY)] });
+    await sessionLog.load(NOW);
+    expect(sessionLog.current().records.map((r) => r.id)).toEqual(["old", "new"]);
+    let tick: (() => void) | null = null;
+    const stop = vi.fn();
+    expect(
+      sessionLog.keepPruned((fn, ms) => {
+        expect(ms).toBe(PRUNE_EVERY_MS);
+        tick = fn;
+        return stop;
+      }),
+    ).toBe(stop);
+    // Two hours on, the first is past RETENTION_MS: the tick drops it, on
+    // disk too.
+    vi.useFakeTimers({ now: NOW + 2 * 3_600_000, toFake: ["Date"] });
+    try {
+      tick!();
+      await vi.waitFor(() => expect(sessionLog.current().records.map((r) => r.id)).toEqual(["new"]));
+      expect((saved.get("log") as { records: SessionRecord[] }).records.map((r) => r.id)).toEqual(["new"]);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(NOW + 2 * 3_600_000 - (NOW - 6 * DAY - 23 * 3_600_000)).toBeGreaterThan(RETENTION_MS);
+  });
+
+  it("keeps nothing to prune while it is off", async () => {
+    await sessionLog.load(NOW);
+    await sessionLog.pruneNow(NOW + 30 * DAY);
+    expect(sessionLog.current()).toEqual({ enabled: false, records: [] });
+    expect(saved.get("log")).toEqual({ enabled: false, records: [] });
+  });
+
   it("is off, and empty, until the customer turns it on", async () => {
     expect(await sessionLog.load(NOW)).toEqual({ enabled: false, records: [] });
     await sessionLog.begin({ start: NOW, routeId: "de-stealth", protocol: "WIREGUARD" }, NOW);
