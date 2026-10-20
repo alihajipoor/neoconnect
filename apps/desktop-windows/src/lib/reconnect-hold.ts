@@ -65,7 +65,16 @@ export type ReconnectHoldProblem = "filtersRefused" | "tunnelNotPermitted" | "ti
  * let through rather than name lookups to those alone. */
 export type ReconnectHold =
   | { readonly state: "armed" }
-  | { readonly state: "holding"; readonly heldSecs: number; readonly dnsAnywhere?: true }
+  | {
+      readonly state: "holding";
+      readonly heldSecs: number;
+      readonly dnsAnywhere?: true;
+      /** A tunnel is up that came up after the drop this holds for, the
+       * hold's plan its own: the service's word. Never the dropped session,
+       * which a status can still call connected while it is taken down
+       * (`landedUnderHold`). Absent from an older service. */
+      readonly landed?: true;
+    }
   | { readonly state: "notHeld"; readonly problem: ReconnectHoldProblem };
 
 const PROBLEMS: ReadonlySet<string> = new Set(["filtersRefused", "tunnelNotPermitted", "timedOut", "notCovered"]);
@@ -86,6 +95,7 @@ export function readHold(raw: unknown): ReconnectHold | null {
         state: "holding",
         heldSecs: typeof secs === "number" && Number.isFinite(secs) && secs >= 0 ? secs : 0,
         ...(field.dns_anywhere === true ? { dnsAnywhere: true as const } : {}),
+        ...(field.landed === true ? { landed: true as const } : {}),
       };
     }
     case "notHeld":
@@ -114,23 +124,61 @@ export function passTeardown({
   return setting && (automatic || holding) ? "keepHold" : "plain";
 }
 
-/** Whether a status read says to let go of a hold: the service is holding
- * over a tunnel that is up, and no pass of ours is keeping it through its
- * rungs -- the gap it was for is over. Read off one status, never the
- * screen's state, which lags the service by up to a second around a drop:
- * holding with no tunnel is the gap itself, and is the episode's to end
- * (`episodeEndReleases`, `watchEpisodesForHold`). */
-export function shouldRelease({
-  hold,
-  tunnelUp,
-  passRunning,
-}: {
-  hold: ReconnectHold | null;
-  /** The same status's `connected`. */
-  tunnelUp: boolean;
-  passRunning: boolean;
-}): boolean {
-  return hold?.state === "holding" && tunnelUp && !passRunning;
+/** What one status read says that letting go turns on: `VpnStatus`'s
+ * fields, as the service sends them. */
+export interface HoldStatusRead {
+  readonly connected: boolean;
+  readonly ipv4Confined?: boolean | null;
+  readonly health?: { readonly state: string };
+}
+
+/** Whether one status shows a tunnel that has landed under the hold,
+ * verified as far as a status can: the service says it landed -- a session
+ * up that came up after the drop, its tunnel in the hold's plan, never the
+ * dropped one still in the slot -- its engine is up, and the tunnel holds
+ * the machine on its own: its IPv4 confinement in (Xray, OpenVPN), or, for
+ * a session with no confinement of ours (WireGuard), a fresh handshake.
+ *
+ * `connected` beside a hold proves nothing by itself. On the VM a read
+ * 0.5 s after a drop said connected, holding and not confined at once --
+ * the dead session not yet taken down -- and letting go on it ran the
+ * whole 26 s reconnect fail-open. */
+export function landedUnderHold(hold: ReconnectHold | null, status: HoldStatusRead): boolean {
+  if (hold?.state !== "holding" || hold.landed !== true || !status.connected) return false;
+  if (status.ipv4Confined === true) return true;
+  return (status.ipv4Confined === null || status.ipv4Confined === undefined) && status.health?.state === "alive";
+}
+
+/** How far apart the two reads that let go from status alone must be. */
+export const RELEASE_READS_APART_MS = 1_000;
+
+/** Letting go of a hold from status reads alone -- the net under the
+ * explicit releases (a pass that landed, an episode's end), for a hold the
+ * service still reports over a tunnel that is up with no pass of ours
+ * keeping it. Never on a single read, and never on a contradictory one:
+ * two reads at least `RELEASE_READS_APART_MS` apart, each showing a
+ * landed tunnel (`landedUnderHold`) with no pass running, and nothing
+ * else between them. Read off the statuses, never the screen's state,
+ * which lags the service around a drop. */
+export function createStatusRelease(): {
+  see(read: { hold: ReconnectHold | null; status: HoldStatusRead; passRunning: boolean; now: number }): boolean;
+} {
+  let firstAt: number | null = null;
+  return {
+    see({ hold, status, passRunning, now }) {
+      if (passRunning || !landedUnderHold(hold, status)) {
+        firstAt = null;
+        return false;
+      }
+      if (firstAt === null) {
+        firstAt = now;
+        return false;
+      }
+      if (now - firstAt < RELEASE_READS_APART_MS) return false;
+      firstAt = null;
+      return true;
+    },
+  };
 }
 
 /** Whether a move of the reconnect's phase lets go of the hold: every end
@@ -228,7 +276,7 @@ function sameHold(a: ReconnectHold | null, b: ReconnectHold | null): boolean {
   // The seconds held move every poll; only the state and the problem are
   // news.
   if (a.state === "notHeld" && b.state === "notHeld") return a.problem === b.problem;
-  if (a.state === "holding" && b.state === "holding") return a.dnsAnywhere === b.dnsAnywhere;
+  if (a.state === "holding" && b.state === "holding") return a.dnsAnywhere === b.dnsAnywhere && a.landed === b.landed;
   return true;
 }
 

@@ -123,7 +123,7 @@ import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
 import { appPrefs } from "../lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
-import { holdHint, holdNote, holdService, holdStore, holdWanted, passTeardown, shouldRelease } from "../lib/reconnect-hold";
+import { createStatusRelease, holdHint, holdNote, holdService, holdStore, holdWanted, passTeardown } from "../lib/reconnect-hold";
 import { NOTIFY_TEXT, notifyMemory, notifyStep } from "../lib/connection-notify";
 import { showNotification } from "../lib/notify";
 import { trafficMeter } from "../lib/traffic-meter";
@@ -592,6 +592,9 @@ export function Dashboard({
   /** Counts a session that keeps passing its health checks, once, for
    * the per-ISP tags. See session-report.ts. */
   const sessionTrackerRef = useRef(createSessionTracker());
+  /** The reads a hold may be let go of on from status alone
+   * (`createStatusRelease`): two, apart, each of a tunnel landed under it. */
+  const statusReleaseRef = useRef(createStatusRelease());
   /** The route the tunnel is on, readable from inside the health poll's
    * interval without depending on which render created it. */
   const settledRouteRef = useRef<string | null>(null);
@@ -1231,14 +1234,19 @@ export function Dashboard({
   /** What every status read says beyond the tunnel's state: the reconnect
    * hold (lib/reconnect-hold.ts) and the tunnel's own counters
    * (lib/traffic-meter.ts). And a hold the service still reports over a
-   * tunnel that is up, with no pass of ours keeping it, is let go of: the
-   * gap it was for is over (`shouldRelease`). */
+   * tunnel that landed under it, verified, with no pass of ours keeping it,
+   * is let go of -- the gap it was for is over -- but never on one read,
+   * nor on a read that contradicts it (`createStatusRelease`). */
   function noteStatus(status: VpnStatus): void {
     holdStore.observe(status.reconnectHold);
     if (status.connected) trafficMeter.observe(status.traffic);
-    if (shouldRelease({ hold: holdStore.current(), tunnelUp: status.connected, passRunning: ladderInFlight() })) {
-      void holdService.release();
-    }
+    const release = statusReleaseRef.current.see({
+      hold: holdStore.current(),
+      status,
+      passRunning: ladderInFlight(),
+      now: Date.now(),
+    });
+    if (release) void holdService.release();
   }
 
   /** Tells the control plane's endpoint order what the service just said

@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { AutoReconnect, QUICK_DEATHS_TO_STOP, type Episode, type ReconnectPhase } from "./auto-reconnect";
 import {
+  createStatusRelease,
   episodeEndReleases,
   holdHint,
   holdNote,
@@ -22,8 +23,9 @@ import {
   RECONNECT_HOLD_OFFERED,
   RECONNECT_HOLD_PROVEN,
   RELEASE_RETRY_MS,
+  RELEASE_READS_APART_MS,
+  landedUnderHold,
   releaseUntilLetGo,
-  shouldRelease,
   watchEpisodesForHold,
   type ReconnectHold,
 } from "./reconnect-hold";
@@ -50,6 +52,8 @@ describe("the service's word on the hold", () => {
   it("is read as the service sends it", () => {
     expect(readHold({ state: "armed" })).toEqual({ state: "armed" });
     expect(readHold({ state: "holding", held_secs: 12 })).toEqual({ state: "holding", heldSecs: 12 });
+    expect(readHold({ state: "holding", held_secs: 12, landed: true })).toEqual({ state: "holding", heldSecs: 12, landed: true });
+    expect(readHold({ state: "holding", held_secs: 12, landed: "yes" })).toEqual({ state: "holding", heldSecs: 12 });
     expect(readHold({ state: "notHeld", problem: "filtersRefused", detail: "0x80320009" })).toEqual({
       state: "notHeld",
       problem: "filtersRefused",
@@ -109,22 +113,75 @@ describe("which teardown a pass uses", () => {
   });
 });
 
-describe("when a status says to let go", () => {
-  it("over a tunnel that is up, with no pass keeping it", () => {
-    expect(shouldRelease({ hold: HOLDING, tunnelUp: true, passRunning: false })).toBe(true);
+describe("a tunnel landed under the hold", () => {
+  const LANDED: ReconnectHold = { state: "holding", heldSecs: 9, landed: true };
+
+  it("is the service's word, with the engine up and the tunnel holding the machine itself", () => {
+    expect(landedUnderHold(LANDED, { connected: true, ipv4Confined: true })).toBe(true);
+    // WireGuard: no confinement of ours, and a fresh handshake.
+    expect(landedUnderHold(LANDED, { connected: true, ipv4Confined: null, health: { state: "alive" } })).toBe(true);
+    expect(landedUnderHold(LANDED, { connected: true, health: { state: "alive" } })).toBe(true);
   });
 
-  it("never while a pass runs: it keeps the hold through its rungs and lets go when it lands", () => {
-    expect(shouldRelease({ hold: HOLDING, tunnelUp: true, passRunning: true })).toBe(false);
+  it("is never connected beside a hold alone, a confinement not in, or a handshake not fresh", () => {
+    // The service did not say it landed: the dropped session still in the
+    // slot, or a service that predates the word.
+    expect(landedUnderHold(HOLDING, { connected: true, ipv4Confined: true })).toBe(false);
+    expect(landedUnderHold(LANDED, { connected: false, ipv4Confined: true })).toBe(false);
+    expect(landedUnderHold(LANDED, { connected: true, ipv4Confined: false })).toBe(false);
+    expect(landedUnderHold(LANDED, { connected: true, ipv4Confined: null, health: { state: "stale" } })).toBe(false);
+    expect(landedUnderHold(LANDED, { connected: true, ipv4Confined: null, health: { state: "unknown" } })).toBe(false);
+    expect(landedUnderHold({ state: "armed" }, { connected: true, ipv4Confined: true })).toBe(false);
+    expect(landedUnderHold(null, { connected: true, ipv4Confined: true })).toBe(false);
+  });
+});
+
+describe("letting go on status reads alone", () => {
+  type Read = { connected: boolean; ipv4Confined: boolean | null; health: { state: string } };
+  const CONFINED: Read = { connected: true, ipv4Confined: true, health: { state: "unknown" } };
+  const CONTRADICTORY: Read = { connected: true, ipv4Confined: false, health: { state: "unknown" } };
+  const DOWN: Read = { connected: false, ipv4Confined: null, health: { state: "down" } };
+
+  it("follows a drop and a reconnect as the VM saw them, and lets go only on a landed tunnel read twice, a second apart", () => {
+    const release = createStatusRelease();
+    const see = (raw: unknown, status: Read, now: number, passRunning = false) =>
+      release.see({ hold: readHold(raw), status, passRunning, now });
+    // Connected and armed: nothing held.
+    expect(see({ state: "armed" }, CONFINED, 0)).toBe(false);
+    // 0.5 s after the drop, run rel-ikev2c: one read said connected, holding
+    // and not confined at once -- the dead session not yet taken down. The
+    // app let go on it, and the whole 26 s reconnect ran fail-open.
+    expect(see({ state: "holding", held_secs: 0 }, CONTRADICTORY, 500)).toBe(false);
+    expect(see({ state: "holding", held_secs: 1 }, CONTRADICTORY, 1_600)).toBe(false);
+    // The gap itself: no tunnel.
+    expect(see({ state: "holding", held_secs: 3 }, DOWN, 3_500)).toBe(false);
+    // A pass dials and lands: while it runs, its rungs are its own.
+    expect(see({ state: "holding", held_secs: 20, landed: true }, CONFINED, 20_000, true)).toBe(false);
+    expect(see({ state: "holding", held_secs: 21, landed: true }, CONFINED, 21_500, true)).toBe(false);
+    // The pass over and its own release lost: one landed read is not
+    // enough, nor a second within the second...
+    expect(see({ state: "holding", held_secs: 26, landed: true }, CONFINED, 26_000)).toBe(false);
+    expect(see({ state: "holding", held_secs: 26, landed: true }, CONFINED, 26_000 + RELEASE_READS_APART_MS - 1)).toBe(false);
+    // ...a second one a second after the first is.
+    expect(see({ state: "holding", held_secs: 27, landed: true }, CONFINED, 26_000 + RELEASE_READS_APART_MS)).toBe(true);
   });
 
-  it("never with no tunnel: that is the gap itself, and the episode's to end", () => {
-    expect(shouldRelease({ hold: HOLDING, tunnelUp: false, passRunning: false })).toBe(false);
+  it("starts over after any read between that does not show a landed tunnel", () => {
+    const release = createStatusRelease();
+    const LANDED: ReconnectHold = { state: "holding", heldSecs: 30, landed: true };
+    expect(release.see({ hold: LANDED, status: CONFINED, passRunning: false, now: 0 })).toBe(false);
+    expect(release.see({ hold: HOLDING, status: CONTRADICTORY, passRunning: false, now: 600 })).toBe(false);
+    expect(release.see({ hold: LANDED, status: CONFINED, passRunning: false, now: 1_200 })).toBe(false);
+    expect(release.see({ hold: LANDED, status: CONFINED, passRunning: true, now: 1_900 })).toBe(false);
+    expect(release.see({ hold: LANDED, status: CONFINED, passRunning: false, now: 2_500 })).toBe(false);
+    expect(release.see({ hold: LANDED, status: CONFINED, passRunning: false, now: 3_500 })).toBe(true);
   });
 
-  it("never for a hold that is not holding", () => {
-    expect(shouldRelease({ hold: { state: "armed" }, tunnelUp: true, passRunning: false })).toBe(false);
-    expect(shouldRelease({ hold: null, tunnelUp: true, passRunning: false })).toBe(false);
+  it("never lets go from the statuses of a service that does not say a tunnel landed", () => {
+    const release = createStatusRelease();
+    for (let now = 0; now < 10_000; now += 500) {
+      expect(release.see({ hold: HOLDING, status: CONFINED, passRunning: false, now })).toBe(false);
+    }
   });
 });
 
