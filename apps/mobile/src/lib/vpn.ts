@@ -153,6 +153,10 @@ export const tunnelGone = () =>
   invoke<{ gone: boolean }>("vpn_tunnel_gone").then((r) => r.gone);
 
 export const vpnStatus = () => invoke<VpnStatus>("vpn_status");
+/** The status with the byte totals, for the speeds alone: on iOS each is a
+ * round trip to the tunnel extension, which the ladder's waits and the
+ * health checks are not to pay for. */
+export const vpnStatusWithTotals = () => invoke<VpnStatus>("vpn_status", { totals: true });
 
 /** Stops every engine and removes what the platform keeps in its own
  * VPN settings -- see `vpn_forget_profiles`. Sign-out only. */

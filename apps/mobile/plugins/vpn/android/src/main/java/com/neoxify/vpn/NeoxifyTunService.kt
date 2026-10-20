@@ -238,8 +238,8 @@ class NeoxifyTunService : VpnService(), Protector {
                     // reader that sees "up" finds it.
                     writeSince(this, System.currentTimeMillis())
                     publish(STATE_UP, null)
-                    // Said only now: "VPN is on" is the engine up on the
-                    // tun, which until this line it was not. Neither of
+                    // Said only now: "the VPN service is running" is the
+                    // engine up on the tun, and no more. Neither of
                     // these may fail a tunnel that is up, so neither can
                     // throw into the catch below.
                     runCatching { Notices.updateStatus(this, up = true) }

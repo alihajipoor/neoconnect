@@ -522,6 +522,11 @@ class NeoxifyVpnPlugin: Plugin {
     }
 
     @objc public func status(_ invoke: Invoke) {
+        // The byte totals only when asked: each is a round trip to the
+        // extension. The speeds ask; the ladder and the health checks do
+        // not, and an older caller sending nothing is not asking.
+        struct Args: Decodable { let totals: Bool? }
+        let wantTotals = (try? invoke.parseArgs(Args.self))?.totals ?? false
         Task {
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
             let tunnel = managers.first?.connection.status ?? .invalid
@@ -558,7 +563,7 @@ class NeoxifyVpnPlugin: Plugin {
             // Byte totals only from our own extension, which counts them
             // (ProviderTotals); IKEv2 is the system's client and iOS gives
             // the app no totals for it, so they stay absent -- null, never 0.
-            if up(tunnel), let session = managers.first?.connection as? NETunnelProviderSession,
+            if wantTotals, up(tunnel), let session = managers.first?.connection as? NETunnelProviderSession,
                let totals = await ProviderTotals.read(session) {
                 answer["rxBytes"] = totals.rx
                 answer["txBytes"] = totals.tx

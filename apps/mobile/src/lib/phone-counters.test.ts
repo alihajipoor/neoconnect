@@ -31,6 +31,19 @@ describe("Android", () => {
     expect(service).toContain("if (up >= 0 && down >= 0) {");
   });
 
+  it("counts the app in front from the activity's own state, on a cold start too, and not for long after it stops saying so", () => {
+    // Tauri loads the plugin after the activity's first resume, which it
+    // never hears: the state is read as it loads.
+    expect(kotlin).toMatch(/override fun load\(webView: WebView\) \{\s+super\.load\(webView\)\s+val front = resumed\(\)/);
+    expect(kotlin).toContain("isAtLeast(Lifecycle.State.RESUMED)");
+    // Renewed by every status a running app asks for, and expiring behind
+    // a main process that died in front.
+    expect(kotlin).toMatch(/fun status\(invoke: Invoke\) \{\s+markFront\(\)/);
+    const notices = source("../../plugins/vpn/android/src/main/java/com/neoxify/vpn/Notices.kt");
+    expect(notices).toContain("(System.currentTimeMillis() - at) in 0L..FRONT_FRESH_MS");
+    expect(notices).toContain("frontFile(context).writeText(System.currentTimeMillis().toString())");
+  });
+
   it("dates the session only for the engine that is up", () => {
     expect(kotlin).toMatch(/wireguardUp -> wireguardSince\s+xrayUp -> NeoxifyTunService\.readSince\(activity\)\s+else -> null/);
     expect(service).toMatch(/writeSince\(this, System\.currentTimeMillis\(\)\)[\s\S]{0,200}publish\(STATE_UP, null\)/);
@@ -46,6 +59,18 @@ describe("iOS", () => {
 
   it("waits half a second at most, and says nothing of IKEv2", () => {
     expect(plugin).toContain("DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { finish(nil) }");
-    expect(plugin).toContain("if up(tunnel), let session = managers.first?.connection as? NETunnelProviderSession,");
+    expect(plugin).toContain("if wantTotals, up(tunnel), let session = managers.first?.connection as? NETunnelProviderSession,");
+  });
+
+  it("asks the extension only for a status that wants the totals: the speeds, not the ladder or the health checks", () => {
+    expect(plugin).toContain("let wantTotals = (try? invoke.parseArgs(Args.self))?.totals ?? false");
+    const commands = source("../../plugins/vpn/src/commands.rs");
+    expect(commands).toContain("pub async fn vpn_status<R: Runtime>(app: AppHandle<R>, totals: Option<bool>)");
+    expect(commands).toContain('.run_mobile_plugin::<VpnStatus>("status", StatusArgs { totals: totals.unwrap_or(false) })');
+    const vpn = source("./vpn.ts");
+    expect(vpn).toContain('export const vpnStatus = () => invoke<VpnStatus>("vpn_status");');
+    expect(vpn).toContain('export const vpnStatusWithTotals = () => invoke<VpnStatus>("vpn_status", { totals: true });');
+    const extras = source("./phone-main-extras.ts");
+    expect(extras.match(/\.statusWithTotals\(\)/g)?.length).toBe(1);
   });
 });

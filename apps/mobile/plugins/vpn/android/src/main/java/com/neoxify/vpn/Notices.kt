@@ -25,9 +25,12 @@ import java.io.File
  * Two kinds of notification, on two channels:
  *  - the ongoing one a VPN service must show while it holds the device
  *    (Xray only: WireGuard's service is the library's and shows none). It
- *    says "Starting the VPN" until the engine is up and "VPN is on" after:
- *    a fact about the tunnel, never "protected" or "connected", which
- *    only the app's own egress check may say;
+ *    says "Starting the VPN" until the engine is up and that the VPN
+ *    service is running after: a fact about the engine and no more. Not
+ *    "VPN is on", which a customer reads as connected -- on a censored
+ *    network the engine starts locally when the server cannot be reached
+ *    -- and never "protected" or "connected", which only the app's own
+ *    egress check may say;
  *  - "VPN turned off", once, when Android or another VPN app takes the
  *    tunnel away -- a change the customer did not make in Neoxify and
  *    would not otherwise see with the app in the background. Not while
@@ -62,7 +65,7 @@ internal object Notices {
         changesChannel = "Connection changes",
         title = "Neoxify",
         starting = "Starting the VPN…",
-        on = "VPN is on",
+        on = "The VPN service is running. Open Neoxify to check the connection.",
         offTitle = "VPN turned off",
         offBody = "Android or another VPN app turned off Neoxify's VPN. Open Neoxify to connect again.",
     )
@@ -121,13 +124,30 @@ internal object Notices {
         ENGLISH
     }
 
-    /** Whether the app is in front, as the main process last said
-     * (`setInFront`, from the activity's resume and pause). */
-    fun appInFront(context: Context): Boolean = frontFile(context).exists()
+    /** How long the main process's word that the app is in front lasts.
+     * It is renewed by the activity's resume and by every status the app
+     * asks for (the plugin's `markFront`); the phone's main page asks at
+     * least every 15 seconds. Past this, a main process that died in front
+     * -- a crash, a force-stop -- no longer counts as in front, and the
+     * tunnel's "turned off" notice is not held back for good by a file it
+     * left behind. */
+    const val FRONT_FRESH_MS = 20_000L
 
+    /** Whether the app is in front, as the main process last said
+     * (`setInFront`) within `FRONT_FRESH_MS`. A marker without a time --
+     * an older build's -- is not. */
+    fun appInFront(context: Context): Boolean = try {
+        val f = frontFile(context)
+        val at = if (f.exists()) f.readText().trim().toLongOrNull() else null
+        at != null && (System.currentTimeMillis() - at) in 0L..FRONT_FRESH_MS
+    } catch (e: Exception) {
+        false
+    }
+
+    /** The app is in front now (its time written), or is not (removed). */
     fun setInFront(context: Context, front: Boolean) {
         try {
-            if (front) frontFile(context).writeText("1") else frontFile(context).delete()
+            if (front) frontFile(context).writeText(System.currentTimeMillis().toString()) else frontFile(context).delete()
         } catch (e: Exception) {
             Log.w(TAG, "could not record whether the app is in front", e)
         }
@@ -158,7 +178,7 @@ internal object Notices {
         }
 
     /** The ongoing notification: "Starting the VPN" until the engine is
-     * up (`up` false), "VPN is on" after. */
+     * up (`up` false), that the service is running after. */
     fun status(context: Context, up: Boolean): Notification {
         val text = read(context)
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -179,8 +199,9 @@ internal object Notices {
         return b.build()
     }
 
-    /** Replaces the ongoing notification's text, for "VPN is on" once the
-     * engine is up. Best-effort: the tunnel does not depend on it. */
+    /** Replaces the ongoing notification's text, for "the service is
+     * running" once the engine is up. Best-effort: the tunnel does not
+     * depend on it. */
     fun updateStatus(context: Context, up: Boolean) {
         try {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

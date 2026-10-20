@@ -19,7 +19,10 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
+import android.webkit.WebView
 import androidx.activity.result.ActivityResult
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -44,6 +47,8 @@ import java.util.concurrent.Executors
  * constant is not on every API level this compiles for. */
 private const val POST_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS"
 private const val NOTIFICATIONS_ALIAS = "notifications"
+/** How often a status renews the in-front marker (Notices.FRONT_FRESH_MS). */
+private const val FRONT_RENEW_MS = 5_000L
 
 /**
  * The tunnel.
@@ -602,7 +607,10 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
      * which is the only cheap evidence requiring the server to take part.
      */
     @Command
-    fun status(invoke: Invoke) = offMainThread(invoke, "status") { readStatus() }
+    fun status(invoke: Invoke) {
+        markFront()
+        offMainThread(invoke, "status") { readStatus() }
+    }
 
     private fun readStatus(): JSObject {
         // Two engines, either of which may be the live one.
@@ -705,15 +713,46 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /** Whether the app is in front, for the tunnel's notices and counters
-     * (Notices.appInFront), from the activity's own lifecycle. */
+     * (Notices.appInFront), from the activity's own lifecycle: its resume
+     * and pause, and its state as this plugin loads -- Tauri loads it once
+     * the WebView exists, after the activity's first resume, which reaches
+     * only the plugins loaded by then. Without that, a cold start left the
+     * app counted as in the background until it was left and reopened. */
+    override fun load(webView: WebView) {
+        super.load(webView)
+        val front = resumed()
+        frontMarkedAt = if (front) System.currentTimeMillis() else 0L
+        Notices.setInFront(activity, front)
+    }
+
     override fun onResume() {
         super.onResume()
+        frontMarkedAt = System.currentTimeMillis()
         Notices.setInFront(activity, true)
     }
 
     override fun onPause() {
         super.onPause()
+        frontMarkedAt = 0L
         Notices.setInFront(activity, false)
+    }
+
+    /** When the in-front marker was last written by this process; 0 while
+     * the app is not in front. */
+    @Volatile
+    private var frontMarkedAt = 0L
+
+    private fun resumed(): Boolean =
+        (activity as? LifecycleOwner)?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true
+
+    /** Renews the in-front marker while the app is in front, at most every
+     * few seconds: a status is asked only by a running app, and a marker
+     * no status renews expires (Notices.FRONT_FRESH_MS). */
+    private fun markFront() {
+        val now = System.currentTimeMillis()
+        if (!resumed() || now - frontMarkedAt < FRONT_RENEW_MS) return
+        frontMarkedAt = now
+        Notices.setInFront(activity, true)
     }
 
     @InvokeArg

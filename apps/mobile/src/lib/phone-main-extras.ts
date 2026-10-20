@@ -152,6 +152,9 @@ export interface PhoneMainExtrasInput {
   adopt: (since: number) => void;
   deps: PhoneAutoConnectDeps & {
     status: () => Promise<VpnStatus>;
+    /** The status with the byte totals (`vpnStatusWithTotals`), which only
+     * the speeds ask for: on iOS each is a round trip to the extension. */
+    statusWithTotals: () => Promise<VpnStatus>;
     /** Whether to read the totals at all: both phones report them for
      * Xray and WireGuard; a status without them is no speed regardless. */
     counts: boolean;
@@ -241,7 +244,7 @@ export function usePhoneMainExtras(input: PhoneMainExtrasInput): { autoConnectin
       if (asking || (typeof document !== "undefined" && document.visibilityState !== "visible")) return;
       asking = true;
       void inputRef.current.deps
-        .status()
+        .statusWithTotals()
         .then(
           (status) => {
             const step = trafficFromTotals(previous, status.connected ? status : null, now());

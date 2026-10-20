@@ -48,7 +48,16 @@ describe("the words handed to the native side", () => {
         expect(text).not.toContain("محافظت");
         expect(text).not.toContain("متصل");
       }
+      // The service's own word once its engine is up: running, and the
+      // app to say more. Not "on" -- read as connected -- which the engine
+      // starting locally on a network that reaches no server is not.
+      expect(n.on).not.toMatch(/\bon\b|\bworking\b/i);
+      expect(n.on).not.toContain("روشن");
+      expect(n.on).toMatch(language === "en" ? /running/ : /در حال اجرا/);
     }
+    const kotlin = source("../../plugins/vpn/android/src/main/java/com/neoxify/vpn/Notices.kt");
+    expect(kotlin).toContain('on = "The VPN service is running. Open Neoxify to check the connection.",');
+    expect(kotlin).not.toContain('on = "VPN is on"');
   });
 });
 
@@ -124,7 +133,7 @@ describe("the native side", () => {
   const kotlin = (name: string) => source(`../../plugins/vpn/android/src/main/java/com/neoxify/vpn/${name}`);
   const swift = (path: string) => source(`../../plugins/vpn/${path}`);
 
-  it("Android says 'VPN is on' only once the engine is up, and 'turned off' only for a stop it did not ask for", () => {
+  it("Android says the service is running only once the engine is up, and 'turned off' only for a stop it did not ask for", () => {
     const service = kotlin("NeoxifyTunService.kt");
     expect(service).toContain("startForeground(Notices.STATUS_ID, Notices.status(this, up = false))");
     expect(service).toMatch(/publish\(STATE_UP, null\)[\s\S]{0,400}Notices\.updateStatus\(this, up = true\)/);

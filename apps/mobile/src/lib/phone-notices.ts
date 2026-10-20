@@ -16,9 +16,11 @@ import { PHONE_MAIN_PAGE_EXTRAS } from "./phone-main-extras";
  *
  *  - Android: "VPN turned off", when Android or another VPN app takes the
  *    tunnel away with Neoxify in the background; and, as Android requires
- *    of any VPN service, the ongoing "VPN is on" while an Xray tunnel runs
- *    ("Starting the VPN..." until its engine is up -- a fact about the
- *    tunnel, never "protected", which only the app's egress check says);
+ *    of any VPN service, the ongoing notification while an Xray tunnel
+ *    runs: "Starting the VPN..." until its engine is up, then that the VPN
+ *    service is running and the app says whether it is connected -- a fact
+ *    about the engine, never "on", "connected" or "protected", which only
+ *    the app's egress check may say;
  *  - iOS: "VPN turned off" when another VPN or Settings turns it off, and
  *    "VPN stopped" when it stops by itself.
  *

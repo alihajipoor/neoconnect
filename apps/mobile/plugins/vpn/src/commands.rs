@@ -212,18 +212,28 @@ pub async fn vpn_tunnel_gone<R: Runtime>(app: AppHandle<R>) -> Result<TunnelGone
     }
 }
 
+/// What a status asks for beyond the tunnel's state. `totals`: the byte
+/// totals, which on iOS are a round trip to the tunnel extension (up to
+/// half a second, and a wake of a process with a 50 MB ceiling) -- asked
+/// only by the speeds, never by the ladder's waits or the health checks.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[derive(serde::Serialize)]
+struct StatusArgs {
+    totals: bool,
+}
+
 #[tauri::command]
-pub async fn vpn_status<R: Runtime>(app: AppHandle<R>) -> Result<VpnStatus, String> {
+pub async fn vpn_status<R: Runtime>(app: AppHandle<R>, totals: Option<bool>) -> Result<VpnStatus, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         handle(&app)?
             .0
-            .run_mobile_plugin::<VpnStatus>("status", ())
+            .run_mobile_plugin::<VpnStatus>("status", StatusArgs { totals: totals.unwrap_or(false) })
             .map_err(|e| e.to_string())
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let _ = app;
+        let _ = (app, totals);
         Err(unavailable())
     }
 }
