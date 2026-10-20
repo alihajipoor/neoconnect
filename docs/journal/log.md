@@ -7590,3 +7590,37 @@ and customer sites): change only neoxify.net's own folder, no service reloads.
 app's own main page in progress, a VM check of the redesigned app running);
 the anti-blocking plan (the control plane through the tunnels, a guest
 connection, per-cohort endpoints, automatic IP replacement) being written.
+
+## 2026-10-20 — desktop 0.9.53: the redesign shipped; the kill switch still hidden
+
+Shipped since the last entry: hotfix 0.9.52 / 0.2.30 (the screen named the
+wrong location after moving between pages); anti-blocking phase 0 on the
+backend (the pager, short admin sessions, heartbeat-gap pages, the block
+watch in `record`); and now the client redesign, merged to `main` and
+released as desktop 0.9.53. The backend went first (devices and daily
+usage; device sign-out stays off behind `ACCOUNT_DEVICE_SIGNOUT`).
+
+Proven on the VM (`Neoxify-Test`, pktmon at the NIC) before the release:
+no reload and no "not confirmed" on returning from a page (7 of 7, every
+frame read), the window opens where it stays (13 of 13 launches), the
+Persian speed reading fits, connect/verify/naming unchanged, no packet to
+the relays. The tray's address and plan figure were cut at the fitted
+922x648 window; fixed and held by the fit check, not re-run on the VM.
+
+**Not shipped, and why:**
+- The phone redesign (0.2.31): only ever seen in a phone-sized preview.
+  The owner tries it on his phone first (Play internal testing,
+  TestFlight), then it goes to everyone.
+- The reconnect hold (kill switch) stays behind `RECONNECT_HOLD_PROVEN=false`.
+  Two VM proofs, both NOT PROVEN. The second held every forced drop on
+  Reality, TLS, Trojan, Shadowsocks, Stealth Web and OpenVPN UDP, and
+  every release path, but WireGuard leaked when its tunnel service took
+  ~4.4 s to stop (the re-sent setting disarmed the dying session), and
+  the screen did not say traffic was held during the automatic failover.
+  Fixes for the first are on `claude/hold-round3`, untested and reverted
+  on `main`; OpenVPN TCP has no server to test against.
+- A 3 s cable unplug still takes ~16 s to recover on the VM: ~5 s is the
+  guest's DHCP, the rest is the redial waiting for a direct check.
+
+**Next:** after the weekly usage reset (2026-10-26) -- the hold's third
+round and VM proof, the unplug redial, the phone on a real device.
