@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
+import { Search as SearchIcon, X } from "lucide-react";
 import { cn } from "../lib/utils";
 
 /** Dialogs and menus, rendered through a portal at the document root.
@@ -120,6 +120,74 @@ export function Dialog({
           {description ? <p id={descriptionId}>{description}</p> : null}
           {children}
           <div className="nx-actions">{actions}</div>
+        </div>
+      </div>
+    </>,
+    document.body,
+  );
+}
+
+/** A modal list to pick from -- the running apps, the game catalogue: a
+ * title and its buttons, a search field that takes the first focus, a
+ * note, the list (the one part that scrolls) and a foot. Strong glass over
+ * a scrim, through a portal at the document root, focus kept inside and
+ * given back, Escape and the scrim to close: the same as `Dialog`, sized
+ * for a list. */
+export function PickerDialog({
+  open,
+  title,
+  onClose,
+  closeLabel,
+  headActions,
+  search,
+  note,
+  children,
+  foot,
+}: {
+  open: boolean;
+  title: ReactNode;
+  onClose: () => void;
+  closeLabel: string;
+  /** Buttons beside the close button: Refresh. */
+  headActions?: ReactNode;
+  search?: { value: string; onChange: (value: string) => void; placeholder: string };
+  /** A line under the search, about what the list is. */
+  note?: ReactNode;
+  children: ReactNode;
+  foot?: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useFocusTrap(ref, open, onClose);
+  if (!open || typeof document === "undefined") return null;
+  return createPortal(
+    <>
+      <div className="nx-scrim" aria-hidden onClick={onClose} />
+      <div className="nx-dlgwrap" onClick={(event) => event.target === event.currentTarget && onClose()}>
+        <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="nx-glass strong nx-dlg nx-pick">
+          <div className="nx-pick-head">
+            <h2 id={titleId}>{title}</h2>
+            {headActions}
+            <button type="button" className="nx-ibtn sm" onClick={onClose} aria-label={closeLabel} title={closeLabel}>
+              <X aria-hidden />
+            </button>
+          </div>
+          {search ? (
+            <div className="nx-search">
+              <SearchIcon className="i" aria-hidden />
+              <input
+                type="search"
+                data-autofocus
+                value={search.value}
+                onChange={(event) => search.onChange(event.target.value)}
+                placeholder={search.placeholder}
+                aria-label={search.placeholder}
+              />
+            </div>
+          ) : null}
+          {note ? <p className="nx-pick-note">{note}</p> : null}
+          <div className="nx-pick-body">{children}</div>
+          {foot ? <div className="nx-actions">{foot}</div> : null}
         </div>
       </div>
     </>,

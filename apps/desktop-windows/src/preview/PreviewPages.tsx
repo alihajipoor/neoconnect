@@ -10,6 +10,8 @@ import { Referrals } from "../screens/Referrals";
 import { ActivityView, type ActivityData } from "../screens/Activity";
 import { CustomModeCard } from "../components/CustomModeCard";
 import { GamingModeCard } from "../components/GamingModeCard";
+import { GamePicker } from "../components/GamePicker";
+import { RunningAppPicker } from "../components/RunningAppPicker";
 import { AppShell, type NavId } from "../components/shell/AppShell";
 import { PageScene } from "../components/shell/Page";
 import { CommunityLinks } from "../components/CommunityLinks";
@@ -24,7 +26,7 @@ import type { RouteOption, Subscription } from "../lib/types";
 import type { ShownFailure } from "../lib/failure-text";
 import type { SocialProvider } from "../lib/social-auth";
 import type { DeviceSettings } from "../screens/Settings";
-import type { AccountDevices, DailyUsage } from "../lib/customer";
+import type { AccountDevices, DailyUsage, GameProfileSummary } from "../lib/customer";
 import type { SessionRecord } from "../lib/session-log";
 
 /** DEV ONLY: the screens of phase 2 in the preview -- sign-in and its steps,
@@ -50,6 +52,8 @@ export const PAGE_SCREENS: Record<string, string> = {
   forgot: "Forgot password",
   verify: "Verify email",
   settings: "Settings",
+  pickGame: "Settings, choosing a game",
+  pickApps: "Settings, choosing a running app",
   activity: "Activity",
   activityLog: "Activity, session log on",
   activityFailed: "Activity, account not reached",
@@ -62,6 +66,8 @@ export const PAGE_SCREENS: Record<string, string> = {
 const NAV: Record<string, NavId> = {
   locations: "locations",
   settings: "settings",
+  pickGame: "settings",
+  pickApps: "settings",
   activity: "activity",
   activityLog: "activity",
   activityFailed: "activity",
@@ -80,6 +86,45 @@ const PREVIEW_DEVICE: DeviceSettings = {
   notifications: { setting: async () => "enabled" },
   reconnectHold: { apply: async () => undefined },
 };
+
+/** DEV ONLY: a few catalogue entries for the game picker; one is already
+ * chosen, so the Added mark shows. */
+const SAMPLE_GAMES: GameProfileSummary[] = [
+  ["cs2", "Counter-Strike 2", "Valve"],
+  ["dota2", "Dota 2", "Valve"],
+  ["valorant", "Valorant", "Riot Games"],
+  ["lol", "League of Legends", "Riot Games"],
+  ["fortnite", "Fortnite", "Epic Games"],
+  ["pubg", "PUBG: Battlegrounds", "Krafton"],
+  ["apex", "Apex Legends", "Electronic Arts"],
+  ["cod", "Call of Duty", "Activision"],
+].map(([slug, displayName, publisher]) => ({
+  slug,
+  displayName,
+  iconKey: null,
+  publisher,
+  hostnames: [],
+  excludeHostnames: [],
+  canaryHostname: null,
+}));
+
+/** DEV ONLY: what the preview's `vpn_list_running_apps` answers (main.tsx),
+ * and the one of them already chosen. */
+export const PREVIEW_CHOSEN_APP = "C:\\Program Files\\Mozilla Firefox\\firefox.exe";
+export const PREVIEW_RUNNING_APPS = [
+  { name: "Firefox", path: PREVIEW_CHOSEN_APP },
+  {
+    name: "Discord",
+    path: "C:\\Users\\you\\AppData\\Local\\Discord\\app-1.0.9200\\Discord.exe",
+    paths: [
+      "C:\\Users\\you\\AppData\\Local\\Discord\\app-1.0.9200\\Discord.exe",
+      "C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe",
+    ],
+  },
+  { name: "Telegram", path: "C:\\Users\\you\\AppData\\Roaming\\Telegram Desktop\\Telegram.exe" },
+  { name: "Steam", path: "C:\\Program Files (x86)\\Steam\\steam.exe" },
+  { name: "Spotify", path: "C:\\Users\\you\\AppData\\Roaming\\Spotify\\Spotify.exe" },
+];
 
 const DAY_MS = 86_400_000;
 const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
@@ -228,20 +273,24 @@ export function PreviewPage({
           }}
         />
       </Page>
-    ) : screen === "settings" ? (
-      <Settings
-        onBack={noop}
-        onOpenReferrals={noop}
-        onOpenSupport={noop}
-        onLoggedOut={noop}
-        customSection={<CustomModeCard />}
-        gamingSection={phone ? undefined : <GamingModeCard />}
-        onOpenPlans={noop}
-        onOpenActivity={noop}
-        onSignOut={noop}
-        platform={phone ? "android" : "windows"}
-        device={phone ? undefined : PREVIEW_DEVICE}
-      />
+    ) : screen === "settings" || screen === "pickGame" || screen === "pickApps" ? (
+      <>
+        <Settings
+          onBack={noop}
+          onOpenReferrals={noop}
+          onOpenSupport={noop}
+          onLoggedOut={noop}
+          customSection={<CustomModeCard />}
+          gamingSection={phone ? undefined : <GamingModeCard />}
+          onOpenPlans={noop}
+          onOpenActivity={noop}
+          onSignOut={noop}
+          platform={phone ? "android" : "windows"}
+          device={phone ? undefined : PREVIEW_DEVICE}
+        />
+        {screen === "pickGame" ? <GamePicker games={SAMPLE_GAMES} chosen={["dota2"]} onPick={noop} onClose={noop} /> : null}
+        {screen === "pickApps" ? <RunningAppPicker chosen={[PREVIEW_CHOSEN_APP]} onPick={noop} onClose={noop} /> : null}
+      </>
     ) : screen === "activity" || screen === "activityEmpty" || screen === "activityLog" || screen === "activityFailed" ? (
       <ActivityView
         data={activity}
