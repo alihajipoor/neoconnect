@@ -26,9 +26,9 @@ import type { VpnAccess, VpnStatus } from "./vpn";
  *    Configurations", never over another VPN -- the same questions an
  *    automatic reconnect asks first (lib/reconnect-steps.ts), and the page
  *    dials as it does for one, passing over any rung that would prompt;
- *  - speeds are rates the app works out from the platform's running
- *    totals, which only Android has (iOS gives the app none): none at all
- *    where they are not counted, never a zero;
+ *  - speeds are rates the app works out from the engines' running totals
+ *    (vpn.ts, `rxBytes`): none at all where they are not counted --
+ *    IKEv2, on either phone -- never a zero;
  *  - a tunnel lost while the app was in the background is recorded as
  *    ending when the app was last seen with it up, not when it was found
  *    gone: the later time would claim minutes nobody saw. */
@@ -152,7 +152,8 @@ export interface PhoneMainExtrasInput {
   adopt: (since: number) => void;
   deps: PhoneAutoConnectDeps & {
     status: () => Promise<VpnStatus>;
-    /** Whether this platform reports running totals (Android). */
+    /** Whether to read the totals at all: both phones report them for
+     * Xray and WireGuard; a status without them is no speed regardless. */
     counts: boolean;
   };
   now?: () => number;

@@ -544,8 +544,7 @@ class NeoxifyVpnPlugin: Plugin {
             var answer: JsonObject = ["connected": up(state), "state": String(describing: state)]
             // How long the live connection has been up, from the system's
             // own record of it, for the timer on a screen that finds it
-            // already running. None where it is not up or not dated. No
-            // byte counts: iOS gives the app none (they are null, never 0).
+            // already running. None where it is not up or not dated.
             var live: NEVPNConnection? = nil
             if up(tunnel) {
                 live = managers.first?.connection
@@ -555,6 +554,14 @@ class NeoxifyVpnPlugin: Plugin {
             if let since = live?.connectedDate {
                 let secs = Int(Date().timeIntervalSince(since))
                 if secs >= 0 { answer["sessionSecs"] = secs }
+            }
+            // Byte totals only from our own extension, which counts them
+            // (ProviderTotals); IKEv2 is the system's client and iOS gives
+            // the app no totals for it, so they stay absent -- null, never 0.
+            if up(tunnel), let session = managers.first?.connection as? NETunnelProviderSession,
+               let totals = await ProviderTotals.read(session) {
+                answer["rxBytes"] = totals.rx
+                answer["txBytes"] = totals.tx
             }
             invoke.resolve(answer)
         }
@@ -630,6 +637,52 @@ class NeoxifyVpnPlugin: Plugin {
             invoke.resolve()
         } catch {
             invoke.reject("could not save the notification text: \(error.localizedDescription)")
+        }
+    }
+}
+
+/// The running engine's byte totals, asked of our packet-tunnel extension
+/// (`handleAppMessage` in PacketTunnelProvider.swift). Half a second at
+/// most, because status is polled: an extension that does not answer in
+/// time is no count, not a wait.
+enum ProviderTotals {
+    static func read(_ session: NETunnelProviderSession) async -> (rx: Int64, tx: Int64)? {
+        await withCheckedContinuation { continuation in
+            let once = Once()
+            let finish: ((rx: Int64, tx: Int64)?) -> Void = { totals in
+                once.run { continuation.resume(returning: totals) }
+            }
+            do {
+                try session.sendProviderMessage(Data("totals".utf8)) { data in
+                    finish(parse(data))
+                }
+            } catch {
+                finish(nil)
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { finish(nil) }
+        }
+    }
+
+    static func parse(_ data: Data?) -> (rx: Int64, tx: Int64)? {
+        guard let data,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rx = (object["rx"] as? NSNumber)?.int64Value,
+              let tx = (object["tx"] as? NSNumber)?.int64Value,
+              rx >= 0, tx >= 0 else { return nil }
+        return (rx, tx)
+    }
+
+    /// Runs its work once, whichever caller comes first.
+    final class Once {
+        private let lock = NSLock()
+        private var done = false
+
+        func run(_ work: () -> Void) {
+            lock.lock()
+            let first = !done
+            done = true
+            lock.unlock()
+            if first { work() }
         }
     }
 }

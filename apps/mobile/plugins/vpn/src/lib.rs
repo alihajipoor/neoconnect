@@ -95,15 +95,14 @@ pub struct Ikev2Profile {
 pub struct VpnStatus {
     pub connected: bool,
     pub protocol: Option<String>,
-    /// Bytes carried, or null where the platform will not say.
+    /// Bytes carried, or null where nothing counted them.
     ///
     /// Optional for the same reason `last_handshake_age_secs` below is,
     /// and the argument there applies unchanged: null is the honest
-    /// answer for "no evidence". iOS has no counters to read -- the
-    /// tunnel runs in a separate extension process and NEVPNConnection
-    /// exposes no byte totals to the app -- so the alternative was a
-    /// zero, which reads as "nothing was carried" rather than "not
-    /// known".
+    /// answer for "no evidence". IKEv2 is each platform's own client and
+    /// gives the app no totals, and an iOS extension that does not answer
+    /// in time is no count either; the alternative was a zero, which reads
+    /// as "nothing was carried" rather than "not known".
     ///
     /// They were required, and the iOS plugin sends neither, so every
     /// single `vpn_status` call on iOS failed to deserialise with

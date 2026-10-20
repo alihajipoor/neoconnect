@@ -20,13 +20,13 @@ export interface VpnStatus {
   connected: boolean;
   protocol: string | null;
   /** Bytes since the tunnel came up, or null where nothing counted them.
-   * Android counts WireGuard's (the library's own totals) and Xray's
-   * (xray-core's count of the bytes through the server, published by the
-   * tunnel's process only while the app is in front); IKEv2 is the
-   * platform's client and counts nothing the app can read; iOS has none
-   * to read, because the tunnel runs in a separate extension process and
-   * NEVPNConnection exposes no totals to the app. Null rather than zero,
-   * so nothing later reads "not known" as "nothing was carried". */
+   * The engines' own counts: WireGuard's (the library's totals on Android,
+   * wireguard-go's on iOS) and Xray's (xray-core's count of the bytes
+   * through the server -- on Android published by the tunnel's process
+   * only while the app is in front, on iOS asked of the extension). IKEv2
+   * is the platform's own client on both and counts nothing the app can
+   * read. Null rather than zero, so nothing later reads "not known" as
+   * "nothing was carried". */
   rxBytes: number | null;
   txBytes: number | null;
   /** How long the live tunnel has been up, in seconds, where its start was

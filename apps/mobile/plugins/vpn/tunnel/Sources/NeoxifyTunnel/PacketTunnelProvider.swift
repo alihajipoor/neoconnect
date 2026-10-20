@@ -299,6 +299,32 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Options first, then the provider configuration -- the latter is
     /// the path a tunnel started by the system, on demand or from
     /// Settings, comes through, where there are no start options at all.
+    /// The app asks for the running engine's byte totals, for its speeds
+    /// (`ProviderTotals` in the plugin): "totals" in, `{"rx":..,"tx":..}`
+    /// out -- the engine's own counts, xray-core's of the bytes through the
+    /// server or wireguard-go's of its peer. Nothing when no engine counts:
+    /// the app then shows no speed, never a zero.
+    override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
+        guard String(data: messageData, encoding: .utf8) == "totals" else {
+            completionHandler?(nil)
+            return
+        }
+        let rx: Int64
+        let tx: Int64
+        if NeoxifyxrayRunning() {
+            rx = NeoxifyxrayDownlink()
+            tx = NeoxifyxrayUplink()
+        } else {
+            rx = NeoxifyxrayWireGuardReceived()
+            tx = NeoxifyxrayWireGuardSent()
+        }
+        guard rx >= 0, tx >= 0 else {
+            completionHandler?(nil)
+            return
+        }
+        completionHandler?(try? JSONSerialization.data(withJSONObject: ["rx": rx, "tx": tx]))
+    }
+
     private func request(from options: [String: NSObject]?) throws -> Request? {
         let stored = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
 
