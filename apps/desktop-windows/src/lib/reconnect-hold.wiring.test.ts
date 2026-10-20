@@ -50,7 +50,8 @@ describe("the reconnect hold's gate", () => {
     const dash = source("../screens/Dashboard.tsx");
     expect(dash).toContain("const gap = gapTraffic(hold, holdWanted(prefs.blockWhileReconnecting));");
     expect(dash).toContain("      gap,\n");
-    expect(dash).toContain("const heldHint = holdHint(hold, {");
+    // In the gap only: never over a tunnel that is up.
+    expect(dash).toMatch(/const heldHint = isTunnelUp\(connectionState\)\s+\? null\s+: holdHint\(hold, \{/);
     // No sentence about the hold picked by hand, and no release on a
     // single status read.
     expect(dash).not.toMatch(/t\("hold\./);

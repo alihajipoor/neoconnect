@@ -4630,8 +4630,13 @@ export function Dashboard({
   const holdSetting = holdWanted(prefs.blockWhileReconnecting);
   const heldNote = holdNote(hold, { inGap: reconnecting !== null || dropped, setting: holdSetting });
   // A pass waiting for a network under the hold is a reconnect's gap too:
-  // its headline's "your traffic is not protected" would be false.
-  const heldHint = holdHint(hold, { reconnecting: reconnecting !== null || waitingForNetwork, dropped, setting: holdSetting });
+  // its headline's "your traffic is not protected" would be false. Only in
+  // the gap itself: over a tunnel that is up -- a reconnect's attempt that
+  // has landed, before its episode ends -- the headline's own sentence
+  // stands, whatever the hold's last word.
+  const heldHint = isTunnelUp(connectionState)
+    ? null
+    : holdHint(hold, { reconnecting: reconnecting !== null || waitingForNetwork, dropped, setting: holdSetting });
   const hintText = slotTeardownShowing
     ? ""
     : connectionError
