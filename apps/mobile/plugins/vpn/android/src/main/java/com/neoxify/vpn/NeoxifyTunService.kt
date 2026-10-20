@@ -1,9 +1,5 @@
 package com.neoxify.vpn
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
@@ -60,6 +56,16 @@ class NeoxifyTunService : VpnService(), Protector {
      * start that has not reached the engine yet. */
     private var configured = false
 
+    /** A stop was asked for: whatever Android does to the service from
+     * here on is this app's own doing, not something to tell the
+     * customer about. */
+    @Volatile
+    private var stopAsked = false
+
+    /** The counter sampler runs while this is true (startSampling). */
+    @Volatile
+    private var sampling = false
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -93,8 +99,10 @@ class NeoxifyTunService : VpnService(), Protector {
             // Required if this arrived via startForegroundService, and a
             // no-op notification update when the service was already in
             // the foreground -- which is the usual case.
-            runCatching { startForeground(NOTIFICATION_ID, buildNotification()) }
+            runCatching { startForeground(Notices.STATUS_ID, Notices.status(this, up = started)) }
             instance = null
+            stopAsked = true
+            sampling = false
             // Off the main thread. Stopping the engine can block for as
             // long as starting it can, and this is the system's
             // main-thread callback: doing it here would trade a stuck
@@ -157,7 +165,7 @@ class NeoxifyTunService : VpnService(), Protector {
         // -- an OEM policy, a future platform rule -- a legible failure
         // instead of a silent death.
         try {
-            startForeground(NOTIFICATION_ID, buildNotification())
+            startForeground(Notices.STATUS_ID, Notices.status(this, up = false))
         } catch (e: Throwable) {
             Log.e(TAG, "could not start in the foreground; stopping", e)
             // Must stop: a service started with startForegroundService
@@ -225,7 +233,17 @@ class NeoxifyTunService : VpnService(), Protector {
                 try {
                     start(config, mtu, dns, apps)
                     watchdog.interrupt()
+                    // When it came up, for the app's timer after a relaunch
+                    // (sessionSecs in the plugin's status). Before "up", so a
+                    // reader that sees "up" finds it.
+                    writeSince(this, System.currentTimeMillis())
                     publish(STATE_UP, null)
+                    // Said only now: "VPN is on" is the engine up on the
+                    // tun, which until this line it was not. Neither of
+                    // these may fail a tunnel that is up, so neither can
+                    // throw into the catch below.
+                    runCatching { Notices.updateStatus(this, up = true) }
+                    runCatching { startSampling() }
                 } catch (t: Throwable) {
                     watchdog.interrupt()
                     // Throwable: a native engine failing to load arrives
@@ -281,6 +299,10 @@ class NeoxifyTunService : VpnService(), Protector {
     /** Android's own "stop VPN" button lands here, and so does another
      * VPN app taking over. */
     override fun onRevoke() {
+        // Said before anything else, while this process surely lives: the
+        // customer did not turn this off in Neoxify, and with the app in
+        // the background nothing else will tell them (Notices).
+        if (!stopAsked && started) Notices.postTurnedOff(this)
         teardown()
         // The tunnel is gone but this process may not be, and the system
         // has a VPN network up for whoever took over -- the two things
@@ -292,6 +314,7 @@ class NeoxifyTunService : VpnService(), Protector {
 
     /** Both halves, for the paths that are not racing anything. */
     private fun teardown() {
+        sampling = false
         closeTun()
         stopEngine()
     }
@@ -345,28 +368,42 @@ class NeoxifyTunService : VpnService(), Protector {
         }
     }
 
-    private fun buildNotification(): Notification {
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "VPN", NotificationManager.IMPORTANCE_LOW),
-            )
-        }
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-        }
-        return builder
-            .setContentTitle("Neoxify")
-            .setContentText("Connected")
-            // A framework drawable rather than one of ours: this library
-            // has no resources of its own, and stat_notify_sync is the
-            // stock icon available on every API level here.
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setOngoing(true)
-            .build()
+    /** Publishes the engine's byte counters for the app's speeds, once a
+     * second, while the app is in front to show them (Notices.appInFront)
+     * -- a file written every second of a day-long session would be
+     * flash wear and battery for a number nobody is looking at. Read by
+     * the plugin's status, which takes nothing older than a few seconds.
+     *
+     * The counts are xray-core's own, of the bytes through the server
+     * outbound (Uplink and Downlink in the engine package); -1 there means
+     * not counted, and then nothing is written. */
+    private fun startSampling() {
+        if (sampling) return
+        sampling = true
+        val sampler = Thread({
+            while (sampling) {
+                try {
+                    if (Notices.appInFront(this)) {
+                        val up = Neoxifyxray.uplink()
+                        val down = Neoxifyxray.downlink()
+                        if (up >= 0 && down >= 0) {
+                            writeTraffic(this, rx = down, tx = up, at = System.currentTimeMillis())
+                        }
+                    }
+                } catch (t: Throwable) {
+                    // A counter that cannot be read is no speed, not a
+                    // reason to touch the tunnel.
+                    Log.w(TAG, "could not read the engine's counters", t)
+                }
+                try {
+                    Thread.sleep(SAMPLE_EVERY_MS)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+            }
+        }, "neoxify-traffic")
+        sampler.isDaemon = true
+        sampler.start()
     }
 
     /**
@@ -476,8 +513,10 @@ class NeoxifyTunService : VpnService(), Protector {
          * would reach for the button a second time. */
         private const val ENGINE_STOP_GRACE_MS = 500L
         private const val TAG = "NeoxifyTun"
-        private const val CHANNEL_ID = "neoxify-vpn"
-        private const val NOTIFICATION_ID = 1
+
+        /** How often the counters are published while the app is in
+         * front: the app's speeds are per second. */
+        private const val SAMPLE_EVERY_MS = 1_000L
 
         // How the tunnel's details cross the process boundary. Everything
         // the old in-process `start(...)` call took, as Intent extras.
@@ -525,7 +564,39 @@ class NeoxifyTunService : VpnService(), Protector {
 
         fun clearState(context: android.content.Context) {
             runCatching { stateFile(context).delete() }
+            runCatching { sinceFile(context).delete() }
+            runCatching { trafficFile(context).delete() }
         }
+
+        private fun sinceFile(context: android.content.Context) = java.io.File(context.filesDir, "xray-since")
+        private fun trafficFile(context: android.content.Context) = java.io.File(context.filesDir, "xray-traffic")
+
+        /** When the engine came up, in epoch milliseconds. */
+        fun writeSince(context: android.content.Context, at: Long) {
+            runCatching { sinceFile(context).writeText(at.toString()) }
+        }
+
+        /** When the running tunnel came up, or null when it was not said. */
+        fun readSince(context: android.content.Context): Long? =
+            runCatching { sinceFile(context).readText().trim().toLong() }.getOrNull()
+
+        /** The engine's counters as last published: bytes received, bytes
+         * sent, and when they were read. Written whole, one line. */
+        fun writeTraffic(context: android.content.Context, rx: Long, tx: Long, at: Long) {
+            runCatching {
+                val tmp = java.io.File(context.filesDir, "xray-traffic.tmp")
+                tmp.writeText("$rx $tx $at")
+                if (!tmp.renameTo(trafficFile(context))) tmp.delete()
+            }
+        }
+
+        /** The last published counters, or null when there are none. */
+        fun readTraffic(context: android.content.Context): Triple<Long, Long, Long>? =
+            runCatching {
+                val parts = trafficFile(context).readText().trim().split(" ")
+                if (parts.size != 3) null
+                else Triple(parts[0].toLong(), parts[1].toLong(), parts[2].toLong())
+            }.getOrNull()
 
         /** The running service, or null.
          *

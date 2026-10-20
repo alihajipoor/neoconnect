@@ -2,6 +2,7 @@ package com.neoxify.vpn
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
@@ -12,14 +13,18 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.provider.Settings
 import android.util.Base64
 import android.util.Log
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSArray
@@ -34,6 +39,11 @@ import java.io.ByteArrayOutputStream
 import java.io.StringReader
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+
+/** Android 13's runtime permission for notifications, by name: the
+ * constant is not on every API level this compiles for. */
+private const val POST_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS"
+private const val NOTIFICATIONS_ALIAS = "notifications"
 
 /**
  * The tunnel.
@@ -50,7 +60,12 @@ import java.util.concurrent.Executors
  * protocol is the decision this project has made everywhere else, for
  * the same reason: an upstream fix is a version bump, not a rewrite.
  */
-@TauriPlugin
+@TauriPlugin(
+    // Android 13 and later ask before an app may post notifications; the
+    // app asks only when the customer turns them on, or presses Allow
+    // under the switch (requestNotifications).
+    permissions = [Permission(strings = [POST_NOTIFICATIONS], alias = NOTIFICATIONS_ALIAS)],
+)
 class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     private val backend: Backend by lazy { GoBackend(activity.applicationContext) }
 
@@ -125,6 +140,37 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         override fun getName() = "Neoxify"
         override fun onStateChange(newState: Tunnel.State) {
             Log.i(TAG, "tunnel state: $newState")
+            if (newState == Tunnel.State.DOWN) {
+                val ours = expectingDown
+                wireguardSince = null
+                // Down without this app asking: Android or another VPN app
+                // took the tunnel (the library calls this from its
+                // service's onDestroy). Said once, and only where the
+                // customer would not otherwise see it (Notices).
+                if (!ours) Notices.postTurnedOff(activity.applicationContext)
+            }
+        }
+    }
+
+    /** True while this app is itself bringing WireGuard down -- a
+     * disconnect, a rung, or the library replacing the tunnel on a new
+     * connect -- so the DOWN that follows is not taken for Android's. */
+    @Volatile
+    private var expectingDown = false
+
+    /** When the WireGuard tunnel came up, for the timer after the app's
+     * screen is rebuilt (sessionSecs). In memory: WireGuard's service
+     * lives in this process, so a tunnel that outlives it does not exist. */
+    @Volatile
+    private var wireguardSince: Long? = null
+
+    /** Any change of WireGuard's state this app makes. */
+    private fun <T> ourOwn(work: () -> T): T {
+        expectingDown = true
+        try {
+            return work()
+        } finally {
+            expectingDown = false
         }
     }
 
@@ -219,7 +265,9 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         offMainThread(invoke, "connect") {
             try {
                 val config = Config.parse(BufferedReader(StringReader(buildQuickConfig(profile))))
-                backend.setState(tunnel, Tunnel.State.UP, config)
+                Notices.clearTurnedOff(activity)
+                ourOwn { backend.setState(tunnel, Tunnel.State.UP, config) }
+                wireguardSince = System.currentTimeMillis()
                 activeProtocol = "WIREGUARD"
                 JSObject()
             } catch (e: Exception) {
@@ -244,11 +292,12 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             // Whatever is up comes down first, including a WireGuard
             // tunnel: Android allows one VPN per app, and establishing a
             // second silently replaces the first.
-            runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+            runCatching { ourOwn { backend.setState(tunnel, Tunnel.State.DOWN, null) } }
 
             // Stale state from a previous attempt would be read as this
             // one's result, and the answer would arrive before the work.
             NeoxifyTunService.clearState(activity)
+            Notices.clearTurnedOff(activity)
 
             val intent = Intent(activity, NeoxifyTunService::class.java)
                 .putExtra(NeoxifyTunService.EXTRA_CONFIG, profile.config)
@@ -317,7 +366,7 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // otherwise make the platform's own start fail for a reason that
         // has nothing to do with IKEv2.
         engine.execute {
-            runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+            runCatching { ourOwn { backend.setState(tunnel, Tunnel.State.DOWN, null) } }
             // Caught here, unlike in disconnect(): this runs directly on
             // the executor rather than inside offMainThread's handler,
             // so an escaping throw would take the process down and leave
@@ -501,7 +550,7 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             // means trusting a variable that a service restart can
             // outlive; tearing down an engine that is already down costs
             // nothing.
-            runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+            runCatching { ourOwn { backend.setState(tunnel, Tunnel.State.DOWN, null) } }
             stopTunService()
             Ikev2Engine.stop(activity)
             activeProtocol = null
@@ -533,7 +582,7 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun forgetProfiles(invoke: Invoke) {
         offMainThread(invoke, "forgetProfiles") {
-            runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+            runCatching { ourOwn { backend.setState(tunnel, Tunnel.State.DOWN, null) } }
             stopTunService()
             Ikev2Engine.forget(activity)
             activeProtocol = null
@@ -586,8 +635,11 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // process state and the tunnel is not.
         if (ikev2Up && activeProtocol == null) activeProtocol = "IKEV2"
 
-        var rx = 0L
-        var tx = 0L
+        // Null unless something counted them: zero would read as "nothing
+        // carried" where the truth is "not known", and the app shows a
+        // speed only from a real count.
+        var rx: Long? = null
+        var tx: Long? = null
         var handshakeAge: Long? = null
 
         // Only WireGuard has cheap evidence to report. Xray has no
@@ -610,10 +662,35 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             } catch (e: Exception) {
                 // Best-effort. Failing to read counters says nothing
                 // about whether the tunnel is up, so the state above
-                // stands and the numbers stay at zero.
+                // stands and the numbers stay unknown.
                 Log.w(TAG, "statistics unavailable", e)
+                rx = null
+                tx = null
+            }
+        } else if (xrayUp) {
+            // xray-core's own count of the bytes through the server, as
+            // the :xray process last published it (NeoxifyTunService
+            // startSampling). Nothing older than a few seconds: a stale
+            // count would draw a speed of nothing over a busy tunnel.
+            NeoxifyTunService.readTraffic(activity)?.let { (r, t, at) ->
+                if (System.currentTimeMillis() - at in 0..TRAFFIC_FRESH_MS) {
+                    rx = r
+                    tx = t
+                }
             }
         }
+        // IKEv2 is the platform's own client and counts nothing this app
+        // can read, so its numbers stay null.
+
+        // How long the tunnel has been up, for the timer on a screen that
+        // finds it already running. Only for the engine that is up, and
+        // only where its start was recorded.
+        val since: Long? = when {
+            wireguardUp -> wireguardSince
+            xrayUp -> NeoxifyTunService.readSince(activity)
+            else -> null
+        }
+        val sessionSecs = since?.let { (System.currentTimeMillis() - it) / 1000 }?.takeIf { it >= 0 }
 
         val result = JSObject()
         result.put("connected", up)
@@ -623,7 +700,117 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // Null, never zero. Zero would read as "handshook just now",
         // which is the opposite of what no evidence means.
         result.put("lastHandshakeAgeSecs", handshakeAge)
+        result.put("sessionSecs", sessionSecs)
         return result
+    }
+
+    /** Whether the app is in front, for the tunnel's notices and counters
+     * (Notices.appInFront), from the activity's own lifecycle. */
+    override fun onResume() {
+        super.onResume()
+        Notices.setInFront(activity, true)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        Notices.setInFront(activity, false)
+    }
+
+    @InvokeArg
+    class NoticesArgs {
+        var enabled: Boolean = true
+        var statusChannel: String = ""
+        var changesChannel: String = ""
+        var title: String = ""
+        var starting: String = ""
+        var on: String = ""
+        var offTitle: String = ""
+        var offBody: String = ""
+    }
+
+    /** The words the tunnel's notifications use, in the app's language,
+     * and whether "Notify me when the connection changes" is on. Saved
+     * where the :xray process can read them (Notices). */
+    @Command
+    fun setNotices(invoke: Invoke) {
+        val args = invoke.parseArgs(NoticesArgs::class.java)
+        Notices.write(
+            activity,
+            Notices.Text(
+                enabled = args.enabled,
+                statusChannel = args.statusChannel,
+                changesChannel = args.changesChannel,
+                title = args.title,
+                starting = args.starting,
+                on = args.on,
+                offTitle = args.offTitle,
+                offBody = args.offBody,
+            ),
+        )
+        invoke.resolve()
+    }
+
+    /** Whether Android shows this app's notifications:
+     *  - "enabled";
+     *  - "canAsk": Android 13+ and not granted, and asking would still show
+     *    the system's question (never asked, or declined once);
+     *  - "disabledForApp": off, and only Android's settings can change it.
+     */
+    private fun notificationStateNow(): String {
+        val manager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (manager.areNotificationsEnabled()) return "enabled"
+        if (Build.VERSION.SDK_INT >= 33 &&
+            activity.checkSelfPermission(POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            val asked = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getBoolean(ASKED_NOTIFICATIONS, false)
+            if (!asked || activity.shouldShowRequestPermissionRationale(POST_NOTIFICATIONS)) return "canAsk"
+        }
+        return "disabledForApp"
+    }
+
+    @Command
+    fun notificationState(invoke: Invoke) {
+        invoke.resolve(JSObject().put("state", notificationStateNow()))
+    }
+
+    /** Asks Android to show this app's notifications -- the system's own
+     * question, raised only from the customer's press. Where it cannot be
+     * asked (already on, or only Settings can change it) this answers
+     * with the state and shows nothing. */
+    @Command
+    fun requestNotifications(invoke: Invoke) {
+        if (Build.VERSION.SDK_INT < 33 || notificationStateNow() != "canAsk") {
+            invoke.resolve(JSObject().put("state", notificationStateNow()))
+            return
+        }
+        activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(ASKED_NOTIFICATIONS, true).apply()
+        requestPermissionForAlias(NOTIFICATIONS_ALIAS, invoke, "notificationsAnswered")
+    }
+
+    @PermissionCallback
+    private fun notificationsAnswered(invoke: Invoke) {
+        invoke.resolve(JSObject().put("state", notificationStateNow()))
+    }
+
+    /** Android's page for this app's notifications, for a customer who
+     * turned them off there. */
+    @Command
+    fun openNotificationSettings(invoke: Invoke) {
+        try {
+            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, activity.packageName)
+            } else {
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", activity.packageName, null))
+            }
+            activity.startActivity(intent)
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.w(TAG, "could not open the notification settings", e)
+            invoke.reject(e.message ?: e.toString())
+        }
     }
 
     /**
@@ -745,6 +932,12 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         private const val TEARDOWN_POLL_MS = 100L
 
         private const val TAG = "NeoxifyVpn"
+
+        /** How old a published Xray count may be and still be a speed. */
+        private const val TRAFFIC_FRESH_MS = 3_000L
+
+        private const val PREFS = "neoxify-vpn"
+        private const val ASKED_NOTIFICATIONS = "askedNotifications"
         /** Covers the Xray process starting, the tunnel being
          * established and xray-core loading a 46MB engine, so it is
          * longer than the old service-start-only wait it replaces. Still
