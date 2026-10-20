@@ -392,10 +392,12 @@
       transform: scale(calc(1 - 0.04 * var(--move)));
     }
   }
+  /* Opaque while it slides down; under reduced motion it stays and
+     fades. */
   @keyframes nx-sheet-out {
     to {
       transform: translateY(calc(100% * var(--move)));
-      opacity: calc(1 - 0.6 * var(--move));
+      opacity: var(--move);
     }
   }
   @keyframes nx-toast-out {

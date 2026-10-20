@@ -621,6 +621,10 @@
   :root:not([data-glass="flat"]) .nx-glass.strong {
     background: linear-gradient(var(--sheen-a), var(--sheen-b)), var(--glass-strong);
   }
+  /* A sheet over the main page is denser (theme.css `--glass-sheet`). */
+  :root:not([data-glass="flat"]) .nx-glass.strong.nx-sheet {
+    background: linear-gradient(var(--sheen-a), var(--sheen-b)), var(--glass-sheet, var(--glass-strong));
+  }
   /* The rim: light from the top left, physical, so not mirrored in RTL. */
   .nx-glass::before {
     content: "";
@@ -2527,10 +2531,12 @@
       transform: scale(calc(1 - 0.05 * var(--move)));
     }
   }
+  /* Opaque while it rises, so the page is never read through it; it
+     fades in only under reduced motion, where it does not move. */
   @keyframes nx-sheet-in {
     from {
       transform: translateY(calc(100% * var(--move)));
-      opacity: 0.4;
+      opacity: calc(1 - 0.6 * (1 - var(--move)));
     }
   }
   @keyframes nx-rise {
@@ -3741,8 +3747,11 @@
   .nx-locsheet {
     height: 88%;
   }
+  /* Where a sheet is dragged from -- the handle and the head, of every
+     sheet (overlay.tsx spreads the drag on both): no pan may start there,
+     or the platform cancels the drag and the sheet springs back. */
   .nx-sheet .handle,
-  .nx-locsheet .nx-sheet-head {
+  .nx-sheet .nx-sheet-head {
     touch-action: none;
   }
   .nx-sheet .handle {

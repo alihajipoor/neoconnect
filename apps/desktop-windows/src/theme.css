@@ -95,6 +95,9 @@
   /* Glass: frosted where allowed, solid otherwise. */
   --glass: rgba(255, 255, 255, 0.42);
   --glass-strong: rgba(255, 255, 255, 0.7);
+  /* A sheet over the main page: denser, so the cobalt button under it never
+     reads through as a blue haze behind a row that is not in use. */
+  --glass-sheet: rgba(255, 255, 255, 0.86);
   --glass-solid: rgba(248, 249, 252, 0.95);
   --sheen-a: rgba(255, 255, 255, 0.3);
   --sheen-b: rgba(255, 255, 255, 0.06);
@@ -310,6 +313,7 @@
     --edge: inset 0 1px 0 rgba(255, 255, 255, 0.07), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
     --glass: rgba(20, 25, 36, 0.5);
     --glass-strong: rgba(22, 27, 39, 0.78);
+    --glass-sheet: rgba(22, 27, 39, 0.84);
     --glass-solid: rgba(17, 21, 30, 0.96);
     --sheen-a: rgba(255, 255, 255, 0.06);
     --sheen-b: rgba(255, 255, 255, 0.01);
@@ -387,6 +391,7 @@
   --edge: inset 0 1px 0 rgba(255, 255, 255, 0.07), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
   --glass: rgba(20, 25, 36, 0.5);
   --glass-strong: rgba(22, 27, 39, 0.78);
+  --glass-sheet: rgba(22, 27, 39, 0.84);
   --glass-solid: rgba(17, 21, 30, 0.96);
   --sheen-a: rgba(255, 255, 255, 0.06);
   --sheen-b: rgba(255, 255, 255, 0.01);
