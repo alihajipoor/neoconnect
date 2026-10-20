@@ -33,6 +33,9 @@ import { ProminentDisclosure, hasAcceptedDisclosure } from "./components/Promine
 import { appPrefs } from "@shared/lib/app-prefs";
 import { PHONE_DEVICE, noticesFor, setNotices } from "./lib/phone-notices";
 import { AndroidUpdateRow } from "./components/AndroidUpdateRow";
+import { autoConnectLatch } from "@shared/lib/auto-connect";
+import { sessionLog } from "@shared/lib/session-log";
+import { PHONE_MAIN_PAGE_EXTRAS } from "./lib/phone-main-extras";
 
 /** How often a queued diagnostic report retries. Matches the desktop
  * client so the two do not report at different rates for no reason. */
@@ -136,16 +139,24 @@ export default function App() {
   // signed in. Play wants it shown before the data collection begins,
   // and someone upgrading from an earlier build has never seen it -- so
   // "has a token" is not evidence of having been told.
+  //
+  // "Connect when Neoxify starts" is for a run that opens on the main page
+  // signed in, with the disclosure already accepted: a run that opens on
+  // either of the other two has nothing to connect "on start", now or after
+  // (lib/auto-connect.ts, lib/phone-main-extras.ts).
   useEffect(() => {
     void (async () => {
       if (!(await hasAcceptedDisclosure())) {
+        autoConnectLatch.disarm();
         setScreen("disclosure");
         return;
       }
       try {
         const tokens = await getTokens();
+        if (!tokens) autoConnectLatch.disarm();
         setScreen(tokens ? "dashboard" : "login");
       } catch {
+        autoConnectLatch.disarm();
         setScreen("login");
       }
     })();
@@ -224,8 +235,13 @@ export default function App() {
     if (endingRef.current) return;
     endingRef.current = true;
     setScreen("signingOut");
-    // The avatar line belongs to the account that just left.
+    // The avatar line belongs to the account that just left; a later
+    // sign-in in this run is not "when Neoxify starts"; and the session log
+    // goes with the session, off for whoever signs in next
+    // (lib/session-log.ts).
     forgetShellProfile();
+    autoConnectLatch.disarm();
+    void sessionLog.wipe();
     try {
       let ended: SessionEnd;
       try {
@@ -412,6 +428,9 @@ export default function App() {
         readNetwork={async () => networkKeyFromAsn()}
         onOpenPlans={() => setScreen("plans")}
         onBack={() => setScreen("settings")}
+        // Offered once the phone's main page records it
+        // (lib/phone-main-extras.ts); not before.
+        sessionLog={PHONE_MAIN_PAGE_EXTRAS}
       />,
     );
   }

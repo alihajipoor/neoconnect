@@ -90,8 +90,8 @@ describe("the system's answer", () => {
 });
 
 describe("what the phone binds", () => {
-  it("is notifications only: the rows a phone does not honour are not drawn", () => {
-    expect(Object.keys(PHONE_DEVICE)).toEqual(["notifications"]);
+  it("is notifications, and nothing a phone does not honour", () => {
+    expect(Object.keys(PHONE_DEVICE).filter((key) => key !== "autoConnect")).toEqual(["notifications"]);
     expect(PHONE_DEVICE.notifications?.setting).toBeTypeOf("function");
     expect(PHONE_DEVICE.notifications?.request).toBeTypeOf("function");
     expect(PHONE_DEVICE.notifications?.openSettings).toBeTypeOf("function");

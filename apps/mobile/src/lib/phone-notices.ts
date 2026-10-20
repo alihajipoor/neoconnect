@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { NotifySetting } from "@shared/lib/notify";
 import type { TranslationKey } from "@shared/lib/i18n";
 import type { DeviceSettings } from "@shared/screens/Settings";
+import { PHONE_MAIN_PAGE_EXTRAS } from "./phone-main-extras";
 
 /** "Notify me when the connection changes", on a phone.
  *
@@ -80,17 +81,19 @@ export const requestNotifications = (): Promise<NotifySetting> =>
 
 export const openNotificationSettings = () => invoke<void>("vpn_open_notification_settings");
 
-/** What a phone binds of Settings' device rows: notifications only.
+/** What a phone binds of Settings' device rows: notifications, and
+ * "Connect when Neoxify starts" once the phone's main page honours it
+ * (`PHONE_MAIN_PAGE_EXTRAS`, lib/phone-main-extras.ts).
  *
  * The others are not bound, so they are not drawn: Windows' "open at
  * sign-in" has no phone counterpart (Android's always-on VPN stops this
- * app's service, and iOS's on-demand rules are cleared on purpose); and
- * "Connect when Neoxify starts" waits for the phone's main page to honour
- * it (lib/phone-main-extras.ts, wired when that page is merged). */
+ * app's service, and iOS's on-demand rules are cleared on purpose), and
+ * blocking the internet while reconnecting is the Windows service's. */
 export const PHONE_DEVICE: DeviceSettings = {
   notifications: {
     setting: notificationState,
     request: requestNotifications,
     openSettings: openNotificationSettings,
   },
+  ...(PHONE_MAIN_PAGE_EXTRAS ? { autoConnect: true } : {}),
 };
