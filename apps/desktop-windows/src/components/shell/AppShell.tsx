@@ -232,6 +232,10 @@ export function AppShell(props: ShellProps) {
         open={menuOpen}
         anchor={anchor === "side" ? sideProfile : headAvatar}
         placement={anchor === "side" ? "above" : "below"}
+        // The phone header's avatar sits at the window's end edge: lined up
+        // with its start, the menu ran off the screen (seen on an iPhone 17
+        // Pro Max, 0.2.31). The sidebar's profile sits at the start edge.
+        align={anchor === "side" ? "start" : "end"}
         onClose={() => setMenuOpen(false)}
         label={t("nav.account")}
       >

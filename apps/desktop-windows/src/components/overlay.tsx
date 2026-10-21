@@ -406,9 +406,14 @@ export function Menu({
       const box = anchor.current?.getBoundingClientRect();
       if (!box) return;
       const rtl = (document.documentElement.dir === "rtl") !== (align === "end");
+      // Never wider than the room on the side it grows into: a menu lined
+      // up with the wrong edge of its trigger wraps its rows rather than
+      // leaving the screen.
+      const right = Math.max(8, window.innerWidth - box.right);
+      const left = Math.max(8, box.left);
       const horizontal: React.CSSProperties = rtl
-        ? { right: Math.max(8, window.innerWidth - box.right), transformOrigin: placement === "above" ? "bottom right" : "top right" }
-        : { left: Math.max(8, box.left), transformOrigin: placement === "above" ? "bottom left" : "top left" };
+        ? { right, maxWidth: window.innerWidth - right - 8, transformOrigin: placement === "above" ? "bottom right" : "top right" }
+        : { left, maxWidth: window.innerWidth - left - 8, transformOrigin: placement === "above" ? "bottom left" : "top left" };
       setStyle(
         placement === "above"
           ? { ...horizontal, bottom: window.innerHeight - box.top + 8 }
