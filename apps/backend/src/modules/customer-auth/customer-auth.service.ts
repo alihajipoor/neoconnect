@@ -519,12 +519,18 @@ export class CustomerAuthService {
     //
     // Reported at warn because a verified signup getting no trial is a
     // lost customer, not routine bookkeeping.
-    if (!settings.enabled || !settings.trialPlanId || !settings.trialRouteId) {
+    //
+    // The trial plan alone decides it. There used to be a separate "trial
+    // route" setting as well, required here; the plan already says which
+    // routes it may be served by, and deleting the chosen route cleared
+    // the setting and silently stopped every trial (2026-10-22: "no trial
+    // route is set" for new sign-ups until the owner noticed). The column
+    // stays in the schema, unread.
+    if (!settings.enabled || !settings.trialPlanId) {
       if (quiet) return null;
       const missing = [
         settings.enabled ? null : "trial mode is off",
         settings.trialPlanId ? null : "no trial plan is set",
-        settings.trialRouteId ? null : "no trial route is set",
       ].filter(Boolean);
       this.logger.warn(`No trial granted to customer ${customerId}: ${missing.join("; ")}`);
       return null;
@@ -539,13 +545,12 @@ export class CustomerAuthService {
     // a network that blocks something, and the likeliest to give up if
     // the first attempt fails.
     const { created: protocolUsers } = await this.protocolUsersService.provisionAll(subscription.id);
-
-    // trialRouteId stays the preferred one, and stays first in the
-    // response so an older client reading only the first entry still
-    // gets the route the operator chose.
-    protocolUsers.sort((a, b) =>
-      a.routeId === settings.trialRouteId ? -1 : b.routeId === settings.trialRouteId ? 1 : 0,
-    );
+    if (protocolUsers.length === 0) {
+      // The plan exists and the customer has it, but there is nothing to
+      // connect to: no route the plan allows exists. Loud, for the same
+      // reason as above.
+      this.logger.warn(`Trial granted to customer ${customerId} with no route: the trial plan allows none that exists`);
+    }
 
     return { subscription, protocolUsers, protocolUser: protocolUsers[0] ?? null };
   }
