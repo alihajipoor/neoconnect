@@ -31,15 +31,16 @@ describe("routeDeleteWarning", () => {
     );
   });
 
-  it("says so when it is the free-trial route, and not otherwise", () => {
-    expect(routeDeleteWarning(route, "route-1")).toMatch(/free-trial route: new sign-ups get no trial/);
-    expect(routeDeleteWarning(route, "route-2")).not.toMatch(/free-trial/);
+  // There is no trial route any more (2026-10-22): the trial plan's own
+  // routes decide, so deleting a route never stops trials.
+  it("names the uplink only when there is one, and never a trial route", () => {
+    expect(routeDeleteWarning(route)).not.toMatch(/trial/i);
     expect(routeDeleteWarning({ ...route, exitProtocolConfigId: null })).not.toMatch(/uplink/);
   });
 
   it("is what the routes table shows", () => {
     const table = readFileSync(new URL("./routes-table.tsx", import.meta.url), "utf8");
-    expect(table).toContain("description={routeDeleteWarning(route, trialRouteId)}");
+    expect(table).toContain("description={routeDeleteWarning(route)}");
     expect(table).not.toMatch(/will block deletion/);
   });
 });

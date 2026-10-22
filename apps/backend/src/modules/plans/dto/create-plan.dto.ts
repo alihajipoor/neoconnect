@@ -78,9 +78,8 @@ export class CreatePlanDto {
   isPurchasable?: boolean;
 
   /** Which Route a customer purchasing this plan gets provisioned on
-   * once payment clears -- see BillingService.confirmPayment(). Same v1
-   * simplification as FreeTrialSettings.trialRouteId (one admin-picked
-   * default, no per-purchase server picker yet). */
+   * once payment clears -- see BillingService.confirmPayment(). One
+   * admin-picked default, no per-purchase server picker yet. */
   @IsOptional()
   @IsUUID()
   defaultRouteId?: string;
