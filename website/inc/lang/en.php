@@ -860,4 +860,19 @@ return array(
     'route.caption' => 'Illustration of what the app does by itself: when one way through is stopped it moves to another, and it says Connected only after checking that traffic really flows.',
     'home.quote' => 'A green light that means nothing is worse than a red one.',
     'home.quote.by' => 'Why the app checks before it says Connected',
+    // The scroll story (inc/partials/story.php): the real app in four
+    // states. What it does, never how -- no method, port or route.
+    'story.1.state' => 'Not connected',
+    'story.1.title' => 'Open it. Press Connect.',
+    'story.1.body' => 'Leave it on Automatic or pick a country. There is no config to paste and nothing to import.',
+    'story.2.state' => 'Connecting',
+    'story.2.title' => 'It finds a way through.',
+    'story.2.body' => 'On a network that blocks connections like this one, the app tries one way after another until one gets through. You don’t choose, and you don’t wait for us.',
+    'story.3.state' => 'Checking',
+    'story.3.title' => 'Then it checks.',
+    'story.3.body' => 'Before it says Connected, it confirms that your traffic really reaches the internet through the tunnel.',
+    'story.4.state' => 'Connected, verified',
+    'story.4.title' => 'Only then: Connected.',
+    'story.4.body' => 'The country you are connected through lights up on the map, and the address the app shows was read through the tunnel itself.',
+    'story.caption' => 'Screens from the Windows and Android apps. The account, the usage and the address shown are examples.',
 );

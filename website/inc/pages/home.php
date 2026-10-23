@@ -158,35 +158,21 @@ require NX_INC . '/partials/head.php';
   </div>
 </section>
 
-<!-- ======================= Ways to connect ======================
+<!-- ===================== The app, in four beats =================
+     The real apps pinned while the story scrolls past: inc/partials/story.php.
      Described by what it does for the customer, never by name, port or
      transport -- see the note at the top of this file. -->
-<section class="section ways" id="protocols" aria-labelledby="h-protocols">
-  <div class="wrap ways__inner">
-    <div class="ways__head reveal">
+<section class="section story-sec" id="protocols" aria-labelledby="h-protocols">
+  <div class="wrap">
+    <div class="section-head reveal">
       <span class="eyebrow"><?php echo nx_e('home.protocols.eyebrow'); ?></span>
       <h2 class="h2" id="h-protocols"><?php echo nx_e('home.protocols.title'); ?></h2>
       <p class="lede"><?php echo nx_e('home.protocols.body'); ?></p>
     </div>
-    <div class="ways__steps reveal">
-      <ol class="steps-ed u-list-reset">
-        <?php foreach (array('point1', 'point2', 'point3') as $nx_i => $nx_key): ?>
-          <li>
-            <span class="steps-ed__n" aria-hidden="true"><?php echo nx_num(sprintf('%02d', $nx_i + 1)); ?></span>
-            <h3><?php echo nx_e('home.protocols.' . $nx_key . '.title'); ?></h3>
-            <p><?php echo nx_e('home.protocols.' . $nx_key . '.body'); ?></p>
-          </li>
-        <?php endforeach; ?>
-      </ol>
-      <p>
-        <a class="link" href="<?php echo nx_esc(nx_url('features')); ?>#protocols"><?php echo nx_e('home.protocols.link'); ?><?php echo nx_icon('arrow-right'); ?></a>
-      </p>
-    </div>
-    <div class="ways__art reveal">
-      <?php require NX_INC . '/partials/route-finder.php'; ?>
-    </div>
+    <?php require NX_INC . '/partials/story.php'; ?>
   </div>
 </section>
+
 <!-- ============================ Exits =========================== -->
 <?php if ($nx_locations): ?>
 <section class="section section--alt" id="locations" aria-labelledby="h-locations">

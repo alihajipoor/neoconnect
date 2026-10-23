@@ -191,3 +191,66 @@ html[lang="fa"] .quote__text{font-weight:800;letter-spacing:0;line-height:1.45}
 .floater{transform:translateZ(70px)}
 @media (prefers-reduced-motion:reduce){.hero__mark,.showcase__scene{transform:none;transition:none}}
 .ways__head .h2,.secure__head .h2{font-size:clamp(34px,4.3vw,60px)}
+
+/* --------------------------------------------------------------- the story
+   inc/partials/story.php. The real apps, pinned, while four beats scroll
+   past; each beat is a view timeline and its screen fades in over the one
+   before when the beat reaches the middle (opacity only). Without
+   scroll-driven animations, or with reduced motion: the final screen and
+   four paragraphs -- nothing lost.                                    */
+.story{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:clamp(28px,5vw,80px);margin-top:clamp(8px,2vw,24px)}
+.story__beats{grid-column:1;grid-row:1;padding-block:8vh 22vh}
+.beat{position:relative;min-height:66vh;display:grid;align-content:center;gap:14px;padding-inline-start:26px}
+.beat::before{content:"";position:absolute;inset-inline-start:0;top:calc(50% - 60px);height:120px;width:2px;border-radius:2px;background:var(--brand-grad);opacity:.25}
+.beat__state{justify-self:start;display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 12px 0 10px;border-radius:999px;background:var(--muted-tint);color:var(--muted-ink);font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase}
+html[lang="fa"] .beat__state{font-size:13px;letter-spacing:0;text-transform:none}
+.beat__dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+.beat__state--connecting,.beat__state--checking{background:var(--hl-tint);color:var(--hl-ink)}
+.beat__state--connected{background:var(--ok-tint);color:var(--ok-ink)}
+.beat__title{font-family:var(--font-head);font-weight:700;font-size:clamp(30px,3.6vw,48px);letter-spacing:-.04em;line-height:1.02;text-wrap:balance}
+html[lang="fa"] .beat__title{font-weight:800;letter-spacing:0;line-height:1.45}
+.beat__body{color:var(--ink-2);font-size:clamp(16px,1.4vw,18.5px);max-width:42ch}
+.story__stage{grid-column:2;grid-row:1;margin:0}
+.story__pin{position:sticky;top:max(96px,calc(50vh - 280px));display:grid;justify-items:center}
+/* The desktop window, framed as a window; the phone stands in front. */
+.story__desk{position:relative;width:min(100%,680px);border-radius:16px;overflow:hidden;background:var(--solid-opaque);
+  box-shadow:0 0 0 1px var(--hairline-2),0 50px 100px -50px rgba(30,30,120,.55),0 30px 60px -40px rgba(0,0,0,.35)}
+.story__bar{display:flex;gap:6px;height:24px;align-items:center;padding-inline:12px;background:var(--glass-solid);border-bottom:1px solid var(--hairline)}
+.story__bar i{width:9px;height:9px;border-radius:50%;background:var(--hairline-2)}
+.story__screens{position:relative}
+.story__screens .shot{width:100%;height:auto}
+.story__screens .shot:not(.shot--1){position:absolute;inset:0}
+.story__screens .shot--1,.story__screens .shot--2,.story__screens .shot--3{opacity:0}
+.story__screens .shot--1{opacity:1}
+.story__phone{position:relative;margin-top:-42%;margin-inline-start:52%;width:min(36%,232px);padding:7px;border-radius:34px;background:linear-gradient(150deg,#3a4050,#0c0f17 40%,#1b2030);
+  box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.14),0 50px 90px -40px rgba(30,20,120,.6),0 24px 50px -30px rgba(0,0,0,.6)}
+.story__phone .story__screens{border-radius:28px;overflow:hidden}
+.story__caption{margin-top:18px;font-size:13px;color:var(--ink-2);text-align:center}
+/* No scroll timelines: show the end of the story -- connected, verified. */
+.story__screens .shot--4{opacity:1}
+@supports ((animation-timeline:view()) and (timeline-scope:--a)){
+  @media (prefers-reduced-motion:no-preference){
+    .story{timeline-scope:--b2,--b3,--b4}
+    .beat--2{view-timeline-name:--b2}.beat--3{view-timeline-name:--b3}.beat--4{view-timeline-name:--b4}
+    .story__screens .shot--2,.story__screens .shot--3,.story__screens .shot--4{opacity:0;animation:shot-in linear both;animation-range:entry 55% contain 15%}
+    .story__screens .shot--2{animation-timeline:--b2}.story__screens .shot--3{animation-timeline:--b3}.story__screens .shot--4{animation-timeline:--b4}
+    .beat::before{animation:beat-on linear both;animation-timeline:view();animation-range:cover 30% cover 70%}
+  }
+}
+@keyframes shot-in{from{opacity:0}to{opacity:1}}
+@keyframes beat-on{0%{opacity:.25;transform:scaleY(.4)}35%,65%{opacity:1;transform:none}100%{opacity:.25;transform:scaleY(.4)}}
+@media (max-width:900px){
+  /* One column: the phone stays pinned at the top while the beats pass
+     beneath it on glass. The window would be too small to read. */
+  .story{grid-template-columns:1fr}
+  .story__desk{display:none}
+  .story__stage{grid-column:1;grid-row:1}
+  .story__pin{top:84px}
+  .story__phone{margin:0;width:auto;height:min(52svh,520px);aspect-ratio:577/1281;padding:6px;border-radius:30px}
+  .story__phone .story__screens{height:100%;border-radius:25px}
+  .story__phone .shot{height:100%;width:100%;object-fit:cover}
+  .story__caption{display:none}
+  .story__beats{grid-column:1;grid-row:1;position:relative;z-index:2;padding-block:calc(52svh + 110px) 6vh}
+  .beat{min-height:70svh;align-content:end;padding:22px;margin-bottom:12px;border-radius:24px;background:var(--glass-solid);box-shadow:var(--edge),var(--drop)}
+  .beat::before{display:none}
+}
