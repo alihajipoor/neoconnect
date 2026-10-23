@@ -113,7 +113,7 @@
   color-scheme:dark;
   --base:#090B12; --pearl:#121620;
   --ink:#EEF1F7; --ink-2:#AFB8C9; --ink-3:#6E788C;
-  --cobalt:#2F5EFF; --cobalt-hover:#4A72FF; --cobalt-ink:#9DB6FF;
+  --cobalt:#2F5EFF; --cobalt-hover:#4A72FF; --cobalt-ink:#AFC4FF;
   --cobalt-shadow:rgba(47,94,255,.55);
   --select:rgba(80,124,255,.16); --select-row:rgba(255,255,255,.07);
   --hairline:rgba(255,255,255,.08); --hairline-2:rgba(255,255,255,.14);
@@ -510,7 +510,7 @@ html[lang="fa"] .site-footer__title{font-size:13px;letter-spacing:0;text-transfo
 /* On a phone the lights sit up and to the right of the title. */
 /* Right to left the title sits on the right, so the lights go left. */
 html[dir="rtl"] .world--page{transform:translateX(-82%)}
-@media (max-width:700px){.world--page{width:760px;top:90px;transform:translateX(-45%)}}
+@media (max-width:700px){.world--page{width:760px;top:6px;transform:translateX(-45%)}}
 @media (max-width:700px){html[dir="rtl"] .world--page{transform:translateX(-68%)}}
 @media (forced-colors:active){.map,.lamp,.world,.sky,.links{display:none}}
 
