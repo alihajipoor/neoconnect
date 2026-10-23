@@ -88,7 +88,7 @@ require NX_INC . '/partials/head.php';
     <p class="lede"><?php echo nx_e('home.hero.subtitle'); ?></p>
 
     <div class="hero__actions">
-      <a class="btn btn--primary btn--lg" href="<?php echo nx_esc(nx_url('download')); ?>">
+      <a class="btn btn--primary btn--lg btn--magnet" href="<?php echo nx_esc(nx_url('download')); ?>">
         <span><?php echo $nx_has_windows
             ? nx_e('home.hero.cta_primary')
             : nx_e('home.hero.cta_primary_soon'); ?></span>
@@ -161,32 +161,32 @@ require NX_INC . '/partials/head.php';
 <!-- ======================= Ways to connect ======================
      Described by what it does for the customer, never by name, port or
      transport -- see the note at the top of this file. -->
-<section class="section" id="protocols" aria-labelledby="h-protocols">
-  <div class="wrap">
-    <div class="section-head reveal">
+<section class="section ways" id="protocols" aria-labelledby="h-protocols">
+  <div class="wrap ways__inner">
+    <div class="ways__head reveal">
       <span class="eyebrow"><?php echo nx_e('home.protocols.eyebrow'); ?></span>
       <h2 class="h2" id="h-protocols"><?php echo nx_e('home.protocols.title'); ?></h2>
       <p class="lede"><?php echo nx_e('home.protocols.body'); ?></p>
     </div>
-
-    <div class="grid grid--3">
-      <?php
-      $nx_glyphs = array('layers', 'shuffle', 'shield-check');
-      foreach (array('point1', 'point2', 'point3') as $nx_i => $nx_key): ?>
-        <article class="card feature reveal">
-          <span class="ico"><?php echo nx_icon($nx_glyphs[$nx_i]); ?></span>
-          <h3><?php echo nx_e('home.protocols.' . $nx_key . '.title'); ?></h3>
-          <p><?php echo nx_e('home.protocols.' . $nx_key . '.body'); ?></p>
-        </article>
-      <?php endforeach; ?>
+    <div class="ways__steps reveal">
+      <ol class="steps-ed u-list-reset">
+        <?php foreach (array('point1', 'point2', 'point3') as $nx_i => $nx_key): ?>
+          <li>
+            <span class="steps-ed__n" aria-hidden="true"><?php echo nx_num(sprintf('%02d', $nx_i + 1)); ?></span>
+            <h3><?php echo nx_e('home.protocols.' . $nx_key . '.title'); ?></h3>
+            <p><?php echo nx_e('home.protocols.' . $nx_key . '.body'); ?></p>
+          </li>
+        <?php endforeach; ?>
+      </ol>
+      <p>
+        <a class="link" href="<?php echo nx_esc(nx_url('features')); ?>#protocols"><?php echo nx_e('home.protocols.link'); ?><?php echo nx_icon('arrow-right'); ?></a>
+      </p>
     </div>
-
-    <p class="u-mt-lg">
-      <a class="link" href="<?php echo nx_esc(nx_url('features')); ?>#protocols"><?php echo nx_e('home.protocols.link'); ?><?php echo nx_icon('arrow-right'); ?></a>
-    </p>
+    <div class="ways__art reveal">
+      <?php require NX_INC . '/partials/route-finder.php'; ?>
+    </div>
   </div>
 </section>
-
 <!-- ============================ Exits =========================== -->
 <?php if ($nx_locations): ?>
 <section class="section section--alt" id="locations" aria-labelledby="h-locations">
@@ -254,8 +254,8 @@ require NX_INC . '/partials/head.php';
 
 <!-- =========================== Security ========================= -->
 <section class="section section--alt" id="security" aria-labelledby="h-security">
-  <div class="wrap">
-    <div class="section-head reveal">
+  <div class="wrap secure">
+    <div class="section-head secure__head reveal">
       <span class="eyebrow"><?php echo nx_e('home.security.eyebrow'); ?></span>
       <h2 class="h2" id="h-security"><?php echo nx_e('home.security.title'); ?></h2>
       <p class="lede"><?php echo nx_e('home.security.body'); ?></p>
@@ -264,6 +264,7 @@ require NX_INC . '/partials/head.php';
     <?php /* The protected leg STOPS at our servers, because that is where a
              VPN's protection ends. Do not redraw this as one unbroken line
              to the internet. */ ?>
+    <div class="secure__body">
     <figure class="reveal">
       <div class="flow" role="img" aria-label="<?php echo nx_e('home.security.diagram.alt'); ?>">
         <div class="flow__node" aria-hidden="true"><span class="ico"><?php echo nx_icon('monitor'); ?></span><span><?php echo nx_e('home.security.diagram.you'); ?></span></div>
@@ -275,16 +276,19 @@ require NX_INC . '/partials/head.php';
       <figcaption class="flow__caption"><?php echo nx_e('home.security.diagram.caption'); ?></figcaption>
     </figure>
 
-    <div class="grid grid--3 u-mt-lg">
+    <ul class="ledger u-list-reset">
       <?php
       $nx_glyphs = array('shield-check', 'lock', 'file-off');
       foreach (array('point1', 'point2', 'point3') as $nx_i => $nx_key): ?>
-        <article class="card feature reveal">
+        <li class="reveal">
           <span class="ico"><?php echo nx_icon($nx_glyphs[$nx_i]); ?></span>
-          <h3><?php echo nx_e('home.security.' . $nx_key . '.title'); ?></h3>
-          <p><?php echo nx_e('home.security.' . $nx_key . '.body'); ?></p>
-        </article>
+          <div>
+            <h3><?php echo nx_e('home.security.' . $nx_key . '.title'); ?></h3>
+            <p><?php echo nx_e('home.security.' . $nx_key . '.body'); ?></p>
+          </div>
+        </li>
       <?php endforeach; ?>
+    </ul>
     </div>
   </div>
 </section>
@@ -301,7 +305,7 @@ require NX_INC . '/partials/head.php';
       <p class="lede"><?php echo nx_e('home.trust.body'); ?></p>
     </div>
 
-    <div class="grid grid--4">
+    <div class="bento">
       <?php
       $nx_trust = array('state' => 'shield-check', 'logs' => 'file-off', 'beta' => 'activity', 'honest' => 'route');
       foreach ($nx_trust as $nx_key => $nx_glyph): ?>
@@ -312,6 +316,18 @@ require NX_INC . '/partials/head.php';
         </article>
       <?php endforeach; ?>
     </div>
+  </div>
+</section>
+
+<!-- ============================ Quote ===========================
+     A sentence from the trust copy above, set large: the one idea the
+     product is built on. Ours, not a customer's -- there are no reviews. -->
+<section class="section quote" aria-label="<?php echo nx_e('home.quote.by'); ?>">
+  <div class="wrap">
+    <figure class="quote__fig reveal">
+      <blockquote><p class="quote__text"><?php echo nx_e('home.quote'); ?></p></blockquote>
+      <figcaption class="quote__by"><?php echo nx_e('home.quote.by'); ?></figcaption>
+    </figure>
   </div>
 </section>
 
@@ -410,7 +426,7 @@ require NX_INC . '/partials/head.php';
         </div>
       </div>
       <div class="close__actions">
-        <a class="btn btn--primary btn--lg" href="<?php echo nx_esc(nx_url('download')); ?>">
+        <a class="btn btn--primary btn--lg btn--magnet" href="<?php echo nx_esc(nx_url('download')); ?>">
           <span><?php echo nx_e('home.cta.button'); ?></span>
           <span class="icon-arrow"><?php echo nx_icon('arrow-right'); ?></span>
         </a>

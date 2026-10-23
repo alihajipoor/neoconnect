@@ -100,10 +100,6 @@ html[dir="rtl"] .phone{transform:rotateY(12deg) rotateX(4deg) rotateZ(-1deg)}
 .floater i{grid-column:2;font-style:normal;font-size:11.5px;color:var(--ink-2)}
 .floater__dot{grid-row:span 2;width:8px;height:8px;border-radius:50%;background:var(--brand-grad);box-shadow:0 0 10px rgba(34,211,238,.7)}
 .floater--1{left:2%;top:16%}.floater--2{right:0;top:30%}.floater--3{left:0;bottom:24%}.floater--4{right:4%;bottom:10%}
-@media (prefers-reduced-motion:no-preference){
-  .floater{animation:float 7s ease-in-out infinite}
-  .floater--2{animation-delay:-2s}.floater--3{animation-delay:-4s}.floater--4{animation-delay:-5.5s}
-}
 .artnote{position:relative;font-size:13px;color:var(--ink-2);text-align:center;max-width:46ch}
 @media (max-width:900px){.showcase__inner{grid-template-columns:1fr}}
 @media (max-width:520px){.floater{font-size:12px;padding:7px 10px}.floater i{display:none}.floater__dot{grid-row:auto}.floater--1{left:0;top:10%}.floater--2{top:26%}.floater--3{bottom:28%}.floater--4{bottom:8%}}
@@ -146,3 +142,52 @@ html[lang="fa"] .claim{letter-spacing:0;line-height:1.6}
 .close__actions{display:grid;gap:12px;justify-items:stretch;align-content:center}
 .close__mark{position:absolute;z-index:-1;width:min(340px,60vw);inset-inline-end:clamp(-120px,-6vw,-50px);bottom:-90px;opacity:.2;pointer-events:none;transform:rotate(-14deg)}
 .warnline{font-size:13.5px;color:var(--ink-2);text-align:center}
+
+/* --------------------------------------------------------------- layouts
+   Each section gets its own shape rather than another row of equal
+   cards: copy and the route finder at 5:7; a sticky title beside the
+   security story; a bento for what we will and will not claim; one
+   sentence set large before the prices.                               */
+.ways__inner{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);grid-template-areas:"head art" "steps art";column-gap:clamp(32px,6vw,96px);row-gap:28px;align-items:center}
+.ways__head{grid-area:head;display:grid;gap:20px;align-self:end}
+.ways__steps{grid-area:steps;display:grid;gap:20px;align-self:start}
+.ways__art{grid-area:art}
+@media (max-width:980px){.ways__inner{grid-template-columns:1fr;grid-template-areas:"head" "art" "steps"}}
+
+.secure{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:clamp(32px,6vw,96px);align-items:start}
+.secure__head{position:sticky;top:112px;margin-bottom:0}
+.secure__body{display:grid;gap:clamp(24px,3vw,40px)}
+@media (max-width:980px){.secure{grid-template-columns:1fr}.secure__head{position:static}}
+
+.bento{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr) minmax(0,1fr);gap:clamp(14px,1.6vw,20px)}
+.bento > :first-child{grid-row:span 2;display:grid;grid-template-rows:1fr auto auto;gap:16px}
+.bento > :first-child .ico{align-self:start}
+.bento > :first-child h3{font-family:var(--font-head);font-size:clamp(26px,2.6vw,36px);font-weight:700;letter-spacing:-.035em;line-height:1.08}
+html[lang="fa"] .bento > :first-child h3{letter-spacing:0;line-height:1.5}
+.bento > :first-child .ico{width:56px;height:56px;border-radius:18px}
+.bento > :nth-child(2){grid-column:span 2}
+@media (max-width:980px){.bento{grid-template-columns:1fr 1fr}.bento > :first-child{grid-row:auto;grid-column:span 2}}
+@media (max-width:640px){.bento{grid-template-columns:1fr}.bento > :first-child,.bento > :nth-child(2){grid-column:auto}}
+
+/* The one sentence, set as a display moment: big, ragged, off-centre,
+   with an opening mark in the accent. The product's own words. */
+.quote{padding-block:clamp(40px,6vw,96px)}
+.quote__fig{margin:0;margin-inline-start:clamp(0px,8vw,140px);max-width:1000px}
+.quote blockquote{margin:0;position:relative}
+.quote blockquote::before{content:"\201C";position:absolute;inset-inline-start:-.08em;top:-.62em;font-family:var(--font-head);font-weight:700;font-size:clamp(96px,12vw,180px);line-height:1;
+  background:var(--brand-grad);-webkit-background-clip:text;background-clip:text;color:transparent;opacity:.85;pointer-events:none}
+html[lang="fa"] .quote blockquote::before{content:"\00AB";top:-.5em}
+.quote__text{position:relative;font-family:var(--font-head);font-weight:700;font-size:clamp(34px,5.4vw,78px);letter-spacing:-.048em;line-height:1;text-wrap:balance}
+html[lang="fa"] .quote__text{font-weight:800;letter-spacing:0;line-height:1.45}
+.quote__by{display:flex;align-items:center;gap:12px;margin-top:26px;color:var(--ink-2);font-size:15px}
+.quote__by::before{content:"";width:36px;height:2px;border-radius:2px;background:var(--brand-grad)}
+
+/* --------------------------------------------------------------- tilt
+   The hero logo and the phone lean a little toward a fine pointer
+   (site.js sets --rx/--ry); the floating notes sit in front of the
+   phone in 3D, so they move a touch more. At rest everything is flat. */
+.hero__mark{transform:perspective(700px) rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg));transition:transform .6s var(--ease)}
+.showcase__scene{transform:perspective(1400px) rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg));transform-style:preserve-3d;transition:transform .7s var(--ease)}
+.floater{transform:translateZ(70px)}
+@media (prefers-reduced-motion:reduce){.hero__mark,.showcase__scene{transform:none;transition:none}}
+.ways__head .h2,.secure__head .h2{font-size:clamp(34px,4.3vw,60px)}
