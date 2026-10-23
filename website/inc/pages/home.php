@@ -185,6 +185,25 @@ require NX_INC . '/partials/head.php';
   </div>
 </section>
 
+<!-- ========================== Statement =========================
+     One line, set huge, sliding sideways as the page scrolls (scroll-driven,
+     transform only), over a slow ribbon of the countries with servers.
+     Countries only: never a city's server, an address or a route. -->
+<section class="band" aria-labelledby="h-band">
+  <h2 class="band__line" id="h-band"><span><?php echo nx_e('home.band.line'); ?></span></h2>
+  <?php if ($nx_locations): ?>
+  <div class="ribbon">
+    <?php for ($nx_r = 0; $nx_r < 4; $nx_r++): ?>
+      <ul class="ribbon__set u-list-reset"<?php echo $nx_r > 0 ? ' aria-hidden="true"' : ' aria-label="' . nx_e('home.band.countries') . '"'; ?>>
+        <?php foreach ($nx_locations as $nx_l): ?>
+          <li class="ribbon__item"><?php echo nx_flag_svg($nx_l['code']); ?><span><?php echo nx_esc(nx_pick($nx_l['country'])); ?></span></li>
+        <?php endforeach; ?>
+      </ul>
+    <?php endfor; ?>
+  </div>
+  <?php endif; ?>
+</section>
+
 <!-- ============================ Exits =========================== -->
 <?php if ($nx_locations): ?>
 <section class="section section--alt" id="locations" aria-labelledby="h-locations">

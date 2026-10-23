@@ -357,3 +357,34 @@ html[dir="rtl"] .widgets .ap__row--a .ap__knob,html[dir="rtl"] .widgets .ap__row
 @keyframes pl-a{0%,40%{opacity:1}48%,92%{opacity:0}100%{opacity:1}}
 @keyframes pl-b{0%,40%{opacity:0;transform:scale(.9)}48%,92%{opacity:1;transform:none}100%{opacity:0}}
 @keyframes tm-d{0%,40%{opacity:0}50%,90%{opacity:1}100%{opacity:0}}
+
+/* --------------------------------------------------------------- statement
+   One line, huge, that slides sideways with the scroll (view timeline,
+   transform only) -- and, beneath it, the countries with servers on a
+   ribbon that drifts slowly and stops under the pointer. Without
+   scroll timelines, or with reduced motion, the line is simply a large
+   heading and the ribbon a still row.                                 */
+.band{position:relative;overflow:hidden;padding-block:clamp(64px,9vw,140px);display:grid;gap:clamp(28px,4vw,56px)}
+.band__line{padding-inline:var(--gutter);font-family:var(--font-head);font-weight:700;font-size:clamp(44px,8vw,120px);letter-spacing:-.05em;line-height:1;text-align:center;text-wrap:balance}
+html[lang="fa"] .band__line{font-weight:800;letter-spacing:0;line-height:1.4}
+.band__line span{display:inline-block}
+@supports (animation-timeline:view()){
+  @media (prefers-reduced-motion:no-preference){
+    .band__line{font-size:clamp(64px,13vw,210px);white-space:nowrap;text-align:start;padding-inline:0}
+    .band__line span{animation:band-slide linear both;animation-timeline:view();animation-range:cover 0% cover 100%}
+    html[dir="rtl"] .band__line span{animation-name:band-slide-rtl}
+  }
+}
+@keyframes band-slide{from{transform:translateX(30vw)}to{transform:translateX(calc(-100% + 40vw))}}
+@keyframes band-slide-rtl{from{transform:translateX(-30vw)}to{transform:translateX(calc(100% - 40vw))}}
+.ribbon{display:flex;width:max-content;direction:ltr}
+.ribbon__set{display:flex;gap:14px;padding-inline-end:14px}
+.ribbon__item{display:inline-flex;align-items:center;gap:12px;height:56px;padding:0 20px 0 14px;border-radius:999px;background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop),inset 0 0 0 1px var(--hairline);font-weight:600;white-space:nowrap}
+html[dir="rtl"] .ribbon__item{direction:rtl}
+.ribbon__item .fl{width:30px;height:21px}
+@media (prefers-reduced-motion:no-preference){
+  .ribbon{animation:ribbon 48s linear infinite}
+  .ribbon:hover{animation-play-state:paused}
+}
+@media (prefers-reduced-motion:reduce){.ribbon{width:auto;flex-wrap:wrap;justify-content:center;padding-inline:var(--gutter)}.ribbon__set[aria-hidden]{display:none}}
+@keyframes ribbon{to{transform:translateX(-25%)}}

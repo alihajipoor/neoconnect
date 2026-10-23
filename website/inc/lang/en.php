@@ -862,4 +862,6 @@ return array(
     'widgets.place.line' => 'The Windows app marks each country by how it has done on your network, so the next connection starts from what worked.',
     'widgets.theme.title' => 'Light or dark',
     'widgets.theme.line' => 'Both apps come in light and dark.',
+    'home.band.line' => 'Made for networks that fight back.',
+    'home.band.countries' => 'Countries with Neoxify servers',
 );
