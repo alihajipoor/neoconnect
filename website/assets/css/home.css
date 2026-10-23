@@ -2,30 +2,58 @@
    Home page only.
    ========================================================================== */
 
-/* --------------------------------------------------------------- hero */
-.hero{position:relative;overflow:hidden;padding-top:calc(74px + clamp(36px,5vw,72px));padding-bottom:clamp(32px,5vw,64px)}
-.hero__inner{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,1fr);gap:clamp(28px,4vw,64px);align-items:center}
-.hero__copy{display:grid;gap:22px;align-content:start;position:relative;z-index:2}
-.hero__kicker{display:inline-flex;align-items:center;gap:10px;justify-self:start}
-/* The tagline, set exactly as the app sets it: Inter Tight 700, tight,
-   one line per sentence. The kicker inside the h1 carries the words a
-   search engine needs ("VPN") without changing the look. */
-.hero__title{display:grid;gap:14px}
-.hero__title .tagline{display:block;font-family:var(--font-head);font-weight:700;font-size:clamp(44px,7.2vw,92px);letter-spacing:-.05em;line-height:.96}
-.hero__title .tagline span{display:block}
-html[lang="fa"] .hero__title .tagline{font-size:clamp(40px,6.4vw,80px);font-weight:800;letter-spacing:0;line-height:1.3}
-.hero__title .kicker{display:block;font-family:var(--font-ui);font-size:13px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--cobalt-ink)}
+/* --------------------------------------------------------------- hero
+   Centred on the glass logo. Behind it, from the back: the aurora (base
+   .sky), the dotted world with its lights and light lines (.world--hero),
+   the logo's own halo and two slow orbits. Only transform and opacity
+   move, and nothing that paints the first screen's text animates in.   */
+.hero{position:relative;isolation:isolate;overflow:hidden;padding-top:calc(74px + clamp(28px,4vw,56px));padding-bottom:clamp(24px,3vw,48px);text-align:center}
+.hero__inner{position:relative;display:grid;justify-items:center;gap:22px}
+.world--hero{top:140px;left:50%;width:clamp(820px,90vw,1320px);transform:translateX(-41%);
+  -webkit-mask-image:radial-gradient(56% 64% at 52% 36%,#000 34%,transparent 80%);mask-image:radial-gradient(56% 64% at 52% 36%,#000 34%,transparent 80%)}
+.world--hero .lamp{width:12px;height:12px;margin:-6px 0 0 -6px}
+@media (max-width:700px){.world--hero{width:820px;top:220px}}
+
+/* The mark: the app's glass logo, a soft halo of the brand's light, and
+   two thin orbits, each carrying one bead of light round it. */
+.hero__mark{position:relative;width:clamp(116px,12vw,168px);aspect-ratio:1;margin-block:clamp(8px,1.6vw,22px) 4px}
+.hero__mark::before{content:"";position:absolute;inset:-70%;border-radius:50%;background:radial-gradient(closest-side,var(--glow-1),var(--glow-2) 42%,transparent 72%);opacity:.9}
+.hero__logo{position:relative;width:100%;height:100%;filter:drop-shadow(0 18px 30px rgba(60,40,160,.28))}
+.orbit{position:absolute;inset:-26%;border-radius:50%;box-shadow:inset 0 0 0 1px var(--orbit)}
+.orbit::after{content:"";position:absolute;top:50%;left:-4px;width:8px;height:8px;margin-top:-4px;border-radius:50%;background:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,.18),0 0 14px 3px rgba(34,211,238,.55)}
+.orbit--2{inset:-50%;opacity:.75}
+.orbit--2::after{top:auto;bottom:14%;left:auto;right:6%;background:var(--violet);box-shadow:0 0 0 3px rgba(139,92,246,.18),0 0 14px 3px rgba(139,92,246,.55)}
+@media (prefers-reduced-motion:no-preference){
+  .hero__mark::before{animation:breathe 7s ease-in-out infinite}
+  .hero__mark .logo{animation:float 8s ease-in-out infinite}
+  .hero__mark .orbit{animation:spin 26s linear infinite}
+  .hero__mark .orbit--2{animation-duration:48s;animation-direction:reverse}
+}
+@keyframes breathe{0%,100%{opacity:.75;transform:scale(.94)}50%{opacity:1;transform:scale(1.04)}}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+@keyframes spin{to{transform:rotate(1turn)}}
+
+/* The tagline, set as the app sets it: Inter Tight 700, tight, one line
+   per sentence, the second in the brand's light. The kicker inside the h1
+   carries the words a search engine needs ("VPN"). */
+.hero__title{display:grid;gap:16px;justify-items:center}
+.hero__title .tagline{display:block;font-family:var(--font-head);font-weight:700;font-size:clamp(46px,7.6vw,104px);letter-spacing:-.055em;line-height:.94}
+.hero__title .tagline span{display:block;padding-bottom:.04em}
+html[lang="fa"] .hero__title .tagline{font-size:clamp(40px,6.8vw,88px);font-weight:800;letter-spacing:0;line-height:1.32}
+.hero__title .kicker{display:block;font-family:var(--font-ui);font-size:13px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--cobalt-ink)}
 html[lang="fa"] .hero__title .kicker{font-family:var(--font-fa);font-size:15px;letter-spacing:0;text-transform:none}
-.hero .lede{font-size:clamp(17px,1.5vw,19.5px);max-width:52ch}
-.hero__actions{display:flex;flex-wrap:wrap;gap:12px}
-.hero__note{display:flex;gap:10px;align-items:flex-start;font-size:14px;color:var(--ink-2);max-width:56ch}
+.hero .lede{font-size:clamp(17px,1.6vw,20px);max-width:60ch;margin-inline:auto}
+.hero__actions{display:flex;flex-wrap:wrap;justify-content:center;gap:12px;margin-top:4px}
+.hero .chips{justify-content:center;max-width:760px}
+.hero__note{display:flex;gap:10px;align-items:flex-start;justify-content:center;font-size:14px;color:var(--ink-2);max-width:62ch;text-align:start}
 .hero__note svg{width:18px;height:18px;flex:none;margin-top:2px;color:var(--ink-2)}
-@media (max-width:980px){.hero__inner{grid-template-columns:1fr}.hero__art{max-width:620px;justify-self:center;width:100%}}
+@media (max-width:600px){.hero__actions .btn{flex:1 1 100%}.hero .chips .chip{font-size:13px}}
 
 /* --------------------------------------------------------------- announcement
    Hidden before the first paint for anyone who dismissed it (the loader
    adds .ann-off), so hiding it never moves the page.                    */
-.announce{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px 12px;justify-self:start;max-width:100%;padding:8px 8px 8px 10px;border-radius:20px;background:var(--solid);box-shadow:var(--edge),0 8px 20px -14px rgba(20,40,90,.35);font-size:14px;line-height:1.45}
+.announce{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px 12px;max-width:min(100%,640px);padding:8px 8px 8px 10px;border-radius:20px;text-align:start;
+  background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--edge),0 12px 30px -18px rgba(40,40,120,.4);font-size:14px;line-height:1.45}
 .announce .tag svg{width:14px;height:14px}
 .announce__text{min-width:0;color:var(--ink-2)}
 @media (max-width:640px){.announce{grid-template-columns:minmax(0,1fr) auto;padding:10px 8px 12px 12px}.announce .tag{justify-self:start}.announce__x{grid-row:1;grid-column:2}.announce__text{grid-column:1/-1}}
@@ -36,50 +64,49 @@ html[lang="fa"] .hero__title .kicker{font-family:var(--font-fa);font-size:15px;l
 .ann-off [data-announce]{display:none}
 html[lang="fa"] .announce{line-height:1.8}
 
-/* --------------------------------------------------------------- the art
-   The dotted world with the exit lights, and the app floating over it.
-   Drawn in HTML and CSS from the app's own tokens: it follows the theme
-   and the language, and it is one text alternative for a screen reader. */
-.hero__art{position:relative;margin:0}
-/* Geography is physical: the map, the lights on it and the card that
-   must not cover them are placed with physical left/top in both
-   directions. The lights sit in the map's upper right (Europe to
-   Singapore); the card floats over its lower left (the Atlantic and
-   Africa, where there are no lights). */
-.hero__stage{position:relative;padding-top:clamp(150px,13vw,190px);direction:ltr}
-.hero__stage .map{position:absolute;top:0;width:200%;left:-62%;-webkit-mask-image:radial-gradient(52% 64% at 58% 30%,#000 42%,transparent 78%);mask-image:radial-gradient(52% 64% at 58% 30%,#000 42%,transparent 78%)}
-.hero__stage .lamp{width:12px;height:12px;margin:-6px 0 0 -6px}
-.hero__stage .lamp--here{width:16px;height:16px;margin:-8px 0 0 -8px}
-.hero__stage .mock{direction:inherit}
-html[dir="rtl"] .hero__stage .mock{direction:rtl}
-@media (max-width:980px){.hero__stage{max-width:520px;margin-inline:auto;padding-top:clamp(140px,40vw,200px)}.hero__stage .map{width:200%;left:-70%}.hero__stage .mock{margin-inline:auto}}
-
-.mock{position:relative;width:min(100%,430px);padding:22px;border-radius:30px;display:grid;gap:16px;z-index:1}
-.mock .status{justify-self:start}
-.mock__top{display:flex;align-items:center;justify-content:space-between}
-.mock__word{font-size:12px;font-weight:500;letter-spacing:.42em;color:var(--ink);direction:ltr}
-.mock__avatar{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--select);color:var(--cobalt-ink);font-size:13px;font-weight:700}
-.mock__timer{font-family:var(--font-ui);font-size:clamp(40px,5vw,52px);font-weight:400;letter-spacing:-.025em;line-height:1;font-variant-numeric:tabular-nums;direction:ltr;text-align:start}
-html[lang="fa"] .mock__timer{font-family:var(--font-fa);font-variant-numeric:normal}
-.mock__hint{font-size:14.5px;line-height:1.55;color:var(--ink-2);max-width:32ch}
-html[lang="fa"] .mock__hint{line-height:1.85}
-.mock__sub{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-2)}
-.mock__sub svg{width:16px;height:16px}
-.mock__sub b{color:var(--ink);font-weight:600}
-.mock__pill{display:flex;align-items:center;justify-content:space-between;height:52px;padding:0 22px;border-radius:999px;background:var(--cobalt);color:#fff;font-weight:600;box-shadow:0 16px 30px -16px var(--cobalt-shadow)}
-.mock__pill svg{width:18px;height:18px}
-.mock__row{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:18px;background:var(--select-row);box-shadow:var(--edge)}
-.mock__row .fl{width:34px;height:24px;border-radius:6px}
-.mock__row b{display:block;font-size:15px;font-weight:600;line-height:1.3}
-.mock__row i{display:block;font-style:normal;font-size:13px;color:var(--ink-2)}
-.mock__row .go{margin-inline-start:auto;display:grid;place-items:center;width:36px;height:36px;border-radius:50%;background:var(--chip-bg);box-shadow:inset 0 0 0 1px var(--hairline-2)}
-.mock__row .go svg{width:16px;height:16px}
-.mock__meters{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.mock__meter{padding:12px 14px;border-radius:16px;background:var(--select-row);box-shadow:var(--edge)}
-.mock__meter i{display:block;font-style:normal;font-size:12px;color:var(--ink-2)}
-.mock__meter b{display:block;font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;direction:ltr;text-align:start}
-.artnote{position:relative;z-index:1;margin-top:14px;font-size:12.5px;color:var(--ink-2);text-align:center}
-@media (max-width:420px){.mock{padding:16px;gap:12px;border-radius:26px}}
+/* --------------------------------------------------------------- the app
+   A real screenshot in a phone, tilted in space, with methods it carries
+   floating round it as glass tags. As it scrolls into view it turns to
+   face you (scroll-driven, transform only).                            */
+.showcase{padding-top:clamp(16px,3vw,40px)}
+.showcase__inner{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:clamp(32px,6vw,96px);align-items:center}
+.showcase__copy{display:grid;gap:20px;align-content:start}
+.showcase__stage{margin:0;display:grid;justify-items:center;gap:18px}
+.showcase__scene{position:relative;display:grid;place-items:center;width:100%;padding-block:clamp(16px,3vw,40px);perspective:1600px}
+.showcase__glow{position:absolute;left:50%;top:50%;width:min(560px,120%);aspect-ratio:1;transform:translate(-50%,-50%);border-radius:50%;
+  background:radial-gradient(closest-side,var(--glow-1),var(--glow-2) 45%,transparent 72%);opacity:.75;pointer-events:none}
+.orbit--stage{inset:auto;left:50%;top:50%;width:min(470px,104%);aspect-ratio:1;transform:translate(-50%,-50%)}
+.orbit--stage::after{top:22%;left:8%}
+.phone{position:relative;width:clamp(232px,23vw,300px);padding:9px;border-radius:46px;
+  background:linear-gradient(150deg,#3a4050,#0c0f17 40%,#1b2030);
+  box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.14),inset 0 2px 0 rgba(255,255,255,.18),0 60px 120px -50px rgba(40,30,140,.65),0 30px 60px -30px rgba(0,0,0,.55);
+  transform:rotateY(-12deg) rotateX(4deg) rotateZ(1deg)}
+html[dir="rtl"] .phone{transform:rotateY(12deg) rotateX(4deg) rotateZ(-1deg)}
+.phone__shot{width:100%;height:auto;aspect-ratio:1080/1920;border-radius:37px;background:var(--pearl)}
+.phone::after{content:"";position:absolute;inset:9px;border-radius:37px;pointer-events:none;background:linear-gradient(125deg,rgba(255,255,255,.22),transparent 34%)}
+@supports (animation-timeline:view()){
+  @media (prefers-reduced-motion:no-preference){
+    .phone{animation:face linear both;animation-timeline:view();animation-range:entry 10% cover 50%}
+    html[dir="rtl"] .phone{animation-name:face-rtl}
+  }
+}
+@keyframes face{from{transform:rotateY(-28deg) rotateX(12deg) rotateZ(3deg) translateY(40px)}to{transform:rotateY(-8deg) rotateX(3deg) rotateZ(.5deg)}}
+@keyframes face-rtl{from{transform:rotateY(28deg) rotateX(12deg) rotateZ(-3deg) translateY(40px)}to{transform:rotateY(8deg) rotateX(3deg) rotateZ(-.5deg)}}
+/* The floating tags: physical placement round the phone (a picture, not
+   reading order), each bobbing on its own beat. */
+.floater{position:absolute;display:grid;grid-template-columns:auto auto;align-items:center;column-gap:8px;padding:9px 14px 9px 12px;border-radius:16px;text-align:start;
+  background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--edge),0 18px 36px -18px rgba(30,30,110,.45);font-size:13px;line-height:1.3;white-space:nowrap}
+.floater b{font-weight:600}
+.floater i{grid-column:2;font-style:normal;font-size:11.5px;color:var(--ink-2)}
+.floater__dot{grid-row:span 2;width:8px;height:8px;border-radius:50%;background:var(--brand-grad);box-shadow:0 0 10px rgba(34,211,238,.7)}
+.floater--1{left:2%;top:16%}.floater--2{right:0;top:30%}.floater--3{left:0;bottom:24%}.floater--4{right:4%;bottom:10%}
+@media (prefers-reduced-motion:no-preference){
+  .floater{animation:float 7s ease-in-out infinite}
+  .floater--2{animation-delay:-2s}.floater--3{animation-delay:-4s}.floater--4{animation-delay:-5.5s}
+}
+.artnote{position:relative;font-size:13px;color:var(--ink-2);text-align:center;max-width:46ch}
+@media (max-width:900px){.showcase__inner{grid-template-columns:1fr}}
+@media (max-width:520px){.floater{font-size:12px;padding:7px 10px}.floater i{display:none}.floater__dot{grid-row:auto}.floater--1{left:0;top:10%}.floater--2{top:26%}.floater--3{bottom:28%}.floater--4{bottom:8%}}
 
 /* --------------------------------------------------------------- method cards */
 .specimens{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:clamp(12px,1.4vw,18px)}
@@ -87,8 +114,10 @@ html[lang="fa"] .mock__hint{line-height:1.85}
 @media (max-width:600px){.specimens{grid-template-columns:1fr}}
 .spec{display:flex;flex-direction:column;gap:10px;padding:22px 20px 20px}
 .spec__top{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.spec__no{font-size:13px;font-weight:600;color:var(--ink-2);font-variant-numeric:tabular-nums}
-.spec__wave{height:36px;margin-block:2px 4px;color:var(--cobalt)}
+/* The number, large, in the brand's light: the card's one flourish. */
+.spec__no{font-family:var(--font-head);font-size:34px;font-weight:700;letter-spacing:-.04em;line-height:1;font-variant-numeric:tabular-nums}
+.spec__wave{height:36px;margin-block:2px 4px;color:var(--violet)}
+:root[data-theme="dark"] .spec__wave{color:var(--cyan)}
 .spec__wave svg{width:100%;height:100%}
 .spec h3{font-size:19px;font-weight:600;letter-spacing:-.01em}
 html[lang="fa"] .spec h3{letter-spacing:0}
@@ -177,7 +206,7 @@ html[dir="rtl"] .sw input:checked ~ .sw__track::after{transform:translateX(-20px
 
 /* --------------------------------------------------------------- answers */
 .answers{display:grid;gap:10px}
-.ans{display:grid;grid-template-columns:44px minmax(0,1fr) minmax(0,1.4fr);gap:8px 22px;align-items:baseline;padding:20px 22px;border-radius:var(--r-card);background:var(--solid);box-shadow:var(--edge)}
+.ans{position:relative;display:grid;grid-template-columns:44px minmax(0,1fr) minmax(0,1.4fr);gap:8px 22px;align-items:baseline;padding:22px 24px;border-radius:var(--r-card);background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop)}
 .ans .n{font-size:13px;font-weight:600;color:var(--ink-2);font-variant-numeric:tabular-nums}
 .claim{position:relative;justify-self:start;font-family:var(--font-head);font-size:clamp(19px,2vw,23px);font-weight:700;letter-spacing:-.02em;color:var(--ink-2);line-height:1.25}
 html[lang="fa"] .claim{letter-spacing:0;line-height:1.6}
@@ -190,7 +219,10 @@ html[lang="fa"] .claim{letter-spacing:0;line-height:1.6}
 @media (max-width:760px){.ans{grid-template-columns:32px 1fr}.say{grid-column:2}}
 
 /* --------------------------------------------------------------- close */
-.close{position:relative;overflow:hidden;display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:clamp(24px,4vw,56px);align-items:center;padding:clamp(28px,5vw,64px);border-radius:32px}
+/* The closing card: glass over a pool of the brand's light, with the
+   logo large and half out of the card, as if it rose out of it. */
+.close{position:relative;isolation:isolate;overflow:hidden;display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:clamp(24px,4vw,56px);align-items:center;padding:clamp(30px,5.4vw,72px);border-radius:36px}
+.close::after{content:"";position:absolute;z-index:-1;inset:auto -20% -60% 30%;height:120%;border-radius:50%;background:radial-gradient(closest-side,var(--glow-1),var(--glow-2) 45%,transparent 72%);opacity:.55;pointer-events:none}
 @media (max-width:900px){.close{grid-template-columns:1fr}}
 .close__copy{display:grid;gap:16px}
 .close-list{display:grid;gap:10px;margin-top:6px}
@@ -198,5 +230,5 @@ html[lang="fa"] .claim{letter-spacing:0;line-height:1.6}
 .close-list b{white-space:nowrap}
 .close-list span{color:var(--ink-2)}
 .close__actions{display:grid;gap:12px;justify-items:stretch;align-content:center}
-.close__ring{position:absolute;z-index:-1;width:min(380px,70vw);inset-inline-end:-110px;top:-130px;opacity:.75;pointer-events:none}
+.close__mark{position:absolute;z-index:-1;width:min(340px,60vw);inset-inline-end:clamp(-120px,-6vw,-50px);bottom:-90px;opacity:.28;pointer-events:none;transform:rotate(-14deg)}
 .warnline{font-size:13.5px;color:var(--ink-2);text-align:center}

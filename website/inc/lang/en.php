@@ -890,4 +890,13 @@ return array(
 
     'delete.or' => 'or',
     'download.platforms_heading' => 'Choose your platform',
+    // 2026-10 rework: the theme switch and the app showcase.
+    'theme.dark' => 'Dark theme',
+    'home.app.eyebrow' => 'The app',
+    'home.app.title' => 'Everything happens in one app',
+    'home.app.body' => 'Sign up, choose a plan, pick where you come out and get help, all inside the app. Before it says Connected, it checks that your traffic really flows.',
+    'home.app.caption' => 'The Android app, connected. A real screenshot; the account, usage and address on it are examples.',
+    'home.app.alt' => 'Screenshot of the Neoxify Android app, connected to Germany over Stealth Web, with a Disconnect button below a dotted world map.',
+    'home.app.alt_dark' => 'Screenshot of the Neoxify Android app in its dark theme, connected to Germany over Stealth Web, with a Disconnect button below a dotted world map.',
+    'home.app.link' => 'Everything the app does',
 );

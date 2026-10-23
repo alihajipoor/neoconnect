@@ -6,7 +6,9 @@
  * order answers a buyer's questions in the order they arrive, and is kept
  * from the 2026-08 "Ladder" rebuild:
  *
- *   hero        what it is -- the app's own tagline over the dotted world
+ *   hero        what it is -- the glass logo and the app's own tagline, over
+ *               the aurora and the dotted world with its light lines
+ *   app         the real app, in a phone (a real screenshot, captioned)
  *   simulator   the one genuinely distinctive thing, made playable
  *   methods     each connection method, what it is, when to pick it
  *   exits       where your traffic comes out (the map and the list)
@@ -37,131 +39,128 @@ $nx_protocols = nx_protocols();
 $nx_locations = nx_locations();
 $nx_relay = nx_relay_location();
 
-// The illustration connects to Germany over Stealth, because both exist:
-// read from the content files so it can never name a place or a method
-// the product does not have.
-$nx_mock_loc = null;
-foreach ($nx_locations as $nx_l) {
-    if ($nx_l['code'] === 'de') {
-        $nx_mock_loc = $nx_l;
-    }
+// Floating beside the phone: methods the ANDROID app carries (the phone is
+// the Android app), read from the content file so it can never name one the
+// product -- or that platform -- does not have.
+// Four, spread across the list so they are not all one family.
+$nx_android = array_values(array_filter($nx_protocols, function ($p) {
+    return !empty($p['android']);
+}));
+$nx_float = array();
+$nx_fn = count($nx_android);
+for ($nx_i = 0; $nx_i < min(4, $nx_fn); $nx_i++) {
+    $nx_float[] = $nx_android[$nx_fn <= 4 ? $nx_i : (int) round($nx_i * ($nx_fn - 1) / 3)];
 }
-if ($nx_mock_loc === null && $nx_locations) {
-    $nx_mock_loc = $nx_locations[0];
-}
-$nx_mock_proto = $nx_protocols ? $nx_protocols[0] : null;
 
-// Every listed country gets a light; the connected one in the illustration
-// is drawn larger. The relay entry is a ring, not a light: it is a way in.
-$nx_lamp_codes = array();
-foreach ($nx_locations as $nx_l) {
-    $nx_lamp_codes[] = strtolower($nx_l['code']);
-}
+/* The app screenshots: real Android screens (Play listing, 1080 x 1920),
+   resized to three widths. One per theme; CSS shows the matching one and a
+   lazy image that is not displayed is never fetched. */
+$nx_shot = function ($variant) {
+    $set = array();
+    foreach (array(300, 450, 600) as $w) {
+        $set[] = nx_asset('img/app/connected-' . $variant . '-' . $w . '.webp') . ' ' . $w . 'w';
+    }
+    return array('src' => nx_asset('img/app/connected-' . $variant . '-450.webp'), 'srcset' => implode(', ', $set));
+};
 
 require NX_INC . '/partials/head.php';
 ?>
 
-<!-- ============================ Hero ============================ -->
+<!-- ============================ Hero ============================
+     Centred on the app's glass logo, over the living background: the
+     aurora (head.php), the dotted world, its lights and the light lines.
+     Nothing on the first screen animates in, so the largest paint is
+     never held back. -->
 <section class="hero">
+  <?php echo nx_world('hero'); ?>
   <div class="wrap hero__inner">
+    <?php require NX_INC . '/partials/announcement.php'; ?>
 
-    <div class="hero__copy">
-      <?php require NX_INC . '/partials/announcement.php'; ?>
-
-      <?php /* One h1: the kicker carries the words a search needs ("VPN",
-               "filtered networks"); the tagline is the app's own, set as
-               the app sets it. */ ?>
-      <h1 class="hero__title">
-        <span class="kicker"><?php echo nx_e('home.hero.kicker'); ?></span>
-        <span class="tagline">
-          <span><?php echo nx_e('home.hero.tagline_1'); ?></span>
-          <span><?php echo nx_e('home.hero.tagline_2'); ?></span>
-        </span>
-      </h1>
-
-      <p class="lede"><?php echo nx_e('home.hero.subtitle'); ?></p>
-
-      <div class="hero__actions">
-        <a class="btn btn--primary btn--lg" href="<?php echo nx_esc(nx_url('download')); ?>">
-          <span><?php echo $nx_has_windows
-              ? nx_e('home.hero.cta_primary')
-              : nx_e('home.hero.cta_primary_soon'); ?></span>
-          <span class="icon-arrow"><?php echo nx_icon('arrow-right'); ?></span>
-        </a>
-        <a class="btn btn--ghost btn--lg" href="<?php echo nx_esc(nx_url('pricing')); ?>"><?php echo nx_e('home.hero.cta_secondary'); ?></a>
-      </div>
-
-      <div class="chips">
-        <span class="chip"><span class="dot" aria-hidden="true"></span><?php echo nx_e('home.hero.chip_locations'); ?></span>
-        <span class="chip"><span class="dot" aria-hidden="true"></span><?php echo nx_e('home.hero.chip_noconfig'); ?></span>
-        <?php if (nx_beta()): ?>
-          <span class="chip"><span class="dot dot--warn" aria-hidden="true"></span><?php echo nx_e('beta.hero'); ?></span>
-        <?php endif; ?>
-      </div>
-
-      <?php /* The unsigned-installer and platform note. It stays until there
-               is a signing certificate. */ ?>
-      <p class="hero__note">
-        <?php echo nx_icon('info'); ?>
-        <span><?php echo $nx_has_windows
-            ? nx_e('home.hero.note_available')
-            : nx_e('home.hero.note_soon'); ?></span>
-      </p>
+    <div class="hero__mark" aria-hidden="true">
+      <span class="orbit"></span>
+      <span class="orbit orbit--2"></span>
+      <?php echo nx_logo('hero__logo'); ?>
     </div>
 
-    <?php /*
-      The art: the dotted world with a light on every listed exit country,
-      and the app floating over it, drawn in HTML from the app's own tokens
-      so it follows the theme and the language. One text alternative for
-      the whole figure; its parts are hidden from assistive technology.
-    */ ?>
-    <figure class="hero__art">
-     <div class="hero__stage" role="img" aria-label="<?php echo nx_e('home.mockup.alt'); ?>">
-      <div class="map" aria-hidden="true">
-        <?php foreach ($nx_lamp_codes as $nx_cc): ?>
-          <span class="lamp lamp--<?php echo nx_esc($nx_cc); ?><?php
-            echo ($nx_mock_loc && $nx_cc === strtolower($nx_mock_loc['code'])) ? ' lamp--here' : ''; ?>"></span>
-        <?php endforeach; ?>
-        <?php if ($nx_relay): ?>
-          <span class="lamp lamp--entry lamp--<?php echo nx_esc(strtolower($nx_relay['code'])); ?>"></span>
-        <?php endif; ?>
-      </div>
+    <?php /* One h1: the kicker carries the words a search needs ("VPN",
+             "filtered networks"); the tagline is the app's own. */ ?>
+    <h1 class="hero__title">
+      <span class="kicker"><?php echo nx_e('home.hero.kicker'); ?></span>
+      <span class="tagline">
+        <span><?php echo nx_e('home.hero.tagline_1'); ?></span>
+        <span class="grad"><?php echo nx_e('home.hero.tagline_2'); ?></span>
+      </span>
+    </h1>
 
-      <div class="mock glass" aria-hidden="true">
-        <div class="mock__top">
-          <span class="mock__word">NEOXIFY</span>
-          <span class="mock__avatar">Y</span>
+    <p class="lede"><?php echo nx_e('home.hero.subtitle'); ?></p>
+
+    <div class="hero__actions">
+      <a class="btn btn--primary btn--lg" href="<?php echo nx_esc(nx_url('download')); ?>">
+        <span><?php echo $nx_has_windows
+            ? nx_e('home.hero.cta_primary')
+            : nx_e('home.hero.cta_primary_soon'); ?></span>
+        <span class="icon-arrow"><?php echo nx_icon('arrow-right'); ?></span>
+      </a>
+      <a class="btn btn--ghost btn--lg" href="<?php echo nx_esc(nx_url('pricing')); ?>"><?php echo nx_e('home.hero.cta_secondary'); ?></a>
+    </div>
+
+    <div class="chips">
+      <span class="chip"><span class="dot" aria-hidden="true"></span><?php echo nx_e('home.hero.chip_locations'); ?></span>
+      <span class="chip"><span class="dot" aria-hidden="true"></span><?php echo nx_e('home.hero.chip_noconfig'); ?></span>
+      <?php if (nx_beta()): ?>
+        <span class="chip"><span class="dot dot--warn" aria-hidden="true"></span><?php echo nx_e('beta.hero'); ?></span>
+      <?php endif; ?>
+    </div>
+
+    <?php /* The unsigned-installer and platform note. It stays until there
+             is a signing certificate. */ ?>
+    <p class="hero__note">
+      <?php echo nx_icon('info'); ?>
+      <span><?php echo $nx_has_windows
+          ? nx_e('home.hero.note_available')
+          : nx_e('home.hero.note_soon'); ?></span>
+    </p>
+  </div>
+</section>
+
+<!-- ============================ The app =========================
+     A real screenshot of the Android app, in a phone, captioned as one:
+     the account, usage and address on it are a demo account's. -->
+<section class="section showcase" aria-labelledby="h-app">
+  <div class="wrap showcase__inner">
+    <div class="showcase__copy reveal">
+      <span class="eyebrow"><?php echo nx_e('home.app.eyebrow'); ?></span>
+      <h2 class="h2" id="h-app"><?php echo nx_e('home.app.title'); ?></h2>
+      <p class="lede"><?php echo nx_e('home.app.body'); ?></p>
+      <ul class="checklist">
+        <?php foreach (array('home.config.point1', 'home.config.point3', 'home.trust.state.title') as $nx_pt): ?>
+          <li><?php echo nx_icon('check'); ?><span><?php echo nx_e($nx_pt); ?></span></li>
+        <?php endforeach; ?>
+      </ul>
+      <p><a class="link" href="<?php echo nx_esc(nx_url('features')); ?>"><?php echo nx_e('home.app.link'); ?><?php echo nx_icon('arrow-right'); ?></a></p>
+    </div>
+
+    <figure class="showcase__stage">
+      <div class="showcase__scene">
+        <span class="showcase__glow" aria-hidden="true"></span>
+        <span class="orbit orbit--stage" aria-hidden="true"></span>
+        <div class="phone">
+          <?php foreach (array('light' => 'l', 'dark' => 'd') as $nx_v => $nx_cls): $nx_img = $nx_shot($nx_v); ?>
+            <img class="phone__shot only-<?php echo $nx_v; ?>" src="<?php echo nx_esc($nx_img['src']); ?>"
+                 srcset="<?php echo nx_esc($nx_img['srcset']); ?>" sizes="(max-width: 600px) 232px, 282px"
+                 width="1080" height="1920" loading="lazy" decoding="async"
+                 alt="<?php echo nx_e($nx_v === 'dark' ? 'home.app.alt_dark' : 'home.app.alt'); ?>">
+          <?php endforeach; ?>
         </div>
-        <span class="status"><?php echo nx_icon('check'); ?><?php echo nx_e('home.mockup.connected'); ?></span>
-        <div>
-          <p class="mock__timer"><?php echo nx_esc(nx_num('01:42:08')); ?></p>
-          <p class="mock__hint"><?php echo nx_e('home.mockup.status'); ?></p>
-        </div>
-        <?php if ($nx_mock_proto): ?>
-          <p class="mock__sub"><?php echo nx_icon('shuffle'); ?><span><?php
-            echo str_replace(':method', '<b>' . nx_e_pick($nx_mock_proto['label']) . '</b>', nx_e('home.mockup.using')); ?></span></p>
-        <?php endif; ?>
-        <span class="mock__pill"><span><?php echo nx_e('home.mockup.disconnect'); ?></span><span class="mirror"><?php echo nx_icon('arrow-right'); ?></span></span>
-        <?php if ($nx_mock_loc): ?>
-          <div class="mock__row">
-            <?php echo nx_flag_svg($nx_mock_loc['code']); ?>
-            <span>
-              <b><?php echo nx_e_pick($nx_mock_loc['country']); ?></b>
-              <i><?php echo $nx_mock_proto ? nx_e_pick($nx_mock_proto['label']) : ''; ?><?php
-                echo !empty($nx_mock_loc['city']) ? ' &middot; ' . nx_e_pick($nx_mock_loc['city']) : ''; ?></i>
-            </span>
-            <span class="go"><?php echo nx_icon('shuffle'); ?></span>
-          </div>
-        <?php endif; ?>
-        <?php if ($nx_mock_proto): ?>
-          <div class="mock__meters">
-            <div class="mock__meter"><i><?php echo nx_e('home.mockup.method'); ?></i><b><?php echo nx_esc($nx_mock_proto['tech']); ?></b></div>
-            <div class="mock__meter"><i><?php echo nx_e('home.mockup.transport'); ?></i><b><?php echo nx_esc($nx_mock_proto['transport']); ?></b></div>
-          </div>
-        <?php endif; ?>
+        <?php foreach ($nx_float as $nx_i => $nx_p): ?>
+          <span class="floater floater--<?php echo $nx_i + 1; ?>" aria-hidden="true">
+            <span class="floater__dot"></span>
+            <b><?php echo nx_e_pick($nx_p['label']); ?></b>
+            <i data-ltr><?php echo nx_esc($nx_p['tech']); ?></i>
+          </span>
+        <?php endforeach; ?>
       </div>
-     </div>
-      <figcaption class="artnote"><?php echo nx_e('home.mockup.note'); ?></figcaption>
+      <figcaption class="artnote"><?php echo nx_e('home.app.caption'); ?></figcaption>
     </figure>
   </div>
 </section>
@@ -209,7 +208,7 @@ require NX_INC . '/partials/head.php';
       ?>
         <li class="spec card reveal">
           <div class="spec__top">
-            <span class="spec__no" data-ltr><?php echo nx_num(sprintf('%02d', $nx_n)); ?></span>
+            <span class="spec__no grad" data-ltr><?php echo nx_num(sprintf('%02d', $nx_n)); ?></span>
             <span class="tag tag--<?php echo $nx_tag; ?>"><span class="d" aria-hidden="true"></span><?php echo nx_e($nx_tag_key); ?></span>
           </div>
           <span class="spec__wave" aria-hidden="true">
@@ -259,14 +258,7 @@ require NX_INC . '/partials/head.php';
         <?php /* The list beside it is the information; the map only shows
                  where those places sit. Anchors are one city per country,
                  for display -- never a server's location or address. */ ?>
-        <div class="map" aria-hidden="true">
-          <?php foreach ($nx_lamp_codes as $nx_cc): ?>
-            <span class="lamp lamp--<?php echo nx_esc($nx_cc); ?>"></span>
-          <?php endforeach; ?>
-          <?php if ($nx_relay): ?>
-            <span class="lamp lamp--entry lamp--<?php echo nx_esc(strtolower($nx_relay['code'])); ?>"></span>
-          <?php endif; ?>
-        </div>
+        <?php echo nx_world('plain'); ?>
         <p class="legend">
           <span><i aria-hidden="true"></i><?php echo nx_e('home.locations.legend_exit'); ?></span>
           <?php if ($nx_relay): ?>
@@ -471,7 +463,7 @@ require NX_INC . '/partials/head.php';
 <section class="section" aria-labelledby="h-close">
   <div class="wrap">
     <div class="close glass reveal">
-      <span class="close__ring" aria-hidden="true"><?php echo nx_glass_ring(); ?></span>
+      <span class="close__mark" aria-hidden="true"><?php echo nx_logo(); ?></span>
       <div class="close__copy">
         <span class="eyebrow"><?php echo nx_e('home.close.eyebrow'); ?></span>
         <h2 class="h2" id="h-close"><?php echo nx_e('home.cta.title'); ?></h2>
