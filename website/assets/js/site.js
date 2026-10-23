@@ -237,8 +237,9 @@
     $$(".btn--magnet").forEach(function (btn) {
       btn.addEventListener("pointermove", onFrame(function (ev) {
         var r = btn.getBoundingClientRect();
-        btn.style.setProperty("--bx", ((ev.clientX - r.left - r.width / 2) * 0.12).toFixed(1) + "px");
-        btn.style.setProperty("--by", ((ev.clientY - r.top - r.height / 2) * 0.25).toFixed(1) + "px");
+        var cap = function (v) { return Math.max(-6, Math.min(6, v)).toFixed(1) + "px"; };
+        btn.style.setProperty("--bx", cap((ev.clientX - r.left - r.width / 2) * 0.12));
+        btn.style.setProperty("--by", cap((ev.clientY - r.top - r.height / 2) * 0.25));
       }));
       btn.addEventListener("pointerleave", function () {
         btn.style.setProperty("--bx", "0px");
