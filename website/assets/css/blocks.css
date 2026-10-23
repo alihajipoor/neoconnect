@@ -213,6 +213,7 @@ html[lang="fa"] .prose h2{letter-spacing:0;line-height:1.6}
 /* --------------------------------------------------------------- 404 */
 .lost{position:relative;padding-top:calc(74px + clamp(56px,9vw,110px));padding-bottom:clamp(40px,6vw,80px)}
 .lost__inner{margin-inline:auto;text-align:center;justify-items:center}
+.lost .world{opacity:.45}
 .lost__code{font-family:var(--font-head);font-weight:700;font-size:clamp(84px,16vw,180px);letter-spacing:-.06em;line-height:.9;
   background:linear-gradient(120deg,var(--accent-a),var(--accent-b));-webkit-background-clip:text;background-clip:text;color:transparent}
 

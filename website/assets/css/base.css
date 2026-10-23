@@ -111,7 +111,7 @@
 :root[data-theme="dark"]{
   color-scheme:dark;
   --base:#090B12; --pearl:#121620;
-  --ink:#EEF1F7; --ink-2:#A9B2C4; --ink-3:#6E788C;
+  --ink:#EEF1F7; --ink-2:#AFB8C9; --ink-3:#6E788C;
   --cobalt:#2F5EFF; --cobalt-hover:#4A72FF; --cobalt-ink:#9DB6FF;
   --cobalt-shadow:rgba(47,94,255,.55);
   --select:rgba(80,124,255,.16); --select-row:rgba(255,255,255,.07);
@@ -138,7 +138,7 @@
   --accent-a:#b69cff; --accent-b:#5fe1f2;
   --aur-1:rgba(139,92,246,.34); --aur-2:rgba(34,211,238,.17); --aur-3:rgba(47,94,255,.26);
   --grid:rgba(255,255,255,.04);
-  --card-a:rgba(30,36,52,.74); --card-b:rgba(15,19,29,.70);
+  --card-a:rgba(30,36,52,.82); --card-b:rgba(15,19,29,.78);
   --card-rim:linear-gradient(160deg,rgba(255,255,255,.22),rgba(255,255,255,.04) 40%,rgba(139,92,246,.30) 80%,rgba(34,211,238,.32));
   --card-drop:0 1px 2px rgba(0,0,0,.4),0 30px 60px -28px rgba(0,0,0,.85);
   --slab-a:rgba(24,29,44,.66); --slab-b:rgba(14,17,26,.10); --slab-rim:rgba(255,255,255,.08);
@@ -194,6 +194,12 @@ html[dir="rtl"] .lane .nm i,html[dir="rtl"] .proto__tech,html[dir="rtl"] .ro b{t
 .logo--d,.only-dark{display:var(--show-d)}
 
 /* --------------------------------------------------------------- layout */
+/* The world, the glows and the phone scene are wider than a phone on
+   purpose; none of it may make the page scroll sideways (in a right-to-left
+   page that overflow would even be scrollable). clip, where supported,
+   does not make main a scroll container. */
+main{overflow-x:hidden}
+@supports (overflow-x:clip){main{overflow-x:clip}}
 .wrap{width:100%;max-width:calc(var(--wrap) + 2 * var(--gutter));margin-inline:auto;padding-inline:var(--gutter)}
 .wrap--prose{max-width:calc(820px + 2 * var(--gutter))}
 .section{position:relative;isolation:isolate;padding-block:clamp(64px,8vw,120px)}
