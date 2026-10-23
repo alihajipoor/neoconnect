@@ -3,7 +3,7 @@ import { login } from "@shared/lib/auth";
 import { useI18n } from "@shared/lib/i18n";
 import { failureText, type ShownFailure } from "@shared/lib/failure-text";
 import { useStillTrying } from "@shared/lib/still-trying";
-import { SocialSignIn } from "@shared/components/SocialSignIn";
+import { SocialSignIn, type PortalSocial } from "./SocialSignIn";
 import { useRelayMode } from "@shared/components/BackupRoute";
 import { CardHead } from "./AuthShell";
 import { Message, PasswordField, PrimaryButton, TextButton, TextField } from "./controls";
@@ -16,9 +16,10 @@ import { useCopy } from "./copy";
  * login() (with its proof of work and its forty-six-second deadline), the
  * same routing of an unverified account to the code screen, the same
  * still-trying line past eight seconds, the same note during a declared
- * intranet, the same social sign-in block (which the web cannot complete,
- * so it renders nothing here). Only the markup is the portal's.
- * auth-screens.wiring.test.ts holds the two together.
+ * intranet, social sign-in above the form leading where a password
+ * sign-in does. Only the markup is the portal's, and the social block,
+ * which on the web leaves the page and comes back (./SocialSignIn.tsx).
+ * auth-screens.test.tsx holds the two together.
  */
 export function PortalLogin({
   onSuccess,
@@ -26,12 +27,15 @@ export function PortalLogin({
   onGoRegister,
   onGoForgotPassword,
   notice,
+  social,
 }: {
   onSuccess: () => void;
   onNeedsVerification: (email: string, password: string) => void;
   onGoRegister: () => void;
   onGoForgotPassword: () => void;
   notice?: string | null;
+  /** A Google or Facebook sign-in the page came back from, if any. */
+  social?: PortalSocial;
 }) {
   const { t } = useI18n();
   const copy = useCopy();
@@ -73,7 +77,7 @@ export function PortalLogin({
       ) : null}
       {/* A social sign-in lands straight on the account: the provider has
           already vouched for the address. */}
-      <SocialSignIn onSuccess={onSuccess} disabled={pending} />
+      <SocialSignIn social={social} from="login" onSuccess={onSuccess} disabled={pending} />
       {/* method="post": if a script ever failed to take the submit, the
           browser must not fall back to a GET that puts the password in
           the address bar, the history and the server's log. */}

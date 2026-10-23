@@ -553,6 +553,25 @@ export async function socialSignIn(
   return result;
 }
 
+/** The web portal's end of a Google or Facebook sign-in: the page came
+ * back from the provider with a handoff code, and holds the verifier of
+ * the PKCE pair it left with (apps/web-portal/src/auth/social-web.ts).
+ *
+ * Everything after the provider trip is socialSignIn()'s, unchanged: the
+ * same exchange, the cache cleared before the tokens are stored, the same
+ * attempt report. The portal has no browser of its own to wait on -- it
+ * WAS the browser, and left -- so it cannot call socialSignIn() itself. */
+export async function collectSocialHandoff(code: string, verifier: string): Promise<ApiResult<TokenPair>> {
+  const trace = newTrace();
+  const result = await exchangeHandoff(code, verifier, trace);
+  if (result.ok) {
+    clearGamingProfileCache();
+    await setTokens(result.data);
+  }
+  reportAuth("SIGN_IN", result, trace);
+  return result;
+}
+
 /** What a backend from before the PKCE binding says to an exchange that
  * carries a verifier: its validation forbids any property its DTO does
  * not declare, and that refusal is worded by class-validator, not by us.

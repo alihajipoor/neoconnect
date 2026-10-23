@@ -1,6 +1,8 @@
-import { Component, Suspense, lazy, useEffect, useLayoutEffect, useState, type ReactNode } from "react";
+import { Component, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { getTokens } from "@shared/lib/session";
 import { AuthShell, type AuthScreen } from "./auth/AuthShell";
+import { takeSocialReturn, tripOf, type SocialReturn } from "./auth/social-web";
+import type { PortalSocial } from "./auth/SocialSignIn";
 import { PortalLogin } from "./auth/PortalLogin";
 import { PortalRegister } from "./auth/PortalRegister";
 import { PortalVerifyEmail } from "./auth/PortalVerifyEmail";
@@ -97,13 +99,29 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
   const [pendingAuth, setPendingAuth] = useState<{ email: string; password?: string } | null>(null);
   const [loginNotice, setLoginNotice] = useState<string | null>(null);
-  const [voucher] = useState<string | null>(() => takeFromUrl("voucher"));
+  // Back from Google or Facebook (auth/social-web.ts). First, because it
+  // takes the fragment out of the address, which takeFromUrl() below
+  // would otherwise write away unread.
+  const [socialReturn] = useState<SocialReturn>(() => takeSocialReturn());
+  const carried = tripOf(socialReturn);
+  // A voucher or a chosen plan survives the trip to the provider: it went
+  // out with the trip and comes back with it.
+  const [voucher] = useState<string | null>(() => takeFromUrl("voucher") ?? carried?.voucher ?? null);
   // Set by the website's pricing buttons (nx_buy_url). Someone who has
   // already picked a plan and pressed Buy must not be dropped back onto
   // a list of plans -- that is the moment a sale is lost.
-  const [wantsPlans] = useState<boolean>(() => takeFromUrl("plan") !== null);
+  const [wantsPlans] = useState<boolean>(() => takeFromUrl("plan") !== null || carried?.plan === true);
+  const social: PortalSocial = useMemo(
+    () => ({ returned: socialReturn, carry: { voucher, plan: wantsPlans } }),
+    [socialReturn, voucher, wantsPlans],
+  );
 
   useEffect(() => {
+    // Mid sign-in: the screen it left from finishes it, or says why not.
+    if (socialReturn.kind !== "none") {
+      setScreen(carried?.screen ?? "login");
+      return;
+    }
     getTokens()
       .then((tokens) => {
         if (!tokens) return setScreen("login");
@@ -114,7 +132,7 @@ export default function App() {
         setScreen(voucher || wantsPlans ? "plans" : "account");
       })
       .catch(() => setScreen("login"));
-  }, [voucher, wantsPlans]);
+  }, [voucher, wantsPlans, socialReturn, carried]);
 
   function goToVerify(email: string, password: string) {
     setPendingAuth({ email, password });
@@ -167,18 +185,18 @@ export default function App() {
         onGoRegister={() => setScreen("register")}
         onGoForgotPassword={() => setScreen("forgot")}
         notice={loginNotice}
+        social={social}
       />
     );
   } else if (screen === "register") {
     content = (
       <PortalRegister
         onNeedsVerification={goToVerify}
-        // Unreachable here: the only path to it is a provider sign-in,
-        // and the portal offers none. Wired to the same handler Login
-        // uses rather than left to throw, so the day the web flow does
-        // exist this is already correct.
+        // A Google or Facebook sign-up: the account exists and is signed
+        // in, so it goes where a sign-in goes.
         onSuccess={afterAuth}
         onGoLogin={() => setScreen("login")}
+        social={social}
       />
     );
   } else if (screen === "forgot") {

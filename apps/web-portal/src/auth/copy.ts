@@ -40,6 +40,26 @@ export const COPY = {
     // A signed-in screen whose file did not arrive (App.tsx).
     loadFailed: "Could not load this page. Reload to try again.",
     reload: "Reload",
+    // Google and Facebook sign-in (SocialSignIn.tsx). `{provider}` is
+    // nameGoogle or nameFacebook.
+    nameGoogle: "Google",
+    nameFacebook: "Facebook",
+    socialSlow:
+      "Still waiting for {provider} to open. If it does not, it may be blocked on this network (Facebook is blocked in Iran, for example). Sign in with your email instead.",
+    socialNotFinished:
+      "The {provider} sign-in was not finished. If a page did not load on the way, it may be blocked on this network (Facebook is blocked in Iran, for example). Sign in with your email, or try again on another connection.",
+    socialExpired: "That sign-in took too long and has expired. Please try again.",
+    socialDisabled: "This Neoxify account is disabled. If you think this is a mistake, contact support.",
+    socialExists:
+      "An account with this email already exists. Sign in with your password to finish setting it up.",
+    socialUnverified:
+      "Your {provider} account has not verified its email address. Verify it with {provider}, or sign up with your email instead.",
+    socialNoEmail:
+      "That {provider} account has no email address. Neoxify needs one for your subscription and support messages, so please sign up with your email instead.",
+    socialLost:
+      "This sign-in came back to a different tab or browser from the one it started in, so it could not be finished here. Please start it again on this page.",
+    socialUnsafe:
+      "This browser cannot keep a {provider} sign-in safe on its way out and back. Sign in with your email, or try another browser.",
   },
   fa: {
     taglineWide1: "اینترنت شما.",
@@ -62,6 +82,23 @@ export const COPY = {
     titleVerify: "تأیید ایمیل",
     loadFailed: "این صفحه بارگذاری نشد. برای تلاش دوباره، صفحه را دوباره بارگذاری کنید.",
     reload: "بارگذاری دوباره",
+    nameGoogle: "گوگل",
+    nameFacebook: "فیسبوک",
+    socialSlow:
+      "هنوز منتظر باز شدن {provider} هستیم. اگر باز نشد، ممکن است در این شبکه مسدود باشد (برای نمونه فیسبوک در ایران مسدود است). به‌جای آن با ایمیل خود وارد شوید.",
+    socialNotFinished:
+      "ورود با {provider} کامل نشد. اگر صفحه‌ای در این مسیر باز نشد، ممکن است در این شبکه مسدود باشد (برای نمونه فیسبوک در ایران مسدود است). با ایمیل خود وارد شوید یا با اتصال دیگری دوباره تلاش کنید.",
+    socialExpired: "مهلت این ورود به پایان رسید. لطفاً دوباره تلاش کنید.",
+    socialDisabled: "این حساب نئوکسیفای غیرفعال شده است. اگر فکر می‌کنید اشتباهی رخ داده، با پشتیبانی تماس بگیرید.",
+    socialExists: "حسابی با این ایمیل از قبل وجود دارد. برای تکمیل راه‌اندازی آن، با رمز عبور خود وارد شوید.",
+    socialUnverified:
+      "ایمیل حساب {provider} شما تأیید نشده است. آن را در {provider} تأیید کنید، یا به‌جای آن با ایمیل خود ثبت‌نام کنید.",
+    socialNoEmail:
+      "حساب {provider} شما نشانی ایمیل ندارد. نئوکسیفای برای پیام‌های اشتراک و پشتیبانی به ایمیل نیاز دارد؛ لطفاً با ایمیل خود ثبت‌نام کنید.",
+    socialLost:
+      "این ورود به برگه یا مرورگری غیر از آنچه در آن آغاز شده بود برگشت و نمی‌توان آن را اینجا کامل کرد. لطفاً دوباره از همین صفحه شروع کنید.",
+    socialUnsafe:
+      "این مرورگر نمی‌تواند ورود با {provider} را در مسیر رفت و برگشت ایمن نگه دارد. با ایمیل خود وارد شوید یا مرورگر دیگری را امتحان کنید.",
   },
 } satisfies Record<Language, Record<string, string>>;
 

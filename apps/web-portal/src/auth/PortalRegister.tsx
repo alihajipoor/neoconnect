@@ -4,7 +4,7 @@ import { useI18n } from "@shared/lib/i18n";
 import { failureText, type ShownFailure } from "@shared/lib/failure-text";
 import { useStillTrying } from "@shared/lib/still-trying";
 import { relayModeActive } from "@shared/lib/last-resort";
-import { SocialSignIn } from "@shared/components/SocialSignIn";
+import { SocialSignIn, type PortalSocial } from "./SocialSignIn";
 import { RecoveryCodeNotice } from "@shared/components/BackupRoute";
 import { CardHead, RecoveryStep } from "./AuthShell";
 import { Message, PasswordField, PrimaryButton, SecondaryButton, TextButton, TextField } from "./controls";
@@ -27,6 +27,7 @@ export function PortalRegister({
   onSuccess,
   onGoLogin,
   onRelaySignedUp,
+  social,
 }: {
   onNeedsVerification: (email: string, password: string) => void;
   /** A provider sign-up ends with a usable session; the password form
@@ -36,6 +37,8 @@ export function PortalRegister({
   /** Where a backup-route sign-up goes once its recovery code is saved.
    * Falls back to `onSuccess`. */
   onRelaySignedUp?: () => void;
+  /** A Google or Facebook sign-up the page came back from, if any. */
+  social?: PortalSocial;
 }) {
   const { t } = useI18n();
   const copy = useCopy();
@@ -168,7 +171,7 @@ export function PortalRegister({
   return (
     <>
       <CardHead title={t("auth.createAccount")} lead={t("auth.noCardRequired")} />
-      <SocialSignIn onSuccess={onSuccess} disabled={pending} />
+      <SocialSignIn social={social} from="register" onSuccess={onSuccess} disabled={pending} />
       <form onSubmit={handleSubmit} method="post" className="pa-form">
         <TextField
           id="email"
