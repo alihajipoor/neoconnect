@@ -65,3 +65,56 @@ export function GlassMark({ className }: { className?: string }) {
     </picture>
   );
 }
+
+/* --- Sign-in providers ----------------------------------------------------
+   The marks as each brand publishes them, the same paths as the apps'
+   BrandIcons.tsx (apps/desktop-windows/src/components). Both brands set
+   binding rules for them:
+
+   - Google's "G" is never recoloured: its four colours are the mark, on
+     a light button or a dark one alike.
+   - Facebook's "f" logo is the blue circle with the "f" in white. The
+     apps draw the circle in currentColor with the "f" cut out, which on
+     a dark card shows the card through it; here a white disc sits
+     behind, so the "f" is white on either. Never the blue on a coloured
+     button, never another blue.
+
+   Fill attributes, not style attributes: the page's style-src has
+   nothing to refuse. Decorative, since the button says the name. */
+
+export function GoogleMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" className={className}>
+      <path
+        fill="#4285F4"
+        d="M23.52 12.273c0-.851-.076-1.67-.218-2.455H12v4.642h6.458a5.52 5.52 0 0 1-2.396 3.622v3.01h3.878c2.269-2.089 3.58-5.165 3.58-8.819"
+      />
+      <path
+        fill="#34A853"
+        d="M12 24c3.24 0 5.956-1.075 7.94-2.908l-3.877-3.01c-1.075.72-2.45 1.145-4.063 1.145-3.126 0-5.772-2.111-6.716-4.948H1.276v3.109A11.995 11.995 0 0 0 12 24"
+      />
+      <path
+        fill="#FBBC05"
+        d="M5.284 14.279A7.212 7.212 0 0 1 4.909 12c0-.791.136-1.56.375-2.279V6.612H1.276A11.995 11.995 0 0 0 0 12c0 1.937.464 3.769 1.276 5.388l4.008-3.109Z"
+      />
+      <path
+        fill="#EA4335"
+        d="M12 4.773c1.762 0 3.344.605 4.587 1.794l3.442-3.442C17.951 1.19 15.235 0 12 0 7.31 0 3.255 2.689 1.276 6.612l4.008 3.109C6.228 6.884 8.874 4.773 12 4.773"
+      />
+    </svg>
+  );
+}
+
+const FACEBOOK_BLUE = "#0866FF";
+
+export function FacebookMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" className={className}>
+      <circle cx="12" cy="12.073" r="11.8" fill="#ffffff" />
+      <path
+        fill={FACEBOOK_BLUE}
+        d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073"
+      />
+    </svg>
+  );
+}

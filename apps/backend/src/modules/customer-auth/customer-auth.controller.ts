@@ -38,7 +38,13 @@ import { LoginDto } from "../auth/dto/login.dto";
 import { SocialLoginDto } from "./dto/social-login.dto";
 import { SocialExchangeDto } from "./dto/social-exchange.dto";
 import { SocialAuthService } from "./social/social-auth.service";
-import { OauthFlowService, PKCE_CHALLENGE, type BrowserProvider } from "./social/oauth-flow.service";
+import {
+  OauthFlowService,
+  PKCE_CHALLENGE,
+  socialClient,
+  webErrorCode,
+  type BrowserProvider,
+} from "./social/oauth-flow.service";
 import { RefreshDto } from "../auth/dto/refresh.dto";
 import { VerifyEmailDto } from "./dto/verify-email.dto";
 import { VerifyEmailCodeDto } from "./dto/verify-email-code.dto";
@@ -163,6 +169,11 @@ export class CustomerAuthController {
    * The app opens this in a browser rather than calling it, so there is
    * nothing to return -- it is a redirect, and the app never sees the
    * provider's authorization code at all. See OauthFlowService.
+   *
+   * `client=web` is the web portal, which is sent back to its own page
+   * rather than the app's scheme (OauthFlowService.finishUrl). Any other
+   * value is refused here, before anything is stored: there is no
+   * destination it could safely mean.
    */
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Get("social/:provider/start")
@@ -170,19 +181,23 @@ export class CustomerAuthController {
     @Param("provider") providerParam: string,
     @Query("locale") locale: string | undefined,
     // The app's PKCE challenge; see OauthFlowService.consumeHandoff.
-    // Optional until every released client sends one.
+    // Optional until every released client sends one; required from the
+    // web portal.
     @Query("challenge") challenge: string | undefined,
+    @Query("client") clientParam: string | undefined,
     @Res() res: Response,
   ) {
+    const client = socialClient(clientParam);
+    if (client === null) throw new BadRequestException("Unknown sign-in client");
     const provider = this.browserProvider(providerParam);
-    if (challenge !== undefined && !PKCE_CHALLENGE.test(challenge)) {
+    if ((challenge !== undefined && !PKCE_CHALLENGE.test(challenge)) || (client === "web" && challenge === undefined)) {
       // Only a broken client sends this. Back to the app with an error
       // rather than into a flow whose handoff nothing could collect.
-      res.redirect(this.oauthFlow.appCallback({ error: "invalid" }));
+      res.redirect(this.oauthFlow.finishUrl(client, { error: "invalid" }));
       return;
     }
     try {
-      res.redirect(this.oauthFlow.start(provider, locale ?? "en", challenge));
+      res.redirect(this.oauthFlow.start(provider, locale ?? "en", challenge, client));
     } catch {
       // Almost always a provider with no credentials configured. Letting
       // the exception through would render Nest's JSON error page inside
@@ -190,7 +205,7 @@ export class CustomerAuthController {
       // dismiss it -- which the app reads as a cancellation and reports
       // as nothing at all. So the button would appear to do nothing.
       // Bouncing straight back to the app turns that into a message.
-      res.redirect(this.oauthFlow.appCallback({ error: "unavailable" }));
+      res.redirect(this.oauthFlow.finishUrl(client, { error: "unavailable" }));
     }
   }
 
@@ -211,15 +226,17 @@ export class CustomerAuthController {
     @Res() res: Response,
   ) {
     const provider = this.browserProvider(providerParam);
+    // The app or the web portal, as the flow's state says.
+    const client = this.oauthFlow.clientOf(state);
 
     // The customer pressed Cancel on the consent screen. Not an error
     // to report, just a flow that ended.
     if (providerError) {
-      res.redirect(this.oauthFlow.appCallback({ error: "cancelled" }));
+      res.redirect(this.oauthFlow.finishUrl(client, { error: "cancelled" }));
       return;
     }
     if (!code || !state) {
-      res.redirect(this.oauthFlow.appCallback({ error: "invalid" }));
+      res.redirect(this.oauthFlow.finishUrl(client, { error: "invalid" }));
       return;
     }
 
@@ -237,9 +254,17 @@ export class CustomerAuthController {
       if (created) await this.customerAuthService.onSocialSignup(customer.id);
       const tokens = await this.customerAuthService.issueTokenPair(customer);
       res.redirect(
-        this.oauthFlow.appCallback({ handoff: this.oauthFlow.storeHandoff(tokens, pending.challenge) }),
+        this.oauthFlow.finishUrl(pending.client, {
+          handoff: this.oauthFlow.storeHandoff(tokens, pending.challenge, pending.client),
+        }),
       );
     } catch (err) {
+      if (client === "web") {
+        // A short code the portal words in the visitor's own language,
+        // in place of the apps' English sentence.
+        res.redirect(this.oauthFlow.finishUrl("web", { error: webErrorCode(err) }));
+        return;
+      }
       // resolveCustomer refuses for reasons the customer can act on --
       // a disabled account, an unverified password account with the
       // same address, a provider account with no email. Those messages

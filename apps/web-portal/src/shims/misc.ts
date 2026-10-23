@@ -93,9 +93,9 @@ export async function check(): Promise<Update | null> {
 //
 // social-auth.ts imports this lazily to catch the neoconnect:// callback
 // at the end of a provider sign-in. Nothing in a browser can register a
-// custom scheme, so the portal never takes that path --
-// availableSocialProviders() returns nothing here and the buttons are
-// not rendered at all.
+// custom scheme, so the portal never takes that path: the shared buttons
+// are not rendered here (availableSocialProviders() returns nothing), and
+// the portal's own (src/auth/SocialSignIn.tsx) come back to its page.
 //
 // It exists anyway because the import is resolved at build time even
 // though it is never executed, and an unresolvable one fails the bundle

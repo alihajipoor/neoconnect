@@ -654,6 +654,76 @@ html[lang="fa"] .pa-hint {
   border-color: var(--pa-field-line);
 }
 
+/* Google and Facebook (SocialSignIn.tsx): the neutral pill, not the cobalt
+   one -- "Sign in" is the primary, and the brand's own mark carries the
+   recognition. Stacked, full width, so neither name is cut short. */
+.pa-social {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pa-social-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.pa-soc {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 46px;
+  padding: 0 18px;
+  border: 1px solid var(--pa-hairline-2);
+  border-radius: 999px;
+  background: var(--pa-chip);
+  color: var(--pa-ink);
+  font: inherit;
+  font-size: 14.5px;
+  font-weight: 600;
+  transition:
+    border-color 160ms ease,
+    transform 300ms var(--pa-spring);
+}
+.pa-soc:hover:not(:disabled) {
+  border-color: var(--pa-field-line);
+}
+.pa-soc:active:not(:disabled) {
+  transform: scale(0.985);
+}
+.pa-soc:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+.pa-soc[aria-busy="true"] {
+  cursor: progress;
+  opacity: 1;
+}
+.pa-soc-mark {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+.pa-spin-ink {
+  border-color: var(--pa-hairline-2);
+  border-top-color: var(--pa-ink);
+}
+.pa-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--pa-ink-2);
+  font-size: 13px;
+}
+.pa-or::before,
+.pa-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--pa-hairline-2);
+}
+
 .pa-link {
   display: inline;
   padding: 2px 2px;

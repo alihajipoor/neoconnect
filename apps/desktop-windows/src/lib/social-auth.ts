@@ -60,12 +60,11 @@ export const isMobile = (): boolean => isAndroid() || isIOS();
  * is the Tauri runtime that provides the native sheet on mobile and the
  * deep-link listener on desktop, and this asks for exactly that.
  *
- * Social sign-in on the web is a real gap rather than a decision. It
- * needs a second, https redirect target and a server that will send the
- * session to it, which is more than a stand-in here could honestly be.
- * Until then the buttons are not rendered, on the same principle Apple
- * is hidden off iOS: a button that opens a flow we cannot finish is
- * worse than no button.
+ * The portal offers Google and Facebook through its own component
+ * (apps/web-portal/src/auth/SocialSignIn.tsx), which leaves the page for
+ * the provider and is sent back to https://neoxify.net/account/ instead
+ * (`client=web` at the server's /start). This shared one stays empty
+ * there.
  */
 const hasNativeRuntime = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;

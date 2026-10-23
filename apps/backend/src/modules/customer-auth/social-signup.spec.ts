@@ -21,10 +21,11 @@ describe("social sign-in grants a new account what verification would", () => {
       resolveCustomer: jest.fn().mockResolvedValue({ customer, created }),
     };
     const oauth = {
-      consumeState: jest.fn().mockReturnValue({ provider: "google", locale: "en" }),
+      consumeState: jest.fn().mockReturnValue({ provider: "google", locale: "en", client: "app" }),
       exchangeCode: jest.fn().mockResolvedValue("provider-token"),
       storeHandoff: jest.fn().mockReturnValue("handoff"),
-      appCallback: jest.fn().mockReturnValue("neoconnect://done"),
+      clientOf: jest.fn().mockReturnValue("app"),
+      finishUrl: jest.fn().mockReturnValue("neoconnect://done"),
     };
     const controller = new CustomerAuthController(
       auth as unknown as CustomerAuthService,
