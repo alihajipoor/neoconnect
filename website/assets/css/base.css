@@ -381,6 +381,7 @@ html[lang="fa"] .brand__beta{font-size:12px;letter-spacing:0}
   .site-nav{display:none}
   .nav-toggle{display:inline-flex}
   .header-actions .btn--signin{display:none}
+  .site-nav + .header-actions{margin-inline-start:auto}
   /* Without JavaScript the drawer is simply open below the bar, so a phone
      always has navigation. The inline script in the head adds .js before
      the first paint, and only then is it folded away -- no flash, no
