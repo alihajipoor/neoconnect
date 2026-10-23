@@ -35,6 +35,11 @@ if (preg_match('#^[a-z][a-z0-9+.-]*://[^/]*#i', $nx_path, $nx_m)) {
 // folder holds this file is the site's root.
 $nx_root = rtrim(str_replace('\\', '/', dirname(isset($_SERVER['SCRIPT_NAME']) ? (string) $_SERVER['SCRIPT_NAME'] : '/index.php')), '/') . '/';
 $nx_rel = strpos($nx_path, $nx_root) === 0 ? (string) substr($nx_path, strlen($nx_root)) : $nx_path;
+// Run from the command line (scripts/check-site.php renders each page that
+// way), SCRIPT_NAME is a filesystem path and is no prefix of "/", which
+// left "/" here and sent the home page to the 404. A leading slash never
+// names anything else.
+$nx_rel = ltrim($nx_rel, '/');
 
 if ($nx_rel === 'sitemap.xml') {
     require __DIR__ . '/sitemap.php';
