@@ -25,14 +25,50 @@ light on each country that has servers. Every colour is the app's own token
 `design-system.md`). **Not deployed** -- it is on `claude/website-redesign`
 for the owner to look at first.
 
-Two honesty notes that come with it:
+### The 2026-10-22 rework: a light/dark switch and an identity of its own
 
-- The hero illustration shows the **redesigned** app. It is labelled as an
-  illustration with an example time, but until the app redesign ships the
-  picture is ahead of the product. Ship the two together, or not this part.
-- The map lights here say only "there are servers in this country" and
-  "the relay enters here". They never blink: on a website there is no
-  evidence about the visitor's network to light anything with.
+Owner feedback on the first pass: no light/dark switch, "the same as you'd
+give everyone else", no background but the world map, the old ring instead
+of the real logo. What changed, still in the app's language:
+
+- **A light/dark switch** in the header (a button with `aria-pressed`, a
+  fixed label, en and fa). It sets a `theme` cookie; `head.php` reads it and
+  writes `data-theme` on `<html>`, one `theme-color` and one `color-scheme`,
+  so the first paint is already right -- no flash, no script on the way.
+  Without the cookie the page follows `prefers-color-scheme`. The dark theme
+  is written once in `base.css` as `:root[data-theme="dark"]` rules and
+  `nx_css_bundle()` repeats them inside the media query (see the THEMES note
+  at the top of `base.css`). Without JavaScript there is no button.
+- **The app's glass logo**, the exact files from
+  `apps/web-portal/src/auth/` (`assets/img/brand/`), inlined once per page as
+  two `<symbol>`s and used by `<use>` in the header, the footer, the home
+  hero and the closing card. The favicons, touch icon, `logo-512.png` and the
+  social cards (now `-v4`) are rendered from the same file.
+- **A living background on every page**: three slow aurora lights over a
+  faint grid (`.sky`, fixed, gradients only), and the dotted world with its
+  lights and light lines (`inc/partials/world.php`) behind the home hero and
+  every page title. Only `transform` and `opacity` animate; all of it stops
+  under `prefers-reduced-motion`. No WebGL, no canvas, no animation script.
+- **Depth**: cards are layered gradients with a lit rim and a long drop, the
+  alternate sections are raised slabs with a line of the brand's light, and
+  sections rise into place with CSS scroll-driven animations under
+  `@supports (animation-timeline: view())` -- elsewhere they are simply there.
+- **The real app**: a real Android screenshot (the Play listing's, 1080 x
+  1920, resized to 300/450/600 px WebP in `assets/img/app/`) in a phone,
+  lazy-loaded, one per theme.
+
+Honesty notes that come with it:
+
+- The phone is a **real screenshot**, captioned as one: the account, the
+  usage and the address on it are a demo account's (the address is a
+  documentation range), and the caption says they are examples. The method
+  tags floating round it are read from `inc/content/protocols.php` and
+  limited to methods the **Android** app has, because the phone is Android.
+- The map lights say only "there are servers in this country" and "the
+  relay enters here". The light lines join the lights west to east and the
+  relay ring to its nearest light: they are drawing, not routes. Nothing
+  blinks as if it were measured: on a website there is no evidence about the
+  visitor's network to light anything with.
 
 ### Performance, measured not assumed
 
@@ -46,8 +82,11 @@ Two honesty notes that come with it:
 - **One tiny inline script** (the "loader") flips `no-js` to `js` before the
   first paint and adds `assets/js/site.js` asynchronously. Nothing on the
   site needs JavaScript.
-- **No raster image on any page.** The art is HTML, CSS and one SVG (the
-  map, used as a CSS mask, one cached request for the whole site).
+- **One raster image, below the fold, lazy.** The app screenshot on the
+  home page, sized by `srcset` (300/450/600 px WebP, 13-37 KB) and fetched
+  only for the theme on screen. Everything else is HTML, CSS and SVG (the
+  map as a CSS mask, one cached request for the whole site; the logo as an
+  inline sprite).
 
 Lighthouse scores for this branch were measured on a **local preview**,
 mobile and desktop, English and Persian -- not on the live host. Since
@@ -222,7 +261,9 @@ not be cached as a permanent property of the URL. Responses carry
 `Vary: Accept-Language, Cookie` for the same reason. `sitemap.php` and
 `404.php` opt out via `$NX_SKIP_LOCALE_REDIRECT`.
 
-**This is the site's only cookie**, and the privacy statement describes it. It
+**This and the theme cookie are the site's only cookies**, and the privacy
+statement describes both (the theme cookie holds `light` or `dark` and is
+set only by the switch in the header). It
 holds one word, identifies nobody, and needs no consent banner because
 remembering a preference someone deliberately asked for is exempt. If you ever
 add a second cookie, that page has to change.
@@ -356,7 +397,7 @@ limit. No CAPTCHA: reCAPTCHA is a blocked third-party request for much of this
 audience, and asking Iranian users to solve one is a bad trade.
 
 The site sets no tracking cookies, which is why there is no cookie banner
-(the one cookie remembers a language someone chose; see *Automatic
+(the two cookies remember a language or a theme someone chose; see *Automatic
 language*).
 CSRF uses a self-contained HMAC token instead of a PHP session. IP addresses
 are stored only as salted hashes.
@@ -378,17 +419,20 @@ inc/content/{faq,locations,protocols}.php         the rest of the data-shaped co
 inc/pages/                                        page templates, shared by locale
 inc/partials/                                     head, header, footer, form fields,
                                                   locations-grid, protocol-table, schema,
-                                                  plan-cards, instrument, cta-band
+                                                  plan-cards, instrument, cta-band, world
 inc/{form,security}.php                           validate → store → mail
 inc/headers.php                                   security headers and the CSP
 assets/css/{base,blocks,home,forms}.css           inlined per page by head.php
 assets/js/site.js                                 enhancement only, loaded async
 assets/fonts/  assets/map/  assets/img/           fonts, the dotted world, icons and
-                                                  the two social cards
+                                                  the two social cards; img/brand/ the app logo,
+                                                  img/app/ the app screenshots
 scripts/check-site.php                            pre-deploy check, run it
 scripts/make-fonts.mjs                            rebuilds the font subsets
 scripts/make-og-image.mjs                         renders the social cards (Chrome)
-scripts/make-icons.py                             the raster icons, from brand/
+scripts/make-icons.py                             the old raster icons, from brand/ (the
+                                                  current ones are rendered from
+                                                  assets/img/brand/neoxify-glass-light.svg)
 scripts/make-zip.{py,mjs}                         zip fallbacks for make-zip.sh
 data/                                             runtime only, never committed
 ```
