@@ -132,8 +132,8 @@ return array(
                review. Saying WHY the route holds up is the stronger sell
                and happens to be true. */
             'tagline' => array(
-                'en' => 'Routed through our Iran relay — the path built for heavily filtered networks.',
-                'fa' => 'از مسیر رله‌ی ایران — مسیری که برای شبکه‌های به‌شدت فیلترشده ساخته شده است.',
+                'en' => 'Separate routes, for the most heavily filtered networks.',
+                'fa' => 'مسیرهای جداگانه، برای شبکه‌هایی که به‌شدت فیلتر شده‌اند.',
             ),
             'price' => 9.99,
             'duration_days' => 30,

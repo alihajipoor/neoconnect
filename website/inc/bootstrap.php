@@ -462,36 +462,10 @@ function nx_locations()
     return isset($data['direct']) && is_array($data['direct']) ? $data['direct'] : array();
 }
 
-/**
- * The Iran relay entry, or null when none is configured.
- *
- * Separate from the list above because it is not a place traffic comes out
- * of -- it is the way in. Rendering it as a sixth location would be a
- * quietly false claim about where a customer appears to be.
- *
- * @return array|null
- */
-function nx_relay_location()
-{
-    $data = nx_content('locations');
-    return (isset($data['relay']) && is_array($data['relay'])) ? $data['relay'] : null;
-}
-
 /** @return int how many direct locations there are, for copy that counts them */
 function nx_location_count()
 {
     return count(nx_locations());
-}
-
-/**
- * The connection methods, as rows ready to render.
- *
- * @return array
- */
-function nx_protocols()
-{
-    $data = nx_content('protocols');
-    return is_array($data) ? $data : array();
 }
 
 /**
@@ -531,12 +505,6 @@ function nx_flag($code)
             . chr(0x80 | ($cp & 0x3F));
     }
     return $out;
-}
-
-/** @return int how many connection methods are advertised */
-function nx_protocol_count()
-{
-    return count(nx_protocols());
 }
 
 /**

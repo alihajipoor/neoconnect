@@ -11,8 +11,8 @@
  *  claim can be made honestly.
  *
  *  Source: docs/journal/HANDOVER-2026-08-22.md section 2 ("Fleet state"),
- *  which lists five direct nodes plus one Iran relay, every one of them
- *  live and carrying paying customers.
+ *  which lists the nodes, every one of them live and carrying paying
+ *  customers.
  *
  *  Rules for editing:
  *    - Add a country here ONLY when a node is actually enrolled and
@@ -29,9 +29,9 @@
  *   code      ISO 3166-1 alpha-2, used for the flag glyph and nothing else
  *   country   display name, per locale
  *   city      display name per locale, or null when the repo does not record it
- *   relay     true for the Iran relay entry -- rendered separately, because
- *             it is not a place you exit from. It is the way IN for the
- *             relay route; traffic still leaves from one of the others.
+ *
+ * Only places traffic comes OUT are listed. How it gets there is not
+ * published, on purpose: a public map of entry points helps a censor.
  */
 
 defined('NX') || exit;
@@ -74,15 +74,4 @@ return array(
         ),
     ),
 
-    /* The relay entry. Deliberately its own key rather than a sixth row in
-       the table above: a visitor reading a list of locations is reading a
-       list of places their traffic can COME OUT, and this is not one of
-       them. It is an entry point inside Iran that hands traffic on to a
-       server abroad -- see inc/content/protocols.php and the relay
-       explanation on the features page. */
-    'relay' => array(
-        'code' => 'ir',
-        'country' => array('en' => 'Iran', 'fa' => 'ایران'),
-        'city' => null,
-    ),
 );

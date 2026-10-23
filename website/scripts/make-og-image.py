@@ -34,9 +34,10 @@ serves both locales; a broken Persian one serves nobody. If the shaping
 dependencies are ever added, a Persian variant is a small change here plus
 one line in inc/partials/head.php, which already reads a per-page override.
 
-What the card says is true and checkable: the product name, the four
-protocol families it carries, and the domain. No claim, no number that
-could go stale.
+What the card says is true and checkable: the product name, one line
+about what it is for, and the domain. No protocol, port or transport is
+named -- at the owner's instruction (2026-10-23), nothing public lists how
+the app connects, because that list is a checklist for a censor.
 """
 
 import os
@@ -116,15 +117,6 @@ def make_og(path):
         "Built for networks that filter hard.",
         font=font(64, 700),
         fill=MUTED,
-    )
-
-    # The protocol families, in Latin -- the words a technical buyer scans
-    # for, and the reason this card works for a Persian reader too.
-    d.text(
-        (mark_x, 486),
-        "WireGuard  ·  OpenVPN  ·  Shadowsocks  ·  VLESS REALITY",
-        font=font(28, 600),
-        fill=(0x22, 0xD3, 0xEE),
     )
 
     d.text((mark_x, 538), "neoxify.net", font=font(30, 600), fill=MUTED)

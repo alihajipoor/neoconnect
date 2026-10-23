@@ -3,14 +3,12 @@
  * Features page, shared by /features/ and /fa/features/.
  *
  * New in the 2026-08 rebuild. Features previously existed only as three
- * cards on the home page, which meant the product's single most
- * distinctive thing -- eight connection methods, named -- had no page of
- * its own, no title, no canonical and nothing for a search engine to rank
- * against "wireguard vpn" or "shadowsocks" or their Persian equivalents.
+ * cards on the home page.
  *
- * Everything on this page is driven by inc/content/protocols.php and
- * inc/content/locations.php, so the page cannot claim a protocol or a
- * country the data files do not list.
+ * No protocol, port, transport or route is named here -- see the note at
+ * the top of inc/pages/home.php. The locations are driven by
+ * inc/content/locations.php, so the page cannot claim a country the data
+ * file does not list.
  */
 
 defined('NX') || exit;
@@ -35,17 +33,6 @@ require NX_INC . '/partials/head.php';
     <div class="section-head">
       <h2><?php echo nx_e('features.protocols.title'); ?></h2>
       <p><?php echo nx_e('features.protocols.body'); ?></p>
-    </div>
-
-    <div class="reveal">
-      <?php require NX_INC . '/partials/protocol-table.php'; ?>
-    </div>
-
-    <div class="callout callout--info u-mt-lg">
-      <?php echo nx_icon('info'); ?>
-      <div>
-        <p><?php echo nx_e('features.protocols.note'); ?></p>
-      </div>
     </div>
   </div>
 </section>
@@ -147,50 +134,6 @@ require NX_INC . '/partials/head.php';
 
     <div class="reveal">
       <?php require NX_INC . '/partials/locations-grid.php'; ?>
-    </div>
-  </div>
-</section>
-
-<!-- ============================ Relay =========================== -->
-<section class="section">
-  <div class="container">
-    <div class="split">
-      <div class="split__body reveal">
-        <h2><?php echo nx_e('features.relay.title'); ?></h2>
-        <p><?php echo nx_e('features.relay.body'); ?></p>
-        <a class="section-link" href="<?php echo nx_esc(nx_url('pricing')); ?>">
-          <?php echo nx_e('features.relay.link'); ?>
-          <?php echo nx_icon('arrow-right'); ?>
-        </a>
-      </div>
-
-      <div class="split__media reveal" role="img"
-           aria-label="<?php echo nx_e('features.relay.diagram_alt'); ?>">
-        <div class="flow" aria-hidden="true">
-          <div class="flow__node">
-            <?php echo nx_icon('smartphone'); ?>
-            <span><?php echo nx_e('features.relay.you'); ?></span>
-          </div>
-          <div class="flow__link">
-            <span class="flow__line"></span>
-            <span class="flow__tag">
-              <?php echo nx_icon('lock'); ?>
-              <?php echo nx_e('home.security.diagram.tunnel'); ?>
-            </span>
-          </div>
-          <div class="flow__node">
-            <?php echo nx_icon('route'); ?>
-            <span><?php echo nx_e('features.relay.entry'); ?></span>
-          </div>
-          <div class="flow__link">
-            <span class="flow__line"></span>
-          </div>
-          <div class="flow__node flow__node--end">
-            <?php echo nx_icon('server'); ?>
-            <span><?php echo nx_e('features.relay.exit'); ?></span>
-          </div>
-        </div>
-      </div>
     </div>
   </div>
 </section>
