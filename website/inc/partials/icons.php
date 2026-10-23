@@ -15,42 +15,47 @@
 defined('NX') || exit;
 
 /**
- * The brand mark: a broken ring around a solid centre, in the violet-to-cyan
- * gradient. It deliberately echoes the circular Connect control at the centre
- * of the desktop app.
+ * The Neoxify logo: the glass mark the apps use, exactly as they ship it
+ * (assets/img/brand/neoxify-glass-{light,dark}.svg are byte copies of
+ * apps/web-portal/src/auth/, presentation attributes only, no style).
  *
- * Each call mints a unique gradient id. Inlining the same SVG several times on
- * one page would otherwise repeat an id, which is invalid HTML and leaves the
- * rendering at the mercy of which duplicate the browser resolves first.
+ * The two files go into the page ONCE, as <symbol>s in a hidden sprite at
+ * the top of the body (nx_logo_sprite(), called by head.php); every logo
+ * on the page is then two tiny <use> references, and CSS shows the one
+ * that matches the theme (--logo-l / --logo-d in base.css). Their gradient
+ * ids are already distinct (nxl* and nxd*), so both can live in one page.
  *
- * @param string $class CSS class for the <svg>
+ * @param string $class extra CSS class on each <svg>
  * @return string
  */
-function nx_logo_mark($class = '')
+function nx_logo($class = '')
 {
-    static $seq = 0;
-    $seq++;
-    $id = 'nx-brand-' . $seq;
+    $out = '';
+    foreach (array('light' => 'l', 'dark' => 'd') as $variant => $short) {
+        $out .= '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"'
+            . ' class="logo logo--' . $short . ($class !== '' ? ' ' . nx_esc($class) : '') . '"'
+            . ' aria-hidden="true" focusable="false"><use href="#nx-logo-' . $variant . '"/></svg>';
+    }
+    return $out;
+}
 
-    // Explicit size, like the other two emitters: CSS scales it per
-    // component, but a bare inline SVG with only a viewBox has no intrinsic
-    // size and will otherwise fill whatever box it lands in.
-    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"'
-        . ' width="28" height="28" fill="none"'
-        . ($class !== '' ? ' class="' . nx_esc($class) . '"' : '')
-        . ' aria-hidden="true" focusable="false">'
-        . '<defs><linearGradient id="' . $id . '" x1="0" y1="0" x2="1" y2="1">'
-        . '<stop offset="0" stop-color="#8b5cf6"/>'
-        . '<stop offset="1" stop-color="#22d3ee"/>'
-        . '</linearGradient></defs>'
-        // r=21 gives a circumference of ~132, so 96 on / 36 off is exactly
-        // one stroke and one gap -- change the radius and this must change
-        // with it or the gap multiplies.
-        . '<circle cx="32" cy="32" r="21" stroke="url(#' . $id . ')" stroke-width="7"'
-        . ' stroke-linecap="round" stroke-dasharray="96 36"'
-        . ' transform="rotate(-58 32 32)"/>'
-        . '<circle cx="32" cy="32" r="8" fill="url(#' . $id . ')"/>'
-        . '</svg>';
+/**
+ * The sprite nx_logo() points into. Zero-sized rather than display:none:
+ * gradients inside an undisplayed SVG do not render through <use>.
+ *
+ * @return string
+ */
+function nx_logo_sprite()
+{
+    $out = '<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" class="sprite" aria-hidden="true" focusable="false">';
+    foreach (array('light', 'dark') as $variant) {
+        $svg = (string) @file_get_contents(NX_ROOT . '/assets/img/brand/neoxify-glass-' . $variant . '.svg');
+        if (!preg_match('#^<svg[^>]*\bviewBox="([^"]+)"[^>]*>(.*)</svg>\s*$#s', $svg, $m)) {
+            continue;
+        }
+        $out .= '<symbol id="nx-logo-' . $variant . '" viewBox="' . $m[1] . '">' . $m[2] . '</symbol>';
+    }
+    return $out . '</svg>';
 }
 
 /**
@@ -112,6 +117,10 @@ function nx_icon($name, $class = '')
         'menu' => '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>',
 
         'close' => '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+
+        'sun' => '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
+
+        'moon' => '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
 
         'check' => '<path d="M20 6 9 17l-5-5"/>',
 
@@ -216,33 +225,6 @@ function nx_icon($name, $class = '')
 
 
 
-/**
- * The brand mark as a large, quiet glass ring -- decoration for the closing
- * call to action. The same geometry as nx_logo_mark() (a broken ring, the
- * gap up and to the right, a bead at the centre), drawn translucent with a
- * highlight along the top so it reads as glass on pearl and on smoke.
- * Always aria-hidden by the caller.
- *
- * @return string
- */
-function nx_glass_ring()
-{
-    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="520" height="520" fill="none" focusable="false">'
-        . '<defs>'
-        . '<linearGradient id="nx-ring-a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#22d3ee"/></linearGradient>'
-        . '<linearGradient id="nx-ring-h" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></linearGradient>'
-        . '<radialGradient id="nx-ring-b" cx=".38" cy=".34" r=".75"><stop offset="0" stop-color="#fff"/><stop offset=".35" stop-color="#93B0FF"/><stop offset="1" stop-color="#1045FF"/></radialGradient>'
-        . '</defs>'
-        // r=66: circumference ~415, so 302 on / 113 off keeps the mark's
-        // proportions (96/36 on r=21).
-        . '<g transform="rotate(-58 100 100)" stroke-linecap="round" stroke-dasharray="302 113">'
-        . '<circle cx="100" cy="100" r="66" stroke="url(#nx-ring-a)" stroke-width="28" opacity=".38"/>'
-        . '<circle cx="100" cy="100" r="66" stroke="#1045FF" stroke-width="5" opacity=".5"/>'
-        . '<circle cx="100" cy="100" r="74" stroke="url(#nx-ring-h)" stroke-width="6" opacity=".9"/>'
-        . '</g>'
-        . '<circle cx="100" cy="100" r="19" fill="url(#nx-ring-b)" opacity=".9"/>'
-        . '</svg>';
-}
 
 // ---------------------------------------------------------------------
 // Flags
