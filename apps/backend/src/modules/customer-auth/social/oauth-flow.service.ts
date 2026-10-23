@@ -1,7 +1,9 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-import { BadRequestException, Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+
+import { SOCIAL_REFUSALS, unverifiedMessage } from "./social-auth.service";
 
 /** The browser half of social sign-in, for Google and Facebook.
  *
@@ -23,6 +25,12 @@ import { ConfigService } from "@nestjs/config";
  * code. Three short-lived secrets, none of which is useful alone -- and
  * the handoff is bound to a PKCE pair the app made, so the code alone is
  * not enough either. See `consumeHandoff`.
+ *
+ * The web portal (https://neoxify.net/account/) takes the same flow with
+ * `client=web` at /start. Everything up to the handoff is identical --
+ * the same verification, linking, trial and refusals -- and only the
+ * last redirect differs: to the portal, with the handoff in the URL
+ * fragment, and always bound to a PKCE pair. See `finishUrl`.
  */
 
 export type BrowserProvider = "google" | "facebook";
@@ -73,27 +81,109 @@ const STATE_TTL_MS = 10 * 60 * 1000;
  * already dead. */
 const HANDOFF_TTL_MS = 2 * 60 * 1000;
 
-/** Where the browser is sent once the exchange is done.
+/** The same for the web portal, which has a page to load before it can
+ * ask -- over a slow or filtered link, that alone can take a minute.
+ * Longer is safe there because a web handoff is always bound to a PKCE
+ * challenge (`start`): the code alone collects nothing, however long it
+ * lives. */
+const WEB_HANDOFF_TTL_MS = 5 * 60 * 1000;
+
+/** Where the apps are sent once the exchange is done.
  *
- * A constant, not something the caller passes. Every client this API
- * has uses the same scheme: Windows already registers `neoconnect://`
- * and forwards it through the single-instance handler, iOS catches it
- * inside ASWebAuthenticationSession without registering anything, and
- * Android claims it with an intent filter. Since there is only ever one
- * destination, taking one as a parameter would add an open-redirect to
- * validate and nothing else.
+ * Every app uses the same scheme: Windows already registers
+ * `neoconnect://` and forwards it through the single-instance handler,
+ * iOS catches it inside ASWebAuthenticationSession without registering
+ * anything, and Android claims it with an intent filter.
  */
 export const APP_CALLBACK_URL = "neoconnect://social-callback";
+
+/** Where the web portal is sent once the exchange is done. It has no
+ * Persian path of its own: the language is the page's, not the URL's. */
+export const WEB_CALLBACK_URL = "https://neoxify.net/account/";
+
+/** Who started a browser sign-in, and so where it finishes.
+ *
+ * A choice between two constants, never an address the caller passes:
+ * taking a URL would add an open redirect to validate, and handing a
+ * session's handoff to an address someone else picked is exactly what
+ * this flow exists to prevent. */
+export type SocialClient = "app" | "web";
+
+const CALLBACKS: Readonly<Record<SocialClient, string>> = {
+  app: APP_CALLBACK_URL,
+  web: WEB_CALLBACK_URL,
+};
+
+/** The `client` query parameter of /start. Absent is the apps, as it
+ * always was; anything other than the two names is refused (null). */
+export function socialClient(raw: string | undefined): SocialClient | null {
+  if (raw === undefined || raw === "app") return "app";
+  if (raw === "web") return "web";
+  return null;
+}
+
+/** A web flow's state starts with this, so a callback whose state has
+ * expired or was never ours can still be sent back to the page it came
+ * from. `.` is outside the base64url alphabet, so no app state can carry
+ * it by chance -- and the worst a forged prefix can do is send an error
+ * to the other of the two fixed destinations. */
+const WEB_STATE_PREFIX = "w.";
 
 /** A PKCE S256 challenge (RFC 7636): base64url of a SHA-256 digest, so
  * exactly 43 characters with no padding. */
 export const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
+
+/** What consumeState says of a state it does not hold. */
+export const STATE_EXPIRED = "This sign-in link has expired -- please try again";
+
+/** The short codes the web portal is sent in place of the apps' sentence
+ * (`detail`), and words itself in the visitor's language. */
+export type WebErrorCode =
+  | "cancelled"
+  | "invalid"
+  | "unavailable"
+  | "expired"
+  | "disabled"
+  | "exists"
+  | "unverified"
+  | "no-email"
+  | "failed";
+
+/** The web portal's code for what a callback refused with. Matched
+ * against the services' own named messages, so a rewording there cannot
+ * quietly turn a reason into "failed". Anything not written for the
+ * customer is "failed", as it is for the apps. */
+export function webErrorCode(err: unknown): WebErrorCode {
+  const message =
+    err instanceof BadRequestException || err instanceof UnauthorizedException
+      ? (err.getResponse() as { message?: unknown }).message
+      : undefined;
+  switch (message) {
+    case STATE_EXPIRED:
+      return "expired";
+    case SOCIAL_REFUSALS.unavailable:
+      return "unavailable";
+    case SOCIAL_REFUSALS.disabled:
+      return "disabled";
+    case SOCIAL_REFUSALS.exists:
+      return "exists";
+    case SOCIAL_REFUSALS.noEmail:
+      return "no-email";
+    case unverifiedMessage("GOOGLE"):
+    case unverifiedMessage("FACEBOOK"):
+      return "unverified";
+    default:
+      return "failed";
+  }
+}
 
 interface PendingState {
   provider: BrowserProvider;
   locale: string;
   /** The PKCE challenge the app started with, when it sent one. */
   challenge?: string;
+  /** Where the flow finishes: the app's scheme or the web portal. */
+  client: SocialClient;
   expiresAt: number;
 }
 
@@ -122,7 +212,7 @@ export class OauthFlowService {
     const value = this.config.get<string>(key);
     if (!value) {
       this.logger.error(`${key} is not configured; this provider cannot be used`);
-      throw new BadRequestException("This sign-in method is not available right now");
+      throw new BadRequestException(SOCIAL_REFUSALS.unavailable);
     }
     return value;
   }
@@ -152,6 +242,25 @@ export class OauthFlowService {
     return url.toString();
   }
 
+  /** Where `client` is sent when the flow finishes, either way.
+   *
+   * The apps exactly as `appCallback`. The web portal gets the same
+   * parameters in the fragment rather than the query: a fragment is
+   * never sent to the server, so the handoff code stays out of the
+   * site's access logs and out of any Referer the page sends. */
+  finishUrl(client: SocialClient, params: Record<string, string>): string {
+    if (client === "app") return this.appCallback(params);
+    return `${CALLBACKS[client]}#${new URLSearchParams(params).toString()}`;
+  }
+
+  /** Which client a callback's state belongs to: the one stored with it,
+   * or -- when it is no longer held, expired or never ours -- what its
+   * prefix says. Never anything but one of the two constants. */
+  clientOf(state: string | undefined): SocialClient {
+    if (state === undefined) return "app";
+    return this.states.get(state)?.client ?? (state.startsWith(WEB_STATE_PREFIX) ? "web" : "app");
+  }
+
   private sweep() {
     const now = Date.now();
     for (const [key, value] of this.states) if (value.expiresAt <= now) this.states.delete(key);
@@ -164,16 +273,24 @@ export class OauthFlowService {
    * with the state to the callback and from there onto the handoff. A
    * malformed one is refused outright rather than stored: it can only
    * come from a broken client, and binding a handoff to something no
-   * verifier can match would strand the customer at the last step. */
-  start(provider: BrowserProvider, locale: string, challenge?: string): string {
+   * verifier can match would strand the customer at the last step.
+   *
+   * `client` is where the flow finishes (`finishUrl`), kept with the
+   * state. The web portal must send a challenge: there are no web clients
+   * from before the binding to stay compatible with, so a web handoff is
+   * never one the code alone can collect. */
+  start(provider: BrowserProvider, locale: string, challenge?: string, client: SocialClient = "app"): string {
     this.sweep();
     if (challenge !== undefined && !PKCE_CHALLENGE.test(challenge)) {
       throw new BadRequestException("That sign-in request was malformed");
     }
+    if (client === "web" && challenge === undefined) {
+      throw new BadRequestException("That sign-in request was malformed");
+    }
 
     const endpoints = PROVIDERS[provider];
-    const state = randomBytes(32).toString("base64url");
-    this.states.set(state, { provider, locale, challenge, expiresAt: Date.now() + STATE_TTL_MS });
+    const state = (client === "web" ? WEB_STATE_PREFIX : "") + randomBytes(32).toString("base64url");
+    this.states.set(state, { provider, locale, challenge, client, expiresAt: Date.now() + STATE_TTL_MS });
 
     const url = new URL(endpoints.authorizeUrl);
     url.searchParams.set("client_id", this.required(endpoints.clientIdKey));
@@ -194,7 +311,7 @@ export class OauthFlowService {
   consumeState(state: string): PendingState {
     this.sweep();
     const pending = this.states.get(state);
-    if (!pending) throw new BadRequestException("This sign-in link has expired -- please try again");
+    if (!pending) throw new BadRequestException(STATE_EXPIRED);
     this.states.delete(state);
     return pending;
   }
@@ -254,10 +371,15 @@ export class OauthFlowService {
    * So the code is bound to the PKCE challenge the app started with,
    * when it sent one, and only the matching verifier collects it.
    */
-  storeHandoff(tokens: { accessToken: string; refreshToken: string }, challenge?: string): string {
+  storeHandoff(
+    tokens: { accessToken: string; refreshToken: string },
+    challenge?: string,
+    client: SocialClient = "app",
+  ): string {
     this.sweep();
     const code = randomBytes(32).toString("base64url");
-    this.handoffs.set(code, { tokens, challenge, expiresAt: Date.now() + HANDOFF_TTL_MS });
+    const ttl = client === "web" && challenge !== undefined ? WEB_HANDOFF_TTL_MS : HANDOFF_TTL_MS;
+    this.handoffs.set(code, { tokens, challenge, expiresAt: Date.now() + ttl });
     return code;
   }
 

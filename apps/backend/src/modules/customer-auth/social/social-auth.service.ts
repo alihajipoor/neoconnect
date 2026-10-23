@@ -29,7 +29,7 @@ export class SocialAuthService {
       // and nothing in the logs says the server was never given a
       // client id.
       this.logger.error(`${key} is not configured; this provider cannot be used`);
-      throw new BadRequestException("This sign-in method is not available right now");
+      throw new BadRequestException(SOCIAL_REFUSALS.unavailable);
     }
     return value;
   }
@@ -99,7 +99,7 @@ export class SocialAuthService {
       // Refused before anything is written: a disabled account's identity
       // row is not refreshed with the address the provider gives today.
       if (existing.customer.status !== "ACTIVE") {
-        throw new UnauthorizedException("This account is disabled");
+        throw new UnauthorizedException(SOCIAL_REFUSALS.disabled);
       }
       await this.prisma.customerIdentity.update({
         where: { id: existing.id },
@@ -130,16 +130,14 @@ export class SocialAuthService {
       });
       if (byEmail) {
         if (byEmail.status !== "ACTIVE") {
-          throw new UnauthorizedException("This account is disabled");
+          throw new UnauthorizedException(SOCIAL_REFUSALS.disabled);
         }
         if (!byEmail.emailVerifiedAt) {
           // They signed up with a password and never confirmed the
           // address. Someone else proving the same address through a
           // provider is not evidence that these are the same person, so
           // this is the one case that refuses rather than guessing.
-          throw new UnauthorizedException(
-            "An account with this email already exists. Sign in with your password to finish setting it up.",
-          );
+          throw new UnauthorizedException(SOCIAL_REFUSALS.exists);
         }
         await this.prisma.customerIdentity.create({
           data: { customerId: byEmail.id, provider, subject: identity.subject, email: identity.email },
@@ -160,9 +158,7 @@ export class SocialAuthService {
     // reveals it weeks later when a renewal notice goes nowhere. Better
     // to refuse now and say why.
     if (!identity.email) {
-      throw new BadRequestException(
-        "That account has no email address. Neoxify needs one to send your subscription and support messages -- please sign up with an email instead.",
-      );
+      throw new BadRequestException(SOCIAL_REFUSALS.noEmail);
     }
 
     // Only from an address the provider has verified. This used to create
@@ -193,7 +189,21 @@ export class SocialAuthService {
   }
 }
 
-function unverifiedMessage(provider: IdentityProvider): string {
+/** What verify and resolveCustomer refuse with, in the customer's words.
+ *
+ * Named so the browser flow can tell them apart without matching prose:
+ * the apps are sent the sentence itself, the web portal a short code it
+ * words in the visitor's own language (webErrorCode in
+ * oauth-flow.service.ts). The wording is unchanged. */
+export const SOCIAL_REFUSALS = {
+  unavailable: "This sign-in method is not available right now",
+  disabled: "This account is disabled",
+  exists: "An account with this email already exists. Sign in with your password to finish setting it up.",
+  noEmail:
+    "That account has no email address. Neoxify needs one to send your subscription and support messages -- please sign up with an email instead.",
+} as const;
+
+export function unverifiedMessage(provider: IdentityProvider): string {
   const name = provider === "GOOGLE" ? "Google" : provider === "APPLE" ? "Apple" : "Facebook";
   return `Your ${name} account has not verified its email address. Please verify it with ${name}, or sign up with your email instead.`;
 }
