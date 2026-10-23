@@ -38,22 +38,18 @@ require NX_INC . '/partials/head.php';
 <!-- ========================== Failover ========================== -->
 <section class="section section--alt" aria-labelledby="h-failover">
   <div class="wrap">
-    <div class="split">
+    <div class="split split--wide-art">
       <div class="split__body reveal">
         <h2 class="h2" id="h-failover"><?php echo nx_e('features.failover.title'); ?></h2>
         <p class="body"><?php echo nx_e('features.failover.body'); ?></p>
       </div>
 
-      <?php /* Drawn from the app's real behaviour: a route that stops
-               responding, a switch to the next one, and -- the part that
-               matters -- a verification step before the state is reported
-               as connected. One text alternative; the parts are hidden. */ ?>
-      <div class="flow flow--stack reveal" role="img" aria-label="<?php echo nx_e('features.failover.diagram_alt'); ?>">
-        <div class="flow__node flow__node--dead" aria-hidden="true"><span class="ico"><?php echo nx_icon('close'); ?></span><span><?php echo nx_e('features.failover.step_blocked'); ?></span></div>
-        <div class="flow__link" aria-hidden="true"><span class="flow__line"></span><span class="flow__tag"><?php echo nx_icon('shuffle'); ?><?php echo nx_e('features.failover.step_switch'); ?></span></div>
-        <div class="flow__node" aria-hidden="true"><span class="ico"><?php echo nx_icon('shield-check'); ?></span><span><?php echo nx_e('features.failover.step_verify'); ?></span></div>
-        <div class="flow__link" aria-hidden="true"><span class="flow__line"></span></div>
-        <div class="flow__node flow__node--ok" aria-hidden="true"><span class="ico"><?php echo nx_icon('check'); ?></span><span><?php echo nx_e('features.failover.step_connected'); ?></span></div>
+      <?php /* The app's real behaviour, drawn abstractly: a way through
+               that is stopped, another that takes over, a check that traffic
+               really flows, and only then "Connected". No method, port or
+               route is named or drawn (owner, 2026-10-23). */ ?>
+      <div class="reveal">
+        <?php require NX_INC . '/partials/route-finder.php'; ?>
       </div>
     </div>
   </div>
@@ -120,19 +116,21 @@ require NX_INC . '/partials/head.php';
       <h2 class="h2" id="h-more"><?php echo nx_e('features.more.title'); ?></h2>
     </div>
 
-    <div class="grid grid--3">
+    <ul class="ledger ledger--cols u-list-reset">
       <?php
       /* DNS and IPv6 first: the one a technical buyer is most likely to
          choose on, and the one nobody else states plainly. */
       $nx_more = array('dns' => 'shield-check', 'usage' => 'chart', 'support' => 'message');
       foreach ($nx_more as $nx_key => $nx_glyph): ?>
-        <article class="card feature reveal">
+        <li class="reveal">
           <span class="ico"><?php echo nx_icon($nx_glyph); ?></span>
-          <h3><?php echo nx_e('features.' . $nx_key . '.title'); ?></h3>
-          <p><?php echo nx_e('features.' . $nx_key . '.body'); ?></p>
-        </article>
+          <div>
+            <h3><?php echo nx_e('features.' . $nx_key . '.title'); ?></h3>
+            <p><?php echo nx_e('features.' . $nx_key . '.body'); ?></p>
+          </div>
+        </li>
       <?php endforeach; ?>
-    </div>
+    </ul>
   </div>
 </section>
 

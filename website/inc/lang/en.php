@@ -848,4 +848,16 @@ return array(
     'home.app.float.3.sub' => 'that traffic really flows',
     'home.app.float.4.title' => 'Nothing to paste',
     'home.app.float.4.sub' => 'no config, no links',
+    // The route finder (inc/partials/route-finder.php). Abstract by rule:
+    // never a method, port, transport, route, or a count of any of them.
+    'route.you' => 'You',
+    'route.internet' => 'The internet',
+    'route.state.finding' => 'Finding a way through…',
+    'route.state.blocked' => 'That way is stopped. Trying another…',
+    'route.state.checking' => 'Checking traffic really flows…',
+    'route.state.done' => 'Connected, checked',
+    'route.replay' => 'Play again',
+    'route.caption' => 'Illustration of what the app does by itself: when one way through is stopped it moves to another, and it says Connected only after checking that traffic really flows.',
+    'home.quote' => 'A green light that means nothing is worse than a red one.',
+    'home.quote.by' => 'Why the app checks before it says Connected',
 );
