@@ -64,9 +64,8 @@ foreach (array('en', 'fa') as $nx_alt): ?>
 // libraqm or arabic-reshaper, neither of which is available, so a Persian
 // card would render as unjoined, reversed letterforms on the single
 // most-shared image the site has. A correct Latin card serves both
-// locales; a broken Persian one serves nobody. The card carries the
-// protocol names, which are Latin in either language and are what a
-// technical buyer scans for.
+// locales; a broken Persian one serves nobody. The card names no protocol
+// (owner, 2026-10-23): a list of how the app connects helps a censor.
 //
 // A page can still override with $NX_OG_IMAGE, and the per-locale variant
 // is a one-line change here if the shaping dependencies ever land.

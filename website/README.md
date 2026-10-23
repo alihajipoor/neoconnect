@@ -219,10 +219,10 @@ inc/bootstrap.php                                 config, locale, helpers
 inc/config.php                                    the file you edit
 inc/lang/{en,fa}.php                              every string on the site
 inc/content/plans.php                             prices — must match the panel
-inc/content/{faq,locations,protocols}.php         the rest of the data-shaped copy
+inc/content/{faq,locations}.php                   the rest of the data-shaped copy
 inc/pages/                                        page templates, shared by locale
 inc/partials/                                     head, header, footer, form fields,
-                                                  locations-grid, protocol-table, schema
+                                                  locations-grid, schema
 inc/{form,security}.php                           validate → store → mail
 assets/                                           css, js, fonts, favicon, OG card
 scripts/check-site.php                            pre-deploy check, run it
@@ -261,20 +261,20 @@ in a Persian sentence as "GB 30".
 
 ## Conventions worth keeping
 
-- **Name the protocols — this reversed in 2026-08.** The site used to refuse
-  to say which engines were behind it, and described everything as "several
-  ways to connect". A word-boundary grep of the whole live site for
-  `wireguard|openvpn|ikev2|vless|shadowsocks|trojan|reality` returned zero
-  hits, and so did one for every country name. Those are the terms a
-  technical buyer filters on and the ones they search for, and refusing to
-  print them cost the site that entire audience while protecting nothing the
-  public repo does not already reveal. `inc/content/protocols.php` now carries
-  all eight with their customer-facing labels, and `locations.php` the six
-  locations. **VMess is not one of them** — it is in the backend enum but the
-  installer does not build it and no node runs it, so it must never appear.
+- **Name no protocol, port, transport, route or server — the owner's
+  instruction, 2026-10-23.** The 2026-08 rebuild listed every engine with its
+  port and showed which kind of blocking stops which one, plus the Iran
+  relay. That was reversed: a public list of how the app connects is a
+  checklist for a censor. Describe the benefit ("several ways to connect,
+  including ones made to look like ordinary web traffic; the app finds the
+  one that works and moves when one stops"), never the mechanism. Server
+  countries may be named; entry points may not. Plans differ by benefit, not
+  by route. Before a deploy, render every page in both locales and grep the
+  HTML, CSS, JS and the OG card for engine names, port numbers, TCP/UDP and
+  relay wording, in Latin and in Persian.
   The footer still has no "source on GitHub" link; that part stands.
 - **Every claim has to be traceable to something that exists.** No no-logs
-  policy (the shipped Xray config writes an access log), no kill switch, no
+  policy (the shipped server config writes an access log), no kill switch, no
   auto-connect, no refund guarantee, no company name or jurisdiction, no
   server count, no uptime figure, no signed installer, and no promise about
   iOS. The download page says an app that does not exist is not "coming
