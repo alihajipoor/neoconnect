@@ -39,7 +39,7 @@
 .hero__title{display:grid;gap:16px;justify-items:center}
 .hero__title .tagline{display:block;font-family:var(--font-head);font-weight:700;font-size:clamp(46px,7.6vw,104px);letter-spacing:-.055em;line-height:.94}
 .hero__title .tagline span{display:block;padding-bottom:.04em}
-html[lang="fa"] .hero__title .tagline{font-size:clamp(40px,6.8vw,88px);font-weight:800;letter-spacing:0;line-height:1.32}
+html[lang="fa"] .hero__title .tagline{font-size:clamp(40px,6.8vw,88px);font-weight:800;letter-spacing:0;line-height:1.22}
 .hero__title .kicker{display:block;font-family:var(--font-ui);font-size:13px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--cobalt-ink)}
 html[lang="fa"] .hero__title .kicker{font-family:var(--font-fa);font-size:15px;letter-spacing:0;text-transform:none}
 .hero .lede{font-size:clamp(17px,1.6vw,20px);max-width:60ch;margin-inline:auto}
@@ -222,7 +222,7 @@ html[lang="fa"] .claim{letter-spacing:0;line-height:1.6}
 /* The closing card: glass over a pool of the brand's light, with the
    logo large and half out of the card, as if it rose out of it. */
 .close{position:relative;isolation:isolate;overflow:hidden;display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:clamp(24px,4vw,56px);align-items:center;padding:clamp(30px,5.4vw,72px);border-radius:36px}
-.close::after{content:"";position:absolute;z-index:-1;inset:auto -20% -60% 30%;height:120%;border-radius:50%;background:radial-gradient(closest-side,var(--glow-1),var(--glow-2) 45%,transparent 72%);opacity:.55;pointer-events:none}
+.close::after{content:"";position:absolute;z-index:-1;inset:auto -20% -60% 30%;height:120%;border-radius:50%;background:radial-gradient(closest-side,var(--glow-1),var(--glow-2) 45%,transparent 72%);opacity:.38;pointer-events:none}
 @media (max-width:900px){.close{grid-template-columns:1fr}}
 .close__copy{display:grid;gap:16px}
 .close-list{display:grid;gap:10px;margin-top:6px}
@@ -230,5 +230,5 @@ html[lang="fa"] .claim{letter-spacing:0;line-height:1.6}
 .close-list b{white-space:nowrap}
 .close-list span{color:var(--ink-2)}
 .close__actions{display:grid;gap:12px;justify-items:stretch;align-content:center}
-.close__mark{position:absolute;z-index:-1;width:min(340px,60vw);inset-inline-end:clamp(-120px,-6vw,-50px);bottom:-90px;opacity:.28;pointer-events:none;transform:rotate(-14deg)}
+.close__mark{position:absolute;z-index:-1;width:min(340px,60vw);inset-inline-end:clamp(-120px,-6vw,-50px);bottom:-90px;opacity:.2;pointer-events:none;transform:rotate(-14deg)}
 .warnline{font-size:13.5px;color:var(--ink-2);text-align:center}

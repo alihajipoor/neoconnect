@@ -462,7 +462,10 @@ html[lang="fa"] .site-footer__title{font-size:13px;letter-spacing:0;text-transfo
 .world--page{top:56px;left:50%;width:clamp(820px,92vw,1320px);transform:translateX(-30%);opacity:.8;
   -webkit-mask-image:radial-gradient(52% 62% at 58% 34%,#000 30%,transparent 78%);mask-image:radial-gradient(52% 62% at 58% 34%,#000 30%,transparent 78%)}
 /* On a phone the lights sit up and to the right of the title. */
+/* Right to left the title sits on the right, so the lights go left. */
+html[dir="rtl"] .world--page{transform:translateX(-82%)}
 @media (max-width:700px){.world--page{width:760px;top:90px;transform:translateX(-45%)}}
+@media (max-width:700px){html[dir="rtl"] .world--page{transform:translateX(-68%)}}
 @media (forced-colors:active){.map,.lamp,.world,.sky,.links{display:none}}
 
 /* --------------------------------------------------------------- reveal
