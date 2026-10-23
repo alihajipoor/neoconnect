@@ -76,15 +76,8 @@ Owner: push the style further, add transitions and animation, "not plain,
 not overwhelming", and nothing that reads as a generated template. What
 was added, and the rules it keeps:
 
-- **The route finder** (`inc/partials/route-finder.php`), on the home and
-  features pages, replacing what the method table gave visually: abstract,
-  unlabelled paths from "You" to "The internet"; one lights and meets a
-  wall and fades, another takes over, a ring turns while the app checks,
-  and only then the tick and "Connected, checked". **No method, port,
-  transport, route or count is named or implied** -- the paths are drawing.
-  CSS animation (one 13-second cycle), run by `site.js` only while it is
-  on screen, with a Play again button. Without the script or under reduced
-  motion it shows its final frame.
+- **The route finder** came out again in round 3 (owner: "like a PowerPoint
+  chart"); see the next section.
 - **Art direction**: an editorial type scale (page and section titles step
   up to 104/76 px, set tight), section labels as a numbered rule of the
   brand's gradient -- the one accent, used the same way everywhere -- and
@@ -107,6 +100,33 @@ was added, and the rules it keeps:
   are for a fine pointer only and write custom properties through the
   CSSOM (the CSP still forbids style attributes); everything stops under
   `prefers-reduced-motion`, and nothing needs JavaScript to be readable.
+
+### Round 3 (2026-10-23): real product, atmosphere, no charts
+
+Owner: the first screens were right, the drawings further down were "like a
+PowerPoint chart". Every diagram is gone (the route finder, the security
+drawing, the numbered steps) and in their place:
+
+- **A pinned scroll story** (`inc/partials/story.php`): the real Windows
+  window and Android phone stay pinned while four beats scroll past, and
+  their screens cross-fade through not connected, connecting, checking and
+  connected-and-verified (the country lit). The 32 frames in
+  `assets/img/story/` (2 apps x en/fa x light/dark x 4 states, WebP) are
+  rendered from `apps/mobile/preview.html` and
+  `apps/desktop-windows/preview.html` with headless Chrome. **Before each
+  capture every method or protocol label, "N protocols" count, relay row,
+  "Via Iran" text and the relay light on the map is hidden in the DOM** --
+  any re-render must do the same. Scroll-driven (`view-timeline` and
+  `timeline-scope`); elsewhere the devices show the final state.
+- **A night section**: always dark, the dotted world as faint stars, the
+  server countries as the bright ones, the glass logo floating, one line.
+- **Live mini-widgets** (`inc/partials/widgets.php`) instead of explanatory
+  cards: live speed with a moving sparkline, per-app switches flipping on
+  generic tiles, a country going from "Not proven yet" to "Worked here", and
+  the app's card turning from light to dark. Every figure says it is an
+  example; the speed and "worked here" cards say they are the Windows app's.
+- **A statement line** that slides sideways with the scroll, over a slowly
+  drifting ribbon of the server countries (countries only).
 
 ### Performance, measured not assumed
 

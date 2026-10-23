@@ -244,7 +244,8 @@ html[lang="fa"] .beat__title{font-weight:800;letter-spacing:0;line-height:1.45}
   .story__phone .shot{height:100%;width:100%;object-fit:cover}
   .story__caption{display:none}
   .story__beats{grid-column:1;grid-row:1;position:relative;z-index:2;padding-block:calc(52svh + 110px) 6vh}
-  .beat{min-height:70svh;align-content:end;padding:22px;margin-bottom:12px;border-radius:24px;background:var(--glass-solid);box-shadow:var(--edge),var(--drop)}
+  .beat{min-height:0;align-content:start;padding:20px 22px;margin-bottom:46svh;border-radius:24px;background:var(--glass-solid);box-shadow:var(--edge),var(--drop)}
+  .beat--4{margin-bottom:8svh}
   .beat::before{display:none}
 }
 

@@ -9,9 +9,13 @@
  *   hero        what it is -- the glass logo and the app's own tagline, over
  *               the aurora and the dotted world with its light lines
  *   app         the real app, in a phone (a real screenshot, captioned)
- *   methods     how it stays connected, described by what it does for you
+ *   story       the real apps pinned through four beats: not connected,
+ *               connecting, checking, connected and verified
+ *   night       the world as stars, the logo in its own light, one line
+ *   statement   one line sliding with the scroll, a ribbon of countries
  *   exits       where your traffic comes out (the map and the list)
- *   no-config   why this is not the config link you usually buy
+ *   no-config   why this is not the config link you usually buy, beside
+ *               live mini-widgets of real pieces of the app
  *   security    what "encrypted" honestly means, and where it stops
  *   trust       what we will and will not claim
  *   pricing     what it costs
