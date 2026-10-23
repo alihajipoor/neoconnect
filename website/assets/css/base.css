@@ -147,7 +147,7 @@
   --orbit:rgba(170,160,255,.20);
   --glow-1:rgba(139,92,246,.50); --glow-2:rgba(34,211,238,.30);
   --show-l:none; --show-d:block;
-  --grain:.32; --light:rgba(160,150,255,.13); --light-2:rgba(34,211,238,.05);
+  --grain:.22; --light:rgba(160,150,255,.13); --light-2:rgba(34,211,238,.05);
 }
 :root[data-theme="dark"] ::selection{background:rgba(120,150,255,.32)}
 
