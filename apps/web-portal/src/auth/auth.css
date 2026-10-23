@@ -88,12 +88,6 @@ html[data-surface="auth"] {
   --pa-danger-ink: #a8231a;
   --pa-danger-tint: rgba(208, 44, 31, 0.1);
   --pa-muted-tint: rgba(80, 90, 110, 0.1);
-  --pa-gm-glass-a: rgba(255, 255, 255, 0.72);
-  --pa-gm-glass-b: rgba(206, 217, 235, 0.34);
-  --pa-gm-dot: #9aabc8;
-  --pa-gm-edge: rgba(74, 90, 122, 0.32);
-  --pa-gm-shadow: rgba(18, 24, 40, 0.28);
-  --pa-gm-core: 0.62;
   --pa-field-focus: rgba(16, 69, 255, 0.22);
 
   --pa-font: "Inter", "Vazirmatn", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -150,12 +144,6 @@ html[data-surface="auth"] {
     --pa-danger-ink: #f79a90;
     --pa-danger-tint: rgba(242, 107, 94, 0.14);
     --pa-muted-tint: rgba(150, 160, 180, 0.13);
-    --pa-gm-glass-a: rgba(214, 226, 255, 0.24);
-    --pa-gm-glass-b: rgba(110, 130, 180, 0.08);
-    --pa-gm-dot: #46557a;
-    --pa-gm-edge: rgba(190, 205, 240, 0.32);
-    --pa-gm-shadow: rgba(0, 0, 0, 0.5);
-    --pa-gm-core: 0.68;
     --pa-field-focus: rgba(91, 131, 255, 0.4);
   }
 }
@@ -820,47 +808,6 @@ html[lang="fa"] .pa-fine {
 }
 .pa-foot a:hover {
   color: var(--pa-ink);
-}
-
-/* --- The glass mark -------------------------------------------------------- */
-.pa-gm .pa-gm-glass-a {
-  stop-color: var(--pa-gm-glass-a);
-}
-.pa-gm .pa-gm-glass-b {
-  stop-color: var(--pa-gm-glass-b);
-}
-.pa-gm .pa-gm-dot {
-  fill: var(--pa-gm-dot);
-}
-.pa-gm .pa-gm-shadow {
-  stop-color: var(--pa-gm-shadow);
-}
-.pa-gm .pa-gm-floor {
-  opacity: 0.6;
-}
-.pa-gm .pa-gm-refract {
-  opacity: 0.6;
-}
-.pa-gm .pa-gm-core {
-  opacity: var(--pa-gm-core);
-}
-.pa-gm .pa-gm-band {
-  opacity: 0.55;
-}
-.pa-gm .pa-gm-edge {
-  stroke: var(--pa-gm-edge);
-}
-.pa-gm .pa-gm-rim {
-  stroke: var(--pa-rim-a);
-  opacity: 0.9;
-}
-.pa-gm .pa-gm-streak {
-  stroke: #ffffff;
-  opacity: 0.7;
-}
-.pa-gm .pa-gm-glint {
-  fill: #ffffff;
-  opacity: 0.85;
 }
 
 /* --- Phones: the card is the page, and it fits one screen ------------------- */
