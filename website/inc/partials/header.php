@@ -33,7 +33,7 @@ $nx_links = array(
     <div class="site-header__bar glass">
       <a class="brand" href="<?php echo nx_esc(nx_url('home')); ?>"<?php
         echo $nx_current === 'home' && empty($GLOBALS['NX_TITLE']) ? ' aria-current="page"' : ''; ?>>
-        <span class="brand__mark"><?php echo nx_logo_mark(); ?></span>
+        <span class="brand__mark"><?php echo nx_logo(); ?></span>
         <span class="brand__word" lang="en">Neoxify</span>
         <?php if (nx_beta()): ?>
           <span class="brand__beta"><?php echo nx_e('beta.badge'); ?></span>
@@ -48,7 +48,19 @@ $nx_links = array(
       </nav>
 
       <div class="header-actions">
-        <?php echo nx_lang_switch(); ?>
+        <?php echo nx_lang_switch('lang-switch--bar'); ?>
+
+        <?php /* Light / dark. Only the script can switch it, so without the
+                 script there is no button (the theme then follows the
+                 system). aria-pressed is right from the server when a cookie
+                 says dark, and site.js corrects it for a dark system. */ ?>
+        <button type="button" class="theme-toggle" data-theme-toggle data-enhanced-only
+                data-cookie-path="<?php echo nx_esc(nx_cfg('base_path', '/')); ?>"
+                aria-pressed="<?php echo nx_theme() === 'dark' ? 'true' : 'false'; ?>">
+          <span class="i-sun"><?php echo nx_icon('sun'); ?></span>
+          <span class="i-moon"><?php echo nx_icon('moon'); ?></span>
+          <span class="sr-only"><?php echo nx_e('theme.dark'); ?></span>
+        </button>
 
         <?php if ($nx_portal !== ''): ?>
           <a class="btn btn--quiet btn--sm btn--signin" href="<?php echo nx_esc($nx_portal); ?>"><?php echo nx_e('nav.signin'); ?></a>
@@ -73,6 +85,9 @@ $nx_links = array(
       <?php if ($nx_portal !== ''): ?>
         <a href="<?php echo nx_esc($nx_portal); ?>"><?php echo nx_e('nav.signin'); ?></a>
       <?php endif; ?>
+      <?php /* On a phone the bar has no room for the language switch, so it
+               is here instead (and in the footer). */ ?>
+      <div class="mobile-nav__lang"><?php echo nx_lang_switch(); ?></div>
       <a class="btn btn--primary btn--block" href="<?php echo nx_esc(nx_url('download')); ?>"><?php echo nx_e('nav.cta'); ?></a>
     </nav>
   </div>

@@ -35,7 +35,7 @@ html[lang="fa"] .checklist svg{margin-top:6px}
 /* --------------------------------------------------------------- flow
    The protected leg stops at our servers; the plain leg to the internet
    is drawn plain. Do not redraw this as one line to the destination.   */
-.flow{display:flex;align-items:center;gap:0;padding:clamp(18px,2.4vw,28px);border-radius:var(--r-panel);background:var(--solid);box-shadow:var(--edge)}
+.flow{display:flex;align-items:center;gap:0;padding:clamp(18px,2.4vw,28px);border-radius:var(--r-panel);background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop)}
 .flow__node{display:grid;justify-items:center;gap:10px;flex:none;width:clamp(92px,12vw,128px);text-align:center;font-size:14px;font-weight:600}
 .flow__node .ico{width:52px;height:52px;border-radius:16px;background:var(--pearl);color:var(--ink);box-shadow:var(--edge),0 6px 14px -8px rgba(20,40,90,.3)}
 .flow__node--ok .ico{background:var(--cobalt);color:#fff}
@@ -60,7 +60,7 @@ html[dir="rtl"] .flow__line{background:linear-gradient(270deg,var(--cobalt),#22d
 }
 
 /* --------------------------------------------------------------- callouts */
-.callout{display:flex;gap:14px;align-items:flex-start;padding:18px 20px;border-radius:var(--r-card);background:var(--solid);box-shadow:var(--edge);color:var(--ink)}
+.callout{display:flex;gap:14px;align-items:flex-start;padding:18px 20px;border-radius:var(--r-card);background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop);color:var(--ink)}
 .callout > svg{width:22px;height:22px;flex:none;margin-top:2px;color:var(--cobalt-ink)}
 .callout p{color:var(--ink-2);font-size:15px}
 .callout__title{font-weight:600;color:var(--ink)!important;margin-bottom:4px}
@@ -71,7 +71,7 @@ html[dir="rtl"] .flow__line{background:linear-gradient(270deg,var(--cobalt),#22d
 .callout--warn p{color:var(--ink)}
 
 /* A notice is a card with a heading: download steps, beta, warnings. */
-.notice{padding:clamp(20px,2.4vw,28px);border-radius:var(--r-card);background:var(--solid);box-shadow:var(--edge)}
+.notice{padding:clamp(20px,2.4vw,28px);border-radius:var(--r-card);background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop)}
 .notice h2,.notice h3{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:600;letter-spacing:-.01em;margin-bottom:8px}
 html[lang="fa"] .notice h2,html[lang="fa"] .notice h3{letter-spacing:0}
 .notice h2 svg,.notice h3 svg{width:20px;height:20px;color:var(--cobalt-ink)}
@@ -88,8 +88,10 @@ html[lang="fa"] .steps li::before{content:counter(s,persian)}
 
 /* --------------------------------------------------------------- plans */
 .plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,252px),1fr));gap:clamp(14px,1.6vw,20px);align-items:stretch}
-.plan{position:relative;display:flex;flex-direction:column;gap:18px;padding:26px 24px 24px;border-radius:var(--r-panel);background:var(--solid);box-shadow:var(--edge),0 1px 2px rgba(20,30,60,.04)}
-.plan--featured{background:var(--solid-opaque);box-shadow:inset 0 0 0 2px var(--cobalt),var(--drop)}
+.plan{position:relative;display:flex;flex-direction:column;gap:18px;padding:26px 24px 24px;border-radius:var(--r-panel);background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop),0 1px 2px rgba(20,30,60,.04)}
+/* The featured plan: a border of the brand's light and a deeper glow. */
+.plan--featured{border:2px solid transparent;background:linear-gradient(180deg,var(--solid-opaque),var(--solid-opaque)) padding-box,linear-gradient(140deg,var(--violet),var(--cobalt) 52%,var(--cyan)) border-box;
+  box-shadow:0 36px 80px -36px rgba(80,60,230,.55),var(--card-drop)}
 .plan__head{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:30px}
 .plan__name{font-size:17px;font-weight:600}
 .plan__price{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 8px}
@@ -108,7 +110,7 @@ html[lang="fa"] .plan__features svg{margin-top:5px}
 
 /* --------------------------------------------------------------- faq
    A grouped list, the app's settings group: one surface, hairline rows. */
-.faq{border-radius:var(--r-panel);background:var(--solid);box-shadow:var(--edge);padding:6px 0}
+.faq{border-radius:var(--r-panel);background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop);padding:6px 0}
 .faq details{border-top:1px solid var(--hairline)}
 .faq details:first-child{border-top:0}
 .faq summary{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:60px;padding:14px 22px;cursor:pointer;list-style:none;font-weight:600;font-size:16.5px;line-height:1.4}
@@ -126,13 +128,13 @@ html[lang="fa"] .faq summary{line-height:1.7}
 /* --------------------------------------------------------------- locations
    Rows like the app's location list: flag, name, where it sits.        */
 .locs{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr));gap:10px}
-.loc{display:flex;align-items:center;gap:14px;min-height:64px;padding:12px 16px;border-radius:16px;background:var(--solid);box-shadow:var(--edge)}
+.loc{display:flex;align-items:center;gap:14px;min-height:64px;padding:12px 16px;border-radius:16px;background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop)}
 .loc__name{display:block;font-weight:600;line-height:1.3}
 .loc__meta{display:block;font-size:13.5px;color:var(--ink-2);line-height:1.4}
 .loc--relay{background:transparent;box-shadow:none;border:1.5px dashed var(--hairline-2)}
 
 /* --------------------------------------------------------------- tables */
-.table-wrap{border-radius:var(--r-panel);background:var(--solid);box-shadow:var(--edge);overflow:hidden}
+.table-wrap{border-radius:var(--r-panel);background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop);overflow:hidden}
 .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 table{width:100%;border-collapse:collapse}
 th,td{padding:16px 20px;text-align:start;vertical-align:top;border-top:1px solid var(--hairline)}
@@ -178,8 +180,8 @@ html[lang="fa"] .prose h2{letter-spacing:0;line-height:1.6}
 
 /* --------------------------------------------------------------- download */
 .platforms{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:clamp(14px,1.6vw,20px)}
-.platform{display:flex;flex-direction:column;gap:12px;padding:26px 24px 24px;border-radius:var(--r-panel);background:var(--solid);box-shadow:var(--edge)}
-.platform--ready{background:var(--solid-opaque);box-shadow:var(--edge),var(--drop)}
+.platform{display:flex;flex-direction:column;gap:12px;padding:26px 24px 24px;border-radius:var(--r-panel);background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop)}
+.platform--ready{background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:0 36px 80px -40px rgba(80,60,230,.5),var(--card-drop)}
 .platform__glyph{display:grid;place-items:center;width:56px;height:56px;border-radius:16px;background:var(--pearl);box-shadow:var(--edge),0 6px 14px -8px rgba(20,40,90,.3);color:var(--ink)}
 .platform__glyph svg{width:30px;height:30px}
 .platform--soon .platform__glyph{color:var(--ink-3);box-shadow:none;background:var(--field)}
@@ -212,4 +214,11 @@ html[lang="fa"] .prose h2{letter-spacing:0;line-height:1.6}
 .lost{position:relative;padding-top:calc(74px + clamp(56px,9vw,110px));padding-bottom:clamp(40px,6vw,80px)}
 .lost__inner{margin-inline:auto;text-align:center;justify-items:center}
 .lost__code{font-family:var(--font-head);font-weight:700;font-size:clamp(84px,16vw,180px);letter-spacing:-.06em;line-height:.9;
-  background:linear-gradient(180deg,var(--ink) 30%,var(--ink-3));-webkit-background-clip:text;background-clip:text;color:transparent}
+  background:linear-gradient(120deg,var(--accent-a),var(--accent-b));-webkit-background-clip:text;background-clip:text;color:transparent}
+
+/* --------------------------------------------------------------- depth
+   Every content surface above gets the card's lit rim (base.css): bright
+   at the top left, picking up the brand's light at the far corner.     */
+.plan,.platform,.notice,.faq,.table-wrap,.flow,.loc,.ans,.callout{position:relative}
+.plan:not(.plan--featured)::before,.platform::before,.notice:not(.notice--warn)::before,.faq::before,.table-wrap::before,.flow::before,.loc:not(.loc--relay)::before,.ans::before{content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;pointer-events:none;background:var(--card-rim);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0)}

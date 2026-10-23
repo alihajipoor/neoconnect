@@ -22,6 +22,7 @@
 defined('NX') || exit;
 
 require_once NX_INC . '/partials/icons.php';
+require_once NX_INC . '/partials/world.php';
 
 $nx_page = nx_page();
 
@@ -99,9 +100,18 @@ $nx_og_image = isset($NX_OG_IMAGE)
     ? $NX_OG_IMAGE
     : $nx_base . 'assets/img/og-' . (nx_locale() === 'fa' ? 'fa' : 'en') . '-v3.jpg';
 $nx_og_image_abs = rtrim(nx_cfg('site_url', ''), '/') . $nx_og_image;
+
+// The theme. A visitor who used the switch has a cookie, and the server
+// paints that theme from the first byte: data-theme on <html>, one
+// theme-color, one color-scheme. Without the cookie there is no attribute
+// and CSS follows the system (prefers-color-scheme). Either way there is no
+// flash of the wrong theme and no script involved in getting it right.
+$nx_theme = nx_theme();
+$nx_theme_colors = array('light' => '#F1F3F6', 'dark' => '#090B12');
 ?>
 <!doctype html>
-<html lang="<?php echo nx_esc(nx_locale()); ?>" dir="<?php echo nx_esc(nx_dir()); ?>" class="no-js">
+<html lang="<?php echo nx_esc(nx_locale()); ?>" dir="<?php echo nx_esc(nx_dir()); ?>" class="no-js"<?php
+    echo $nx_theme !== '' ? ' data-theme="' . $nx_theme . '"' : ''; ?>>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -112,9 +122,14 @@ $nx_og_image_abs = rtrim(nx_cfg('site_url', ''), '/') . $nx_og_image;
 <?php endforeach; ?>
 <style><?php echo $nx_css; ?></style>
 <script><?php echo $nx_loader; ?></script>
+<?php if ($nx_theme !== ''): ?>
+<meta name="color-scheme" content="<?php echo $nx_theme; ?>">
+<meta name="theme-color" content="<?php echo $nx_theme_colors[$nx_theme]; ?>">
+<?php else: ?>
 <meta name="color-scheme" content="light dark">
-<meta name="theme-color" content="#F1F3F6" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#0B0E15" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="<?php echo $nx_theme_colors['light']; ?>" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="<?php echo $nx_theme_colors['dark']; ?>" media="(prefers-color-scheme: dark)">
+<?php endif; ?>
 <?php if ($nx_noindex): ?>
 <meta name="robots" content="noindex, follow">
 <?php else: ?>
@@ -160,6 +175,7 @@ if (!$nx_noindex) {
 </head>
 <body>
 <a class="skip-link" href="#main"><?php echo nx_e('skip_to_content'); ?></a>
-<div class="ambient" aria-hidden="true"></div>
+<?php echo nx_logo_sprite(); ?>
+<div class="sky" aria-hidden="true"><i class="sky__a"></i><i class="sky__b"></i><i class="sky__c"></i></div>
 <?php require NX_INC . '/partials/header.php'; ?>
 <main id="main">

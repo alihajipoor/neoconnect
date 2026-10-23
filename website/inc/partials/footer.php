@@ -21,7 +21,7 @@ $nx_portal_url = nx_portal_url();
 
       <div class="site-footer__about">
         <a class="brand" href="<?php echo nx_esc(nx_url('home')); ?>">
-          <span class="brand__mark"><?php echo nx_logo_mark(); ?></span>
+          <span class="brand__mark"><?php echo nx_logo(); ?></span>
           <span class="brand__word" lang="en">Neoxify</span>
         </a>
         <p><?php echo nx_e('footer.note'); ?></p>

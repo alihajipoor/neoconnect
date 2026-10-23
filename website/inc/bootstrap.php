@@ -282,6 +282,21 @@ function nx_asset($relative)
 
 
 /**
+ * The visitor's chosen theme: 'light', 'dark', or '' for "follow the
+ * system". Read from the theme cookie, which only the switch in the header
+ * sets (assets/js/site.js). head.php writes it onto <html data-theme>, so
+ * the very first paint is already right -- no flash of the other theme and
+ * no script needed to get there. Anything else in the cookie is ignored.
+ *
+ * @return string
+ */
+function nx_theme()
+{
+    $v = isset($_COOKIE['theme']) ? (string) $_COOKIE['theme'] : '';
+    return ($v === 'light' || $v === 'dark') ? $v : '';
+}
+
+/**
  * The page's stylesheet, ready to inline.
  *
  * Reads assets/css/<module>.css in order, drops comments and collapses
@@ -310,6 +325,21 @@ function nx_css_bundle($modules)
     $css = preg_replace('/\s+/', ' ', $css);
     $css = preg_replace('/\s*([{};,>])\s*/', '$1', $css);
     $css = str_replace(';}', '}', $css);
+
+    // The dark theme is written ONCE, as rules whose selector starts with
+    // :root[data-theme="dark"] -- what the theme switch (a cookie, read in
+    // head.php) asks for. The same rules also apply to a visitor who never
+    // used the switch and whose system is dark, so each is repeated here
+    // inside prefers-color-scheme, for a root with no data-theme at all.
+    // Top-level rules only: one nested in another @media would lose it.
+    if (preg_match_all('/(?<=^|\})(:root\[data-theme="dark"\][^{}@]*)\{([^{}]*)\}/', $css, $m)) {
+        $auto = '';
+        foreach ($m[1] as $i => $selector) {
+            $auto .= str_replace(':root[data-theme="dark"]', ':root:not([data-theme])', $selector)
+                . '{' . $m[2][$i] . '}';
+        }
+        $css .= '@media (prefers-color-scheme:dark){' . $auto . '}';
+    }
 
     $base = nx_cfg('base_path', '/');
     if ($base !== '/') {

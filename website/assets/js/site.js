@@ -43,7 +43,7 @@
   ready(function () {
     if (root.className.indexOf("js") === -1) { root.className += " js"; }
     nav();
-    reveal();
+    theme();
     announcement();
     forms();
     instrument();
@@ -77,41 +77,57 @@
     });
   }
 
-  /* ============================================================= reveal
-   * Only for things that start below the first screen: nothing the
-   * visitor sees on arrival is ever hidden, so the largest paint and the
-   * layout are never touched. Content ships visible; this arms it just
-   * before observing, and a sweep catches anything a fast scroll skipped. */
-  function reveal() {
-    if (reduceMotion || !("IntersectionObserver" in window)) { return; }
-    var fold = window.innerHeight || 800;
-    var els = $$(".reveal").filter(function (el) { return el.getBoundingClientRect().top > fold; });
-    if (!els.length) { return; }
+  /* ============================================================== theme
+   * Light / dark. The server already painted the right theme from the
+   * cookie (head.php sets data-theme before anything renders), so this only
+   * handles the click: flip data-theme, remember it for a year, and keep
+   * aria-pressed and the browser's theme-color honest. With no cookie the
+   * page follows the system, and aria-pressed follows it too. */
+  function theme() {
+    var btn = $("[data-theme-toggle]");
+    if (!btn) { return; }
+    var mq = null;
+    try { mq = window.matchMedia("(prefers-color-scheme: dark)"); } catch (e) { /* no system preference */ }
+    var colors = { light: "#F1F3F6", dark: "#090B12" };
 
-    var io = new IntersectionObserver(function (entries) {
-      entries.forEach(function (entry) {
-        if (entry.isIntersecting) {
-          entry.target.classList.add("is-visible");
-          io.unobserve(entry.target);
-        }
-      });
-    }, { rootMargin: "0px 0px -6% 0px", threshold: 0.04 });
-
-    els.forEach(function (el) { el.classList.add("is-armed"); io.observe(el); });
-
-    // Safety net: a long jump (an anchor, the End key) can pass elements
-    // the observer never reports. Anything above the fold is shown.
-    var queued = false;
-    function sweep() {
-      queued = false;
-      var h = window.innerHeight;
-      $$(".reveal.is-armed:not(.is-visible)").forEach(function (el) {
-        if (el.getBoundingClientRect().top < h) { el.classList.add("is-visible"); }
-      });
+    function current() {
+      var t = root.getAttribute("data-theme");
+      if (t === "light" || t === "dark") { return t; }
+      return mq && mq.matches ? "dark" : "light";
     }
-    window.addEventListener("scroll", function () {
-      if (!queued) { queued = true; window.requestAnimationFrame(sweep); }
-    }, { passive: true });
+    function sync() {
+      var t = current();
+      btn.setAttribute("aria-pressed", t === "dark" ? "true" : "false");
+      if (root.getAttribute("data-theme")) {
+        $$('meta[name="theme-color"]').forEach(function (m) {
+          m.setAttribute("content", colors[t]);
+          m.removeAttribute("media");
+        });
+        var cs = $('meta[name="color-scheme"]');
+        if (cs) { cs.setAttribute("content", t); }
+      }
+    }
+    function apply(next) {
+      root.setAttribute("data-theme", next);
+      var path = btn.getAttribute("data-cookie-path") || "/";
+      document.cookie = "theme=" + next + "; path=" + path + "; max-age=31536000; samesite=lax" +
+        (location.protocol === "https:" ? "; secure" : "");
+      sync();
+    }
+
+    btn.addEventListener("click", function () {
+      var next = current() === "dark" ? "light" : "dark";
+      // A soft cross-fade where the browser can do it for free.
+      if (doc.startViewTransition && !reduceMotion) {
+        doc.startViewTransition(function () { apply(next); });
+      } else {
+        apply(next);
+      }
+    });
+    if (mq) {
+      if (mq.addEventListener) { mq.addEventListener("change", sync); } else if (mq.addListener) { mq.addListener(sync); }
+    }
+    sync();
   }
 
   /* ======================================================= announcement
