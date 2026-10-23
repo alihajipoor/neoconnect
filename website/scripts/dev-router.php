@@ -36,12 +36,16 @@ $file = $root . $path;
 // host sends and no Cache-Control, which the host does not send either.
 $gzip = isset($_SERVER['HTTP_ACCEPT_ENCODING']) && stripos($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip') !== false;
 if ($gzip && function_exists('gzencode')) {
-    ini_set('zlib.output_compression', '1');
+    // Only for what PHP renders: a static file the built-in server sends
+    // itself (an image, a font) must not pass through it, or it arrives
+    // compressed with no header saying so, and broken.
+    if (!is_file($file) || strtolower(pathinfo($file, PATHINFO_EXTENSION)) === 'php') {
+        ini_set('zlib.output_compression', '1');
+    }
     $types = array('css' => 'text/css', 'js' => 'application/javascript', 'svg' => 'image/svg+xml',
         'txt' => 'text/plain', 'xml' => 'application/xml', 'json' => 'application/json');
     $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
     if (isset($types[$ext]) && is_file($file)) {
-        ini_set('zlib.output_compression', '0');
         $mtime = filemtime($file);
         $etag = '"' . dechex($mtime) . '-' . dechex(filesize($file)) . '"';
         header('Content-Type: ' . $types[$ext] . ($ext === 'svg' ? '' : '; charset=utf-8'));
