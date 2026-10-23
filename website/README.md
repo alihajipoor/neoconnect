@@ -70,6 +70,44 @@ Honesty notes that come with it:
   blinks as if it were measured: on a website there is no evidence about the
   visitor's network to light anything with.
 
+### The 2026-10-23 round: motion, gadgets, an art direction of its own
+
+Owner: push the style further, add transitions and animation, "not plain,
+not overwhelming", and nothing that reads as a generated template. What
+was added, and the rules it keeps:
+
+- **The route finder** (`inc/partials/route-finder.php`), on the home and
+  features pages, replacing what the method table gave visually: abstract,
+  unlabelled paths from "You" to "The internet"; one lights and meets a
+  wall and fades, another takes over, a ring turns while the app checks,
+  and only then the tick and "Connected, checked". **No method, port,
+  transport, route or count is named or implied** -- the paths are drawing.
+  CSS animation (one 13-second cycle), run by `site.js` only while it is
+  on screen, with a Play again button. Without the script or under reduced
+  motion it shows its final frame.
+- **Art direction**: an editorial type scale (page and section titles step
+  up to 104/76 px, set tight), section labels as a numbered rule of the
+  brand's gradient -- the one accent, used the same way everywhere -- and
+  layouts that change shape section to section (5:7 splits, a sticky
+  title, a bento, a ledger of hairline rows, one sentence of the product's
+  own set large) instead of rows of equal cards. A film grain
+  (`assets/img/grain.svg`, 369 bytes) sits on the fixed sky under the glass.
+- **Motion and micro-interactions**: cross-document view transitions (the
+  header bar and the logo stay put), a scroll-progress hairline on the bar
+  (scroll-driven, no script), a light that follows the cursor over cards
+  and plans, a slight pointer tilt on the hero logo and the phone, a
+  magnetic pull of at most 6 px on the two big primary buttons, a pressed
+  state on every button, the FAQ answer settling in when opened, plans
+  lifting on hover, and the location map: hover or tab to a light, or
+  point at a country in the list, and it lights and names itself.
+- **Restraint**: one thing moves per screen. Nothing on a map moves by
+  itself any more (no pings, no glints); the notes round the phone are
+  still; the hero keeps only the logo's slow orbit.
+- **Rules kept**: only `transform` and `opacity` animate; pointer effects
+  are for a fine pointer only and write custom properties through the
+  CSSOM (the CSP still forbids style attributes); everything stops under
+  `prefers-reduced-motion`, and nothing needs JavaScript to be readable.
+
 ### Performance, measured not assumed
 
 - **No render-blocking request.** Each page's CSS (`assets/css/base.css` +
