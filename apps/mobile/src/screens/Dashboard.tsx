@@ -3383,7 +3383,12 @@ export function Dashboard({
    * it: the stage keeps its place and draws nothing. */
   const notesShowing =
     slotTeardownState === "stuck" || customerTeardownState === "stuck" || permissionDenied || unsupportedChoice !== null;
-  const mapAlert = bannerShowing || slotShowing || connectionError !== null || notesShowing;
+  /** No plan yet is not a problem to read past the map for: the note is a
+   * line, and an empty stage under it looked broken (owner, 2026-10-23, on
+   * an account with no subscription). The map and the mark stay; only a
+   * real problem -- an error, offline, an ended plan -- clears the stage. */
+  const noPlanOnly = !subscription && !error && offlineSince === null && !endedState;
+  const mapAlert = (bannerShowing && !noPlanOnly) || slotShowing || connectionError !== null || notesShowing;
 
   /** The list's row in use and its words, held through a brief gap with
    * the chip's colour, the button's fill and the map's light: "Connected
