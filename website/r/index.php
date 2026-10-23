@@ -18,18 +18,23 @@
  * which is where the real work happens. It deliberately does NOT look
  * the code up: this page is public and unauthenticated, and a lookup
  * here would turn it into an oracle for testing guessed codes at
- * whatever rate Apache will serve. The API's preview endpoint is rate
+ * whatever rate the web server will serve. The API's preview endpoint is rate
  * limited for exactly that reason; this is a redirect, nothing more.
  */
 
 // No bootstrap: this file must not depend on locale resolution or the
 // translation layer. It renders no UI and must survive being hit before
 // anything else on the site is warm.
+// The same security headers as every page, without loading the whole site.
+define('NX', 1);
+require dirname(__DIR__) . '/inc/headers.php';
+nx_security_headers();
+
 $code = '';
 
-// The rewrite passes it as ?c=; the fallback path parses PATH_INFO so
-// this still works on a host without mod_rewrite, where the URL arrives
-// as /r/index.php/ABCD1234EFGH.
+// The router in index.php (or the rewrite, on Apache) passes it as ?c=;
+// the fallback path parses PATH_INFO so this still works where the URL
+// arrives as /r/index.php/ABCD1234EFGH.
 if (isset($_GET['c']) && is_string($_GET['c'])) {
     $code = $_GET['c'];
 } elseif (isset($_SERVER['PATH_INFO']) && is_string($_SERVER['PATH_INFO'])) {

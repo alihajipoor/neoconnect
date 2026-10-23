@@ -30,7 +30,7 @@ defined('NX') || exit;
 
 return array(
 
-    'updated' => '2026-08-03',
+    'updated' => '2026-10-22',
 
     'sections' => array(
 
@@ -129,12 +129,12 @@ return array(
             ),
             'body' => array(
                 'en' => array(
-                    'This website sets exactly one cookie, and only once you use the language switch. It records whether you chose English or Persian, so we stop guessing on your next visit. It contains that word and nothing else, it identifies nobody, and it is why there is no cookie banner here — remembering a preference you deliberately asked for does not require consent. There is no analytics, nothing loaded from any third party, and no tracking between visits.',
+                    'This website sets at most two cookies, each only once you use the switch it belongs to: one records whether you chose English or Persian, the other whether you chose the light or the dark theme, so we stop guessing on your next visit. Each contains that one word and nothing else, neither identifies anybody, and that is why there is no cookie banner here — remembering a preference you deliberately asked for does not require consent. There is no analytics, nothing loaded from any third party, and no tracking between visits.',
                     'To decide which language to show you before you have chosen, we read the language your browser asks for, and a country code if the network in front of us adds one to the request. Neither is stored, and you can always switch.',
                     'If you send the contact form or apply to be a reseller, we receive what you typed into it — your name, email address, and the message itself, plus the extra fields on the reseller form. Alongside it we store a one-way hash of your IP address, used to stop the form being abused. We do not keep the address itself.',
                 ),
                 'fa' => array(
-                    'این وب‌سایت دقیقاً یک کوکی تنظیم می‌کند، آن هم فقط زمانی که از کلید تغییر زبان استفاده کنید. این کوکی ثبت می‌کند که انگلیسی را انتخاب کرده‌اید یا فارسی، تا در بازدید بعدی دیگر حدس نزنیم. جز همین یک کلمه چیزی در آن نیست، هیچ‌کس را شناسایی نمی‌کند، و به همین دلیل اینجا بنر کوکی نمی‌بینید — به‌خاطر سپردن ترجیحی که خودتان خواسته‌اید نیازی به کسب رضایت ندارد. هیچ ابزار تحلیلی، هیچ بارگذاری از سرویس شخص ثالث و هیچ ردیابی میان بازدیدها وجود ندارد.',
+                    'این وب‌سایت حداکثر دو کوکی تنظیم می‌کند، و هرکدام فقط زمانی که از کلید مربوط به آن استفاده کنید: یکی ثبت می‌کند که انگلیسی را انتخاب کرده‌اید یا فارسی، و دیگری اینکه پوسته روشن را انتخاب کرده‌اید یا تیره، تا در بازدید بعدی دیگر حدس نزنیم. در هرکدام جز همان یک کلمه چیزی نیست، هیچ‌کدام کسی را شناسایی نمی‌کنند، و به همین دلیل اینجا بنر کوکی نمی‌بینید — به‌خاطر سپردن ترجیحی که خودتان خواسته‌اید نیازی به کسب رضایت ندارد. هیچ ابزار تحلیلی، هیچ بارگذاری از سرویس شخص ثالث و هیچ ردیابی میان بازدیدها وجود ندارد.',
                     'برای اینکه پیش از انتخاب شما تصمیم بگیریم کدام زبان را نشان دهیم، به زبانی که مرورگرتان درخواست می‌کند نگاه می‌کنیم و همچنین به کد کشور، اگر شبکه‌ای که جلوی ماست آن را به درخواست اضافه کند. هیچ‌کدام ذخیره نمی‌شوند و همیشه می‌توانید زبان را عوض کنید.',
                     'اگر فرم تماس را بفرستید یا برای نمایندگی درخواست بدهید، آنچه در فرم نوشته‌اید به ما می‌رسد — نام، آدرس ایمیل و خود پیام، به‌علاوه فیلدهای اضافی فرم نمایندگی. در کنار آن، یک هش یک‌طرفه از نشانی IP شما را ذخیره می‌کنیم تا جلوی سوءاستفاده از فرم گرفته شود. خود نشانی را نگه نمی‌داریم.',
                 ),

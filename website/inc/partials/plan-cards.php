@@ -46,11 +46,12 @@ if (empty($nx_plan_data['plans'])) {
   ?>
     <article class="plan<?php echo $nx_best ? ' plan--featured' : ''; ?>">
 
-      <?php if ($nx_best): ?>
-        <span class="plan__badge"><?php echo nx_e('home.pricing.popular'); ?></span>
-      <?php endif; ?>
-
-      <p class="plan__name"><?php echo nx_e_pick($nx_plan['name']); ?></p>
+      <div class="plan__head">
+        <h3 class="plan__name"><?php echo nx_e_pick($nx_plan['name']); ?></h3>
+        <?php if ($nx_best): ?>
+          <span class="status"><?php echo nx_e('home.pricing.popular'); ?></span>
+        <?php endif; ?>
+      </div>
 
       <div class="plan__price">
         <span class="plan__amount" data-ltr><?php echo nx_esc(nx_price($nx_plan['price'])); ?></span>
@@ -134,6 +135,7 @@ if (empty($nx_plan_data['plans'])) {
         <a class="btn <?php echo $nx_best ? 'btn--primary' : 'btn--ghost'; ?> btn--block"
            href="<?php echo nx_esc(nx_buy_url(isset($nx_plan['id']) ? $nx_plan['id'] : '')); ?>">
           <?php echo nx_e('home.pricing.cta'); ?>
+          <span class="sr-only">&mdash; <?php echo nx_e_pick($nx_plan['name']); ?></span>
         </a>
       <?php endif; ?>
     </article>

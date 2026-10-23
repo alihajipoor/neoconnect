@@ -31,37 +31,48 @@ ErrorDocument 404 /404.php
 # ---------------------------------------------------------------------
 
 <IfModule mod_headers.c>
+    # PHP sends these on every page itself (inc/headers.php), minus any
+    # listed in config.php's headers_sent_by_server. Each fixed header is
+    # unset from PHP's set first and then added once here, so it covers
+    # static files too and is never sent twice. HSTS without 'preload' on
+    # purpose: see inc/headers.php.
+    Header unset Strict-Transport-Security
+    Header unset X-Content-Type-Options
+    Header unset Referrer-Policy
+    Header unset X-Frame-Options
+    Header unset Cross-Origin-Opener-Policy
+    Header unset Cross-Origin-Resource-Policy
+    Header unset Permissions-Policy
+    Header unset X-Powered-By
+    Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains"
     Header always set X-Content-Type-Options "nosniff"
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
-    Header always set X-Frame-Options "SAMEORIGIN"
-    Header always set Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()"
+    Header always set X-Frame-Options "DENY"
+    Header always set Cross-Origin-Opener-Policy "same-origin"
+    Header always set Cross-Origin-Resource-Policy "same-origin"
+    Header always set Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()"
 
-    # No 'unsafe-inline' anywhere: the site has no inline <script> and no
-    # style="..." attributes -- templates use the utility classes at the
-    # bottom of assets/css/site.css instead. If you ever add an inline style
-    # or script, fix the template rather than weakening this header.
+    # THE CSP ON A PAGE IS PHP'S ALONE: it pins the page's inline
+    # stylesheet and its one inline script by SHA-256, so it differs per
+    # page. setifempty (not 'always') only adds this static policy where
+    # PHP sent none: static files. Two CSP headers would both be enforced,
+    # and this one would block a page's own CSS.
     #
-    # 'self' only, with data: for images because the favicon and any inline
-    # SVG data URIs need it. No third-party origins load anything here.
-    #
-    # connect-src is the one exception, and it is not optional: /account/
-    # is the customer portal, and every call it makes -- sign in, plans,
-    # purchase, vouchers -- goes to a DIFFERENT origin. 'self' alone
-    # blocks all of them, and the portal then renders perfectly and fails
-    # at the first request with nothing on screen to explain it.
-    #
-    # It is a wildcard over neoxify.site rather than one hostname because
-    # the portal reuses the apps' endpoint ladder (apps/desktop-windows/
-    # src/lib/api-endpoints.ts): connect.neoxify.site first, then the node
-    # mirrors on their VPN ports, then further mirrors derived at runtime
-    # from whatever credentials the customer holds. Those last ones cannot
-    # be enumerated here -- any node may become one -- and every one of
-    # them is a neoxify.site name on a nonstandard port by design. Naming
-    # only the panel would leave the portal with no failover on exactly
-    # the filtered networks the ladder exists for.
-    #
-    # Nothing else on the site makes an XHR at all.
-    Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.neoxify.site:*; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'"
+    # NOT on /account/. The customer portal is a static build that carries
+    # its own policy in a <meta> (apps/web-portal/portal-html.ts): its
+    # inline loader and first-paint styles by hash, and connect-src https:,
+    # because its API calls go to mirrors on several domains and addresses
+    # that are signed into the endpoint bundle and change without a
+    # release -- no host list written here can stay right, and the ones
+    # Iran can still reach are exactly the ones such a list leaves out.
+    # This policy on top of it would block the loader (a map and no card)
+    # and every mirror not listed. Framing is refused there all the same,
+    # by X-Frame-Options above. Nothing else on the site makes a request,
+    # so connect-src here is 'self'.
+    <IfModule mod_setenvif.c>
+        SetEnvIf Request_URI "^/account(/|$)" NX_PORTAL
+    </IfModule>
+    Header setifempty Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" env=!NX_PORTAL
 </IfModule>
 
 # ---------------------------------------------------------------------
@@ -98,12 +109,17 @@ ErrorDocument 404 /404.php
 
 <IfModule mod_expires.c>
     ExpiresActive On
-    # Safe to cache hard: asset URLs carry a ?v= stamp from the file's own
-    # mtime (see nx_asset() in inc/bootstrap.php), so a redeploy changes the
-    # URL and no visitor can be stuck on a stale stylesheet.
+    # Safe to cache hard: the script and icons carry a ?v= stamp from the
+    # file's own mtime (nx_asset() in inc/bootstrap.php), and the fonts,
+    # the map and the social cards carry a version in the file name. CSS
+    # is inlined into each page, so there is no stylesheet to go stale.
     ExpiresByType text/css "access plus 1 year"
     ExpiresByType application/javascript "access plus 1 year"
+    ExpiresByType text/javascript "access plus 1 year"
     ExpiresByType image/svg+xml "access plus 1 year"
+    ExpiresByType image/png "access plus 1 year"
+    ExpiresByType image/jpeg "access plus 1 year"
+    ExpiresByType font/woff2 "access plus 1 year"
     # HTML is generated per request and must never be cached by a proxy.
     ExpiresByType text/html "access plus 0 seconds"
 </IfModule>

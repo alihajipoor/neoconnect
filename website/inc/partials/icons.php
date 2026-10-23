@@ -15,42 +15,47 @@
 defined('NX') || exit;
 
 /**
- * The brand mark: a broken ring around a solid centre, in the violet-to-cyan
- * gradient. It deliberately echoes the circular Connect control at the centre
- * of the desktop app.
+ * The Neoxify logo: the glass mark the apps use, exactly as they ship it
+ * (assets/img/brand/neoxify-glass-{light,dark}.svg are byte copies of
+ * apps/web-portal/src/auth/, presentation attributes only, no style).
  *
- * Each call mints a unique gradient id. Inlining the same SVG several times on
- * one page would otherwise repeat an id, which is invalid HTML and leaves the
- * rendering at the mercy of which duplicate the browser resolves first.
+ * The two files go into the page ONCE, as <symbol>s in a hidden sprite at
+ * the top of the body (nx_logo_sprite(), called by head.php); every logo
+ * on the page is then two tiny <use> references, and CSS shows the one
+ * that matches the theme (--logo-l / --logo-d in base.css). Their gradient
+ * ids are already distinct (nxl* and nxd*), so both can live in one page.
  *
- * @param string $class CSS class for the <svg>
+ * @param string $class extra CSS class on each <svg>
  * @return string
  */
-function nx_logo_mark($class = '')
+function nx_logo($class = '')
 {
-    static $seq = 0;
-    $seq++;
-    $id = 'nx-brand-' . $seq;
+    $out = '';
+    foreach (array('light' => 'l', 'dark' => 'd') as $variant => $short) {
+        $out .= '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"'
+            . ' class="logo logo--' . $short . ($class !== '' ? ' ' . nx_esc($class) : '') . '"'
+            . ' aria-hidden="true" focusable="false"><use href="#nx-logo-' . $variant . '"/></svg>';
+    }
+    return $out;
+}
 
-    // Explicit size, like the other two emitters: CSS scales it per
-    // component, but a bare inline SVG with only a viewBox has no intrinsic
-    // size and will otherwise fill whatever box it lands in.
-    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"'
-        . ' width="28" height="28" fill="none"'
-        . ($class !== '' ? ' class="' . nx_esc($class) . '"' : '')
-        . ' aria-hidden="true" focusable="false">'
-        . '<defs><linearGradient id="' . $id . '" x1="0" y1="0" x2="1" y2="1">'
-        . '<stop offset="0" stop-color="#8b5cf6"/>'
-        . '<stop offset="1" stop-color="#22d3ee"/>'
-        . '</linearGradient></defs>'
-        // r=21 gives a circumference of ~132, so 96 on / 36 off is exactly
-        // one stroke and one gap -- change the radius and this must change
-        // with it or the gap multiplies.
-        . '<circle cx="32" cy="32" r="21" stroke="url(#' . $id . ')" stroke-width="7"'
-        . ' stroke-linecap="round" stroke-dasharray="96 36"'
-        . ' transform="rotate(-58 32 32)"/>'
-        . '<circle cx="32" cy="32" r="8" fill="url(#' . $id . ')"/>'
-        . '</svg>';
+/**
+ * The sprite nx_logo() points into. Zero-sized rather than display:none:
+ * gradients inside an undisplayed SVG do not render through <use>.
+ *
+ * @return string
+ */
+function nx_logo_sprite()
+{
+    $out = '<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" class="sprite" aria-hidden="true" focusable="false">';
+    foreach (array('light', 'dark') as $variant) {
+        $svg = (string) @file_get_contents(NX_ROOT . '/assets/img/brand/neoxify-glass-' . $variant . '.svg');
+        if (!preg_match('#^<svg[^>]*\bviewBox="([^"]+)"[^>]*>(.*)</svg>\s*$#s', $svg, $m)) {
+            continue;
+        }
+        $out .= '<symbol id="nx-logo-' . $variant . '" viewBox="' . $m[1] . '">' . $m[2] . '</symbol>';
+    }
+    return $out . '</svg>';
 }
 
 /**
@@ -112,6 +117,10 @@ function nx_icon($name, $class = '')
         'menu' => '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>',
 
         'close' => '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+
+        'sun' => '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
+
+        'moon' => '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
 
         'check' => '<path d="M20 6 9 17l-5-5"/>',
 
@@ -213,6 +222,8 @@ function nx_icon($name, $class = '')
 
     return '<svg ' . $attrs . '>' . $paths[$name] . '</svg>';
 }
+
+
 
 
 // ---------------------------------------------------------------------
@@ -333,33 +344,6 @@ function nx_signal_path($seed, $w, $h, $kind)
 
     return 'M' . implode(' L', $points);
 }
-
-/**
- * The gradient definitions every decorative SVG on the page refers to.
- *
- * Emitted ONCE near the top of <body> by head.php, in a zero-size SVG, so
- * that `stroke="url(#nx-beam)"` resolves anywhere in the document. Defining
- * them inside the component that happens to be first would make every other
- * component depend on that one rendering -- which is how the specimen cards
- * lost their traces the first time round.
- *
- * @return string
- */
-function nx_svg_defs()
-{
-    return '<svg width="0" height="0" class="sr-only" aria-hidden="true" focusable="false"><defs>'
-        . '<linearGradient id="nx-brand-grad" x1="0" y1="0" x2="1" y2="1">'
-        . '<stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#22d3ee"/>'
-        . '</linearGradient>'
-        . '<linearGradient id="nx-beam" x1="0" y1="0" x2="1" y2="0">'
-        . '<stop offset="0" stop-color="#6D3AE8"/><stop offset="1" stop-color="#0A6E82"/>'
-        . '</linearGradient>'
-        . '<linearGradient id="nx-orb" x1="0" y1="0" x2="1" y2="1">'
-        . '<stop offset="0" stop-color="#10b981"/><stop offset="1" stop-color="#22d3ee"/>'
-        . '</linearGradient>'
-        . '</defs></svg>';
-}
-
 
 // ---------------------------------------------------------------------
 // Language switch

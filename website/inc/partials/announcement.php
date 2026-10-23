@@ -2,7 +2,7 @@
 /**
  * Launch banner.
  *
- * An inline strip at the top of the home page, not a modal. It sits in the
+ * A slim card at the top of the home page hero, not a modal. It sits in the
  * page flow, so it never covers content, needs no scroll lock or focus
  * management, and is fully visible with JavaScript switched off -- the script
  * only hides it again for someone who has already dismissed it. That is the
@@ -34,32 +34,16 @@ $nx_glyph = $nx_trial ? 'ticket' : 'download';
 // means dismissed once, dismissed everywhere.
 $nx_key = 'nx-announce-' . nx_cfg('announcement_version', '1');
 ?>
-<div class="container banner-wrap">
-  <div class="banner" data-announce data-announce-key="<?php echo nx_esc($nx_key); ?>">
-
-    <span class="banner__icon"><?php echo nx_icon($nx_glyph); ?></span>
-
-    <div class="banner__text">
-      <p class="banner__title">
-        <span class="banner__pill">
-          <?php echo nx_e('announce.' . $nx_variant . '.pill', array('days' => nx_num($nx_days))); ?>
-        </span>
-        <span><?php echo nx_e('announce.' . $nx_variant . '.headline'); ?></span>
-      </p>
-      <p class="banner__body">
-        <?php echo nx_e('announce.' . $nx_variant . '.short'); ?>
-      </p>
-    </div>
-
-    <div class="banner__actions">
-      <a class="btn btn--primary" href="<?php echo nx_esc(nx_url('download')); ?>">
-        <?php echo nx_e('announce.cta'); ?>
-      </a>
-      <button type="button" class="banner__x" data-announce-close
-              aria-label="<?php echo nx_e('announce.close'); ?>">
-        <?php echo nx_icon('close'); ?>
-      </button>
-    </div>
-
-  </div>
+<div class="announce" data-announce data-announce-key="<?php echo nx_esc($nx_key); ?>">
+  <span class="tag tag--ok"><?php echo nx_icon($nx_glyph); ?><?php echo nx_e('announce.' . $nx_variant . '.pill', array('days' => nx_num($nx_days))); ?></span>
+  <p class="announce__text">
+    <b><?php echo nx_e('announce.' . $nx_variant . '.headline'); ?></b>
+    <span><?php echo nx_e('announce.' . $nx_variant . '.short'); ?></span>
+  </p>
+  <?php /* Only the script can remember a dismissal, so without it there is
+           no close button rather than one that does nothing. The loader in
+           head.php hides the card before the first paint for anyone who
+           closed it before, so it never shifts the page. */ ?>
+  <button type="button" class="announce__x" data-announce-close data-enhanced-only
+          aria-label="<?php echo nx_e('announce.close'); ?>"><?php echo nx_icon('close'); ?></button>
 </div>

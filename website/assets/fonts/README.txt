@@ -1,60 +1,56 @@
 Typefaces shipped with this site
 ===============================
 
-All four are self-hosted. THE SITE MAKES NO THIRD-PARTY REQUESTS -- no
+All three are self-hosted. THE SITE MAKES NO THIRD-PARTY REQUESTS -- no
 CDN, no fonts.googleapis.com, no fonts.gstatic.com. The audience is
 largely on networks where a third-party request is slow at best and
 blocked at worst, and a blocked font is a visibly broken page. Do not
 "optimise" any of these back to a CDN.
 
-  vazirmatn-variable.woff2            Persian + Latin, wght 100-900
-  bricolage-grotesque-variable.woff2  display face, opsz 12-96,
-                                      wght 600-800, wdth 86-100
-  instrument-sans-variable.woff2      body face, wght 400-700
-  martian-mono-variable.woff2         mono labels and figures, wght 400-700
+They are the apps' own faces (the 2026-10 "pearl glass" redesign), so the
+site and the app set type identically:
+
+  inter-latin-v1.woff2        Inter, body text on English pages.
+                              wght 400-700, Latin + Latin-1 + punctuation.
+  inter-tight-latin-v1.woff2  Inter Tight, display type on English pages.
+                              Pinned to 700 (the only weight used).
+  vazirmatn-v2.woff2          Vazirmatn, EVERYTHING on Persian pages,
+                              Latin words included, so a Persian page loads
+                              exactly one font. wght 400-800. v2 added
+                              the copyright, registered and trade mark
+                              signs; v1 lacked the footer's copyright sign,
+                              which then drew in Tahoma.
+
+Each page preloads only what its first screen paints: an English page
+the two Inter files, a Persian page Vazirmatn. An English page never
+downloads Vazirmatn -- the "فا" in its language switch is drawn in a
+system face.
 
 Every one is licensed under the SIL Open Font License, Version 1.1, which
-permits self-hosting and redistribution. The licence for each travels
-beside it and MUST STAY THERE:
+permits subsetting, self-hosting and redistribution. The licence for each
+travels beside it and MUST STAY THERE:
 
-  OFL-Vazirmatn.txt          Copyright 2015 The Vazirmatn Project Authors
-  OFL-BricolageGrotesque.txt Copyright 2022 The Bricolage Grotesque Project Authors
-  OFL-InstrumentSans.txt     Copyright 2022 The Instrument Sans Project Authors
-  OFL-MartianMono.txt        Copyright 2021 The Martian Mono Project Authors
+  OFL-Inter.txt        Copyright 2016 The Inter Project Authors
+  OFL-InterTight.txt   Copyright 2022 The Inter Project Authors
+  OFL-Vazirmatn.txt    Copyright 2015 The Vazirmatn Project Authors
 
-The copyright notice and licence are also embedded in each woff2's `name`
-table (name IDs 0, 13 and 14), which is why the subsetting step keeps
-those records.
+The copyright and licence records are also kept inside each woff2's name
+table (name IDs 0, 13 and 14).
 
 
-Subsetting
+Rebuilding
 ----------
 
-The three Latin faces are SUBSET to the 241 codepoints this site actually
-renders -- measured by walking every rendered page, not guessed -- plus a
-safety margin of full printable ASCII and Latin-1 Supplement so that a
-name typed into a contact form is never drawn in a different face from
-the text around it.
+    node website/scripts/make-fonts.mjs --src <dir with the app's fonts>
+    node website/scripts/make-fonts.mjs --src <dir> --check
 
-They carry NO Persian glyphs and are not meant to: html[lang="fa"] swaps
---display and --sans to Vazirmatn, and the mono stack keeps Martian first
-only so Latin tokens and figures inside a Persian sentence stay in it.
+The sources are the app's Inter-latin-wght.woff2, InterTight-latin-wght.woff2
+and Vazirmatn-variable.woff2 (apps/desktop-windows/src/assets/ once the app
+redesign is merged). --check reads every character in inc/lang and
+inc/content and reports any the subsets do not cover; run it after any copy
+change. A missing glyph does not break a page -- it falls through to a
+system font and looks subtly wrong in one spot, which is the kind of fault
+nobody notices for months.
 
-Axes the stylesheet never varies are PINNED, which is most of the saving:
-Instrument Sans dropped from 60 KB to 30 KB by pinning wdth, Martian Mono
-from 37 KB to 16 KB. Bricolage keeps opsz and wdth because varying them
-is the entire reason the design chose it.
-
-After ANY copy change that might introduce a new character, run
-
-    python3 scripts/make-fonts.py --check
-
-It re-derives the inventory from the rendered pages and tells you whether
-the shipped subset still covers it. Run it without --check to rebuild.
-
-This matters because a missing glyph does not break the page -- it falls
-through to the platform font and looks subtly wrong in one spot, which is
-the kind of fault nobody notices for months.
-
-The character set itself lives in scripts/fonts-unicodes.txt. Neither the
-script nor that file ships in the deploy archive; scripts/ is excluded.
+If a font file changes, bump the -vN in its name in base.css AND in the
+preload list in inc/partials/head.php: the files are cached for a year.

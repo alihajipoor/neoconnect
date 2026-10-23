@@ -64,11 +64,11 @@ return array(
     'meta.home.title' => 'Neoxify — a VPN that keeps working on filtered networks',
     'meta.home.description' => 'Several ways to connect in one app, including ones made to look like ordinary web traffic. Servers across Europe and Asia, and nothing to import.',
 
-    'meta.download.title' => 'Download Neoxify for Windows and Android — direct installer and APK',
+    'meta.download.title' => 'Download Neoxify VPN for Windows and Android',
     'meta.download.description' => 'Get the Neoxify app for Windows or Android. Direct download, always the current release. No macOS or iOS app yet.',
 
     'meta.contact.title' => 'Contact Neoxify — questions before you buy, and support',
-    'meta.contact.description' => 'Ask about plans, payment, or whether a connection method will work on your network. Write to us and a person answers. Existing customers get faster help in the app.',
+    'meta.contact.description' => 'Ask about plans, payment, or whether a connection method will work on your network. A person answers. Existing customers get faster help in the app.',
 
     'meta.privacy.title' => 'Privacy — what Neoxify records, and what it does not',
     'meta.privacy.description' => 'What we hold for your account, what our servers log, what payment providers see, how long it is kept and how to have it deleted. We make no no-logs claim.',
@@ -100,7 +100,7 @@ return array(
     'privacy.contact.title' => 'Contact',
     'privacy.contact.body' => 'Questions about any of this, or a request about your own data, go to :email. Write from the address on your account and we will deal with it.',
 
-    'meta.reseller.title' => 'Become a Neoxify reseller — sell VPN accounts to your own audience',
+    'meta.reseller.title' => 'Become a Neoxify reseller — sell VPN accounts',
     'meta.reseller.description' => 'For Telegram channels, gaming communities, local shops and network admins. Terms are agreed individually with every partner, not from a published price list.',
 
     // -----------------------------------------------------------------
@@ -223,7 +223,6 @@ return array(
     'home.assure.noconfig' => 'No config files',
     'home.assure.switch' => 'Switch location anytime',
 
-    'home.mockup.alt' => 'The Neoxify app running on Windows, connected, showing the current server and the data left on the plan.',
     'home.mockup.windows' => 'Windows',
     'home.mockup.mobile' => 'Mobile',
     'home.mockup.macos' => 'macOS',
@@ -652,6 +651,8 @@ return array(
     'features.split.body' => 'Custom mode routes the applications you pick through the tunnel and leaves everything else on your normal connection. Chosen per application, not per website — so a browser and a game can genuinely take different paths.',
     'features.split.platforms' => 'Windows and Android. Not available on iOS: Apple restricts per-app VPN to devices managed by an organisation, so no consumer app can offer it. Saying that plainly is better than shipping a switch that quietly does nothing.',
 
+    'features.relay.title' => 'A plan for the hardest networks',
+    'features.relay.body' => 'Some networks will not hold a direct connection abroad at all. One plan carries separate routes made for exactly that.',
 
     'features.locations.title' => 'Choose where you come out',
     'features.locations.body' => 'Change country from inside the app as often as you like.',
@@ -754,6 +755,7 @@ return array(
     'features.split.example.bank.title' => 'Local banking and government sites',
     'features.split.example.bank.body' => 'These reject foreign addresses, so a full tunnel breaks them. Leave them off the tunnel and they keep working while everything else goes through it.',
 
+    'features.relay.link' => 'See the plan that includes it',
 
     'features.more.title' => 'The rest of it',
 
@@ -791,7 +793,7 @@ return array(
     'home.hero.chip_noconfig' => 'No config files, no subscription links',
     'home.hero.chip_locations' => 'Servers in Europe and Asia',
     'home.mockup.disconnect' => 'Disconnect',
-    'home.mockup.note' => 'Drawn from the actual Windows app',
+    'home.mockup.note' => 'Illustration of the app. The time shown is an example.',
     'home.answers.eyebrow' => 'Straight answers',
     'home.answers.title' => 'Things we are not going to tell you.',
     'home.answers.body' => 'Everyone in this market repeats the same few sentences. Most of them we cannot say honestly, and one of them is something we have not done yet.',
@@ -819,4 +821,43 @@ return array(
     'home.close.point3.rest' => 'We do not claim no logs.',
     'home.close.warn' => 'You do not need to pay to start. Every new account begins on a trial.',
 
+    // 2026-10 pearl-glass redesign. The tagline is the app's own (owner-approved 2026-10-18).
+    'nav.main_label' => 'Main',
+    'home.hero.kicker' => 'A VPN for networks that fight back',
+    'home.hero.tagline_1' => 'Your internet.',
+    'home.hero.tagline_2' => 'Without limits.',
+    'home.locations.legend_exit' => 'Server location',
+    'home.security.diagram.alt' => 'Your device connects to our servers through an encrypted tunnel. From our servers on, your traffic travels the internet as ordinary traffic.',
+
+    'delete.or' => 'or',
+    'download.platforms_heading' => 'Choose your platform',
+    // 2026-10 rework: the theme switch and the app showcase.
+    'theme.dark' => 'Dark theme',
+    'home.app.eyebrow' => 'The app',
+    'home.app.title' => 'Everything happens in one app',
+    'home.app.body' => 'Sign up, choose a plan, pick where you come out and get help, all inside the app. Before it says Connected, it checks that your traffic really flows.',
+    'home.app.caption' => 'The Android app, connected. A real screenshot; the account, usage and address on it are examples.',
+    'home.app.alt' => 'Screenshot of the Neoxify Android app, connected to Germany, with a Disconnect button below a dotted world map.',
+    'home.app.alt_dark' => 'Screenshot of the Neoxify Android app in its dark theme, connected to Germany, with a Disconnect button below a dotted world map.',
+    'home.app.link' => 'Everything the app does',
+    'home.app.float.1.title' => 'Finds a way in',
+    'home.app.float.1.sub' => 'on your network, by itself',
+    'home.app.float.2.title' => 'Switches by itself',
+    'home.app.float.2.sub' => 'when one way stops working',
+    'home.app.float.3.title' => 'Checks before Connected',
+    'home.app.float.3.sub' => 'that traffic really flows',
+    'home.app.float.4.title' => 'Nothing to paste',
+    'home.app.float.4.sub' => 'no config, no links',
+    // The route finder (inc/partials/route-finder.php). Abstract by rule:
+    // never a method, port, transport, route, or a count of any of them.
+    'route.you' => 'You',
+    'route.internet' => 'The internet',
+    'route.state.finding' => 'Finding a way through…',
+    'route.state.blocked' => 'That way is stopped. Trying another…',
+    'route.state.checking' => 'Checking traffic really flows…',
+    'route.state.done' => 'Connected, checked',
+    'route.replay' => 'Play again',
+    'route.caption' => 'Illustration of what the app does by itself: when one way through is stopped it moves to another, and it says Connected only after checking that traffic really flows.',
+    'home.quote' => 'A green light that means nothing is worse than a red one.',
+    'home.quote.by' => 'Why the app checks before it says Connected',
 );

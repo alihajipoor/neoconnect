@@ -4,32 +4,21 @@
  *
  *     php -S 127.0.0.1:8123 -t website website/scripts/dev-router.php
  *
- * The built-in server serves directory index.php files on its own, which
- * gets you most of the site. It does not do the two things the real server
- * does that this site's SEO depends on, and both of them are defects the
- * live site actually shipped:
+ * It behaves like the live host, which is a shared nginx box whose config
+ * is not ours to change: a real file (or a directory with an index file) is
+ * served as itself, and EVERYTHING ELSE goes to /index.php. The site's own
+ * routing -- real 404s, /sitemap.xml, /r/CODE -- lives at the top of
+ * index.php, so this file must not do any of it. If it did, a local check
+ * would pass on rules production does not have, which is exactly how the
+ * soft-404s on the live site went unnoticed (2026-10-19).
  *
- *   1. An unknown path must be a real 404 rendered by 404.php. Without
- *      this, every mistyped URL 200s -- which is exactly the production
- *      bug being fixed, so checking locally without this router reports
- *      the bug as absent.
- *   2. /sitemap.xml must serve the XML from sitemap.php.
+ * ONE DIFFERENCE FROM PRODUCTION, on purpose: nginx issues a 301 from
+ * /download to /download/, and the built-in server just serves the
+ * directory index at both. The redirects were measured working on the
+ * live host. Do not conclude from a local 200 on /download that the
+ * redirect is missing.
  *
- * It also carries the /r/CODE voucher rewrite, for the same reason: it is
- * inert on the live host today and needs somewhere to be exercised.
- *
- * This mirrors nginx-website.conf.example. If you change a rule there,
- * change it here, or local rendering stops describing production.
- *
- * ONE DIFFERENCE FROM PRODUCTION, on purpose: nginx's `try_files $uri $uri/`
- * issues a 301 from /download to /download/, and the built-in server just
- * serves the directory index at both. Emulating that here would mean
- * reimplementing nginx's rule rather than exercising the site, and the
- * trailing-slash redirects were measured working on the live host. Do not
- * conclude from a local 200 on /download that the redirect is missing.
- *
- * Development only. It is excluded from the deploy archive, and the server
- * config denies /scripts/ outright.
+ * Development only. It is excluded from the deploy archive.
  */
 
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -37,38 +26,47 @@ $root = getenv('NX_ROOT_DIR');
 if (!$root) {
     $root = dirname(__DIR__);
 }
-
-// location = /sitemap.xml { rewrite ^ /sitemap.php last; }
-if ($path === '/sitemap.xml') {
-    require $root . '/sitemap.php';
-    return true;
-}
-
-// location ~ "^/r/([A-Za-z0-9-]{1,32})/?$" { rewrite ^ /r/index.php?c=$1 last; }
-if (preg_match('#^/r/([A-Za-z0-9-]{1,32})/?$#', $path, $m)) {
-    $_GET['c'] = $m[1];
-    require $root . '/r/index.php';
-    return true;
-}
-
-// location ^~ /data/ | /inc/ | /scripts/ { deny all; return 404; }
-if (preg_match('#^/(data|inc|scripts)/#', $path) || preg_match('#/\.#', $path)) {
-    http_response_code(404);
-    require $root . '/404.php';
-    return true;
-}
-
 $file = $root . $path;
 
+// gzip, as the live host does (it sends gzip and nothing better). Without
+// it a local Lighthouse run measures transfers production never makes.
+// PHP output: zlib.output_compression, set before anything is printed; it
+// holds for a script the built-in server runs after "return false" too.
+// Static text: served here, compressed, with the ETag and Last-Modified the
+// host sends and no Cache-Control, which the host does not send either.
+$gzip = isset($_SERVER['HTTP_ACCEPT_ENCODING']) && stripos($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip') !== false;
+if ($gzip && function_exists('gzencode')) {
+    // Only for what PHP renders: a static file the built-in server sends
+    // itself (an image, a font) must not pass through it, or it arrives
+    // compressed with no header saying so, and broken.
+    if (!is_file($file) || strtolower(pathinfo($file, PATHINFO_EXTENSION)) === 'php') {
+        ini_set('zlib.output_compression', '1');
+    }
+    $types = array('css' => 'text/css', 'js' => 'application/javascript', 'svg' => 'image/svg+xml',
+        'txt' => 'text/plain', 'xml' => 'application/xml', 'json' => 'application/json');
+    $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+    if (isset($types[$ext]) && is_file($file)) {
+        $mtime = filemtime($file);
+        $etag = '"' . dechex($mtime) . '-' . dechex(filesize($file)) . '"';
+        header('Content-Type: ' . $types[$ext] . ($ext === 'svg' ? '' : '; charset=utf-8'));
+        header('ETag: ' . $etag);
+        header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $mtime) . ' GMT');
+        header('Vary: Accept-Encoding');
+        if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && trim($_SERVER['HTTP_IF_NONE_MATCH']) === $etag) {
+            http_response_code(304);
+            return true;
+        }
+        $body = gzencode(file_get_contents($file), 6);
+        header('Content-Encoding: gzip');
+        header('Content-Length: ' . strlen($body));
+        echo $body;
+        return true;
+    }
+}
+
 // try_files $uri $uri/ -- let the built-in server handle anything real.
-//
-// index.html as well as index.php, and for one reason: /account/ is the
-// compiled customer portal, an SPA with no index.php under it. Checking
-// only for index.php made /account/ 404 here while every file inside it
-// served fine, so the portal could not be walked locally at all -- and the
-// same gap existed in the real server configs, where it was a live fault
-// rather than a testing one. Mirrors `index index.php index.html;` in
-// nginx-website.conf.example.
+// index.html as well as index.php for /account/, the compiled customer
+// portal, which has no index.php.
 foreach (array('index.php', 'index.html') as $indexFile) {
     if (is_dir($file) && is_file(rtrim($file, '/') . '/' . $indexFile)) {
         return false;
@@ -78,16 +76,8 @@ if (is_file($file)) {
     return false;
 }
 
-// A missing asset is a bare 404, not a marketing page: rendering the
-// whole site into a stylesheet request would be its own kind of lie.
-if (preg_match('#\.(css|js|woff2|svg|png|jpg|jpeg|webp|avif|ico|txt|xml|map)$#', $path)) {
-    http_response_code(404);
-    header('Content-Type: text/plain; charset=UTF-8');
-    echo "404\n";
-    return true;
-}
-
-// error_page 404 /404.php;
-http_response_code(404);
-require $root . '/404.php';
+// ... /index.php -- the host's fallback for everything else.
+$_SERVER['SCRIPT_NAME'] = '/index.php';
+$_SERVER['SCRIPT_FILENAME'] = $root . '/index.php';
+require $root . '/index.php';
 return true;

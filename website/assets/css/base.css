@@ -1,0 +1,538 @@
+/* ==========================================================================
+   Neoxify website -- base layer: tokens, type, the shell, primitives.
+
+   "Pearl glass", in the apps' own language (design-system.md, section 2):
+   pearl light and "smoked" dark, cobalt for the one primary action, and the
+   brand's violet-to-cyan for light, glow and the logo. The 2026-10 rework
+   (owner: "too basic, no background other than the world map") gives every
+   page a living background -- a slow aurora over a faint grid, the dotted
+   world with light lines between the server lights -- and surfaces with
+   depth: layered gradients, a lit rim, a soft drop.
+
+   HOW THIS FILE REACHES A VISITOR. It is not linked. inc/partials/head.php
+   reads it (plus blocks.css and the page's own module), strips comments
+   and whitespace, and inlines the result in a <style> element whose
+   SHA-256 goes into the Content-Security-Policy. So there is no
+   render-blocking stylesheet request on any page, and still no
+   'unsafe-inline'. Keep comments generous -- they never ship.
+
+   THEMES. Light is the default. The dark theme is written once, as
+   :root[data-theme="dark"] rules; nx_css_bundle() repeats them inside
+   prefers-color-scheme for a visitor who never touched the switch. So:
+   every theme difference is a token, set in that one block, and any other
+   dark-only rule must also start with :root[data-theme="dark"] and sit at
+   the top level (not inside another @media).
+
+   MOTION. Only transform and opacity ever animate, so all of it runs on
+   the compositor; all of it stops under prefers-reduced-motion.
+
+   Rules that hold everywhere:
+   - Logical properties (margin-inline, inset-inline...) so Persian mirrors
+     from <html dir="rtl"> alone. The deliberate exceptions are the world
+     map and its lights (geography has no reading direction) and the glass
+     rim, which is lit from the physical top-left like the app's.
+   - No letter-spacing, uppercase or tracking on Persian text.
+   - No url() to another origin. Ever. See the README.
+   ========================================================================== */
+
+/* ---------------------------------------------------------------- fonts --
+   Self-hosted subsets, made by scripts/make-fonts.mjs from the app's own
+   Inter, Inter Tight and Vazirmatn files. The preload URLs in head.php
+   must match these character for character, or each font downloads
+   twice -- so no ?v= stamp here; the file name changes instead.
+
+   The "Fallback" faces are local system fonts re-scaled to Inter's
+   metrics. With font-display: swap the first paint can use the fallback;
+   matching its size keeps the swap from moving anything (no layout
+   shift). Values measured by scripts/make-fonts.mjs --metrics.          */
+@font-face{font-family:"Inter";src:url(/assets/fonts/inter-latin-v1.woff2) format("woff2");font-weight:400 700;font-style:normal;font-display:swap;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02C6,U+02DA,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-2193,U+2212,U+2713,U+2715}
+@font-face{font-family:"Inter Tight";src:url(/assets/fonts/inter-tight-latin-v1.woff2) format("woff2");font-weight:700;font-style:normal;font-display:swap;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02C6,U+02DA,U+02DC,U+2000-206F,U+20AC,U+2122,U+2190-2193,U+2212,U+2713,U+2715}
+@font-face{font-family:"Vazirmatn";src:url(/assets/fonts/vazirmatn-v2.woff2) format("woff2");font-weight:400 800;font-style:normal;font-display:swap}
+@font-face{font-family:"Inter Fallback";src:local("Arial"),local("ArialMT"),local("Roboto"),local("Helvetica");size-adjust:107%;ascent-override:90%;descent-override:22.5%;line-gap-override:0%}
+@font-face{font-family:"Inter Tight Fallback";src:local("Arial Bold"),local("Arial-BoldMT"),local("Arial"),local("Roboto");font-weight:700;size-adjust:97%;ascent-override:99%;descent-override:24.7%;line-gap-override:0%}
+@font-face{font-family:"Vazirmatn Fallback";src:local("Tahoma"),local("Segoe UI"),local("Noto Sans Arabic");size-adjust:104%;ascent-override:108%;descent-override:58%;line-gap-override:0%}
+
+/* --------------------------------------------------------------- tokens */
+:root{
+  color-scheme:light;
+  --base:#F1F3F6; --pearl:#F8F9FC;
+  --ink:#090B10; --ink-2:#465063; --ink-3:#8490A3;
+  --cobalt:#1045FF; --cobalt-hover:#0737E8; --cobalt-ink:#0B3BE0; --on-cobalt:#FFFFFF;
+  --cobalt-shadow:rgba(16,69,255,.45);
+  --select:rgba(50,103,255,.10); --select-row:rgba(255,255,255,.78);
+  --hairline:rgba(32,48,80,.08); --hairline-2:rgba(32,48,80,.15);
+  --field:rgba(32,48,80,.05); --chip-bg:rgba(255,255,255,.66);
+  --solid:rgba(251,252,254,.86); --solid-opaque:#FBFCFE;
+  --scrim:rgba(18,24,40,.28);
+  --focus:#0B3BE0; --focus-halo:rgba(255,255,255,.95);
+  --drop:0 1px 2px rgba(20,30,60,.05),0 22px 44px -22px rgba(20,40,90,.28);
+  --edge:inset 0 1px 0 rgba(255,255,255,.9),inset 0 0 0 1px rgba(32,48,80,.05);
+  --glass:rgba(255,255,255,.42); --glass-strong:rgba(255,255,255,.70); --glass-solid:rgba(248,249,252,.95);
+  --sheen-a:rgba(255,255,255,.30); --sheen-b:rgba(255,255,255,.06);
+  --rim-a:rgba(255,255,255,.95); --rim-b:rgba(255,255,255,.25);
+  /* state tones: dot / ink / tint (design-system 2.1) */
+  --ok:#1045FF; --ok-ink:#0B3BE0; --ok-tint:rgba(50,103,255,.12);
+  --hl:#0E7C86; --hl-ink:#0B6670; --hl-tint:rgba(14,124,134,.11);
+  --warn:#D97A00; --warn-ink:#8F4A00; --warn-tint:rgba(217,122,0,.13);
+  --danger:#D02C1F; --danger-ink:#A8231A; --danger-tint:rgba(208,44,31,.10);
+  --muted:#6B7385; --muted-ink:#4D5566; --muted-tint:rgba(80,90,110,.10);
+  /* map */
+  --map-bg-top:#F7F9FC; --map-bg:#EDF1F6; --map-dot:#B9C5D9;
+  --lamp:#1A7FD4; --lamp-glow:rgba(26,127,212,.34); --lamp-idle:#7A89A3; --lamp-rim:#FFFFFF;
+  --halo-ok:rgba(16,69,255,.30);
+  --amb-ok:rgba(16,69,255,.16); --amb-hl:rgba(14,124,134,.14);
+  --steel:#A9B6CE; --steel-deep:#5A6884;
+  /* the brand's light: the logo's violet and cyan */
+  --violet:#8b5cf6; --cyan:#22d3ee;
+  --brand-grad:linear-gradient(120deg,#8b5cf6,#22d3ee);
+  /* gradient TEXT uses darker stops in light (both over 4.5:1 on pearl) */
+  --accent-a:#6a35e6; --accent-b:#0a7894;
+  --aur-1:rgba(139,92,246,.26); --aur-2:rgba(34,211,238,.24); --aur-3:rgba(16,69,255,.15);
+  --grid:rgba(32,48,80,.055);
+  --card-a:rgba(255,255,255,.86); --card-b:rgba(246,248,252,.70);
+  --card-rim:linear-gradient(160deg,rgba(255,255,255,1),rgba(255,255,255,.35) 38%,rgba(139,92,246,.22) 78%,rgba(34,211,238,.30));
+  --card-drop:0 1px 2px rgba(20,30,60,.05),0 28px 56px -32px rgba(36,40,120,.32);
+  --slab-a:rgba(255,255,255,.62); --slab-b:rgba(255,255,255,.12); --slab-rim:rgba(255,255,255,.95);
+  --link-halo:rgba(139,92,246,.16); --link-glint:#FFFFFF;
+  --orbit:rgba(80,70,200,.20);
+  --glow-1:rgba(139,92,246,.40); --glow-2:rgba(34,211,238,.26);
+  --show-l:block; --show-d:none;
+  --grain:.5; --light:rgba(255,255,255,.75); --light-2:rgba(139,92,246,.10);
+  /* shape */
+  --r-panel:24px; --r-card:20px; --r-field:14px; --r-row:10px;
+  --wrap:1200px; --gutter:clamp(16px,4vw,40px);
+  --font-ui:"Inter","Inter Fallback",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-display:"Inter Tight","Inter Tight Fallback","Inter","Inter Fallback",system-ui,sans-serif;
+  --font-fa:"Vazirmatn","Vazirmatn Fallback",Tahoma,"Segoe UI",sans-serif;
+  --font:var(--font-ui); --font-head:var(--font-display);
+  --ease:cubic-bezier(.2,.8,.2,1);
+  --spring:cubic-bezier(.34,1.36,.64,1);
+}
+/* The one dark block (see THEMES above). */
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --base:#090B12; --pearl:#121620;
+  --ink:#EEF1F7; --ink-2:#AFB8C9; --ink-3:#6E788C;
+  --cobalt:#2F5EFF; --cobalt-hover:#4A72FF; --cobalt-ink:#AFC4FF;
+  --cobalt-shadow:rgba(47,94,255,.55);
+  --select:rgba(80,124,255,.16); --select-row:rgba(255,255,255,.07);
+  --hairline:rgba(255,255,255,.08); --hairline-2:rgba(255,255,255,.14);
+  --field:rgba(255,255,255,.06); --chip-bg:rgba(255,255,255,.07);
+  --solid:rgba(19,23,33,.88); --solid-opaque:#131721;
+  --scrim:rgba(0,0,0,.5);
+  --focus:#FFFFFF; --focus-halo:rgba(8,10,16,.95);
+  --drop:0 1px 2px rgba(0,0,0,.4),0 24px 48px -22px rgba(0,0,0,.7);
+  --edge:inset 0 1px 0 rgba(255,255,255,.07),inset 0 0 0 1px rgba(255,255,255,.05);
+  --glass:rgba(20,25,36,.50); --glass-strong:rgba(22,27,39,.74); --glass-solid:rgba(17,21,30,.96);
+  --sheen-a:rgba(255,255,255,.06); --sheen-b:rgba(255,255,255,.01);
+  --rim-a:rgba(255,255,255,.30); --rim-b:rgba(255,255,255,.04);
+  --ok:#5B83FF; --ok-ink:#A7BEFF; --ok-tint:rgba(80,124,255,.18);
+  --hl:#3CC6CF; --hl-ink:#7FE0E6; --hl-tint:rgba(60,198,207,.14);
+  --warn:#F2A93B; --warn-ink:#F7C46F; --warn-tint:rgba(242,169,59,.15);
+  --danger:#F26B5E; --danger-ink:#F79A90; --danger-tint:rgba(242,107,94,.14);
+  --muted:#8A93A6; --muted-ink:#B3BBCB; --muted-tint:rgba(150,160,180,.13);
+  --map-bg-top:#070A11; --map-bg:#0D1320; --map-dot:#2B3550;
+  --lamp:#5CB2FF; --lamp-glow:rgba(92,178,255,.40); --lamp-idle:#7A87A0; --lamp-rim:#0B0E15;
+  --halo-ok:rgba(91,131,255,.36);
+  --amb-ok:rgba(91,131,255,.24); --amb-hl:rgba(60,198,207,.16);
+  --steel:#7B8AA8; --steel-deep:#2C3754;
+  --accent-a:#b69cff; --accent-b:#5fe1f2;
+  --aur-1:rgba(139,92,246,.34); --aur-2:rgba(34,211,238,.17); --aur-3:rgba(47,94,255,.26);
+  --grid:rgba(255,255,255,.04);
+  --card-a:rgba(30,36,52,.82); --card-b:rgba(15,19,29,.78);
+  --card-rim:linear-gradient(160deg,rgba(255,255,255,.22),rgba(255,255,255,.04) 40%,rgba(139,92,246,.30) 80%,rgba(34,211,238,.32));
+  --card-drop:0 1px 2px rgba(0,0,0,.4),0 30px 60px -28px rgba(0,0,0,.85);
+  --slab-a:rgba(24,29,44,.66); --slab-b:rgba(14,17,26,.10); --slab-rim:rgba(255,255,255,.08);
+  --link-halo:rgba(139,92,246,.22); --link-glint:#E6F9FF;
+  --orbit:rgba(170,160,255,.20);
+  --glow-1:rgba(139,92,246,.50); --glow-2:rgba(34,211,238,.30);
+  --show-l:none; --show-d:block;
+  --grain:.22; --light:rgba(160,150,255,.13); --light-2:rgba(34,211,238,.05);
+}
+:root[data-theme="dark"] ::selection{background:rgba(120,150,255,.32)}
+
+/* --------------------------------------------------------------- reset */
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%;scroll-padding-top:96px}
+@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+body{margin:0;min-height:100vh;background:var(--base);color:var(--ink);font-family:var(--font);font-size:16px;line-height:1.6;
+  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;overflow-x:clip}
+html[lang="fa"]{--font:var(--font-fa);--font-head:var(--font-fa)}
+html[lang="fa"] body{line-height:1.9}
+/* Persian glyphs on an English page (the language switch's label) take a
+   system face, so an English page never downloads Vazirmatn for two
+   letters. */
+html:not([lang="fa"]) [lang="fa"]{font-family:Tahoma,"Segoe UI",system-ui,sans-serif}
+img,svg,video{display:block;max-width:100%}
+img{height:auto}
+h1,h2,h3,h4,p,ul,ol,figure,blockquote,dl,dd{margin:0}
+ul[class],ol[class]{list-style:none;padding:0}
+a{color:inherit;text-decoration-thickness:1px;text-underline-offset:.18em}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+b,strong{font-weight:600}
+hr{border:0;border-top:1px solid var(--hairline-2);margin:24px 0}
+[hidden]{display:none!important}
+::selection{background:rgba(16,69,255,.18)}
+
+/* Two-tone focus ring, the app's: visible on pearl, on cobalt and on glass. */
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;box-shadow:0 0 0 5px var(--focus-halo);border-radius:6px}
+.btn:focus-visible,.chip:focus-visible,.theme-toggle:focus-visible{border-radius:999px}
+
+.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.skip-link{position:absolute;inset-inline-start:16px;top:-80px;z-index:100;padding:12px 18px;border-radius:999px;background:var(--ink);color:var(--base);font-weight:600;text-decoration:none}
+.skip-link:focus{top:12px}
+[data-ltr]{direction:ltr;unicode-bidi:isolate}
+/* A left-to-right run that is laid out as a block (a grid item, a block
+   span) would otherwise hug the left edge of a right-to-left column. */
+html[dir="rtl"] .lane .nm i,html[dir="rtl"] .proto__tech,html[dir="rtl"] .ro b{text-align:right}
+.no-js [data-enhanced-only]{display:none!important}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+
+/* The logo and anything else drawn twice, once per theme: CSS shows the
+   one that matches. A lazy image that is not displayed is never fetched. */
+.logo{display:block;width:100%;height:auto;overflow:visible}
+.logo--l,.only-light{display:var(--show-l)}
+.logo--d,.only-dark{display:var(--show-d)}
+
+/* --------------------------------------------------------------- layout */
+/* The world, the glows and the phone scene are wider than a phone on
+   purpose; none of it may make the page scroll sideways (in a right-to-left
+   page that overflow would even be scrollable). clip, where supported,
+   does not make main a scroll container. */
+main{overflow-x:hidden}
+@supports (overflow-x:clip){main{overflow-x:clip}}
+.wrap{width:100%;max-width:calc(var(--wrap) + 2 * var(--gutter));margin-inline:auto;padding-inline:var(--gutter)}
+.wrap--prose{max-width:calc(820px + 2 * var(--gutter))}
+.section{position:relative;isolation:isolate;padding-block:clamp(72px,10vw,152px)}
+.section--tight{padding-block:clamp(40px,6vw,72px)}
+.section--flush-top{padding-top:0}
+/* The alternate sections are a raised slab: a lit top edge, a layered
+   gradient that falls away, and a line of the brand's light along the
+   top. Depth without a single extra element. */
+.section--alt::before{content:"";position:absolute;z-index:-1;inset:0 clamp(0px,1.6vw,24px);border-radius:clamp(28px,4vw,56px);
+  background:radial-gradient(60% 220px at 50% 0,var(--aur-1),transparent 75%),linear-gradient(180deg,var(--slab-a),var(--slab-b) 72%,transparent);
+  box-shadow:inset 0 1px 0 var(--slab-rim)}
+.section--alt::after{content:"";position:absolute;z-index:-1;top:0;left:50%;width:min(760px,78%);height:1px;transform:translateX(-50%);
+  background:linear-gradient(90deg,transparent,var(--violet),var(--cyan),transparent);opacity:.8}
+
+/* ------------------------------------------------------------------ sky
+   The page's living background, behind everything and fixed to the
+   viewport: three slow aurora lights (violet, cyan, cobalt) drifting over
+   a faint grid that fades out below the header. Painted from gradients --
+   no image, no filter, no script -- and moved only with transform, so the
+   compositor does all of it. Still under reduced motion.               */
+.sky{position:fixed;inset:0;z-index:-1;overflow:hidden;pointer-events:none;contain:strict}
+.sky::before{content:"";position:absolute;inset:0;background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:56px 56px;background-position:50% -1px;
+  -webkit-mask-image:radial-gradient(120% 70% at 50% 0,#000 20%,transparent 70%);mask-image:radial-gradient(120% 70% at 50% 0,#000 20%,transparent 70%)}
+.sky i{position:absolute;width:72vmax;height:72vmax;border-radius:50%;will-change:transform}
+.sky__a{top:-34vmax;left:-20vmax;background:radial-gradient(closest-side,var(--aur-1),transparent);animation:sky-a 32s ease-in-out infinite alternate}
+.sky__b{top:-30vmax;right:-24vmax;background:radial-gradient(closest-side,var(--aur-2),transparent);animation:sky-b 38s ease-in-out infinite alternate}
+.sky__c{top:42vh;left:18vw;width:60vmax;height:60vmax;background:radial-gradient(closest-side,var(--aur-3),transparent);animation:sky-c 44s ease-in-out infinite alternate}
+/* Film grain under the glass: one 180px tile of SVG noise, fixed with the
+   sky, so it is painted once and never moves. */
+.sky::after{content:"";position:absolute;inset:0;background:url(/assets/img/grain.svg) 0 0/180px 180px;opacity:var(--grain)}
+@keyframes sky-a{to{transform:translate3d(22vw,14vh,0) scale(1.18)}}
+@keyframes sky-b{to{transform:translate3d(-20vw,20vh,0) scale(.9)}}
+@keyframes sky-c{to{transform:translate3d(-14vw,-18vh,0) scale(1.22)}}
+
+/* --------------------------------------------------------------- type */
+.display{font-family:var(--font-head);font-weight:700;letter-spacing:-.05em;line-height:.96;text-wrap:balance}
+/* Editorial scale: display sizes that step, not creep. A page title and a
+   section title are both big, set tight, and do the talking. */
+.h1{font-family:var(--font-head);font-weight:700;font-size:clamp(44px,7.4vw,104px);letter-spacing:-.05em;line-height:.95;text-wrap:balance}
+.h2{font-family:var(--font-head);font-weight:700;font-size:clamp(36px,5.6vw,76px);letter-spacing:-.048em;line-height:.98;text-wrap:balance}
+.h3{font-size:19px;font-weight:600;letter-spacing:-.012em;line-height:1.3}
+.h-sm{font-size:17px;font-weight:600;letter-spacing:-.01em;line-height:1.35}
+html[lang="fa"] .display,html[lang="fa"] .h1,html[lang="fa"] .h2{font-weight:800;letter-spacing:0;line-height:1.35}
+html[lang="fa"] .h3,html[lang="fa"] .h-sm{letter-spacing:0;line-height:1.6}
+/* The brand's light as text: darker stops in light, brighter in dark,
+   both readable. Forced colours get plain text back. */
+.grad{background:linear-gradient(100deg,var(--accent-a),var(--accent-b));-webkit-background-clip:text;background-clip:text;color:transparent;-webkit-box-decoration-break:clone;box-decoration-break:clone}
+@media (forced-colors:active){.grad{background:none;color:CanvasText}}
+.lede{font-size:clamp(17px,1.7vw,20px);line-height:1.6;color:var(--ink-2);max-width:62ch;text-wrap:pretty}
+html[lang="fa"] .lede{line-height:1.95}
+.body,.prose p,.card p{color:var(--ink-2)}
+.muted{color:var(--ink-2)}
+.small{font-size:14px;line-height:1.55}
+html[lang="fa"] .small{line-height:1.85}
+.num{font-variant-numeric:tabular-nums}
+
+/* Eyebrow: a chip with a hairline of the brand's light and a glowing dot. */
+/* The section label: THE accent, everywhere the same -- a short rule of the
+   brand's light, then the label. Inside a section the label is numbered
+   (01, 02...), like the parts of an article. */
+.eyebrow{justify-self:start;display:inline-flex;align-items:center;gap:12px;color:var(--cobalt-ink);font-size:12.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase}
+.page-hero--center .eyebrow,.section-head--center .eyebrow,.lost__inner .eyebrow{justify-self:center}
+.eyebrow::before{content:"";width:36px;height:2px;border-radius:2px;background:var(--brand-grad);flex:none}
+main{counter-reset:part}
+.section .eyebrow{counter-increment:part}
+.section .eyebrow::after{content:counter(part,decimal-leading-zero);order:-1;font-variant-numeric:tabular-nums;color:var(--ink-2);letter-spacing:.04em}
+html[lang="fa"] .section .eyebrow::after{content:counter(part,persian)}
+html[lang="fa"] .eyebrow{font-size:13px;letter-spacing:0;text-transform:none}
+
+.section-head{display:grid;gap:18px;margin-bottom:clamp(36px,4.4vw,60px);max-width:780px}
+.section-head--center{margin-inline:auto;text-align:center;justify-items:center}
+.section-head .lede{max-width:60ch}
+
+/* --------------------------------------------------------------- surfaces
+   A card is solid content: a layered gradient, a lit rim (brightest at the
+   top left, picking up the brand's light at the far corner) and a long
+   soft drop. Glass -- a live blur -- stays for floating controls only (the
+   header, forms, the simulator's list): blurs are the expensive part.   */
+.card{position:relative;background:linear-gradient(180deg,var(--card-a),var(--card-b));border-radius:var(--r-card);box-shadow:var(--card-drop);padding:clamp(22px,2.4vw,30px);
+  transition:transform .4s var(--ease),box-shadow .4s var(--ease)}
+.card::before,.glass::before{content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;pointer-events:none;background:var(--card-rim);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0)}
+/* A light that follows the cursor across a card or a plan (site.js moves
+   it with --mx/--my; only its transform and opacity change). */
+.card,.plan{overflow:hidden}
+.card::after,.plan::after{content:"";position:absolute;left:0;top:0;width:320px;height:320px;margin:-160px 0 0 -160px;border-radius:50%;pointer-events:none;z-index:0;
+  background:radial-gradient(closest-side,var(--light),var(--light-2) 55%,transparent);opacity:0;transform:translate(var(--mx,0),var(--my,0));transition:opacity .35s var(--ease)}
+.card > *,.plan > *{position:relative;z-index:1}
+@media (hover:hover) and (prefers-reduced-motion:no-preference){
+  .card.is-lit::after,.plan.is-lit::after{opacity:1}
+  a.card:hover,.card--lift:hover,.plan:hover{transform:translateY(-4px)}
+}
+.glass{position:relative;background:var(--glass-solid);border-radius:var(--r-panel);box-shadow:var(--edge),var(--drop)}
+@supports ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
+  .glass{background:linear-gradient(var(--sheen-a),var(--sheen-b)),var(--glass-strong);-webkit-backdrop-filter:blur(24px) saturate(140%);backdrop-filter:blur(24px) saturate(140%)}
+}
+@media (prefers-reduced-transparency:reduce){.glass{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;background:var(--glass-solid)!important}}
+@media (prefers-contrast:more){.glass,.card{box-shadow:inset 0 0 0 1px var(--ink-2),var(--drop)}:root{--ink-2:var(--ink)}}
+
+/* An icon tile: a small lit gem in the brand's light. */
+.ico{position:relative;display:inline-grid;place-items:center;width:46px;height:46px;border-radius:15px;flex:none;color:var(--cobalt-ink);
+  background:linear-gradient(145deg,rgba(139,92,246,.16),rgba(34,211,238,.14));box-shadow:inset 0 1px 0 rgba(255,255,255,.5),inset 0 0 0 1px rgba(139,92,246,.18)}
+.ico svg{width:22px;height:22px}
+
+/* --------------------------------------------------------------- buttons
+   The app's pill: fully round, cobalt for the one primary action, a quiet
+   chip for everything else. 48px tall (54 large), never under 44.       */
+.btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:48px;padding:0 22px;border:0;border-radius:999px;
+  font-size:15px;font-weight:600;line-height:1.2;text-decoration:none;white-space:nowrap;
+  transition:background-color .2s var(--ease),box-shadow .3s var(--ease),scale .25s var(--spring),translate .45s var(--spring)}
+.btn svg{width:18px;height:18px;flex:none}
+.btn:active{scale:.96}
+.btn--primary{background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,0) 55%),var(--cobalt);color:var(--on-cobalt);
+  box-shadow:0 18px 34px -16px var(--cobalt-shadow),0 0 0 1px rgba(16,69,255,.5),inset 0 1px 0 rgba(255,255,255,.28)}
+.btn--primary:hover{background-color:var(--cobalt-hover);box-shadow:0 22px 40px -14px var(--cobalt-shadow),0 0 0 1px rgba(16,69,255,.5),inset 0 1px 0 rgba(255,255,255,.28)}
+@media (hover:hover) and (prefers-reduced-motion:no-preference){.btn--primary:hover .icon-arrow{transform:translateX(3px)}html[dir="rtl"] .btn--primary:hover .icon-arrow{transform:scaleX(-1) translateX(3px)}}
+.btn .icon-arrow{display:inline-grid;transition:transform .3s var(--spring)}
+.btn--ghost{background:var(--chip-bg);color:var(--ink);box-shadow:inset 0 0 0 1px var(--hairline-2),0 8px 20px -14px rgba(20,40,90,.3)}
+.btn--ghost:hover{background:var(--select)}
+.btn--quiet{background:transparent;color:var(--ink);padding-inline:14px}
+.btn--quiet:hover{background:var(--select)}
+.btn--lg{min-height:54px;padding:0 28px;font-size:16px}
+.btn--sm{min-height:44px;padding:0 16px;font-size:14px}
+.btn--block{display:flex;width:100%}
+.btn[aria-disabled="true"],.btn:disabled{opacity:.6;cursor:not-allowed}
+html[dir="rtl"] .mirror,html[dir="rtl"] .btn .icon-arrow{transform:scaleX(-1)}
+/* A magnetic pull on the big primary buttons: site.js sets --bx/--by
+   (a few pixels at most) while a fine pointer is over one. */
+.btn--magnet{translate:var(--bx,0) var(--by,0)}
+@media (prefers-reduced-motion:reduce){.btn,.card,.plan{transition:none}.btn:active{scale:none}.btn--magnet{translate:none}}
+
+.link{display:inline-flex;align-items:center;gap:8px;color:var(--cobalt-ink);font-weight:600;text-decoration:none;min-height:44px}
+.link svg{width:18px;height:18px;transition:transform .3s var(--spring)}
+.link:hover{text-decoration:underline}
+.link:hover svg{transform:translateX(3px)}
+html[dir="rtl"] .link svg{transform:scaleX(-1)}
+html[dir="rtl"] .link:hover svg{transform:scaleX(-1) translateX(3px)}
+
+/* --------------------------------------------------------------- chips */
+.chip{display:inline-flex;align-items:center;gap:8px;min-height:34px;padding:5px 14px;border-radius:999px;background:var(--chip-bg);
+  box-shadow:inset 0 0 0 1px var(--hairline-2);font-size:13.5px;font-weight:500;color:var(--ink);line-height:1.3}
+.chip .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok);flex:none}
+.chip .dot--warn{background:var(--warn);box-shadow:0 0 8px var(--warn)}
+.chip .dot--hl{background:var(--hl)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+
+/* Status chip, as the app draws it: tinted, ink text, a glyph that says
+   the same thing as the colour. */
+.status{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 12px 0 9px;border-radius:999px;background:var(--ok-tint);color:var(--ok-ink);
+  font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap}
+.status svg{width:16px;height:16px;flex:none}
+html[lang="fa"] .status{font-size:13px;letter-spacing:0;text-transform:none}
+.status--hl{background:var(--hl-tint);color:var(--hl-ink)}
+.status--warn{background:var(--warn-tint);color:var(--warn-ink)}
+.status--muted{background:var(--muted-tint);color:var(--muted-ink)}
+
+.tag{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12.5px;font-weight:600;line-height:1.4;background:var(--muted-tint);color:var(--muted-ink)}
+.tag--ok{background:var(--ok-tint);color:var(--ok-ink)}
+.tag--hl{background:var(--hl-tint);color:var(--hl-ink)}
+.tag--warn{background:var(--warn-tint);color:var(--warn-ink)}
+.tag .d{width:6px;height:6px;border-radius:50%;background:currentColor}
+
+/* --------------------------------------------------------------- icons */
+.icon{width:20px;height:20px;flex:none;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+
+/* --------------------------------------------------------------- brand */
+.brand{display:inline-flex;align-items:center;gap:10px;text-decoration:none;color:var(--ink);min-height:44px}
+.brand__mark{display:grid;place-items:center;width:34px;height:34px}
+.brand__mark .logo{width:34px;height:34px}
+/* The wordmark is always Latin and left-to-right, tracked like the app's. */
+.brand__word{font-family:var(--font-ui);font-weight:500;font-size:16px;text-transform:uppercase;letter-spacing:.38em;margin-inline-end:-.38em;direction:ltr;unicode-bidi:isolate}
+html[lang="fa"] .brand__word{font-family:var(--font-fa);letter-spacing:.32em}
+.brand__beta{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;background:var(--select);color:var(--cobalt-ink);font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+html[lang="fa"] .brand__beta{font-size:12px;letter-spacing:0}
+
+/* --------------------------------------------------------------- header
+   A floating glass capsule, sticky. The one blur that is always live.  */
+.site-header{position:sticky;top:0;z-index:50;padding-top:12px;margin-bottom:-74px}
+.site-header__bar{display:flex;align-items:center;gap:10px;height:62px;padding-inline:12px 10px;border-radius:999px}
+/* How far down the page you are: a hairline of the brand's light along the
+   foot of the bar, driven by the scroll itself (no script). */
+.site-header__bar::after{content:"";position:absolute;left:30px;right:30px;bottom:0;height:2px;border-radius:2px;background:var(--brand-grad);transform:scaleX(0);transform-origin:0 50%;opacity:0;pointer-events:none}
+html[dir="rtl"] .site-header__bar::after{transform-origin:100% 50%}
+@supports (animation-timeline:scroll()){
+  @media (prefers-reduced-motion:no-preference){
+    .site-header__bar::after{animation:progress linear both;animation-timeline:scroll(root)}
+  }
+}
+@keyframes progress{0%{transform:scaleX(0);opacity:0}4%{opacity:.9}100%{transform:scaleX(1);opacity:.9}}
+/* Moving between pages: the browser cross-fades, and the bar and the logo
+   stay where they are. Off under reduced motion. */
+@media (prefers-reduced-motion:no-preference){@view-transition{navigation:auto}}
+.site-header__bar{view-transition-name:nx-header}
+.site-header .brand__mark{view-transition-name:nx-logo}
+::view-transition-old(root),::view-transition-new(root){animation-duration:.32s}
+.site-header .brand{padding-inline:2px 8px}
+.site-nav{display:flex;align-items:center;gap:2px;margin-inline:auto}
+.site-nav a{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;border-radius:999px;color:var(--ink);text-decoration:none;font-size:14.5px;font-weight:500}
+.site-nav a:hover{background:var(--select)}
+.site-nav a[aria-current="page"]{background:var(--select);color:var(--cobalt-ink)}
+.header-actions{display:flex;align-items:center;gap:6px;margin-inline-start:auto}
+.site-nav + .header-actions{margin-inline-start:0}
+.nav-toggle,.theme-toggle{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;flex:none;border:0;border-radius:999px;background:var(--chip-bg);box-shadow:inset 0 0 0 1px var(--hairline-2);color:var(--ink)}
+.nav-toggle{display:none}
+.nav-toggle .icon-close{display:none}
+.no-js .nav-toggle{display:none!important}
+.nav-toggle[aria-expanded="true"] .icon-close{display:block}
+.nav-toggle[aria-expanded="true"] .icon-menu{display:none}
+/* The theme switch shows the theme you are in: a sun in light, a moon in
+   dark. aria-pressed says whether dark is on; the label never changes. */
+.theme-toggle:hover{background:var(--select)}
+.theme-toggle svg{width:20px;height:20px}
+.theme-toggle .i-sun{display:var(--show-l)}
+.theme-toggle .i-moon{display:var(--show-d)}
+.mobile-nav{display:none}
+@media (max-width:1100px){
+  .site-nav{display:none}
+  .nav-toggle{display:inline-flex}
+  .header-actions .btn--signin{display:none}
+  .site-nav + .header-actions{margin-inline-start:auto}
+  /* Without JavaScript the drawer is simply open below the bar, so a phone
+     always has navigation. The inline script in the head adds .js before
+     the first paint, and only then is it folded away -- no flash, no
+     shift. */
+  .mobile-nav{display:grid;gap:4px;margin-top:8px;padding:10px;border-radius:24px}
+  .js .mobile-nav:not(.is-open){display:none}
+  .mobile-nav a{display:flex;align-items:center;min-height:48px;padding:0 16px;border-radius:14px;text-decoration:none;font-weight:500}
+  .mobile-nav a:hover,.mobile-nav a[aria-current="page"]{background:var(--select);color:var(--cobalt-ink)}
+  .mobile-nav .btn{margin-top:6px}
+}
+@media (max-width:600px){
+  .site-header__bar{padding-inline:8px 8px;gap:4px}
+  .header-actions{gap:4px}
+  .header-actions .btn--cta{display:none}
+  .brand{gap:8px}
+  .brand__word{font-size:13.5px;letter-spacing:.26em;margin-inline-end:-.26em}
+}
+@media (max-width:380px){.brand__beta{display:none}}
+
+/* --------------------------------------------------------------- language */
+.lang-switch{display:inline-flex;align-items:center;gap:2px;padding:3px;border-radius:999px;background:var(--field);box-shadow:inset 0 0 0 1px var(--hairline)}
+.lang-switch__opt{display:inline-grid;place-items:center;min-width:44px;height:38px;padding:0 10px;border-radius:999px;font-size:13px;font-weight:600;text-decoration:none;color:var(--ink-2)}
+.lang-switch__opt:hover{color:var(--ink);background:var(--select)}
+.lang-switch__opt.is-current{background:var(--pearl);color:var(--ink);box-shadow:0 1px 2px rgba(20,30,60,.12),0 0 0 1px var(--hairline)}
+.mobile-nav__lang{display:none}
+@media (max-width:600px){.lang-switch--bar{display:none}.mobile-nav__lang{display:flex;padding:6px 6px 2px}}
+
+/* --------------------------------------------------------------- page hero
+   Every inner page opens on the same world as the home page: the dotted
+   map with its lights and light lines, under a big confident title.    */
+.page-hero{position:relative;isolation:isolate;padding-top:calc(74px + clamp(64px,9vw,120px));padding-bottom:clamp(40px,5vw,72px)}
+.page-hero__inner{position:relative;display:grid;gap:20px;max-width:860px}
+.page-hero--center .page-hero__inner{margin-inline:auto;text-align:center;justify-items:center}
+.page-hero .lede{max-width:64ch}
+
+/* --------------------------------------------------------------- footer */
+.site-footer{position:relative;isolation:isolate;margin-top:clamp(48px,7vw,96px);padding-block:64px 32px;background:linear-gradient(180deg,var(--slab-b),var(--slab-a));box-shadow:inset 0 1px 0 var(--hairline-2)}
+.site-footer::before{content:"";position:absolute;top:0;left:50%;width:min(900px,90%);height:1px;transform:translateX(-50%);background:linear-gradient(90deg,transparent,var(--violet),var(--cyan),transparent)}
+.site-footer__grid{display:grid;grid-template-columns:1.6fr repeat(3,1fr);gap:32px}
+.site-footer__about p{margin-top:14px;color:var(--ink-2);font-size:14.5px;max-width:38ch}
+.site-footer__title{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);margin-bottom:10px}
+html[lang="fa"] .site-footer__title{font-size:13px;letter-spacing:0;text-transform:none}
+.site-footer ul{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.site-footer li a{display:inline-flex;align-items:center;min-height:36px;color:var(--ink);text-decoration:none;font-size:14.5px}
+.site-footer li a:hover{color:var(--cobalt-ink);text-decoration:underline}
+.site-footer__bottom{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;margin-top:40px;padding-top:20px;border-top:1px solid var(--hairline-2);color:var(--ink-2);font-size:13.5px}
+@media (max-width:860px){.site-footer__grid{grid-template-columns:1fr 1fr}.site-footer__about{grid-column:1/-1}}
+
+/* ---------------------------------------------------------------- world
+   One static SVG of 4,542 dots (Natural Earth via world-atlas), used as a
+   CSS mask so it takes the theme's dot colour and costs one cached
+   request across the whole site. On it: a light on each country with
+   servers, and light lines joining the
+   lights (inc/partials/world.php). Decorative everywhere it appears.   */
+.map{position:relative;aspect-ratio:200/82;direction:ltr}
+.map::before{content:"";position:absolute;inset:0;background:var(--map-dot);
+  -webkit-mask:url(/assets/map/world-map.svg) 0 0/100% 100% no-repeat;mask:url(/assets/map/world-map.svg) 0 0/100% 100% no-repeat}
+/* Lights: positioned in the map's own grid (scripts' geo anchors), so they
+   are physical left/top on purpose -- the map never mirrors. The same
+   numbers are in inc/partials/world.php, which draws the lines. */
+.lamp{position:absolute;width:10px;height:10px;margin:-5px 0 0 -5px;border-radius:50%;background:var(--lamp);box-shadow:0 0 0 2px var(--lamp-rim),0 0 16px 4px var(--lamp-glow)}
+.lamp--here{width:14px;height:14px;margin:-7px 0 0 -7px;background:var(--ok);box-shadow:0 0 0 3px var(--lamp-rim),0 0 0 10px var(--halo-ok),0 0 26px 8px var(--halo-ok)}
+.lamp--fi{left:55.53%;top:11.42%}.lamp--fr{left:50.57%;top:19.63%}.lamp--de{left:52.09%;top:18.69%}
+.lamp--tr{left:57.38%;top:25.54%}.lamp--sg{left:78.83%;top:55.93%}
+.lamp--gb{left:49.97%;top:17.66%}.lamp--nl{left:51.16%;top:17.03%}.lamp--us{left:31.13%;top:25.76%}.lamp--ae{left:64.93%;top:37.64%}
+/* Nothing on a map moves by itself. On the one map you can explore, a
+   light grows and names itself when you hover it, focus it, or point at
+   its country in the list beside it (.is-lit from site.js). */
+.lamp::after{content:"";position:absolute;inset:-7px;border-radius:50%;box-shadow:0 0 0 1.5px var(--lamp);opacity:0;transition:opacity .3s var(--ease),transform .4s var(--ease)}
+.map--explore .lamp{transition:transform .35s var(--spring)}
+.map--explore .lamp:focus-visible{outline:2px solid var(--focus);outline-offset:4px;border-radius:50%;box-shadow:0 0 0 2px var(--lamp-rim),0 0 16px 4px var(--lamp-glow)}
+.lamp__tip{position:absolute;left:50%;bottom:calc(100% + 10px);padding:5px 10px;border-radius:10px;white-space:nowrap;pointer-events:none;
+  background:var(--glass-solid);box-shadow:var(--edge),var(--drop);color:var(--ink);font-size:13.5px;font-weight:600;line-height:1.3;
+  opacity:0;transform:translate(-50%,6px) scale(.667);transform-origin:50% 100%;transition:opacity .25s var(--ease),transform .3s var(--ease)}
+.lamp:hover,.lamp:focus-visible,.lamp.is-lit{transform:scale(1.5)}
+.lamp:hover::after,.lamp:focus-visible::after,.lamp.is-lit::after{opacity:1;transform:scale(1.3)}
+.lamp:hover .lamp__tip,.lamp:focus-visible .lamp__tip,.lamp.is-lit .lamp__tip{opacity:1;transform:translate(-50%,0) scale(.667)}
+.links{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.links path{fill:none;vector-effect:non-scaling-stroke;stroke-linecap:round}
+.links .halo{stroke:var(--link-halo);stroke-width:7}
+.links .line{stroke-width:1.6}
+/* The world behind a page title: wide, faint at the edges. */
+.world{position:absolute;z-index:-1;pointer-events:none;direction:ltr}
+.world--page{top:56px;left:50%;width:clamp(820px,92vw,1320px);transform:translateX(-30%);opacity:.8;
+  -webkit-mask-image:radial-gradient(52% 62% at 58% 34%,#000 30%,transparent 78%);mask-image:radial-gradient(52% 62% at 58% 34%,#000 30%,transparent 78%)}
+/* On a phone the lights sit up and to the right of the title. */
+/* Right to left the title sits on the right, so the lights go left. */
+html[dir="rtl"] .world--page{transform:translateX(-82%)}
+@media (max-width:700px){.world--page{width:760px;top:6px;transform:translateX(-45%);-webkit-mask-image:linear-gradient(#000 60px,transparent 124px);mask-image:linear-gradient(#000 60px,transparent 124px)}}
+@media (max-width:700px){html[dir="rtl"] .world--page{transform:translateX(-68%)}}
+@media (forced-colors:active){.map,.lamp,.world,.sky,.links{display:none}}
+
+/* --------------------------------------------------------------- reveal
+   Sections rise into place as they scroll in, driven by the scroll itself
+   (CSS scroll-driven animations) -- no script, no observer. Where that is
+   not supported, or motion is reduced, everything is simply there.     */
+@supports (animation-timeline:view()){
+  @media (prefers-reduced-motion:no-preference){
+    .reveal{animation:rise linear both;animation-timeline:view();animation-range:entry 0% entry 42%}
+  }
+}
+@keyframes rise{from{opacity:0;transform:translateY(36px) scale(.98)}to{opacity:1;transform:none}}
+
+/* --------------------------------------------------------------- utilities */
+.u-center{text-align:center}
+.u-mt-sm{margin-top:12px}.u-mt-md{margin-top:20px}.u-mt-lg{margin-top:32px}.u-mt-xl{margin-top:48px}
+.u-mb-sm{margin-bottom:12px}.u-mb-md{margin-bottom:20px}.u-mb-lg{margin-bottom:32px}.u-mb-xl{margin-bottom:48px}
+.u-row{display:flex;flex-wrap:wrap;align-items:center;gap:12px}
+.u-row--center{justify-content:center}
+.u-list-reset{list-style:none;margin:0;padding:0}
+
+/* Motion off: every animation on the site stops where it stands. */
+@media (prefers-reduced-motion:reduce){.sky i,.orbit,.hero__mark .logo,.hero__mark::before,.site-header__bar::after{animation:none!important}
+  .lamp,.lamp::after,.lamp__tip,.card::after,.plan::after{transition:none!important}}

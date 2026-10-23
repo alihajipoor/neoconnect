@@ -1,67 +1,64 @@
 # Neoxify website -- nginx server block.
 #
 # ============================================================================
-# READ THIS FIRST. THIS FILE IS NOT DEPLOYED AND THE SITE IS BROKEN WITHOUT IT.
+# READ THIS FIRST. NOT FOR TODAY'S HOST -- DO NOT INSTALL IT THERE.
 # ============================================================================
 #
-# The site ships a carefully written .htaccess: security headers, a deny
-# rule over data/, ErrorDocument 404, and the /r/CODE voucher rewrite.
-# neoxify.net is served by **nginx**, which never reads .htaccess, so on
-# the live host every one of those is inert.
+# neoxify.net is on a SHARED box (owner, 2026-10-19) that also serves other
+# sites and a hosting panel. Its nginx is not ours: no server-wide changes,
+# no reloads. The site therefore works without this file:
+#   - routing (real 404s, /sitemap.xml, /r/CODE) is done by the router at
+#     the top of index.php, which the shared nginx falls back to;
+#   - www. is redirected to the apex by inc/bootstrap.php;
+#   - security headers come from PHP (inc/headers.php), minus the four the
+#     shared nginx already sends (config.php, headers_sent_by_server).
+# What that host does NOT give, and only a server config can: long-lived
+# Cache-Control on static files (it sends only ETag/Last-Modified) and
+# brotli. Ask the host operator for PER-SITE directives if those matter.
 #
-# That was measured on 2026-08-14, this file was written, and it was
-# **still not deployed on 2026-08-24** -- re-measured against the live
-# site, with the response bodies and headers saved. What that costs today:
+# This file is kept for the day the site has a server of its own. It is
+# written for that case and has never been installed anywhere.
 #
-#   1. NO 404 HANDLER AT ALL. Thirteen probed unknown paths -- including
-#      /terms, /plans, /faq/ and /refund/ -- every one returned **200**
-#      with a byte-identical copy of the home page (36,161 bytes, same
-#      md5). Every nonexistent URL on this domain is a soft-404 duplicate
-#      of the home page. This is the single worst SEO defect the site has:
-#      it manufactures unlimited duplicate content and wastes the entire
-#      crawl budget of a domain that has very little authority to spend.
+# HOW THE HEADERS ARE SPLIT, so none is ever sent twice:
+#   - nginx sends the fixed set (HSTS, nosniff, Referrer-Policy, XFO,
+#     Permissions-Policy, COOP, CORP) on EVERY response, and hides PHP's
+#     copies of exactly those with fastcgi_hide_header.
+#   - The Content-Security-Policy on a page is PHP's alone. It pins the
+#     page's inline stylesheet and its one inline script by SHA-256, so it
+#     differs per page and cannot be written down here. nginx adds its own
+#     static policy only when the upstream sent none (the `map` below):
+#     static files. Never on /account/, the customer portal, which carries
+#     its own policy in a <meta> (see its location below).
+#   Two CSP headers on one response would BOTH be enforced -- a static one
+#   here would block the page's own inline CSS. That is why the map exists.
+#   With this file installed, config.php's headers_sent_by_server does not
+#   matter: whatever PHP sends of the fixed set is hidden here.
 #
-#   2. /sitemap.xml RETURNS THE HOME PAGE. Status 200, Content-Type
-#      text/html. Only /sitemap.php emits real XML. The conventional path
-#      every crawler tries first gets a marketing page.
-#
-#   3. NO SECURITY HEADERS. The live response carries no
-#      Content-Security-Policy, X-Frame-Options, X-Content-Type-Options,
-#      Referrer-Policy or Permissions-Policy.
-#
-#   4. NO COMPRESSION OR CACHING HEADERS, and the site is served over
-#      HTTP/1.1. For an audience on slow mobile connections in Iran this
-#      is the most expensive of the four in practice.
-#
-#   5. VOUCHER SHORT LINKS DO NOT WORK. GET /r/ABCD2345 returns the
-#      marketing page rather than redirecting to /account/?voucher=... So
-#      the links resellers hand out silently do nothing.
-#
-#   6. www.neoxify.net SERVES A COMPLETE DUPLICATE SITE on 200, and
-#      http://www. redirects to https://www. rather than to the apex. The
-#      only thing keeping the duplicate out of the index is an in-body
-#      canonical tag, which is a hint rather than an instruction.
-#
-# The .htaccess stays: it is correct, and it is what a shared Apache or
-# LiteSpeed host would use. This is the same posture for the host the site
-# actually runs on.
-#
-# TO DEPLOY: copy onto the web host, fix the two paths marked CHECK below,
-# `nginx -t`, then `systemctl reload nginx`. Nothing in this repo deploys
-# it -- that is deliberate, but it is also why it has not happened.
+# TO DEPLOY (own server only): copy onto the web host, fix the paths marked
+# CHECK, `nginx -t`, then `systemctl reload nginx`. Set expose_php = Off in
+# php.ini as well. The rewrites below duplicate the router in index.php and
+# are harmless alongside it.
+
+# ---------------------------------------------------------------------
+# 0. Static CSP, only where PHP did not send one (http context)
+# ---------------------------------------------------------------------
+# connect-src 'self': nothing on the site makes a request. The one part
+# that does, the /account/ portal, never gets this policy (its location
+# below sends none), because its API calls go to mirrors on several
+# domains and addresses that change without a release.
+map $upstream_http_content_security_policy $nx_static_csp {
+    ""      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+    default "";
+}
 
 # ---------------------------------------------------------------------
 # 1. Canonical host: everything 301s to https://neoxify.net
 # ---------------------------------------------------------------------
-# One redirect, permanent, straight to the final URL. The live site
-# currently sends http://www. -> https://www. and then stops, leaving two
-# fully working hosts. Chaining redirects also wastes a round trip on
-# exactly the connections that can least afford one.
-
 server {
     listen 80;
     listen [::]:80;
     server_name neoxify.net www.neoxify.net;
+    server_tokens off;
 
     # ACME renewals must not be redirected or certbot's HTTP-01 challenge
     # fails and the certificate quietly stops renewing.
@@ -79,189 +76,190 @@ server {
     listen [::]:443 ssl http2;
                                    # This host runs nginx 1.24.0, where
                                    # `http2 on;` does not exist and would
-                                   # fail `nginx -t`, blocking the reload.
-                                   # The form above is accepted by 1.24 AND
-                                   # by 1.25+, where it is merely deprecated
-                                   # -- verified with `nginx -t` on 1.28.3.
-                                   # On 1.25.1+ you may instead drop http2
-                                   # from these two lines and add `http2 on;`.
+                                   # fail `nginx -t`. The form above is
+                                   # accepted by 1.24 and (deprecated) by
+                                   # 1.25+. On 1.25.1+ you may drop http2
+                                   # from these lines and add `http2 on;`.
     server_name www.neoxify.net;
+    server_tokens off;
 
     # CHECK: leave whatever certbot already wrote for this host. The cert
     # must cover www as well as the apex, or this block cannot answer.
     # ssl_certificate     /etc/letsencrypt/live/neoxify.net/fullchain.pem;
     # ssl_certificate_key /etc/letsencrypt/live/neoxify.net/privkey.pem;
 
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
     return 301 https://neoxify.net$request_uri;
 }
 
 # ---------------------------------------------------------------------
 # 2. The site
 # ---------------------------------------------------------------------
-
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-                                   # see the note above for the nginx 1.24
-                                   # vs 1.25+ http2 syntax
     server_name neoxify.net;
 
     # CHECK: document root of the unzipped site.
     root /var/www/neoxify.net;
-    # index.html is in this list for ONE directory: /account/.
-    #
-    # The customer portal is a compiled React SPA whose entry point is
-    # account/index.html, with no index.php under it anywhere. With a bare
-    # `index index.php;` a request for /account/ finds no index file and
-    # returns 403, while /account/assets/*.js and *.css resolve normally --
-    # which is exactly what makes the fault hard to spot.
-    #
-    # index.php stays first so no stray index.html can shadow a PHP page.
+    # index.html for ONE directory: /account/, the compiled customer
+    # portal, which has no index.php. index.php stays first so no stray
+    # index.html can shadow a PHP page.
     index index.php index.html;
 
     # CHECK: ssl_certificate / ssl_certificate_key -- leave certbot's.
 
     charset utf-8;
+    # No version in the Server header or on error pages.
+    server_tokens off;
 
     # ------------------------------------------------------------------
     # Security headers
     # ------------------------------------------------------------------
-    # nginx REPLACES inherited add_header directives in any block that
-    # adds one of its own. Every location below that sets a header must
-    # therefore repeat the whole set, or silently serve without them.
-    # That is why the asset block further down repeats these.
-
+    # nginx REPLACES inherited add_header directives in any block that adds
+    # one of its own, so every location below that sets a header repeats
+    # the whole set (`include`-ing a snippet is the tidier way on a host
+    # where you can add files to /etc/nginx/snippets/).
+    #
+    # HSTS: two years and every subdomain, and deliberately NOT 'preload'.
+    # That token is what hstspreload.org acts on, its form does not check
+    # who owns the domain, and inclusion is close to irreversible (removal
+    # takes months to reach shipped browsers). Add it only when the owner
+    # decides to submit. Confirm every neoxify.net name serves HTTPS before
+    # reloading with includeSubDomains.
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()" always;
-
-    # HSTS. Two years, subdomains included.
-    #
-    # Deliberately WITHOUT `preload`. Preloading is close to irreversible
-    # -- removal takes months to reach shipped browsers -- and this domain
-    # may need to do awkward things at short notice if it is blocked.
-    # includeSubDomains is safe here because every neoxify.net name is
-    # HTTPS already; confirm that is still true before reloading.
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
-
-    # connect-src is wider than 'self' on purpose: /account/ is the
-    # customer portal and every call it makes goes to another origin --
-    # connect.neoxify.site first, then the node mirrors on their VPN
-    # ports, then mirrors derived at runtime from the customer's own
-    # credentials, which cannot be enumerated here. All are neoxify.site
-    # names on nonstandard ports by design. See the same header in
-    # .htaccess for the full reasoning.
-    #
-    # No 'unsafe-inline' anywhere. The JSON-LD block in the page head is
-    # NOT affected: a <script> whose type is not a JavaScript MIME type is
-    # never prepared for execution, so CSP does not apply to it.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.neoxify.site:*; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+    # Only feature names current browsers recognise: an unknown one (the
+    # old interest-cohort) is logged as a console error on every page.
+    add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()" always;
+    add_header Content-Security-Policy $nx_static_csp always;
 
     # ------------------------------------------------------------------
     # Compression
     # ------------------------------------------------------------------
-    # The single biggest win available here. The home page is ~36 KB of
-    # HTML and the stylesheet is ~75 KB; both are highly compressible text
-    # and both are currently served raw. On a slow mobile connection in
-    # Iran that is the difference between a page that appears and a page
-    # someone gives up on.
-    #
-    # gzip_types deliberately does not list text/html -- nginx always
-    # compresses that and listing it emits a duplicate-MIME warning.
+    # Every page inlines its own CSS (no render-blocking request), so the
+    # HTML is the biggest text on the wire -- compress it. nginx always
+    # compresses text/html once gzip is on; listing it warns.
     gzip on;
     gzip_vary on;
     gzip_comp_level 6;
     gzip_min_length 512;
     gzip_proxied any;
-    gzip_types
-        text/plain
-        text/css
-        text/xml
-        application/xml
-        application/xml+rss
-        application/json
-        application/ld+json
-        application/javascript
-        image/svg+xml;
+    gzip_types text/plain text/css text/xml application/xml application/javascript application/json application/ld+json application/manifest+json image/svg+xml;
 
-    # If ngx_brotli is available, this is better again for text and costs
-    # nothing at runtime for pre-compressed static files. Safe to leave
-    # commented out -- gzip above already covers every client.
+    # Better again if ngx_brotli is available. Safe to leave commented out.
     # brotli on;
     # brotli_comp_level 5;
-    # brotli_types text/plain text/css application/json application/javascript application/ld+json image/svg+xml application/xml;
+    # brotli_types text/plain text/css text/xml application/xml application/javascript application/json image/svg+xml;
 
     # ------------------------------------------------------------------
     # Not pages
     # ------------------------------------------------------------------
-    # Second layer only: every file written into data/ begins with
-    # `<?php exit; ?>` (NX_FILE_GUARD in inc/security.php), and every file
-    # under inc/ begins with `defined('NX') || exit;`. This is the first
-    # layer that .htaccess was supposed to provide and does not.
-    location ^~ /data/ {
-        deny all;
-        return 404;
-    }
-
-    location ^~ /inc/ {
-        deny all;
-        return 404;
-    }
-
-    location ^~ /scripts/ {
-        deny all;
-        return 404;
-    }
-
-    # Dotfiles: .htaccess, .gitignore, and anything else that should never
-    # be readable over HTTP.
-    location ~ /\. {
-        deny all;
-        return 404;
-    }
+    # Second layer only: every file in data/ begins with `<?php exit; ?>`
+    # and every file under inc/ with `defined('NX') || exit;`.
+    location ^~ /data/    { deny all; return 404; }
+    location ^~ /inc/     { deny all; return 404; }
+    location ^~ /scripts/ { deny all; return 404; }
+    location ~ /\.        { deny all; return 404; }
 
     # ------------------------------------------------------------------
-    # Static assets
+    # Static assets: cached for a year
     # ------------------------------------------------------------------
-    # Safe to cache for a year because every asset URL carries a ?v=
-    # stamp derived from the file's own mtime (nx_asset() in
-    # inc/bootstrap.php), so a redeploy changes the URL and no visitor can
-    # be stuck on a stale stylesheet.
+    # Safe because nothing here changes in place: CSS is inlined into the
+    # pages, the script, favicon and touch icon carry a ?v= stamp from the
+    # file's mtime (nx_asset()), and the fonts, the map and the social
+    # cards carry a version IN THE FILE NAME (-v1, -v2) -- change the file,
+    # change the name. The fonts deliberately have no ?v=, so the preload
+    # in the page and the @font-face request the same URL.
     #
-    # The font is the exception that proves the rule: it is referenced
-    # WITHOUT a stamp, deliberately, so that the preload in the page head
-    # and the @font-face in the stylesheet request byte-identical URLs and
-    # the browser does not download it twice. immutable is still correct --
-    # if the typeface is ever replaced, replace the filename.
+    # An add_header inside a location replaces EVERY inherited one, so both
+    # locations below repeat the server block's whole set.
     location ~* \.(css|js|woff2|svg|png|jpg|jpeg|webp|avif|ico)$ {
         expires 1y;
         add_header Cache-Control "public, max-age=31536000, immutable" always;
-
-        # Repeated because this block sets a header of its own -- see the
-        # note at the top of the security header section.
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()" always;
+        add_header Content-Security-Policy $nx_static_csp always;
+        access_log off;
+        try_files $uri =404;
+    }
 
+    # The social cards and the logo are meant to be shown by other sites
+    # and apps, so they may be embedded cross-origin -- the one difference
+    # from the set above.
+    location ^~ /assets/img/ {
+        expires 1y;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "cross-origin" always;
+        add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()" always;
+        add_header Content-Security-Policy $nx_static_csp always;
         access_log off;
         try_files $uri =404;
     }
 
     # ------------------------------------------------------------------
+    # The customer portal: the fixed set, and NO Content-Security-Policy
+    # ------------------------------------------------------------------
+    # /account/ is a static build (apps/web-portal) that carries its own
+    # policy in a <meta>: its inline loader and first-paint styles by hash,
+    # and connect-src https:, because its API calls go to mirrors on several
+    # domains and addresses, signed into the endpoint bundle and changed
+    # without a release. The static policy above, enforced on top of it,
+    # would block the loader (a map and no card) and every mirror it does
+    # not list. So this location sends none; framing is still refused, by
+    # X-Frame-Options. ^~ keeps the asset regex above off its files.
+    #
+    # The page is revalidated on every visit: a stale copy would ask for
+    # hashed files that a later deploy may have pruned. Those files never
+    # change in place, so they are cached for a year. This directory is
+    # deployed only by scripts/deploy-portal.sh, never by the site zip.
+    location ^~ /account/ {
+        add_header Cache-Control "no-cache" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()" always;
+        try_files $uri $uri/ =404;
+
+        location ^~ /account/assets/ {
+            add_header Cache-Control "public, max-age=31536000, immutable" always;
+            add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+            add_header X-Frame-Options "DENY" always;
+            add_header Cross-Origin-Opener-Policy "same-origin" always;
+            add_header Cross-Origin-Resource-Policy "same-origin" always;
+            add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()" always;
+            access_log off;
+            try_files $uri =404;
+        }
+    }
+
+    # ------------------------------------------------------------------
     # Rewrites
     # ------------------------------------------------------------------
-
-    # Search engines look for /sitemap.xml by convention. Without this the
-    # request falls through to the try_files below and lands on the home
-    # page -- which is exactly what the live site does today.
     location = /sitemap.xml {
         rewrite ^ /sitemap.php last;
     }
 
     # Voucher short links: /r/ABCD2345 -> r/index.php?c=ABCD2345
-    # The code alphabet is A-Z and 2-9; r/index.php re-validates against
-    # ^[A-Z0-9]{1,32}$ and redirects to /account/?voucher=...
     location ~ "^/r/([A-Za-z0-9-]{1,32})/?$" {
         rewrite ^ /r/index.php?c=$1 last;
     }
@@ -270,9 +268,7 @@ server {
     # Pages
     # ------------------------------------------------------------------
     # A missing page must be a real 404 rendered by 404.php, not a 200
-    # showing the home page. Without the =404 on try_files, nginx falls
-    # back to index.php for everything and every mistyped URL becomes an
-    # indexable duplicate of the home page.
+    # showing the home page.
     error_page 404 /404.php;
 
     location / {
@@ -282,29 +278,33 @@ server {
     location ~ \.php$ {
         try_files $uri =404;
 
-        # This has to live in the same block that runs PHP, not in a
-        # `location ~* \.php$` of its own further up. nginx tries regex
-        # locations in file order and stops at the first match, so a
-        # separate earlier block for the same extension wins -- and because
-        # that block has no fastcgi_pass, nginx would fall back to serving
-        # the file from disk. Every page would come out as PHP source text.
-        # HTML here is generated per request and varies on the visitor's
-        # language cookie, so it must never sit in a shared cache.
-        add_header Cache-Control "no-cache, must-revalidate" always;
+        # PHP sends these too (inc/headers.php), so a host without this file
+        # is still covered; hide PHP's copies so each goes out exactly once.
+        # NOT the CSP: that is PHP's alone (see the top of this file).
+        fastcgi_hide_header Strict-Transport-Security;
+        fastcgi_hide_header X-Content-Type-Options;
+        fastcgi_hide_header Referrer-Policy;
+        fastcgi_hide_header X-Frame-Options;
+        fastcgi_hide_header Cross-Origin-Opener-Policy;
+        fastcgi_hide_header Cross-Origin-Resource-Policy;
+        fastcgi_hide_header Permissions-Policy;
+        fastcgi_hide_header X-Powered-By;
 
-        # add_header REPLACES the inherited set, so the server-level
-        # security headers have to be repeated here too.
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-        add_header X-Frame-Options "SAMEORIGIN" always;
-        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()" always;
-        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.neoxify.site:*; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()" always;
+        # Empty whenever PHP sent its own policy, which every page does.
+        add_header Content-Security-Policy $nx_static_csp always;
+        # Cache-Control comes from PHP: pages are per request and vary on the
+        # language cookie, so they are revalidated every time.
 
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        # PATH_INFO is what lets /r/index.php/CODE work on a host with no
-        # rewrite at all -- r/index.php reads it as a fallback.
+        # PATH_INFO lets /r/index.php/CODE work on a host with no rewrite.
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         fastcgi_param PATH_INFO $fastcgi_path_info;
         # CHECK: the php-fpm socket path for the installed PHP version.

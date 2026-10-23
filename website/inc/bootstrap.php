@@ -23,6 +23,35 @@ define('NX_DATA', NX_ROOT . '/data');
 
 $NX_CFG = require NX_INC . '/config.php';
 
+// Security headers go out first, on every response -- a redirect, the
+// sitemap and a 404 included. head.php replaces the CSP with the page's
+// own once it knows what it will inline. See inc/headers.php.
+require_once NX_INC . '/headers.php';
+nx_security_headers();
+
+// One host. www.neoxify.net reaches this same folder on the live host and
+// used to serve a full duplicate of every page with a 200; the server
+// config that would redirect it is not ours to change (the box is shared),
+// so PHP does it. Only a www. host that is not the configured one, so a
+// site_url that itself starts with www. can never loop.
+$nx_host = isset($_SERVER['HTTP_HOST']) ? strtolower((string) $_SERVER['HTTP_HOST']) : '';
+$nx_host = preg_replace('/:\d+$/', '', $nx_host);
+if (strpos($nx_host, 'www.') === 0) {
+    $nx_canon = strtolower((string) parse_url((string) $NX_CFG['site_url'], PHP_URL_HOST));
+    if ($nx_canon !== '' && $nx_canon !== $nx_host) {
+        $nx_target = isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '/';
+        // Keep only path and query: an absolute-form request target must
+        // not choose the host we send people to.
+        $nx_target = preg_replace('#^[a-z][a-z0-9+.-]*://[^/]*#i', '', $nx_target);
+        if ($nx_target === '' || $nx_target[0] !== '/') {
+            $nx_target = '/' . $nx_target;
+        }
+        header('Location: ' . rtrim((string) $NX_CFG['site_url'], '/') . $nx_target, true, 301);
+        exit;
+    }
+}
+unset($nx_host);
+
 /** Locales the site is actually translated into, and which of them are RTL. */
 $NX_LOCALES = array('en', 'fa');
 $NX_RTL_LOCALES = array('fa');
@@ -250,6 +279,74 @@ function nx_asset($relative)
     return $url;
 }
 
+
+
+/**
+ * The visitor's chosen theme: 'light', 'dark', or '' for "follow the
+ * system". Read from the theme cookie, which only the switch in the header
+ * sets (assets/js/site.js). head.php writes it onto <html data-theme>, so
+ * the very first paint is already right -- no flash of the other theme and
+ * no script needed to get there. Anything else in the cookie is ignored.
+ *
+ * @return string
+ */
+function nx_theme()
+{
+    $v = isset($_COOKIE['theme']) ? (string) $_COOKIE['theme'] : '';
+    return ($v === 'light' || $v === 'dark') ? $v : '';
+}
+
+/**
+ * The page's stylesheet, ready to inline.
+ *
+ * Reads assets/css/<module>.css in order, drops comments and collapses
+ * whitespace (the source files are written to be read, and the comments
+ * never need to reach a visitor), and points the absolute /assets/ URLs at
+ * base_path. The result is hashed into the CSP by head.php, so it must be
+ * echoed byte for byte as returned.
+ *
+ * No build step: this runs per request, on a few tens of kilobytes, in well
+ * under a millisecond.
+ *
+ * @param array $modules e.g. array('base', 'blocks', 'home')
+ * @return string
+ */
+function nx_css_bundle($modules)
+{
+    $css = '';
+    foreach ($modules as $module) {
+        $file = NX_ROOT . '/assets/css/' . basename($module) . '.css';
+        if (is_file($file)) {
+            $css .= file_get_contents($file) . "\n";
+        }
+    }
+
+    $css = preg_replace('#/\*.*?\*/#s', '', $css);
+    $css = preg_replace('/\s+/', ' ', $css);
+    $css = preg_replace('/\s*([{};,>])\s*/', '$1', $css);
+    $css = str_replace(';}', '}', $css);
+
+    // The dark theme is written ONCE, as rules whose selector starts with
+    // :root[data-theme="dark"] -- what the theme switch (a cookie, read in
+    // head.php) asks for. The same rules also apply to a visitor who never
+    // used the switch and whose system is dark, so each is repeated here
+    // inside prefers-color-scheme, for a root with no data-theme at all.
+    // Top-level rules only: one nested in another @media would lose it.
+    if (preg_match_all('/(?<=^|\})(:root\[data-theme="dark"\][^{}@]*)\{([^{}]*)\}/', $css, $m)) {
+        $auto = '';
+        foreach ($m[1] as $i => $selector) {
+            $auto .= str_replace(':root[data-theme="dark"]', ':root:not([data-theme])', $selector)
+                . '{' . $m[2][$i] . '}';
+        }
+        $css .= '@media (prefers-color-scheme:dark){' . $auto . '}';
+    }
+
+    $base = nx_cfg('base_path', '/');
+    if ($base !== '/') {
+        $css = str_replace('url(/assets/', 'url(' . $base . 'assets/', $css);
+    }
+    return trim($css);
+}
 
 
 // ---------------------------------------------------------------------

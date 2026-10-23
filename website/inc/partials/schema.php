@@ -32,6 +32,22 @@
  *     (Windows, Android). macOS and iOS do not exist, so they get no
  *     entry, however much it would pad the graph out.
  *
+ * KNOWN, AND ACCEPTED: Google shows a software-app rich result only with
+ * an aggregateRating or a review, so Search Console's "Software apps"
+ * report will list both SoftwareApplication nodes as invalid. That stays
+ * true until real reviews exist. The nodes still describe the apps
+ * correctly for everything else that reads them. Never "fix" the report
+ * with a rating nobody gave.
+ *
+ * ONE ENTITY, ONE DESCRIPTION. The Organization and the WebSite carry the
+ * same @id on every page in both languages, so they must say the same
+ * thing everywhere: the name is "Neoxify" with the Persian name as
+ * alternateName, the WebSite is in both languages, and the Organization's
+ * description is the English one. The Product and the apps are described
+ * in the page's own language, so each locale gets its own @id for them
+ * (anchored on that locale's home page) rather than two conflicting
+ * descriptions of one node.
+ *
  * If you add to this file, hold it to that bar: everything here must be
  * checkable against the product itself.
  */
@@ -55,6 +71,13 @@ function nx_schema_graph()
     // does not move when a page is renamed.
     $orgId = $site . '/#organization';
     $siteId = $site . '/#website';
+    // Per-locale anchors for the nodes described in the page's language.
+    $localeHome = nx_abs_url('home');
+    $logo = $site . nx_cfg('base_path', '/') . 'assets/img/logo-512.png';
+
+    // The brand as one entity: the same name on every page.
+    $brand = nx_schema_lang('en', 'brand.name');
+    $brandFa = nx_schema_lang('fa', 'brand.name');
 
     $graph = array();
 
@@ -65,15 +88,16 @@ function nx_schema_graph()
     $org = array(
         '@type' => 'Organization',
         '@id' => $orgId,
-        'name' => nx_t('brand.name'),
+        'name' => $brand,
+        'alternateName' => $brandFa,
         'url' => $site . '/',
         'logo' => array(
             '@type' => 'ImageObject',
-            'url' => $site . nx_cfg('base_path', '/') . 'assets/img/logo-512.png',
+            'url' => $logo,
             'width' => 512,
             'height' => 512,
         ),
-        'description' => nx_t('schema.org.description'),
+        'description' => nx_schema_lang('en', 'schema.org.description'),
         'contactPoint' => array(array(
             '@type' => 'ContactPoint',
             'contactType' => 'customer support',
@@ -106,9 +130,11 @@ function nx_schema_graph()
         '@type' => 'WebSite',
         '@id' => $siteId,
         'url' => $site . '/',
-        'name' => nx_t('brand.name'),
+        'name' => $brand,
+        'alternateName' => $brandFa,
         'publisher' => array('@id' => $orgId),
-        'inLanguage' => $lang,
+        // One site in two languages, the same on every page.
+        'inLanguage' => array('en', 'fa'),
         // No SearchAction: the site has no search. Declaring a sitelinks
         // search box that does not exist is a broken promise Google will
         // try to render.
@@ -209,9 +235,13 @@ function nx_schema_graph()
         if ($offers) {
             $graph[] = array(
                 '@type' => 'Product',
-                '@id' => $site . '/#product',
+                '@id' => $localeHome . '#product',
                 'name' => nx_t('brand.name'),
                 'description' => nx_t('schema.product.description'),
+                // Merchant listings treat a Product with no image as
+                // missing a critical field. The logo is the one image that
+                // stands for the service in every language.
+                'image' => $logo,
                 'brand' => array('@id' => $orgId),
                 'category' => 'VPN service',
                 'offers' => $offers,
@@ -253,11 +283,14 @@ function nx_schema_graph()
 
     if ($page === 'download' || $page === 'home') {
         $apps = array();
+        // The platforms that genuinely ship, and nothing else: macOS and
+        // iOS do not exist and get no node, however much it would pad the
+        // graph.
 
         if (nx_windows_available()) {
             $apps[] = array(
                 '@type' => 'SoftwareApplication',
-                '@id' => $site . '/#app-windows',
+                '@id' => $localeHome . '#app-windows',
                 'name' => nx_t('schema.app.windows.name'),
                 'operatingSystem' => 'Windows 10, Windows 11',
                 'applicationCategory' => 'SecurityApplication',
@@ -267,31 +300,21 @@ function nx_schema_graph()
                 // No version number, on purpose and for the same reason the
                 // download page carries none: the URL always resolves to the
                 // current release, and a number here could only go stale.
-                'offers' => nx_free_trial_enabled() ? array(
-                    '@type' => 'Offer',
-                    'price' => '0',
-                    'priceCurrency' => 'USD',
-                    'description' => nx_t('schema.app.trial'),
-                ) : null,
+                'offers' => nx_schema_app_offers(),
             );
         }
 
         if (nx_android_available()) {
             $apps[] = array(
                 '@type' => 'SoftwareApplication',
-                '@id' => $site . '/#app-android',
+                '@id' => $localeHome . '#app-android',
                 'name' => nx_t('schema.app.android.name'),
                 'operatingSystem' => 'Android 7.0+',
                 'applicationCategory' => 'SecurityApplication',
                 'downloadUrl' => nx_abs_url('download'),
                 'softwareRequirements' => nx_t('download.android.requirements'),
                 'publisher' => array('@id' => $orgId),
-                'offers' => nx_free_trial_enabled() ? array(
-                    '@type' => 'Offer',
-                    'price' => '0',
-                    'priceCurrency' => 'USD',
-                    'description' => nx_t('schema.app.trial'),
-                ) : null,
+                'offers' => nx_schema_app_offers(),
             );
         }
 
@@ -305,6 +328,79 @@ function nx_schema_graph()
     }
 
     return $graph;
+}
+
+/**
+ * A string from one language file regardless of the page's locale, for the
+ * nodes that must read the same on every page. English is always loaded;
+ * the Persian file is read once, only when asked for.
+ *
+ * @param string $locale 'en' or 'fa'
+ * @param string $key
+ * @return string
+ */
+function nx_schema_lang($locale, $key)
+{
+    global $NX_LANG_EN;
+    static $fa = null;
+
+    if ($locale === 'fa') {
+        if ($fa === null) {
+            $fa = require NX_INC . '/lang/fa.php';
+        }
+        if (is_array($fa) && isset($fa[$key]) && is_string($fa[$key])) {
+            return $fa[$key];
+        }
+    }
+    return (isset($NX_LANG_EN[$key]) && is_string($NX_LANG_EN[$key])) ? $NX_LANG_EN[$key] : '';
+}
+
+/**
+ * What the app costs, as schema.org offers, for both SoftwareApplication
+ * nodes.
+ *
+ * The download itself is free; using the service takes a plan (or the
+ * trial, when the panel grants one). So: the trial as a zero-price Offer
+ * only while free_trial_enabled is on, and the plans as one AggregateOffer
+ * whose low and high prices come from inc/content/plans.php -- the same
+ * file the cards render, so the structured data cannot quote a price the
+ * page does not show. Nothing here invents a rating or a review.
+ *
+ * @return array|null null when there is nothing honest to say
+ */
+function nx_schema_app_offers()
+{
+    $offers = array();
+
+    if (nx_free_trial_enabled()) {
+        $offers[] = array(
+            '@type' => 'Offer',
+            'price' => '0',
+            'priceCurrency' => 'USD',
+            'description' => nx_t('schema.app.trial'),
+            'url' => nx_abs_url('pricing'),
+        );
+    }
+
+    $plans = nx_content('plans');
+    $prices = array();
+    foreach (isset($plans['plans']) ? $plans['plans'] : array() as $plan) {
+        if (empty($plan['coming_soon'])) {
+            $prices[] = (float) $plan['price'];
+        }
+    }
+    if ($prices) {
+        $offers[] = array(
+            '@type' => 'AggregateOffer',
+            'lowPrice' => number_format(min($prices), 2, '.', ''),
+            'highPrice' => number_format(max($prices), 2, '.', ''),
+            'offerCount' => count($prices),
+            'priceCurrency' => 'USD',
+            'url' => nx_abs_url('pricing'),
+        );
+    }
+
+    return $offers ? $offers : null;
 }
 
 /**
