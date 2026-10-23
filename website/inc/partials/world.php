@@ -48,7 +48,7 @@ function nx_world_arc($a, $b)
 }
 
 /**
- * @param string $variant hero | page | plain (plain: lights, no lines --
+ * @param string $variant hero | page | night (lights only, as stars) | plain (plain: lights, no lines --
  *                        and the one map you can explore: each light is
  *                        focusable, named, and shows its name on hover or
  *                        focus; the list beside it lights it too, site.js)
@@ -71,7 +71,7 @@ function nx_world($variant = 'page')
     }
 
     $out = '';
-    if ($variant !== 'plain' && count($exits) > 1) {
+    if ($variant !== 'plain' && $variant !== 'night' && count($exits) > 1) {
         // West to east, each light to the next.
         uasort($exits, function ($p, $q) { return $p[0] < $q[0] ? -1 : ($p[0] > $q[0] ? 1 : 0); });
         $pts = array_values($exits);

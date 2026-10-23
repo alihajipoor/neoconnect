@@ -173,6 +173,18 @@ require NX_INC . '/partials/head.php';
   </div>
 </section>
 
+<!-- ============================ Night ===========================
+     A breath between the story and the facts: the dotted world as a field
+     of stars at night, the server countries as the brightest of them, the
+     glass logo floating in its own light, and one line. Always dark. -->
+<section class="night" aria-labelledby="h-night">
+  <?php echo nx_world('night'); ?>
+  <div class="wrap night__inner">
+    <div class="night__mark" aria-hidden="true"><?php echo nx_logo('night__logo'); ?></div>
+    <h2 class="night__line reveal" id="h-night"><?php echo nx_e('home.night.line'); ?></h2>
+  </div>
+</section>
+
 <!-- ============================ Exits =========================== -->
 <?php if ($nx_locations): ?>
 <section class="section section--alt" id="locations" aria-labelledby="h-locations">

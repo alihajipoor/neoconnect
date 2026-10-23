@@ -845,4 +845,5 @@ return array(
     'story.caption' => 'Screens from the Windows and Android apps. The account, the usage and the address shown are examples.',
     'features.failover.shot_alt' => 'The Neoxify Windows app checking a connection before it says Connected.',
     'features.failover.shot_note' => 'The Windows app, checking. The account and the usage shown are examples.',
+    'home.night.line' => 'When the network goes dark, the app keeps looking for a way through.',
 );
