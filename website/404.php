@@ -36,6 +36,7 @@ require NX_INC . '/partials/head.php';
 ?>
 
 <section class="lost">
+  <?php echo nx_world('page'); ?>
   <div class="wrap">
     <div class="page-hero__inner lost__inner">
       <p class="lost__code" data-ltr><?php echo nx_esc(nx_num('404')); ?></p>

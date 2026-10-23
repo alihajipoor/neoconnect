@@ -19,6 +19,7 @@ require NX_INC . '/partials/head.php';
 ?>
 
 <section class="page-hero page-hero--center">
+  <?php echo nx_world('page'); ?>
   <div class="wrap">
     <div class="page-hero__inner">
       <span class="eyebrow"><?php echo nx_e('home.faq.eyebrow'); ?></span>
