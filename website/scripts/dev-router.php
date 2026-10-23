@@ -28,6 +28,38 @@ if (!$root) {
 }
 $file = $root . $path;
 
+// gzip, as the live host does (it sends gzip and nothing better). Without
+// it a local Lighthouse run measures transfers production never makes.
+// PHP output: zlib.output_compression, set before anything is printed; it
+// holds for a script the built-in server runs after "return false" too.
+// Static text: served here, compressed, with the ETag and Last-Modified the
+// host sends and no Cache-Control, which the host does not send either.
+$gzip = isset($_SERVER['HTTP_ACCEPT_ENCODING']) && stripos($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip') !== false;
+if ($gzip && function_exists('gzencode')) {
+    ini_set('zlib.output_compression', '1');
+    $types = array('css' => 'text/css', 'js' => 'application/javascript', 'svg' => 'image/svg+xml',
+        'txt' => 'text/plain', 'xml' => 'application/xml', 'json' => 'application/json');
+    $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+    if (isset($types[$ext]) && is_file($file)) {
+        ini_set('zlib.output_compression', '0');
+        $mtime = filemtime($file);
+        $etag = '"' . dechex($mtime) . '-' . dechex(filesize($file)) . '"';
+        header('Content-Type: ' . $types[$ext] . ($ext === 'svg' ? '' : '; charset=utf-8'));
+        header('ETag: ' . $etag);
+        header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $mtime) . ' GMT');
+        header('Vary: Accept-Encoding');
+        if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && trim($_SERVER['HTTP_IF_NONE_MATCH']) === $etag) {
+            http_response_code(304);
+            return true;
+        }
+        $body = gzencode(file_get_contents($file), 6);
+        header('Content-Encoding: gzip');
+        header('Content-Length: ' . strlen($body));
+        echo $body;
+        return true;
+    }
+}
+
 // try_files $uri $uri/ -- let the built-in server handle anything real.
 // index.html as well as index.php for /account/, the compiled customer
 // portal, which has no index.php.
