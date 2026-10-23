@@ -218,7 +218,7 @@ html[lang="fa"] .beat__title{font-weight:800;letter-spacing:0;line-height:1.45}
 .story__phone{position:relative;margin-top:-42%;margin-inline-start:52%;width:min(36%,232px);padding:7px;border-radius:34px;background:linear-gradient(150deg,#3a4050,#0c0f17 40%,#1b2030);
   box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.14),0 50px 90px -40px rgba(30,20,120,.6),0 24px 50px -30px rgba(0,0,0,.6)}
 .story__phone .story__screens{border-radius:28px;overflow:hidden}
-.story__caption{margin-top:18px;font-size:13px;color:var(--ink-2);text-align:center}
+.story__caption{justify-self:center;width:fit-content;margin:22px auto 0;padding:5px 12px;border-radius:999px;background:var(--glass-solid);font-size:13px;color:var(--ink-2);text-align:center}
 /* No scroll timelines: show the end of the story -- connected, verified. */
 .story__screens .shot--4{opacity:1}
 @supports ((animation-timeline:view()) and (timeline-scope:--a)){
