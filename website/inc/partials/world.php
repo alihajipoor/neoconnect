@@ -6,10 +6,10 @@
  *
  * WHAT IT SAYS, AND ALL IT SAYS. A light is a country with servers in it
  * (inc/content/locations.php -- never a server's own position or address;
- * the anchors are one city per country, for display). A ring is the relay
- * entry inside Iran. The solid lines join the lights west to east and the
- * dashed one joins the relay entry to its nearest light: they are drawing,
- * not routes, and nothing here claims a path a packet takes. No light
+ * the anchors are one city per country, for display). The lines join the
+ * lights west to east: they are drawing, not routes, and nothing here
+ * claims a path a packet takes. Entry points are never drawn: a public map
+ * of how traffic gets in helps a censor (owner, 2026-10-23). No light
  * ever blinks on/off as if something were measured -- a website has no
  * evidence about the visitor's network to light anything with.
  *
@@ -26,7 +26,7 @@ function nx_world_anchors()
 {
     return array(
         'fi' => array(55.53, 11.42), 'fr' => array(50.57, 19.63), 'de' => array(52.09, 18.69),
-        'tr' => array(57.38, 25.54), 'sg' => array(78.83, 55.93), 'ir' => array(63.42, 29.6),
+        'tr' => array(57.38, 25.54), 'sg' => array(78.83, 55.93),
         'gb' => array(49.97, 17.66), 'nl' => array(51.16, 17.03), 'us' => array(31.13, 25.76),
         'ae' => array(64.93, 37.64),
     );
@@ -64,11 +64,6 @@ function nx_world($variant = 'page')
             $exits[$c] = $anchors[$c];
         }
     }
-    $relay = nx_relay_location();
-    $relayCode = $relay ? strtolower($relay['code']) : '';
-    if (!isset($anchors[$relayCode])) {
-        $relayCode = '';
-    }
 
     $out = '';
     if ($variant !== 'plain' && count($exits) > 1) {
@@ -89,15 +84,6 @@ function nx_world($variant = 'page')
         foreach ($arcs as $d) {
             $svg .= '<path class="line" stroke="url(#' . $gid . ')" d="' . $d . '"/>';
         }
-        if ($relayCode !== '') {
-            // The relay entry to whichever light is nearest it.
-            $best = null; $bestD = INF;
-            foreach ($exits as $p) {
-                $dd = pow($p[0] - $anchors[$relayCode][0], 2) + pow($p[1] - $anchors[$relayCode][1], 2);
-                if ($dd < $bestD) { $bestD = $dd; $best = $p; }
-            }
-            $svg .= '<path class="relay" d="' . nx_world_arc($anchors[$relayCode], $best) . '"/>';
-        }
         $svg .= '<g>';
         foreach ($arcs as $d) {
             $svg .= '<path class="glint" d="' . $d . '"/>';
@@ -107,9 +93,6 @@ function nx_world($variant = 'page')
 
     foreach (array_keys($exits) as $c) {
         $out .= '<span class="lamp lamp--' . nx_esc($c) . '"></span>';
-    }
-    if ($relayCode !== '') {
-        $out .= '<span class="lamp lamp--entry lamp--' . nx_esc($relayCode) . '"></span>';
     }
 
     $map = '<div class="map" aria-hidden="true">' . $out . '</div>';

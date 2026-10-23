@@ -4,7 +4,7 @@
  *
  *   node website/scripts/make-og-image.mjs [--chrome <path to chrome>]
  *
- * Writes assets/img/og-en-v4.jpg and og-fa-v4.jpg (1200x630, the size
+ * Writes assets/img/og-en-v5.jpg and og-fa-v5.jpg (1200x630, the size
  * Telegram, WhatsApp, Facebook, LinkedIn and X all crop from).
  *
  * JPEG at quality 85, not PNG. The truecolor PNGs (v2) were 260-300 KB,
@@ -25,8 +25,11 @@
  * scrapers cache images by exact URL more or less forever.
  *
  * What the card says is true and checkable: the name, the app's tagline,
- * the connection method families, the platforms that exist, the domain.
- * No count, no speed, no claim that can go stale.
+ * what the app does for you, the platforms that exist, the domain.
+ * No count, no speed, no claim that can go stale. No protocol, port or
+ * transport, and no entry-point light on the map (owner, 2026-10-23): a
+ * list of how the app connects is a checklist for a censor. v5 is the
+ * first card without them.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -57,6 +60,7 @@ const COPY = {
     l1: 'Your internet.', l2: 'Without limits.',
     status: 'Connected',
     platforms: 'Windows · Android',
+    benefit: 'Finds the way that works on your network',
   },
   fa: {
     dir: 'rtl', font: '"Vazirmatn"', body: '"Vazirmatn"',
@@ -64,9 +68,9 @@ const COPY = {
     l1: 'اینترنت شما.', l2: 'بدون محدودیت.',
     status: 'متصل',
     platforms: 'ویندوز · اندروید',
+    benefit: 'خودش راهی را که روی شبکه شما کار می‌کند پیدا می‌کند',
   },
 };
-const METHODS = 'VLESS + REALITY · WireGuard · Shadowsocks · Trojan · OpenVPN · IKEv2';
 
 function html(c) {
   return `<!doctype html><html lang="${c === COPY.fa ? 'fa' : 'en'}" dir="${c.dir}"><head><meta charset="utf-8"><style>
@@ -80,7 +84,6 @@ body{width:1200px;height:630px;overflow:hidden;font-family:${c.body};color:#090B
 .map::before{content:"";position:absolute;inset:0;background:#BFCADC;-webkit-mask:url(${asset('map/world-map.svg')}) 0 0/100% 100% no-repeat}
 .lamp{position:absolute;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:#1A7FD4;box-shadow:0 0 0 3px #fff,0 0 18px 5px rgba(26,127,212,.34)}
 .here{width:22px;height:22px;margin:-11px 0 0 -11px;background:#1045FF;box-shadow:0 0 0 4px #fff,0 0 0 14px rgba(16,69,255,.25),0 0 34px 10px rgba(16,69,255,.3)}
-.entry{background:#fff;box-shadow:inset 0 0 0 3px #7A89A3,0 0 0 3px #fff}
 .wrap{position:absolute;inset:0;padding:64px 72px;display:flex;flex-direction:column;gap:22px}
 .brand{display:flex;align-items:center;gap:14px;direction:ltr;align-self:flex-start}
 html[dir=rtl] .map{left:-560px}
@@ -99,7 +102,7 @@ h1 span{display:block}
 <div class="map">
   <span class="lamp" style="left:55.53%;top:11.42%"></span><span class="lamp" style="left:50.57%;top:19.63%"></span>
   <span class="lamp here" style="left:52.09%;top:18.69%"></span><span class="lamp" style="left:57.38%;top:25.54%"></span>
-  <span class="lamp" style="left:78.83%;top:55.93%"></span><span class="lamp entry" style="left:63.42%;top:29.6%"></span>
+  <span class="lamp" style="left:78.83%;top:55.93%"></span>
 </div>
 <div class="wrap">
   <div class="brand">
@@ -109,7 +112,7 @@ h1 span{display:block}
   <p class="kicker">${c.kicker}</p>
   <h1><span>${c.l1}</span><span>${c.l2}</span></h1>
   <div class="chips">
-    <span class="chip" dir="ltr">${METHODS}</span>
+    <span class="chip">${c.benefit}</span>
   </div>
   <div class="chips" style="margin-top:0">
     <span class="chip"><b>${c.platforms}</b></span>
@@ -129,7 +132,7 @@ try {
     fs.writeFileSync(tmp, html(c));
     await page.goto(pathToFileURL(tmp).href, { waitUntil: 'networkidle0' });
     await page.evaluate(() => document.fonts.ready);
-    const out = path.join(site, 'assets', 'img', `og-${lang}-v4.jpg`);
+    const out = path.join(site, 'assets', 'img', `og-${lang}-v5.jpg`);
     await page.screenshot({ path: out, type: 'jpeg', quality: 85 });
     fs.unlinkSync(tmp);
     console.log(out, fs.statSync(out).size, 'bytes');

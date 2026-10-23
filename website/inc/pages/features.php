@@ -2,14 +2,10 @@
 /**
  * Features page, shared by /features/ and /fa/features/.
  *
- * The product's most distinctive thing -- several connection methods,
- * named -- gets a page of its own, with a title, a canonical and something
- * for a search engine to rank against "wireguard vpn" or "shadowsocks" and
- * their Persian equivalents.
- *
- * Everything here is driven by inc/content/protocols.php and
- * inc/content/locations.php, so the page cannot claim a protocol or a
- * country the data files do not list.
+ * No protocol, port, transport, route or entry point is named here -- see
+ * the note at the top of inc/pages/home.php. The locations are driven by
+ * inc/content/locations.php, so the page cannot claim a country the data
+ * file does not list.
  */
 
 defined('NX') || exit;
@@ -35,13 +31,6 @@ require NX_INC . '/partials/head.php';
     <div class="section-head">
       <h2 class="h2" id="h-protocols"><?php echo nx_e('features.protocols.title'); ?></h2>
       <p class="lede"><?php echo nx_e('features.protocols.body'); ?></p>
-    </div>
-
-    <?php require NX_INC . '/partials/protocol-table.php'; ?>
-
-    <div class="callout callout--info u-mt-md">
-      <?php echo nx_icon('info'); ?>
-      <p><?php echo nx_e('features.protocols.note'); ?></p>
     </div>
   </div>
 </section>
@@ -111,24 +100,16 @@ require NX_INC . '/partials/head.php';
   </div>
 </section>
 
-<!-- ============================ Relay =========================== -->
-<section class="section" aria-labelledby="h-relay">
+<!-- ===================== The hardest networks ===================
+     The plan difference, by what it is for. Never how it works, and no
+     diagram: a drawing of the route is a map for a censor. -->
+<section class="section" aria-labelledby="h-hardnet">
   <div class="wrap">
-    <div class="split">
-      <div class="split__body reveal">
-        <h2 class="h2" id="h-relay"><?php echo nx_e('features.relay.title'); ?></h2>
-        <p class="body"><?php echo nx_e('features.relay.body'); ?></p>
-        <p><a class="link" href="<?php echo nx_esc(nx_url('pricing')); ?>"><?php echo nx_e('features.relay.link'); ?><?php echo nx_icon('arrow-right'); ?></a></p>
-      </div>
-
-      <div class="flow reveal" role="img" aria-label="<?php echo nx_e('features.relay.diagram_alt'); ?>">
-        <div class="flow__node" aria-hidden="true"><span class="ico"><?php echo nx_icon('smartphone'); ?></span><span><?php echo nx_e('features.relay.you'); ?></span></div>
-        <div class="flow__link" aria-hidden="true"><span class="flow__line"></span><span class="flow__tag"><?php echo nx_icon('lock'); ?><?php echo nx_e('home.security.diagram.tunnel'); ?></span></div>
-        <div class="flow__node" aria-hidden="true"><span class="ico"><?php echo nx_icon('route'); ?></span><span><?php echo nx_e('features.relay.entry'); ?></span></div>
-        <div class="flow__link" aria-hidden="true"><span class="flow__line"></span></div>
-        <div class="flow__node flow__node--ok" aria-hidden="true"><span class="ico"><?php echo nx_icon('server'); ?></span><span><?php echo nx_e('features.relay.exit'); ?></span></div>
-      </div>
+    <div class="section-head reveal">
+      <h2 class="h2" id="h-hardnet"><?php echo nx_e('features.relay.title'); ?></h2>
+      <p class="lede"><?php echo nx_e('features.relay.body'); ?></p>
     </div>
+    <p><a class="link" href="<?php echo nx_esc(nx_url('pricing')); ?>"><?php echo nx_e('features.relay.link'); ?><?php echo nx_icon('arrow-right'); ?></a></p>
   </div>
 </section>
 

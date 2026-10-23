@@ -434,7 +434,7 @@ html[lang="fa"] .site-footer__title{font-size:13px;letter-spacing:0;text-transfo
    One static SVG of 4,542 dots (Natural Earth via world-atlas), used as a
    CSS mask so it takes the theme's dot colour and costs one cached
    request across the whole site. On it: a light on each country with
-   servers, a ring for the relay entry, and light lines joining the
+   servers, and light lines joining the
    lights (inc/partials/world.php). Decorative everywhere it appears.   */
 .map{position:relative;aspect-ratio:200/82;direction:ltr}
 .map::before{content:"";position:absolute;inset:0;background:var(--map-dot);
@@ -443,21 +443,19 @@ html[lang="fa"] .site-footer__title{font-size:13px;letter-spacing:0;text-transfo
    are physical left/top on purpose -- the map never mirrors. The same
    numbers are in inc/partials/world.php, which draws the lines. */
 .lamp{position:absolute;width:10px;height:10px;margin:-5px 0 0 -5px;border-radius:50%;background:var(--lamp);box-shadow:0 0 0 2px var(--lamp-rim),0 0 16px 4px var(--lamp-glow)}
-.lamp--entry{background:var(--lamp-rim);box-shadow:inset 0 0 0 2px var(--lamp-idle),0 0 0 2px var(--lamp-rim)}
 .lamp--here{width:14px;height:14px;margin:-7px 0 0 -7px;background:var(--ok);box-shadow:0 0 0 3px var(--lamp-rim),0 0 0 10px var(--halo-ok),0 0 26px 8px var(--halo-ok)}
 .lamp--fi{left:55.53%;top:11.42%}.lamp--fr{left:50.57%;top:19.63%}.lamp--de{left:52.09%;top:18.69%}
-.lamp--tr{left:57.38%;top:25.54%}.lamp--sg{left:78.83%;top:55.93%}.lamp--ir{left:63.42%;top:29.6%}
+.lamp--tr{left:57.38%;top:25.54%}.lamp--sg{left:78.83%;top:55.93%}
 .lamp--gb{left:49.97%;top:17.66%}.lamp--nl{left:51.16%;top:17.03%}.lamp--us{left:31.13%;top:25.76%}.lamp--ae{left:64.93%;top:37.64%}
 /* A slow ring rises from each light, staggered. */
-.lamp:not(.lamp--entry)::after{content:"";position:absolute;inset:-7px;border-radius:50%;box-shadow:0 0 0 1.5px var(--lamp);opacity:0}
+.lamp::after{content:"";position:absolute;inset:-7px;border-radius:50%;box-shadow:0 0 0 1.5px var(--lamp);opacity:0}
 .links{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
 .links path{fill:none;vector-effect:non-scaling-stroke;stroke-linecap:round}
 .links .halo{stroke:var(--link-halo);stroke-width:7}
 .links .line{stroke-width:1.6}
 .links .glint{stroke:var(--link-glint);stroke-width:2.2;opacity:0}
-.links .relay{stroke:var(--lamp-idle);stroke-width:1.3;stroke-dasharray:3 5}
 @media (prefers-reduced-motion:no-preference){
-  .lamp:not(.lamp--entry)::after{animation:ping 4.8s var(--ease) infinite}
+  .lamp::after{animation:ping 4.8s var(--ease) infinite}
   .lamp:nth-child(2n)::after{animation-delay:1.2s}.lamp:nth-child(3n)::after{animation-delay:2.4s}.lamp:nth-child(5n)::after{animation-delay:3.6s}
   .links .glint{animation:glint 7s ease-in-out infinite}
   .links .glint:nth-of-type(2n){animation-delay:1.75s}.links .glint:nth-of-type(3n){animation-delay:3.5s}.links .glint:nth-of-type(4n){animation-delay:5.25s}

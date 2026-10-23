@@ -9,8 +9,7 @@
  *   hero        what it is -- the glass logo and the app's own tagline, over
  *               the aurora and the dotted world with its light lines
  *   app         the real app, in a phone (a real screenshot, captioned)
- *   simulator   the one genuinely distinctive thing, made playable
- *   methods     each connection method, what it is, when to pick it
+ *   methods     how it stays connected, described by what it does for you
  *   exits       where your traffic comes out (the map and the list)
  *   no-config   why this is not the config link you usually buy
  *   security    what "encrypted" honestly means, and where it stops
@@ -25,32 +24,26 @@
  *
  * No counted stat strip ("8 ways to connect / 5 countries"): the fleet
  * changes and a number baked into the home page goes wrong unnoticed. No
- * no-logs claim (the shipped Xray config writes an access log), no kill
+ * no-logs claim (the shipped server config writes an access log), no kill
  * switch, no uptime figure, no user count, no refund guarantee, no signed
  * installer, and no speed or latency number anywhere. The illustration's
  * timer is labelled as an example beneath it.
+ *
+ * NO PROTOCOL, PORT, TRANSPORT, ROUTE OR ENTRY POINT IS NAMED OR DRAWN
+ * ON THIS SITE, at the owner's instruction (2026-10-23). A public list of
+ * how the app connects is a checklist for whoever is trying to block it.
+ * Describe what the connection does for the customer, never how.
  * ---------------------------------------------------------------------------
  */
 
 defined('NX') || exit;
 
 $nx_has_windows = nx_windows_available();
-$nx_protocols = nx_protocols();
 $nx_locations = nx_locations();
-$nx_relay = nx_relay_location();
 
-// Floating beside the phone: methods the ANDROID app carries (the phone is
-// the Android app), read from the content file so it can never name one the
-// product -- or that platform -- does not have.
-// Four, spread across the list so they are not all one family.
-$nx_android = array_values(array_filter($nx_protocols, function ($p) {
-    return !empty($p['android']);
-}));
-$nx_float = array();
-$nx_fn = count($nx_android);
-for ($nx_i = 0; $nx_i < min(4, $nx_fn); $nx_i++) {
-    $nx_float[] = $nx_android[$nx_fn <= 4 ? $nx_i : (int) round($nx_i * ($nx_fn - 1) / 3)];
-}
+// Floating beside the phone: what the app does for you, in a few words.
+// Benefits only -- never a method's name.
+$nx_float = array(1, 2, 3, 4);
 
 /* The app screenshots: real Android screens (Play listing, 1080 x 1920),
    resized to three widths. One per theme; CSS shows the matching one and a
@@ -152,11 +145,11 @@ require NX_INC . '/partials/head.php';
                  alt="<?php echo nx_e($nx_v === 'dark' ? 'home.app.alt_dark' : 'home.app.alt'); ?>">
           <?php endforeach; ?>
         </div>
-        <?php foreach ($nx_float as $nx_i => $nx_p): ?>
-          <span class="floater floater--<?php echo $nx_i + 1; ?>" aria-hidden="true">
+        <?php foreach ($nx_float as $nx_n): ?>
+          <span class="floater floater--<?php echo $nx_n; ?>" aria-hidden="true">
             <span class="floater__dot"></span>
-            <b><?php echo nx_e_pick($nx_p['label']); ?></b>
-            <i data-ltr><?php echo nx_esc($nx_p['tech']); ?></i>
+            <b><?php echo nx_e('home.app.float.' . $nx_n . '.title'); ?></b>
+            <i><?php echo nx_e('home.app.float.' . $nx_n . '.sub'); ?></i>
           </span>
         <?php endforeach; ?>
       </div>
@@ -165,25 +158,9 @@ require NX_INC . '/partials/head.php';
   </div>
 </section>
 
-<!-- ========================= Simulator ==========================
-     An illustration of how the client picks a transport. It probes
-     nothing and measures nothing, and the note underneath says so. -->
-<section class="section section--alt" id="methods" aria-labelledby="h-methods">
-  <div class="wrap">
-    <div class="section-head reveal">
-      <span class="eyebrow"><?php echo nx_e('home.inst.eyebrow'); ?></span>
-      <h2 class="h2" id="h-methods"><?php echo nx_e('home.inst.title'); ?></h2>
-      <p class="lede"><?php echo nx_e('home.inst.body'); ?></p>
-    </div>
-
-    <?php require NX_INC . '/partials/instrument.php'; ?>
-
-    <p class="inst-note"><?php echo nx_e('home.inst.note'); ?></p>
-  </div>
-</section>
-
-<!-- ========================== Methods =========================== -->
-<?php if ($nx_protocols): ?>
+<!-- ======================= Ways to connect ======================
+     Described by what it does for the customer, never by name, port or
+     transport -- see the note at the top of this file. -->
 <section class="section" id="protocols" aria-labelledby="h-protocols">
   <div class="wrap">
     <div class="section-head reveal">
@@ -192,56 +169,23 @@ require NX_INC . '/partials/head.php';
       <p class="lede"><?php echo nx_e('home.protocols.body'); ?></p>
     </div>
 
-    <ul class="specimens u-list-reset">
-      <?php $nx_n = 0; foreach ($nx_protocols as $nx_p): $nx_n++;
-        $nx_blocked = isset($nx_p['blocked_by']) ? $nx_p['blocked_by'] : array();
-        /* The verdict is DERIVED from how many kinds of filtering stop the
-           method -- never typed, and never a success rate. */
-        $nx_c = count($nx_blocked);
-        if ($nx_c === 0) {
-            $nx_tag = 'ok';   $nx_tag_key = 'home.protocols.tag.resists';
-        } elseif ($nx_c <= 2) {
-            $nx_tag = 'hl';   $nx_tag_key = 'home.protocols.tag.conditional';
-        } else {
-            $nx_tag = 'warn'; $nx_tag_key = 'home.protocols.tag.fragile';
-        }
-      ?>
-        <li class="spec card reveal">
-          <div class="spec__top">
-            <span class="spec__no grad" data-ltr><?php echo nx_num(sprintf('%02d', $nx_n)); ?></span>
-            <span class="tag tag--<?php echo $nx_tag; ?>"><span class="d" aria-hidden="true"></span><?php echo nx_e($nx_tag_key); ?></span>
-          </div>
-          <span class="spec__wave" aria-hidden="true">
-            <svg viewBox="0 0 200 36" preserveAspectRatio="none" focusable="false">
-              <path d="<?php echo nx_esc(nx_signal_path($nx_n * 613 + 41, 200, 36, $nx_p['kind'])); ?>"
-                    fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
-            </svg>
-          </span>
-          <h3><?php echo nx_e_pick($nx_p['label']); ?></h3>
-          <span class="spec__tech"><span data-ltr><?php echo nx_esc($nx_p['tech']); ?> &middot; <?php echo nx_esc($nx_p['transport']); ?></span></span>
-          <p class="spec__hint"><?php echo nx_e_pick($nx_p['hint']); ?></p>
-          <?php /* Per-platform availability, stated plainly. OpenVPN is not in
-                   the Android client, and a phone user must not expect it. */ ?>
-          <div class="spec__avail">
-            <?php foreach (array('windows', 'android') as $nx_os):
-              $nx_ok = !empty($nx_p[$nx_os]); ?>
-              <span class="tag<?php echo $nx_ok ? ' tag--ok' : ''; ?>">
-                <?php echo $nx_ok ? nx_icon('check') : nx_icon('minus'); ?>
-                <?php echo nx_e('common.' . $nx_os); ?>
-                <span class="sr-only"><?php echo $nx_ok ? nx_e('common.yes') : nx_e('common.no'); ?></span>
-              </span>
-            <?php endforeach; ?>
-          </div>
-        </li>
+    <div class="grid grid--3">
+      <?php
+      $nx_glyphs = array('layers', 'shuffle', 'shield-check');
+      foreach (array('point1', 'point2', 'point3') as $nx_i => $nx_key): ?>
+        <article class="card feature reveal">
+          <span class="ico"><?php echo nx_icon($nx_glyphs[$nx_i]); ?></span>
+          <h3><?php echo nx_e('home.protocols.' . $nx_key . '.title'); ?></h3>
+          <p><?php echo nx_e('home.protocols.' . $nx_key . '.body'); ?></p>
+        </article>
       <?php endforeach; ?>
-    </ul>
+    </div>
 
     <p class="u-mt-lg">
       <a class="link" href="<?php echo nx_esc(nx_url('features')); ?>#protocols"><?php echo nx_e('home.protocols.link'); ?><?php echo nx_icon('arrow-right'); ?></a>
     </p>
   </div>
 </section>
-<?php endif; ?>
 
 <!-- ============================ Exits =========================== -->
 <?php if ($nx_locations): ?>
@@ -261,20 +205,11 @@ require NX_INC . '/partials/head.php';
         <?php echo nx_world('plain'); ?>
         <p class="legend">
           <span><i aria-hidden="true"></i><?php echo nx_e('home.locations.legend_exit'); ?></span>
-          <?php if ($nx_relay): ?>
-            <span><i class="entry" aria-hidden="true"></i><?php echo nx_e('home.locations.legend_entry'); ?></span>
-          <?php endif; ?>
         </p>
       </div>
 
       <div class="exits__list reveal">
         <?php require NX_INC . '/partials/locations-grid.php'; ?>
-        <?php if ($nx_relay): ?>
-          <div class="callout callout--info u-mt-sm">
-            <?php echo nx_icon('route'); ?>
-            <p><?php echo nx_e('home.locations.relay_note'); ?></p>
-          </div>
-        <?php endif; ?>
       </div>
     </div>
   </div>

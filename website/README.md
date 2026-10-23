@@ -62,11 +62,11 @@ Honesty notes that come with it:
 - The phone is a **real screenshot**, captioned as one: the account, the
   usage and the address on it are a demo account's (the address is a
   documentation range), and the caption says they are examples. The method
-  tags floating round it are read from `inc/content/protocols.php` and
-  limited to methods the **Android** app has, because the phone is Android.
-- The map lights say only "there are servers in this country" and "the
-  relay enters here". The light lines join the lights west to east and the
-  relay ring to its nearest light: they are drawing, not routes. Nothing
+  label under the country and the idle light the app draws at the relay
+  entry were painted out of it (2026-10-23, see the conventions below). The
+  tags floating round it say what the app does for you, never how.
+- The map lights say only "there are servers in this country". The light
+  lines join the lights west to east: they are drawing, not routes. Nothing
   blinks as if it were measured: on a website there is no evidence about the
   visitor's network to light anything with.
 
@@ -415,11 +415,11 @@ inc/bootstrap.php                                 config, locale, helpers
 inc/config.php                                    the file you edit
 inc/lang/{en,fa}.php                              every string on the site
 inc/content/plans.php                             prices — must match the panel
-inc/content/{faq,locations,protocols}.php         the rest of the data-shaped copy
+inc/content/{faq,locations}.php                   the rest of the data-shaped copy
 inc/pages/                                        page templates, shared by locale
 inc/partials/                                     head, header, footer, form fields,
-                                                  locations-grid, protocol-table, schema,
-                                                  plan-cards, instrument, cta-band, world
+                                                  locations-grid, schema,
+                                                  plan-cards, cta-band, world
 inc/{form,security}.php                           validate → store → mail
 inc/headers.php                                   security headers and the CSP
 assets/css/{base,blocks,home,forms}.css           inlined per page by head.php
@@ -474,20 +474,21 @@ in a Persian sentence as "GB 30".
 
 ## Conventions worth keeping
 
-- **Name the protocols — this reversed in 2026-08.** The site used to refuse
-  to say which engines were behind it, and described everything as "several
-  ways to connect". A word-boundary grep of the whole live site for
-  `wireguard|openvpn|ikev2|vless|shadowsocks|trojan|reality` returned zero
-  hits, and so did one for every country name. Those are the terms a
-  technical buyer filters on and the ones they search for, and refusing to
-  print them cost the site that entire audience while protecting nothing the
-  public repo does not already reveal. `inc/content/protocols.php` now carries
-  all eight with their customer-facing labels, and `locations.php` the six
-  locations. **VMess is not one of them** — it is in the backend enum but the
-  installer does not build it and no node runs it, so it must never appear.
+- **Name no protocol, port, transport, route or server — the owner's
+  instruction, 2026-10-23.** The 2026-08 rebuild listed every engine with its
+  port and showed which kind of blocking stops which one, plus the Iran
+  relay. That was reversed: a public list of how the app connects is a
+  checklist for a censor. Describe the benefit ("several ways to connect,
+  including ones made to look like ordinary web traffic; the app finds the
+  one that works and moves when one stops"), never the mechanism. Server
+  countries may be named and lit; entry points may not, in words or on the
+  map. Plans differ by benefit, not by route. Before a deploy, render every
+  page in both locales and grep the HTML, CSS, JS, the social cards and the
+  app screenshots for engine names, port numbers, TCP/UDP and relay wording,
+  in Latin and in Persian.
   The footer still has no "source on GitHub" link; that part stands.
 - **Every claim has to be traceable to something that exists.** No no-logs
-  policy (the shipped Xray config writes an access log), no kill switch, no
+  policy (the shipped server config writes an access log), no kill switch, no
   auto-connect, no refund guarantee, no company name or jurisdiction, no
   server count, no uptime figure, no signed installer, and no promise about
   iOS. The download page says an app that does not exist is not "coming

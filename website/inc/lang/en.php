@@ -62,7 +62,7 @@ return array(
     // the product can least substantiate. This one leads with what it
     // actually is and what it actually carries.
     'meta.home.title' => 'Neoxify — a VPN that keeps working on filtered networks',
-    'meta.home.description' => 'WireGuard, OpenVPN, Shadowsocks, VLESS REALITY and more, in one app. Servers across Europe and Asia, an Iran relay path, and nothing to import.',
+    'meta.home.description' => 'Several ways to connect in one app, including ones made to look like ordinary web traffic. Servers across Europe and Asia, and nothing to import.',
 
     'meta.download.title' => 'Download Neoxify VPN for Windows and Android',
     'meta.download.description' => 'Get the Neoxify app for Windows or Android. Direct download, always the current release. No macOS or iOS app yet.',
@@ -223,7 +223,6 @@ return array(
     'home.assure.noconfig' => 'No config files',
     'home.assure.switch' => 'Switch location anytime',
 
-    'home.mockup.alt' => 'Illustration: the Neoxify app connected to Germany over Stealth, in front of a dotted world map with a light on every country that has Neoxify servers.',
     'home.mockup.windows' => 'Windows',
     'home.mockup.mobile' => 'Mobile',
     'home.mockup.macos' => 'macOS',
@@ -283,9 +282,8 @@ return array(
     // "every connection option" nor "every server location", it is one
     // premium path. Saying so is also the sell, since that path is what
     // the higher price buys.
-    'home.pricing.relay_only' => 'Relay routes only — not the standard servers',
-    'home.pricing.relay_premium' => 'Premium two-hop path through our Iran relay',
-    'home.pricing.relay_gaming' => 'Built for low latency on filtered networks',
+    'home.pricing.relay_only' => 'Separate routes only — not the standard servers',
+    'home.pricing.relay_premium' => 'Made for when a direct connection abroad will not hold',
     'home.pricing.trial' => 'New accounts start with a :days-day free trial — no card required.',
     'home.pricing.note' => 'Prices are in US dollars.',
 
@@ -505,7 +503,7 @@ return array(
     // -----------------------------------------------------------------
 
     'schema.org.description' => 'Neoxify is a commercial VPN service with multiple connection methods, built for people on heavily filtered networks.',
-    'schema.product.description' => 'A VPN subscription with multiple connection methods, servers across Europe and Asia plus an Iran relay path, and apps for Windows and Android.',
+    'schema.product.description' => 'A VPN subscription with multiple connection methods, servers across Europe and Asia, and apps for Windows and Android.',
     'schema.app.windows.name' => 'Neoxify for Windows',
     'schema.app.android.name' => 'Neoxify for Android',
     'schema.app.trial' => 'Free trial for new accounts, no payment method required.',
@@ -582,8 +580,14 @@ return array(
 
     'home.protocols.eyebrow' => 'Connection methods',
     'home.protocols.title' => 'Several ways in, because one is never enough',
-    'home.protocols.body' => 'A filtered network does not block "VPNs" — it blocks specific, recognisable patterns, one at a time, and what worked last week can be gone today. So the app carries several different methods and moves between them. When one stops getting through, you pick another and carry on.',
-    'home.protocols.link' => 'See every connection method',
+    'home.protocols.body' => 'A filtered network does not block "VPNs" as such — it blocks patterns it recognises, one at a time, and what worked last week can be gone today. So the app carries several different ways to connect, including ones made to look like ordinary web traffic.',
+    'home.protocols.point1.title' => 'More than one way in',
+    'home.protocols.point1.body' => 'Each way to connect fails in different circumstances, which is the whole point of carrying several.',
+    'home.protocols.point2.title' => 'It finds the one that works',
+    'home.protocols.point2.body' => 'The app works out by itself which one gets through on your network. There is nothing to configure.',
+    'home.protocols.point3.title' => 'It moves when one stops',
+    'home.protocols.point3.body' => 'If the one you are on stops getting through, the app moves you to another, and checks that traffic really flows before it says connected.',
+    'home.protocols.link' => 'How it stays connected',
 
     // -----------------------------------------------------------------
     // Home — locations teaser
@@ -592,7 +596,6 @@ return array(
     'home.locations.eyebrow' => 'Server locations',
     'home.locations.title' => 'Where your traffic comes out',
     'home.locations.body' => 'Pick a country in the app and change it whenever you like. Server addresses come from our backend rather than being built into the app, so they can be rotated without you reinstalling or importing anything.',
-    'home.locations.relay_note' => 'Plus a relay inside Iran — an entry point that hands your traffic on to a server abroad, for networks where a direct connection will not hold. It is a way in, not a place you come out.',
 
     // -----------------------------------------------------------------
     // Home — honest trust section
@@ -631,20 +634,15 @@ return array(
     // Features page
     // =================================================================
 
-    'meta.features.title' => 'Features — VPN protocols and split tunnelling | Neoxify',
-    'meta.features.description' => 'WireGuard, OpenVPN, Shadowsocks, VLESS REALITY and more, in one app. Per-app split tunnelling, servers across Europe and Asia, and an Iran relay path.',
+    'meta.features.title' => 'Features — staying connected and split tunnelling | Neoxify',
+    'meta.features.description' => 'Several ways to connect, and the app finds the one that works on your network by itself. Per-app split tunnelling and servers across Europe and Asia.',
 
     'features.title' => 'What is actually in it',
     'features.subtitle' => 'The features below are the ones that exist and work today. Where something only works on one platform, it says so.',
     'features.eyebrow' => 'Features',
 
-    'features.protocols.title' => 'Every connection method',
-    'features.protocols.body' => 'Each one is a different way of getting your traffic out, and they fail in different circumstances — which is the whole point of carrying more than one. The names in the app describe the trade-off; the technology behind each is listed beside it.',
-    'features.protocols.table.method' => 'Method',
-    'features.protocols.table.what' => 'When to use it',
-    'features.protocols.table.windows' => 'Windows',
-    'features.protocols.table.android' => 'Android',
-    'features.protocols.note' => 'OpenVPN is the one gap on Android: the client does not carry it. Every other method works on both. iOS and macOS apps do not exist yet, so neither carries any of them.',
+    'features.protocols.title' => 'Several ways to connect',
+    'features.protocols.body' => 'The app carries several different ways of getting your traffic out, including ones made to look like ordinary web traffic. They fail in different circumstances, which is the whole point of carrying more than one. The app finds the one that works on your network by itself, and moves to another if that one stops working.',
 
     'features.failover.title' => 'It switches when a route dies — and checks before saying so',
     'features.failover.body' => 'If the method you are on stops getting through, the app moves you to another one. What makes that trustworthy rather than cosmetic is the check underneath: it confirms traffic is actually reaching the internet through the new route before it reports success. An indicator that turns green without verifying anything is exactly the bug this was built to fix.',
@@ -653,8 +651,8 @@ return array(
     'features.split.body' => 'Custom mode routes the applications you pick through the tunnel and leaves everything else on your normal connection. Chosen per application, not per website — so a browser and a game can genuinely take different paths.',
     'features.split.platforms' => 'Windows and Android. Not available on iOS: Apple restricts per-app VPN to devices managed by an organisation, so no consumer app can offer it. Saying that plainly is better than shipping a switch that quietly does nothing.',
 
-    'features.relay.title' => 'A relay path for the hardest networks',
-    'features.relay.body' => 'Some networks will not hold a direct connection abroad at all. The relay route starts at a server inside Iran, which is reachable when foreign addresses are not, and hands your traffic on from there. Two hops instead of one: more reliable where it matters, and slower, because the traffic is travelling further.',
+    'features.relay.title' => 'A plan for the hardest networks',
+    'features.relay.body' => 'Some networks will not hold a direct connection abroad at all. One plan carries separate routes made for exactly that.',
 
     'features.locations.title' => 'Choose where you come out',
     'features.locations.body' => 'Change country from inside the app as often as you like.',
@@ -677,7 +675,7 @@ return array(
     // =================================================================
 
     'meta.pricing.title' => 'Plans and pricing — Neoxify VPN',
-    'meta.pricing.description' => 'Compare Neoxify plans: unlimited-data tiers, device limits, and the relay route built for heavily filtered networks. Pay by international card or crypto.',
+    'meta.pricing.description' => 'Compare Neoxify plans: unlimited-data tiers, device limits, and a plan built for the most heavily filtered networks. Pay by international card or crypto.',
 
     'pricing.title' => 'Plans',
     'pricing.subtitle' => 'Every plan includes all connection methods and every server location, unless the plan itself says otherwise. Buy inside the app or in your account area.',
@@ -691,10 +689,10 @@ return array(
     'pricing.compare.locations' => 'Locations',
     'pricing.compare.protocols' => 'Connection methods',
     'pricing.compare.support' => 'In-app support',
-    'pricing.compare.routes_standard' => 'Direct',
-    'pricing.compare.routes_relay' => 'Iran relay only',
+    'pricing.compare.routes_standard' => 'Standard',
+    'pricing.compare.routes_relay' => 'Separate routes only',
     'pricing.compare.locations_all' => 'All',
-    'pricing.compare.locations_relay' => 'Relay path',
+    'pricing.compare.locations_relay' => 'Selected',
     'pricing.compare.protocols_all' => 'All of them',
 
     // Trial, which is granted rather than sold. It exists in the plans
@@ -736,7 +734,6 @@ return array(
     // Features page — diagrams, examples and remaining labels
     // -----------------------------------------------------------------
 
-    'locations.relay_label' => 'Relay entry point',
 
     'features.failover.diagram_alt' => 'A blocked connection method, an automatic switch to another, a check that traffic is really flowing, and only then a connected state.',
     'features.failover.step_blocked' => 'Route stops getting through',
@@ -759,10 +756,6 @@ return array(
     'features.split.example.bank.body' => 'These reject foreign addresses, so a full tunnel breaks them. Leave them off the tunnel and they keep working while everything else goes through it.',
 
     'features.relay.link' => 'See the plan that includes it',
-    'features.relay.diagram_alt' => 'Your device connects to a relay inside Iran, which passes the traffic on to a server abroad.',
-    'features.relay.you' => 'Your device',
-    'features.relay.entry' => 'Relay inside Iran',
-    'features.relay.exit' => 'Server abroad',
 
     'features.more.title' => 'The rest of it',
 
@@ -798,57 +791,9 @@ return array(
 
     'rail.tagline' => 'A VPN for filtered networks',
     'home.hero.chip_noconfig' => 'No config files, no subscription links',
-    'home.hero.chip_locations' => 'Servers in Europe and Asia, plus a relay inside Iran',
+    'home.hero.chip_locations' => 'Servers in Europe and Asia',
     'home.mockup.disconnect' => 'Disconnect',
     'home.mockup.note' => 'Illustration of the app. The time shown is an example.',
-    'home.inst.eyebrow' => 'Network simulator',
-    'home.inst.title' => 'Close the network. Watch what the connection does.',
-    'home.inst.body' => 'These are the connection methods in the app, in the order it tries them on an open network. Beside them are things the filter in Iran actually does. Switch them on.',
-    'home.inst.note' => 'This panel is an illustration, not a live status board — it contacts nothing and measures nothing, and no timing or speed figure appears in it. What it does show is real: each condition takes out the methods it takes out in practice, because of how each one looks on the wire.',
-    'home.inst.conditions' => 'Network conditions',
-    'home.inst.random' => 'Simulate a bad night',
-    'home.inst.clear' => 'Open network',
-    'home.inst.handovers' => 'Handovers',
-    'home.inst.carrying' => 'Carrying you now',
-    'home.inst.flowing' => 'Traffic is moving',
-    'home.inst.flowing_relay' => 'Moving, via the relay',
-    'home.inst.no_route' => 'Nothing left',
-    'home.inst.log' => 'App log',
-    'home.inst.log_label' => 'Simulated app log',
-    'home.inst.log.lines' => ':n lines',
-    'home.inst.log.handover' => 'Handover :n — now on :p. Session held.',
-    'home.inst.log.lost' => ':p stopped answering:r.',
-    'home.inst.log.reason' => ' — :c',
-    'home.inst.log.none' => 'Nothing left. Every method is blocked.',
-    'home.inst.log.start' => 'Connected via :p — the first route on the list.',
-    'home.inst.log.open' => 'All conditions cleared.',
-    'home.inst.lane.carrying' => 'In use',
-    'home.inst.lane.standby' => 'Ready',
-    'home.inst.lane.ready' => 'Ready',
-    'home.inst.lane.blocked' => 'Blocked',
-    'home.inst.lane.via_relay' => 'via relay',
-    'home.inst.verdict.open' => 'Nothing is blocked. The app took the first route on its list. This is what an unfiltered network looks like, and it is not the network most of our customers are on.',
-    'home.inst.verdict.one' => 'One route left, and it is holding. :p is still carrying you while the rest are down. Your session never dropped.',
-    'home.inst.verdict.many' => 'Your session did not drop. You are connected via :p. Each time a route closed, the app took the next one without asking you anything.',
-    'home.inst.verdict.relay' => ' Foreign server addresses are unreachable directly, so what is left goes through the relay inside Iran.',
-    'home.inst.verdict.down' => 'This is a full shutdown, and nothing gets through one. When the border is closed there is no clever way around it. We are not going to claim we have a method that beats a cut cable; the honest answer is that you wait.',
-    'cond.dpi.label' => 'Protocol fingerprinting',
-    'cond.dpi.sub' => 'The filter recognises the handshake itself',
-    'cond.udp.label' => 'UDP blocked',
-    'cond.udp.sub' => 'Only TCP crosses the border',
-    'cond.sni.label' => 'Domain name blocklist',
-    'cond.sni.sub' => 'Our domains are on the list',
-    'cond.ja3.label' => 'TLS fingerprint',
-    'cond.ja3.sub' => 'The client hello is compared against known clients',
-    'cond.port.label' => 'Only ports 80 and 443',
-    'cond.port.sub' => 'Nothing else leaves the country',
-    'cond.dc.label' => 'Datacentre ranges blocked',
-    'cond.dc.sub' => 'Foreign server addresses unreachable directly',
-    'cond.off.label' => 'Full shutdown',
-    'cond.off.sub' => 'The border is closed',
-    'home.protocols.tag.resists' => 'Holds up under filtering',
-    'home.protocols.tag.conditional' => 'Depends on the filtering',
-    'home.protocols.tag.fragile' => 'First to go on a filtered network',
     'home.answers.eyebrow' => 'Straight answers',
     'home.answers.title' => 'Things we are not going to tell you.',
     'home.answers.body' => 'Everyone in this market repeats the same few sentences. Most of them we cannot say honestly, and one of them is something we have not done yet.',
@@ -857,13 +802,13 @@ return array(
     'home.answers.1.say' => 'The billing system records how much data you used — a number of bytes — and the servers themselves keep operational logs, as network software does. Those logs can include connection records. They exist so the service can be run and faults fixed, they are not used to build a profile of you, and they are not sold.',
     'home.answers.2.claim' => 'Undetectable',
     'home.answers.2.lead' => 'Nothing is undetectable.',
-    'home.answers.2.say' => 'Telling Stealth apart from an ordinary HTTPS session is genuinely hard, and we will defend that sentence. “Undetectable” is a different sentence, and it is the one that makes people relax when they should not.',
+    'home.answers.2.say' => 'Telling our connection apart from an ordinary visit to a website is genuinely hard, and we will defend that sentence. “Undetectable” is a different sentence, and it is the one that makes people relax when they should not.',
     'home.answers.3.claim' => 'Signed installer',
     'home.answers.3.lead' => 'The Windows installer is not signed yet.',
     'home.answers.3.say' => 'The first time you run it, Windows may show the blue “Windows protected your PC” screen. Click More info, then Run anyway. Buying a signing certificate is on our list; until it is done, this paragraph stays here.',
     'home.answers.4.claim' => 'Works everywhere',
-    'home.answers.4.lead' => 'WireGuard is often blocked in Iran, and OpenVPN does not always get through.',
-    'home.answers.4.say' => 'We keep both anyway, because the network changes week to week. What we will not do is quietly drop a method so the list looks tidier.',
+    'home.answers.4.lead' => 'Some ways to connect are often blocked in Iran, and none gets through everywhere.',
+    'home.answers.4.say' => 'We keep them all anyway, because the network changes week to week. What we will not do is quietly drop a method so the list looks tidier.',
     'home.answers.5.claim' => 'On iOS',
     'home.answers.5.lead' => 'There is no iOS app.',
     'home.answers.5.say' => 'Windows and Android are done. An app that does not exist is not “coming soon”, so we are not announcing a date. iOS also has no per-app tunnelling at all, so that feature will not arrive with it either.',
@@ -881,11 +826,7 @@ return array(
     'home.hero.kicker' => 'A VPN for networks that fight back',
     'home.hero.tagline_1' => 'Your internet.',
     'home.hero.tagline_2' => 'Without limits.',
-    'home.mockup.using' => 'Now using :method',
-    'home.mockup.method' => 'Method',
-    'home.mockup.transport' => 'Transport',
     'home.locations.legend_exit' => 'Server location',
-    'home.locations.legend_entry' => 'Relay entry, inside Iran',
     'home.security.diagram.alt' => 'Your device connects to our servers through an encrypted tunnel. From our servers on, your traffic travels the internet as ordinary traffic.',
 
     'delete.or' => 'or',
@@ -896,7 +837,15 @@ return array(
     'home.app.title' => 'Everything happens in one app',
     'home.app.body' => 'Sign up, choose a plan, pick where you come out and get help, all inside the app. Before it says Connected, it checks that your traffic really flows.',
     'home.app.caption' => 'The Android app, connected. A real screenshot; the account, usage and address on it are examples.',
-    'home.app.alt' => 'Screenshot of the Neoxify Android app, connected to Germany over Stealth Web, with a Disconnect button below a dotted world map.',
-    'home.app.alt_dark' => 'Screenshot of the Neoxify Android app in its dark theme, connected to Germany over Stealth Web, with a Disconnect button below a dotted world map.',
+    'home.app.alt' => 'Screenshot of the Neoxify Android app, connected to Germany, with a Disconnect button below a dotted world map.',
+    'home.app.alt_dark' => 'Screenshot of the Neoxify Android app in its dark theme, connected to Germany, with a Disconnect button below a dotted world map.',
     'home.app.link' => 'Everything the app does',
+    'home.app.float.1.title' => 'Finds a way in',
+    'home.app.float.1.sub' => 'on your network, by itself',
+    'home.app.float.2.title' => 'Switches by itself',
+    'home.app.float.2.sub' => 'when one way stops working',
+    'home.app.float.3.title' => 'Checks before Connected',
+    'home.app.float.3.sub' => 'that traffic really flows',
+    'home.app.float.4.title' => 'Nothing to paste',
+    'home.app.float.4.sub' => 'no config, no links',
 );
