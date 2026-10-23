@@ -35,7 +35,6 @@
     theme();
     announcement();
     forms();
-    routes();
     pointer();
     map();
   });
@@ -148,41 +147,6 @@
       });
     });
   }
-  /* ======================================================= route finder
-   * The illustration on the home and features pages. Its whole cycle is
-   * CSS (transform and opacity); this only runs it while it is on screen
-   * and restarts it from the "play again" button. Without this file, or
-   * with reduced motion, it holds its final frame: connected, checked. */
-  function routes() {
-    var figs = $$("[data-route]");
-    if (!figs.length) { return; }
-    function restart(fig) {
-      if (fig.getAnimations) {
-        fig.getAnimations({ subtree: true }).forEach(function (a) { a.cancel(); a.play(); });
-      }
-    }
-    figs.forEach(function (fig) {
-      var btn = $("[data-route-replay]", fig);
-      if (reduceMotion) {
-        if (btn) { btn.hidden = true; }
-        return;
-      }
-      if (btn) {
-        btn.addEventListener("click", function () {
-          if (!fig.classList.contains("is-run")) { fig.classList.add("is-run"); } else { restart(fig); }
-        });
-      }
-    });
-    if (reduceMotion || !("IntersectionObserver" in window)) { return; }
-    var io = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) {
-        // Starts from the beginning each time it comes back into view.
-        e.target.classList.toggle("is-run", e.isIntersecting);
-      });
-    }, { threshold: 0.35 });
-    figs.forEach(function (fig) { io.observe(fig); });
-  }
-
   /* ================================================== pointer niceties
    * For a fine pointer only, and never under reduced motion: a light that
    * follows the cursor over cards and plans, a slight tilt on the hero logo

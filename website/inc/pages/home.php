@@ -247,21 +247,7 @@ require NX_INC . '/partials/head.php';
       <p class="lede"><?php echo nx_e('home.security.body'); ?></p>
     </div>
 
-    <?php /* The protected leg STOPS at our servers, because that is where a
-             VPN's protection ends. Do not redraw this as one unbroken line
-             to the internet. */ ?>
     <div class="secure__body">
-    <figure class="reveal">
-      <div class="flow" role="img" aria-label="<?php echo nx_e('home.security.diagram.alt'); ?>">
-        <div class="flow__node" aria-hidden="true"><span class="ico"><?php echo nx_icon('monitor'); ?></span><span><?php echo nx_e('home.security.diagram.you'); ?></span></div>
-        <div class="flow__link" aria-hidden="true"><span class="flow__line"></span><span class="flow__tag"><?php echo nx_icon('lock'); ?><?php echo nx_e('home.security.diagram.tunnel'); ?></span></div>
-        <div class="flow__node flow__node--ok" aria-hidden="true"><span class="ico"><?php echo nx_icon('server'); ?></span><span><?php echo nx_e('home.security.diagram.server'); ?></span></div>
-        <div class="flow__link flow__link--plain" aria-hidden="true"><span class="flow__line"></span></div>
-        <div class="flow__node" aria-hidden="true"><span class="ico"><?php echo nx_icon('globe'); ?></span><span><?php echo nx_e('home.security.diagram.internet'); ?></span></div>
-      </div>
-      <figcaption class="flow__caption"><?php echo nx_e('home.security.diagram.caption'); ?></figcaption>
-    </figure>
-
     <ul class="ledger u-list-reset">
       <?php
       $nx_glyphs = array('shield-check', 'lock', 'file-off');

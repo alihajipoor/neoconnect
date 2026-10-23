@@ -44,13 +44,18 @@ require NX_INC . '/partials/head.php';
         <p class="body"><?php echo nx_e('features.failover.body'); ?></p>
       </div>
 
-      <?php /* The app's real behaviour, drawn abstractly: a way through
-               that is stopped, another that takes over, a check that traffic
-               really flows, and only then "Connected". No method, port or
-               route is named or drawn (owner, 2026-10-23). */ ?>
-      <div class="reveal">
-        <?php require NX_INC . '/partials/route-finder.php'; ?>
-      </div>
+      <?php /* The real Windows app, checking a connection before it says
+               Connected (rendered from its preview, sample account; no method
+               or route appears in the frame). */
+            $nx_win = nx_locale() === 'fa' ? 'fa' : 'en'; ?>
+      <figure class="appwin reveal">
+        <span class="appwin__bar" aria-hidden="true"><i></i><i></i><i></i></span>
+        <?php foreach (array('light', 'dark') as $nx_t): ?>
+          <img class="only-<?php echo $nx_t; ?>" src="<?php echo nx_esc(nx_asset('img/story/desk-' . $nx_win . '-' . $nx_t . '-checking.webp')); ?>"
+               width="944" height="608" loading="lazy" decoding="async" alt="<?php echo nx_e('features.failover.shot_alt'); ?>">
+        <?php endforeach; ?>
+        <figcaption class="appwin__note"><?php echo nx_e('features.failover.shot_note'); ?></figcaption>
+      </figure>
     </div>
   </div>
 </section>

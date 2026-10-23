@@ -207,13 +207,6 @@ return array(
     'home.security.point3.title' => 'Nothing to paste, nothing to leak',
     'home.security.point3.body' => 'There are no configuration files or subscription links to copy around, share by accident, or leave sitting in a chat. Your access lives in your account, inside the official app.',
 
-    'home.security.diagram.you' => 'Your device',
-    'home.security.diagram.network' => 'Your network',
-    'home.security.diagram.tunnel' => 'Encrypted',
-    'home.security.diagram.server' => 'Our servers',
-    'home.security.diagram.internet' => 'The internet',
-    'home.security.diagram.caption' => 'Simplified illustration. Your network can see that traffic is flowing, not what it contains.',
-
     // -----------------------------------------------------------------
     // Home — assurance strip and app mockup
     // -----------------------------------------------------------------
@@ -581,13 +574,6 @@ return array(
     'home.protocols.eyebrow' => 'Connection methods',
     'home.protocols.title' => 'Several ways in, because one is never enough',
     'home.protocols.body' => 'A filtered network does not block "VPNs" as such — it blocks patterns it recognises, one at a time, and what worked last week can be gone today. So the app carries several different ways to connect, including ones made to look like ordinary web traffic.',
-    'home.protocols.point1.title' => 'More than one way in',
-    'home.protocols.point1.body' => 'Each way to connect fails in different circumstances, which is the whole point of carrying several.',
-    'home.protocols.point2.title' => 'It finds the one that works',
-    'home.protocols.point2.body' => 'The app works out by itself which one gets through on your network. There is nothing to configure.',
-    'home.protocols.point3.title' => 'It moves when one stops',
-    'home.protocols.point3.body' => 'If the one you are on stops getting through, the app moves you to another, and checks that traffic really flows before it says connected.',
-    'home.protocols.link' => 'How it stays connected',
 
     // -----------------------------------------------------------------
     // Home — locations teaser
@@ -734,13 +720,6 @@ return array(
     // Features page — diagrams, examples and remaining labels
     // -----------------------------------------------------------------
 
-
-    'features.failover.diagram_alt' => 'A blocked connection method, an automatic switch to another, a check that traffic is really flowing, and only then a connected state.',
-    'features.failover.step_blocked' => 'Route stops getting through',
-    'features.failover.step_switch' => 'Switches method',
-    'features.failover.step_verify' => 'Checks traffic really flows',
-    'features.failover.step_connected' => 'Reports connected',
-
     // Categories rather than named applications: naming them would be an
     // endorsement, and every specific name dates.
     'features.split.example.browser.title' => 'Your browser, through the tunnel',
@@ -827,7 +806,6 @@ return array(
     'home.hero.tagline_1' => 'Your internet.',
     'home.hero.tagline_2' => 'Without limits.',
     'home.locations.legend_exit' => 'Server location',
-    'home.security.diagram.alt' => 'Your device connects to our servers through an encrypted tunnel. From our servers on, your traffic travels the internet as ordinary traffic.',
 
     'delete.or' => 'or',
     'download.platforms_heading' => 'Choose your platform',
@@ -848,16 +826,6 @@ return array(
     'home.app.float.3.sub' => 'that traffic really flows',
     'home.app.float.4.title' => 'Nothing to paste',
     'home.app.float.4.sub' => 'no config, no links',
-    // The route finder (inc/partials/route-finder.php). Abstract by rule:
-    // never a method, port, transport, route, or a count of any of them.
-    'route.you' => 'You',
-    'route.internet' => 'The internet',
-    'route.state.finding' => 'Finding a way through…',
-    'route.state.blocked' => 'That way is stopped. Trying another…',
-    'route.state.checking' => 'Checking traffic really flows…',
-    'route.state.done' => 'Connected, checked',
-    'route.replay' => 'Play again',
-    'route.caption' => 'Illustration of what the app does by itself: when one way through is stopped it moves to another, and it says Connected only after checking that traffic really flows.',
     'home.quote' => 'A green light that means nothing is worse than a red one.',
     'home.quote.by' => 'Why the app checks before it says Connected',
     // The scroll story (inc/partials/story.php): the real app in four
@@ -875,4 +843,6 @@ return array(
     'story.4.title' => 'Only then: Connected.',
     'story.4.body' => 'The country you are connected through lights up on the map, and the address the app shows was read through the tunnel itself.',
     'story.caption' => 'Screens from the Windows and Android apps. The account, the usage and the address shown are examples.',
+    'features.failover.shot_alt' => 'The Neoxify Windows app checking a connection before it says Connected.',
+    'features.failover.shot_note' => 'The Windows app, checking. The account and the usage shown are examples.',
 );
