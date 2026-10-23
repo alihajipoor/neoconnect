@@ -84,6 +84,11 @@ export class NetworkIdentityService {
     return this.asn.orgOf(asn);
   }
 
+  /** Where an ASN is registered (ISO alpha-2), or null when unknown. */
+  countryOfAsn(asn: number): string | null {
+    return this.asn.countryOfAsn(asn);
+  }
+
   /** Whether `ip` is one of ours -- or might be.
    *
    * Fails closed: until the node list has been read successfully once,

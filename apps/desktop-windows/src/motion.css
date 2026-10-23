@@ -1,0 +1,692 @@
+/* Motion: how every control, view, list, overlay and message in the app
+   moves (design-system.md section 6; owner, 2026-10-20: "animation and
+   transition style for every thing and every page").
+
+   The rules, each pinned by lib/motion-css.test.ts:
+   - Every duration and curve is a token (theme.css): the springs for what
+     moves, `--dur-quick` for hover and focus, `--dur-exit` for what leaves,
+     `--dur-tint` and `--dur-glow` for colour. Reduced motion is decided
+     there, once.
+   - Only transform and opacity are animated or transitioned for movement
+     -- never a width, a height, a position or a margin. Colour cross-fades
+     (paint, never layout). Nothing re-lays out frame by frame, so nothing
+     shifts: a list that opens jumps once in layout and is drawn sliding
+     from where it was (lib/motion.ts).
+   - Nothing loops at rest. The loops -- spinners, the progress line, a
+     skeleton's sheen, the mark's sweep -- exist only while something is
+     under way; the location lights are the one exception (5.4).
+   - Motion never speaks for the tunnel. Nothing here moves or tints with
+     the connection state; the calm tone (pearl.css) is a colour held
+     through brief gaps, and the one bounce, the check on the first verified
+     connect, is Hero.tsx's.
+   - Reduced motion: every movement multiplies by `--move` (0), so what
+     moved fades, briefly; the loops stop; the press scale and the stagger
+     are gone. Colour and text changes stay.
+
+   The phone, the web portal and the desktop all load this file after
+   pearl.css and pages.css, in the same components layer. */
+
+@layer components {
+  /* ---------- press, hover and focus ---------- */
+
+  /* Every small control gives way under the finger on the press spring and
+     comes back on release; its colours follow the pointer quickly. The
+     connect pill and the other pill buttons (.nx-btn) do the same in
+     pearl.css, with their own light. */
+  :is(
+      .nx-ibtn,
+      .nx-eye,
+      .nx-avbtn,
+      .nx-search .clr,
+      .nx-chipbtn,
+      .nx-langsw button,
+      .nx-seg button,
+      .nx-mtabs button,
+      .nx-mnav button,
+      .nx-nav button,
+      .nx-tlink,
+      .nx-dtoggle,
+      .nx-back,
+      .nx-tlnk,
+      .nx-lnk,
+      .nx-profile,
+      .nx-soc,
+      .nx-sumline,
+      .nx-morecue,
+      .nx-tbar button
+    ) {
+    transition:
+      transform var(--dur-press) var(--spring-press),
+      background-color var(--dur-quick) var(--spring-quick),
+      color var(--dur-quick) var(--spring-quick),
+      box-shadow var(--dur-quick) var(--spring-quick),
+      opacity var(--dur-quick) var(--spring-quick);
+  }
+  :is(
+      .nx-chipbtn,
+      .nx-langsw button,
+      .nx-seg button,
+      .nx-mtabs button,
+      .nx-mnav button,
+      .nx-nav button,
+      .nx-tlink,
+      .nx-dtoggle,
+      .nx-back,
+      .nx-tlnk,
+      .nx-lnk,
+      .nx-profile,
+      .nx-soc,
+      .nx-sumline,
+      .nx-morecue
+    ):active:not(:disabled, [aria-disabled="true"]) {
+    transform: scale(0.965);
+    transition-duration: var(--dur-press-in);
+  }
+  :is(.nx-ibtn, .nx-eye, .nx-avbtn, .nx-search .clr):active:not(:disabled, [aria-disabled="true"]) {
+    transform: scale(0.9);
+    transition-duration: var(--dur-press-in);
+  }
+  /* A locked segmented control, a switch someone may not change: still. */
+  .nx-seg.locked button:active {
+    transform: none;
+  }
+
+  /* Rows -- settings rows, the location list, the pickers, the menu, and
+     the location card that opens the list -- are wide: they deepen under
+     the finger and settle back a hair smaller, so the press is felt without
+     the row seeming to shrink away. */
+  :is(button.nx-li, .nx-row, .nx-pick-row, .nx-perapp-row, .nx-menu [role="menuitem"], .nx-dsc-link, .nx-hloc) {
+    transition:
+      transform var(--dur-press) var(--spring-press),
+      background-color var(--dur-quick) var(--spring-quick),
+      color var(--dur-quick) var(--spring-quick),
+      box-shadow var(--dur-quick) var(--spring-quick);
+  }
+  :is(button.nx-li, .nx-row, .nx-pick-row, .nx-perapp-row, .nx-menu [role="menuitem"], .nx-dsc-link, .nx-hloc):active:not(
+      :disabled,
+      [aria-disabled="true"]
+    ) {
+    transform: scale(0.988);
+    background: var(--select-row);
+    transition-duration: var(--dur-press-in);
+  }
+
+  /* Fields: the border and the halo follow focus quickly. */
+  :is(.nx-input, .nx-textarea) {
+    transition:
+      border-color var(--dur-quick) var(--spring-quick),
+      background-color var(--dur-quick) var(--spring-quick),
+      box-shadow var(--dur-quick) var(--spring-quick);
+  }
+
+  /* Focus: the two-tone ring is drawn from the first frame -- it is never
+     faded in, a keyboard user must see where they are at once -- and
+     settles from a little way out onto the control. Outlines take no
+     layout. */
+  :is(
+      .nx-btn,
+      .nx-ibtn,
+      .nx-eye,
+      .nx-avbtn,
+      .nx-chipbtn,
+      .nx-langsw button,
+      .nx-seg button,
+      .nx-mtabs button,
+      .nx-mnav button,
+      .nx-nav button,
+      .nx-tlink,
+      .nx-dtoggle,
+      .nx-back,
+      .nx-tlnk,
+      .nx-lnk,
+      .nx-profile,
+      .nx-soc,
+      .nx-sw,
+      button.nx-li,
+      .nx-row,
+      .nx-pick-row,
+      .nx-perapp-row,
+      .nx-sumline,
+      .nx-hloc
+    ):focus-visible {
+    animation: nx-focus var(--dur-quick) var(--spring-quick);
+  }
+  @keyframes nx-focus {
+    from {
+      outline-offset: 5px;
+    }
+  }
+
+  :root[data-motion="reduce"] :is(
+      .nx-ibtn,
+      .nx-eye,
+      .nx-avbtn,
+      .nx-search .clr,
+      .nx-chipbtn,
+      .nx-langsw button,
+      .nx-seg button,
+      .nx-mtabs button,
+      .nx-mnav button,
+      .nx-nav button,
+      .nx-tlink,
+      .nx-dtoggle,
+      .nx-back,
+      .nx-tlnk,
+      .nx-lnk,
+      .nx-profile,
+      .nx-soc,
+      .nx-sumline,
+      .nx-morecue,
+      button.nx-li,
+      .nx-row,
+      .nx-pick-row,
+      .nx-perapp-row,
+      .nx-menu [role="menuitem"],
+      .nx-dsc-link,
+      .nx-hloc
+    ):active {
+    transform: none;
+  }
+  :root[data-motion="reduce"] :focus-visible {
+    animation: none;
+  }
+
+  /* ---------- the switch and the checkbox ---------- */
+
+  /* The switch (pearl.css): its thumb slides on the snappy spring and
+     stretches, by scale, while pressed -- not under reduced motion, where
+     it only moves across, briefly. */
+  :root[data-motion="reduce"] .nx-sw:not([disabled]):active::before {
+    transform: none;
+  }
+  :root[data-motion="reduce"] .nx-sw[aria-checked="true"]:not([disabled]):active::before {
+    transform: translateX(calc(20px * var(--dir)));
+  }
+
+  /* A ticked box: the fill cross-fades and the check pops in. */
+  .nx-perapp-row .box {
+    transition:
+      background-color var(--dur-quick) var(--spring-quick),
+      box-shadow var(--dur-quick) var(--spring-quick);
+  }
+  .nx-perapp-row[aria-checked="true"] .box svg,
+  .nx-tick,
+  .nx-tick-in {
+    animation: nx-tick var(--dur-snappy) var(--spring-snappy) both;
+  }
+  @keyframes nx-tick {
+    from {
+      opacity: 0;
+      transform: scale(calc(1 - 0.5 * var(--move)));
+    }
+  }
+
+  /* ---------- a view's first entrance (lib/motion.ts useFirstView) ----------
+     Once a session for each view: its header, cards and groups rise in
+     order (`--i`, numbered in script), and the rows inside them fade in
+     after their block (`--r`). Never on a re-filter, a re-sort or a return:
+     `data-enter` is on the view's root only for its first appearance. */
+  [data-enter] :is(.nx-phead, .nx-pcard, .nx-group, .nx-auth-card, [data-stagger]) {
+    animation: nx-rise var(--dur-smooth) var(--spring-smooth) both;
+    animation-delay: calc(min(var(--i, 0), 7) * var(--stagger));
+  }
+  [data-enter] :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars) > * {
+    animation: nx-fade var(--dur-smooth) var(--spring-smooth) both;
+    animation-delay: calc((min(var(--i, 0), 7) + 1 + min(var(--r, 0), 7)) * var(--stagger));
+  }
+  /* The first set too, so it never inherits a count from further out. */
+  :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars, .nx-loclist) > :first-child {
+    --r: 0;
+  }
+  :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars, .nx-loclist) > :nth-child(2) {
+    --r: 1;
+  }
+  :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars, .nx-loclist) > :nth-child(3) {
+    --r: 2;
+  }
+  :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars, .nx-loclist) > :nth-child(4) {
+    --r: 3;
+  }
+  :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars, .nx-loclist) > :nth-child(5) {
+    --r: 4;
+  }
+  :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars, .nx-loclist) > :nth-child(6) {
+    --r: 5;
+  }
+  :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars, .nx-loclist) > :nth-child(7) {
+    --r: 6;
+  }
+  :is(.nx-rows, .nx-alist, .nx-thread, .nx-stagger, .nx-pick-list, .nx-perapp-list, .nx-ubars, .nx-loclist) > :nth-child(n + 8) {
+    --r: 7;
+  }
+
+  /* The main page's first look: the copy column top to bottom, then the
+     panel and the tray. The words say the state from the first frame; what
+     moves is where they are, never what they say. */
+  .nx-ov[data-enter] .nx-hero-copy > * {
+    animation: nx-rise var(--dur-smooth) var(--spring-smooth) both;
+    animation-delay: calc(min(var(--r, 0), 7) * var(--stagger));
+  }
+  .nx-hero-copy > :first-child {
+    --r: 0;
+  }
+  .nx-hero-copy > :nth-child(2) {
+    --r: 1;
+  }
+  .nx-hero-copy > :nth-child(3) {
+    --r: 2;
+  }
+  .nx-hero-copy > :nth-child(4) {
+    --r: 3;
+  }
+  .nx-hero-copy > :nth-child(5) {
+    --r: 4;
+  }
+  .nx-hero-copy > :nth-child(6) {
+    --r: 5;
+  }
+  .nx-hero-copy > :nth-child(n + 7) {
+    --r: 6;
+  }
+  .nx-ov[data-enter] > :is(.nx-panel, .nx-tray, .nx-modebar) {
+    animation: nx-rise var(--dur-smooth) var(--spring-smooth) both;
+    animation-delay: calc(4 * var(--stagger));
+  }
+  /* The location list's rows, the first time the list is drawn. */
+  .nx-loclist[data-enter] > * {
+    animation: nx-fade var(--dur-smooth) var(--spring-smooth) both;
+    animation-delay: calc((2 + min(var(--r, 0), 7)) * var(--stagger));
+  }
+
+  /* The usage chart's bars grow from the axis, once, in order. */
+  :is([data-enter] .nx-ubars, .nx-ubars[data-enter]) .bar {
+    transform-origin: 50% 100%;
+    animation: nx-grow-y var(--dur-smooth) var(--spring-smooth) both;
+    animation-delay: calc((min(var(--i, 0), 7) + 1) * var(--stagger) + min(var(--k, 0), 20) * var(--stagger-fine));
+  }
+  @keyframes nx-grow-y {
+    from {
+      transform: scaleY(calc(1 - var(--move)));
+    }
+  }
+
+  /* ---------- meters ---------- */
+  /* A fraction drawn as a bar: scaled from its inline start, never resized
+     (`--f`, 0 to 1). It grows into place when it is first drawn and slides
+     when the number changes. */
+  :is(.nx-meter, .nx-bar) > i {
+    width: 100%;
+    transform-origin: calc(50% - 50% * var(--dir)) 50%;
+    transform: scaleX(var(--f, 0));
+    transition: transform var(--dur-smooth) var(--spring-smooth);
+    animation: nx-grow-x var(--dur-smooth) var(--spring-smooth) both;
+  }
+  @keyframes nx-grow-x {
+    from {
+      transform: scaleX(calc(var(--f, 0) * (1 - var(--move))));
+    }
+  }
+
+  /* ---------- opening in place ---------- */
+  /* A country's protocols and a disclosure open in layout at once and are
+     drawn sliding out from under their row (lib/motion.ts revealBelow);
+     their box clips them while they do. */
+  .nx-acc,
+  .nx-dpanel {
+    overflow: hidden;
+  }
+  .nx-acc:not(.open) > div,
+  .nx-dpanel:not(.open) > div {
+    display: none;
+  }
+  /* A native <details> (an error's detail): what it shows rises in. */
+  details[open] > :not(summary) {
+    animation: nx-rise var(--dur-snappy) var(--spring-snappy) both;
+  }
+  details > summary {
+    transition: color var(--dur-quick) var(--spring-quick);
+  }
+
+  /* What left a list after a search or a filter: a copy where it stood,
+     fading (lib/motion.ts flipList). Nothing can reach it. */
+  .nx-ghost {
+    position: absolute;
+    z-index: 0;
+    pointer-events: none;
+  }
+  .nx-loclist {
+    position: relative;
+  }
+
+  /* ---------- overlays: in, and out the way they came ---------- */
+  /* lib/motion.ts usePresence keeps a closing overlay mounted for
+     `--dur-exit`, marked `data-state="closed"` and inert. */
+  .nx-scrim[data-state="closed"] {
+    animation: nx-fade-out var(--dur-exit) var(--spring-exit) both;
+    pointer-events: none;
+  }
+  .nx-dlgwrap[data-state="closed"] {
+    pointer-events: none;
+  }
+  .nx-dlgwrap[data-state="closed"] > .nx-dlg,
+  .nx-menu[data-state="closed"] {
+    animation: nx-pop-out var(--dur-exit) var(--spring-exit) both;
+    pointer-events: none;
+  }
+  .nx-sheet[data-state="closed"] {
+    animation: nx-sheet-out var(--dur-exit) var(--spring-exit) both;
+    pointer-events: none;
+  }
+  /* A sheet being dragged follows the finger; its scrim thins with it. */
+  .nx-sheet[data-drag] {
+    transition: none;
+  }
+  .nx-toast[data-state="closed"] {
+    animation: nx-toast-out var(--dur-exit) var(--spring-exit) both;
+  }
+  @keyframes nx-fade-out {
+    to {
+      opacity: 0;
+    }
+  }
+  @keyframes nx-pop-out {
+    to {
+      opacity: 0;
+      transform: scale(calc(1 - 0.04 * var(--move)));
+    }
+  }
+  /* Opaque while it slides down; under reduced motion it stays and
+     fades. */
+  @keyframes nx-sheet-out {
+    to {
+      transform: translateY(calc(100% * var(--move)));
+      opacity: var(--move);
+    }
+  }
+  @keyframes nx-toast-out {
+    to {
+      opacity: 0;
+      transform: translate(-50%, calc(8px * var(--move)));
+    }
+  }
+  /* The toast arrives centred, rising. */
+  .nx-toast {
+    animation-name: nx-toast-in;
+  }
+  @keyframes nx-toast-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, calc(10px * var(--move)));
+    }
+  }
+
+  /* The panel's flash when Locations is asked for on a wide window: a ring
+     that brightens and fades (opacity, not the shadow itself). */
+  .nx-panel.flash {
+    animation: none;
+  }
+  .nx-panel::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow: 0 0 0 3px var(--select);
+    opacity: 0;
+  }
+  .nx-panel.flash::after {
+    animation: nx-ring var(--dur-glow) var(--spring-smooth) both;
+  }
+  @keyframes nx-ring {
+    30% {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+    }
+  }
+
+  /* ---------- messages, banners and notes ---------- */
+  /* What appears to be read rises in where it stands; what goes, fades
+     (Presence, components/ui.tsx). Neither moves anything else: a message
+     takes its room at once. */
+  :is(.nx-banner, .nx-msg, .nx-upd, .nx-upd-hero, .nx-leak, .nx-slot, .nx-arrive) {
+    animation: nx-rise var(--dur-smooth) var(--spring-smooth) both;
+  }
+  .nx-notes > .nx-note,
+  .nx-fhint[data-tone="danger"] {
+    animation: nx-fade var(--dur-smooth) var(--spring-smooth) both;
+  }
+  .nx-leaving {
+    animation: nx-fade-out var(--dur-exit) var(--spring-exit) both !important;
+    pointer-events: none;
+  }
+
+  /* A word that changed in place -- "Copy" to "Copied", a rung of the
+     ladder -- swaps with a short rise (`nx-swap`, pearl.css). The check
+     beside a done thing pops. */
+  .nx-done-in {
+    animation: nx-tick var(--dur-snappy) var(--spring-snappy) both;
+  }
+
+  /* ---------- loading ---------- */
+  /* A skeleton holds the shape of what is coming while it is read; its
+     sheen runs only while it is on screen, and never under reduced
+     motion. The words beside it say what is happening. */
+  .nx-skels {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .nx-skel {
+    position: relative;
+    display: block;
+    overflow: hidden;
+    border-radius: 10px;
+    background: var(--hairline);
+    height: 14px;
+  }
+  .nx-skel.card {
+    height: 72px;
+    border-radius: var(--r-card);
+  }
+  .nx-skel.short {
+    width: 55%;
+  }
+  .nx-skel::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(calc(-100% * var(--dir)));
+    background: linear-gradient(90deg, transparent, var(--skel-sheen, rgba(255, 255, 255, 0.55)), transparent);
+    animation: nx-shimmer var(--loop-shimmer) ease-in-out infinite;
+  }
+  :root[data-theme="dark"] .nx-skel::after {
+    --skel-sheen: rgba(255, 255, 255, 0.07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .nx-skel::after {
+      --skel-sheen: rgba(255, 255, 255, 0.07);
+    }
+  }
+  @keyframes nx-shimmer {
+    to {
+      transform: translateX(calc(100% * var(--dir)));
+    }
+  }
+  /* Arriving content takes over from the skeleton with a fade. */
+  .nx-loaded {
+    animation: nx-fade var(--dur-smooth) var(--spring-smooth) both;
+  }
+
+  /* ---------- the busy loops, gated ---------- */
+  /* Separate rules: a pseudo-element inside :is() is invalid, and drops the
+     whole rule. */
+  :root[data-motion="reduce"] .nx-skel::after {
+    animation: none;
+    opacity: 0;
+  }
+  :root[data-motion="reduce"] .nx-spinning {
+    animation: none;
+  }
+
+  /* ---------- the ladder and the reconnect ---------- */
+  /* A rung or an attempt changing swaps the words (`nx-swap`,
+     ProgressLine.tsx); the countdown's second is rewritten, never tweened.
+     The reconnect's arrow turns while an attempt is under way -- a busy
+     loop, gone the moment it ends, and still under reduced motion. */
+  .nx-subline[data-now] > svg {
+    animation: nx-spin var(--loop-spin) linear infinite;
+  }
+  :root[data-motion="reduce"] .nx-subline[data-now] > svg {
+    animation: none;
+  }
+
+  /* ---------- a conversation ---------- */
+  /* A message that arrives after the thread opened -- one sent, one a poll
+     brought in -- rises from its own side (Support.tsx). */
+  .nx-bubble.me {
+    transform-origin: calc(50% + 50% * var(--dir)) 100%;
+  }
+  .nx-bubble.them {
+    transform-origin: calc(50% - 50% * var(--dir)) 100%;
+  }
+  .nx-bubble.nx-new {
+    animation: nx-bubble var(--dur-snappy) var(--spring-snappy) both;
+  }
+  @keyframes nx-bubble {
+    from {
+      opacity: 0;
+      transform: translateY(calc(8px * var(--move))) scale(calc(1 - 0.06 * var(--move)));
+    }
+  }
+
+  /* ---------- the sign-in steps ---------- */
+  /* A step arrives from the side it logically comes from; back goes back. */
+  .nx-auth-step[data-dir="back"] {
+    animation-name: nx-step-back;
+  }
+  @keyframes nx-step-back {
+    from {
+      opacity: 0;
+      transform: translateX(calc(-18px * var(--dir) * var(--move)));
+    }
+  }
+  .nx-auth-step[data-dir="forward"] {
+    animation-name: nx-step-forward;
+  }
+  @keyframes nx-step-forward {
+    from {
+      opacity: 0;
+      transform: translateX(calc(18px * var(--dir) * var(--move)));
+    }
+  }
+
+  /* ---------- in-screen views without the View Transitions API ---------- */
+  /* lib/view-transition.ts swapView: on an engine without the API the new
+     view slides in by this class instead (old Android WebViews, WKWebView
+     before iOS 18); under reduced motion it fades. */
+  :root[data-view-in="forward"] :is(.nx-page, .nx-ov) {
+    animation: nx-view-in var(--dur-snappy) var(--spring-snappy) both;
+  }
+  :root[data-view-in="back"] :is(.nx-page, .nx-ov) {
+    animation: nx-view-in-back var(--dur-snappy) var(--spring-snappy) both;
+  }
+  /* The old view, kept over its place while it fades on the exit curve
+     (swapView's `keepOutgoingView`, in script): a still copy -- nothing in
+     it moves, loops or enters again -- that nothing can reach. */
+  .nx-viewghost {
+    z-index: 30;
+    pointer-events: none;
+  }
+  .nx-viewghost,
+  .nx-viewghost *,
+  .nx-viewghost *::before,
+  .nx-viewghost *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  /* ---------- the navs, across a page change ---------- */
+  /* The selected item's pill travels to the new item: inside one shell by
+     its own transition, and across pages -- where the shell is drawn anew
+     -- as a shared element of the view transition. The items themselves
+     are named too, so their labels stay above the pill as it passes. */
+  .nx-nav-pill {
+    view-transition-name: nxpill;
+  }
+  .nx-nav > button:nth-of-type(1) {
+    view-transition-name: nxnav1;
+  }
+  .nx-nav > button:nth-of-type(2) {
+    view-transition-name: nxnav2;
+  }
+  .nx-nav > button:nth-of-type(3) {
+    view-transition-name: nxnav3;
+  }
+  .nx-nav > button:nth-of-type(4) {
+    view-transition-name: nxnav4;
+  }
+  /* Inside the selected item (positioned below), never the nav itself:
+     the phone's nav is docked by its own absolute position (pearl.css). */
+  .nx-tabpill {
+    position: absolute;
+    z-index: 0;
+    inset: 0;
+    border-radius: inherit;
+    background: var(--pearl);
+    box-shadow: 0 1px 3px rgba(20, 30, 60, 0.12);
+    view-transition-name: nxtabpill;
+    pointer-events: none;
+  }
+  .nx-mnav .nx-tabpill {
+    background: var(--select);
+    box-shadow: none;
+    view-transition-name: nxmnavpill;
+  }
+  /* Each item its own stacking context, so the pill sits above its fill
+     and under its label and icon. */
+  .nx-mtabs button,
+  .nx-mnav button {
+    position: relative;
+    isolation: isolate;
+  }
+  .nx-mtabs .nx-tabpill,
+  .nx-mnav .nx-tabpill {
+    z-index: -1;
+  }
+  .nx-mtabs button[aria-current="page"],
+  .nx-mnav button[aria-current="page"] {
+    background: transparent;
+    box-shadow: none;
+  }
+  /* The new item's icon lifts once as it is chosen. */
+  .nx-mnav button[aria-current="page"] > svg {
+    animation: nx-lift var(--dur-snappy) var(--spring-snappy) both;
+  }
+  @keyframes nx-lift {
+    from {
+      transform: translateY(calc(3px * var(--move))) scale(calc(1 - 0.08 * var(--move)));
+    }
+  }
+  ::view-transition-group(nxpill),
+  ::view-transition-group(nxtabpill),
+  ::view-transition-group(nxmnavpill) {
+    animation-duration: var(--dur-snappy);
+    animation-timing-function: var(--spring-snappy);
+  }
+  ::view-transition-group(nxnav1),
+  ::view-transition-group(nxnav2),
+  ::view-transition-group(nxnav3),
+  ::view-transition-group(nxnav4) {
+    animation-duration: var(--dur-quick);
+  }
+
+  /* ---------- the pill's width ---------- */
+  /* ConnectOrb.tsx grows the pill from its old width to its new one by
+     scale (lib/motion.ts widthMorph), held at its inline start; the label
+     inside is counter-scaled so it never stretches. */
+  .nx-btn {
+    transform-origin: calc(50% - 50% * var(--dir)) 50%;
+  }
+}

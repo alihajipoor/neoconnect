@@ -17,6 +17,13 @@ const repair = readFileSync(new URL("../components/RepairNetwork.tsx", import.me
 
 /** The body of a function, from its signature to the first line that
  * closes it at the indentation it was declared at. */
+const ADOPT_SERVICE_STATE = [
+  "async function adoptServiceState(",
+  "    sub: Subscription | null,",
+  "    users: readonly ProtocolUser[],",
+  "  ): Promise<ConnectionState | null> {",
+].join("\n");
+
 function body(signature: string, indent = "  "): string {
   const start = dashboard.indexOf(signature);
   expect(start, signature).toBeGreaterThan(0);
@@ -30,7 +37,7 @@ describe("where an episode begins", () => {
     // Both polls unmount with the screen. The one mounted on return asks
     // the service, and a tunnel the app was vouching for that is now
     // verifiably gone is a drop -- through the same rule as the polls.
-    const adopt = body("async function adoptServiceState(sub: Subscription | null): Promise<ConnectionState | null> {");
+    const adopt = body(ADOPT_SERVICE_STATE);
     const vouched = adopt.indexOf("const vouched = vouching(autoReconnect.current(), sessionGeneration());");
     const mark = adopt.indexOf("const mark = statusDisturbances.mark();");
     const asked = adopt.indexOf("const adopted = await syncFromService();");
@@ -58,7 +65,7 @@ describe("where an episode begins", () => {
     expect(ladder.split("autoReconnect.forget();").length - 1).toBe(1);
     // "Nothing is running", found by a recheck, was not a drop either.
     expect(dashboard).toContain('if (settled === "disconnected") autoReconnect.forget();');
-    expect(dashboard).toContain('if ((await syncFromService()) === "disconnected") autoReconnect.forget();');
+    expect(dashboard).toContain('if ((await syncNamingTunnel()) === "disconnected") autoReconnect.forget();');
   });
 
   it("begins only at the screen's own drop, after the rule has agreed it is one", () => {
@@ -73,7 +80,13 @@ describe("where an episode begins", () => {
   });
 
   it("gives the slot back only when nothing is coming back", () => {
-    expect(publishDrop).toContain('=== "lost") void deviceSlot.release();');
+    expect(publishDrop).toMatch(/=== "lost"\) \{\s+void deviceSlot\.release\(\);/);
+  });
+
+  it("lets go of the reconnect hold when nothing is coming back, whatever phase the drop found", () => {
+    expect(publishDrop).toMatch(
+      /=== "lost"\) \{\s+void deviceSlot\.release\(\);\s+if \(holdWanted\(appPrefs\.current\(\)\.blockWhileReconnecting\)\) void holdService\.release\(\);/,
+    );
   });
 
   it("and the episode gives it back when it ends before a claim, or waits for the app", () => {
@@ -179,7 +192,7 @@ describe("what an attempt is", () => {
   });
 
   it("arms a tunnel adopted from the service, unless something overruled the answer while it was asked", () => {
-    const adopt = body("async function adoptServiceState(sub: Subscription | null): Promise<ConnectionState | null> {");
+    const adopt = body(ADOPT_SERVICE_STATE);
     const taken = adopt.indexOf("const reconnectStamp = autoReconnect.stamp();");
     expect(taken).toBeGreaterThan(0);
     expect(taken).toBeLessThan(adopt.indexOf("const adopted = await syncFromService();"));
@@ -276,7 +289,8 @@ describe("which screen runs an attempt", () => {
     // placeholders: led by protocols already refused here, and its landing
     // saved its one entry over every network's remembered route and history.
     const memory = body("function loadRouteMemory(): void {");
-    expect(memory).toContain('invoke<string | null>("network_fingerprint")');
+    expect(memory).toContain("readNetworkId(),");
+    expect(body("function readNetworkId(keepOnNull = false): Promise<void> {")).toContain('invoke<string | null>("network_fingerprint")');
     expect(memory).toContain("loadLastGood().then(setLastGood),");
     expect(memory).toContain("loadConnectHistory().then(setHistory),");
     expect(memory).toContain(".finally(() => setRouteMemoryLoaded(true));");
@@ -383,7 +397,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     const rung = ladder.slice(ladder.indexOf("for (let index = 0; index < candidates.length; index += 1) {"));
     const settled = rung.indexOf("baselineIpRef.current = await settleAndCaptureBaseline(");
     const named = rung.indexOf('const tunnelServer = await tunnelServerOf(candidate, "windows");');
-    const ipv6 = rung.indexOf("ipv6BaselineRef.current = await captureIpv6Baseline();");
+    const ipv6 = rung.indexOf("ipv6BaselineRef.current = await (ipv6Beside ?? captureIpv6Baseline());");
     const check = rung.indexOf(
       "if (stopped() || sessionGeneration() !== sessionAtStart || ladderGenerationRef.current !== generation) break;",
     );
@@ -401,12 +415,12 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     // choice. The next Connect, landing on the chosen server, was told it
     // had moved off the old one.
     expect(ladder).toContain(
-      "const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId);",
+      "const shownRouteId = displayedRouteId(connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed);",
     );
     expect(ladder).not.toContain("const shownRouteId = protocolUser?.routeId ?? null;");
     // The tile's own rule, with the same arguments.
     expect(dashboard).toContain(
-      "displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId)",
+      "displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId, tunnelNamed)",
     );
   });
 
@@ -425,7 +439,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     expect(choose).toContain('choice === "keepTunnel" ? (protocolUserRef.current?.routeId ?? routeId) : routeId');
     const picker = dashboard.slice(dashboard.indexOf("<LocationPicker"));
     expect(picker).toContain("const shown = chooseLocation(routeId ?? null);");
-    expect(picker).toContain("void loadAll(shown ?? undefined);");
+    expect(picker).toContain("void loadAll(shown ?? undefined).finally(connectAfterSwitch);");
     expect(picker).toContain("chooseLocation(null);");
     // Nothing in the list ends the episode any other way.
     expect(picker).not.toContain("autoReconnect.cancel(");
@@ -485,7 +499,11 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
       'const choice = autoReconnect.choosing({ routeId, tunnelShown: connectionStateRef.current !== "disconnected" });',
     );
     expect(picking).toContain('if (choice === "stopPass") void stopPass();');
-    expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toContain("onPicking={pickingLocation}");
+    // Every pick is told, whatever else the handler does with it (it also
+    // holds the phone's sheet open while a switch is out).
+    expect(dashboard.slice(dashboard.indexOf("<LocationPicker"))).toMatch(
+      /onPicking=\{\(routeId\) => \{(?:\s*if \(routeId !== null\) setSwitchInFlight\(true\);)?\s*pickingLocation\(routeId\);\s*\}\}/,
+    );
   });
 
   it("a server picked over a tunnel kept up is what its reconnect leads with, until a switch that fails puts it back", () => {

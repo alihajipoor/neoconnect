@@ -14,5 +14,6 @@ export function deviceSlotsStub() {
     keepAlive: jest.fn().mockResolvedValue(undefined),
     onGrant: jest.fn(),
     state: jest.fn().mockResolvedValue({ holders: new Set(), live: new Set(), displaced: new Map(), credit: new Map() }),
+    inUse: jest.fn().mockResolvedValue({ known: false, sessions: new Map() }),
   };
 }

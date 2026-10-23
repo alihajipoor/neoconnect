@@ -47,6 +47,7 @@ import type { ReconnectingView } from "./auto-reconnect";
 import type { Intent } from "./connect-intent";
 import type { EgressVerdict } from "./egress";
 import type { TranslationKey } from "./i18n";
+import { readHold } from "./reconnect-hold";
 
 /** What the helper service reports about the far end.
  *
@@ -122,6 +123,26 @@ export type VpnStatus = {
   /** Why not, when `ipv4Confined` is false. English, for support; never
    * the words the customer is shown. */
   confinementProblem?: string;
+  /** "Block the internet while reconnecting": armed, holding, or not held
+   * and why -- facts the app words (lib/reconnect-hold.ts, `readHold`).
+   * Absent when the setting is off, nothing is armed, or the service is
+   * older. Read through `readHold`, which says nothing for a shape it does
+   * not know. */
+  reconnectHold?: unknown;
+  /** The tunnel adapter's own counters this session, from Windows
+   * (lib/traffic-meter.ts, `readTraffic`). Absent whenever the service read
+   * nothing -- never a zero standing for "unknown". */
+  traffic?: unknown;
+  /** Which problem `splitTunnelProblem` is, as a code the app words in the
+   * customer's language (lib/custom-mode-problem.ts). Absent with no
+   * problem, or from an older service; a code this app does not know is
+   * shown as the service's own sentence. */
+  splitTunnelProblemCode?: string;
+  /** How long the live session's engine has been up, in whole seconds on
+   * the service's clock: the session timer for a tunnel this window did
+   * not bring up (lib/session-clock.ts, `adoptedSince`). Absent with
+   * no session or from an older service, and then no timer is shown. */
+  sessionSecs?: number;
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }
@@ -413,7 +434,9 @@ export function noTunnelVerified(status: Pick<VpnStatus, "connected" | "health">
  *    did not may go and do something they would not otherwise have done.
  *
  *  - **It is the service's verified "no tunnel"** (`noTunnelVerified`),
- *    not the fallback's guess while it was busy.
+ *    not the fallback's guess while it was busy -- or the service holding
+ *    the internet for the drop of the very session it calls connected
+ *    (`heldOverItsDrop`).
  *
  *  - **Nothing of ours is changing the tunnel.** A connect tears down
  *    before it dials and a disconnect tears down because it was asked
@@ -431,7 +454,7 @@ export function noTunnelVerified(status: Pick<VpnStatus, "connected" | "health">
 export function droppedFromPoll(
   shown: ConnectionState,
   intent: Intent,
-  status: Pick<VpnStatus, "connected" | "health"> | null,
+  status: Pick<VpnStatus, "connected" | "health" | "reconnectHold"> | null,
   disturbed: boolean,
 ): boolean {
   return droppedUnseen(isTunnelUp(shown), intent, status, disturbed);
@@ -451,14 +474,32 @@ export function droppedFromPoll(
 export function droppedUnseen(
   vouching: boolean,
   intent: Intent,
-  status: Pick<VpnStatus, "connected" | "health"> | null,
+  status: Pick<VpnStatus, "connected" | "health" | "reconnectHold"> | null,
   disturbed: boolean,
 ): boolean {
   if (status === null) return false;
   if (intent !== "idle") return false;
   if (disturbed) return false;
   if (!vouching) return false;
-  return noTunnelVerified(status);
+  return noTunnelVerified(status) || heldOverItsDrop(status);
+}
+
+/** Whether a status says "connected" about a session the service is
+ * holding the internet for the drop of ("Block the internet while
+ * reconnecting"): holding, and no tunnel landed under the hold -- the
+ * service's word that the session it calls connected is the dropped one,
+ * still in its slot (lib/reconnect-hold.ts, `landedUnderHold`). With no
+ * pass of ours running (`droppedUnseen`) nothing of ours is taking it
+ * down, so it is a drop, and the reconnect starts now. Read as connected,
+ * the screen said "Connected" over a machine refusing everything but
+ * Neoxify until the service's two-minute backstop let go -- and then over
+ * traffic in the clear. A current service also says such a session
+ * ended (its tunnel adapter gone); this is the same rule from the hold's
+ * side, for whatever else leaves one in the slot. */
+export function heldOverItsDrop(status: Pick<VpnStatus, "connected" | "reconnectHold">): boolean {
+  if (!status.connected) return false;
+  const hold = readHold(status.reconnectHold);
+  return hold?.state === "holding" && hold.landed !== true;
 }
 
 /** Whether the screen must say that this tunnel's IPv4 is not confined to
@@ -504,6 +545,26 @@ export interface Headline {
   hint: TranslationKey;
   tone: HeadlineTone;
 }
+
+/** Every sentence `headlineFor` can put under the line. A phone keeps the
+ * height of the longest of them in its language and width under the line
+ * (`Hint`'s `reserve`), so a longer sentence never moves what is below it:
+ * the height follows the screen, never the state. The test holds this list
+ * to what `headlineFor` returns. */
+export const HEADLINE_HINTS: readonly TranslationKey[] = [
+  "dash.connectedNotConfinedHint",
+  "dash.reconnectingHint",
+  "dash.reconnectingOfflineHint",
+  "dash.waitingForNetworkHint",
+  "dash.protectedHint",
+  "dash.unverifiedHint",
+  "dash.unverifiedCustomHint",
+  "dash.degradedHint",
+  "dash.verifyingHint",
+  "dash.unknownHint",
+  "dash.droppedHint",
+  "dash.notProtectedHint",
+];
 
 /** The headline and the sentence under it, for every state the screen
  * can be in.

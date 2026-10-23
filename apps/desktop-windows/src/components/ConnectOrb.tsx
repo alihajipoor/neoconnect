@@ -1,6 +1,8 @@
-import { useId } from "react";
-import { AlertTriangle, HelpCircle, Power } from "lucide-react";
+import { useId, useLayoutEffect, useRef, type PointerEvent } from "react";
+import { AlertTriangle, ArrowRight, HelpCircle, Power } from "lucide-react";
+import { curve, motionReduced, play, widthMorph } from "../lib/motion";
 import { orbTone } from "../lib/orb-caution";
+import type { PillVariant } from "../lib/hero-model";
 import { cn } from "../lib/utils";
 
 export type ConnectionState =
@@ -69,6 +71,9 @@ export function ConnectOrb({
   disabled,
   onToggle,
   label,
+  look = "orb",
+  pill,
+  pressLabel,
 }: {
   state: ConnectionState;
   /** A confirmed connection that has been "not fully protected" long
@@ -78,6 +83,16 @@ export function ConnectOrb({
   disabled?: boolean;
   onToggle: () => void;
   label: string;
+  /** "pill" is the Pearl Glass connect control, which both clients' main
+   * pages draw; "orb" the dial they drew before it, which nothing draws any
+   * more. */
+  look?: "orb" | "pill";
+  /** The pill's fill and furniture (`pillFor` in lib/hero-model.ts). */
+  pill?: { variant: PillVariant; arrow: boolean; progress: boolean };
+  /** What a press does, when the label says what is happening instead:
+   * "Connecting..." stops the connect. Read to assistive technology after
+   * the label, so the busy pill is announced as the control it is. */
+  pressLabel?: string;
 }) {
   // Two inline SVGs sharing a gradient id means the second renders black,
   // so the id has to be per-instance.
@@ -103,6 +118,18 @@ export function ConnectOrb({
   // as "press me to connect", which is a claim about the tunnel being
   // down, and that is precisely the claim this state exists to withhold.
   const unsure = tone === "muted";
+
+  if (look === "pill") {
+    return (
+      <ConnectPill
+        label={label}
+        pressLabel={pressLabel}
+        onPress={onToggle}
+        disabled={disabled}
+        model={pill ?? { variant: busy ? "busy" : "primary", arrow: !busy && !on, progress: busy }}
+      />
+    );
+  }
 
   // r=54 in a 128 viewBox -> circumference 339.29. The arc is a quarter
   // while spinning, and 88% once connected (the gap keeps it reading as a
@@ -243,5 +270,103 @@ export function ConnectOrb({
         <span className="px-2 text-center text-xs leading-tight font-semibold tracking-wide">{label}</span>
       </button>
     </div>
+  );
+}
+
+/** Two presses this close together are one: the reference's "blocked
+ * repeated clicks", without taking away a second press as the way out of a
+ * Disconnect that has stopped describing anything. */
+const SAME_PRESS_MS = 600;
+
+/** The Pearl Glass connect control: a 52px pill whose fill says who
+ * started what it is doing, never how the tunnel is -- the status chip
+ * carries that.
+ *
+ * Pressable in every state (see the orb above for why a control that can
+ * wedge is not a control): busy is `aria-busy` and `data-busy`, never
+ * `disabled` -- nor `aria-disabled`, which would tell a screen reader the
+ * press that stops a connect is unavailable. Its accessible name says what
+ * the press does when the label does not. When its label changes length
+ * it grows or shrinks from its old width to its new one -- by scale, held at
+ * its inline start, its label counter-scaled so the words never stretch
+ * (lib/motion.ts widthMorph): the layout changes once, nothing re-lays out
+ * per frame. Under reduced motion it does not. */
+function ConnectPill({
+  label,
+  pressLabel,
+  onPress,
+  disabled,
+  model,
+}: {
+  label: string;
+  pressLabel?: string;
+  onPress: () => void;
+  disabled?: boolean;
+  model: { variant: PillVariant; arrow: boolean; progress: boolean };
+}) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const width = useRef<number | null>(null);
+  const lastPress = useRef(0);
+  const frame = useRef(0);
+  const busy = model.variant !== "primary";
+
+  // The width morph: the width the new label needs (the layout's, which no
+  // transform changes), drawn growing from the old one.
+  useLayoutEffect(() => {
+    const button = ref.current;
+    if (!button) return;
+    const from = width.current;
+    const to = button.offsetWidth;
+    width.current = to;
+    if (from === null) return;
+    const frames = widthMorph(from, to, motionReduced());
+    if (!frames) return;
+    const timing = curve("morph");
+    play(button, frames.box, timing);
+    for (const child of Array.from(button.children)) {
+      if (child.classList.contains("lt") || child.classList.contains("prog")) continue;
+      // Added to the label's own swap, not instead of it.
+      play(child, frames.content, { ...timing, composite: "add" });
+    }
+  }, [label]);
+
+  // The press light follows the pointer, once a frame at most.
+  const onPointerMove = (event: PointerEvent<HTMLButtonElement>) => {
+    const button = event.currentTarget;
+    const { clientX, clientY } = event;
+    if (frame.current) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      const box = button.getBoundingClientRect();
+      button.style.setProperty("--px", `${clientX - box.left}px`);
+      button.style.setProperty("--py", `${clientY - box.top}px`);
+    });
+  };
+
+  return (
+    <button
+      ref={ref}
+      type="button"
+      className={cn("nx-btn", model.variant === "busy" ? "busy" : "primary", model.variant === "primary-busy" && "busy")}
+      aria-disabled={disabled || undefined}
+      aria-busy={model.progress || undefined}
+      aria-label={pressLabel && pressLabel !== label ? `${label} ${pressLabel}` : undefined}
+      data-busy={busy ? "1" : undefined}
+      disabled={disabled}
+      onPointerMove={onPointerMove}
+      onClick={() => {
+        const now = Date.now();
+        if (now - lastPress.current < SAME_PRESS_MS) return;
+        lastPress.current = now;
+        onPress();
+      }}
+    >
+      <span className="lt" aria-hidden />
+      <span key={label} className="lbl nx-swap">
+        {label}
+      </span>
+      {model.arrow ? <ArrowRight className="nx-mir" aria-hidden /> : null}
+      {model.progress ? <span className="prog" aria-hidden /> : null}
+    </button>
   );
 }

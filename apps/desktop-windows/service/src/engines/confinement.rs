@@ -373,7 +373,7 @@ pub const WEIGHT_BLOCK: u8 = 0;
 
 /// Link-local (APIPA), multicast and the limited broadcast: the LAN's
 /// own plumbing, whatever its prefix.
-fn lan_plumbing() -> [Prefix; 3] {
+pub(super) fn lan_plumbing() -> [Prefix; 3] {
     [
         Prefix::new(Ipv4Addr::new(169, 254, 0, 0), 16),
         Prefix::new(Ipv4Addr::new(224, 0, 0, 0), 4),
@@ -615,7 +615,7 @@ fn mapped(cond: &Cond) -> Cond {
 /// -- DHCP's answers from any server, IKE by its local ports -- held to
 /// the IPv4-mapped range, so this sublayer permits no native IPv6 on the
 /// strength of an IPv4 rule.
-fn v6_twin(conds: &[Cond]) -> Vec<Cond> {
+pub(super) fn v6_twin(conds: &[Cond]) -> Vec<Cond> {
     let mut twin: Vec<Cond> = conds.iter().map(mapped).collect();
     let placed = conds.iter().any(|c| matches!(c, Cond::RemoteV4(_) | Cond::LocalInterface(_) | Cond::Loopback));
     if !placed {
@@ -1390,13 +1390,19 @@ const SUBLAYER_WEIGHT: u16 = 0xFFFE;
 pub(super) const CAPTURE_PROVIDER_KEY_ALT: GUID = GUID::from_u128(0x5e0f3a72_9c42_4d8b_a6e1_7b3c2f9d0a14);
 pub(super) const CAPTURE_SUBLAYER_KEY_ALT: GUID = GUID::from_u128(0x6f1a4b83_ad53_4e9c_b7f2_8c4d3e0a1b25);
 
-/// A provider and sublayer a confinement installs under, and the
-/// sublayer's weight.
+/// A provider and sublayer a confinement installs under, the sublayer's
+/// weight, and the names `netsh wfp show` prints for them. The reconnect
+/// hold (`reconnect_hold`) installs through the same code under pairs of
+/// its own.
 #[derive(Clone, Copy)]
 pub(super) struct CaptureKeys {
     pub provider: GUID,
     pub sublayer: GUID,
     pub weight: u16,
+    pub provider_name: &'static str,
+    pub provider_description: &'static str,
+    pub sublayer_name: &'static str,
+    pub sublayer_description: &'static str,
 }
 
 /// Two pairs, and an install takes the one no live session holds
@@ -1408,8 +1414,24 @@ pub(super) struct CaptureKeys {
 /// still referenced, which WFP does not document. On two, neither session
 /// touches the other's objects. Both weigh below the IPv6 block's sublayer.
 pub(super) const CAPTURE_KEYS: [CaptureKeys; 2] = [
-    CaptureKeys { provider: CAPTURE_PROVIDER_KEY, sublayer: CAPTURE_SUBLAYER_KEY, weight: SUBLAYER_WEIGHT },
-    CaptureKeys { provider: CAPTURE_PROVIDER_KEY_ALT, sublayer: CAPTURE_SUBLAYER_KEY_ALT, weight: SUBLAYER_WEIGHT - 1 },
+    CaptureKeys {
+        provider: CAPTURE_PROVIDER_KEY,
+        sublayer: CAPTURE_SUBLAYER_KEY,
+        weight: SUBLAYER_WEIGHT,
+        provider_name: PROVIDER_NAME,
+        provider_description: PROVIDER_DESCRIPTION,
+        sublayer_name: SUBLAYER_NAME,
+        sublayer_description: SUBLAYER_DESCRIPTION,
+    },
+    CaptureKeys {
+        provider: CAPTURE_PROVIDER_KEY_ALT,
+        sublayer: CAPTURE_SUBLAYER_KEY_ALT,
+        weight: SUBLAYER_WEIGHT - 1,
+        provider_name: PROVIDER_NAME,
+        provider_description: PROVIDER_DESCRIPTION,
+        sublayer_name: SUBLAYER_NAME,
+        sublayer_description: SUBLAYER_DESCRIPTION,
+    },
 ];
 
 /// The first pair whose sublayer is not registered now. Both registered
@@ -1418,8 +1440,17 @@ pub(super) const CAPTURE_KEYS: [CaptureKeys; 2] = [
 ///
 /// # Safety
 /// `engine` must be live.
+#[cfg_attr(not(test), allow(dead_code))]
 unsafe fn free_keys(engine: HANDLE) -> CaptureKeys {
-    for keys in CAPTURE_KEYS {
+    free_keys_of(engine, &CAPTURE_KEYS)
+}
+
+/// The same, among any pool of pairs.
+///
+/// # Safety
+/// `engine` must be live.
+pub(super) unsafe fn free_keys_of(engine: HANDLE, pool: &[CaptureKeys; 2]) -> CaptureKeys {
+    for keys in pool.iter().copied() {
         let mut sublayer: *mut FWPM_SUBLAYER0 = std::ptr::null_mut();
         let err = FwpmSubLayerGetByKey0(engine, &keys.sublayer, &mut sublayer);
         if err == 0 {
@@ -1428,11 +1459,13 @@ unsafe fn free_keys(engine: HANDLE) -> CaptureKeys {
         }
         return keys;
     }
-    CAPTURE_KEYS[0]
+    pool[0]
 }
 
 const PROVIDER_NAME: &str = "Neoxify capture";
+const PROVIDER_DESCRIPTION: &str = "Neoxify VPN: IPv4 confined to a full tunnel";
 const SUBLAYER_NAME: &str = "Neoxify IPv4 confinement";
+const SUBLAYER_DESCRIPTION: &str = "IPv4 confined to a Neoxify full tunnel; removed when it ends";
 const LOG_FILE: &str = "confinement.log";
 
 /// Installs a plan in a dynamic WFP session of its own, in one transaction:
@@ -1477,6 +1510,21 @@ fn describe(plan: &Plan) -> String {
 }
 
 fn install_specs(specs: &[FilterSpec]) -> Result<Installed, String> {
+    install_specs_with(specs, &CAPTURE_KEYS, SUBLAYER_NAME, "Confines IPv4 to a Neoxify full tunnel; removed when it ends")
+}
+
+/// Installs filters in a dynamic WFP session of their own, in one
+/// transaction, under whichever pair of `pool` no live session holds: the
+/// confinement's, and the reconnect hold's (`reconnect_hold`), which is the
+/// same shape of filter set for a different moment. Every application a
+/// filter names is resolved to its app id first, and one that cannot be is
+/// an error rather than a permit left out.
+pub(super) fn install_specs_with(
+    specs: &[FilterSpec],
+    pool: &[CaptureKeys; 2],
+    session_name: &str,
+    session_purpose: &str,
+) -> Result<Installed, String> {
     use super::ipv6_block::AppId;
     // Resolved before the session opens, and held until it has committed:
     // the filters point into these blobs.
@@ -1496,12 +1544,9 @@ fn install_specs(specs: &[FilterSpec]) -> Result<Installed, String> {
     // Before the session opens: what WFP refuses from here on may be this
     // plan's doing (`plan_error_in_refusals`).
     let since = filetime_now();
-    let engine = super::ipv6_block::open_dynamic_session_named(
-        SUBLAYER_NAME,
-        "Confines IPv4 to a Neoxify full tunnel; removed when it ends",
-    )?;
+    let engine = super::ipv6_block::open_dynamic_session_named(session_name, session_purpose)?;
     // SAFETY: `engine` is live.
-    let keys = unsafe { free_keys(engine) };
+    let keys = unsafe { free_keys_of(engine, pool) };
     // SAFETY: `engine` is live, and every blob in `apps` outlives the call.
     match unsafe { build(engine, keys, specs, &apps) } {
         Ok(blocks) => Ok(Installed { engine: engine as isize, filters: specs.len(), blocks, since }),
@@ -1532,7 +1577,7 @@ unsafe fn build(
             let err = FwpmTransactionCommit0(engine);
             if err != 0 {
                 FwpmTransactionAbort0(engine);
-                return Err(format!("the IPv4 confinement could not be committed ({err:#010x})"));
+                return Err(format!("the {} could not be committed ({err:#010x})", keys.sublayer_name));
             }
             Ok(blocks)
         }
@@ -1565,11 +1610,75 @@ unsafe fn add_everything(
     Ok(blocks)
 }
 
+/// Hands `specs` to the real filtering engine under a pair of `pool`,
+/// inside a transaction, and aborts it: WFP validates each filter as it is
+/// added -- layer, sublayer, weight, every condition's field and value type,
+/// an app id -- and nothing stays in force. `None` where the engine or a
+/// transaction will not open, or where an add is refused as access denied:
+/// adding filters needs administrator rights, which GitHub's Windows
+/// runners have. A session that is not elevated can open the engine and a
+/// transaction and is refused only at the first add, which used to read as
+/// WFP rejecting the filters.
+#[cfg(test)]
+pub(super) fn add_then_abort(specs: &[FilterSpec], pool: &[CaptureKeys; 2]) -> Option<Result<usize, String>> {
+    let mut apps: Vec<(PathBuf, super::ipv6_block::AppId)> = Vec::new();
+    for spec in specs {
+        for cond in &spec.conds {
+            if let Cond::App(path) = cond {
+                if apps.iter().any(|(p, _)| p == path) {
+                    continue;
+                }
+                match super::ipv6_block::AppId::resolve(&path.to_string_lossy()) {
+                    Ok(id) => apps.push((path.clone(), id)),
+                    Err(e) => return Some(Err(format!("an app id: {e}"))),
+                }
+            }
+        }
+    }
+    let engine = super::ipv6_block::open_dynamic_session_named("Neoxify test", "test").ok()?;
+    // SAFETY: `engine` is live until it is closed below, once, and every
+    // blob in `apps` outlives the calls that point into it.
+    unsafe {
+        if FwpmTransactionBegin0(engine, 0) != 0 {
+            FwpmEngineClose0(engine);
+            return None;
+        }
+        let result = add_everything(engine, free_keys_of(engine, pool), specs, &apps);
+        FwpmTransactionAbort0(engine);
+        FwpmEngineClose0(engine);
+        if result.as_ref().is_err_and(|e| access_denied(e)) {
+            return None;
+        }
+        Some(result.map(|blocks| blocks.len()))
+    }
+}
+
+/// Whether an add's error is the platform refusing a caller that is not
+/// elevated -- `E_ACCESSDENIED` or `ERROR_ACCESS_DENIED`, as `add_spec` and
+/// its kin write the code -- rather than refusing the filter.
+#[cfg(test)]
+fn access_denied(error: &str) -> bool {
+    ["0x80070005", "0x00000005"].iter().any(|code| error.contains(code))
+}
+
+#[cfg(test)]
+mod access_denied_tests {
+    /// Refused for want of rights, said as not elevated -- never as the
+    /// filters being wrong -- and nothing else taken for it.
+    #[test]
+    fn an_add_refused_for_want_of_rights_is_not_a_rejected_filter() {
+        assert!(super::access_denied("could not add the filter \"Neoxify reconnect hold: block all outbound IPv4\" (0x80070005)"));
+        assert!(super::access_denied("could not register the Neoxify reconnect hold filtering provider (0x00000005)"));
+        assert!(!super::access_denied("could not add the filter (0x80320009)"));
+        assert!(!super::access_denied("an app id: the system cannot find the file specified (0x00000002)"));
+    }
+}
+
 /// # Safety
 /// Inside an open transaction.
 unsafe fn add_provider(engine: HANDLE, keys: CaptureKeys) -> Result<(), String> {
-    let mut name = super::ipv6_block::wide(PROVIDER_NAME);
-    let mut description = super::ipv6_block::wide("Neoxify VPN: IPv4 confined to a full tunnel");
+    let mut name = super::ipv6_block::wide(keys.provider_name);
+    let mut description = super::ipv6_block::wide(keys.provider_description);
     let mut provider: FWPM_PROVIDER0 = std::mem::zeroed();
     provider.providerKey = keys.provider;
     provider.displayData.name = name.as_mut_ptr();
@@ -1580,14 +1689,14 @@ unsafe fn add_provider(engine: HANDLE, keys: CaptureKeys) -> Result<(), String> 
     if err == 0 || err == FWP_E_ALREADY_EXISTS as u32 {
         return Ok(());
     }
-    Err(format!("could not register the {PROVIDER_NAME} filtering provider ({err:#010x})"))
+    Err(format!("could not register the {} filtering provider ({err:#010x})", keys.provider_name))
 }
 
 /// # Safety
 /// Inside an open transaction.
 unsafe fn add_sublayer(engine: HANDLE, keys: CaptureKeys) -> Result<(), String> {
-    let mut name = super::ipv6_block::wide(SUBLAYER_NAME);
-    let mut description = super::ipv6_block::wide("IPv4 confined to a Neoxify full tunnel; removed when it ends");
+    let mut name = super::ipv6_block::wide(keys.sublayer_name);
+    let mut description = super::ipv6_block::wide(keys.sublayer_description);
     let mut provider_key = keys.provider;
     let mut sublayer: FWPM_SUBLAYER0 = std::mem::zeroed();
     sublayer.subLayerKey = keys.sublayer;
@@ -1600,7 +1709,7 @@ unsafe fn add_sublayer(engine: HANDLE, keys: CaptureKeys) -> Result<(), String> 
     if err == 0 || err == FWP_E_ALREADY_EXISTS as u32 {
         return Ok(());
     }
-    Err(format!("could not create the {SUBLAYER_NAME} sublayer ({err:#010x})"))
+    Err(format!("could not create the {} sublayer ({err:#010x})", keys.sublayer_name))
 }
 
 pub(super) fn layer_key(layer: Layer) -> GUID {
@@ -2682,9 +2791,18 @@ mod tests {
         assert_eq!((key(a.provider), key(a.sublayer)), (key(CAPTURE_PROVIDER_KEY), key(CAPTURE_SUBLAYER_KEY)));
         assert!(a.weight < 0xFFFF && b.weight < 0xFFFF && a.weight != b.weight);
         let source = include_str!("confinement.rs");
-        let body = &source[source.find("fn install_specs(").expect("install_specs")..];
-        let body = &body[..body.find("\n}\n").expect("its end")];
-        let probed = body.find("free_keys(engine)").expect("the free pair asked for");
+        let body_of = |signature: &str| {
+            let body = &source[source.find(signature).unwrap_or_else(|| panic!("{signature}"))..];
+            &body[..body.find("\n}\n").expect("its end")]
+        };
+        // The confinement installs under its own two pairs, through the
+        // install every filter set of this kind shares.
+        assert!(
+            body_of("fn install_specs(").contains("install_specs_with(specs, &CAPTURE_KEYS,"),
+            "the confinement installs under another pool"
+        );
+        let body = body_of("pub(super) fn install_specs_with(");
+        let probed = body.find("free_keys_of(engine, pool)").expect("the free pair asked for");
         assert!(probed < body.find("build(engine, keys, specs, &apps)").expect("and built under"));
     }
 

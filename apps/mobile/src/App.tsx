@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { ScreenTransition } from "@shared/components/ScreenTransition";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { ScreenTransition, screenDirection } from "@shared/components/ScreenTransition";
 import { getTokens } from "@shared/lib/session";
 import { flushAttempts } from "@shared/lib/attempts";
 import { endCustomerSession, setTunnelTeardown, type SessionEnd } from "@shared/lib/session-end";
@@ -9,6 +9,9 @@ import { useI18n } from "@shared/lib/i18n";
 import { tearDownMobileForSignOut, vpnStatus } from "./lib/vpn";
 import { setRelayTunnelReader } from "@shared/lib/last-resort";
 import { BackupRouteChip } from "@shared/components/BackupRoute";
+import type { NavId, ShellPage } from "@shared/components/shell/AppShell";
+import { forgetShellProfile, isSignedInScreen, transitionKey } from "@shared/lib/shell-nav";
+import { swapView } from "@shared/lib/view-transition";
 import { Login } from "@shared/screens/Login";
 import { Register } from "@shared/screens/Register";
 import { VerifyEmail } from "@shared/screens/VerifyEmail";
@@ -18,12 +21,21 @@ import { StorePlans } from "@shared/screens/StorePlans";
 import { Referrals } from "@shared/screens/Referrals";
 import { Support } from "@shared/screens/Support";
 import { Settings } from "@shared/screens/Settings";
+import { Activity } from "@shared/screens/Activity";
+import { logout } from "@shared/lib/auth";
+import { networkKeyFromAsn } from "@shared/lib/network-identity";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { sweepUnfinishedPurchases } from "@shared/lib/iap";
 import { Dashboard } from "./screens/Dashboard";
 import { PerAppCard } from "./components/PerAppCard";
-import { isAndroid } from "./lib/platform";
+import { isAndroid, isIOS } from "./lib/platform";
 import { ProminentDisclosure, hasAcceptedDisclosure } from "./components/ProminentDisclosure";
+import { appPrefs } from "@shared/lib/app-prefs";
+import { PHONE_DEVICE, noticesFor, setNotices } from "./lib/phone-notices";
+import { AndroidUpdateRow } from "./components/AndroidUpdateRow";
+import { autoConnectLatch } from "@shared/lib/auto-connect";
+import { sessionLog } from "@shared/lib/session-log";
+import { PHONE_MAIN_PAGE_EXTRAS } from "./lib/phone-main-extras";
 
 /** How often a queued diagnostic report retries. Matches the desktop
  * client so the two do not report at different rates for no reason. */
@@ -65,9 +77,10 @@ setRelayTunnelReader(async () => (await vpnStatus()).connected);
  * routing table there. Custom mode splits for the same reason, and is
  * passed into the shared Settings as a slot.
  *
- * No update banner: Android cannot silently replace its own APK, so
- * in-app updating is a different mechanism entirely and is not wired up
- * yet. Better absent than present and lying about what it will do.
+ * Updates: Android cannot silently replace its own APK, so the direct
+ * build says in Settings when a newer one is published and opens its
+ * download (components/AndroidUpdateRow.tsx); Android's installer asks
+ * before replacing anything. Play and the App Store update their own.
  */
 type Screen =
   | "loading"
@@ -81,10 +94,15 @@ type Screen =
   | "plans"
   | "settings"
   | "referrals"
-  | "support";
+  | "support"
+  | "activity";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
+  /** The screen as of the last render, for a change of screen asked from a
+   * callback (`go`). */
+  const screenRef = useRef<Screen>(screen);
+  screenRef.current = screen;
   // Carries the just-submitted credentials into the verify screen so it
   // can sign in the moment the code is confirmed. Held in memory only.
   const [pendingAuth, setPendingAuth] = useState<{ email: string; password?: string } | null>(null);
@@ -92,22 +110,61 @@ export default function App() {
   // After a sign-up through the relay: "enter an Ultimate voucher code".
   const [plansNotice, setPlansNotice] = useState<string | null>(null);
   const endingRef = useRef(false);
-  const { t } = useI18n();
+  // A sign-out from one of the shell's pages, from its profile menu.
+  const [pageSigningOut, setPageSigningOut] = useState(false);
+  const { t, language } = useI18n();
+  const prefs = useSyncExternalStore(appPrefs.subscribe, appPrefs.current, appPrefs.current);
+  const [prefsLoaded, setPrefsLoaded] = useState(false);
+
+  // The device's preferences, read once per run (lib/app-prefs.ts).
+  useEffect(() => {
+    let alive = true;
+    void appPrefs.load().then(() => alive && setPrefsLoaded(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // The session log keeps seven days while the app runs, not only at each
+  // start (lib/session-log.ts).
+  useEffect(() => sessionLog.keepPruned(), []);
+
+  // The tunnel's own notifications (lib/phone-notices.ts) in the app's
+  // language, with the customer's setting: handed to the native side now
+  // and whenever either changes, so what it posts in the background is
+  // what Settings says. Not before the setting has been read -- a default
+  // is not the customer's answer.
+  useEffect(() => {
+    if (!prefsLoaded) return;
+    const platform = isAndroid() ? "android" : isIOS() ? "ios" : null;
+    if (platform === null) return;
+    void setNotices(noticesFor(t, prefs.notifications, platform)).catch(() => undefined);
+    // `t` follows the language.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefsLoaded, prefs.notifications, language]);
 
   // The disclosure gates everything, including a session that is already
   // signed in. Play wants it shown before the data collection begins,
   // and someone upgrading from an earlier build has never seen it -- so
   // "has a token" is not evidence of having been told.
+  //
+  // "Connect when Neoxify starts" is for a run that opens on the main page
+  // signed in, with the disclosure already accepted: a run that opens on
+  // either of the other two has nothing to connect "on start", now or after
+  // (lib/auto-connect.ts, lib/phone-main-extras.ts).
   useEffect(() => {
     void (async () => {
       if (!(await hasAcceptedDisclosure())) {
+        autoConnectLatch.disarm();
         setScreen("disclosure");
         return;
       }
       try {
         const tokens = await getTokens();
+        if (!tokens) autoConnectLatch.disarm();
         setScreen(tokens ? "dashboard" : "login");
       } catch {
+        autoConnectLatch.disarm();
         setScreen("login");
       }
     })();
@@ -186,6 +243,13 @@ export default function App() {
     if (endingRef.current) return;
     endingRef.current = true;
     setScreen("signingOut");
+    // The avatar line belongs to the account that just left; a later
+    // sign-in in this run is not "when Neoxify starts"; and the session log
+    // goes with the session, off for whoever signs in next
+    // (lib/session-log.ts).
+    forgetShellProfile();
+    autoConnectLatch.disarm();
+    void sessionLog.wipe();
     try {
       let ended: SessionEnd;
       try {
@@ -207,17 +271,132 @@ export default function App() {
     }
   }
 
+  /** Signing out from Settings, after it has asked: an automatic
+   * reconnect waiting for the app to be in front is cancelled, then
+   * `logout()` takes the tunnel down (setTunnelTeardown above) before it
+   * deletes anything, then the session ends as every other way does. */
+  async function signOutFromSettings() {
+    if (pageSigningOut) return;
+    setPageSigningOut(true);
+    autoReconnect.cancel("signedOut");
+    try {
+      await logout();
+    } finally {
+      setPageSigningOut(false);
+      await handleLoggedOut();
+    }
+  }
+
   // See the desktop App: registered once, always calling the current
   // render's handler.
   const handleLoggedOutRef = useRef(handleLoggedOut);
   handleLoggedOutRef.current = handleLoggedOut;
   useEffect(() => onSessionRevoked(() => void handleLoggedOutRef.current("revoked")), []);
 
+  /** A change of screen. Between the main page and another page of the
+   * signed-in shell it is animated here, as a change of view (`swapView`):
+   * the transition below keeps one key for all of them (`transitionKey`),
+   * so the Dashboard -- and the shell it draws them in -- stays mounted.
+   * Everything else goes through the transition below. As on Windows,
+   * where a Dashboard mounted anew for every return put "Loading..." over
+   * the whole window and then "Connected, not confirmed", no route and no
+   * list for seconds over a tunnel that never changed (VM, 2026-10-20). */
+  const go = (next: Screen) => {
+    const from = screenRef.current;
+    if (from === next) return;
+    if (isSignedInScreen(from) && isSignedInScreen(next)) {
+      swapView(() => setScreen(next), screenDirection(from, next));
+      return;
+    }
+    setScreen(next);
+  };
+
+  /** One of the signed-in pages, drawn in the main page's own shell (the
+   * Dashboard's `page`) -- the bottom nav on a phone, the tabs or the
+   * sidebar on a tablet -- as on Windows. `nav` is the nav item it belongs
+   * to. Null on the main page and outside the shell. */
+  const shellPage = (): ShellPage | null => {
+    const page = (nav: NavId, node: ReactNode): ShellPage => ({ nav, key: screen, node });
+    if (screen === "settings") {
+      return page(
+        "settings",
+        <Settings
+          onBack={() => go("dashboard")}
+          onOpenReferrals={() => go("referrals")}
+          onOpenSupport={() => go("support")}
+          onLoggedOut={() => void handleLoggedOut()}
+          // Android only. Custom mode is per-app routing, which on iOS
+          // belongs to the system: `vpn_list_apps` has no iOS
+          // implementation and returns unavailable(), so this card
+          // offered a feature that errored the moment it was switched
+          // on -- which is also what App Review would find. Positive
+          // test rather than `!isIOS()`, so a platform this does not
+          // recognise hides the section instead of offering a broken one.
+          customSection={isAndroid() ? <PerAppCard /> : null}
+          onOpenPlans={() => go("plans")}
+          onOpenActivity={() => go("activity")}
+          onSignOut={() => void signOutFromSettings()}
+          platform={isAndroid() ? "android" : isIOS() ? "ios" : "web"}
+          // Notifications only (lib/phone-notices.ts): the rows a phone does
+          // not honour are not drawn.
+          device={isAndroid() || isIOS() ? PHONE_DEVICE : undefined}
+          // The direct APK only: Play and the App Store update their own
+          // builds, and a store build never carries the check.
+          aboutExtra={isAndroid() && !IS_STORE_BUILD ? <AndroidUpdateRow /> : null}
+        />,
+      );
+    }
+    if (screen === "activity") {
+      return page(
+        "activity",
+        <Activity
+          // The network the phone's connect history is filed under: the
+          // address block the control plane last reported for it.
+          readNetwork={async () => networkKeyFromAsn()}
+          onOpenPlans={() => go("plans")}
+          onBack={() => go("settings")}
+          // Offered once the phone's main page records it
+          // (lib/phone-main-extras.ts); not before.
+          sessionLog={PHONE_MAIN_PAGE_EXTRAS}
+        />,
+      );
+    }
+    if (screen === "referrals") {
+      // Back to Settings rather than the Dashboard: that is where they came
+      // from, and landing somewhere else is how a detour starts feeling
+      // like getting lost.
+      return page("none", <Referrals onBack={() => go("settings")} />);
+    }
+    if (screen === "support") {
+      return page("none", <Support onBack={() => go("settings")} />);
+    }
+    // Unreachable in a store build, and unreachable rather than merely
+    // unlinked: the condition is a build-time constant, so the bundler
+    // drops this branch and the Plans screen -- with its purchase flow and
+    // its voucher field -- is not present in the artifact at all. Hiding
+    // the entrance would still ship the room, which is what a reviewer
+    // looks for and what a determined customer finds.
+    if (screen === "plans" && !IS_STORE_BUILD) {
+      const leavePlans = () => {
+        setPlansNotice(null);
+        go("dashboard");
+      };
+      return page("none", <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />);
+    }
+    // The App Store counterpart, and the mirror image of the branch above:
+    // this one is dropped from every non-store build for the same reason,
+    // so neither artifact carries the other's purchase path.
+    if (screen === "plans" && IS_STORE_BUILD) {
+      return page("none", <StorePlans onActivated={() => go("dashboard")} onBack={() => go("dashboard")} />);
+    }
+    return null;
+  };
+
   function renderScreen() {
   if (screen === "loading") {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        Loading...
+        {t("common.loading")}
       </div>
     );
   }
@@ -287,73 +466,38 @@ export default function App() {
       />
     );
   }
-  if (screen === "settings") {
-    return (
-      <Settings
-        onBack={() => setScreen("dashboard")}
-        onOpenReferrals={() => setScreen("referrals")}
-        onOpenSupport={() => setScreen("support")}
-        onLoggedOut={() => void handleLoggedOut()}
-        // Android only. Custom mode is per-app routing, which on iOS
-        // belongs to the system: `vpn_list_apps` has no iOS
-        // implementation and returns unavailable(), so this card
-        // offered a feature that errored the moment it was switched
-        // on -- which is also what App Review would find. Positive
-        // test rather than `!isIOS()`, so a platform this does not
-        // recognise hides the section instead of offering a broken one.
-        customSection={isAndroid() ? <PerAppCard /> : null}
-      />
-    );
-  }
-  if (screen === "referrals") {
-    // Back to Settings rather than the Dashboard: that is where they came
-    // from, and landing somewhere else is how a detour starts feeling
-    // like getting lost.
-    return <Referrals onBack={() => setScreen("settings")} />;
-  }
-  if (screen === "support") {
-    return <Support onBack={() => setScreen("settings")} />;
-  }
-  // Unreachable in a store build, and unreachable rather than merely
-  // unlinked: the condition is a build-time constant, so the bundler
-  // drops this branch and the Plans screen -- with its purchase flow and
-  // its voucher field -- is not present in the artifact at all. Hiding
-  // the entrance would still ship the room, which is what a reviewer
-  // looks for and what a determined customer finds.
-  if (screen === "plans" && !IS_STORE_BUILD) {
-    const leavePlans = () => {
-      setPlansNotice(null);
-      setScreen("dashboard");
-    };
-    return <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />;
-  }
-  // The App Store counterpart, and the mirror image of the branch above:
-  // this one is dropped from every non-store build for the same reason,
-  // so neither artifact carries the other's purchase path.
-  if (screen === "plans" && IS_STORE_BUILD) {
-    return (
-      <StorePlans
-        onActivated={() => setScreen("dashboard")}
-        onBack={() => setScreen("dashboard")}
-      />
-    );
-  }
+    // The main page, and every other page of the signed-in shell drawn in
+    // its shell (`shellPage`): one Dashboard, mounted once a session.
     return (
       <Dashboard
         onLoggedOut={() => void handleLoggedOut()}
-        onBrowsePlans={() => setScreen("plans")}
-        onOpenSettings={() => setScreen("settings")}
+        onBrowsePlans={() => go("plans")}
+        onOpenSettings={() => go("settings")}
+        onOpenActivity={() => go("activity")}
+        onOpenReferrals={() => go("referrals")}
+        onOpenSupport={() => go("support")}
+        page={shellPage()}
+        onShowMain={() => setScreen("dashboard")}
       />
     );
   }
 
   // As on the desktop: the backup-route chip above every screen while
-  // relay mode lasts, and the consent prompt over them when asked.
+  // relay mode lasts. Its row takes the status bar's inset while it shows,
+  // and the screen beneath then takes none (globals.css).
   return (
     <div className="flex h-full flex-col">
-      <BackupRouteChip />
-      <div className="min-h-0 flex-1">
-        <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>
+      <div className="nx-relayrow">
+        <BackupRouteChip />
+      </div>
+      <div className="nx-screen min-h-0 flex-1">
+        {/* Through the View Transitions API where the WebView has it
+            (Android's Chromium WebView; WKWebView from iOS 18), so the
+            bottom nav keeps still and its pill travels while the page
+            slides; the CSS slide where it does not. */}
+        <ScreenTransition screenKey={transitionKey(screen)} viewTransitions>
+          {renderScreen()}
+        </ScreenTransition>
       </div>
     </div>
   );

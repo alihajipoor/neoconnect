@@ -15,6 +15,12 @@ export interface AccessTokenPayload {
 export interface RefreshTokenPayload {
   sub: string;
   tokenVersion: number;
+  /** When the session was signed in to (unix seconds). Carried through
+   * every refresh, so the session cap counts from the sign-in. Absent on
+   * tokens issued before it existed. */
+  ast?: number;
+  /** Set by the JWT library on every token. */
+  iat?: number;
 }
 
 // Deliberately its own shape (not reusing AccessTokenPayload) even though

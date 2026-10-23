@@ -1,5 +1,6 @@
-import { CircleAlert, CircleCheck } from "lucide-react";
-import type { TranslationKey } from "../lib/i18n";
+import { Check, CircleAlert, CircleCheck, TriangleAlert } from "lucide-react";
+import type { Language, TranslationKey } from "../lib/i18n";
+import { formatNumber } from "../lib/locale-format";
 import type { IspTag } from "../lib/types";
 import { cn } from "../lib/utils";
 
@@ -14,23 +15,52 @@ type Translate = (key: TranslationKey, vars?: Record<string, string | number>) =
  * in the tooltip and the accessible name rather than the line, so the
  * row stays readable and the evidence is one hover away.
  *
+ * `look="pearl"` is the desktop's locations panel: a short line ("Works
+ * for others here") that fits its rows, with the full sentence in the
+ * tooltip and the accessible name, and colour from pearl.css's ink tokens
+ * -- the hues the icon keeps are below AA as text.
+ *
+ * `look="icon"` is the redesigned list's protocol row: a check or an alert
+ * in a tinted circle, the full sentence its accessible name and tooltip --
+ * an image role, so a screen reader reads it (a label on a bare span is
+ * ignored).
+ *
  * Takes `t` rather than calling the hook, so it renders -- and is tested
- * -- without the provider. */
-export function IspTagLine({ tag, t }: { tag: IspTag | null | undefined; t: Translate }) {
+ * -- without the provider; `language` writes the counts in its digits. */
+export function IspTagLine({
+  tag,
+  t,
+  look,
+  language = "en",
+}: {
+  tag: IspTag | null | undefined;
+  t: Translate;
+  look?: "pearl" | "icon";
+  language?: Language;
+}) {
   if (!tag) return null;
   const works = tag.code === "worksOnYourIsp";
   const text = t(works ? "loc.ispWorks" : "loc.ispFailing");
-  const detail = t("loc.ispCount", { customers: tag.customers, outOf: tag.outOf, hours: tag.windowHours });
+  const n = (value: number) => formatNumber(value, language);
+  const detail = t("loc.ispCount", { customers: n(tag.customers), outOf: n(tag.outOf), hours: n(tag.windowHours) });
   const Icon = works ? CircleCheck : CircleAlert;
+  if (look === "icon") {
+    return (
+      <span className={cn("nx-ispi", !works && "fail")} role="img" title={`${text}. ${detail}`} aria-label={`${text}. ${detail}`} data-isp-tag={tag.code}>
+        {works ? <Check aria-hidden /> : <TriangleAlert aria-hidden />}
+      </span>
+    );
+  }
+  const pearl = look === "pearl";
   return (
     <span
-      className={cn("flex min-w-0 items-center gap-1 text-[11px]", works ? "text-success" : "text-warning")}
-      title={detail}
+      className={cn("flex min-w-0 items-center gap-1", !pearl && "text-[11px]", !pearl && (works ? "text-success" : "text-[var(--warn-ink)]"))}
+      title={pearl ? `${text}. ${detail}` : detail}
       aria-label={`${text}. ${detail}`}
       data-isp-tag={tag.code}
     >
       <Icon className="size-3 shrink-0" aria-hidden />
-      <span className="truncate">{text}</span>
+      <span className="truncate">{pearl ? t(works ? "loc.ispWorksShort" : "loc.ispFailingShort") : text}</span>
     </span>
   );
 }

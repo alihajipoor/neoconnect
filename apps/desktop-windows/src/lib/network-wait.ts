@@ -13,9 +13,15 @@
  * when a network with a way out is back. The screen says "Waiting for a
  * network connection" meanwhile (`networkWait`).
  *
- * Whether there is a way out is asked of Windows' routing table
- * (`network_way_out`, the table the service's own refusal reads), every
- * `NETWORK_POLL_MS`. That answer is only a hint for when to try: the service
+ * Whether there is a way out is asked of the service, by the rule its
+ * refusal applies (`network_way_out`, `Request::WayOut`: the best route
+ * toward the rung's own server on an up adapter that is not ours, a
+ * leftover host route skipped, or an up adapter with a gateway -- the best
+ * route alone, wherever it led, said yes with the cable out and ended every
+ * wait at its first look; the app's own copy of the rule had drifted from
+ * the service's): soon after the refusal, and less often the longer the wait,
+ * up to every `NETWORK_POLL_MS` (`nextLookIn`). That answer is only a hint
+ * for when to try: the service
  * decides, and the rung is dialled again every `NETWORK_RETRY_ANYWAY_MS`
  * regardless -- a dial the service refuses for want of a network costs
  * nothing and names no server -- so a hint that cannot see a way out (a line
@@ -23,8 +29,23 @@
 
 import { BLOCKED_WAIT_MAX_MS } from "./auto-reconnect";
 
-/** How often a waiting pass asks whether a network is back. */
+/** How often a waiting pass asks whether a network is back, once it has
+ * waited a while. */
 export const NETWORK_POLL_MS = 2_000;
+
+/** How soon it first asks, after the service's first refusal on a rung.
+ *
+ * Measured on the VM (R3d, the guest's link off for four seconds): the
+ * reconnect's dial went out once the browser said the network was back,
+ * 1.5 s after the address returned, and was refused -- the default route
+ * not there yet. The first look again came `NETWORK_POLL_MS` later
+ * whatever had come back in the meantime, and found a way out at once.
+ * A refusal like that is a network on its way back, so the wait looks
+ * again within a quarter of a second, and then every quarter of the time
+ * it has waited, up to `NETWORK_POLL_MS`: a network that comes back is
+ * noticed within a quarter of the time it took. Each look is a local
+ * routing-table read; nothing is dialled, and nothing leaves the machine. */
+export const NETWORK_FIRST_LOOK_MS = 250;
 
 /** How often it dials the same rung again whatever the answer. */
 export const NETWORK_RETRY_ANYWAY_MS = 30_000;
@@ -49,15 +70,36 @@ export interface NetworkWaitDeps {
  * service look again. Both mean "dial the same rung". */
 export type NetworkWaitOutcome = "back" | "retry" | "stopped" | "gaveUp";
 
+/** How long to wait before the next look, `waited` into this round of the
+ * wait, `round` being how many rounds this rung has waited already -- each
+ * one ended by a dial the service refused again.
+ *
+ * A quarter of the time waited, between `NETWORK_FIRST_LOOK_MS` and
+ * `NETWORK_POLL_MS`. Never hammering: what a look can lead to is a dial,
+ * and a hint the service keeps refusing -- the two read the routing table
+ * with different questions, and could disagree for good -- would have it
+ * dialled at every first look. So the first look of each later round
+ * comes twice as late as the last one's did, up to `NETWORK_POLL_MS`: the
+ * pace the wait always had. */
+export function nextLookIn(waited: number, round: number): number {
+  const first = Math.min(NETWORK_FIRST_LOOK_MS * 2 ** Math.max(0, round), NETWORK_POLL_MS);
+  return Math.min(NETWORK_POLL_MS, Math.max(first, Math.round(waited / 4)));
+}
+
 /** Waits until a network is back, it is time to try anyway, the pass is
  * stopped, or `since` -- when this rung first found no network -- is
- * `NETWORK_WAIT_MAX_MS` ago. */
-export async function waitForNetwork(deps: NetworkWaitDeps, since: number = deps.now()): Promise<NetworkWaitOutcome> {
+ * `NETWORK_WAIT_MAX_MS` ago. `round`: how many times this rung has waited
+ * already (`nextLookIn`). */
+export async function waitForNetwork(
+  deps: NetworkWaitDeps,
+  since: number = deps.now(),
+  round = 0,
+): Promise<NetworkWaitOutcome> {
   const began = deps.now();
   for (;;) {
     if (deps.stopped()) return "stopped";
     if (deps.now() - since >= NETWORK_WAIT_MAX_MS) return "gaveUp";
-    await deps.sleep(NETWORK_POLL_MS);
+    await deps.sleep(nextLookIn(deps.now() - began, round));
     if (deps.stopped()) return "stopped";
     deps.progress();
     const back = await deps.wayOut().catch(() => false);

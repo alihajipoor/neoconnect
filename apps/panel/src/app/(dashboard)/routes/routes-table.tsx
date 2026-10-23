@@ -22,14 +22,11 @@ export function RoutesTable({
   protocolConfigs,
   nodes,
   canManage,
-  trialRouteId,
 }: {
   routes: Route[];
   protocolConfigs: ProtocolConfig[];
   nodes: Node[];
   canManage: boolean;
-  /** The free-trial route, so deleting it can say what that does. */
-  trialRouteId?: string | null;
 }) {
   const describe = (protocolConfigId: string | null) => {
     if (!protocolConfigId) return "—";
@@ -113,7 +110,7 @@ export function RoutesTable({
                               </DropdownMenuItem>
                             }
                             title="Delete this route?"
-                            description={routeDeleteWarning(route, trialRouteId)}
+                            description={routeDeleteWarning(route)}
                             successMessage="Route deleted"
                             onConfirm={() => deleteRoute(route.id)}
                           />

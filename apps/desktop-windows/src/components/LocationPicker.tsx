@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Loader2, Repeat, Sparkles, X } from "lucide-react";
+import { Check, CircleCheck, Loader2, Repeat, Sparkles, X } from "lucide-react";
 import { getAvailableRoutes, switchRoute } from "../lib/customer";
 import { hasRecommended, pickerRows } from "../lib/isp-tags";
 import { IspTagLine } from "./IspTagLine";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import type { RouteOption } from "../lib/types";
 import { cn } from "../lib/utils";
-import { Button } from "./ui";
+import { Button, PillButton } from "./ui";
 import { Latency } from "./Latency";
 import { RouteFlag } from "./Flag";
 import { useI18n } from "../lib/i18n";
@@ -15,11 +15,23 @@ import { failureText, type ShownFailure } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
 import { traceRequests } from "../lib/unanswered-report";
 import { routesToAdopt } from "../lib/picker-routes";
-import { groupByPlace, placeLabel, routePlace } from "../lib/route-place";
+import { groupByPlace, placeKey, placeLabel, routePlace } from "../lib/route-place";
+import { LocationList, type ListEvidence } from "./LocationList";
 
-// Full-screen overlay, not a floating dialog -- this app's window is a
-// fixed 400x640 (see tauri.conf.json), so "sheet slides over the whole
-// window" reads better than a small centered modal would.
+export type { ListEvidence } from "./LocationList";
+
+/** The last timing of the list, in memory for this run: the panel, the
+ * sheet and the Locations page are separate mounts of the list, and a
+ * measurement taken in one is shown, with its age, in the others rather
+ * than taken again -- a list that timed every server each time it was
+ * opened would be a visible probe pattern on a censored network. */
+let lastTiming: { subscriptionId: string; at: number; values: Record<string, number | null> } | null = null;
+
+// Four forms, one list: the full-window overlay the phone app opens from
+// its card ("overlay"), and the redesign's three -- the desktop's locations
+// panel beside the hero ("panel"), the phone-sized window's sheet ("sheet")
+// and the Locations page ("page"; LocationList.tsx draws those three). The
+// picking, the reconnect wiring and the honesty rules are the same in all.
 export function LocationPicker({
   subscriptionId,
   currentRouteId,
@@ -32,8 +44,36 @@ export function LocationPicker({
   onPicking,
   onPickFailed,
   connectionState,
+  lookState,
   onRoutes,
+  variant = "overlay",
+  confirmPick,
+  evidence,
+  onOpenFull,
+  focusSection,
 }: {
+  /** The Locations page, from the panel's menu. */
+  onOpenFull?: (section?: "explain") => void;
+  /** The page opened at a section: its explanation of the protocols. */
+  focusSection?: "explain";
+  /** The map's evidence, for the list to agree with it. Absent -- the
+   * phone app -- the filter reads the per-network tags alone, as before. */
+  evidence?: ListEvidence;
+  /** "overlay" is the full-window list the phone app opens from its card;
+   * "panel" the Pearl Glass locations panel the desktop keeps beside the
+   * hero; "sheet" the phone-sized window's sheet; "page" the Locations
+   * page. The panel is always there, so it does not fetch the list or time
+   * every server on its own when it appears -- the dashboard's own loads
+   * feed it, and latency is measured when the customer asks: a list that
+   * dialled every endpoint each time the window opened would be a visible
+   * probe pattern on a censored network. The sheet and the page are opened
+   * on purpose, as the overlay is: they refresh the list, and time the
+   * servers once if nothing has timed them yet in this run. */
+  variant?: "overlay" | "panel" | "sheet" | "page";
+  /** Asked before a pick goes ahead, with the route (null for Automatic):
+   * while a tunnel is up the dashboard confirms the switch and takes the
+   * tunnel down first. False leaves everything as it was. */
+  confirmPick?: (route: RouteOption | null) => Promise<boolean>;
   /** Told the list this picker's own request was answered with, and for
    * which subscription: newer than anything the dashboard holds. It stayed
    * in the picker, and the dashboard -- with nothing cached, its own
@@ -46,6 +86,10 @@ export function LocationPicker({
    * probe must not run across a connect or a disconnect, and the list
    * stays open while the dashboard does either (unanswered-report.ts). */
   connectionState?: string;
+  /** The state the list's words are drawn for -- "Connected here", "In
+   * use" -- when it is not the service's: the settled look held through a
+   * brief gap, as the chip's colour is (`heldListLook`). */
+  lookState?: string;
   /** Told the moment a server or Automatic is picked, before anything is
    * awaited -- a server's switch request can take seconds to answer, and
    * `onSwitched` waits for it. Whatever an automatic reconnect was doing
@@ -108,9 +152,12 @@ export function LocationPicker({
   initialRoutes?: RouteOption[];
 }) {
   const { t, language } = useI18n();
+  const panel = variant === "panel";
+  const overlay = variant === "overlay";
   const [routes, setRoutes] = useState<RouteOption[]>(initialRoutes ?? []);
-  // Only a blocking load when there is genuinely nothing to show.
-  const [loading, setLoading] = useState((initialRoutes ?? []).length === 0);
+  // Only a blocking load when there is genuinely nothing to show -- and
+  // never in the panel, which loads only when asked.
+  const [loading, setLoading] = useState(!panel && (initialRoutes ?? []).length === 0);
   // Kept as they came, and worded as the list renders (`ShownFailure`).
   const [error, setError] = useState<ShownFailure | null>(null);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
@@ -124,7 +171,15 @@ export function LocationPicker({
   /** Measured round-trip per route. Absent means "not measured yet",
    * which renders as "--" -- distinct from a measured failure, which is
    * an explicit null. Both are honest; neither invents a number. */
-  const [latencies, setLatencies] = useState<Record<string, number | null>>({});
+  const [latencies, setLatencies] = useState<Record<string, number | null>>(() =>
+    !overlay && lastTiming?.subscriptionId === subscriptionId ? { ...lastTiming.values } : {},
+  );
+  /** When the figures on screen were taken, and whether a timing runs now. */
+  const [measuredAt, setMeasuredAt] = useState<number | null>(() =>
+    !overlay && lastTiming?.subscriptionId === subscriptionId ? lastTiming.at : null,
+  );
+  const [measuring, setMeasuring] = useState(false);
+  const measuringRef = useRef(false);
   /** Narrow the list to routes that worked for most people on this
    * network. Off by default: the tags are information, and hiding
    * everything else unasked would make the choice for the customer. */
@@ -133,7 +188,11 @@ export function LocationPicker({
   // -- is into this, not into `routes`. Routes to one place sit
   // together (`groupByPlace`): with relays named by their exit, the
   // server's name order put Iran → Germany and Iran → France in turns.
-  const rows = groupByPlace(pickerRows(routes, recommendedOnly));
+  const rows = groupByPlace(
+    evidence ? workedRows(routes, recommendedOnly, evidence.worked) : pickerRows(routes, recommendedOnly),
+  );
+  // The filter, only when there is something to narrow to.
+  const canNarrow = evidence ? routes.some((r) => evidence.worked.has(placeKey(r))) : hasRecommended(routes);
   // With Automatic chosen, no server row is "the current one": the ladder
   // decides at connect time, and every row stays a way to pin a server.
   const pinnedRouteId = automatic ? undefined : currentRouteId;
@@ -160,7 +219,7 @@ export function LocationPicker({
     setError(null);
     if (adopted.length > 0) {
       setLoading(false);
-      void measureAll(adopted);
+      if (!panel) measureIfDue(adopted);
       return;
     }
     // Taken away: they were another plan's. This plan's list is the
@@ -170,11 +229,13 @@ export function LocationPicker({
   }, [initialRoutes]);
 
   useEffect(() => {
+    // The panel is fed by the dashboard: see `variant`.
+    if (panel) return;
     void load();
     // Measuring starts against whatever is on screen now rather than
     // waiting for the refresh, so the numbers fill in while the list is
     // already readable.
-    if ((initialRoutes ?? []).length > 0) void measureAll(initialRoutes ?? []);
+    if ((initialRoutes ?? []).length > 0) measureIfDue(initialRoutes ?? []);
   }, []);
 
   async function load() {
@@ -201,7 +262,7 @@ export function LocationPicker({
       ownAnswered.current = true;
       setRoutes(result.data);
       onRoutes?.(subscriptionId, result.data);
-      void measureAll(result.data);
+      measureIfDue(result.data);
     } else if (shown.length === 0) {
       // A failed refresh must not blank a list the customer can see and
       // use. It only becomes an error when there is nothing behind it.
@@ -226,9 +287,13 @@ export function LocationPicker({
     // Leaving the map empty renders every row as "--", which is what
     // "not measured" already means here.
     if (tunnelActive) return;
+    measuringRef.current = true;
+    setMeasuring(true);
+    const taken: Record<string, number | null> = {};
     await Promise.all(
       options.map(async (route) => {
         if (route.nodeStatus !== "ONLINE") {
+          taken[route.id] = null;
           setLatencies((prev) => ({ ...prev, [route.id]: null }));
           return;
         }
@@ -236,9 +301,26 @@ export function LocationPicker({
           host: route.endpoint.host,
           port: route.endpoint.port,
         }).catch(() => null);
+        taken[route.id] = ms;
         setLatencies((prev) => ({ ...prev, [route.id]: ms }));
       }),
     );
+    measuringRef.current = false;
+    setMeasuring(false);
+    const at = Date.now();
+    setMeasuredAt(at);
+    lastTiming = { subscriptionId, at, values: taken };
+  }
+
+  /** The overlay times the list each time it gets one, as it always has.
+   * The redesign's lists time it once a run, and again when asked. */
+  function measureIfDue(options: RouteOption[]) {
+    if (overlay) {
+      void measureAll(options);
+      return;
+    }
+    if (measuringRef.current || lastTiming?.subscriptionId === subscriptionId) return;
+    void measureAll(options);
   }
 
   /* One tab stop for the whole list, arrow keys to move within it.
@@ -283,7 +365,9 @@ export function LocationPicker({
    * away, which is the same bug wearing a different hat. */
   const autoFocusedRef = useRef(false);
   useEffect(() => {
-    if (loading || rows.length === 0 || autoFocusedRef.current) return;
+    // Nothing autofocuses in the panel: it sits beside the hero, and taking
+    // focus there would take it from wherever the customer was.
+    if (!overlay || loading || rows.length === 0 || autoFocusedRef.current) return;
     const first = rows.findIndex((_, i) => selectable(i));
     if (first < 0) return;
     autoFocusedRef.current = true;
@@ -304,7 +388,7 @@ export function LocationPicker({
    * of this app follows about not claiming things it has not done. */
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape" || switchingId !== null) return;
+      if (panel || variant === "page" || event.key !== "Escape" || switchingId !== null) return;
       event.preventDefault();
       onClose();
     }
@@ -335,6 +419,8 @@ export function LocationPicker({
 
   async function handlePick(route: RouteOption) {
     if (route.id === pinnedRouteId || switchingId) return;
+    // Over a live tunnel, the dashboard asks first and takes it down.
+    if (confirmPick && !(await confirmPick(route))) return;
     // The press, heard as it is made -- not once the request answers.
     onPicking?.(route.id);
     setSwitchError(null);
@@ -358,6 +444,208 @@ export function LocationPicker({
     }
   }
 
+  /** Automatic: no server call -- it means "no pin", which lives on the
+   * device. Over a live tunnel, the dashboard asks first and takes it down. */
+  async function pickAutomatic() {
+    if (!onChooseAutomatic) return;
+    if (automatic || switchingId) return;
+    if (confirmPick && !(await confirmPick(null))) return;
+    onPicking?.(null);
+    onChooseAutomatic();
+    onClose();
+  }
+
+  // The list's own waits and failures, the same in every form.
+  const status = loading ? (
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
+      <Loader2 className="size-4 animate-spin" />
+      {loadingLong ? <p className="text-xs">{t("common.stillTrying")}</p> : null}
+    </div>
+  ) : error ? (
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
+      <p className="text-sm text-destructive">{failureText(error, t)}</p>
+      <Button onClick={() => void load()}>{t("loc.retry")}</Button>
+    </div>
+  ) : routes.length === 0 ? (
+    panel ? (
+      // The panel loads only when asked: an empty list here is one
+      // that has not arrived, not a plan with nothing on it.
+      <div className="flex flex-col items-center gap-3 px-4 py-8 text-center text-sm text-ink-2">
+        <p className="m-0">{t("loc.notLoaded")}</p>
+        <PillButton variant="ghost" size="sm" onClick={() => void load()}>
+          {t("loc.retry")}
+        </PillButton>
+      </div>
+    ) : (
+      <p className="px-2 py-6 text-center text-sm text-muted-foreground">{t("loc.noLocations")}</p>
+    )
+  ) : null;
+
+  const after = (
+    <>
+      {switchingLong ? <p className="px-2 pt-2 text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
+      {switchError ? <p className="px-2 pt-2 text-xs text-destructive">{failureText(switchError, t)}</p> : null}
+    </>
+  );
+
+  if (!overlay) {
+    return (
+      <LocationList
+        variant={variant}
+        routes={routes}
+        latencies={latencies}
+        measuring={measuring}
+        measuredAt={measuredAt}
+        tunnelActive={tunnelActive}
+        connectionState={lookState ?? connectionState}
+        pinnedRouteId={pinnedRouteId}
+        currentRouteId={currentRouteId}
+        automatic={automatic}
+        showAutomatic={onChooseAutomatic !== undefined}
+        switchingId={switchingId}
+        evidence={evidence}
+        onPick={(route) => void handlePick(route)}
+        onAutomatic={() => void pickAutomatic()}
+        // Latency on request: see `variant`. Not from inside a tunnel.
+        onMeasure={() => {
+          if (!tunnelActive && !measuringRef.current) void measureAll(routesRef.current);
+        }}
+        onOpenFull={onOpenFull}
+        focusSection={focusSection}
+        status={status}
+        after={after}
+      />
+    );
+  }
+
+  // The phone app's overlay, as it was before the redesign: its own
+  // dashboard keeps the old look until the phone's phase.
+  const automaticRow = onChooseAutomatic ? (
+    <button
+      type="button"
+      onClick={() => void pickAutomatic()}
+      disabled={switchingId !== null}
+      aria-pressed={automatic}
+      className={cn(
+        "mb-2 flex w-full items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
+        automatic ? "border-primary/50 bg-primary/10" : "border-[var(--hairline-2)] bg-card/60 hover:border-[var(--ink-3)] hover:bg-card",
+      )}
+    >
+      <div
+        className={cn(
+          "flex size-9 shrink-0 items-center justify-center rounded-full",
+          automatic ? "bg-primary/20 text-primary" : "bg-highlight/10 text-highlight",
+        )}
+      >
+        <Sparkles className="size-4" />
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate text-sm font-medium">{t("loc.automatic")}</span>
+        <span className="text-xs text-muted-foreground">{t("loc.automaticHint")}</span>
+      </div>
+      {automatic ? <Check className="size-4 shrink-0 text-primary" /> : null}
+    </button>
+  ) : null;
+
+  const list = (
+    <>
+      {automaticRow}
+      {/* Only offered when there is something to narrow to. A filter
+          that empties the list would read as "nothing works here",
+          which is not what an absence of evidence means. */}
+      {canNarrow ? (
+        <label className="mb-2 flex cursor-pointer items-center gap-2 px-1 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={recommendedOnly}
+            onChange={(event) => setRecommendedOnly(event.target.checked)}
+            className="accent-primary"
+          />
+          {t("loc.recommendedOnly")}
+        </label>
+      ) : null}
+      <div className="flex flex-col gap-2" onKeyDown={onListKeyDown}>
+        {rows.map((route, index) => {
+          const isCurrent = route.id === pinnedRouteId;
+          const isSwitching = switchingId === route.id;
+          const place = routePlace(route);
+          const placeName = placeLabel(route, language);
+          const protocol = customerProtocolLabel(route.protocol, route.transport);
+          const ownAt = evidence?.ownAt(route) ?? null;
+          return (
+            <button
+              key={route.id}
+              ref={(el) => {
+                rowRefs.current[index] = el;
+              }}
+              tabIndex={index === focusedIndex ? 0 : -1}
+              onFocus={() => setFocusedIndex(index)}
+              onClick={() => void handlePick(route)}
+              disabled={isCurrent || switchingId !== null}
+              className={cn(
+                "flex items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
+                isCurrent ? "border-primary/50 bg-primary/10" : "border-[var(--hairline-2)] bg-card/60 hover:border-[var(--ink-3)] hover:bg-card",
+              )}
+            >
+              {/* The flag, not a pin: the country is what the list is
+                  scanned for. A relay shows its exit's flag with Iran's
+                  as a badge, since the exit is the country being chosen. */}
+              <div
+                className={cn(
+                  "flex size-9 shrink-0 items-center justify-center rounded-full",
+                  isCurrent ? "bg-primary/20" : "bg-highlight/10",
+                )}
+              >
+                <RouteFlag region={place.entry} exitRegion={place.exit} label={placeName} />
+              </div>
+              <div className="flex min-w-0 flex-1 flex-col">
+                {/* The country -- "Iran → Germany" for a relay -- over the
+                    node and protocol, which is where two routes to one
+                    place differ. */}
+                <span className="truncate text-sm font-medium">{placeName}</span>
+                <span className="truncate text-xs text-muted-foreground">
+                  {route.location.nodeName} &middot; {protocol}
+                </span>
+                {ownAt !== null ? (
+                  <span
+                    className="flex min-w-0 items-center gap-1 text-[11px] text-success"
+                    data-own-worked=""
+                    title={t("loc.ownWorkedTip")}
+                    aria-label={`${t("loc.ownWorked")}. ${t("loc.ownWorkedTip")}`}
+                  >
+                    <CircleCheck className="size-3 shrink-0" aria-hidden />
+                    <span className="truncate">{t("loc.ownWorked")}</span>
+                  </span>
+                ) : evidence && !evidence.tags ? null : (
+                  <IspTagLine tag={route.ispTag} t={t} language={language} />
+                )}
+              </div>
+              <Latency ms={route.id in latencies ? latencies[route.id] : null} />
+              {route.isRelay ? (
+                <span className="flex shrink-0 items-center gap-1 rounded-full bg-highlight/15 px-2 py-0.5 text-[10px] font-medium text-highlight">
+                  <Repeat className="size-3" />
+                  {t("loc.relayPill")}
+                </span>
+              ) : null}
+              {isSwitching ? (
+                <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
+              ) : isCurrent ? (
+                <Check className="size-4 shrink-0 text-primary" />
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+    </>
+  );
+
+  const body = (
+    <>
+      {status ?? list}
+      {after}
+    </>
+  );
+
   return (
     <div className="absolute inset-0 z-20 flex flex-col bg-background">
       <div className="flex items-center justify-between border-b border-border px-5 py-4">
@@ -373,152 +661,23 @@ export function LocationPicker({
         </div>
         <button
           onClick={onClose}
-          className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
+          className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-[var(--select)] hover:text-foreground"
         >
           <X className="size-4" />
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-3 py-3">
-        {loading ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" />
-            {loadingLong ? <p className="text-xs">{t("common.stillTrying")}</p> : null}
-          </div>
-        ) : error ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
-            <p className="text-sm text-destructive">{failureText(error, t)}</p>
-            <Button onClick={() => void load()}>{t("loc.retry")}</Button>
-          </div>
-        ) : routes.length === 0 ? (
-          <p className="px-2 py-6 text-center text-sm text-muted-foreground">
-            No locations available on your current plan.
-          </p>
-        ) : (
-          <>
-          {/* Automatic first, because the people this exists for are the
-              ones who open the list, try the first few rows by hand, hit
-              a blocked one and decide the app is broken. Choosing it
-              hands the order back to the ladder, which already moves on
-              by itself -- and on a network this device has never seen,
-              now leans on what worked for others there. */}
-          {onChooseAutomatic ? (
-            <button
-              type="button"
-              onClick={() => {
-                if (automatic || switchingId) return;
-                onPicking?.(null);
-                onChooseAutomatic();
-                onClose();
-              }}
-              disabled={switchingId !== null}
-              aria-pressed={automatic}
-              className={cn(
-                "mb-2 flex w-full items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
-                automatic
-                  ? "border-primary/50 bg-primary/10"
-                  : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",
-              )}
-            >
-              <div
-                className={cn(
-                  "flex size-9 shrink-0 items-center justify-center rounded-full",
-                  automatic ? "bg-primary/20 text-primary" : "bg-highlight/10 text-highlight",
-                )}
-              >
-                <Sparkles className="size-4" />
-              </div>
-              <div className="flex min-w-0 flex-1 flex-col">
-                <span className="truncate text-sm font-medium">{t("loc.automatic")}</span>
-                <span className="text-xs text-muted-foreground">{t("loc.automaticHint")}</span>
-              </div>
-              {automatic ? <Check className="size-4 shrink-0 text-primary" /> : null}
-            </button>
-          ) : null}
-          {/* Only offered when there is something to narrow to. A filter
-              that empties the list would read as "nothing works here",
-              which is not what an absence of evidence means. */}
-          {hasRecommended(routes) ? (
-            <label className="mb-2 flex cursor-pointer items-center gap-2 px-1 text-xs text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={recommendedOnly}
-                onChange={(event) => setRecommendedOnly(event.target.checked)}
-                className="accent-primary"
-              />
-              {t("loc.recommendedOnly")}
-            </label>
-          ) : null}
-          <div className="flex flex-col gap-2" onKeyDown={onListKeyDown}>
-            {rows.map((route, index) => {
-              const isCurrent = route.id === pinnedRouteId;
-              const isSwitching = switchingId === route.id;
-              const place = routePlace(route);
-              const placeName = placeLabel(route, language);
-              return (
-                <button
-                  key={route.id}
-                  ref={(el) => {
-                    rowRefs.current[index] = el;
-                  }}
-                  tabIndex={index === focusedIndex ? 0 : -1}
-                  onFocus={() => setFocusedIndex(index)}
-                  onClick={() => void handlePick(route)}
-                  disabled={isCurrent || switchingId !== null}
-                  className={cn(
-                    "flex items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
-                    isCurrent
-                      ? "border-primary/50 bg-primary/10"
-                      : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",
-                  )}
-                >
-                  {/* The flag, not a pin. Every row used to carry the
-                      same pin, which told the customer nothing they
-                      could not already read -- while the one thing they
-                      actually scan a server list for, the country, was
-                      buried in a slug like "fr-france". A relay shows
-                      its exit's flag with Iran's as a badge, since the
-                      exit is the country being chosen. */}
-                  <div
-                    className={cn(
-                      "flex size-9 shrink-0 items-center justify-center rounded-full",
-                      isCurrent ? "bg-primary/20" : "bg-highlight/10",
-                    )}
-                  >
-                    <RouteFlag region={place.entry} exitRegion={place.exit} label={placeName} />
-                  </div>
-                  <div className="flex min-w-0 flex-1 flex-col">
-                    {/* The country -- "Iran → Germany" for a relay --
-                        over the node and protocol, which is where two
-                        routes to one place differ. A relay used to read
-                        "ir2 / ir-iran" whichever country it left from. */}
-                    <span className="truncate text-sm font-medium">{placeName}</span>
-                    <span className="truncate text-xs text-muted-foreground">
-                      {route.location.nodeName} &middot; {customerProtocolLabel(route.protocol, route.transport)}
-                    </span>
-                    <IspTagLine tag={route.ispTag} t={t} />
-                  </div>
-                  <Latency ms={route.id in latencies ? latencies[route.id] : null} />
-                  {route.isRelay ? (
-                    <span className="flex shrink-0 items-center gap-1 rounded-full bg-highlight/15 px-2 py-0.5 text-[10px] font-medium text-highlight">
-                      <Repeat className="size-3" />
-                      Relay
-                    </span>
-                  ) : null}
-                  {isSwitching ? (
-                    <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
-                  ) : isCurrent ? (
-                    <Check className="size-4 shrink-0 text-primary" />
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
-          </>
-        )}
-        {switchingLong ? <p className="px-2 pt-2 text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
-        {switchError ? <p className="px-2 pt-2 text-xs text-destructive">{failureText(switchError, t)}</p> : null}
-      </div>
+      <div className="flex-1 overflow-y-auto px-3 py-3">{body}</div>
     </div>
   );
+}
+
+/** The rows for the "Worked here" filter from the map's evidence, in the
+ * order the server sent them. As `pickerRows`: narrowing never reorders,
+ * and a filter that would leave nothing shows everything instead -- an
+ * absence of evidence is not "nothing works here". */
+function workedRows(routes: readonly RouteOption[], workedOnly: boolean, worked: ReadonlySet<string>): RouteOption[] {
+  if (!workedOnly) return [...routes];
+  const kept = routes.filter((route) => worked.has(placeKey(route)));
+  return kept.length > 0 ? kept : [...routes];
 }

@@ -145,6 +145,22 @@ export interface SlotState {
   credit: Map<string, DeviceKey>;
 }
 
+/** Which of a customer's devices hold a slot they are using now, for the
+ * account's device list (GET /customer/devices).
+ *
+ * `known` is false whenever slots are not recorded for every subscription
+ * that could be in use -- DEVICE_SLOTS=off, an unlimited plan, or no
+ * active subscription -- and then `sessions` is empty and says nothing.
+ * Even when it is true, a device missing from `sessions` is not shown to
+ * be idle: an app from before slots, or one that dialled while the API
+ * was unreachable, connects without holding one. */
+export interface DevicesInUse {
+  known: boolean;
+  /** By session id: since when it has held its slot, and when it last
+   * renewed or carried traffic (epoch ms). */
+  sessions: Map<string, { since: number; lastSeen: number }>;
+}
+
 /** A device was just let in: by a claim (with or without a takeover) or
  * by a renewal that gave a lapsed slot back. */
 export interface SlotGrant {
@@ -498,6 +514,47 @@ export class DeviceSlotsService {
     } catch (err) {
       this.logger.warn(`Could not keep the slots of subscription ${subscriptionId}: ${(err as Error).message}`);
     }
+  }
+
+  /** The customer's devices holding a slot they are using now, across
+   * their active subscriptions -- read only, nothing is claimed, renewed
+   * or dropped. A holder counts while it renewed or carried traffic within
+   * STALE_AFTER_SEC and is not signed out: exactly the holders a claim
+   * would have to ask to take over. See DevicesInUse for what `known`
+   * means. */
+  async inUse(customerId: string): Promise<DevicesInUse> {
+    const unknown: DevicesInUse = { known: false, sessions: new Map() };
+    if (deviceSlotsMode() === "off") return unknown;
+    const subscriptions = await this.prisma.subscription.findMany({
+      where: { customerId, status: "ACTIVE" },
+      select: { id: true, plan: { select: { maxConcurrentConnections: true } } },
+    });
+    // A device using an unlimited subscription claims nothing that is
+    // kept, so with one of those active nobody's use can be read off slots.
+    if (
+      subscriptions.length === 0 ||
+      subscriptions.some((s) => positive(s.plan?.maxConcurrentConnections ?? null) === null)
+    ) {
+      return unknown;
+    }
+
+    const now = Date.now();
+    const sessions = new Map<string, { since: number; lastSeen: number }>();
+    for (const subscription of subscriptions) {
+      const holders = await this.holders(subscription.id);
+      if (holders.length === 0) continue;
+      const [seen, gone] = await Promise.all([this.lastSeen(subscription.id, holders, now), this.signedOut(holders)]);
+      for (const h of holders) {
+        const lastSeen = seen.get(h.sessionId) ?? h.lastRenew;
+        if (gone.has(h.sessionId) || now - lastSeen > STALE_MS) continue;
+        const other = sessions.get(h.sessionId);
+        sessions.set(h.sessionId, {
+          since: Math.min(other?.since ?? h.since, h.since),
+          lastSeen: Math.max(other?.lastSeen ?? lastSeen, lastSeen),
+        });
+      }
+    }
+    return { known: true, sessions };
   }
 
   /** For the backstop. Empty when slots are off. */

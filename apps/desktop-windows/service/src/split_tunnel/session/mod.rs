@@ -558,20 +558,21 @@ impl<P: Parts> Session<P> {
 
     /// What the live counters say is wrong, or `None` when nothing is.
     /// See `SplitTunnel::complaint`.
-    pub(super) fn complaint(&self) -> Option<String> {
+    pub(super) fn complaint(&self) -> Option<(neoconnect_ipc::SplitTunnelProblemCode, String)> {
         // Ahead of the counters, because it explains them. Once the
         // backstop has switched interception off the numbers stop
         // moving, and "nothing is coming back" would be a true reading
         // pointed at the wrong cause.
         if self.watchdog_tripped.load(std::sync::atomic::Ordering::SeqCst) {
-            return Some(
+            return Some((
+                neoconnect_ipc::SplitTunnelProblemCode::AdapterGone,
                 "The VPN adapter Custom mode was using disappeared, so it stopped \
                  redirecting and your applications are using your ordinary \
                  connection. Reconnect to protect them again."
                     .to_string(),
-            );
+            ));
         }
-        self.interception.stats().complaint(self.started.elapsed())
+        self.interception.stats().finding(self.started.elapsed())
     }
 
     /// Whether the tunnel is really carrying traffic. See

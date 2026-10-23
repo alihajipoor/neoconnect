@@ -54,9 +54,35 @@ export function displayedRouteId(
   pinnedRouteId: string | null | undefined,
   /** What the backend has provisioned, used when nothing is pinned. */
   provisionedRouteId: string | null | undefined,
+  /** False for a tunnel the screen found up and cannot say the route of:
+   * the service reports a protocol, never a credential, and the last dial
+   * this app remembers is not that tunnel's (`credentialOnTunnel` in
+   * tunnel-credential.ts). Such a tunnel is named as nothing. Naming the
+   * pin there is the 0.9.51 misnaming after Settings and back, and a route
+   * that merely shares the service's protocol may be another country.
+   * While nothing is up it changes nothing: the tile is then a promise
+   * about the next connect. */
+  settledKnown = true,
 ): string | null {
+  if (TUNNEL_UP.has(connectionState) && !settledKnown) return null;
   if (TUNNEL_UP.has(connectionState) && settledRouteId) return settledRouteId;
   return pinnedRouteId ?? provisionedRouteId ?? null;
+}
+
+/** Whether the screen may name a route at all: not over a tunnel up whose
+ * credential it cannot name (`settledKnown` above). For a screen that
+ * reads its credential directly -- the phone's PROTOCOL tile and current
+ * row -- rather than through the functions here. */
+export function routeNameable(connectionState: ConnectionState, settledKnown: boolean): boolean {
+  return settledKnown || !describesTunnel(connectionState);
+}
+
+/** Whether the screen is describing a tunnel up, whose route the tiles
+ * name, rather than the next connect: an engine running (`TUNNEL_UP`). A
+ * load does not put the pin in place of the credential such a tunnel is
+ * on. */
+export function describesTunnel(connectionState: ConnectionState): boolean {
+  return TUNNEL_UP.has(connectionState);
 }
 
 /** The same decision, resolved against the route list the screen holds.
@@ -71,7 +97,11 @@ export function displayedRoute<T extends RouteLike>(
   settledRouteId: string | null | undefined,
   pinnedRouteId: string | null | undefined,
   provisionedRouteId: string | null | undefined,
+  settledKnown = true,
 ): T | null {
+  // Not the fall-through below either: a tunnel no one can name is named
+  // as nothing, not as the pin (`settledKnown` in `displayedRouteId`).
+  if (TUNNEL_UP.has(connectionState) && !settledKnown) return null;
   const wanted = displayedRouteId(connectionState, settledRouteId, pinnedRouteId, provisionedRouteId);
   return (
     (wanted ? routes.find((r) => r.id === wanted) : undefined) ??
@@ -100,6 +130,35 @@ export function displayedRoute<T extends RouteLike>(
  *
  * A pin is always named -- it is the customer's own choice, and the rule
  * above already handles it. */
+/** The location list's row in use, and the state its words are drawn
+ * for, through a brief gap.
+ *
+ * The chip's colour, the button's fill and the map's connected light hold
+ * a settled session's look over a short reconnect, a rung, a lapsed
+ * reading (`orbHold`, ui-state-calm). The list read the service's state
+ * instead, so every such gap took "Connected here" off the row in use and
+ * put the selection back on the pin -- and gave it back a few seconds
+ * later. Now it holds with them: while the look is held, the row the
+ * session last settled on keeps its selection and its words, and when the
+ * hold ends, or a press ends it, the list says what the state says.
+ *
+ * `settledRouteId` is the route the list named while the session was last
+ * settled -- null for a tunnel it could not name, which stays unnamed
+ * through the gap rather than naming the pin. */
+export function heldListLook(input: {
+  /** The service's state now. */
+  state: ConnectionState;
+  /** The look the control wears (`orbHold`): `state`, or a settled look
+   * held over a gap. */
+  look: ConnectionState;
+  /** `displayedRouteId` for `state`. */
+  routeId: string | null;
+  settledRouteId: string | null;
+}): { state: ConnectionState; routeId: string | null } {
+  const holding = input.look !== input.state && (input.look === "connected" || input.look === "unverified");
+  return holding ? { state: input.look, routeId: input.settledRouteId } : { state: input.state, routeId: input.routeId };
+}
+
 export function showsAutomatic(connectionState: ConnectionState, pinnedRouteId: string | null | undefined): boolean {
   if (pinnedRouteId) return false;
   return !SETTLED.has(connectionState);
@@ -143,8 +202,13 @@ export function displayedProtocol(
   /** Every credential the screen holds -- the ladder's candidates. */
   held: readonly CredentialLike[],
   routes: readonly RouteProtocolLike[],
+  /** As for `displayedRouteId`: false for a tunnel found up whose
+   * credential the screen cannot name. Its protocol is not named either --
+   * the service's word for it cannot tell Stealth Web from Stealth HTTPS. */
+  settledKnown = true,
 ): { protocol: Protocol; transport?: string } | null {
   const ofCredential = (c: CredentialLike) => ({ protocol: c.protocol, transport: c.connection?.transport });
+  if (TUNNEL_UP.has(connectionState) && !settledKnown) return null;
   if (TUNNEL_UP.has(connectionState) && settled) return ofCredential(settled);
   if (pinnedRouteId) {
     const credential = held.find((c) => c.routeId === pinnedRouteId);

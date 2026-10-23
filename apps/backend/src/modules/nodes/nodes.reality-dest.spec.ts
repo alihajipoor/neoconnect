@@ -24,7 +24,7 @@ describe("NodesService REALITY dest health", () => {
         return Promise.resolve();
       }),
     };
-    return { service: new NodesService(prisma as never, alerting as never), sent, updates, prisma };
+    return { service: new NodesService(prisma as never, alerting as never, {} as never, { get: () => undefined } as never), sent, updates, prisma };
   }
 
   it("records the dest and stamps when it was checked", async () => {

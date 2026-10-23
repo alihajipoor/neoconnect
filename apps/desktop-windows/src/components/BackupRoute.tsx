@@ -78,7 +78,7 @@ export function BackupRouteChip() {
     <div className="pointer-events-none flex shrink-0 justify-center px-4 pt-2">
       <span
         title={t(relayDetail(status))}
-        className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-muted-foreground"
+        className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-[var(--hairline-2)] bg-[var(--field)] px-3 py-1 text-xs text-muted-foreground"
       >
         <Route className="size-3.5" />
         {t("relay.chip")}
@@ -126,15 +126,17 @@ export function RecoveryCodeNotice({
       <p className="text-sm">{t("recovery.save")}</p>
       <p
         dir="ltr"
-        className="rounded-lg border border-white/10 bg-black/20 px-3 py-3 text-center font-mono text-base tracking-widest select-all"
+        className="rounded-lg border border-[var(--hairline-2)] bg-[var(--field)] px-3 py-3 text-center font-mono text-base tracking-widest select-all"
         data-recovery-code
       >
         {code}
       </p>
       <div className="flex gap-2">
-        <Button variant="ghost" onClick={() => void copy()} className="gap-2 border border-white/10">
-          {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
-          {copied ? t("recovery.copied") : t("recovery.copy")}
+        <Button variant="ghost" onClick={() => void copy()} className="gap-2 border border-[var(--hairline-2)]">
+          {copied ? <Check className="size-4 nx-done-in" /> : <Copy className="size-4" />}
+          <span key={copied ? "done" : "copy"} className="nx-swap">
+            {copied ? t("recovery.copied") : t("recovery.copy")}
+          </span>
         </Button>
         <Button onClick={onSaved} className="flex-1 justify-center">
           {t("recovery.saved")}

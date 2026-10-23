@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { login } from "../lib/auth";
-import { Button, Card, Input, Label } from "../components/ui";
-import { LogoMark } from "../components/Logo";
+import { Message, PasswordField, PillButton, TextField, TextLink } from "../components/ui";
+import { AuthFrame, AuthHead, type AuthSeed } from "../components/auth/AuthFrame";
 import { useI18n } from "../lib/i18n";
 import { failureText, type ShownFailure } from "../lib/failure-text";
 import { useStillTrying } from "../lib/still-trying";
@@ -14,18 +14,21 @@ export function Login({
   onGoRegister,
   onGoForgotPassword,
   notice,
+  seed,
 }: {
   onSuccess: () => void;
   onNeedsVerification: (email: string, password: string) => void;
   onGoRegister: () => void;
   onGoForgotPassword: () => void;
   notice?: string | null;
+  /** DEV ONLY (`AuthSeed`): the preview's states. */
+  seed?: AuthSeed;
 }) {
   const { t } = useI18n();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   // Kept as it came, and worded as the screen renders (`ShownFailure`).
-  const [error, setError] = useState<ShownFailure | null>(null);
+  const [error, setError] = useState<ShownFailure | null>(seed?.error ?? null);
   const [pending, setPending] = useState(false);
   // A sign-in may spend up to forty-six and a half seconds on the network
   // where only a slow route answers (`SIGN_IN_DEADLINE_MS` in auth.ts),
@@ -35,6 +38,7 @@ export function Login({
   // During a declared intranet, what will not work is said before it is
   // tried (docs/relay-last-resort.md, R4.4) -- only when declared (I4).
   const { active: relayActive, status: relayStatus } = useRelayMode();
+  const intranet = Boolean(seed?.intranet || (relayActive && relayStatus?.intranet));
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -53,92 +57,69 @@ export function Login({
     }
   }
 
-  return (
-    <div className="glow-backdrop flex h-full flex-col items-center justify-center gap-7 overflow-hidden p-6">
-      {/* The mark at hero scale rather than the small nav lockup -- this
-          is the first screen anyone sees, and it was previously carrying
-          the same 32px logo used in a toolbar. */}
-      <div className="animate-rise flex flex-col items-center gap-3">
-        <LogoMark className="size-16" />
-        <span className="text-brand-gradient text-2xl font-semibold tracking-tight">Neoxify</span>
-      </div>
+  // A social sign-in lands straight on the dashboard: the provider has
+  // already vouched for the address, so there is no verification step to
+  // send anyone to.
+  const social = (
+    <SocialSignIn key="social" onSuccess={onSuccess} disabled={pending} providers={seed?.providers} divider={!intranet} />
+  );
+  const form = (
+    <form key="form" onSubmit={handleSubmit} className="nx-form">
+      <TextField
+        id="email"
+        label={t("auth.email")}
+        type="email"
+        autoComplete="email"
+        required
+        autoFocus
+        dir="ltr"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+      />
+      <PasswordField
+        id="password"
+        label={t("auth.password")}
+        autoComplete="current-password"
+        required
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+      />
+      {error ? <Message tone="danger">{failureText(error, t)}</Message> : null}
+      <PillButton type="submit" disabled={pending} aria-busy={pending || undefined} className="nx-auth-submit">
+        {pending ? t("auth.signingIn") : t("auth.signIn")}
+      </PillButton>
+      {pendingLong ? <p className="text-center text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
+    </form>
+  );
 
-      <Card className="animate-rise w-full max-w-xs" style={{ animationDelay: "90ms" }}>
-        <h1 className="mb-1 text-lg font-semibold">{t("auth.welcomeBack")}</h1>
-        <p className="mb-4 text-sm text-muted-foreground">{t("auth.signInToConnect")}</p>
-        {notice ? (
-          <p className="mb-3 rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-success">
-            {notice}
-          </p>
-        ) : null}
-        {relayActive && relayStatus?.intranet ? (
-          <p className="mb-3 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs text-muted-foreground" data-intranet-limits>
-            {t("relay.intranetLimits")}
-          </p>
-        ) : null}
-        {/* A social sign-in lands straight on the dashboard: the
-            provider has already vouched for the address, so there is no
-            verification step to send anyone to. */}
-        <SocialSignIn onSuccess={onSuccess} disabled={pending} />
-        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="email">{t("auth.email")}</Label>
-            <Input
-              id="email"
-              type="email"
-              autoComplete="email"
-              required
-              autoFocus
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="password">{t("auth.password")}</Label>
-            <Input
-              id="password"
-              type="password"
-              autoComplete="current-password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </div>
-          {error ? (
-            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {failureText(error, t)}
-            </p>
-          ) : null}
-          <Button type="submit" disabled={pending} className="mt-1 w-full">
-            {pending ? t("auth.signingIn") : t("auth.signIn")}
-          </Button>
-          {pendingLong ? <p className="text-center text-xs text-muted-foreground">{t("common.stillTrying")}</p> : null}
-        </form>
+  return (
+    <AuthFrame step="login">
+      <AuthHead title={t("auth.welcomeBack")} lead={t("auth.signInToConnect")} />
+      {notice ? <Message tone="neutral">{notice}</Message> : null}
+      {intranet ? (
+        // Neutral: nothing is wrong with the account, only with the network.
+        <Message tone="neutral" data-intranet-limits>
+          {t("relay.intranetLimits")}
+        </Message>
+      ) : null}
+      {/* The providers above the form; during a declared intranet, after
+          it, as the note says to sign in with the password. One keyed pair,
+          so a status that arrives mid-sign-in moves them rather than
+          drawing them again -- which would end a provider's sign-in under
+          way, and empty the fields. */}
+      {intranet ? [form, social] : [social, form]}
+      <div className="nx-auth-after">
         {/* Below the button rather than beside the password field: it is
             the exit for a failed sign-in, so it belongs where someone
             looks after one, not where they look while typing. */}
-        <p className="mt-3 text-center text-xs">
-          <button
-            type="button"
-            onClick={onGoForgotPassword}
-            className="text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
-          >
-            {t("forgot.link")}
-          </button>
-        </p>
-        {/* Was hardcoded English, so it stayed English in Persian mode --
-            the keys for both halves already existed. */}
-        <p className="mt-4 text-center text-xs text-muted-foreground">
+        <TextLink onClick={onGoForgotPassword}>{t("forgot.link")}</TextLink>
+        <p>
           {t("auth.noAccount")}{" "}
-          <button
-            type="button"
-            onClick={onGoRegister}
-            className="font-medium text-primary underline-offset-2 transition-colors hover:text-highlight hover:underline"
-          >
+          <TextLink strong onClick={onGoRegister}>
             {t("auth.register")}
-          </button>
+          </TextLink>
         </p>
-      </Card>
-    </div>
+      </div>
+    </AuthFrame>
   );
 }

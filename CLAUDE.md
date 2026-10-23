@@ -113,6 +113,11 @@ every bundled resource is on disk. Two Windows-only traps:
   socket was measured losing sight of its connection under load; a
   single-instance test passed every time while 8 to 20 of 32 concurrent
   stops failed. See `docs/split-tunnel-rewrite.md`.
+- **`cargo test --workspace` needs an elevated shell.** One test hands the
+  reconnect hold's filters to the real Windows Filtering Platform, and it
+  fails rather than skips without administrator rights. Run from an
+  administrator PowerShell, or set `NEOXIFY_SKIP_WFP_TESTS=1` to skip that
+  test on purpose (`docs/new-machine-setup.md`). CI is always elevated.
 
 **On the Mac, the Windows service type-checks and nothing more.**
 `cargo check` does not link, so with the `x86_64-pc-windows-gnu` target
@@ -224,7 +229,7 @@ Tag prefixes are load-bearing and must not be shared: `desktop-v*`,
 prefix, and a desktop release once hijacked the agent installer's
 download URL precisely because they collided.
 
-Current: desktop `0.9.51`, mobile `0.2.29`, agent `v0.2.10` — each
+Current: desktop `0.9.53`, mobile `0.2.31`, agent `v0.2.10` — each
 matching its latest released tag.
 
 **The production backend tracks `main`** as of 2026-10-06 (`3bafbe0`,

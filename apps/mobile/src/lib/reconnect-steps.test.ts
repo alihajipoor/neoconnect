@@ -332,7 +332,7 @@ describe("the phone dashboard's wiring", () => {
     // nothing dialling -- for good.
     const start = dashboard.indexOf("async function adoptPlatform(");
     const adopt = dashboard.slice(start, dashboard.indexOf("\n  }\n", start));
-    const read = adopt.indexOf('adopted = stateFromStatus(await withTimeout(vpnStatus(), "vpn_status"));');
+    const read = adopt.indexOf('const status = await withTimeout(vpnStatus(), "vpn_status");');
     // The read's own, not the one said at once over a pass under way.
     const ready = adopt.indexOf("ready();", read);
     const walk = adopt.indexOf("await takeBaseline(");

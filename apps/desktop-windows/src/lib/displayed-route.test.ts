@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
-import { displayedProtocol, displayedRoute, displayedRouteId } from "./displayed-route";
+import { displayedProtocol, displayedRoute, displayedRouteId, heldListLook } from "./displayed-route";
 
 const routes = [
   { id: "de-germany", label: "Germany" },
@@ -119,6 +121,41 @@ describe("displayedProtocol", () => {
       const server = displayedRouteId(state, stealth.routeId, "fi-ss", stealth.routeId);
       const route = catalogue.find((r) => r.id === server);
       expect(displayedProtocol(state, stealth, "fi-ss", held, catalogue)?.protocol, state).toBe(route?.protocol);
+    }
+  });
+});
+
+describe("heldListLook: the list's row in use through a brief gap", () => {
+  // Connected on Germany (the ladder settled there, nothing pinned or a pin
+  // elsewhere), then a 4 s reconnect the hold covers, then connected again.
+  const settled = "de-germany";
+
+  it("keeps the row and its words while the look is held", () => {
+    // reconnectHeld: the service says connecting; the chip still wears connected.
+    expect(heldListLook({ state: "connecting", look: "connected", routeId: "fr-france", settledRouteId: settled })).toEqual({ state: "connected", routeId: settled });
+    expect(heldListLook({ state: "disconnected", look: "connected", routeId: null, settledRouteId: settled })).toEqual({ state: "connected", routeId: settled });
+    // A brief unverified gap keeps "Connected here", as the colour keeps cobalt.
+    expect(heldListLook({ state: "unverified", look: "connected", routeId: settled, settledRouteId: settled }).state).toBe("connected");
+  });
+
+  it("says what the state says once the hold ends, or when nothing is held", () => {
+    expect(heldListLook({ state: "disconnected", look: "disconnected", routeId: "fr-france", settledRouteId: settled })).toEqual({ state: "disconnected", routeId: "fr-france" });
+    expect(heldListLook({ state: "connected", look: "connected", routeId: settled, settledRouteId: settled })).toEqual({ state: "connected", routeId: settled });
+    // A press shows at once: the hold has already let go (look === state).
+    expect(heldListLook({ state: "connecting", look: "connecting", routeId: "fr-france", settledRouteId: settled }).routeId).toBe("fr-france");
+  });
+
+  it("never names a tunnel it could not name, through the gap either", () => {
+    expect(heldListLook({ state: "connecting", look: "connected", routeId: "fr-france", settledRouteId: null })).toEqual({ state: "connected", routeId: null });
+  });
+
+  it("is wired where the list is drawn, from the held look", () => {
+    for (const rel of ["../screens/Dashboard.tsx", "../../../mobile/src/screens/Dashboard.tsx"]) {
+      const src = readFileSync(new URL(rel, import.meta.url), "utf8");
+      expect(src, rel).toContain("const listLook = heldListLook({ state: connectionState, look: orbState, routeId: screenRouteId, settledRouteId: listSettledRef.current });");
+      expect(src, rel).toContain("if (settledNow) listSettledRef.current = screenRouteId;");
+      expect(src, rel).toContain("currentRouteId={listLook.routeId ?? undefined}");
+      expect(src, rel).toContain("lookState={listLook.state}");
     }
   });
 });

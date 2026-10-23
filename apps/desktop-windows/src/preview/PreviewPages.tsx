@@ -1,0 +1,403 @@
+import { useMemo } from "react";
+import { Login } from "../screens/Login";
+import { Register } from "../screens/Register";
+import { ForgotPassword } from "../screens/ForgotPassword";
+import { VerifyEmail } from "../screens/VerifyEmail";
+import { Settings } from "../screens/Settings";
+import { Plans } from "../screens/Plans";
+import { Support } from "../screens/Support";
+import { Referrals } from "../screens/Referrals";
+import { ActivityView, type ActivityData } from "../screens/Activity";
+import { CustomModeCard } from "../components/CustomModeCard";
+import { GamingModeCard } from "../components/GamingModeCard";
+import { GamePicker } from "../components/GamePicker";
+import { RunningAppPicker } from "../components/RunningAppPicker";
+import { AppShell, type NavId } from "../components/shell/AppShell";
+import { PageScene } from "../components/shell/Page";
+import { CommunityLinks } from "../components/CommunityLinks";
+import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
+import { LocationPicker } from "../components/LocationPicker";
+import { Page } from "../components/shell/Page";
+import { ownWorkedAt, placesEvidence } from "../lib/map-lights";
+import { isTunnelUp } from "../lib/connection-evidence";
+import { useI18n } from "../lib/i18n";
+import { planLineText } from "../lib/shell-nav";
+import type { RouteOption, Subscription } from "../lib/types";
+import type { ShownFailure } from "../lib/failure-text";
+import type { SocialProvider } from "../lib/social-auth";
+import type { DeviceSettings } from "../screens/Settings";
+import type { AccountDevices, DailyUsage, GameProfileSummary } from "../lib/customer";
+import type { SessionRecord } from "../lib/session-log";
+
+/** DEV ONLY: the screens of phase 2 in the preview -- sign-in and its steps,
+ * and the signed-in pages in the shell -- each drawn by the real component.
+ * The account API answers from samples when the dev server runs with
+ * NX_PREVIEW_MOCKS=1 (vite.config.ts); without it, those pages show what
+ * they show when Neoxify cannot be reached. Activity is drawn from sample
+ * history through its view, as the store it reads is the app's. */
+
+export const PAGE_SCREENS: Record<string, string> = {
+  main: "Main page",
+  locations: "Locations page",
+  signin: "Sign in",
+  signinNotice: "Sign in, with a notice",
+  signinError: "Sign in, network blocked",
+  signinIntranet: "Sign in, intranet",
+  signinIntranetError: "Sign in, intranet and an error",
+  signinIos: "Sign in, iPhone (three providers)",
+  register: "Create account",
+  registerError: "Create account, an error",
+  registerRelayOffer: "Create account, backup route offered",
+  registerIos: "Create account, iPhone (three providers)",
+  forgot: "Forgot password",
+  verify: "Verify email",
+  settings: "Settings",
+  pickGame: "Settings, choosing a game",
+  pickApps: "Settings, choosing a running app",
+  activity: "Activity",
+  activityLog: "Activity, session log on",
+  activityFailed: "Activity, account not reached",
+  activitySignOut: "Activity, Sign out on other devices (awaiting owner)",
+  activityEmpty: "Activity, network unknown",
+  activityLoading: "Activity, still reading (skeletons)",
+  plans: "Plans",
+  support: "Support",
+  referrals: "Invite friends",
+};
+
+/** The pages the app draws in the main page's own shell (App.tsx
+ * `shellPage`), with the nav item each belongs to. The preview draws them
+ * in the main page's shell too (PreviewApp `Composed`), so the shell keeps
+ * still across a change of page here as it does there. */
+export const PREVIEW_NAV: Record<string, NavId> = {
+  locations: "locations",
+  settings: "settings",
+  pickGame: "settings",
+  pickApps: "settings",
+  activity: "activity",
+  activityLog: "activity",
+  activityFailed: "activity",
+  activitySignOut: "activity",
+  activityEmpty: "activity",
+  activityLoading: "activity",
+  plans: "none",
+  support: "none",
+  referrals: "none",
+};
+
+const noop = () => undefined;
+
+/** DEV ONLY: Windows' device rows, answered here (Settings' `DeviceSettings`). */
+const PREVIEW_DEVICE: DeviceSettings = {
+  autostart: { read: async () => true, write: async (on) => on },
+  autoConnect: true,
+  notifications: { setting: async () => "enabled" },
+  reconnectHold: { apply: async () => undefined },
+};
+
+/** DEV ONLY: a few catalogue entries for the game picker; one is already
+ * chosen, so the Added mark shows. */
+const SAMPLE_GAMES: GameProfileSummary[] = [
+  ["cs2", "Counter-Strike 2", "Valve"],
+  ["dota2", "Dota 2", "Valve"],
+  ["valorant", "Valorant", "Riot Games"],
+  ["lol", "League of Legends", "Riot Games"],
+  ["fortnite", "Fortnite", "Epic Games"],
+  ["pubg", "PUBG: Battlegrounds", "Krafton"],
+  ["apex", "Apex Legends", "Electronic Arts"],
+  ["cod", "Call of Duty", "Activision"],
+].map(([slug, displayName, publisher]) => ({
+  slug,
+  displayName,
+  iconKey: null,
+  publisher,
+  hostnames: [],
+  excludeHostnames: [],
+  canaryHostname: null,
+}));
+
+/** DEV ONLY: what the preview's `vpn_list_running_apps` answers (main.tsx),
+ * and the one of them already chosen. */
+export const PREVIEW_CHOSEN_APP = "C:\\Program Files\\Mozilla Firefox\\firefox.exe";
+export const PREVIEW_RUNNING_APPS = [
+  { name: "Firefox", path: PREVIEW_CHOSEN_APP },
+  {
+    name: "Discord",
+    path: "C:\\Users\\you\\AppData\\Local\\Discord\\app-1.0.9200\\Discord.exe",
+    paths: [
+      "C:\\Users\\you\\AppData\\Local\\Discord\\app-1.0.9200\\Discord.exe",
+      "C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe",
+    ],
+  },
+  { name: "Telegram", path: "C:\\Users\\you\\AppData\\Roaming\\Telegram Desktop\\Telegram.exe" },
+  { name: "Steam", path: "C:\\Program Files (x86)\\Steam\\steam.exe" },
+  { name: "Spotify", path: "C:\\Users\\you\\AppData\\Roaming\\Spotify\\Spotify.exe" },
+];
+
+let signOutTries = 0;
+/** DEV ONLY: signing a device out, as the Activity page would. */
+async function previewSignOut(): Promise<"done" | "unreached"> {
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  signOutTries += 1;
+  return signOutTries % 2 === 1 ? "unreached" : "done";
+}
+
+const DAY_MS = 86_400_000;
+const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+/** DEV ONLY: the account's devices and a fortnight of usage, in the
+ * backend's shapes (docs/account-activity.md). */
+const SAMPLE_DEVICES: AccountDevices = {
+  inUseKnown: true,
+  devices: [
+    { id: "d1", thisDevice: true, label: null, platform: "windows", signedInAt: isoAgo(17 * DAY_MS), lastSeenAt: isoAgo(60_000), inUse: { since: isoAgo(3_600_000), lastSeen: isoAgo(30_000) } },
+    { id: "d2", thisDevice: false, label: "Pixel 7", platform: "android", signedInAt: isoAgo(21 * DAY_MS), lastSeenAt: isoAgo(5 * 3_600_000), inUse: null },
+    { id: "d3", thisDevice: false, label: null, platform: "ios", signedInAt: isoAgo(3 * DAY_MS), lastSeenAt: isoAgo(DAY_MS), inUse: null },
+  ],
+};
+
+function sampleUsage(): DailyUsage {
+  const days = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date(Date.now() - (13 - i) * DAY_MS).toISOString().slice(0, 10);
+    const down = i === 4 ? 0 : Math.round((0.4 + 0.6 * Math.abs(Math.sin(i * 1.3))) * 1.6e9);
+    return { date: d, bytesDown: String(down), bytesUp: String(Math.round(down / 14)) };
+  });
+  return { subscriptionId: null, timeZone: "Asia/Tehran", from: days[0].date, to: days[13].date, asOf: isoAgo(90_000), days };
+}
+
+function sampleLog(): SessionRecord[] {
+  const at = (h: number) => Date.now() - h * 3_600_000;
+  return [
+    { id: "s1", start: at(50), end: at(48.5), open: false, routeId: "de-stealth", protocol: "XRAY_VLESS_TLS", transport: "WS", rxBytes: 1.4e9, txBytes: 6.1e7, ended: "disconnected" },
+    { id: "s2", start: at(26), end: null, open: false, routeId: "fi-reality", protocol: "XRAY_VLESS_REALITY", rxBytes: null, txBytes: null, ended: null },
+    { id: "s3", start: at(3), end: at(2.2), open: false, routeId: "de-wg", protocol: "WIREGUARD", rxBytes: 3.2e8, txBytes: 1.2e7, ended: "lost" },
+  ];
+}
+
+/** The failures a blocked network gives sign-in, the longest of each kind:
+ * the network's block page, and nothing answering, the backup server
+ * included (failure-text.ts). */
+const BLOCKED: ShownFailure = { error: "", noResponse: true, blockPage: true };
+const NOTHING_ANSWERED: ShownFailure = { error: "", noResponse: true, relayTried: true };
+/** What an iPhone offers (`availableSocialProviders`); a browser has no Apple. */
+const IOS_PROVIDERS: SocialProvider[] = ["apple", "google", "facebook"];
+
+export function PreviewPage({
+  screen,
+  width,
+  routes,
+  history,
+  network,
+  subscription,
+  tunnel = "disconnected",
+  onNavigate = noop,
+  hosted = false,
+}: {
+  /** Drawn inside the main page's shell (PreviewApp `Composed`), as the
+   * app draws its pages: the page alone, no shell of its own. */
+  hosted?: boolean;
+  /** The tunnel state the scenario switcher has chosen, for the list. */
+  tunnel?: string;
+  /** The shell's nav, as the app wires it (App.tsx): another screen. */
+  onNavigate?: (screen: string) => void;
+  screen: string;
+  width: number;
+  routes: RouteOption[];
+  history: ConnectHistory;
+  network: string;
+  subscription: Subscription;
+}) {
+  const phone = width < 640;
+  const { t, language } = useI18n();
+  const activity = useMemo<ActivityData>(
+    () => ({
+      history: withMoreTries(history, network, routes),
+      network: screen === "activityEmpty" ? null : network,
+      routes,
+      subscription,
+      savedAt: Date.now() - 4 * 60_000,
+    }),
+    [history, network, routes, subscription, screen],
+  );
+
+  switch (screen) {
+    case "signin":
+    case "signinError":
+    case "signinIntranet":
+    case "signinIntranetError":
+    case "signinIos":
+      return (
+        <Login
+          onSuccess={noop}
+          onNeedsVerification={noop}
+          onGoRegister={noop}
+          onGoForgotPassword={noop}
+          seed={{
+            error: screen === "signinError" ? BLOCKED : screen === "signinIntranetError" ? NOTHING_ANSWERED : undefined,
+            intranet: screen === "signinIntranet" || screen === "signinIntranetError",
+            providers: screen === "signinIos" ? IOS_PROVIDERS : undefined,
+          }}
+        />
+      );
+    case "signinNotice":
+      return (
+        <Login
+          onSuccess={noop}
+          onNeedsVerification={noop}
+          onGoRegister={noop}
+          onGoForgotPassword={noop}
+          notice="Password changed. You can sign in now."
+        />
+      );
+    case "register":
+    case "registerError":
+    case "registerRelayOffer":
+    case "registerIos":
+      return (
+        <Register
+          onNeedsVerification={noop}
+          onSuccess={noop}
+          onGoLogin={noop}
+          seed={{
+            error: screen === "registerError" ? NOTHING_ANSWERED : screen === "registerRelayOffer" ? BLOCKED : undefined,
+            relayOffered: screen === "registerRelayOffer",
+            providers: screen === "registerIos" ? IOS_PROVIDERS : undefined,
+          }}
+        />
+      );
+    case "forgot":
+      return <ForgotPassword onDone={noop} onCancel={noop} />;
+    case "verify":
+      return <VerifyEmail email="you@example.com" onVerified={noop} onGoLogin={noop} />;
+  }
+
+  const ctx = { history, network, now: Date.now() };
+  const up = isTunnelUp(tunnel as never);
+  const page =
+    screen === "locations" ? (
+      <Page title={t("loc.panelTitle")} lede={t("loc.pageLede")} className="nx-locpg">
+        <LocationPicker
+          variant="page"
+          subscriptionId={subscription.id}
+          currentRouteId={up ? routes[0]?.id : undefined}
+          tunnelActive={tunnel !== "disconnected"}
+          connectionState={tunnel}
+          initialRoutes={routes}
+          automatic={!up}
+          onChooseAutomatic={noop}
+          onClose={noop}
+          onSwitched={noop}
+          confirmPick={async () => false}
+          evidence={{
+            places: placesEvidence(routes, ctx),
+            worked: new Set([...placesEvidence(routes, ctx)].filter(([, e]) => e.look === "live").map(([k]) => k)),
+            ownAt: (route) => ownWorkedAt(route, ctx),
+            tags: true,
+          }}
+        />
+      </Page>
+    ) : screen === "settings" || screen === "pickGame" || screen === "pickApps" ? (
+      <>
+        <Settings
+          onBack={noop}
+          onOpenReferrals={noop}
+          onOpenSupport={noop}
+          onLoggedOut={noop}
+          customSection={<CustomModeCard />}
+          gamingSection={phone ? undefined : <GamingModeCard />}
+          onOpenPlans={noop}
+          onOpenActivity={noop}
+          onSignOut={noop}
+          platform={phone ? "android" : "windows"}
+          device={phone ? undefined : PREVIEW_DEVICE}
+        />
+        {screen === "pickGame" ? <GamePicker games={SAMPLE_GAMES} chosen={["dota2"]} onPick={noop} onClose={noop} /> : null}
+        {screen === "pickApps" ? <RunningAppPicker chosen={[PREVIEW_CHOSEN_APP]} onPick={noop} onClose={noop} /> : null}
+      </>
+    ) : screen === "activity" ||
+      screen === "activityEmpty" ||
+      screen === "activityLog" ||
+      screen === "activityFailed" ||
+      screen === "activitySignOut" ||
+      screen === "activityLoading" ? (
+      <ActivityView
+        data={activity}
+        devices={
+          screen === "activityFailed"
+            ? { state: "failed", noAnswer: true }
+            : screen === "activityLoading"
+              ? { state: "loading" }
+              : { state: "ok", data: SAMPLE_DEVICES }
+        }
+        usage={
+          screen === "activityFailed"
+            ? { state: "failed", noAnswer: false }
+            : screen === "activityLoading"
+              ? { state: "loading" }
+              : { state: "ok", data: sampleUsage() }
+        }
+        log={
+          phone
+            ? undefined
+            : {
+                enabled: screen === "activityLog",
+                loaded: true,
+                records: screen === "activityLog" ? sampleLog() : [],
+                onEnabled: noop,
+                onClear: noop,
+              }
+        }
+        // Not offered by any app until the owner approves it; drawn here so
+        // it can be looked at. The first try is not answered, the next is.
+        onSignOutDevice={screen === "activitySignOut" ? previewSignOut : undefined}
+        onRetryDevices={noop}
+        onRetryUsage={noop}
+        onOpenPlans={noop}
+      />
+    ) : screen === "plans" ? (
+      <Plans onActivated={noop} onBack={noop} />
+    ) : screen === "support" ? (
+      <Support onBack={noop} />
+    ) : screen === "referrals" ? (
+      <Referrals onBack={noop} />
+    ) : null;
+
+  if (hosted) return page;
+  return (
+    <AppShell
+      active={PREVIEW_NAV[screen] ?? "none"}
+      shown="idle"
+      titlebar
+      email="you@example.com"
+      planLine={planLineText({ daysLeft: 6, unlimited: true }, t, language)}
+      onOverview={() => onNavigate("main")}
+      onLocations={() => onNavigate("locations")}
+      onOpenActivity={() => onNavigate("activity")}
+      onOpenSettings={() => onNavigate("settings")}
+      onBrowsePlans={() => onNavigate("plans")}
+      onOpenReferrals={() => onNavigate("referrals")}
+      onOpenSupport={() => onNavigate("support")}
+      onSignOut={noop}
+      signingOut={false}
+      update={<CommunityLinks />}
+      scene={<PageScene />}
+    >
+      {page}
+    </AppShell>
+  );
+}
+
+/** A few more tries on the sample network, so the Activity list shows a
+ * failure after a success and a count above one. */
+function withMoreTries(history: ConnectHistory, network: string, routes: RouteOption[]): ConnectHistory {
+  let h = history;
+  const now = Date.now();
+  const de = routes.find((r) => r.id === "de-stealth");
+  const wg = routes.find((r) => r.id === "de-wg");
+  if (de) {
+    h = recordAttempt(h, network, de.id, de.protocol, true, now - 50 * 60_000);
+    h = recordAttempt(h, network, de.id, de.protocol, true, now - 12 * 60_000);
+  }
+  if (wg) h = recordAttempt(h, network, wg.id, wg.protocol, false, now - 13 * 60_000);
+  return h;
+}

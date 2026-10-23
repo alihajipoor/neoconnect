@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { viewTransitionsAvailable, withViewTransition } from "../lib/view-transition";
 
 /** Motion between screens.
  *
@@ -33,21 +34,38 @@ const DEPTH: Record<string, number> = {
   verify: 2,
   dashboard: 0,
   settings: 1,
+  activity: 1,
   plans: 1,
   referrals: 2,
   support: 2,
 };
 
-/** Matches the CSS below. Long enough to read as movement, short enough
- * that it never feels like waiting for the app. */
+/** Which way a change from one screen to another goes: deeper forward,
+ * back back. For a change this component does not see -- one page of the
+ * signed-in shell to another, which App.tsx animates itself so the shell
+ * and the main page under it stay mounted (`swapView`). */
+export function screenDirection(from: string, to: string): "forward" | "back" {
+  return (DEPTH[to] ?? 0) < (DEPTH[from] ?? 0) ? "back" : "forward";
+}
+
+/** How long the leaving screen is kept: its exit (`--dur-exit`, 180ms;
+ * theme.css `.screen-leave`) with room. The arriving one takes the snappy
+ * spring, unhurried by this. */
 const DURATION_MS = 220;
 
 export function ScreenTransition({
   screenKey,
   children,
+  viewTransitions = false,
 }: {
   screenKey: string;
   children: ReactNode;
+  /** Hand the change to the View Transitions API where the engine has it
+   * (lib/view-transition.ts): the outgoing screen is a snapshot, so it is
+   * not kept mounted, and the incoming one slides in on the snappy spring.
+   * The CSS below stays the fallback. On for the desktop and, since the
+   * motion pass, the phone. */
+  viewTransitions?: boolean;
 }) {
   const [current, setCurrent] = useState({ key: screenKey, node: children });
   const [leaving, setLeaving] = useState<{
@@ -55,6 +73,9 @@ export function ScreenTransition({
     node: ReactNode;
   } | null>(null);
   const [back, setBack] = useState(false);
+  /** How the last change was animated: by the browser, or by the classes
+   * below. */
+  const [via, setVia] = useState<"vt" | "css">("css");
 
   // Held in a ref because `children` is a new element on every render:
   // depending on it in the effect would restart the transition
@@ -68,7 +89,18 @@ export function ScreenTransition({
     if (showing.current === screenKey) return;
     const from = showing.current;
     showing.current = screenKey;
-    setBack((DEPTH[screenKey] ?? 0) < (DEPTH[from] ?? 0));
+    const goingBack = screenDirection(from, screenKey) === "back";
+    if (viewTransitions && viewTransitionsAvailable()) {
+      withViewTransition(() => {
+        setVia("vt");
+        setBack(goingBack);
+        setLeaving(null);
+        setCurrent({ key: screenKey, node: latest.current });
+      }, goingBack ? "back" : "forward");
+      return;
+    }
+    setVia("css");
+    setBack(goingBack);
     setLeaving({ key: from, node: current.node });
     setCurrent({ key: screenKey, node: latest.current });
     const timer = setTimeout(() => setLeaving(null), DURATION_MS);
@@ -92,13 +124,12 @@ export function ScreenTransition({
         // Absolutely positioned so the two screens overlap for the
         // handover instead of stacking and shoving the layout down.
         // aria-hidden and inert: it is on its way out, and a screen
-        // reader or a stray tap should not reach it.
+        // reader or a stray tap should not reach it. A boolean: React 19
+        // reads `inert=""` as false, which left it reachable.
         <div
           key={leaving.key}
           aria-hidden="true"
-          // @ts-expect-error -- `inert` is valid HTML that React's types
-          // have not caught up with on this version.
-          inert=""
+          inert
           className={`absolute inset-0 h-full ${back ? "screen-leave-back" : "screen-leave"}`}
         >
           {leaving.node}
@@ -106,7 +137,7 @@ export function ScreenTransition({
       ) : null}
       <div
         key={current.key}
-        className={`h-full ${back ? "screen-enter-back" : "screen-enter"}`}
+        className={[viewTransitions ? "nx-viewport" : "", "h-full", via === "css" ? (back ? "screen-enter-back" : "screen-enter") : ""].join(" ")}
       >
         {current.node}
       </div>

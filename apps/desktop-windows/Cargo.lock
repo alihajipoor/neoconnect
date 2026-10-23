@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "neoconnect-desktop"
-version = "0.9.51"
+version = "0.9.53"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2721,6 +2721,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "webpki-roots",
+ "windows 0.61.3",
  "windows-registry 0.6.1",
  "windows-sys 0.59.0",
 ]

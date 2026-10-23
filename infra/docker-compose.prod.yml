@@ -51,7 +51,10 @@ services:
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?JWT_ACCESS_SECRET is required}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
-      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+      # Admin panel sessions: idle limit and cap from sign-in. Blank = 1h
+      # and 12h. They replace JWT_REFRESH_TTL, which is no longer read.
+      ADMIN_SESSION_IDLE: ${ADMIN_SESSION_IDLE:-}
+      ADMIN_SESSION_MAX: ${ADMIN_SESSION_MAX:-}
       CUSTOMER_JWT_ACCESS_SECRET: ${CUSTOMER_JWT_ACCESS_SECRET:?CUSTOMER_JWT_ACCESS_SECRET is required}
       CUSTOMER_JWT_REFRESH_SECRET: ${CUSTOMER_JWT_REFRESH_SECRET:?CUSTOMER_JWT_REFRESH_SECRET is required}
       CUSTOMER_JWT_ACCESS_TTL: ${CUSTOMER_JWT_ACCESS_TTL:-15m}
@@ -103,6 +106,15 @@ services:
       # Unset, every SUPERADMIN in admin_users is mailed, which is the
       # right default because it needs no maintenance.
       REACHABILITY_ALERT_EMAILS: ${REACHABILITY_ALERT_EMAILS:-}
+      # Block watch (modules/block-watch): off (blank), record, digest or
+      # notify. It never changes a server; notify pages the owner.
+      BLOCK_WATCH: ${BLOCK_WATCH:-}
+      # Its thresholds, as name=value pairs. The values in use are set in
+      # infra/.env only, never in this repository.
+      BLOCK_WATCH_TUNING: ${BLOCK_WATCH_TUNING:-}
+      # Minutes without a heartbeat before the owner is paged (webhook and
+      # email). Blank or 0 = off.
+      HEARTBEAT_GAP_PAGE_MINUTES: ${HEARTBEAT_GAP_PAGE_MINUTES:-}
       # Per-ISP recommendations: an offline IP-to-ASN table (iptoasn.com,
       # public domain), downloaded once a day. All optional and on by
       # default. ASN_LOOKUP_ENABLED=false turns the feature off (no tags,
@@ -176,6 +188,10 @@ services:
       # limit with 409 DEVICE_LIMIT; "off" grants every claim. Only apps
       # that claim are affected (docs/device-slots.md).
       DEVICE_SLOTS: ${DEVICE_SLOTS:-}
+      # "Sign out of another device" (DELETE /customer/devices/:id): blank
+      # or "off" (default) answers 404; "on" only with the app release
+      # that offers it, once the owner has decided it.
+      ACCOUNT_DEVICE_SIGNOUT: ${ACCOUNT_DEVICE_SIGNOUT:-}
       # Swagger UI at /api/docs. Off here because NODE_ENV is production;
       # set to "true" only if you deliberately want the whole control
       # plane's routes and payload shapes published unauthenticated.

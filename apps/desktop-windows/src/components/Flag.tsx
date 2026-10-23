@@ -154,6 +154,9 @@ const ROUTE_FLAG_SIZES = {
   // The dashboard's server tile, beside a caption -- spaced so the badge,
   // which hangs past the flag's edge, does not touch the caption's text.
   sm: { main: "h-3 w-[1rem]", badge: "h-2 w-[0.65rem]", at: "-bottom-1 -end-1", wrap: "me-1" },
+  // The Pearl locations panel's rows (30x21), and the tray's location (40x28).
+  row: { main: "h-[21px] w-[30px] rounded-[5px]", badge: "h-[11px] w-[16px] rounded-[3px]", at: "-bottom-1.5 -end-[7px]", wrap: "" },
+  lg: { main: "h-[28px] w-[40px] rounded-[7px]", badge: "h-[14px] w-[20px] rounded-[3px]", at: "-bottom-1.5 -end-[7px]", wrap: "" },
 } as const;
 
 /** A route's flag: one for a direct route, and for a relay the exit

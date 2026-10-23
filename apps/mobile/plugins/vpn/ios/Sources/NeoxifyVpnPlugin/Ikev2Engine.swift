@@ -253,6 +253,11 @@ enum Ikev2Engine {
         await loadedIfOurs()?.connection.status ?? .invalid
     }
 
+    /// Our profile's connection, for when it came up (`connectedDate`).
+    static func connection() async -> NEVPNConnection? {
+        await loadedIfOurs()?.connection
+    }
+
     static func disconnect() async {
         await loadedIfOurs()?.connection.stopVPNTunnel()
     }

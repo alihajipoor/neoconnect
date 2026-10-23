@@ -195,8 +195,8 @@ describe("CustomerAuthService", () => {
       });
       subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
       // Every route the plan allows, so the client can fail over without
-      // asking us. The operator's chosen trial route must still come
-      // first in the response.
+      // asking us -- in the order they were provisioned. A trial route
+      // left in the settings from before means nothing any more.
       protocolUsersService.provisionAll.mockResolvedValue({
         created: [
           { id: "pu-2", routeId: "route-2", credentials: { uuid: "y" } },
@@ -212,11 +212,30 @@ describe("CustomerAuthService", () => {
       expect(result.trial).toEqual({
         subscription: { id: "sub-1" },
         protocolUsers: [
-          { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
           { id: "pu-2", routeId: "route-2", credentials: { uuid: "y" } },
+          { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
         ],
-        protocolUser: { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
+        protocolUser: { id: "pu-2", routeId: "route-2", credentials: { uuid: "y" } },
       });
+    });
+
+    // 2026-10-22: the trial route was cleared (deleting a route does that)
+    // and every new sign-up got "No trial granted ... no trial route is
+    // set". The trial plan's own routes decide; no trial route is needed.
+    it("grants the trial on the plan's routes when no trial route is set", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", purpose: "verify-email" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: null }));
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: null });
+      subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
+      protocolUsersService.provisionAll.mockResolvedValue({
+        created: [{ id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } }],
+        revoked: [],
+      });
+
+      const result = await service.verifyEmail("token");
+
+      expect(subscriptionsService.create).toHaveBeenCalledWith({ customerId: "customer-1", planId: "plan-1" });
+      expect(result.trial?.protocolUser).toEqual({ id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } });
     });
 
     it("is idempotent -- verifying an already-verified customer doesn't grant a second trial", async () => {

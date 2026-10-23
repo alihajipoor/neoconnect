@@ -82,3 +82,15 @@ describe("REALITY", () => {
     ).toThrow(/REALITY/);
   });
 });
+
+describe("traffic counters", () => {
+  // The speeds come from these (plugins/vpn/xray/xray.go, Uplink and
+  // Downlink): the engine counts the outbound tagged "proxy", and only when
+  // the config asks for stats and a system policy that counts it.
+  it("asks the engine to count the server outbound in both directions", () => {
+    const config = JSON.parse(buildXrayConfig(user("XRAY_VLESS_REALITY", REALITY_PARAMS, { uuid: "u-1", flow: "xtls-rprx-vision" })));
+    expect(config.stats).toEqual({});
+    expect(config.policy).toEqual({ system: { statsOutboundUplink: true, statsOutboundDownlink: true } });
+    expect(config.outbounds.map((o: { tag: string }) => o.tag)).toEqual(["proxy"]);
+  });
+});

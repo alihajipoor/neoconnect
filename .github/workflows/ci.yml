@@ -83,6 +83,13 @@ jobs:
       - name: Dockerfiles copy what pnpm install reads
         run: node scripts/check-docker-install-inputs.mjs
 
+      # The copies of the signed endpoint lists go to a public repository
+      # that the apps will trust only as far as the signatures do. A copy
+      # that does not verify, or that walks a version back, is an outage
+      # for whoever fetches it. A stand-in panel and throwaway checkouts.
+      - name: Endpoint-list copies verify, never go backwards, hold nothing else
+        run: node --test scripts/endpoints/publish-copies.test.mjs
+
       - run: pnpm --filter @neoxify/backend prisma:generate
 
       # The one place a migration meets a real Postgres before production.
@@ -101,6 +108,19 @@ jobs:
           pnpm exec prisma migrate deploy
           pnpm exec prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
           pnpm exec prisma db execute --url "$DATABASE_URL" --file test/sql/rollback-check.sql
+
+      # Specs that need that migrated Postgres: raw SQL whose column names,
+      # result types and time handling a mocked Prisma cannot check
+      # (*.db.spec.ts) -- daily usage, and the block watch's queries (grouped
+      # upstream counts, the owner's latest answer per server), whose unit
+      # tests use an in-memory stand-in. Skipped everywhere but here, the
+      # turbo run below included.
+      - name: Database-backed specs
+        working-directory: apps/backend
+        env:
+          NEOXIFY_DB_SPECS: "1"
+          BLOCK_WATCH_DB_TEST: "1"
+        run: pnpm exec jest --testPathPattern '\.db\.spec\.ts$'
 
       - run: pnpm turbo run lint typecheck build test
 
@@ -198,6 +218,13 @@ jobs:
       # from the release workflow would undo that without a sound.
       - name: The test-installer build cannot publish, tag or sign
         run: bash scripts/check-test-installer-workflow.sh
+
+      # The portal's deploy runs against a live, shared host, where a
+      # rollback that cannot restore the old build, or a check that passes
+      # a page the browser will blank, is found by customers. Stand-ins
+      # for ssh and curl; the host is a temporary directory.
+      - name: Portal deploy script deploys, checks and rolls back
+        run: bash scripts/test-deploy-portal.sh
 
   desktop:
     name: Desktop client tests

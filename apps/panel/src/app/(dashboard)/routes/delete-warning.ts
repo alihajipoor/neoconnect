@@ -13,7 +13,6 @@ import type { Route } from "@/lib/types";
  */
 export function routeDeleteWarning(
   route: Pick<Route, "id" | "name" | "exitProtocolConfigId" | "protocolUserCount">,
-  trialRouteId?: string | null,
 ): string {
   const parts = [`This permanently removes ${route.name}. Customers on it do not stop the delete.`];
   const n = route.protocolUserCount;
@@ -31,8 +30,5 @@ export function routeDeleteWarning(
     );
   }
   if (route.exitProtocolConfigId) parts.push("Its uplink to the exit node is removed too.");
-  if (trialRouteId && trialRouteId === route.id) {
-    parts.push("It is the free-trial route: new sign-ups get no trial until another trial route is chosen in Settings.");
-  }
   return parts.join(" ");
 }

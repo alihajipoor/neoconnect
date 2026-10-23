@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { invoke } from "@tauri-apps/api/core";
 import { getTokens } from "./lib/session";
-import { verifyEmailByToken } from "./lib/auth";
+import { logout, verifyEmailByToken } from "./lib/auth";
+import { autoReconnect } from "./lib/auto-reconnect";
 import { flushAttempts } from "./lib/attempts";
 import { endCustomerSession, type SessionEnd } from "./lib/session-end";
 import { onSessionRevoked } from "./lib/session-revoked";
@@ -13,17 +14,29 @@ import { Register } from "./screens/Register";
 import { VerifyEmail } from "./screens/VerifyEmail";
 import { ForgotPassword } from "./screens/ForgotPassword";
 import { Dashboard } from "./screens/Dashboard";
-import { ScreenTransition } from "./components/ScreenTransition";
+import { ScreenTransition, screenDirection } from "./components/ScreenTransition";
 import { Plans } from "./screens/Plans";
-import { Settings } from "./screens/Settings";
+import { Settings, type DeviceSettings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
 import { Support } from "./screens/Support";
+import { Activity } from "./screens/Activity";
+import type { NavId, ShellPage } from "./components/shell/AppShell";
+import { forgetShellProfile, isSignedInScreen, transitionKey } from "./lib/shell-nav";
+import { swapView } from "./lib/view-transition";
 import { CustomModeCard } from "./components/CustomModeCard";
 import { GamingModeCard } from "./components/GamingModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 import { setRelayTunnelReader } from "./lib/last-resort";
 import { BackupRouteChip } from "./components/BackupRoute";
+import { windowsAutostart } from "./lib/autostart";
+import { notificationSetting } from "./lib/notify";
+import { autoConnectLatch } from "./lib/auto-connect";
+import { notifyMemory } from "./lib/connection-notify";
+import { holdService, holdWanted, RECONNECT_HOLD_OFFERED, watchEpisodesForHold } from "./lib/reconnect-hold";
+import { appPrefs } from "./lib/app-prefs";
+import { ladderPass } from "./lib/ladder-pass";
+import { sessionLog } from "./lib/session-log";
 
 /** How often a queued diagnostic report retries.
  *
@@ -39,6 +52,20 @@ const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 // before any screen can make a request.
 setRelayTunnelReader(async () => (await invoke<{ connected: boolean }>("vpn_status")).connected);
 
+/** What Windows does for Settings' device rows: every one of them bound
+ * here, so Settings draws them (`DeviceSettings`). The phone app binds
+ * its own once its main page honours them. "Block the internet while
+ * reconnecting" only in a build that offers it: not until a capture has
+ * proved it (`RECONNECT_HOLD_PROVEN` in lib/reconnect-hold.ts). */
+const WINDOWS_DEVICE: DeviceSettings = {
+  autostart: windowsAutostart,
+  autoConnect: true,
+  notifications: { setting: notificationSetting },
+  ...(RECONNECT_HOLD_OFFERED
+    ? { reconnectHold: { apply: (enabled: boolean) => invoke<void>("vpn_set_reconnect_hold", { enabled }) } }
+    : {}),
+};
+
 type Screen =
   | "loading"
   | "signingOut"
@@ -50,10 +77,15 @@ type Screen =
   | "plans"
   | "settings"
   | "referrals"
-  | "support";
+  | "support"
+  | "activity";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
+  /** The screen as of the last render, for a change of screen asked from a
+   * callback (`go`). */
+  const screenRef = useRef<Screen>(screen);
+  screenRef.current = screen;
   // Carries the just-submitted credentials from register/login into the
   // verify screen so it can auto-sign-in the moment the code is confirmed
   // -- see VerifyEmail's doc comment. Password is only ever held in
@@ -66,6 +98,8 @@ export default function App() {
   const [updateState, setUpdateState] = useState<UpdateState>({ status: "none" });
   const [restarting, setRestarting] = useState(false);
   const [updateBlocked, setUpdateBlocked] = useState(false);
+  // A sign-out pressed on one of the shell's pages, under way.
+  const [pageSigningOut, setPageSigningOut] = useState(false);
   // Guards against processing the same deep-link URL twice -- the launch
   // URL can plausibly reach handleDeepLinkUrl via both the Rust-side
   // get_launch_deep_link command and the plugin's own onOpenUrl forwarding
@@ -87,8 +121,37 @@ export default function App() {
     // means no future change to it can strand the app on "Loading..."
     // with no way forward.
     getTokens()
-      .then((tokens) => setScreen(tokens ? "dashboard" : "login"))
-      .catch(() => setScreen("login"));
+      .then((tokens) => {
+        // A run that opens on sign-in has nothing to connect "when Neoxify
+        // starts": signing in later is not a start (lib/auto-connect.ts).
+        if (!tokens) autoConnectLatch.disarm();
+        setScreen(tokens ? "dashboard" : "login");
+      })
+      .catch(() => {
+        autoConnectLatch.disarm();
+        setScreen("login");
+      });
+  }, []);
+
+  // The session log keeps seven days while the app runs, not only at
+  // each start (lib/session-log.ts).
+  useEffect(() => sessionLog.keepPruned(), []);
+
+  // "Block the internet while reconnecting": the service's hold is let go
+  // of when the reconnect it was for ends -- landed, given up, or ended by
+  // something other than a press whose own pass decides -- from whichever
+  // screen is up (lib/reconnect-hold.ts). Read once; the preferences are
+  // read here so the setting is known before any screen asks.
+  useEffect(() => {
+    void appPrefs.load();
+    return watchEpisodesForHold({
+      phase: autoReconnect.current,
+      subscribe: autoReconnect.subscribe,
+      setting: () => holdWanted(appPrefs.current().blockWhileReconnecting),
+      passRunning: () => ladderPass.inFlight(),
+      release: holdService.release,
+      keep: holdService.keep,
+    });
   }, []);
 
   // Handles the "Open in Neoxify" link from the verification email --
@@ -259,6 +322,15 @@ export default function App() {
     if (endingRef.current) return;
     endingRef.current = true;
     setScreen("signingOut");
+    // The avatar line belongs to the account that just left, and so does
+    // anything a notification still owed it; a later sign-in in this run
+    // is not "when Neoxify starts".
+    forgetShellProfile();
+    notifyMemory.reset();
+    autoConnectLatch.disarm();
+    // The session log goes with the session, and is off for whoever signs
+    // in next (lib/session-log.ts).
+    void sessionLog.wipe();
     try {
       let ended: SessionEnd;
       try {
@@ -282,6 +354,25 @@ export default function App() {
     }
   }
 
+  /** Signing out from one of the shell's pages (the profile menu, Settings).
+   *
+   * The Dashboard's own sign-out, less the half only it can reach: an
+   * automatic reconnect waiting between attempts is cancelled, then
+   * `logout()` takes the tunnel down before it deletes anything, then the
+   * session ends as every other way does. A connect pass still walking its
+   * protocols is caught by the session generation `logout()` moves. */
+  async function signOutFromPage() {
+    if (pageSigningOut) return;
+    setPageSigningOut(true);
+    try {
+      autoReconnect.cancel("signedOut");
+      await logout();
+    } finally {
+      setPageSigningOut(false);
+    }
+    await handleLoggedOut();
+  }
+
   // Read through a ref so the listener, registered once, always calls
   // the current render's handler -- and with it the current language.
   const handleLoggedOutRef = useRef(handleLoggedOut);
@@ -294,9 +385,87 @@ export default function App() {
   // in scope, which is why this build cuts between screens while
   // the mobile one animates -- the component lived here and only
   // mobile was ever wired into it.
+  /** A change of screen. Between the main page and another page of the
+   * signed-in shell it is animated here, as a change of view
+   * (`swapView`): the transition below keeps one key for all of them
+   * (`transitionKey`), so the Dashboard -- and the shell it draws them in --
+   * stays mounted. Everything else goes through the transition below. */
+  const go = (next: Screen) => {
+    const from = screenRef.current;
+    if (from === next) return;
+    if (isSignedInScreen(from) && isSignedInScreen(next)) {
+      swapView(() => setScreen(next), screenDirection(from, next));
+      return;
+    }
+    setScreen(next);
+  };
+
+  /** One of the signed-in pages, drawn in the main page's own shell (the
+   * Dashboard's `page`): the sidebar on a wide window, the tabs on a medium
+   * one, the bottom nav on a phone-sized one. `nav` is the nav item it
+   * belongs to. Null on the main page and outside the shell. */
+  const shellPage = (): ShellPage | null => {
+    const page = (nav: NavId, node: ReactNode): ShellPage => ({ nav, key: screen, node });
+    if (screen === "settings") {
+      return page(
+        "settings",
+        <Settings
+          onBack={() => go("dashboard")}
+          onOpenReferrals={() => go("referrals")}
+          onOpenSupport={() => go("support")}
+          onLoggedOut={() => void handleLoggedOut()}
+          customSection={<CustomModeCard />}
+          // Supplied here rather than imported by the screen, the same way
+          // Custom mode is: gaming mode drives the Windows helper service
+          // and has no counterpart on the mobile build that shares this
+          // screen. Passing it is what makes its row exist.
+          gamingSection={<GamingModeCard />}
+          onOpenPlans={() => go("plans")}
+          onOpenActivity={() => go("activity")}
+          onSignOut={() => void signOutFromPage()}
+          platform="windows"
+          device={WINDOWS_DEVICE}
+        />,
+      );
+    }
+    if (screen === "activity") {
+      return page(
+        "activity",
+        <Activity
+          // The Windows helper's fingerprint of the network; and, for when it
+          // cannot be read (under a tunnel), the ways out, to tell whether the
+          // main page's network is still the one (`currentNetwork`).
+          readNetwork={() => invoke<string | null>("network_fingerprint")}
+          readWayOut={() => invoke<string | null>("network_uplinks")}
+          onOpenPlans={() => go("plans")}
+          // The main page records it here, so its switch is offered.
+          sessionLog
+        />,
+      );
+    }
+    if (screen === "referrals") {
+      // Back to Settings rather than the Dashboard: that is where the
+      // customer came from, and dropping them somewhere else is how a
+      // two-tap detour starts feeling like getting lost.
+      return page("none", <Referrals onBack={() => go("settings")} />);
+    }
+    if (screen === "support") {
+      // Same reasoning as Referrals: back where they came from.
+      return page("none", <Support onBack={() => go("settings")} />);
+    }
+    if (screen === "plans") {
+      const leavePlans = () => {
+        setPlansNotice(null);
+        go("dashboard");
+      };
+      return page("none", <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />);
+    }
+    return null;
+  };
+
   const renderScreen = () => {
   if (screen === "loading") {
-    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading...</div>;
+    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t("common.loading")}</div>;
   }
   if (screen === "signingOut") {
     return (
@@ -357,71 +526,57 @@ export default function App() {
       />
     );
   }
-  if (screen === "settings") {
-    return (
-      <Settings
-        onBack={() => setScreen("dashboard")}
-        onOpenReferrals={() => setScreen("referrals")}
-        onOpenSupport={() => setScreen("support")}
-        onLoggedOut={() => void handleLoggedOut()}
-        customSection={<CustomModeCard />}
-        // Supplied here rather than imported by the screen, the same way
-        // Custom mode is: gaming mode drives the Windows helper service
-        // and has no counterpart on the mobile build that shares this
-        // screen. Passing it is what makes the rail row exist.
-        gamingSection={<GamingModeCard />}
-      />
-    );
-  }
-  if (screen === "referrals") {
-    // Back to Settings rather than the Dashboard: that is where the
-    // customer came from, and dropping them somewhere else is how a
-    // two-tap detour starts feeling like getting lost.
-    return <Referrals onBack={() => setScreen("settings")} />;
-  }
-  if (screen === "support") {
-    // Same reasoning as Referrals: back where they came from.
-    return <Support onBack={() => setScreen("settings")} />;
-  }
-  if (screen === "plans") {
-    const leavePlans = () => {
-      setPlansNotice(null);
-      setScreen("dashboard");
-    };
-    return <Plans onActivated={leavePlans} onBack={leavePlans} notice={plansNotice} />;
-  }
-  // The banner rides above the Dashboard only. It is the screen people
-  // sit on, and putting it above every screen would mean it appears
-  // over the sign-in form -- telling somebody who cannot get into their
-  // account yet about a version number.
+  // The update notice rides on the Dashboard only -- in its sidebar, or
+  // at the top of the hero on a narrower window. It is the screen people
+  // sit on, and putting it on every screen would mean it appears over the
+  // sign-in form, telling somebody who cannot get into their account yet
+  // about a version number.
+  //
+  // The other pages of the shell are drawn by the Dashboard too, in its own
+  // shell, in place of the main page (`shellPage`): it stays mounted under
+  // them, with what it has loaded and verified.
   return (
-    <div className="flex h-full flex-col">
-      <UpdateBanner
-        state={updateState}
-        onRestart={() => void restartForUpdate()}
-        busy={restarting}
-        blocked={updateBlocked}
-      />
-      <div className="min-h-0 flex-1">
-        <Dashboard
-          onLoggedOut={() => void handleLoggedOut()}
-          onBrowsePlans={() => setScreen("plans")}
-          onOpenSettings={() => setScreen("settings")}
+    <Dashboard
+      onLoggedOut={() => void handleLoggedOut()}
+      onBrowsePlans={() => go("plans")}
+      onOpenSettings={() => go("settings")}
+      onOpenReferrals={() => go("referrals")}
+      onOpenSupport={() => go("support")}
+      onOpenActivity={() => go("activity")}
+      page={shellPage()}
+      onShowMain={() => setScreen("dashboard")}
+      update={
+        <UpdateBanner
+          state={updateState}
+          onRestart={() => void restartForUpdate()}
+          busy={restarting}
+          blocked={updateBlocked}
         />
-      </div>
-    </div>
+      }
+    />
   );
   };
+
+  // The redesigned screens keep the title strip in their own padding: the
+  // shell's pages and the Dashboard through the shell, sign-in and the
+  // rest of its steps through AuthFrame. Only the two plain waits are
+  // given the strip's 32px here. The version moved to Settings › About
+  // and the profile menu's foot.
+  const framed = (content: ReactNode) =>
+    screen === "loading" || screen === "signingOut" ? <div className="relative h-full pt-8">{content}</div> : content;
 
   // The backup-route chip above every screen while relay mode lasts, and
   // the consent prompt over them when a request the customer made needs
   // it: both at the root, so neither touches the Dashboard's orb or
   // headline (calm UI).
   return (
-    <div className="flex h-full flex-col">
-      <BackupRouteChip />
-      <div className="min-h-0 flex-1">
-        <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>
+    <div className="relative h-full">
+      <ScreenTransition screenKey={transitionKey(screen)} viewTransitions>
+        {framed(renderScreen())}
+      </ScreenTransition>
+      {/* In the title strip, clear of the caption buttons. */}
+      <div className="nx-tbchip">
+        <BackupRouteChip />
       </div>
     </div>
   );

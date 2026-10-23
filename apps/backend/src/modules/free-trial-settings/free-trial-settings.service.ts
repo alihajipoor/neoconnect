@@ -22,7 +22,9 @@ export class FreeTrialSettingsService {
       data: {
         enabled: dto.enabled,
         trialPlanId: dto.trialPlanId,
-        trialRouteId: dto.trialRouteId,
+        // No longer a setting: the trial plan's routes decide. Cleared on
+        // save so nothing reads a stale choice as meaning something.
+        trialRouteId: null,
       },
     });
   }

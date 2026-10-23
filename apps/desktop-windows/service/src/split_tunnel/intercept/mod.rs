@@ -1533,6 +1533,27 @@ mod tests {
     }
 
     #[test]
+    fn each_complaint_carries_the_code_the_app_words_it_by() {
+        // The app shows Persian customers its own words for these, keyed
+        // on the code; the code and the sentence come from one reading,
+        // so they must name the same problem.
+        use neoconnect_ipc::SplitTunnelProblemCode as Code;
+        for (counters, code, words) in [
+            (stats(500, 90, 90, 0, 90), Code::InjectionRefused, "refusing"),
+            (stats(441, 90, 90, 0, 0), Code::NoReplies, "nothing is coming back"),
+            (stats(5000, 0, 0, 0, 0), Code::NoAppTraffic, "None of the apps you chose"),
+        ] {
+            let (found, sentence) = counters.finding(WARMUP * 2).expect("must complain");
+            assert_eq!(found, code, "{sentence}");
+            assert!(sentence.contains(words), "{sentence}");
+            assert_eq!(counters.complaint(WARMUP * 2), Some(sentence), "the same sentence either way");
+        }
+        // Quiet stays quiet, and warming up stays unjudged, with a code too.
+        assert_eq!(stats(4000, 900, 850, 800, 0).finding(WARMUP * 2), None);
+        assert_eq!(stats(5000, 0, 0, 0, 0).finding(Duration::from_secs(1)), None);
+    }
+
+    #[test]
     fn a_quiet_machine_that_matches_nothing_is_not_yet_a_fault() {
         // Below the threshold this is just an idle machine, and saying
         // "none of your apps have sent traffic" would be true but

@@ -357,6 +357,9 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     // reported exactly once and then never again -- which is how two of
     // six ran dark for six days. See docs/journal/log.md, 2026-08-30.
     await this.nodesService.remindAboutOfflineNodes();
+    // And the one that reaches a person: a gap past the paging threshold,
+    // once per gap (NodesService.pageHeartbeatGaps).
+    await this.nodesService.pageHeartbeatGaps();
   }
 
   /** A stream ending is not the same as the node being down.

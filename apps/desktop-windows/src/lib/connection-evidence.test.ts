@@ -7,7 +7,9 @@ import {
   fullTunnelPollState,
   handshakeEvidence,
   droppedUnseen,
+  HEADLINE_HINTS,
   headlineFor,
+  heldOverItsDrop,
   isTunnelUp,
   LIVENESS_POLL_MS,
   noTunnelVerified,
@@ -409,6 +411,13 @@ describe("noticing that the tunnel has gone", () => {
   /** What a current service's fallback says while its owning thread is
    * busy and it can see no tunnel: nothing proved either way. */
   const GUESSED: Pick<VpnStatus, "connected" | "health"> = { connected: false, health: { state: "unknown" } };
+  /** A tunnel said up while the service holds the internet for the drop
+   * of that very session: no tunnel has landed under the hold. */
+  const HELD_OVER_ITS_DROP: Pick<VpnStatus, "connected" | "health" | "reconnectHold"> = {
+    connected: true,
+    health: { state: "unknown" },
+    reconnectHold: { state: "holding", held_secs: 1 },
+  };
 
   it("takes the service at its word when it says nothing is running", () => {
     for (const shown of LIVE) {
@@ -517,7 +526,7 @@ describe("noticing that the tunnel has gone", () => {
 
     it("is the poll's rule, with the screen's claim swapped for the app's", () => {
       for (const shown of [...LIVE, ...NOT_LIVE]) {
-        for (const answer of [ENDED, GUESSED, null]) {
+        for (const answer of [ENDED, GUESSED, HELD_OVER_ITS_DROP, null]) {
           for (const disturbed of [false, true]) {
             expect(droppedFromPoll(shown, "idle", answer, disturbed)).toBe(
               droppedUnseen(LIVE.includes(shown), "idle", answer, disturbed),
@@ -525,6 +534,48 @@ describe("noticing that the tunnel has gone", () => {
           }
         }
       }
+    });
+  });
+
+  // "Block the internet while reconnecting" (2026-10-20 review): the
+  // service held a drop -- the tunnel adapter gone under a running
+  // xray.exe -- and went on calling that session connected. The screen
+  // said "Connected" over a machine refusing everything but Neoxify, and
+  // nothing reconnected until the service's two-minute backstop let go,
+  // into traffic in the clear.
+  describe("a status that says connected over a hold for its own drop", () => {
+    it("is a drop, with nothing of ours running and a tunnel claimed", () => {
+      expect(heldOverItsDrop(HELD_OVER_ITS_DROP)).toBe(true);
+      for (const shown of LIVE) {
+        expect(droppedFromPoll(shown, "idle", HELD_OVER_ITS_DROP, false), shown).toBe(true);
+      }
+      expect(droppedUnseen(true, "idle", HELD_OVER_ITS_DROP, false)).toBe(true);
+    });
+
+    it("is not one while a press of ours runs, when disturbed, or with no tunnel claimed", () => {
+      expect(droppedFromPoll("connected", "connect", HELD_OVER_ITS_DROP, false)).toBe(false);
+      expect(droppedFromPoll("connected", "disconnect", HELD_OVER_ITS_DROP, false)).toBe(false);
+      expect(droppedFromPoll("connected", "idle", HELD_OVER_ITS_DROP, true)).toBe(false);
+      for (const shown of NOT_LIVE) {
+        expect(droppedFromPoll(shown, "idle", HELD_OVER_ITS_DROP, false), shown).toBe(false);
+      }
+      expect(droppedUnseen(false, "idle", HELD_OVER_ITS_DROP, false)).toBe(false);
+    });
+
+    it("is not one over a tunnel that landed under the hold, an armed one, or none held", () => {
+      const over = (reconnectHold: unknown) => ({ ...HELD_OVER_ITS_DROP, reconnectHold });
+      for (const hold of [
+        { state: "holding", held_secs: 4, landed: true },
+        { state: "armed" },
+        { state: "notHeld", problem: "timedOut" },
+        undefined,
+        null,
+      ]) {
+        expect(heldOverItsDrop(over(hold)), JSON.stringify(hold)).toBe(false);
+        expect(droppedFromPoll("connected", "idle", over(hold), false), JSON.stringify(hold)).toBe(false);
+      }
+      // A "no tunnel" beside a hold is the plain rule's, as ever.
+      expect(heldOverItsDrop({ connected: false, reconnectHold: { state: "holding", held_secs: 1 } })).toBe(false);
     });
   });
 });
@@ -608,6 +659,24 @@ describe("the headline", () => {
       hint: "dash.notProtectedHint",
       tone: "plain",
     });
+  });
+
+  it("lists every sentence it can say, for the phone's reserved height", () => {
+    const said = new Set<string>();
+    for (const state of EVERY) {
+      for (const dropped of [false, true]) {
+        for (const customMode of [false, true]) {
+          for (const unconfined of [false, true]) {
+            for (const waitingForNetwork of [false, true]) {
+              for (const reconnecting of [null, { offline: false, waiting: true }, { offline: true, waiting: true }]) {
+                said.add(headlineFor(state, { dropped, customMode, unconfined, waitingForNetwork, reconnecting }).hint);
+              }
+            }
+          }
+        }
+      }
+    }
+    expect([...said].sort()).toEqual([...HEADLINE_HINTS].sort());
   });
 
   it("gives Custom mode its narrower unconfirmed sentence", () => {

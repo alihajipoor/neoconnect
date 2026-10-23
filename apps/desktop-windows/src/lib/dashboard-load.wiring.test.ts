@@ -62,9 +62,23 @@ describe.each(screens)("the %s dashboard's first load", (_name, path, signature)
     expect(failed).toMatch(
       /if \(shownWhileWaiting\) \{(\s*\/\/[^\n]*\n)+\s*setOfflineReason\(reason\);\s*offlineRetry\.start\(\);\s*return "unanswered";\s*\}/,
     );
-    expect(load).toContain(
-      "setProtocolUser((current) => usersResult.data.find((u) => u.id === current?.id) ?? current);",
+    if (_name === "phone") {
+      expect(load).toContain(
+        "setProtocolUser((current) => usersResult.data.find((u) => u.id === current?.id) ?? current);",
+      );
+      return;
+    }
+    // Windows: the same, and over a tunnel the screen shows up as well
+    // (`showLoadedCredential`, pinned in dashboard-remount.test.ts).
+    // A return to the main page chooses again only for a credential the
+    // answer no longer lists, with no pass dialling (`revalidate`).
+    expect(load).toMatch(
+      /showLoadedCredential\(\s*usersResult\.data,\s*chosen,\s*shownWhileWaiting && \(retry !== "returned" \|\| heldListed \|\| ladderInFlight\(\)\),\s*\);/,
     );
+    const begins = screen.indexOf("  function showLoadedCredential(");
+    const shown = screen.slice(begins, screen.indexOf("\n  }\n", begins));
+    expect(shown).toContain("if (keepHeld || describesTunnel(connectionStateRef.current)) {");
+    expect(shown).toContain("setProtocolUser((current) => users.find((u) => u.id === current?.id) ?? current);");
   });
 });
 
@@ -74,7 +88,7 @@ describe("the Windows dashboard's load that answers after the snapshot went up",
   const load = screen.slice(start, screen.indexOf("\n  }\n", start));
 
   it("does not ask the service again, or capture baselines over a tunnel the screen may have brought up", () => {
-    expect(load).toContain("const adopted = shownWhileWaiting ? null : await adoptServiceState(sub);");
+    expect(load).toContain("const adopted = shownWhileWaiting ? null : await adoptServiceState(sub, usersResult.data);");
     expect(load).toContain('if (adopted === "disconnected") await captureBaselinesWhileDown(usersResult.data);');
   });
 });
@@ -153,7 +167,11 @@ describe.each(screens)("the %s dashboard on its snapshot", (_name, path, signatu
     const onFailed = listed.slice(listed.indexOf("onPickFailed={() => {"));
     expect(onFailed.slice(0, onFailed.indexOf("}}"))).toContain("switchLoadSettled();");
     const onSwitched = listed.slice(listed.indexOf("onSwitched={(routeId) => {"));
-    expect(onSwitched.slice(0, onSwitched.indexOf("}}"))).toMatch(/void loadAll\(shown \?\? undefined\);(\s*\/\/[^\n]*\n)*\s*switchLoadSettled\(\);/);
+    // The Windows screen's connect after a confirmed switch waits for the
+    // load (`connectAfterSwitch`); the phone has no such connect.
+    expect(onSwitched.slice(0, onSwitched.indexOf("}}"))).toMatch(
+      /void loadAll\(shown \?\? undefined\)(\.finally\(connectAfterSwitch\))?;(\s*\/\/[^\n]*\n)*\s*switchLoadSettled\(\);/,
+    );
   });
 
   /** Every answer Neoxify gives, the updater's check and the tunnel's

@@ -95,15 +95,14 @@ pub struct Ikev2Profile {
 pub struct VpnStatus {
     pub connected: bool,
     pub protocol: Option<String>,
-    /// Bytes carried, or null where the platform will not say.
+    /// Bytes carried, or null where nothing counted them.
     ///
     /// Optional for the same reason `last_handshake_age_secs` below is,
     /// and the argument there applies unchanged: null is the honest
-    /// answer for "no evidence". iOS has no counters to read -- the
-    /// tunnel runs in a separate extension process and NEVPNConnection
-    /// exposes no byte totals to the app -- so the alternative was a
-    /// zero, which reads as "nothing was carried" rather than "not
-    /// known".
+    /// answer for "no evidence". IKEv2 is each platform's own client and
+    /// gives the app no totals, and an iOS extension that does not answer
+    /// in time is no count either; the alternative was a zero, which reads
+    /// as "nothing was carried" rather than "not known".
     ///
     /// They were required, and the iOS plugin sends neither, so every
     /// single `vpn_status` call on iOS failed to deserialise with
@@ -117,6 +116,47 @@ pub struct VpnStatus {
     /// treats it differently from a stale number -- so it must never be
     /// filled in with a zero to keep the type simple.
     pub last_handshake_age_secs: Option<i64>,
+    /// How long the live tunnel has been up, in seconds, or null where the
+    /// platform did not record its start (IKEv2 on Android, an older
+    /// plugin). For the timer on a screen that finds a tunnel already up
+    /// -- the app adopts it rather than starting a clock from nothing.
+    #[serde(default)]
+    pub session_secs: Option<i64>,
+}
+
+/// The words the tunnel's own notifications use, in the app's language,
+/// and whether the customer wants the ones about connection changes
+/// (Settings, "Notify me when the connection changes"). Handed to the
+/// native side, which posts them when the app's JavaScript is not running
+/// -- the Android tunnel service, the iOS packet-tunnel extension.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notices {
+    pub enabled: bool,
+    /// Android's names for its two channels, as its settings list them.
+    pub status_channel: String,
+    pub changes_channel: String,
+    /// The ongoing notification an Android VPN service must show.
+    pub title: String,
+    pub starting: String,
+    pub on: String,
+    /// The tunnel was turned off by the system or another VPN app.
+    pub off_title: String,
+    pub off_body: String,
+    /// iOS: the tunnel stopped on its own.
+    #[serde(default)]
+    pub stopped_title: String,
+    #[serde(default)]
+    pub stopped_body: String,
+}
+
+/// Whether the system shows this app's notifications: "enabled",
+/// "canAsk" (not yet, and asking would show the system's question), or
+/// "disabledForApp" (only the system's settings can turn them on).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationState {
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,7 +325,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 /// up only by reading one side against the other.
 #[cfg(test)]
 mod plugin_contract_tests {
-    use super::{Empty, Granted, VpnStatus};
+    use super::{Empty, Granted, Notices, NotificationState, VpnStatus};
 
     /// What iOS's `hasPermission` sends, reaching the UI whole.
     ///
@@ -356,5 +396,57 @@ mod plugin_contract_tests {
         assert_eq!(status.tx_bytes, Some(2048));
         assert_eq!(status.last_handshake_age_secs, Some(3));
         assert_eq!(status.protocol.as_deref(), Some("WIREGUARD"));
+        // An older plugin says nothing of the session's age.
+        assert_eq!(status.session_secs, None);
+    }
+
+    /// The session's age reaches the webview under the name the app reads
+    /// (`sessionSecs`, lib/session-clock.ts), and a missing count stays
+    /// null on the way out -- never a zero the app would take for counted.
+    #[test]
+    fn the_session_age_and_missing_counters_cross_as_the_app_reads_them() {
+        let payload = r#"{"connected":true,"protocol":"XRAY_VLESS_REALITY","sessionSecs":75}"#;
+        let status = serde_json::from_str::<VpnStatus>(payload).expect("status rejected");
+        let out = serde_json::to_value(&status).unwrap();
+        assert_eq!(out["sessionSecs"], serde_json::json!(75));
+        assert_eq!(out["rxBytes"], serde_json::Value::Null);
+        assert_eq!(out["txBytes"], serde_json::Value::Null);
+    }
+
+    /// What the app sends for the native notifications, under the names
+    /// the Kotlin `NoticesArgs` and the Swift decoder read.
+    #[test]
+    fn the_notices_cross_under_the_native_names() {
+        let notices = Notices {
+            enabled: true,
+            status_channel: "VPN status".into(),
+            changes_channel: "Connection changes".into(),
+            title: "Neoxify".into(),
+            starting: "Starting".into(),
+            on: "VPN is on".into(),
+            off_title: "VPN turned off".into(),
+            off_body: "Turned off".into(),
+            stopped_title: "VPN stopped".into(),
+            stopped_body: "Stopped".into(),
+        };
+        let out = serde_json::to_value(&notices).unwrap();
+        for key in [
+            "enabled", "statusChannel", "changesChannel", "title", "starting", "on", "offTitle", "offBody",
+            "stoppedTitle", "stoppedBody",
+        ] {
+            assert!(out.get(key).is_some(), "{key} missing");
+        }
+        // Android has no "stopped" words to send; they default to empty.
+        let android = r#"{"enabled":false,"statusChannel":"a","changesChannel":"b","title":"c","starting":"d",
+                          "on":"e","offTitle":"f","offBody":"g"}"#;
+        let parsed = serde_json::from_str::<Notices>(android).expect("notices rejected");
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.stopped_title, "");
+    }
+
+    #[test]
+    fn the_notification_state_is_one_word() {
+        let parsed = serde_json::from_str::<NotificationState>(r#"{"state":"canAsk"}"#).expect("state rejected");
+        assert_eq!(parsed.state, "canAsk");
     }
 }

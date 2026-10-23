@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Globe } from "lucide-react";
 import { DiscordIcon, InstagramIcon, TelegramIcon } from "./BrandIcons";
 import { getAppLinks } from "../lib/customer";
 import { IS_STORE_BUILD } from "../lib/distribution";
+import { useI18n } from "../lib/i18n";
 import type { AppLinks } from "../lib/types";
 
 /** Typed on the icon rather than inferred, because the row now mixes a
@@ -27,20 +28,41 @@ type CommunityLink = {
  * someone else's pages, they need the customer's own logged-in session,
  * and a VPN client should not be in the business of rendering them.
  */
-export function CommunityLinks() {
+export function CommunityLinks({
+  look = "icons",
+  onNone,
+}: {
+  /** Icons in the sidebar; labelled chips in Settings › About. */
+  look?: "icons" | "chips";
+  /** Told when there is nothing to show -- no links set, or none could be
+   * read -- so a row around this can go too. */
+  onNone?: () => void;
+} = {}) {
+  const { t } = useI18n();
   const [links, setLinks] = useState<AppLinks | null>(null);
+  const noneRef = useRef(onNone);
+  noneRef.current = onNone;
 
   useEffect(() => {
     let cancelled = false;
     void getAppLinks().then((result) => {
       // Silent on failure: these are a convenience, and an error here
       // must not push itself in front of someone trying to connect.
-      if (!cancelled && result.ok) setLinks(result.data);
+      if (cancelled) return;
+      if (result.ok) setLinks(result.data);
+      else noneRef.current?.();
     });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  const empty =
+    links !== null &&
+    ![IS_STORE_BUILD ? null : links.websiteUrl, links.discordUrl, links.instagramUrl, links.telegramUrl].some(Boolean);
+  useEffect(() => {
+    if (empty) noneRef.current?.();
+  }, [empty]);
 
   if (!links) return null;
 
@@ -63,7 +85,7 @@ export function CommunityLinks() {
   // ever becomes a sales channel it has to come out of store builds
   // too, for exactly the same reason.
   const entries: CommunityLink[] = [
-    ...(IS_STORE_BUILD ? [] : [{ url: links.websiteUrl, icon: Globe, label: "Website" }]),
+    ...(IS_STORE_BUILD ? [] : [{ url: links.websiteUrl, icon: Globe, label: t("set.website") }]),
     { url: links.discordUrl, icon: DiscordIcon, label: "Discord" },
     { url: links.instagramUrl, icon: InstagramIcon, label: "Instagram" },
     { url: links.telegramUrl, icon: TelegramIcon, label: "Telegram" },
@@ -75,6 +97,19 @@ export function CommunityLinks() {
 
   if (shown.length === 0) return null;
 
+  if (look === "chips") {
+    return (
+      <div className="nx-chips">
+        {shown.map(({ url, icon: Icon, label }) => (
+          <button key={label} type="button" className="nx-chipbtn" onClick={() => void openUrl(url).catch(() => undefined)}>
+            <Icon className="size-4" />
+            <span dir="auto">{label}</span>
+          </button>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div className="flex items-center gap-0.5">
       {shown.map(({ url, icon: Icon, label }) => (
@@ -84,7 +119,7 @@ export function CommunityLinks() {
           title={label}
           aria-label={label}
           onClick={() => void openUrl(url).catch(() => undefined)}
-          className="press flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-white/8 hover:text-foreground"
+          className="press flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-[var(--select)] hover:text-foreground"
         >
           <Icon className="size-4" />
         </button>

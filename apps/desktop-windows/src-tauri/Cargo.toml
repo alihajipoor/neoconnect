@@ -1,6 +1,6 @@
 [package]
 name = "neoconnect-desktop"
-version = "0.9.51"
+version = "0.9.53"
 description = "NeoConnect VPN client"
 authors = ["NeoConnect"]
 edition = "2021"
@@ -72,6 +72,9 @@ hyper = { version = "1", default-features = false }
 # WinINet's proxy settings, for the same question. Already in the tree
 # through hyper-util, at the version in Cargo.lock.
 windows-registry = "0.6"
+# Toast notifications (src/notify.rs), through WinRT. The version Tauri
+# already builds (Cargo.lock); the two features add bindings, not crates.
+windows = { version = "0.61", features = ["Data_Xml_Dom", "UI_Notifications"] }
 
 [dev-dependencies]
 # relay_http.rs's HTTP/2 test serves h2 over TLS on loopback. All four are
@@ -93,6 +96,10 @@ features = [
   # MIB_IPFORWARDROW, which GetBestRoute fills in -- see
   # vpn.rs::network_fingerprint.
   "Win32_Networking_WinSock",
+  # MIB_IF_ROW2 and its operational state, which GetIfEntry2 fills in:
+  # whether the adapter a way out leaves by is up, as the service asks it
+  # (vpn.rs::network_way_out).
+  "Win32_NetworkManagement_Ndis",
   # EnumWindows: which processes own a window the customer can
   # see. Only answerable here -- the helper service is in
   # session 0 and cannot see the interactive desktop at all.

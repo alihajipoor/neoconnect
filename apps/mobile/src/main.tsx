@@ -4,6 +4,7 @@ import App from "./App";
 import { I18nProvider } from "@shared/lib/i18n";
 import { setHealthIpTransport } from "@shared/lib/egress";
 import { ipv4OnlyHealthIp } from "@shared/lib/health-ip-v4";
+import { startEffects } from "@shared/lib/effects";
 import "./globals.css";
 
 // Before anything can take a baseline, as on Windows: the egress check
@@ -13,6 +14,10 @@ import "./globals.css";
 // platforms -- as "indeterminate". See `mod health_ip` in
 // src-tauri/src/lib.rs.
 setHealthIpTransport(ipv4OnlyHealthIp);
+
+// Theme, glass and motion on <html> for the Pearl screens (lib/effects.ts):
+// Settings › Appearance changes them.
+startEffects();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

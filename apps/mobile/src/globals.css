@@ -13,6 +13,16 @@
    file, shared by reference, so the two clients cannot drift into looking
    like different products. */
 @import "../../desktop-windows/src/theme.css";
+/* The Pearl Glass components and pages: every screen of the phone is
+   drawn in them -- the main page, sign-in, Settings and the rest it shares
+   with the desktop. */
+@import "../../desktop-windows/src/pearl.css";
+@import "../../desktop-windows/src/pages.css";
+/* How every part moves (the desktop's, shared): after the components and
+   pages it refines. */
+@import "../../desktop-windows/src/motion.css";
+/* The phone's own: the first-run disclosure and the per-app card. */
+@import "./phone.css";
 
 @layer base {
   body {
@@ -48,41 +58,22 @@
     text-size-adjust: 100%;
   }
 
-  /* Keeps content clear of the notch, the status bar and the gesture
-     handle. Tauri draws into the full window on Android, so nothing does
-     this for us -- without it the header sits under the clock. */
+  /* Edge to edge, as the screens are drawn (design-system.md 3.3): each
+     Pearl screen keeps the notch, the status bar and the gesture handle
+     clear itself, from the safe-area insets (`--safe-t` and `--safe-b`
+     on .nx-app, pearl.css) -- so the bottom nav is docked to the very
+     bottom and its glass runs under the gesture handle, and the header
+     sits under the clock's row rather than under the clock. Tauri draws
+     into the full window on Android, so nothing else does this. The sides
+     stay padded here: a phone on its side keeps its notch out of the way.
+
+     A tablet, and a phone on its side, lay themselves out for their width
+     (the medium and wide layouts) and keep the status bar and the home
+     indicator clear the same way, from the same insets (phone.css). */
   #root {
-    padding-top: env(safe-area-inset-top);
-    padding-bottom: env(safe-area-inset-bottom);
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
     box-sizing: border-box;
-  }
-
-  /* Tablets. The screens are laid out for a phone and stretch to fill
-     whatever they are given, so on a 13" iPad the connect control ended
-     up floating in roughly 900px of empty space -- correct, and reading
-     as a phone app that had been pulled out of shape.
-
-     Centring the app column instead of stretching it turns that into a
-     deliberate composition: the same screen, sized to itself, sitting in
-     the middle of the display. Done here rather than per screen so
-     Settings, Support and the rest inherit it, and gated at the tablet
-     breakpoint so phones are untouched -- there the column filling the
-     screen is exactly right.
-
-     The safe-area padding above still applies; this only changes how the
-     remaining space is distributed. */
-  @media (min-width: 768px) {
-    #root {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    #root > * {
-      max-height: 100%;
-    }
   }
 
   /* A tap on Android otherwise flashes a grey box over the tapped
@@ -101,4 +92,32 @@
   [role="button"] {
     -webkit-touch-callout: none;
   }
+}
+
+/* The plain waits (loading, signing out) and the backup-route chip's row
+   have no .nx-app of their own: the chip's row takes the status bar's
+   inset while it shows, and the screen under it then takes none.
+   Unlayered, like the rules below: `--safe-t` is declared on .nx-app in
+   pearl.css's components layer, and any layered rule here -- this one sat
+   in the base layer -- loses to it whatever its specificity, which drew
+   the status bar's inset twice under the chip. */
+.nx-relayrow:not(:empty) {
+  padding-top: env(safe-area-inset-top);
+}
+.nx-relayrow:not(:empty) + .nx-screen .nx-app {
+  --safe-t: 0px;
+}
+
+/* The backup-route chip in the Pearl tokens, as the desktop's title strip
+   draws it (pearl.css, .nx-tbchip): neutral, never a warning colour.
+   Unlayered, so it wins over the utilities the chip was written with. */
+.nx-relayrow {
+  background: var(--base);
+}
+.nx-relayrow span[title] {
+  border: 0;
+  background: var(--chip-bg);
+  box-shadow: inset 0 0 0 1px var(--hairline-2);
+  color: var(--ink-2);
+  font-weight: 500;
 }

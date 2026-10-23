@@ -11,7 +11,12 @@ import { AgentGatewayService } from "./agent-gateway.service";
 describe("AgentGatewayService stream close", () => {
   function build() {
     const registry = { delete: jest.fn(), get: jest.fn(), connectedNodeIds: () => [] };
-    const nodesService = { setStatus: jest.fn(), suppressNextOfflineReminder: jest.fn(), remindAboutOfflineNodes: jest.fn() };
+    const nodesService = {
+      setStatus: jest.fn(),
+      suppressNextOfflineReminder: jest.fn(),
+      remindAboutOfflineNodes: jest.fn(),
+      pageHeartbeatGaps: jest.fn(),
+    };
     const prisma = { node: { findMany: jest.fn().mockResolvedValue([]) } };
     const service = new AgentGatewayService(
       prisma as never, {} as never, {} as never, {} as never, {} as never, {} as never,
@@ -47,5 +52,11 @@ describe("AgentGatewayService stream close", () => {
     // And holds the repeat back, so the transition alert does not arrive
     // paired with a "STILL OFFLINE -- no heartbeat for 0h".
     expect(nodesService.suppressNextOfflineReminder).toHaveBeenCalledWith("node-1");
+  });
+
+  it("asks for heartbeat gaps to be paged on every sweep", async () => {
+    const { service, nodesService } = build();
+    await sweep(service);
+    expect(nodesService.pageHeartbeatGaps).toHaveBeenCalledTimes(1);
   });
 });

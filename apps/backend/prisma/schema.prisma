@@ -651,6 +651,15 @@ model Node {
   realityDestReachable Boolean?
   realityDestCheckedAt DateTime?
 
+  /// When the owner was paged that this node had stopped heartbeating.
+  /// Set once per gap, when the page reached somebody, and cleared once
+  /// the node is back and that has been told, so a gap pages once and its
+  /// end is told only if its start was.
+  heartbeatGapPagedAt  DateTime?
+  /// When the owner was last told this node was heartbeating again. A new
+  /// gap soon after is not paged, so a flapping link does not page all day.
+  heartbeatBackPagedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -667,6 +676,7 @@ model Node {
 
   reachabilityChecks NodeReachabilityCheck[]
   reachabilityAlerts NodeReachabilityAlert[]
+  blockIncidents     BlockIncident[]
 
   @@map("nodes")
 }
@@ -2056,4 +2066,88 @@ model NodeReachabilityAlert {
 
   @@index([nodeId, resolvedAt])
   @@map("node_reachability_alerts")
+}
+
+/// How strongly the evidence says a node is blocked from the watched
+/// country. See modules/block-watch.
+enum BlockVerdict {
+  /// One signal. Shown in the panel and the daily digest, never paged.
+  SUSPECT
+  /// Independent signals agree, or one has persisted with nothing to
+  /// contradict it. Paged, when paging is on.
+  LIKELY_BLOCKED
+}
+
+enum BlockIncidentStatus {
+  OPEN
+  /// The signals went quiet on their own.
+  CLEARED
+  /// The owner replaced the server. Evidence from before this is ignored
+  /// for the node from then on.
+  REPLACED
+  /// The owner retired the server. Not watched again while it keeps the
+  /// address it had.
+  RETIRED
+}
+
+/// A stretch of time in which a node looked blocked from the watched
+/// country. Opened, upgraded and cleared by the block watch; replaced,
+/// retired, kept or snoozed by the owner. Nothing here changes a server.
+model BlockIncident {
+  id       String @id @default(uuid())
+  nodeId   String
+  /// The node's address when the incident opened, so a retirement can be
+  /// told apart from a node that has since been given a new one.
+  publicIp String
+  country  String @default("ir")
+
+  status  BlockIncidentStatus @default(OPEN)
+  /// The strongest verdict reached. The latest one is in the evidence.
+  verdict BlockVerdict        @default(SUSPECT)
+
+  openedAt    DateTime  @default(now())
+  /// The last evaluation in which any signal fired.
+  lastSeenAt  DateTime  @default(now())
+  likelyAt    DateTime?
+  closedAt    DateTime?
+  /// Consecutive evaluations with nothing firing and the server shown
+  /// working again; the incident clears at a small number of them.
+  quietCycles Int       @default(0)
+  /// When a cleared incident came back soon after and was opened again,
+  /// rather than a new one -- told in the digest, not paged again.
+  reopenedAt  DateTime?
+
+  /// The signals ("client", "traffic", "probe") that have fired during
+  /// the incident, and the networks (ASNs) whose app reports failed. It
+  /// clears only when one of those signals shows the server working
+  /// again: a signal that merely ran out of data proves nothing.
+  firedFamilies String[] @default([])
+  failedAsns    Int[]    @default([])
+
+  /// The latest evaluation: per-signal results, the networks involved,
+  /// since when each signal has fired, and the best guess at the kind of
+  /// block. Read as a whole.
+  evidenceJson Json
+
+  /// Delivery, recorded rather than assumed. pagedAt is set only once a
+  /// page reached somebody; until then pageAttempts counts the tries.
+  pagedAt            DateTime?
+  pageError          String?
+  pageAttempts       Int       @default(0)
+  remindedAt         DateTime?
+  recoveryNotifiedAt DateTime?
+  digestedAt         DateTime?
+
+  /// The owner's answers. "Keep" stops pages and reminders for this
+  /// incident; a snooze holds them until the time given.
+  keptAt       DateTime?
+  snoozedUntil DateTime?
+  actedBy      String?
+  actionNote   String?
+
+  node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@index([nodeId, status])
+  @@index([status, openedAt])
+  @@map("block_incidents")
 }

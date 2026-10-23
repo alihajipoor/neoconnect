@@ -1,8 +1,11 @@
+mod autostart;
 mod bundle_scope;
 mod control_plane_probe;
 mod health_ip;
+mod notify;
 mod relay_http;
 mod vpn;
+mod window_fit;
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -51,6 +54,14 @@ fn build_platform() -> &'static str {
 pub fn run() {
     let launch_url = std::env::args().find(|a| a.starts_with("neoconnect://"));
 
+    // The main window is created by `setup()`, at its size and place, and
+    // shown once painted (window_fit.rs): created from the config before
+    // it, it was seen at the config's size, and then at the config's place,
+    // for a moment. The config the app was built with is changed in memory
+    // here; tauri.conf.json is not.
+    let mut context = tauri::generate_context!();
+    window_fit::defer_main_window(&mut context.config_mut().app.windows);
+
     tauri::Builder::default()
         // Must be registered first, so a duplicate launch is turned away
         // before it initialises anything else.
@@ -95,6 +106,13 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(LaunchDeepLink(launch_url))
         .setup(|app| {
+            // Wide on the redesign's first launch, as it was left after
+            // that, and never larger than the screen: created at that size
+            // and place, and only then shown. At runtime rather than in
+            // tauri.conf.json; see window_fit.rs. First, so nothing below can
+            // leave the window unmade or unshown.
+            window_fit::create_main_window(app)?;
+
             // Static scheme registration in tauri.conf.json alone doesn't
             // actually take effect with the NSIS installer target this
             // project uses (a documented Tauri bug -- MSI is unaffected,
@@ -108,7 +126,6 @@ pub fn run() {
             // this app is Windows-only for now.
             #[cfg(desktop)]
             app.deep_link().register("neoconnect")?;
-
             // Tells the service this app is still here.
             //
             // The service tears a tunnel down when it has heard nothing
@@ -138,6 +155,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             vpn::vpn_connect,
             vpn::vpn_disconnect,
+            // "Block the internet while reconnecting" (opt-in): the
+            // reconnect's own teardown, letting go of the hold, and the
+            // setting changing. See `Request::DisconnectForReconnect`.
+            vpn::vpn_disconnect_for_reconnect,
+            vpn::vpn_release_reconnect_hold,
+            vpn::vpn_set_reconnect_hold,
             vpn::vpn_set_split_tunnel,
             vpn::vpn_exit_placements,
             vpn::vpn_probe_split_tunnel,
@@ -193,7 +216,15 @@ pub fn run() {
             relay_http::relay_request,
             // The HTTP scope for the hosts of a signed endpoint bundle,
             // checked here before it is widened. See bundle_scope.rs.
-            bundle_scope::grant_bundle_scope
+            bundle_scope::grant_bundle_scope,
+            // "Open Neoxify when I sign in to Windows": the current user's
+            // Run key, read back from Windows each time (autostart.rs).
+            autostart::autostart_state,
+            autostart::set_autostart,
+            // "Notify me when the connection changes": a toast, in words
+            // the app chose, and whether Windows lets them show (notify.rs).
+            notify::notify_show,
+            notify::notify_setting
         ])
         // Closing the window is an instruction, and it has to be acted
         // on rather than inferred.
@@ -217,12 +248,16 @@ pub fn run() {
         // -- so closing the app would leave a window where the game
         // simply will not resolve, with nothing on screen to explain
         // it. Rules must not outlive the app.
-        .on_window_event(|_window, event| {
+        .on_window_event(|window, event| {
+            // The size it is closed at is the size it opens at next time.
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                window_fit::remember_size(window);
+            }
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let _ = tauri::async_runtime::block_on(vpn::vpn_disconnect());
                 let _ = tauri::async_runtime::block_on(vpn::gaming_disarm());
             }
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

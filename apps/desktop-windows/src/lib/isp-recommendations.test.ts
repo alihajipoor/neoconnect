@@ -265,4 +265,15 @@ describe("IspTagLine", () => {
     expect(html).toContain(DICTIONARIES.fa["loc.ispFailing"]);
     expect(html).toContain("6 نفر از 7 نفر");
   });
+
+  /** The desktop panel: a line that fits its rows, the whole sentence one
+   * hover away, and its colour from pearl.css's ink tokens -- the base hues
+   * fail AA as text. */
+  it("in the panel, shows the short line and keeps the sentence as tooltip and name", () => {
+    const html = renderToStaticMarkup(createElement(IspTagLine, { tag: tag("failingOnYourIsp"), t: translate("en"), look: "pearl" }));
+    expect(html).toContain(">Failing for others here<");
+    expect(html).toContain('title="Failing for most people on your network recently. 6 of 7 people, last 48 hours"');
+    expect(html).toContain('aria-label="Failing for most people on your network recently. 6 of 7 people, last 48 hours"');
+    expect(html).not.toMatch(/text-(warning|success)|text-[11px]/);
+  });
 });

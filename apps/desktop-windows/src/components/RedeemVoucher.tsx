@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Check, Loader2, Ticket } from "lucide-react";
+import { Ticket } from "lucide-react";
 import { previewVoucher, redeemVoucher } from "../lib/customer";
 import type { SubscriptionPlan } from "../lib/types";
-import { formatBytes } from "../lib/utils";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
-import { Button, Card, Input } from "./ui";
+import { formatNumber, formatSize } from "../lib/locale-format";
+import { Card, CardHead, Message, PillButton } from "./ui";
 import { StillTrying } from "./StillTrying";
 
 /** Redeeming a code, as a two-step confirm rather than one action.
@@ -30,7 +30,7 @@ export function RedeemVoucher({
   onRedeemed: () => void;
   initialCode?: string;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [code, setCode] = useState(initialCode ?? "");
   const [found, setFound] = useState<{ plan: SubscriptionPlan; expiresAt: string | null } | null>(
     null,
@@ -73,71 +73,57 @@ export function RedeemVoucher({
 
   return (
     <Card className="flex flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-highlight/15 text-highlight">
-          <Ticket className="size-4" />
-        </div>
-        <div className="min-w-0">
-          <p className="text-sm font-semibold">{t("voucher.title")}</p>
-          <p className="text-xs text-muted-foreground">{t("voucher.subtitle")}</p>
-        </div>
-      </div>
+      <CardHead icon={<Ticket />} title={t("voucher.title")} hint={t("voucher.subtitle")} />
 
       {found ? (
         <div className="flex flex-col gap-3">
-          <div className="rounded-lg border border-success/30 bg-success/10 px-3 py-2.5">
-            <p className="flex items-center gap-1.5 text-xs font-semibold text-success">
-              <Check className="size-3.5" />
-              {t("voucher.valid")}
+          <Message tone="ok">
+            <p className="nx-strong">{t("voucher.valid")}</p>
+            <p>
+              {found.plan.name} ·{" "}
+              {found.plan.dataCapBytes === null ? t("dash.unlimited") : formatSize(Number(found.plan.dataCapBytes), language)} ·{" "}
+              {formatNumber(found.plan.durationDays, language)} {t("voucher.days")}
             </p>
-            <p className="mt-1 text-sm font-semibold">{found.plan.name}</p>
-            <p className="text-xs text-muted-foreground">
-              {found.plan.dataCapBytes === null
-                ? t("dash.unlimited")
-                : formatBytes(Number(found.plan.dataCapBytes))}{" "}
-              · {found.plan.durationDays}{" "}
-              {t("voucher.days")}
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <Button onClick={() => void confirm()} disabled={busy} className="flex-1 justify-center gap-2">
-              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+          </Message>
+          <div className="nx-row2">
+            <PillButton size="sm" onClick={() => void confirm()} disabled={busy} aria-busy={busy || undefined}>
               {t("voucher.confirm")}
-            </Button>
-            <Button
-              variant="ghost"
-              onClick={() => setFound(null)}
-              disabled={busy}
-              className="border border-white/10"
-            >
+            </PillButton>
+            <PillButton variant="ghost" size="sm" onClick={() => setFound(null)} disabled={busy}>
               {t("voucher.cancel")}
-            </Button>
+            </PillButton>
           </div>
         </div>
       ) : (
-        <form onSubmit={check} className="flex gap-2">
-          <Input
-            value={code}
-            onChange={(e) => setCode(e.target.value.toUpperCase())}
-            placeholder={t("voucher.placeholder")}
-            autoComplete="off"
-            spellCheck={false}
-            // Codes are read off a screen or a message and typed, so
-            // they arrive with whatever spacing the customer used. The
-            // server strips it; showing it uppercased as they type is
-            // what makes it look like a code rather than a password.
-            className="font-mono tracking-wider"
-            dir="ltr"
-          />
-          <Button type="submit" disabled={busy || code.trim().length < 4} className="shrink-0 gap-2">
-            {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-            {t("voucher.check")}
-          </Button>
+        <form onSubmit={check} className="nx-field">
+          {/* A visible label: a placeholder alone goes the moment typing
+              starts. */}
+          <label htmlFor="voucher-code" className="nx-label">
+            {t("voucher.placeholder")}
+          </label>
+          <div className="nx-codebox m-0">
+            <input
+              id="voucher-code"
+              className="nx-input nx-vcode"
+              value={code}
+              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              autoComplete="off"
+              spellCheck={false}
+              // Codes are read off a screen or a message and typed, so
+              // they arrive with whatever spacing the customer used. The
+              // server strips it; showing it uppercased as they type is
+              // what makes it look like a code rather than a password.
+              dir="ltr"
+            />
+            <PillButton type="submit" variant="ghost" size="sm" disabled={busy || code.trim().length < 4} aria-busy={busy || undefined}>
+              {t("voucher.check")}
+            </PillButton>
+          </div>
         </form>
       )}
 
       <StillTrying waiting={busy} />
-      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      {error ? <Message tone="danger">{error}</Message> : null}
     </Card>
   );
 }

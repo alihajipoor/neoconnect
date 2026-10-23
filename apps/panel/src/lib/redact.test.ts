@@ -75,7 +75,8 @@ describe("what the panel's pages and actions send to the browser", () => {
     expect(direct.map(({ file }) => file)).toEqual([]);
     // And the pages that show them do use the helpers.
     const users = sources.filter(({ text }) => /fetch(Routes|ProtocolConfigs)\(/.test(text)).map(({ file }) => file);
-    expect(users.length).toBeGreaterThanOrEqual(5);
+    // Four since 2026-10-22: the trial settings no longer pick a route.
+    expect(users.length).toBeGreaterThanOrEqual(4);
   });
 
   it("redacts every route or protocol config a server action returns", () => {

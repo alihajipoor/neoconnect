@@ -7528,3 +7528,99 @@ password, since Google and Apple sign-in cannot work in an intranet.
   it as a file.
 - The bundle draft (`GET /admin/endpoints/draft`) cannot express the direct
   mirrors (it fixes port 2053 and one mirror host per node): hand-edit it.
+
+## 2026-10-19 — release 0.9.51 / 0.2.29 shipped, the website's sign-in redesigned and live
+
+**Status:** released on every platform. Main at `b0bc4cd` for the apps;
+`3d9fc41` adds the web portal.
+
+**What shipped.** The reachability release (server-signed lists, the HTTP
+scope following the signed list, the backup route on by default) plus the
+release-gate fixes: lists fetched through the relay when only the relay
+answers; an expired server list falls back to the newest offline list held,
+not the seed; strict base64 in the bundle check; one bundle refresh at a
+time; a RELAY_REGION refusal abroad shows the ordinary "can't reach
+Neoxify"; the panel refuses a server list numbered beneath the offline list;
+the Settings hint says what the backup route does.
+
+- Backend deployed first (`b0bc4cd`, DB dump `/root/db-backups/pre-0.9.51-*`);
+  lists v7 and v100 intact, all 7 nodes ONLINE afterwards.
+- Desktop 0.9.51 and Android 0.2.29 (APK) from the release workflows; the
+  updater offered 0.9.51 to 0.9.50 at once.
+- Google Play 2029 (0.2.29) submitted 2026-10-19 (0.2.28 had gone live).
+- iOS 1.0.0 (12) = mobile 0.2.29, uploaded from the Mac 2026-10-19 22:01 UTC,
+  processed VALID, export compliance false, external group "Neoxify", in beta
+  testing. App Store version 1.0 is still waiting for review.
+
+**Proven, on the VM** (scratchpad evidence `vm-reach`, `vm-reach-scope`,
+`vm-final`): start-up with an old stored list, a stored bundle2, app data
+cleared and a tampered list (no crash; the tampered list is refused and grants
+nothing); the scope grant for hosts outside the seed, with a VM-only list the
+Mac signed (two extra hosts: before the grant the HTTP plugin refused them
+locally, after it the capture shows the NXDOMAIN and the TLS handshake with no
+HTTP request; a copy with one changed signature character granted nothing);
+0 relay packets on a normal network and with the tunnel up; under a full block
+the relay is dialled with no prompt (pinned IPv4, no SNI, no DNS), RELAY_REGION
+comes back from the US exit and the app switches the relay off for the network
+with the ordinary wording; the button does not flicker.
+
+**Unverified:** a list delivered through the relay (needs an Iranian network);
+the second relay box; relay pin mismatch; the expired-list fallback and serial
+refreshes on a device; any phone. One observation outside the gates: under the
+VM's full block (firewall plus hosts entries) a connect from saved servers never
+settled, while the firewall-only block connected first time -- most likely the
+hosts entries applying inside the tunnel, which real filtering does not do. Not
+proven; the connect path was not changed in this release.
+
+**Website.** neoxify.net runs on its own shared hosting box (also neoxify.com
+and customer sites): change only neoxify.net's own folder, no service reloads.
+- `data/` was root-owned, so the site could neither store form submissions
+  (contact, reseller, the account-deletion form Play requires -- they were only
+  emailed) nor keep its own secret (the CSRF tokens used a guessable fallback).
+  Now owned by the site's PHP user, mode 750; the site generated its secret.
+- `/account/` (the web portal) redesigned in the app's new pearl-glass style and
+  deployed with `scripts/deploy-portal.sh` (backup first, swap, live checks,
+  automatic rollback). The host's ufw rate-limits SSH (about 6 connections per
+  30 s): the script now reuses one connection.
+- The whole marketing site is redesigned on `claude/website-redesign` (Lighthouse
+  100 in all four categories locally, routing that returns real 404s, security
+  headers from PHP) and is NOT deployed: the owner reviews it first.
+
+**Next:** the client redesign on `claude/ui-redesign` (desktop done, the phone
+app's own main page in progress, a VM check of the redesigned app running);
+the anti-blocking plan (the control plane through the tunnels, a guest
+connection, per-cohort endpoints, automatic IP replacement) being written.
+
+## 2026-10-20 — desktop 0.9.53: the redesign shipped; the kill switch still hidden
+
+Shipped since the last entry: hotfix 0.9.52 / 0.2.30 (the screen named the
+wrong location after moving between pages); anti-blocking phase 0 on the
+backend (the pager, short admin sessions, heartbeat-gap pages, the block
+watch in `record`); and now the client redesign, merged to `main` and
+released as desktop 0.9.53. The backend went first (devices and daily
+usage; device sign-out stays off behind `ACCOUNT_DEVICE_SIGNOUT`).
+
+Proven on the VM (`Neoxify-Test`, pktmon at the NIC) before the release:
+no reload and no "not confirmed" on returning from a page (7 of 7, every
+frame read), the window opens where it stays (13 of 13 launches), the
+Persian speed reading fits, connect/verify/naming unchanged, no packet to
+the relays. The tray's address and plan figure were cut at the fitted
+922x648 window; fixed and held by the fit check, not re-run on the VM.
+
+**Not shipped, and why:**
+- The phone redesign (0.2.31): only ever seen in a phone-sized preview.
+  The owner tries it on his phone first (Play internal testing,
+  TestFlight), then it goes to everyone.
+- The reconnect hold (kill switch) stays behind `RECONNECT_HOLD_PROVEN=false`.
+  Two VM proofs, both NOT PROVEN. The second held every forced drop on
+  Reality, TLS, Trojan, Shadowsocks, Stealth Web and OpenVPN UDP, and
+  every release path, but WireGuard leaked when its tunnel service took
+  ~4.4 s to stop (the re-sent setting disarmed the dying session), and
+  the screen did not say traffic was held during the automatic failover.
+  Fixes for the first are on `claude/hold-round3`, untested and reverted
+  on `main`; OpenVPN TCP has no server to test against.
+- A 3 s cable unplug still takes ~16 s to recover on the VM: ~5 s is the
+  guest's DHCP, the rest is the redial waiting for a direct check.
+
+**Next:** after the weekly usage reset (2026-10-26) -- the hold's third
+round and VM proof, the unplug redial, the phone on a real device.
