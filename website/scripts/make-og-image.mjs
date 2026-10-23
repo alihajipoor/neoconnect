@@ -4,7 +4,7 @@
  *
  *   node website/scripts/make-og-image.mjs [--chrome <path to chrome>]
  *
- * Writes assets/img/og-en-v3.jpg and og-fa-v3.jpg (1200x630, the size
+ * Writes assets/img/og-en-v4.jpg and og-fa-v4.jpg (1200x630, the size
  * Telegram, WhatsApp, Facebook, LinkedIn and X all crop from).
  *
  * JPEG at quality 85, not PNG. The truecolor PNGs (v2) were 260-300 KB,
@@ -46,6 +46,9 @@ const require = createRequire(import.meta.url);
 const puppeteer = require('puppeteer-core');
 
 const asset = (p) => pathToFileURL(path.join(site, 'assets', p)).href;
+// The app's glass logo, the same file the pages use.
+const LOGO = fs.readFileSync(path.join(site, 'assets', 'img', 'brand', 'neoxify-glass-light.svg'), 'utf8')
+  .replace('<svg ', '<svg width="60" height="60" ');
 
 const COPY = {
   en: {
@@ -100,8 +103,7 @@ h1 span{display:block}
 </div>
 <div class="wrap">
   <div class="brand">
-    <svg viewBox="0 0 64 64" width="52" height="52" fill="none"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#22d3ee"/></linearGradient></defs>
-    <circle cx="32" cy="32" r="21" stroke="url(#g)" stroke-width="7" stroke-linecap="round" stroke-dasharray="96 36" transform="rotate(-58 32 32)"/><circle cx="32" cy="32" r="8" fill="url(#g)"/></svg>
+    ${LOGO}
     <span class="word">NEOXIFY</span>
   </div>
   <p class="kicker">${c.kicker}</p>
@@ -127,7 +129,7 @@ try {
     fs.writeFileSync(tmp, html(c));
     await page.goto(pathToFileURL(tmp).href, { waitUntil: 'networkidle0' });
     await page.evaluate(() => document.fonts.ready);
-    const out = path.join(site, 'assets', 'img', `og-${lang}-v3.jpg`);
+    const out = path.join(site, 'assets', 'img', `og-${lang}-v4.jpg`);
     await page.screenshot({ path: out, type: 'jpeg', quality: 85 });
     fs.unlinkSync(tmp);
     console.log(out, fs.statSync(out).size, 'bytes');
