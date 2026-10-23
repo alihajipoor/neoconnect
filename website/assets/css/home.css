@@ -273,3 +273,87 @@ html[lang="fa"] .beat__title{font-weight:800;letter-spacing:0;line-height:1.45}
 html[lang="fa"] .night__line{font-weight:800;letter-spacing:0;line-height:1.5;max-width:24ch}
 @media (prefers-reduced-motion:no-preference){.night__mark .logo{animation:float 9s ease-in-out infinite}}
 @media (forced-colors:active){.night{background:Canvas;color:CanvasText}.night__line{color:CanvasText}}
+
+/* --------------------------------------------------------------- widgets
+   inc/partials/widgets.php: small, real-looking pieces of the app in a
+   bento. Paused until on screen (.is-live from site.js), still under
+   reduced motion; only transform and opacity move.                    */
+.split--widgets{grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr)}
+@media (max-width:900px){.split--widgets{grid-template-columns:1fr}}
+.widgets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-areas:"speed speed" "apps place" "apps theme";gap:clamp(12px,1.4vw,18px)}
+.wg{display:grid;align-content:start;gap:8px;padding:18px}
+.wg--speed{grid-area:speed}.wg--apps{grid-area:apps}.wg--place{grid-area:place}.wg--theme{grid-area:theme}
+@media (max-width:560px){.widgets{grid-template-columns:1fr;grid-template-areas:"speed" "apps" "place" "theme"}}
+.wg__mock{margin-bottom:8px}
+.wg__title{font-size:16.5px;font-weight:600;letter-spacing:-.01em;line-height:1.3}
+html[lang="fa"] .wg__title{letter-spacing:0;line-height:1.6}
+.wg__line{font-size:14px;color:var(--ink-2);line-height:1.5}
+html[lang="fa"] .wg__line{line-height:1.8}
+.wg__ex{margin-inline-start:auto;align-self:center;padding:2px 8px;border-radius:999px;background:var(--muted-tint);color:var(--muted-ink);font-size:11.5px;font-weight:600}
+.wg .icon{width:16px;height:16px}
+/* speed */
+.sp__row{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.sp__dir{align-self:center;display:grid;place-items:center;width:26px;height:26px;border-radius:50%;background:var(--ok-tint);color:var(--ok-ink)}
+.sp__down{transform:rotate(90deg)}
+.sp__num{font-family:var(--font-head);font-size:36px;font-weight:700;letter-spacing:-.04em;line-height:1;font-variant-numeric:tabular-nums}
+.sp__unit{font-size:14px;font-weight:600;color:var(--ink-2)}
+.sp__up{display:inline-flex;align-items:center;gap:4px;font-size:13px;color:var(--ink-2);direction:ltr}
+.sp__upi{transform:rotate(-90deg);width:13px!important;height:13px!important}
+.sp__chart{position:relative;height:60px;margin-top:10px;overflow:hidden;border-radius:10px;
+  -webkit-mask-image:linear-gradient(90deg,transparent,#000 12%,#000 88%,transparent);mask-image:linear-gradient(90deg,transparent,#000 12%,#000 88%,transparent)}
+.sp__line{position:absolute;left:0;top:0;width:200%;height:100%;overflow:visible}
+.sp__stroke{fill:none;stroke:var(--cobalt);stroke-width:2;vector-effect:non-scaling-stroke}
+.sp__fill{fill:var(--ok-tint)}
+/* per-app */
+.ap{display:grid;gap:6px}
+.ap__row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:8px 10px;border-radius:12px;background:var(--select-row);box-shadow:var(--edge)}
+.ap__tile{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;color:#fff}
+.ap__row--a .ap__tile{background:linear-gradient(135deg,#3b82f6,#1d4ed8)}.ap__row--b .ap__tile{background:linear-gradient(135deg,#a855f7,#6d28d9)}
+.ap__row--c .ap__tile{background:linear-gradient(135deg,#f43f5e,#be123c)}.ap__row--d .ap__tile{background:linear-gradient(135deg,#14b8a6,#0f766e)}
+.ap__name{font-size:14px;font-weight:600}
+.ap__sw{position:relative;width:38px;height:22px;border-radius:999px;background:var(--hairline-2);overflow:hidden}
+.ap__on{position:absolute;inset:0;border-radius:inherit;background:var(--cobalt);opacity:0}
+.ap__knob{position:absolute;top:2px;inset-inline-start:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.ap__row--b .ap__on,.ap__row--c .ap__on{opacity:1}
+.ap__row--b .ap__knob,.ap__row--c .ap__knob{transform:translateX(16px)}
+html[dir="rtl"] .ap__row--b .ap__knob,html[dir="rtl"] .ap__row--c .ap__knob{transform:translateX(-16px)}
+/* place */
+.pl{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:6px 12px;padding:12px;border-radius:14px;background:var(--select-row);box-shadow:var(--edge)}
+.pl .fl{width:34px;height:24px;border-radius:6px;grid-row:span 2}
+.pl__name{font-weight:600;font-size:15px}
+.pl__state{display:grid}
+.pl__s{grid-area:1/1;display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600}
+.pl__s--a{color:var(--ink-2);opacity:0}
+.pl__s--b{color:var(--ok-ink)}
+.pl__dot{width:7px;height:7px;border-radius:50%;background:var(--ink-3)}
+/* theme */
+.tm{position:relative;height:118px}
+.tm__card{position:absolute;inset:0;display:grid;align-content:space-between;justify-items:start;gap:8px;padding:12px 14px;border-radius:16px}
+.tm__card--l{background:linear-gradient(180deg,#FBFCFE,#EEF1F6);color:#090B10;box-shadow:inset 0 0 0 1px rgba(32,48,80,.10)}
+.tm__card--d{background:linear-gradient(180deg,#171C29,#0B0E15);color:#EEF1F7;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);opacity:0}
+.tm__word{font-size:10px;font-weight:500;letter-spacing:.4em;direction:ltr}
+.tm__chip{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 9px 0 7px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+html[lang="fa"] .tm__chip{letter-spacing:0;text-transform:none;font-size:12px}
+.tm__card--l .tm__chip{background:rgba(50,103,255,.12);color:#0B3BE0}.tm__card--d .tm__chip{background:rgba(80,124,255,.18);color:#A7BEFF}
+.tm__chip .icon{width:12px;height:12px}
+.tm__btn{justify-self:stretch;display:flex;align-items:center;justify-content:center;height:30px;border-radius:999px;font-size:12.5px;font-weight:600;color:#fff}
+.tm__card--l .tm__btn{background:#1045FF}.tm__card--d .tm__btn{background:#2F5EFF}
+@media (prefers-reduced-motion:no-preference){
+  .widgets .sp__line{animation:sp-run 9s linear infinite}
+  .widgets .ap__row--a .ap__on{animation:ap-on 8s var(--ease) infinite}
+  .widgets .ap__row--a .ap__knob{animation:ap-knob 8s var(--spring) infinite}
+  .widgets .ap__row--d .ap__on{animation:ap-on 8s var(--ease) infinite 4s}
+  .widgets .ap__row--d .ap__knob{animation:ap-knob 8s var(--spring) infinite 4s}
+  .widgets .pl__s--a{animation:pl-a 9s var(--ease) infinite}
+  .widgets .pl__s--b{animation:pl-b 9s var(--ease) infinite}
+  .widgets .tm__card--d{animation:tm-d 10s var(--ease) infinite}
+  .widgets:not(.is-live) *{animation-play-state:paused!important}
+}
+@keyframes sp-run{to{transform:translateX(-50%)}}
+@keyframes ap-on{0%,30%{opacity:0}38%,80%{opacity:1}88%,100%{opacity:0}}
+@keyframes ap-knob{0%,30%{transform:none}38%,80%{transform:translateX(16px)}88%,100%{transform:none}}
+html[dir="rtl"] .widgets .ap__row--a .ap__knob,html[dir="rtl"] .widgets .ap__row--d .ap__knob{animation-name:ap-knob-rtl}
+@keyframes ap-knob-rtl{0%,30%{transform:none}38%,80%{transform:translateX(-16px)}88%,100%{transform:none}}
+@keyframes pl-a{0%,40%{opacity:1}48%,92%{opacity:0}100%{opacity:1}}
+@keyframes pl-b{0%,40%{opacity:0;transform:scale(.9)}48%,92%{opacity:1;transform:none}100%{opacity:0}}
+@keyframes tm-d{0%,40%{opacity:0}50%,90%{opacity:1}100%{opacity:0}}

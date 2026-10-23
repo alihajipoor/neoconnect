@@ -846,4 +846,20 @@ return array(
     'features.failover.shot_alt' => 'The Neoxify Windows app checking a connection before it says Connected.',
     'features.failover.shot_note' => 'The Windows app, checking. The account and the usage shown are examples.',
     'home.night.line' => 'When the network goes dark, the app keeps looking for a way through.',
+
+    // Live mini-widgets (inc/partials/widgets.php).
+    'widgets.example' => 'Example',
+    'widgets.speed.title' => 'Your speed, live',
+    'widgets.speed.line' => 'While you are connected, the Windows app shows how fast your traffic is moving. These figures are an example.',
+    'widgets.apps.a' => 'Browser',
+    'widgets.apps.b' => 'Games',
+    'widgets.apps.c' => 'Video',
+    'widgets.apps.d' => 'Banking',
+    'widgets.apps.line' => 'Pick the apps that go through the tunnel; everything else stays on your normal connection.',
+    'widgets.place.title' => 'It remembers what worked',
+    'widgets.place.unproven' => 'Not proven yet',
+    'widgets.place.worked' => 'Worked here',
+    'widgets.place.line' => 'The Windows app marks each country by how it has done on your network, so the next connection starts from what worked.',
+    'widgets.theme.title' => 'Light or dark',
+    'widgets.theme.line' => 'Both apps come in light and dark.',
 );

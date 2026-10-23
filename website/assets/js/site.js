@@ -36,6 +36,7 @@
     announcement();
     forms();
     pointer();
+    live();
     map();
   });
 
@@ -228,4 +229,15 @@
       });
     });
   }
+  /* ========================================================= widgets
+   * The bento of live mini-widgets moves only while it is on screen. */
+  function live() {
+    var els = $$("[data-live]");
+    if (!els.length || reduceMotion || !("IntersectionObserver" in window)) { return; }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) { e.target.classList.toggle("is-live", e.isIntersecting); });
+    }, { threshold: 0.2 });
+    els.forEach(function (el) { io.observe(el); });
+  }
+
 })();

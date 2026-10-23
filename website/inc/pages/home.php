@@ -217,7 +217,7 @@ require NX_INC . '/partials/head.php';
 <!-- ===================== No config files ======================== -->
 <section class="section" aria-labelledby="h-config">
   <div class="wrap">
-    <div class="split">
+    <div class="split split--widgets">
       <div class="split__body reveal">
         <span class="eyebrow"><?php echo nx_e('home.config.eyebrow'); ?></span>
         <h2 class="h2" id="h-config"><?php echo nx_e('home.config.title'); ?></h2>
@@ -229,22 +229,8 @@ require NX_INC . '/partials/head.php';
         </ul>
       </div>
 
-      <div class="grid grid--2 reveal">
-        <article class="card feature feature--wide">
-          <span class="ico"><?php echo nx_icon('layers'); ?></span>
-          <h3><?php echo nx_e('features.split.example.bank.title'); ?></h3>
-          <p><?php echo nx_e('features.split.example.bank.body'); ?></p>
-        </article>
-        <article class="card feature">
-          <span class="ico"><?php echo nx_icon('refresh'); ?></span>
-          <h3><?php echo nx_e('home.features.updates.title'); ?></h3>
-          <p><?php echo nx_e('home.features.updates.body'); ?></p>
-        </article>
-        <article class="card feature">
-          <span class="ico"><?php echo nx_icon('chart'); ?></span>
-          <h3><?php echo nx_e('features.usage.title'); ?></h3>
-          <p><?php echo nx_e('features.usage.body'); ?></p>
-        </article>
+      <div class="reveal">
+        <?php require NX_INC . '/partials/widgets.php'; ?>
       </div>
     </div>
   </div>
