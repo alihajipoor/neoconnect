@@ -15,7 +15,7 @@ if (!$nx_locs) {
 ?>
 <ul class="locs u-list-reset">
   <?php foreach ($nx_locs as $nx_loc): ?>
-    <li class="loc">
+    <li class="loc" data-cc="<?php echo nx_esc(strtolower($nx_loc['code'])); ?>">
       <?php /* aria-hidden: the flag repeats the country name that follows
                it, and a screen reader announcing "flag of Finland Finland"
                helps nobody. Windows renders these as the two letters in a

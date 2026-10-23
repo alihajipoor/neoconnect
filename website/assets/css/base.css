@@ -97,6 +97,7 @@
   --orbit:rgba(80,70,200,.20);
   --glow-1:rgba(139,92,246,.40); --glow-2:rgba(34,211,238,.26);
   --show-l:block; --show-d:none;
+  --grain:.5; --light:rgba(255,255,255,.75); --light-2:rgba(139,92,246,.10);
   /* shape */
   --r-panel:24px; --r-card:20px; --r-field:14px; --r-row:10px;
   --wrap:1200px; --gutter:clamp(16px,4vw,40px);
@@ -146,6 +147,7 @@
   --orbit:rgba(170,160,255,.20);
   --glow-1:rgba(139,92,246,.50); --glow-2:rgba(34,211,238,.30);
   --show-l:none; --show-d:block;
+  --grain:.32; --light:rgba(160,150,255,.13); --light-2:rgba(34,211,238,.05);
 }
 :root[data-theme="dark"] ::selection{background:rgba(120,150,255,.32)}
 
@@ -202,7 +204,7 @@ main{overflow-x:hidden}
 @supports (overflow-x:clip){main{overflow-x:clip}}
 .wrap{width:100%;max-width:calc(var(--wrap) + 2 * var(--gutter));margin-inline:auto;padding-inline:var(--gutter)}
 .wrap--prose{max-width:calc(820px + 2 * var(--gutter))}
-.section{position:relative;isolation:isolate;padding-block:clamp(64px,8vw,120px)}
+.section{position:relative;isolation:isolate;padding-block:clamp(72px,10vw,152px)}
 .section--tight{padding-block:clamp(40px,6vw,72px)}
 .section--flush-top{padding-top:0}
 /* The alternate sections are a raised slab: a lit top edge, a layered
@@ -227,14 +229,19 @@ main{overflow-x:hidden}
 .sky__a{top:-34vmax;left:-20vmax;background:radial-gradient(closest-side,var(--aur-1),transparent);animation:sky-a 32s ease-in-out infinite alternate}
 .sky__b{top:-30vmax;right:-24vmax;background:radial-gradient(closest-side,var(--aur-2),transparent);animation:sky-b 38s ease-in-out infinite alternate}
 .sky__c{top:42vh;left:18vw;width:60vmax;height:60vmax;background:radial-gradient(closest-side,var(--aur-3),transparent);animation:sky-c 44s ease-in-out infinite alternate}
+/* Film grain under the glass: one 180px tile of SVG noise, fixed with the
+   sky, so it is painted once and never moves. */
+.sky::after{content:"";position:absolute;inset:0;background:url(/assets/img/grain.svg) 0 0/180px 180px;opacity:var(--grain)}
 @keyframes sky-a{to{transform:translate3d(22vw,14vh,0) scale(1.18)}}
 @keyframes sky-b{to{transform:translate3d(-20vw,20vh,0) scale(.9)}}
 @keyframes sky-c{to{transform:translate3d(-14vw,-18vh,0) scale(1.22)}}
 
 /* --------------------------------------------------------------- type */
 .display{font-family:var(--font-head);font-weight:700;letter-spacing:-.05em;line-height:.96;text-wrap:balance}
-.h1{font-family:var(--font-head);font-weight:700;font-size:clamp(42px,6.4vw,84px);letter-spacing:-.045em;line-height:.98;text-wrap:balance}
-.h2{font-family:var(--font-head);font-weight:700;font-size:clamp(34px,4.8vw,60px);letter-spacing:-.04em;line-height:1.02;text-wrap:balance}
+/* Editorial scale: display sizes that step, not creep. A page title and a
+   section title are both big, set tight, and do the talking. */
+.h1{font-family:var(--font-head);font-weight:700;font-size:clamp(44px,7.4vw,104px);letter-spacing:-.05em;line-height:.95;text-wrap:balance}
+.h2{font-family:var(--font-head);font-weight:700;font-size:clamp(36px,5.6vw,76px);letter-spacing:-.048em;line-height:.98;text-wrap:balance}
 .h3{font-size:19px;font-weight:600;letter-spacing:-.012em;line-height:1.3}
 .h-sm{font-size:17px;font-weight:600;letter-spacing:-.01em;line-height:1.35}
 html[lang="fa"] .display,html[lang="fa"] .h1,html[lang="fa"] .h2{font-weight:800;letter-spacing:0;line-height:1.35}
@@ -252,11 +259,16 @@ html[lang="fa"] .small{line-height:1.85}
 .num{font-variant-numeric:tabular-nums}
 
 /* Eyebrow: a chip with a hairline of the brand's light and a glowing dot. */
-.eyebrow{justify-self:start;display:inline-flex;align-items:center;gap:9px;min-height:32px;padding:4px 14px 4px 12px;border:1px solid transparent;border-radius:999px;
-  background:linear-gradient(var(--glass-solid),var(--glass-solid)) padding-box,linear-gradient(120deg,rgba(139,92,246,.55),rgba(34,211,238,.55)) border-box;
-  color:var(--cobalt-ink);font-size:12px;font-weight:600;letter-spacing:.1em;text-transform:uppercase}
+/* The section label: THE accent, everywhere the same -- a short rule of the
+   brand's light, then the label. Inside a section the label is numbered
+   (01, 02...), like the parts of an article. */
+.eyebrow{justify-self:start;display:inline-flex;align-items:center;gap:12px;color:var(--cobalt-ink);font-size:12.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase}
 .page-hero--center .eyebrow,.section-head--center .eyebrow,.lost__inner .eyebrow{justify-self:center}
-.eyebrow::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--brand-grad);box-shadow:0 0 0 3px rgba(139,92,246,.14),0 0 10px rgba(34,211,238,.6);flex:none}
+.eyebrow::before{content:"";width:36px;height:2px;border-radius:2px;background:var(--brand-grad);flex:none}
+main{counter-reset:part}
+.section .eyebrow{counter-increment:part}
+.section .eyebrow::after{content:counter(part,decimal-leading-zero);order:-1;font-variant-numeric:tabular-nums;color:var(--ink-2);letter-spacing:.04em}
+html[lang="fa"] .section .eyebrow::after{content:counter(part,persian)}
 html[lang="fa"] .eyebrow{font-size:13px;letter-spacing:0;text-transform:none}
 
 .section-head{display:grid;gap:18px;margin-bottom:clamp(36px,4.4vw,60px);max-width:780px}
@@ -272,7 +284,16 @@ html[lang="fa"] .eyebrow{font-size:13px;letter-spacing:0;text-transform:none}
   transition:transform .4s var(--ease),box-shadow .4s var(--ease)}
 .card::before,.glass::before{content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;pointer-events:none;background:var(--card-rim);
   -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0)}
-@media (hover:hover) and (prefers-reduced-motion:no-preference){a.card:hover,.card--lift:hover{transform:translateY(-4px)}}
+/* A light that follows the cursor across a card or a plan (site.js moves
+   it with --mx/--my; only its transform and opacity change). */
+.card,.plan{overflow:hidden}
+.card::after,.plan::after{content:"";position:absolute;left:0;top:0;width:320px;height:320px;margin:-160px 0 0 -160px;border-radius:50%;pointer-events:none;z-index:0;
+  background:radial-gradient(closest-side,var(--light),var(--light-2) 55%,transparent);opacity:0;transform:translate(var(--mx,0),var(--my,0));transition:opacity .35s var(--ease)}
+.card > *,.plan > *{position:relative;z-index:1}
+@media (hover:hover) and (prefers-reduced-motion:no-preference){
+  .card.is-lit::after,.plan.is-lit::after{opacity:1}
+  a.card:hover,.card--lift:hover,.plan:hover{transform:translateY(-4px)}
+}
 .glass{position:relative;background:var(--glass-solid);border-radius:var(--r-panel);box-shadow:var(--edge),var(--drop)}
 @supports ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
   .glass{background:linear-gradient(var(--sheen-a),var(--sheen-b)),var(--glass-strong);-webkit-backdrop-filter:blur(24px) saturate(140%);backdrop-filter:blur(24px) saturate(140%)}
@@ -290,9 +311,9 @@ html[lang="fa"] .eyebrow{font-size:13px;letter-spacing:0;text-transform:none}
    chip for everything else. 48px tall (54 large), never under 44.       */
 .btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:48px;padding:0 22px;border:0;border-radius:999px;
   font-size:15px;font-weight:600;line-height:1.2;text-decoration:none;white-space:nowrap;
-  transition:background-color .2s var(--ease),box-shadow .3s var(--ease),transform .3s var(--spring)}
+  transition:background-color .2s var(--ease),box-shadow .3s var(--ease),scale .25s var(--spring),translate .45s var(--spring)}
 .btn svg{width:18px;height:18px;flex:none}
-.btn:active{transform:scale(.97)}
+.btn:active{scale:.96}
 .btn--primary{background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,0) 55%),var(--cobalt);color:var(--on-cobalt);
   box-shadow:0 18px 34px -16px var(--cobalt-shadow),0 0 0 1px rgba(16,69,255,.5),inset 0 1px 0 rgba(255,255,255,.28)}
 .btn--primary:hover{background-color:var(--cobalt-hover);box-shadow:0 22px 40px -14px var(--cobalt-shadow),0 0 0 1px rgba(16,69,255,.5),inset 0 1px 0 rgba(255,255,255,.28)}
@@ -307,7 +328,10 @@ html[lang="fa"] .eyebrow{font-size:13px;letter-spacing:0;text-transform:none}
 .btn--block{display:flex;width:100%}
 .btn[aria-disabled="true"],.btn:disabled{opacity:.6;cursor:not-allowed}
 html[dir="rtl"] .mirror,html[dir="rtl"] .btn .icon-arrow{transform:scaleX(-1)}
-@media (prefers-reduced-motion:reduce){.btn,.card{transition:none}.btn:active{transform:none}}
+/* A magnetic pull on the big primary buttons: site.js sets --bx/--by
+   (a few pixels at most) while a fine pointer is over one. */
+.btn--magnet{translate:var(--bx,0) var(--by,0)}
+@media (prefers-reduced-motion:reduce){.btn,.card,.plan{transition:none}.btn:active{scale:none}.btn--magnet{translate:none}}
 
 .link{display:inline-flex;align-items:center;gap:8px;color:var(--cobalt-ink);font-weight:600;text-decoration:none;min-height:44px}
 .link svg{width:18px;height:18px;transition:transform .3s var(--spring)}
@@ -357,6 +381,22 @@ html[lang="fa"] .brand__beta{font-size:12px;letter-spacing:0}
    A floating glass capsule, sticky. The one blur that is always live.  */
 .site-header{position:sticky;top:0;z-index:50;padding-top:12px;margin-bottom:-74px}
 .site-header__bar{display:flex;align-items:center;gap:10px;height:62px;padding-inline:12px 10px;border-radius:999px}
+/* How far down the page you are: a hairline of the brand's light along the
+   foot of the bar, driven by the scroll itself (no script). */
+.site-header__bar::after{content:"";position:absolute;left:30px;right:30px;bottom:0;height:2px;border-radius:2px;background:var(--brand-grad);transform:scaleX(0);transform-origin:0 50%;opacity:0;pointer-events:none}
+html[dir="rtl"] .site-header__bar::after{transform-origin:100% 50%}
+@supports (animation-timeline:scroll()){
+  @media (prefers-reduced-motion:no-preference){
+    .site-header__bar::after{animation:progress linear both;animation-timeline:scroll(root)}
+  }
+}
+@keyframes progress{0%{transform:scaleX(0);opacity:0}4%{opacity:.9}100%{transform:scaleX(1);opacity:.9}}
+/* Moving between pages: the browser cross-fades, and the bar and the logo
+   stay where they are. Off under reduced motion. */
+@media (prefers-reduced-motion:no-preference){@view-transition{navigation:auto}}
+.site-header__bar{view-transition-name:nx-header}
+.site-header .brand__mark{view-transition-name:nx-logo}
+::view-transition-old(root),::view-transition-new(root){animation-duration:.32s}
 .site-header .brand{padding-inline:2px 8px}
 .site-nav{display:flex;align-items:center;gap:2px;margin-inline:auto}
 .site-nav a{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;border-radius:999px;color:var(--ink);text-decoration:none;font-size:14.5px;font-weight:500}
@@ -447,21 +487,22 @@ html[lang="fa"] .site-footer__title{font-size:13px;letter-spacing:0;text-transfo
 .lamp--fi{left:55.53%;top:11.42%}.lamp--fr{left:50.57%;top:19.63%}.lamp--de{left:52.09%;top:18.69%}
 .lamp--tr{left:57.38%;top:25.54%}.lamp--sg{left:78.83%;top:55.93%}
 .lamp--gb{left:49.97%;top:17.66%}.lamp--nl{left:51.16%;top:17.03%}.lamp--us{left:31.13%;top:25.76%}.lamp--ae{left:64.93%;top:37.64%}
-/* A slow ring rises from each light, staggered. */
-.lamp::after{content:"";position:absolute;inset:-7px;border-radius:50%;box-shadow:0 0 0 1.5px var(--lamp);opacity:0}
+/* Nothing on a map moves by itself. On the one map you can explore, a
+   light grows and names itself when you hover it, focus it, or point at
+   its country in the list beside it (.is-lit from site.js). */
+.lamp::after{content:"";position:absolute;inset:-7px;border-radius:50%;box-shadow:0 0 0 1.5px var(--lamp);opacity:0;transition:opacity .3s var(--ease),transform .4s var(--ease)}
+.map--explore .lamp{transition:transform .35s var(--spring)}
+.map--explore .lamp:focus-visible{outline:2px solid var(--focus);outline-offset:4px;border-radius:50%;box-shadow:0 0 0 2px var(--lamp-rim),0 0 16px 4px var(--lamp-glow)}
+.lamp__tip{position:absolute;left:50%;bottom:calc(100% + 10px);padding:5px 10px;border-radius:10px;white-space:nowrap;pointer-events:none;
+  background:var(--glass-solid);box-shadow:var(--edge),var(--drop);color:var(--ink);font-size:13.5px;font-weight:600;line-height:1.3;
+  opacity:0;transform:translate(-50%,6px) scale(.667);transform-origin:50% 100%;transition:opacity .25s var(--ease),transform .3s var(--ease)}
+.lamp:hover,.lamp:focus-visible,.lamp.is-lit{transform:scale(1.5)}
+.lamp:hover::after,.lamp:focus-visible::after,.lamp.is-lit::after{opacity:1;transform:scale(1.3)}
+.lamp:hover .lamp__tip,.lamp:focus-visible .lamp__tip,.lamp.is-lit .lamp__tip{opacity:1;transform:translate(-50%,0) scale(.667)}
 .links{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
 .links path{fill:none;vector-effect:non-scaling-stroke;stroke-linecap:round}
 .links .halo{stroke:var(--link-halo);stroke-width:7}
 .links .line{stroke-width:1.6}
-.links .glint{stroke:var(--link-glint);stroke-width:2.2;opacity:0}
-@media (prefers-reduced-motion:no-preference){
-  .lamp::after{animation:ping 4.8s var(--ease) infinite}
-  .lamp:nth-child(2n)::after{animation-delay:1.2s}.lamp:nth-child(3n)::after{animation-delay:2.4s}.lamp:nth-child(5n)::after{animation-delay:3.6s}
-  .links .glint{animation:glint 7s ease-in-out infinite}
-  .links .glint:nth-of-type(2n){animation-delay:1.75s}.links .glint:nth-of-type(3n){animation-delay:3.5s}.links .glint:nth-of-type(4n){animation-delay:5.25s}
-}
-@keyframes ping{0%{transform:scale(.5);opacity:.9}70%,100%{transform:scale(2.6);opacity:0}}
-@keyframes glint{0%,100%{opacity:0}45%{opacity:.85}60%{opacity:0}}
 /* The world behind a page title: wide, faint at the edges. */
 .world{position:absolute;z-index:-1;pointer-events:none;direction:ltr}
 .world--page{top:56px;left:50%;width:clamp(820px,92vw,1320px);transform:translateX(-30%);opacity:.8;
@@ -493,4 +534,5 @@ html[dir="rtl"] .world--page{transform:translateX(-82%)}
 .u-list-reset{list-style:none;margin:0;padding:0}
 
 /* Motion off: every animation on the site stops where it stands. */
-@media (prefers-reduced-motion:reduce){.sky i,.lamp::after,.links .glint,.orbit,.hero__mark .logo,.hero__mark::before{animation:none!important}}
+@media (prefers-reduced-motion:reduce){.sky i,.orbit,.hero__mark .logo,.hero__mark::before,.site-header__bar::after{animation:none!important}
+  .lamp,.lamp::after,.lamp__tip,.card::after,.plan::after{transition:none!important}}

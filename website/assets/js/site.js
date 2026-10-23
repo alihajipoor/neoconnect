@@ -35,6 +35,9 @@
     theme();
     announcement();
     forms();
+    routes();
+    pointer();
+    map();
   });
 
   /* ================================================================ nav */
@@ -142,6 +145,121 @@
         var busy = button.getAttribute("data-busy-label");
         if (busy) { button.textContent = busy; }
         button.setAttribute("aria-disabled", "true");
+      });
+    });
+  }
+  /* ======================================================= route finder
+   * The illustration on the home and features pages. Its whole cycle is
+   * CSS (transform and opacity); this only runs it while it is on screen
+   * and restarts it from the "play again" button. Without this file, or
+   * with reduced motion, it holds its final frame: connected, checked. */
+  function routes() {
+    var figs = $$("[data-route]");
+    if (!figs.length) { return; }
+    function restart(fig) {
+      if (fig.getAnimations) {
+        fig.getAnimations({ subtree: true }).forEach(function (a) { a.cancel(); a.play(); });
+      }
+    }
+    figs.forEach(function (fig) {
+      var btn = $("[data-route-replay]", fig);
+      if (reduceMotion) {
+        if (btn) { btn.hidden = true; }
+        return;
+      }
+      if (btn) {
+        btn.addEventListener("click", function () {
+          if (!fig.classList.contains("is-run")) { fig.classList.add("is-run"); } else { restart(fig); }
+        });
+      }
+    });
+    if (reduceMotion || !("IntersectionObserver" in window)) { return; }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        // Starts from the beginning each time it comes back into view.
+        e.target.classList.toggle("is-run", e.isIntersecting);
+      });
+    }, { threshold: 0.35 });
+    figs.forEach(function (fig) { io.observe(fig); });
+  }
+
+  /* ================================================== pointer niceties
+   * For a fine pointer only, and never under reduced motion: a light that
+   * follows the cursor over cards and plans, a slight tilt on the hero logo
+   * and the phone, a magnetic pull on the big primary buttons. Each writes
+   * custom properties on its own element (CSSOM, so the CSP is untouched)
+   * once per frame at most; CSS turns them into transforms. */
+  function pointer() {
+    var fine = false;
+    try { fine = window.matchMedia("(hover: hover) and (pointer: fine)").matches; } catch (e) { /* touch */ }
+    if (!fine || reduceMotion || !window.requestAnimationFrame) { return; }
+
+    function onFrame(fn) {
+      var queued = false, last = null;
+      return function (ev) {
+        last = ev;
+        if (queued) { return; }
+        queued = true;
+        window.requestAnimationFrame(function () { queued = false; fn(last); });
+      };
+    }
+
+    // Light on cards and plans.
+    $$(".card, .plan").forEach(function (el) {
+      el.addEventListener("pointerenter", function () { el.classList.add("is-lit"); });
+      el.addEventListener("pointerleave", function () { el.classList.remove("is-lit"); });
+      el.addEventListener("pointermove", onFrame(function (ev) {
+        var r = el.getBoundingClientRect();
+        el.style.setProperty("--mx", Math.round(ev.clientX - r.left) + "px");
+        el.style.setProperty("--my", Math.round(ev.clientY - r.top) + "px");
+      }));
+    });
+
+    // Tilt: the pointer anywhere over the area turns the target a little.
+    [[".hero", ".hero__mark", 10], [".showcase__stage", ".showcase__scene", 6]].forEach(function (cfg) {
+      var area = $(cfg[0]), target = area && $(cfg[1], area), max = cfg[2];
+      if (!target) { return; }
+      area.addEventListener("pointermove", onFrame(function (ev) {
+        var r = target.getBoundingClientRect();
+        var x = (ev.clientX - (r.left + r.width / 2)) / Math.max(r.width, 300);
+        var y = (ev.clientY - (r.top + r.height / 2)) / Math.max(r.height, 300);
+        x = Math.max(-1, Math.min(1, x)); y = Math.max(-1, Math.min(1, y));
+        target.style.setProperty("--ry", (x * max).toFixed(2) + "deg");
+        target.style.setProperty("--rx", (-y * max).toFixed(2) + "deg");
+      }));
+      area.addEventListener("pointerleave", function () {
+        target.style.setProperty("--ry", "0deg");
+        target.style.setProperty("--rx", "0deg");
+      });
+    });
+
+    // Magnet: a few pixels toward the pointer, back on leave.
+    $$(".btn--magnet").forEach(function (btn) {
+      btn.addEventListener("pointermove", onFrame(function (ev) {
+        var r = btn.getBoundingClientRect();
+        btn.style.setProperty("--bx", ((ev.clientX - r.left - r.width / 2) * 0.12).toFixed(1) + "px");
+        btn.style.setProperty("--by", ((ev.clientY - r.top - r.height / 2) * 0.25).toFixed(1) + "px");
+      }));
+      btn.addEventListener("pointerleave", function () {
+        btn.style.setProperty("--bx", "0px");
+        btn.style.setProperty("--by", "0px");
+      });
+    });
+  }
+
+  /* =========================================================== the map
+   * Pointing at (or tabbing to) a country in the list lights its light on
+   * the map beside it; the lights themselves name themselves in CSS. */
+  function map() {
+    $$("[data-map]").forEach(function (m) {
+      var scope = m.closest("section") || doc;
+      $$(".loc[data-cc]", scope).forEach(function (row) {
+        var lamp = $('.lamp[data-cc="' + row.getAttribute("data-cc") + '"]', m);
+        if (!lamp) { return; }
+        function on() { lamp.classList.add("is-lit"); }
+        function off() { lamp.classList.remove("is-lit"); }
+        row.addEventListener("pointerenter", on);
+        row.addEventListener("pointerleave", off);
       });
     });
   }

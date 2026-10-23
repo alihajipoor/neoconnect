@@ -48,7 +48,10 @@ function nx_world_arc($a, $b)
 }
 
 /**
- * @param string $variant hero | page | plain (plain: lights, no lines)
+ * @param string $variant hero | page | plain (plain: lights, no lines --
+ *                        and the one map you can explore: each light is
+ *                        focusable, named, and shows its name on hover or
+ *                        focus; the list beside it lights it too, site.js)
  * @return string
  */
 function nx_world($variant = 'page')
@@ -58,10 +61,12 @@ function nx_world($variant = 'page')
 
     $anchors = nx_world_anchors();
     $exits = array();
+    $names = array();
     foreach (nx_locations() as $loc) {
         $c = strtolower($loc['code']);
         if (isset($anchors[$c])) {
             $exits[$c] = $anchors[$c];
+            $names[$c] = nx_pick($loc['country']);
         }
     }
 
@@ -84,20 +89,21 @@ function nx_world($variant = 'page')
         foreach ($arcs as $d) {
             $svg .= '<path class="line" stroke="url(#' . $gid . ')" d="' . $d . '"/>';
         }
-        $svg .= '<g>';
-        foreach ($arcs as $d) {
-            $svg .= '<path class="glint" d="' . $d . '"/>';
-        }
-        $out .= $svg . '</g></svg>';
+        $out .= $svg . '</svg>';
     }
 
     foreach (array_keys($exits) as $c) {
-        $out .= '<span class="lamp lamp--' . nx_esc($c) . '"></span>';
+        if ($variant === 'plain') {
+            $out .= '<span class="lamp lamp--' . nx_esc($c) . '" data-cc="' . nx_esc($c) . '" tabindex="0" role="img" aria-label="'
+                . nx_esc($names[$c]) . '"><span class="lamp__tip" aria-hidden="true">' . nx_esc($names[$c]) . '</span></span>';
+        } else {
+            $out .= '<span class="lamp lamp--' . nx_esc($c) . '"></span>';
+        }
     }
 
-    $map = '<div class="map" aria-hidden="true">' . $out . '</div>';
     if ($variant === 'plain') {
-        return $map;
+        return '<div class="map map--explore" data-map>' . $out . '</div>';
     }
+    $map = '<div class="map" aria-hidden="true">' . $out . '</div>';
     return '<div class="world world--' . nx_esc($variant) . '" aria-hidden="true">' . $map . '</div>';
 }
