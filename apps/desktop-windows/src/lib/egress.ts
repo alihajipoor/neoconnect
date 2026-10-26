@@ -417,7 +417,7 @@ function familyOf(ip: string): 4 | 6 {
 /** An address as compared: an IPv4-mapped IPv6 literal is the IPv4
  * address it carries, so one server writing the same address two ways
  * cannot read as a change of route. */
-function plainAddress(ip: string): string {
+export function plainAddress(ip: string): string {
   const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
   return mapped ? mapped[1] : ip;
 }

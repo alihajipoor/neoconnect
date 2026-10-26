@@ -7,7 +7,7 @@ import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import { concurrentExitsFor } from "../lib/concurrent-exits";
-import { settleAndCaptureBaseline, settleBeside } from "../lib/baseline-settle";
+import { besideRetakes, settleAndCaptureBaseline, settleBeside } from "../lib/baseline-settle";
 import {
   captureBaselineIp,
   captureIpv6Baseline,
@@ -3903,8 +3903,12 @@ export function Dashboard({
         // baseline to take -- beside the dial (`settleBeside`). In front of
         // it, it held every such redial 1.5 to 2.5 s on the VM (round 3),
         // past the ten-second calm hold. Not after a rung dialled so found
-        // the settle had said nothing (`settleInFront`).
-        const dialEarly = redialAfterWait && !settleInFront;
+        // the settle had said nothing (`settleInFront`). And not with no
+        // address of this machine's known on the bare network: a reading in
+        // once the dial is out is a baseline only if it is that one -- any
+        // other may be a relayed route's exit -- so with none known every
+        // such rung would be dialled twice.
+        const dialEarly = redialAfterWait && !settleInFront && knownBaseline !== null;
         settleInFront = false;
         redialAfterWait = false;
         // Fresh every attempt, and taken only once plain networking is
@@ -3916,9 +3920,10 @@ export function Dashboard({
           nodeAddresses,
           index > 0 || !nothingUpAtStart,
         );
-        const beside = dialEarly ? settleBeside(settling) : null;
-        /** Whether this rung's dial was answered: its check then ran on
-         * what the settle beside it had found by then. */
+        const beside = dialEarly ? settleBeside(settling, knownBaseline) : null;
+        /** Whether this rung's dial was answered: beside the settle, it was
+         * then checked against a baseline from the bare network, or dialled
+         * again before any check (`besideRetakes`). */
         let dialAnswered = false;
         if (beside === null) {
           baselineIpRef.current = await settling;
@@ -3989,6 +3994,9 @@ export function Dashboard({
           // notification, wait for the service's own word, read while it
           // dials (`holdStore.lettingGo`, `dialledUnderHold`).
           if (holdSetting && !holdCovers(candidate.protocol, customMode)) holdStore.lettingGo();
+          // From here a reading the settle beside the dial takes may come
+          // through this rung's tunnel (`settleBeside`).
+          beside?.dialling();
           const dial = invoke("vpn_connect", {
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
@@ -4001,8 +4009,9 @@ export function Dashboard({
           dialAnswered = true;
           showNetworkWait(false);
           // Dialled beside the settle: its baseline, waited for a moment
-          // more if it is not in yet (`settleBeside`), and the IPv6 one,
-          // begun beside it.
+          // more if it is not in yet -- none if it may have come through
+          // this tunnel (`settleBeside`) -- and the IPv6 one, begun beside
+          // it.
           if (beside !== null) {
             baselineIpRef.current = await beside.found();
             if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
@@ -4023,6 +4032,20 @@ export function Dashboard({
           // on top of it named a server nothing will dial. The teardown
           // after the loop takes the engine down.
           if (stopped()) break;
+          // Dialled beside the settle, with no baseline from the bare network
+          // to check it against: through this tunnel a relayed route's exit
+          // read as this machine's address, and a working tunnel as bypassed.
+          // Taken down and dialled again, the settle in front, before
+          // anything of it reaches the screen (`besideRetakes`).
+          if (beside !== null && besideRetakes({ answered: true, baseline: baselineIpRef.current })) {
+            await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);
+            noNetworkSince = null;
+            noNetworkRounds = 0;
+            settleInFront = true;
+            redialAfterWait = true;
+            index -= 1;
+            continue;
+          }
           setProtocolUser(candidate);
           setTunnelRouteUnknown(false);
           setConnectedAt(Date.now());
@@ -4470,20 +4493,22 @@ export function Dashboard({
         // this one's routes and fails for a reason that has nothing to
         // do with it. Keeping the hold between rungs, when it is kept.
         await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);
-        // Dialled beside the settle, which never said plain networking
-        // worked before that tunnel was up: what the rung did says nothing
-        // about its server -- never held against a node for a network that
-        // may have been dead. Taken back, and the rung dialled again with
-        // the settle in front; only that dial's failure is its own.
+        // Dialled beside the settle, and the dial failed (for anything but no
+        // network, which waits above): what the settle found after it says
+        // nothing about the moment of the dial -- one that found the network
+        // a second after a dial had failed in half of one left that failure
+        // standing against the server. Taken back, and the rung dialled
+        // again with the settle in front; only that dial's failure is its
+        // own (`besideRetakes`). One that answered was checked against a
+        // baseline from the bare network, or dialled again before any check.
         if (
           beside !== null &&
           !stopped() &&
-          (dialAnswered ? baselineIpRef.current === null : (await beside.found()) === null)
+          besideRetakes(dialAnswered ? { answered: true, baseline: baselineIpRef.current } : { answered: false })
         ) {
           attempts.pop();
           dials.pop();
           failedRungs.pop();
-          if (carriedNothing[carriedNothing.length - 1] === candidate) carriedNothing.pop();
           settleInFront = true;
           redialAfterWait = true;
           index -= 1;
