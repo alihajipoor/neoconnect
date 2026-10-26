@@ -649,33 +649,122 @@ mod tests {
         }
     }
 
-    /// A long job on the owning thread (`Ledger::busy`) -- a connect
-    /// dialling, a teardown's thorough pass -- does not keep a status
-    /// waiting the second it would wait for any other: it is answered from
-    /// the ledger at once, the reconnect hold's word with it. On the VM a
-    /// hold let go of inside a connect was heard 1.5 to 2.5 s late, and a
-    /// re-hold at a reconnect's teardown 1.7 s late (round 3, F2 and F3).
+    /// A connect marks the service busy (`Ledger::busy`) from the moment it
+    /// arrives until it has answered: a status sent while it waits behind
+    /// another job -- a teardown's thorough pass, say -- does not wait the
+    /// second it would for any other, but is answered from the ledger at
+    /// once, the reconnect hold's word with it; and nothing is left busy
+    /// once the connect has answered. On the VM a hold let go of inside a
+    /// connect was heard 1.5 to 2.5 s late (round 3, F2). Through a real
+    /// dispatch: a guard made by hand here pinned nothing, and taking
+    /// `Ledger::busy` out of the connect failed no test (round 4).
     #[tokio::test]
-    async fn a_status_during_a_long_job_answers_at_once_from_the_ledger() {
+    async fn a_status_during_a_connect_answers_at_once_from_the_ledger() {
         let empty_dir = PathBuf::from(std::env::temp_dir()).join("neoconnect-test-no-engines");
-        let engines = Supervisor::spawn(Engines::new(empty_dir.clone(), empty_dir), "test-engines-busy");
+        let engines = Supervisor::spawn(Engines::new(empty_dir.clone(), empty_dir), "test-engines-busy-connect");
         let ledger = Arc::new(Ledger::new());
-        let parked = engines.run(|_engines: &mut Engines, token: &CancelToken| {
-            let _ = token.sleep(Duration::from_secs(30));
+        // Ahead of the connect on the owning thread, as a thorough pass is:
+        // it ignores its token, so nothing hurries it.
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let ahead = engines.run(move |_engines: &mut Engines, _token: &CancelToken| {
+            let _ = parked.recv_timeout(Duration::from_secs(30));
         });
+        // No engine binaries here: once it runs, the connect fails at the
+        // engine-resolution guard and dials nothing.
+        let profile = ConnectProfile::Wireguard(WireguardProfile {
+            private_key: "GMSgBTYpH7yC6bV88xblWmViQlk+bHxiTDsdsi+WgXI=".into(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
+            endpoint: "203.0.113.5:51888".into(),
+        });
+        let connect = dispatch(
+            Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new(), block_while_reconnecting: false },
+            &engines,
+            &ledger,
+            None,
+        );
+        let status = async {
+            // `join!` has polled the connect by now: it is queued, behind.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let started = Instant::now();
+            let reply = dispatch(Request::Status, &engines, &ledger, None).await;
+            let took = started.elapsed();
+            let _ = release.send(());
+            (reply, took)
+        };
+        let (connected, (reply, took)) = tokio::join!(connect, status);
+        let _ = ahead.await;
 
-        let busy = Ledger::busy(&ledger);
-        assert!(ledger.is_busy());
-        let started = Instant::now();
-        let reply = dispatch(Request::Status, &engines, &ledger, None).await;
-        let took = started.elapsed();
-        drop(busy);
-        assert!(!ledger.is_busy(), "the guard outlived its job");
+        assert!(matches!(reply, Response::State { .. }), "a status during a connect was not answered");
+        assert!(took < STATUS_LOCK_WAIT, "a status waited {took:?} behind a connect");
+        assert!(matches!(connected, Response::Error { .. }), "the connect did not answer as one that ran with no engines");
+        assert!(!ledger.is_busy(), "the connect left the service busy after it answered");
+    }
 
-        engines.cancel_running();
-        let _ = parked.await;
-        assert!(matches!(reply, Response::State { .. }), "a status during a long job was not answered");
-        assert!(took < STATUS_LOCK_WAIT, "a status waited {took:?} behind a long job");
+    /// A teardown's thorough pass, queued behind its answer, marks the
+    /// service busy until it has run -- whether the hard stop answered in
+    /// time or was still queued behind another job past
+    /// `DISCONNECT_LOCK_WAIT`, for the customer's Disconnect and for a
+    /// reconnect's: a status sent while the pass waits is answered from the
+    /// ledger at once, and nothing is left busy once it has run. On the VM a
+    /// re-hold at a reconnect's teardown was heard 1.7 s late (round 3, F3).
+    ///
+    /// In the first case the hard stop runs on a machine with nothing up, in
+    /// well under `DISCONNECT_LOCK_WAIT`; on a runner slow enough to miss
+    /// it, the second case's arm answers instead, which marks it the same.
+    #[tokio::test]
+    async fn a_status_during_a_teardowns_thorough_pass_answers_at_once_from_the_ledger() {
+        for (what, request, hard_stop_in_time) in [
+            ("a reconnect's teardown", Request::DisconnectForReconnect, true),
+            ("the customer's Disconnect", Request::Disconnect, false),
+        ] {
+            let empty_dir = PathBuf::from(std::env::temp_dir()).join("neoconnect-test-no-engines");
+            let engines = Supervisor::spawn(Engines::new(empty_dir.clone(), empty_dir), "test-engines-busy-teardown");
+            let ledger = Arc::new(Ledger::new());
+            // Ahead of the hard stop: let go of at once in the first case,
+            // only after the answer in the second.
+            let (release_first, first) = std::sync::mpsc::channel::<()>();
+            let ahead = engines.run(move |_engines: &mut Engines, _token: &CancelToken| {
+                let _ = first.recv_timeout(Duration::from_secs(30));
+            });
+            // And one the thorough pass is queued behind, queued once the
+            // hard stop is.
+            let (release_second, second) = std::sync::mpsc::channel::<()>();
+            let teardown = dispatch(request, &engines, &ledger, None);
+            let queue_behind = async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let behind = engines.run(move |_engines: &mut Engines, _token: &CancelToken| {
+                    let _ = second.recv_timeout(Duration::from_secs(30));
+                });
+                if hard_stop_in_time {
+                    let _ = release_first.send(());
+                }
+                behind
+            };
+            let (answer, behind) = tokio::join!(teardown, queue_behind);
+            assert!(matches!(answer, Response::Ok | Response::Error { .. }), "{what} did not answer");
+
+            let started = Instant::now();
+            let reply = dispatch(Request::Status, &engines, &ledger, None).await;
+            let took = started.elapsed();
+            let _ = release_first.send(());
+            let _ = release_second.send(());
+            let _ = ahead.await;
+            let _ = behind.await;
+            assert!(matches!(reply, Response::State { .. }), "{what}: a status during its thorough pass was not answered");
+            assert!(took < STATUS_LOCK_WAIT, "{what}: a status waited {took:?} behind its thorough pass");
+
+            // Queued behind the thorough pass: once this has run, so has it.
+            let after = tokio::time::timeout(
+                Duration::from_secs(120),
+                engines.run(|_engines: &mut Engines, _token: &CancelToken| ()),
+            )
+            .await;
+            assert!(matches!(after, Ok(Ok(()))), "{what}: the thorough pass never ran");
+            assert!(!ledger.is_busy(), "{what}: its thorough pass left the service busy after it ran");
+        }
     }
 
     #[tokio::test]
