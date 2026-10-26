@@ -174,17 +174,24 @@ describe("the reconnect hold's gate", () => {
   // The VM, round 3 (F1, F2): the let-go of a connect the hold does not
   // cover was heard only after that connect had dialled, and one inside a
   // covered connect only at the next poll.
-  it("says a connect the hold does not cover lets go before it is sent, and reads the word while one it covers dials", () => {
+  // Round 4: and only the service's own read says the let-go of a connect it
+  // does not cover, read while that connect dials as for one it covers.
+  it("drops 'blocked' before a connect the hold does not cover is sent, and reads the word while any connect over a hold dials", () => {
     const dash = source("../screens/Dashboard.tsx");
-    const letting = dash.indexOf('if (holdSetting && !holdCovers(candidate.protocol, customMode)) holdStore.lettingGo("notCovered");');
+    const letting = dash.indexOf("if (holdSetting && !holdCovers(candidate.protocol, customMode)) holdStore.lettingGo();");
     const sent = dash.indexOf('const dial = invoke("vpn_connect", {');
     expect(letting).toBeGreaterThan(-1);
     expect(sent).toBeGreaterThan(letting);
     const after = dash.slice(sent);
     expect(after.slice(0, after.indexOf("showNetworkWait(false);"))).toContain("await dialledUnderHold(dial);");
-    expect(dash).toContain(
-      'return holdStore.dialling(holdStore.current()?.state === "holding" ? readWhileDialling(dial, { read: serviceStatus }) : dial);',
+    const dialled = dash.slice(dash.indexOf("function dialledUnderHold<T>("));
+    const body = dialled.slice(0, dialled.indexOf("\n}\n"));
+    expect(body).toContain("const state = holdStore.current()?.state;");
+    expect(body).toContain(
+      'return holdStore.dialling(state === "holding" || state === "lettingGo" ? readWhileDialling(dial, { read: serviceStatus }) : dial);',
     );
+    // Nowhere does the app say "not held" on its own.
+    expect(source("./reconnect-hold.ts")).not.toMatch(/set\(\{ state: "notHeld"/);
     // The one connect the screen sends.
     expect(dash.split('invoke("vpn_connect"').length).toBe(2);
     // A service not there at all is said as gone wherever the gap's calls meet it.

@@ -302,12 +302,17 @@ function serviceDisconnect(): Promise<void> {
 }
 
 /** A connect on the wire. One the hold covers can still let go of it
- * before it dials -- a WireGuard server the service cannot name -- so over
- * a hold the service's word is read while it is (`readWhileDialling`). And
- * a read it leaves unanswered meanwhile is not the service gone
+ * before it dials -- a WireGuard server the service cannot name -- and one
+ * it does not cover lets go of it once it runs, which the screen says only
+ * on the service's word (`holdStore.lettingGo`): so over a hold, or a
+ * let-go not yet said, the service's word is read while it is
+ * (`readWhileDialling`) -- answered from the ledger at once while the
+ * service is busy, so the let-go is heard within a read. And a read it
+ * leaves unanswered meanwhile is not the service gone
  * (`holdStore.dialling`). */
 function dialledUnderHold<T>(dial: Promise<T>): Promise<T> {
-  return holdStore.dialling(holdStore.current()?.state === "holding" ? readWhileDialling(dial, { read: serviceStatus }) : dial);
+  const state = holdStore.current()?.state;
+  return holdStore.dialling(state === "holding" || state === "lettingGo" ? readWhileDialling(dial, { read: serviceStatus }) : dial);
 }
 
 /** A pass landed a tunnel: lets go of the reconnect hold if the landing
@@ -3978,11 +3983,12 @@ export function Dashboard({
           setEndpointTunnelServer(tunnelServer);
           const holdSetting = holdWanted(appPrefs.current().blockWhileReconnecting);
           // A connection the hold does not cover (Built-in (IKEv2), Custom
-          // mode): the service lets go of a hold before it dials it, and the
-          // app knows that now -- said before it is sent, with the plain
-          // "lost" notification, not once the connect has answered
-          // (`holdStore.lettingGo`).
-          if (holdSetting && !holdCovers(candidate.protocol, customMode)) holdStore.lettingGo("notCovered");
+          // mode): the service lets go of a hold before it dials it, if it
+          // runs at all. "Blocked" is dropped before it is sent, for a word
+          // that says neither; the let-go, and the plain "lost"
+          // notification, wait for the service's own word, read while it
+          // dials (`holdStore.lettingGo`, `dialledUnderHold`).
+          if (holdSetting && !holdCovers(candidate.protocol, customMode)) holdStore.lettingGo();
           const dial = invoke("vpn_connect", {
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),

@@ -90,7 +90,13 @@ export type ReconnectHold =
   /** The app's own word, never the service's: the last status read went
    * unanswered -- the service restarting, or not running -- so nothing is
    * known about the hold, either way (`holdStore.unanswered`). */
-  | { readonly state: "unanswered" };
+  | { readonly state: "unanswered" }
+  /** The app's own word, never the service's: a connect the hold does not
+   * cover has been sent, which the service lets go of the hold before it
+   * dials -- if it runs at all -- and the service has not yet said so
+   * (`holdStore.lettingGo`). Neither blocked nor open: only the service's
+   * own "not held" says traffic goes out without Neoxify. */
+  | { readonly state: "lettingGo" };
 
 const PROBLEMS: ReadonlySet<string> = new Set(["filtersRefused", "tunnelNotPermitted", "timedOut", "notCovered"]);
 
@@ -285,7 +291,11 @@ export function holdNote(hold: ReconnectHold | null, opts: { inGap: boolean; set
  *    tunnel whose way out has gone: either way not "going out without
  *    Neoxify", which is false the moment the hold is in -- measured on the
  *    VM, said for 0.25 to 2.3 s while the service already held -- nor
- *    "blocked", which nothing has confirmed;
+ *    "blocked", which nothing has confirmed. And a connect the hold does
+ *    not cover sent, whose let-go the service has not yet said
+ *    (`lettingGo`): on the VM that connect waited 1.7 s and more behind
+ *    the previous rung's thorough pass while the service still held, and
+ *    one abandoned, cancelled or refused never lets go at all;
  *  - `open`: the setting off, nothing armed or held, or the service says
  *    it is not holding and why. */
 export type GapTraffic = "blocked" | "blockedLate" | "unconfirmed" | "unanswered" | "open";
@@ -297,7 +307,7 @@ export type GapTraffic = "blocked" | "blockedLate" | "unconfirmed" | "unanswered
 export function gapTraffic(hold: ReconnectHold | null, setting: boolean): GapTraffic {
   if (!setting || hold === null) return "open";
   if (hold.state === "holding") return hold.standingRefused === true ? "blockedLate" : "blocked";
-  if (hold.state === "armed") return "unconfirmed";
+  if (hold.state === "armed" || hold.state === "lettingGo") return "unconfirmed";
   if (hold.state === "unanswered") return "unanswered";
   return "open";
 }
@@ -501,8 +511,10 @@ let connecting = 0;
 /** A connect the hold does not cover has been sent (`lettingGo`) and has
  * not answered: until it has, a read that still says "holding" was
  * answered before that connect reached the service's thread -- queued
- * behind a teardown's thorough pass, say -- and is not taken back over
- * the let-go the app has already said. */
+ * behind a teardown's thorough pass, say -- and is not taken over the
+ * neutral word the app has already said. Once it has answered, a read is
+ * the service's word again, whatever it says: a connect abandoned,
+ * cancelled, refused or invalid never let go. */
 let lettingGoSent = false;
 const listeners = new Set<() => void>();
 
@@ -569,22 +581,27 @@ export const holdStore = {
    * The next read says what is left (armed, or nothing). */
   released(): void {
     decisions += 1;
-    if (held?.state === "holding" || held?.state === "unanswered") set(null);
+    if (held?.state === "holding" || held?.state === "unanswered" || held?.state === "lettingGo") set(null);
   },
   /** A connect the hold does not cover (`holdCovers`: IKEv2, Custom mode)
    * is about to be sent: the service lets go of a hold before it dials it
-   * (`hold_through_connect`), and says why. Said from here, before it is
-   * sent -- the app knows it already -- not from a status read: the
-   * connect holds the service's one thread until it has dialled, and on
-   * the VM "blocked" stood 7.7 s over traffic leaving, then "the service
-   * isn't answering" for 6 s more, before a read said so. Only over a hold
-   * the service holds, or may (`unanswered`); an armed tunnel is not held,
-   * and the connect only disarms it. */
-  lettingGo(problem: ReconnectHoldProblem): void {
+   * (`hold_through_connect`), and says why. "Blocked" is dropped from here,
+   * before it is sent -- on the VM it stood 7.7 s over traffic leaving,
+   * then "the service isn't answering" for 6 s more, before a read said
+   * so -- but only for a word that says neither (`lettingGo`): the let-go
+   * is the service's to say, on the reads sent while it dials
+   * (`readWhileDialling`). That connect can wait 1.7 s and more behind the
+   * previous rung's thorough pass while the service still holds, and one
+   * abandoned, cancelled, refused for Gaming mode or failing validation
+   * never lets go at all: said as let go of from here, "goes out without
+   * Neoxify" and the plain "lost" toast came over a machine still held.
+   * Only over a hold the service holds, or may (`unanswered`); an armed
+   * tunnel is not held, and the connect only disarms it. */
+  lettingGo(): void {
     if (held?.state !== "holding" && held?.state !== "unanswered") return;
     decisions += 1;
     lettingGoSent = true;
-    set({ state: "notHeld", problem });
+    set({ state: "lettingGo" });
   },
   /** A reconnect's teardown (`vpn_disconnect_for_reconnect`) answered over
    * a tunnel the service had said was armed: it holds the gap from that
@@ -644,12 +661,14 @@ function sameHold(a: ReconnectHold | null, b: ReconnectHold | null): boolean {
  * service's word while it dials (`readWhileDialling`). */
 export const DIALLING_READ_EVERY_MS = 400;
 
-/** While `work` -- a connect sent over a hold the service holds -- is on
- * the wire, asks for the service's word at once and then
- * `DIALLING_READ_EVERY_MS` after each answer, one read at a time, until it
- * settles. Returns `work`.
+/** While `work` -- a connect sent over a hold the service holds, or over a
+ * let-go the app has not heard it say (`lettingGo`) -- is on the wire,
+ * asks for the service's word at once and then `DIALLING_READ_EVERY_MS`
+ * after each answer, one read at a time, until it settles. Returns `work`.
  *
- * A connect the hold covers can still let go of it before it dials: a
+ * A connect the hold does not cover lets go of it once it runs, and only
+ * the service's read says it did. A connect the hold covers can still let
+ * go of it before it dials: a
  * WireGuard server the service cannot name as an IPv4 address
  * (`hold_through_connect`), which the app cannot know beforehand. The
  * connect's reply comes only after the dial, so on the VM "blocked" stood

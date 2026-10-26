@@ -14,6 +14,7 @@ import {
   DIALLING_READ_EVERY_MS,
   gapTraffic,
   gapWord,
+  holdHint,
   holdNote,
   holdStore,
   readWhileDialling,
@@ -40,46 +41,64 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 describe("a connect the hold does not cover", () => {
   const LOST_HELD: NotifyMemory = { up: true, lostSaid: true, heldSaid: true };
 
-  it("is said as let go of before it is sent, with the plain loss notification", () => {
-    holdStore.observe({ state: "holding", held_secs: 30 });
-    holdStore.lettingGo("notCovered");
-    const hold = holdStore.current();
-    expect(hold).toEqual({ state: "notHeld", problem: "notCovered" });
-    expect(gapTraffic(hold, true)).toBe("open");
-    expect(holdNote(hold, { inGap: true, setting: true })).toBe("hold.notCovered");
-    const step = notifyStep(LOST_HELD, {
+  const lossSaid = (hold: ReturnType<typeof holdStore.current>) =>
+    notifyStep(LOST_HELD, {
       tone: "warn",
       reconnecting: true,
       gap: gapWord(gapTraffic(hold, true), true),
       letGo: hold?.state === "notHeld",
       focused: false,
       gaming: false,
-    });
-    expect(step.say).toBe("lost");
+    }).say;
+
+  // Round 4: that connect waited 1.7 s and more behind the previous rung's
+  // thorough pass while the service still held, and one abandoned,
+  // cancelled or refused never let go at all -- under "goes out without
+  // Neoxify" and the plain "lost" toast, said by the app before it was sent.
+  it("drops 'blocked' before it is sent for a word that says neither, and says the let-go only on the service's", () => {
+    holdStore.observe({ state: "holding", held_secs: 30 });
+    holdStore.lettingGo();
+    let hold = holdStore.current();
+    expect(hold).toEqual({ state: "lettingGo" });
+    expect(gapTraffic(hold, true)).toBe("unconfirmed");
+    expect(holdNote(hold, { inGap: true, setting: true })).toBeNull();
+    // Nothing in the hint's room within the grace, "checking" after it --
+    // never the headline's "going out without Neoxify".
+    expect(holdHint(hold, { reconnecting: true, dropped: false, setting: true, wordLate: false })).toBe("pending");
+    expect(holdHint(hold, { reconnecting: true, dropped: false, setting: true })).toBe("hold.unconfirmed");
+    expect(lossSaid(hold)).toBeNull();
+    // The service's own word: let go of, and why -- with the plain "lost".
+    holdStore.observeRead(holdStore.decisionMark(), { state: "notHeld", problem: "notCovered" });
+    hold = holdStore.current();
+    expect(hold).toEqual({ state: "notHeld", problem: "notCovered" });
+    expect(gapTraffic(hold, true)).toBe("open");
+    expect(holdNote(hold, { inGap: true, setting: true })).toBe("hold.notCovered");
+    expect(lossSaid(hold)).toBe("lost");
   });
 
   it("is not said over a tunnel the service only armed: that connect disarms it, holding nothing", () => {
     holdStore.observe({ state: "armed" });
-    holdStore.lettingGo("notCovered");
+    holdStore.lettingGo();
     expect(holdStore.current()).toEqual({ state: "armed" });
     holdStore.resetForTests();
-    holdStore.lettingGo("notCovered");
+    holdStore.lettingGo();
     expect(holdStore.current()).toBeNull();
   });
 
   it("is not taken back by a read answered before that connect reached the service", async () => {
     holdStore.observe({ state: "holding", held_secs: 30 });
     const before = holdStore.decisionMark();
-    holdStore.lettingGo("notCovered");
+    holdStore.lettingGo();
     let answer!: () => void;
     const dial = holdStore.dialling(new Promise<void>((resolve) => (answer = resolve)));
     // Sent before the let-go: older than it.
     holdStore.observeRead(before, { state: "holding", held_secs: 31 });
-    expect(holdStore.current()?.state).toBe("notHeld");
+    expect(holdStore.current()?.state).toBe("lettingGo");
     // Sent after it, but answered before the connect ran -- queued behind a
-    // teardown's thorough pass: still the let-go.
+    // teardown's thorough pass: still neither, and never "let go".
     holdStore.observeRead(holdStore.decisionMark(), { state: "holding", held_secs: 32 });
-    expect(holdStore.current()?.state).toBe("notHeld");
+    expect(holdStore.current()?.state).toBe("lettingGo");
+    expect(lossSaid(holdStore.current())).toBeNull();
     // What the service says once it has let go stands.
     holdStore.observeRead(holdStore.decisionMark(), { state: "notHeld", problem: "notCovered" });
     expect(holdStore.current()).toEqual({ state: "notHeld", problem: "notCovered" });
@@ -88,6 +107,21 @@ describe("a connect the hold does not cover", () => {
     // Answered: a read is the service's word again, whatever it says.
     holdStore.observeRead(holdStore.decisionMark(), { state: "holding", held_secs: 1 });
     expect(holdStore.current()?.state).toBe("holding");
+  });
+
+  it("is never said as let go of when that connect never lets go: abandoned, cancelled, refused", async () => {
+    holdStore.observe({ state: "holding", held_secs: 30 });
+    holdStore.lettingGo();
+    let refuse!: (err: Error) => void;
+    const dial = holdStore.dialling(new Promise<void>((_, reject) => (refuse = reject)));
+    holdStore.observeRead(holdStore.decisionMark(), { state: "holding", held_secs: 31 });
+    expect(lossSaid(holdStore.current())).toBeNull();
+    refuse(new Error("Gaming mode is on, and a VPN connection cannot run alongside it."));
+    await dial.catch(() => undefined);
+    // The service still holds, and says so: blocked again, never "lost".
+    holdStore.observeRead(holdStore.decisionMark(), { state: "holding", held_secs: 33 });
+    expect(gapTraffic(holdStore.current(), true)).toBe("blocked");
+    expect(lossSaid(holdStore.current())).toBeNull();
   });
 
   it("never says the service is not answering while a connect it is dialling holds its thread", async () => {
