@@ -266,6 +266,15 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    the degraded "NOT protected" line, or any other, once the screen has moved
    on. The switch confirmation while held says the block is in, and for
    Built-in (IKEv2) or Custom mode that it is let go of before they connect.
+   **(new, third round)** With the window behind: a failover whose every
+   rung fails (every node blocked in the guest's firewall) says "lost" in
+   held words, then -- once its teardown has let go of the hold, never
+   before (the capture) -- "VPN connection lost ... not protected". A
+   failover the hold is let go of partway (a WireGuard rung with
+   `unname-wireguard-server`, or an IKEv2 rung) shows the reason under
+   "Checking connection..." from the moment the service says it, and sends
+   a plain "lost" toast after the held one. A one-second re-check of the
+   state is not spoken again by the screen reader.
 6. **The LAN while held, and after roaming.** A LAN host (the VirtualBox
    gateway, a share on the host-only network) answers while held. Then
    change the guest's network during a long wait (switch the adapter to

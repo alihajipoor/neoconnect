@@ -320,6 +320,12 @@ export interface HoldScene {
   /** A pass dialling under "Checking connection...": the mid-session
    * failover's ladder, or a connect. */
   readonly checking?: boolean;
+  /** A pass is running that keeps the hold through its teardowns
+   * (`passTeardown`): the failover, a press made while it held. A hold the
+   * service lets go of before one of its rungs -- one it does not cover, a
+   * WireGuard server it cannot name -- is said there, with why: the rest
+   * of its ladder runs without it. */
+  readonly holdKept?: boolean;
   /** The screen shows a tunnel up: connected, not confirmed, or degraded. */
   readonly tunnelUp?: boolean;
   /** That tunnel is shown degraded, whose own line says "Your traffic is
@@ -334,12 +340,14 @@ function tunnelSpeaks(hold: ReconnectHold | null, scene: HoldScene): boolean {
 }
 
 /** Whether the hold is for the main page to speak of in `scene`: a
- * reconnect or a drop, and -- while the service says it holds a drop -- a
+ * reconnect or a drop, a pass that keeps the hold once the service has let
+ * go of it (and why), and -- while the service says it holds a drop -- a
  * pass dialling, and a tunnel the screen still shows up that has not
  * landed under it (or is shown degraded). The notes under the state read
  * this. */
 export function holdSpoken(hold: ReconnectHold | null, scene: HoldScene): boolean {
   if (scene.reconnecting || scene.dropped) return true;
+  if (scene.holdKept === true && hold?.state === "notHeld") return true;
   if (hold?.state !== "holding") return false;
   return scene.checking === true || (scene.tunnelUp === true && !tunnelSpeaks(hold, scene));
 }

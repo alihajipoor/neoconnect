@@ -11,8 +11,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { AutoReconnect, QUICK_DEATHS_TO_STOP, type Episode, type ReconnectPhase } from "./auto-reconnect";
-import { notifyStep } from "./connection-notify";
+import { notifyStep, type NotifyMemory } from "./connection-notify";
+import { shownTone } from "./hero-model";
 import { DICTIONARIES } from "./i18n";
+import { orbTone } from "./orb-caution";
 import {
   createStatusRelease,
   episodeEndReleases,
@@ -676,6 +678,28 @@ describe("the held words in every phase", () => {
     expect(at({ tunnelUp: true, degraded: true }, null)).toBeNull();
   });
 
+  // 2026-10-25 review: under "Checking connection..." the failover said it
+  // held; the service then let go before a rung it does not cover (IKEv2),
+  // or a WireGuard server it cannot name -- and the screen just went quiet,
+  // the rest of the ladder running open. A reconnect says why there.
+  it("says why when the hold is let go of before a rung of a pass that keeps it, and only there", () => {
+    for (const problem of ["tunnelNotPermitted", "notCovered"] as const) {
+      const letGo: ReconnectHold = { state: "notHeld", problem };
+      const scene = { reconnecting: false, dropped: false, checking: true, holdKept: true };
+      expect(holdSpoken(letGo, scene), problem).toBe(true);
+      expect(holdNotes(letGo, { inGap: holdSpoken(letGo, scene), setting: true })).toEqual([`hold.${problem}`]);
+      // Nothing held: the headline's own sentence, beside the note.
+      expect(at(scene, letGo)).toBeNull();
+      // A rung that came up meanwhile, before it is verified: still said.
+      expect(holdSpoken(letGo, { ...scene, checking: false, tunnelUp: true })).toBe(true);
+      // A press from a quiet screen let go on purpose: nothing to say.
+      expect(holdSpoken(letGo, { reconnecting: false, dropped: false, checking: true })).toBe(false);
+    }
+    // Still held, the pass's scene says so as before.
+    expect(holdSpoken(HOLDING, { reconnecting: false, dropped: false, checking: true, holdKept: true })).toBe(true);
+    expect(holdSpoken({ state: "armed" }, { reconnecting: false, dropped: false, checking: true, holdKept: true })).toBe(false);
+  });
+
   it("claims nothing before the word in a pass or over a tunnel, whose own lines claim nothing either way", () => {
     expect(at({ checking: true }, { state: "armed" })).toBeNull();
     expect(at({ tunnelUp: true }, { state: "armed" })).toBeNull();
@@ -741,6 +765,79 @@ describe("the held words in every phase", () => {
     const open = notifyStep({ up: true, lostSaid: false }, { tone: "warn", reconnecting: true, failover: true, gap: "open", focused: false, gaming: false });
     expect(open.say).toBeNull();
     expect(open.memory).toEqual({ up: true, lostSaid: false });
+  });
+
+  /** Plays looks at the main page through `notifyStep`, from a verified
+   * tunnel, and collects what would have been said. */
+  const playNotify = (looks: { tone: ShownToneForTest; gap: GapWord; reconnecting?: boolean; failover?: boolean; dropped?: boolean; letGo?: boolean }[]) => {
+    let memory: NotifyMemory = { up: true, lostSaid: false };
+    return looks.map(({ reconnecting = false, ...look }) => {
+      const step = notifyStep(memory, { reconnecting, focused: false, gaming: false, ...look });
+      memory = step.memory;
+      return step.say;
+    });
+  };
+
+  // 2026-10-25 review: the failover's held "lost" was never followed up. A
+  // pass that failed let go of the hold with its plain teardown, and the
+  // screen went quiet ("idle": the memory forgotten, nothing said); a
+  // window behind kept "other connections are blocked" as its last word
+  // while traffic went out without Neoxify.
+  it("says the failover's held loss is over when the failover gives up and lets go", () => {
+    expect(
+      playNotify([
+        { tone: "warn", gap: "blocked", reconnecting: true, failover: true },
+        // Every rung failed; its plain teardown let go, and the pass ended.
+        // The look is still the pass's own busy one for a render:
+        { tone: shownTone(orbTone("connecting", false), { reconnecting: false, dropped: true }), gap: "open", dropped: true },
+        { tone: shownTone(orbTone("disconnected", false), { reconnecting: false, dropped: true }), gap: "open", dropped: true },
+      ]),
+    ).toEqual(["lostHeld", null, "dropped"]);
+    // Not until the service's word that the hold has gone.
+    expect(
+      playNotify([
+        { tone: "warn", gap: "blocked", reconnecting: true, failover: true },
+        { tone: "danger", gap: "blocked", dropped: true },
+        { tone: "danger", gap: "open", dropped: true },
+      ]),
+    ).toEqual(["lostHeld", null, "dropped"]);
+  });
+
+  it("says plainly that the loss is no longer held when the hold is let go of while it reconnects on", () => {
+    // A rung the hold does not cover (IKEv2), or a WireGuard server it
+    // cannot name: the service lets go before it dials, and says why.
+    expect(
+      playNotify([
+        { tone: "warn", gap: "pending", reconnecting: true, failover: true },
+        { tone: "warn", gap: "blocked", reconnecting: true, failover: true },
+        { tone: "warn", gap: "open", reconnecting: true, failover: true, letGo: true },
+        { tone: "warn", gap: "open", reconnecting: true, failover: true, letGo: true },
+        { tone: "ok", gap: "open" },
+      ]),
+    ).toEqual([null, "lostHeld", "lost", null, "back"]);
+    // The same for an automatic reconnect's, held late or not.
+    expect(
+      playNotify([
+        { tone: "warn", gap: "blockedLate", reconnecting: true },
+        { tone: "warn", gap: "open", reconnecting: true, letGo: true },
+      ]),
+    ).toEqual(["lostHeldLate", "lost"]);
+    // The app's own release at a landing, answered before the screen shows
+    // the tunnel, is no hold let go of: the next word is "back".
+    expect(
+      playNotify([
+        { tone: "warn", gap: "blocked", reconnecting: true },
+        { tone: "warn", gap: "open", reconnecting: true },
+        { tone: "ok", gap: "open" },
+      ]),
+    ).toEqual(["lostHeld", null, "back"]);
+    // A loss first said as plain "lost" has nothing held to take back.
+    expect(
+      playNotify([
+        { tone: "warn", gap: "open", reconnecting: true },
+        { tone: "warn", gap: "open", reconnecting: true, letGo: true },
+      ]),
+    ).toEqual(["lost", null]);
   });
 });
 

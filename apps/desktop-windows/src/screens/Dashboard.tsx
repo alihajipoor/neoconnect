@@ -701,6 +701,18 @@ export function Dashboard({
    * and the loss notification go (`notifyStep`'s `failover`). */
   const [failoverRunning, setFailoverRunning] = useState(false);
   const failoverPassRef = useRef(0);
+  /** That failover gave up -- no tunnel, and not for a press, a sign-out or
+   * a newer pass -- after its loss was said: its plain teardown let go of
+   * the hold, nothing reconnects, and the loss is owed its outcome
+   * (`notifyStep`'s `dropped`). Kept until that is said, or anything else
+   * is shown. */
+  const [failoverLost, setFailoverLost] = useState(false);
+  /** A pass is running that keeps the hold through its teardowns
+   * (`passTeardown`) -- the failover, a press made while it held, a
+   * reconnect's attempt -- and which: a hold the service lets go of before
+   * one of its rungs is said there, with why (`HoldScene.holdKept`). */
+  const [holdPassRunning, setHoldPassRunning] = useState(false);
+  const holdPassRef = useRef(0);
   /** Guards the ladder against running twice at once. The health poll
    * and the Connect button can both start one, and two of them
    * interleaving would have each tearing down the other's engine.
@@ -2790,7 +2802,7 @@ export function Dashboard({
   // notification that say the internet is blocked, or why it is not
   // (`gapTraffic`): until it answers they say neither. Only with the
   // setting on: off, there is nothing to say.
-  const gapDropped = tunnelDropped || reconnectLost(reconnect, sessionGeneration());
+  const gapDropped = tunnelDropped || failoverLost || reconnectLost(reconnect, sessionGeneration());
   const inHoldGap = reconnectRunning || gapDropped || failoverRunning;
   useEffect(() => {
     if (!inHoldGap || !holdWanted(prefs.blockWhileReconnecting)) return;
@@ -2878,6 +2890,9 @@ export function Dashboard({
           reconnecting: notifyReconnecting,
           dropped: gapDropped,
         });
+  /** The service has said it let go of the hold, and why: news in a
+   * reconnect whose loss was said in held words. */
+  const holdLetGo = hold?.state === "notHeld";
   useEffect(() => {
     if (loading) return;
     const step = notifyStep(notifyMemory.current(), {
@@ -2885,18 +2900,24 @@ export function Dashboard({
       reconnecting: notifyReconnecting,
       failover: failoverSaid && !reconnectRunning,
       gap: gapSaid,
+      letGo: holdLetGo,
+      // A failover that gave up wears its pass's busy look for a render
+      // after its end, read as "idle", which forgets what was said.
+      dropped: failoverLost,
       // In front, and on the main page: another page of the shell does not
       // say the connection's state, so it is said as for a window behind.
       focused: typeof document !== "undefined" && document.hasFocus() && onMainPage,
       gaming: appMode === "gaming",
     });
     notifyMemory.set(step.memory);
+    // The failover's loss, owed no longer: said, or forgotten.
+    if (failoverLost && !step.memory.up && !step.memory.lostSaid) setFailoverLost(false);
     if (step.say === null || !appPrefs.current().notifications) return;
     const text = NOTIFY_TEXT[step.say];
     void showNotification(t(text.title), t(text.body), language).catch(() => undefined);
     // On a change of what is said, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, notifyTone, notifyReconnecting, failoverSaid, appMode, gapSaid]);
+  }, [loading, notifyTone, notifyReconnecting, failoverSaid, appMode, gapSaid, holdLetGo, failoverLost]);
 
   // The session log (lib/session-log.ts), only when the customer has
   // turned it on: a record opens when the screen first shows a tunnel up
@@ -2950,6 +2971,11 @@ export function Dashboard({
   useEffect(() => {
     if (connectionState !== "disconnected") setTunnelDropped(false);
   }, [connectionState]);
+  // The failover's give-up the same: a tunnel shown, or a connect, is news
+  // of its own.
+  useEffect(() => {
+    if (failoverLost && connectionState !== "disconnected") setFailoverLost(false);
+  }, [connectionState, failoverLost]);
 
   // Nothing that is only passing through gets to stay.
   //
@@ -3443,6 +3469,10 @@ export function Dashboard({
         holding: holdStore.current()?.state === "holding",
       }) === "keepHold";
     const takeDown = (): Promise<void> => (holdThrough ? holdService.disconnectKeepingHold() : serviceDisconnect());
+    if (holdThrough) {
+      holdPassRef.current = generation;
+      setHoldPassRunning(true);
+    }
     /** Whether this pass brought a tunnel up. One of the app's own
      * automatic passes that did not -- the mid-session failover -- has
      * just taken the tunnel the episode was armed for down on purpose,
@@ -4441,6 +4471,23 @@ export function Dashboard({
       if (failover && failoverPassRef.current === generation) {
         failoverPassRef.current = 0;
         setFailoverRunning(false);
+        // Gave up after its loss was said -- not for a press, a sign-out
+        // or a newer pass: its plain teardown let go of the hold, and
+        // nothing reconnects. "Blocked until it's back" is not to be the
+        // last word a window behind was given.
+        if (
+          !landed &&
+          !stopped() &&
+          sessionGeneration() === sessionAtStart &&
+          ladderGenerationRef.current === generation &&
+          notifyMemory.current().lostSaid
+        ) {
+          setFailoverLost(true);
+        }
+      }
+      if (holdPassRef.current === generation) {
+        holdPassRef.current = 0;
+        setHoldPassRunning(false);
       }
     }
   }
@@ -4703,11 +4750,13 @@ export function Dashboard({
    * VM under "Checking connection..." alone), a drop, and a tunnel still
    * shown up -- connected, or degraded -- over a drop the service holds.
    * Over a tunnel that landed under the hold, the headline's own sentence
-   * stands (`holdHint`). */
+   * stands (`holdHint`). A pass that keeps the hold says why, if the service
+   * lets go of it before one of its rungs (`holdKept`). */
   const holdScene: HoldScene = {
     reconnecting: reconnecting !== null || waitingForNetwork,
     dropped,
     checking: connectionState === "connecting" || connectionState === "verifying",
+    holdKept: holdPassRunning,
     tunnelUp: isTunnelUp(connectionState),
     degraded: connectionState === "degraded",
   };
