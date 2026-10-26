@@ -649,7 +649,7 @@ function Composed({
   );
   const bannerShowing = Boolean(sc.offline || plan === "ended" || !subscribed);
   // As Dashboard.tsx: a plain no-plan note keeps the map and the mark.
-  const noPlanOnly = !subscribed && !sc.offline && plan !== "ended";
+  const noPlanOnly = !subscribed && !sc.offline;
   const mapAlert = (bannerShowing && !noPlanOnly) || Boolean(sc.slot) || failed || Boolean(sc.teardownStuck || sc.permission || sc.unsupported);
 
   const actions = subscribed ? (
