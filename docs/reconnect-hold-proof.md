@@ -101,9 +101,13 @@ failed on:
   disarmed); and arming a standing session again never takes its filters
   out. A stop refused by a tunnel service already stopping is the stop under
   way, not a failed teardown. `every_path_that_takes_out_a_hold_or_a_confinement_is_one_of_these`
-  lists every path that takes out a hold, standing filters or a confinement,
-  and shows the drop paths hold first; two 32-way tests race the slow stop
-  and the adapter disable against the reconnect's first word.
+  lists every path that takes out a hold, standing filters or a confinement
+  in the files that name one -- engines/mod.rs, hard_stop.rs,
+  confinement.rs, reconnect_hold.rs (the hold's own closes and releases,
+  `arm_dialling` among them), wireguard.rs and pipe.rs -- and shows the
+  drop paths hold first; two 32-way tests race the slow stop and the
+  adapter disable against the reconnect's first word. A static list, not a
+  capture: it says which paths exist, not that any of them holds a packet.
 - **The mid-session failover held silently.** The health check's ladder
   (`runLadder({ automatic: true })`) held for 25 to 84 s under "Checking
   connection..." alone, with no "lost" toast, on 5 of 5 runs. The service's

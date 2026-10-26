@@ -7887,10 +7887,13 @@ mod helper_tests {
     /// a teardown that keeps or was told to let go, or no drop at all. A path
     /// added is not in this list, and fails it until it has been looked at:
     /// the WireGuard leak of 2026-10-20 was such a path, a re-arm that
-    /// disarmed.
+    /// disarmed. Read: engines/mod.rs, hard_stop.rs, confinement.rs,
+    /// reconnect_hold.rs (the hold's own closes and releases, `arm_dialling`
+    /// among them) and wireguard.rs, and pipe.rs -- every file of the
+    /// service's that names any of these.
     #[test]
     fn every_path_that_takes_out_a_hold_or_a_confinement_is_one_of_these() {
-        const CALLS: [&str; 7] = [
+        const CALLS: [&str; 11] = [
             ".release(Release::",
             ".disarm()",
             ".turn_off()",
@@ -7898,6 +7901,11 @@ mod helper_tests {
             "let_go_of_confinement()",
             ".release(confinement::Release",
             "reconnect_hold::Release::",
+            // Inside the hold itself.
+            "close_locked(",
+            "release_locked(",
+            "let_go_locked(",
+            ".ops.close(",
         ];
         /// The source without its test modules: from `#[cfg(test)]` over a
         /// `mod` line to the first `}` in the first column.
@@ -7956,6 +7964,8 @@ mod helper_tests {
             ("engines/mod.rs", include_str!("mod.rs")),
             ("engines/hard_stop.rs", include_str!("hard_stop.rs")),
             ("engines/confinement.rs", include_str!("confinement.rs")),
+            ("engines/reconnect_hold.rs", include_str!("reconnect_hold.rs")),
+            ("engines/wireguard.rs", include_str!("wireguard.rs")),
             ("pipe.rs", include_str!("../pipe.rs")),
         ];
         // Each, with why it may take something out.
@@ -7980,6 +7990,26 @@ mod helper_tests {
             ("engines/hard_stop.rs", "release_confinement", "let_go_of_confinement()", 1, "the same"),
             ("engines/confinement.rs", "drop", ".release(Release::", 1, "a confinement dropped with nothing left to hold"),
             ("engines/confinement.rs", "run_valve", ".release(Release::", 1, "a tunnel up and carrying that its plan refused: not a drop, decision (d)"),
+            ("engines/reconnect_hold.rs", "turn_off", "close_locked(", 1, "the setting off"),
+            ("engines/reconnect_hold.rs", "arm_dialling", "release_locked(", 2, "while it holds, a tunnel that came up that the plan cannot permit: a protocol is never stopped for it"),
+            ("engines/reconnect_hold.rs", "arm_dialling", "close_locked(", 3, "filters standing for another session as this one is armed; its own, armed again, stay (it returns before)"),
+            ("engines/reconnect_hold.rs", "arm_dialling", ".ops.close(", 2, "the plan before, once the new one is in"),
+            ("engines/reconnect_hold.rs", "disarm", "close_locked(", 1, "a session not to be held: its callers are listed above"),
+            ("engines/reconnect_hold.rs", "engage", ".ops.close(", 1, "a plan replaced, once the hold is in"),
+            ("engines/reconnect_hold.rs", "replan", ".ops.close(", 1, "the plan before, once the new one is in"),
+            ("engines/reconnect_hold.rs", "replan", "release_locked(", 1, "a tunnel that came up that the plan cannot permit: a protocol is never stopped for it"),
+            ("engines/reconnect_hold.rs", "release", "let_go_locked(", 1, "the helper every Release above calls"),
+            ("engines/reconnect_hold.rs", "release_locked", "release_locked(", 1, "its own line"),
+            ("engines/reconnect_hold.rs", "release_locked", "let_go_locked(", 1, "the helper the rest call"),
+            ("engines/reconnect_hold.rs", "let_go_locked", "let_go_locked(", 1, "its own line"),
+            ("engines/reconnect_hold.rs", "let_go_locked", "close_locked(", 1, "the helper the rest call; filters standing for a live session stay"),
+            ("engines/reconnect_hold.rs", "close_locked", "close_locked(", 1, "its own line"),
+            ("engines/reconnect_hold.rs", "close_locked", ".ops.close(", 1, "the one close of what is in force"),
+            ("engines/reconnect_hold.rs", "release_if_engaged_by", "let_go_locked(", 1, "the engine reported gone is running: no drop"),
+            ("engines/reconnect_hold.rs", "settle_standing", "close_locked(", 1, "filters standing for a session another has replaced, or the setting off"),
+            ("engines/reconnect_hold.rs", "let_go_if_unfollowed", "release_locked(", 1, "the backstop: no reconnect followed the drop"),
+            ("engines/reconnect_hold.rs", "expire_if_due", "release_locked(", 1, "the backstop: 40 minutes with no tunnel"),
+            ("engines/reconnect_hold.rs", "drop", "close_locked(", 1, "the last holder gone: the service ending"),
             ("pipe.rs", "serve_on", "reconnect_hold::Release::", 1, "the app went away"),
             ("pipe.rs", "serve_on", ".disarm()", 1, "the app went away"),
             ("pipe.rs", "dispatch", "reconnect_hold::Release::", 2, "the customer's Disconnect; the app letting go"),
