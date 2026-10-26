@@ -1258,7 +1258,11 @@ impl Engines {
     /// failover. Let go of for good, with the reason; whether the tunnel
     /// carries anything is the app's egress check's to judge, as ever. An
     /// adapter list that cannot be read is no evidence, and changes
-    /// nothing. Asked only while a confinement is held.
+    /// nothing. Asked while a confinement is held, or the session is armed
+    /// -- an Xray or OpenVPN session whose confinement was refused at
+    /// connect is armed all the same, and with its adapter gone its traffic
+    /// fell to the physical adapter while the status said up, unheld, until
+    /// the app's health check had failed twice. Once per session.
     ///
     /// An armed session is held first ("Block the internet while
     /// reconnecting"): its tunnel is as good as dropped -- usually it is
@@ -1278,16 +1282,25 @@ impl Engines {
     /// check noticed; said as ended, the app reconnects at once.
     fn let_go_if_the_tunnel_adapter_is_gone(&mut self) {
         let ops = Arc::clone(&self.confinement_ops);
+        let hold = Arc::clone(&self.reconnect_hold);
         let Some(session) = self.active.peek_mut() else { return };
-        if session.confinement.confined() != Some(true) {
+        let confined = session.confinement.confined() == Some(true);
+        if session.adapter_gone || (!confined && !hold.armed_for(session.generation)) {
             return;
         }
         let adapter = adapter_name_for(&session.profile);
         if ops.tunnel_present(adapter) != Some(false) {
             return;
         }
-        self.reconnect_hold.engage(session.generation, "the tunnel adapter is gone");
+        hold.engage(session.generation, "the tunnel adapter is gone");
         session.adapter_gone = true;
+        if !confined {
+            crate::cleanup_log::note(
+                "held the drop: the tunnel adapter is gone",
+                &format!("the tunnel adapter {adapter} is gone while its engine still runs, with no IPv4 confinement held for it"),
+            );
+            return;
+        }
         let why = format!(
             "the tunnel adapter {adapter} is gone while its engine still runs, so the IPv4 confinement was let go of"
         );
@@ -7406,6 +7419,41 @@ mod helper_tests {
             matches!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Holding { landed: false, .. })),
             "the dropped session was said to be a tunnel landed"
         );
+        engines.release_reconnect_hold("the customer disconnected", true);
+        assert_eq!(hold.closed(), vec![7000]);
+        end_test_session(&mut engines);
+    }
+
+    /// The same for an armed session with no confinement of its own -- WFP
+    /// refused the engine under its plan, so it was let go of, and the
+    /// session armed all the same. The check was asked only while a
+    /// confinement was held: with the adapter gone the status still said
+    /// up, nothing held the drop, and traffic fell to the physical adapter
+    /// until the app's health check had failed twice (15 s each) and the
+    /// failover's teardown held it. Held now, and said as ended, once; the
+    /// confinement let go of before is not closed again.
+    #[test]
+    fn a_tunnel_adapter_gone_under_an_armed_session_with_no_confinement_is_held() {
+        let (mut engines, fake, hold, g) = armed_session();
+        engines.active.peek().unwrap().confinement.release(confinement::Release::PlanError("refused".into()));
+        assert_eq!(engines.ipv4_confined(), Some(false));
+        assert_eq!(fake.closed(), vec![1000]);
+        assert!(engines.status().0, "the adapter is there: the tunnel is up");
+        assert!(!engines.reconnect_hold.holding());
+
+        fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(engines.status(), (false, None, TunnelHealth::Down), "a tunnel with no adapter said to be up");
+        assert!(engines.reconnect_hold.held_for(g), "its drop was not held");
+        assert_eq!(hold.installs().len(), 1);
+        assert!(
+            matches!(engines.reconnect_hold_status(), Some(neoconnect_ipc::ReconnectHold::Holding { landed: false, .. })),
+            "{:?}",
+            engines.reconnect_hold_status()
+        );
+        assert_eq!(engines.status(), (false, None, TunnelHealth::Down), "said once, then up again");
+        assert_eq!(hold.installs().len(), 1, "held again on the next poll");
+        assert_eq!(fake.closed(), vec![1000], "a confinement let go of already was closed again");
+        assert!(engines.has_session(), "the session is the reconnect's teardown's to take down");
         engines.release_reconnect_hold("the customer disconnected", true);
         assert_eq!(hold.closed(), vec![7000]);
         end_test_session(&mut engines);

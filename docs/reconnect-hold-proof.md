@@ -174,6 +174,11 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    leak from the stop or the disable to the next tunnel; `reconnect-hold.log`
    shows no "standing filters taken out" before it, and `cleanup.log` no
    "not armed: the WIREGUARD tunnel's adapter could not be named".
+   **(new, third round, unit test only)** An armed Xray or OpenVPN session
+   whose confinement was refused at connect is now held when its adapter
+   goes (`cleanup.log`: "held the drop: the tunnel adapter is gone"). The
+   VM has no switch to refuse the confinement, so this is **unverified**
+   against a capture.
 1b. **(new) Standing under WireGuard.** With the setting on and a
    WireGuard tunnel up: `netsh wfp show filters` shows the hold's filters
    in force before any drop, the tunnel carries as before (exit IP = node,
