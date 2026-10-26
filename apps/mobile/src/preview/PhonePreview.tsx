@@ -648,7 +648,9 @@ function Composed({
     </>
   );
   const bannerShowing = Boolean(sc.offline || plan === "ended" || !subscribed);
-  const mapAlert = bannerShowing || Boolean(sc.slot) || failed || Boolean(sc.teardownStuck || sc.permission || sc.unsupported);
+  // As Dashboard.tsx: a plain no-plan note keeps the map and the mark.
+  const noPlanOnly = !subscribed && !sc.offline && plan !== "ended";
+  const mapAlert = (bannerShowing && !noPlanOnly) || Boolean(sc.slot) || failed || Boolean(sc.teardownStuck || sc.permission || sc.unsupported);
 
   const actions = subscribed ? (
     <div className="nx-actions">
