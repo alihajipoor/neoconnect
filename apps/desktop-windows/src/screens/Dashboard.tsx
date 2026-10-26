@@ -129,12 +129,17 @@ import {
   gapWord,
   HOLD_HINTS,
   HOLD_WORD_GRACE_MS,
+  hintKey,
+  holdCovers,
   holdHint,
   holdNotes,
   holdService,
+  holdSpoken,
   holdStore,
   holdWanted,
   passTeardown,
+  switchBody,
+  type HoldScene,
 } from "../lib/reconnect-hold";
 import { NOTIFY_TEXT, notifyMemory, notifyStep } from "../lib/connection-notify";
 import { showNotification } from "../lib/notify";
@@ -257,11 +262,29 @@ const NOT_THE_NETWORK = new Set(["concurrentLimit", "quotaExhausted", "subscript
  * A call that can hang forever is a state that can stay on screen
  * forever -- see service-call for the teardown that proved it. */
 function serviceStatus(): Promise<VpnStatus> {
-  return withTimeout(invoke<VpnStatus>("vpn_status"), "vpn_status");
+  return withTimeout(invoke<VpnStatus>("vpn_status"), "vpn_status").then(
+    (status) => {
+      // The service's word on the reconnect hold, from every read: the one
+      // source the held words read, in every phase (lib/reconnect-hold.ts).
+      holdStore.observe(status.reconnectHold);
+      return status;
+    },
+    (err: unknown) => {
+      // Unanswered -- a restart -- and whatever it last said about the hold
+      // is no longer known: after a restart it is gone. Said as being
+      // checked, never as blocked nor as open.
+      holdStore.unanswered();
+      throw err;
+    },
+  );
 }
 
 function serviceDisconnect(): Promise<void> {
-  return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect");
+  return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect").then(() => {
+    // A Disconnect lets go of the hold on receipt: dropped from the screen
+    // with its reply, not at the next status (`holdStore.released`).
+    holdStore.released();
+  });
 }
 
 /** How often to re-check a live tunnel.
@@ -672,6 +695,12 @@ export function Dashboard({
   // dialled for want of a network, or never asked -- because each takes a
   // different sentence and only one of them is true (`failoverNotice`).
   const [failedOverTo, setFailedOverTo] = useState<FailoverNotice | null>(null);
+  /** The mid-session failover's pass is running (`runLadder`, automatic
+   * and not a reconnect's attempt), and which pass it is: while the service
+   * holds the internet for it, it is a reconnect as far as the held words
+   * and the loss notification go (`notifyStep`'s `failover`). */
+  const [failoverRunning, setFailoverRunning] = useState(false);
+  const failoverPassRef = useRef(0);
   /** Guards the ladder against running twice at once. The health poll
    * and the Connect button can both start one, and two of them
    * interleaving would have each tearing down the other's engine.
@@ -840,6 +869,8 @@ export function Dashboard({
     place: string | null;
     protocol: string | null;
     tunnelUp: boolean;
+    /** The hold covers the connection the switch makes (`holdCovers`). */
+    covered: boolean;
     resolve: (go: boolean) => void;
   } | null>(null);
   const stayRef = useRef<HTMLButtonElement>(null);
@@ -2760,15 +2791,16 @@ export function Dashboard({
   // (`gapTraffic`): until it answers they say neither. Only with the
   // setting on: off, there is nothing to say.
   const gapDropped = tunnelDropped || reconnectLost(reconnect, sessionGeneration());
-  const inHoldGap = reconnectRunning || gapDropped;
+  const inHoldGap = reconnectRunning || gapDropped || failoverRunning;
   useEffect(() => {
     if (!inHoldGap || !holdWanted(prefs.blockWhileReconnecting)) return;
     let asking = false;
     const look = () => {
       if (asking) return;
       asking = true;
+      // Every read tells the hold store, answered or not (`serviceStatus`).
       serviceStatus()
-        .then((status) => holdStore.observe(status.reconnectHold), () => undefined)
+        .catch(() => undefined)
         .finally(() => {
           asking = false;
         });
@@ -2818,13 +2850,6 @@ export function Dashboard({
   // gap, so a few seconds' gap is never a notification -- as it is never a
   // colour. Words in the app's language; nothing while the window is in
   // front, where the screen says it.
-  const notifyTone: ShownTone =
-    appMode === "gaming"
-      ? "idle"
-      : shownTone(orbTone(orbState, cautionShown), {
-          reconnecting: reconnectRunning,
-          dropped: gapDropped,
-        });
   /** Where other traffic goes in the gap, as the service has said: the
    * same source the sentence under the state reads (`holdHint`). */
   const gap = gapTraffic(hold, holdWanted(prefs.blockWhileReconnecting));
@@ -2841,11 +2866,24 @@ export function Dashboard({
     return () => clearTimeout(id);
   }, [holdWordAwaited]);
   const gapSaid = gapWord(gap, holdWordLate);
+  /** A reconnect for what is said: the automatic one, or -- the setting on
+   * -- the failover, whose loss is said once the service holds for it, in
+   * held words (`notifyStep`'s `failover`). */
+  const failoverSaid = failoverRunning && holdWanted(prefs.blockWhileReconnecting);
+  const notifyReconnecting = reconnectRunning || failoverSaid;
+  const notifyTone: ShownTone =
+    appMode === "gaming"
+      ? "idle"
+      : shownTone(orbTone(orbState, cautionShown), {
+          reconnecting: notifyReconnecting,
+          dropped: gapDropped,
+        });
   useEffect(() => {
     if (loading) return;
     const step = notifyStep(notifyMemory.current(), {
       tone: notifyTone,
-      reconnecting: reconnectRunning,
+      reconnecting: notifyReconnecting,
+      failover: failoverSaid && !reconnectRunning,
       gap: gapSaid,
       // In front, and on the main page: another page of the shell does not
       // say the connection's state, so it is said as for a window behind.
@@ -2858,7 +2896,7 @@ export function Dashboard({
     void showNotification(t(text.title), t(text.body), language).catch(() => undefined);
     // On a change of what is said, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, notifyTone, reconnectRunning, appMode, gapSaid]);
+  }, [loading, notifyTone, notifyReconnecting, failoverSaid, appMode, gapSaid]);
 
   // The session log (lib/session-log.ts), only when the customer has
   // turned it on: a record opens when the screen first shows a tunnel up
@@ -3359,6 +3397,14 @@ export function Dashboard({
     // its own long-obsolete verdict over the screen.
     const generation = ++ladderGenerationRef.current;
     ownPassRef.current = generation;
+    // The mid-session failover: the health poll's own pass, not a
+    // reconnect's attempt. Its teardown keeps the hold (`passTeardown`),
+    // and the screen says so from the service's word (`holdHint`).
+    const failover = options.automatic === true && options.reconnect === undefined;
+    if (failover) {
+      failoverPassRef.current = generation;
+      setFailoverRunning(true);
+    }
     // Which customer session this pass dials for. See sessionGeneration:
     // a sign-out can land while the pass is mid-ladder, from this screen
     // or from one that cannot reach `cancelRef`.
@@ -4392,6 +4438,10 @@ export function Dashboard({
       // mid-connect -- adopted it and is waiting to ask the service what
       // it left. This screen, if it is still the one mounted, ignores it.
       if (ladderGenerationRef.current === generation) ladderPass.ended();
+      if (failover && failoverPassRef.current === generation) {
+        failoverPassRef.current = 0;
+        setFailoverRunning(false);
+      }
     }
   }
 
@@ -4416,6 +4466,7 @@ export function Dashboard({
         place: route ? placeLabel(route, language) : null,
         protocol: route ? customerProtocolLabel(route.protocol, route.transport) : null,
         tunnelUp: isTunnelUp(state),
+        covered: holdCovers(route?.protocol ?? null, customConfigured || splitTunnelActive),
         resolve,
       }),
     );
@@ -4644,24 +4695,35 @@ export function Dashboard({
    * Neoxify" then, and saying so would be false), a note when it should
    * and does not (`holdNote`). */
   const holdSetting = holdWanted(prefs.blockWhileReconnecting);
-  const heldNotes = holdNotes(hold, { inGap: reconnecting !== null || dropped, setting: holdSetting });
-  // A pass waiting for a network under the hold is a reconnect's gap too:
-  // its headline's "your traffic is not protected" would be false. Only in
-  // the gap itself: over a tunnel that is up -- a reconnect's attempt that
-  // has landed, before its episode ends -- the headline's own sentence
-  // stands, whatever the hold's last word.
-  const heldHint = isTunnelUp(connectionState)
-    ? null
-    : holdHint(hold, { reconnecting: reconnecting !== null || waitingForNetwork, dropped, setting: holdSetting, wordLate: holdWordLate });
-  const hintText = slotTeardownShowing
-    ? ""
-    : connectionError
-      ? t(connectionError.messageKey)
-      : heldHint === "pending"
-        ? ""
-        : heldHint !== null
-          ? t(heldHint)
-          : t(headline.hint);
+  /** Where the app is, for the hold's words. A pass waiting for a network
+   * under the hold is a reconnect's gap too: its headline's "your traffic is
+   * not protected" would be false. Every phase but a quiet screen is one the
+   * service's word decides them in: a reconnect and the waits between its
+   * attempts, a pass dialling (the failover's ladder held 25 to 84 s on the
+   * VM under "Checking connection..." alone), a drop, and a tunnel still
+   * shown up -- connected, or degraded -- over a drop the service holds.
+   * Over a tunnel that landed under the hold, the headline's own sentence
+   * stands (`holdHint`). */
+  const holdScene: HoldScene = {
+    reconnecting: reconnecting !== null || waitingForNetwork,
+    dropped,
+    checking: connectionState === "connecting" || connectionState === "verifying",
+    tunnelUp: isTunnelUp(connectionState),
+    degraded: connectionState === "degraded",
+  };
+  const heldNotes = holdNotes(hold, { inGap: holdSpoken(hold, holdScene), setting: holdSetting });
+  const heldHint = holdHint(hold, { ...holdScene, setting: holdSetting, wordLate: holdWordLate });
+  // The service's word on the hold outranks the line under it, a connect's
+  // error included (`hintKey`); the error's detail stays below, as ever.
+  const hintSaid = hintKey(heldHint, {
+    teardownShowing: slotTeardownShowing,
+    error: connectionError?.messageKey ?? null,
+    headline: headline.hint,
+  });
+  const hintText = hintSaid === null ? "" : t(hintSaid);
+  /** The error's colour only on the error's own words: the held sentence
+   * kept between two failed attempts is not drawn as a failure. */
+  const hintFailed = connectionError !== null && hintSaid === connectionError.messageKey;
   /** Every sentence the hint can say, for the room it keeps: the hold's
    * only where the setting can make it say them. */
   const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, ...HOLD_HINTS] : HEADLINE_HINTS;
@@ -5177,7 +5239,7 @@ export function Dashboard({
           }
           hint={
             error ? null : (
-              <Hint tone={hintTone(calmTone, { failed: connectionError !== null })} reserve={hintReserve}>
+              <Hint tone={hintTone(calmTone, { failed: hintFailed })} reserve={hintReserve}>
                 {hintText}
               </Hint>
             )
@@ -5270,7 +5332,7 @@ export function Dashboard({
             ? t("sw.title", { place: switchAsk.protocol ? `${switchAsk.place} · ${switchAsk.protocol}` : switchAsk.place })
             : t("sw.titleAuto")
         }
-        description={t("sw.body")}
+        description={t(switchBody(gap, { covered: switchAsk?.covered ?? true }))}
         onClose={() => switchAsk?.resolve(false)}
         initialFocus={stayRef}
         actions={

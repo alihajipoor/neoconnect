@@ -70,9 +70,11 @@ describe("the reconnect hold's gate", () => {
     expect(dash).toContain("const holdWordAwaited = (inHoldGap || waitingForNetwork) && gap === \"unconfirmed\";");
     expect(dash).toContain("const id = setTimeout(() => setHoldWordLate(true), HOLD_WORD_GRACE_MS);");
     expect(dash).toMatch(/holdHint\(hold, \{[^}]*wordLate: holdWordLate \}\)/);
-    expect(dash).toContain('heldHint === "pending"\n        ? ""');
-    // In the gap only: never over a tunnel that is up.
-    expect(dash).toMatch(/const heldHint = isTunnelUp\(connectionState\)\s+\? null\s+: holdHint\(hold, \{/);
+    // Over everything else under the state, from the one table (`hintKey`),
+    // in every phase the scene names (`holdScene`).
+    expect(dash).toContain("const hintSaid = hintKey(heldHint, {");
+    expect(dash).toContain("const heldHint = holdHint(hold, { ...holdScene, setting: holdSetting, wordLate: holdWordLate });");
+    expect(dash).toContain("const heldNotes = holdNotes(hold, { inGap: holdSpoken(hold, holdScene), setting: holdSetting });");
     // No sentence about the hold picked by hand, and no release on a
     // single status read.
     expect(dash).not.toMatch(/t\("hold\./);
@@ -81,6 +83,48 @@ describe("the reconnect hold's gate", () => {
     const notify = source("./connection-notify.ts");
     expect(notify).toContain("readonly gap: GapWord;");
     expect(notify).not.toMatch(/readonly holding|input\.holding/);
+  });
+
+  it("hears the service on every status read, says it is checking when none is answered, and drops the held words on a release's reply", () => {
+    const dash = source("../screens/Dashboard.tsx");
+    const status = dash.slice(dash.indexOf("function serviceStatus(): Promise<VpnStatus> {"), dash.indexOf("function serviceDisconnect(): Promise<void> {"));
+    expect(status).toContain("holdStore.observe(status.reconnectHold);");
+    expect(status).toContain("holdStore.unanswered();");
+    const disconnect = dash.slice(dash.indexOf("function serviceDisconnect(): Promise<void> {"));
+    expect(disconnect.slice(0, disconnect.indexOf("\n}\n"))).toContain("holdStore.released();");
+    const hold = source("./reconnect-hold.ts");
+    expect(hold).toContain("released: () => holdStore.released(),");
+  });
+
+  it("treats the mid-session failover as a reconnect while the service holds for it", () => {
+    const dash = source("../screens/Dashboard.tsx");
+    expect(dash).toContain("const failover = options.automatic === true && options.reconnect === undefined;");
+    expect(dash).toContain("const inHoldGap = reconnectRunning || gapDropped || failoverRunning;");
+    expect(dash).toContain("const failoverSaid = failoverRunning && holdWanted(prefs.blockWhileReconnecting);");
+    expect(dash).toContain("const notifyReconnecting = reconnectRunning || failoverSaid;");
+    expect(dash).toContain("      reconnecting: notifyReconnecting,\n      failover: failoverSaid && !reconnectRunning,\n      gap: gapSaid,");
+    expect(dash).toMatch(/shownTone\(orbTone\(orbState, cautionShown\), \{\s+reconnecting: notifyReconnecting,/);
+    // Started and ended by the pass itself, and only by the one that set it.
+    expect(dash).toContain("if (failover && failoverPassRef.current === generation) {");
+  });
+
+  it("draws the held words in no failure's colour, over a degraded tunnel too, and lets the screen reader drop stale words at once", () => {
+    const dash = source("../screens/Dashboard.tsx");
+    // Between two failed attempts the held sentence stands, not as an error.
+    expect(dash).toContain("const hintFailed = connectionError !== null && hintSaid === connectionError.messageKey;");
+    expect(dash).toContain("<Hint tone={hintTone(calmTone, { failed: hintFailed })} reserve={hintReserve}>");
+    expect(dash).not.toContain("failed: connectionError !== null })} reserve=");
+    expect(dash).toContain('    degraded: connectionState === "degraded",\n  };');
+    const hero = source("../components/main/Hero.tsx");
+    const announcer = hero.slice(hero.indexOf("export function StateAnnouncer"));
+    expect(announcer.slice(0, announcer.indexOf("\n}\n"))).toContain("setSaid((before) => announcedAtOnce(before, text));");
+  });
+
+  it("asks the switch confirmation what the hold covers, from the service's word", () => {
+    const dash = source("../screens/Dashboard.tsx");
+    expect(dash).toContain("covered: holdCovers(route?.protocol ?? null, customConfigured || splitTunnelActive),");
+    expect(dash).toContain("description={t(switchBody(gap, { covered: switchAsk?.covered ?? true }))}");
+    expect(dash).not.toContain('description={t("sw.body")}');
   });
 
   it("is read through holdWanted wherever the preference decides what is held or said", () => {
