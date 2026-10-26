@@ -22,7 +22,13 @@
  *    service lets go of the hold while the reconnect runs on -- a rung it
  *    does not cover, a server it cannot name -- and says why: "blocked"
  *    must not be the last word over traffic going out without Neoxify;
- *  - `back`: verified again after `lost` was said;
+ *  - `back`: verified again after `lost` was said -- `backPartial` when
+ *    the screen then says "not fully protected" (IKEv2, a confinement
+ *    refused), which "Neoxify checked that your traffic goes through the
+ *    VPN again" would contradict, and `backUnconfirmed` when the tunnel
+ *    back is one no check has vouched for ("Connected, not confirmed"):
+ *    the loss, said in held words or not, is followed up either way, and
+ *    not as a check that was not made;
  *  - `dropped`: gone, and nothing is reconnecting it (the episode gave up,
  *    or none could start, or the failover gave up) -- once the service has
  *    said it no longer holds the internet for it: "not protected" while
@@ -42,7 +48,17 @@ import type { ShownTone } from "./hero-model";
 import type { TranslationKey } from "./i18n";
 import type { GapWord } from "./reconnect-hold";
 
-export type NotifyKind = "connected" | "connectedPartial" | "lost" | "lostHeld" | "lostHeldLate" | "lostUnconfirmed" | "back" | "dropped";
+export type NotifyKind =
+  | "connected"
+  | "connectedPartial"
+  | "lost"
+  | "lostHeld"
+  | "lostHeldLate"
+  | "lostUnconfirmed"
+  | "back"
+  | "backPartial"
+  | "backUnconfirmed"
+  | "dropped";
 
 export interface NotifyMemory {
   /** A verified tunnel has been seen since the customer last had nothing up. */
@@ -98,7 +114,7 @@ export function notifyStep(memory: NotifyMemory, input: NotifyInput): { memory: 
     case "ok":
     case "caution": {
       const partial = input.tone === "caution";
-      if (memory.lostSaid) return say("back", { up: true, lostSaid: false });
+      if (memory.lostSaid) return say(partial ? "backPartial" : "back", { up: true, lostSaid: false });
       if (!memory.up) return say(partial ? "connectedPartial" : "connected", { up: true, lostSaid: false });
       return { memory, say: null };
     }
@@ -143,9 +159,14 @@ export function notifyStep(memory: NotifyMemory, input: NotifyInput): { memory: 
     // look that has not caught up with a loss nothing reconnects.
     case "idle":
       return input.reconnecting || input.dropped === true ? { memory, say: null } : { memory: FRESH_MEMORY, say: null };
-    // "Not confirmed" and "can't tell" are said on screen; neither is a
-    // change the app has measured.
+    // A tunnel back that no check has vouched for, after a loss was said:
+    // followed up as that. On the VM a reconnect that landed unverified let
+    // go of the hold and the last toast stayed "blocked until it's back".
     case "hl":
+      if (memory.lostSaid) return say("backUnconfirmed", { up: true, lostSaid: false });
+      return { memory, say: null };
+    // "Can't tell" is said on screen; it is not a change the app has
+    // measured.
     case "muted":
       return { memory, say: null };
   }
@@ -159,6 +180,8 @@ export const NOTIFY_TEXT: Record<NotifyKind, { title: TranslationKey; body: Tran
   lostHeldLate: { title: "notif.lostTitle", body: "notif.lostHeldLateBody" },
   lostUnconfirmed: { title: "notif.lostTitle", body: "notif.lostUnconfirmedBody" },
   back: { title: "notif.backTitle", body: "notif.backBody" },
+  backPartial: { title: "notif.backTitle", body: "notif.backPartialBody" },
+  backUnconfirmed: { title: "notif.backTitle", body: "notif.backUnconfirmedBody" },
   dropped: { title: "notif.droppedTitle", body: "notif.droppedBody" },
 };
 
