@@ -148,7 +148,7 @@ describe("the Dashboard's wiring", () => {
     expect(loop).toBeGreaterThan(0);
     const checked = dashboard.indexOf("if (ladderGenerationRef.current !== generation) break;", loop);
     const renewed = dashboard.indexOf("ladderPass.progress(generation);", loop);
-    const settled = dashboard.indexOf("await settleAndCaptureBaseline(", loop);
+    const settled = dashboard.indexOf("const settling = settleAndCaptureBaseline(", loop);
     expect(checked).toBeGreaterThan(loop);
     expect(renewed).toBeGreaterThan(checked);
     expect(renewed).toBeLessThan(settled);
@@ -221,7 +221,7 @@ describe("the Dashboard's wiring", () => {
         dialled,
       );
       expect(check).toBeGreaterThan(dialled);
-      expect(check).toBeLessThan(dashboard.indexOf('await invoke("vpn_connect", {'));
+      expect(check).toBeLessThan(dashboard.indexOf('const dial = invoke("vpn_connect", {'));
     });
 
     it("names the credential of the last dial when the service's protocol agrees, and no route when it cannot", () => {

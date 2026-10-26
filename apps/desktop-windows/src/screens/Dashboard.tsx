@@ -7,7 +7,7 @@ import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import { concurrentExitsFor } from "../lib/concurrent-exits";
-import { settleAndCaptureBaseline } from "../lib/baseline-settle";
+import { besideRetakes, settleAndCaptureBaseline, settleBeside } from "../lib/baseline-settle";
 import {
   captureBaselineIp,
   captureIpv6Baseline,
@@ -117,6 +117,7 @@ import {
 import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
 import { credentialOnTunnel, tunnelCredential, type TunnelDial } from "../lib/tunnel-credential";
+import { createFreshAsk, onFreshCredentials } from "../lib/fresh-credentials";
 import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "../lib/api-endpoints";
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
@@ -129,12 +130,19 @@ import {
   gapWord,
   HOLD_HINTS,
   HOLD_WORD_GRACE_MS,
+  hintKey,
+  holdCovers,
   holdHint,
   holdNotes,
   holdService,
+  holdSpoken,
   holdStore,
   holdWanted,
+  landingReleases,
   passTeardown,
+  readWhileDialling,
+  switchBody,
+  type HoldScene,
 } from "../lib/reconnect-hold";
 import { NOTIFY_TEXT, notifyMemory, notifyStep } from "../lib/connection-notify";
 import { showNotification } from "../lib/notify";
@@ -157,7 +165,7 @@ import {
   type ReconnectAttempt,
   type ReconnectStop,
 } from "../lib/auto-reconnect";
-import { isServiceTimeout, withTimeout } from "../lib/service-call";
+import { isServiceTimeout, serviceGone, withTimeout } from "../lib/service-call";
 import { PROBE_CAP_MS, statusDisturbances } from "../lib/status-disturbance";
 import {
   concludeIntent,
@@ -257,11 +265,63 @@ const NOT_THE_NETWORK = new Set(["concurrentLimit", "quotaExhausted", "subscript
  * A call that can hang forever is a state that can stay on screen
  * forever -- see service-call for the teardown that proved it. */
 function serviceStatus(): Promise<VpnStatus> {
-  return withTimeout(invoke<VpnStatus>("vpn_status"), "vpn_status");
+  // A read sent before the app says something of its own about the hold --
+  // a release answered, a connect the hold does not cover sent -- is older
+  // than that, and its "holding" is not taken over it (`observeRead`).
+  const mark = holdStore.decisionMark();
+  return withTimeout(invoke<VpnStatus>("vpn_status"), "vpn_status").then(
+    (status) => {
+      // The service's word on the reconnect hold, from every read: the one
+      // source the held words read, in every phase (lib/reconnect-hold.ts).
+      holdStore.observeRead(mark, status.reconnectHold);
+      return status;
+    },
+    (err: unknown) => {
+      // Unanswered -- a restart -- and whatever it last said about the hold
+      // is no longer known: after a restart it is gone. Said as being
+      // checked, never as blocked nor as open. Not for a read a connect on
+      // the wire left unanswered, unless the service is not there at all.
+      holdStore.unanswered(serviceGone(err));
+      throw err;
+    },
+  );
 }
 
 function serviceDisconnect(): Promise<void> {
-  return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect");
+  return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect").then(
+    () => {
+      // A Disconnect lets go of the hold on receipt: dropped from the screen
+      // with its reply, not at the next status (`holdStore.released`).
+      holdStore.released();
+    },
+    (err: unknown) => {
+      if (serviceGone(err)) holdStore.unanswered(true);
+      throw err;
+    },
+  );
+}
+
+/** A connect on the wire. One the hold covers can still let go of it
+ * before it dials -- a WireGuard server the service cannot name -- and one
+ * it does not cover lets go of it once it runs, which the screen says only
+ * on the service's word (`holdStore.lettingGo`): so over a hold, or a
+ * let-go not yet said, the service's word is read while it is
+ * (`readWhileDialling`) -- answered from the ledger at once while the
+ * service is busy, so the let-go is heard within a read. And a read it
+ * leaves unanswered meanwhile is not the service gone
+ * (`holdStore.dialling`). */
+function dialledUnderHold<T>(dial: Promise<T>): Promise<T> {
+  const state = holdStore.current()?.state;
+  return holdStore.dialling(state === "holding" || state === "lettingGo" ? readWhileDialling(dial, { read: serviceStatus }) : dial);
+}
+
+/** A pass landed a tunnel: lets go of the reconnect hold if the landing
+ * does (`landingReleases`) -- verified, at once; unverified, only over a
+ * tunnel a status read now shows holding the machine itself. Never
+ * rejects; nothing waits on it. */
+async function releaseOnLanding(verdict: "connected" | "unverified"): Promise<void> {
+  const status = verdict === "connected" ? null : await serviceStatus().catch(() => null);
+  if (landingReleases(verdict, status && { hold: holdStore.current(), status })) await holdService.release();
 }
 
 /** How often to re-check a live tunnel.
@@ -672,6 +732,24 @@ export function Dashboard({
   // dialled for want of a network, or never asked -- because each takes a
   // different sentence and only one of them is true (`failoverNotice`).
   const [failedOverTo, setFailedOverTo] = useState<FailoverNotice | null>(null);
+  /** The mid-session failover's pass is running (`runLadder`, automatic
+   * and not a reconnect's attempt), and which pass it is: while the service
+   * holds the internet for it, it is a reconnect as far as the held words
+   * and the loss notification go (`notifyStep`'s `failover`). */
+  const [failoverRunning, setFailoverRunning] = useState(false);
+  const failoverPassRef = useRef(0);
+  /** That failover gave up -- no tunnel, and not for a press, a sign-out or
+   * a newer pass -- after its loss was said: its plain teardown let go of
+   * the hold, nothing reconnects, and the loss is owed its outcome
+   * (`notifyStep`'s `dropped`). Kept until that is said, or anything else
+   * is shown. */
+  const [failoverLost, setFailoverLost] = useState(false);
+  /** A pass is running that keeps the hold through its teardowns
+   * (`passTeardown`) -- the failover, a press made while it held, a
+   * reconnect's attempt -- and which: a hold the service lets go of before
+   * one of its rungs is said there, with why (`HoldScene.holdKept`). */
+  const [holdPassRunning, setHoldPassRunning] = useState(false);
+  const holdPassRef = useRef(0);
   /** Guards the ladder against running twice at once. The health poll
    * and the Connect button can both start one, and two of them
    * interleaving would have each tearing down the other's engine.
@@ -840,6 +918,8 @@ export function Dashboard({
     place: string | null;
     protocol: string | null;
     tunnelUp: boolean;
+    /** The hold covers the connection the switch makes (`holdCovers`). */
+    covered: boolean;
     resolve: (go: boolean) => void;
   } | null>(null);
   const stayRef = useRef<HTMLButtonElement>(null);
@@ -1250,7 +1330,9 @@ export function Dashboard({
    * is let go of -- the gap it was for is over -- but never on one read,
    * nor on a read that contradicts it (`createStatusRelease`). */
   function noteStatus(status: VpnStatus): void {
-    holdStore.observe(status.reconnectHold);
+    // The hold's word is already taken, by the read that brought it
+    // (`serviceStatus`) -- with when it was sent, so a read older than the
+    // app's own word on the hold is not put back over it here.
     if (status.connected) trafficMeter.observe(status.traffic);
     const release = statusReleaseRef.current.see({
       hold: holdStore.current(),
@@ -2759,16 +2841,17 @@ export function Dashboard({
   // notification that say the internet is blocked, or why it is not
   // (`gapTraffic`): until it answers they say neither. Only with the
   // setting on: off, there is nothing to say.
-  const gapDropped = tunnelDropped || reconnectLost(reconnect, sessionGeneration());
-  const inHoldGap = reconnectRunning || gapDropped;
+  const gapDropped = tunnelDropped || failoverLost || reconnectLost(reconnect, sessionGeneration());
+  const inHoldGap = reconnectRunning || gapDropped || failoverRunning;
   useEffect(() => {
     if (!inHoldGap || !holdWanted(prefs.blockWhileReconnecting)) return;
     let asking = false;
     const look = () => {
       if (asking) return;
       asking = true;
+      // Every read tells the hold store, answered or not (`serviceStatus`).
       serviceStatus()
-        .then((status) => holdStore.observe(status.reconnectHold), () => undefined)
+        .catch(() => undefined)
         .finally(() => {
           asking = false;
         });
@@ -2818,13 +2901,6 @@ export function Dashboard({
   // gap, so a few seconds' gap is never a notification -- as it is never a
   // colour. Words in the app's language; nothing while the window is in
   // front, where the screen says it.
-  const notifyTone: ShownTone =
-    appMode === "gaming"
-      ? "idle"
-      : shownTone(orbTone(orbState, cautionShown), {
-          reconnecting: reconnectRunning,
-          dropped: gapDropped,
-        });
   /** Where other traffic goes in the gap, as the service has said: the
    * same source the sentence under the state reads (`holdHint`). */
   const gap = gapTraffic(hold, holdWanted(prefs.blockWhileReconnecting));
@@ -2841,24 +2917,46 @@ export function Dashboard({
     return () => clearTimeout(id);
   }, [holdWordAwaited]);
   const gapSaid = gapWord(gap, holdWordLate);
+  /** A reconnect for what is said: the automatic one, or -- the setting on
+   * -- the failover, whose loss is said once the service holds for it, in
+   * held words (`notifyStep`'s `failover`). */
+  const failoverSaid = failoverRunning && holdWanted(prefs.blockWhileReconnecting);
+  const notifyReconnecting = reconnectRunning || failoverSaid;
+  const notifyTone: ShownTone =
+    appMode === "gaming"
+      ? "idle"
+      : shownTone(orbTone(orbState, cautionShown), {
+          reconnecting: notifyReconnecting,
+          dropped: gapDropped,
+        });
+  /** The service has said it let go of the hold, and why: news in a
+   * reconnect whose loss was said in held words. */
+  const holdLetGo = hold?.state === "notHeld";
   useEffect(() => {
     if (loading) return;
     const step = notifyStep(notifyMemory.current(), {
       tone: notifyTone,
-      reconnecting: reconnectRunning,
+      reconnecting: notifyReconnecting,
+      failover: failoverSaid && !reconnectRunning,
       gap: gapSaid,
+      letGo: holdLetGo,
+      // A failover that gave up wears its pass's busy look for a render
+      // after its end, read as "idle", which forgets what was said.
+      dropped: failoverLost,
       // In front, and on the main page: another page of the shell does not
       // say the connection's state, so it is said as for a window behind.
       focused: typeof document !== "undefined" && document.hasFocus() && onMainPage,
       gaming: appMode === "gaming",
     });
     notifyMemory.set(step.memory);
+    // The failover's loss, owed no longer: said, or forgotten.
+    if (failoverLost && !step.memory.up && !step.memory.lostSaid) setFailoverLost(false);
     if (step.say === null || !appPrefs.current().notifications) return;
     const text = NOTIFY_TEXT[step.say];
     void showNotification(t(text.title), t(text.body), language).catch(() => undefined);
     // On a change of what is said, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, notifyTone, reconnectRunning, appMode, gapSaid]);
+  }, [loading, notifyTone, notifyReconnecting, failoverSaid, appMode, gapSaid, holdLetGo, failoverLost]);
 
   // The session log (lib/session-log.ts), only when the customer has
   // turned it on: a record opens when the screen first shows a tunnel up
@@ -2912,6 +3010,11 @@ export function Dashboard({
   useEffect(() => {
     if (connectionState !== "disconnected") setTunnelDropped(false);
   }, [connectionState]);
+  // The failover's give-up the same: a tunnel shown, or a connect, is news
+  // of its own.
+  useEffect(() => {
+    if (failoverLost && connectionState !== "disconnected") setFailoverLost(false);
+  }, [connectionState, failoverLost]);
 
   // Nothing that is only passing through gets to stay.
   //
@@ -3359,6 +3462,14 @@ export function Dashboard({
     // its own long-obsolete verdict over the screen.
     const generation = ++ladderGenerationRef.current;
     ownPassRef.current = generation;
+    // The mid-session failover: the health poll's own pass, not a
+    // reconnect's attempt. Its teardown keeps the hold (`passTeardown`),
+    // and the screen says so from the service's word (`holdHint`).
+    const failover = options.automatic === true && options.reconnect === undefined;
+    if (failover) {
+      failoverPassRef.current = generation;
+      setFailoverRunning(true);
+    }
     // Which customer session this pass dials for. See sessionGeneration:
     // a sign-out can land while the pass is mid-ladder, from this screen
     // or from one that cannot reach `cancelRef`.
@@ -3397,6 +3508,10 @@ export function Dashboard({
         holding: holdStore.current()?.state === "holding",
       }) === "keepHold";
     const takeDown = (): Promise<void> => (holdThrough ? holdService.disconnectKeepingHold() : serviceDisconnect());
+    if (holdThrough) {
+      holdPassRef.current = generation;
+      setHoldPassRunning(true);
+    }
     /** Whether this pass brought a tunnel up. One of the app's own
      * automatic passes that did not -- the mid-session failover -- has
      * just taken the tunnel the episode was armed for down on purpose,
@@ -3612,7 +3727,11 @@ export function Dashboard({
       // mean a third opinion about what that outcome is called.
       const reachability = await probeCandidates(dialable).catch(() => ({}));
 
-      const candidates = orderCandidates(dialable, {
+      let candidates = orderCandidates(dialable, {
+        // The plan in use leads; a credential the server has switched off
+        // -- an expired plan's, still listed beside the one bought after it
+        // -- comes last, never first.
+        subscriptionId,
         // A reconnect starts where the tunnel was, then falls back in
         // the ordinary order.
         resumeRouteId: options.reconnect?.resumeRouteId ?? null,
@@ -3666,6 +3785,23 @@ export function Dashboard({
       // and another country answered (`failoverNotice`).
       const failedRungs: FailedRung[] = [];
 
+      // Credentials asked for again, when a rung's tunnel comes up and
+      // carries nothing on credentials this pass did not ask the server for
+      // -- once that tunnel is down (`createFreshAsk`): the rungs still to
+      // come are dialled on what comes back, and a rung whose credential has
+      // changed since is dialled again on the new one
+      // (`onFreshCredentials`). Never waited for, but by a last rung.
+      const carriedNothing: ProtocolUser[] = [];
+      const fresh = createFreshAsk(
+        () => refreshConnectionConfig({ held: dialable, force: true, trigger: "connect", appState: connectionState }),
+        (protocolUsers) => setProtocolUsers(protocolUsers),
+      );
+      const takeFresh = (from: number) => {
+        const answer = fresh.take();
+        if (answer === null) return;
+        candidates = [...candidates.slice(0, from), ...onFreshCredentials(candidates.slice(from), carriedNothing, answer)];
+      };
+
       let lastError: ClassifiedError | null = null;
       // Why each attempt failed, in order. Kept because diagnosing the
       // first version of this needed a firewall rule and the server's
@@ -3709,6 +3845,9 @@ export function Dashboard({
       // gone by this rung's own settle before that -- so its IPv6 baseline
       // can be taken beside the settle rather than after it.
       let redialAfterWait = false;
+      // A rung dialled beside the settle failed with the settle never having
+      // said the network worked: dialled once more, the settle in front.
+      let settleInFront = false;
       // Over an index, not an iterator: a rung the service refused for want
       // of a network is dialled again, on the same server, once there is one.
       for (let index = 0; index < candidates.length; index += 1) {
@@ -3759,23 +3898,40 @@ export function Dashboard({
         // Beside the settle after a wait for a network (`redialAfterWait`).
         // After it, on the VM, the probe waited out its timeout (about two
         // seconds) on a network with IPv6 addresses and no IPv6 route,
-        // the settle's half second before it. Beside it saves only that
-        // half second -- the dial still waits for the probe below. By the
-        // VM's R3d timings a four-second blip is still verified about
-        // 1.7 s past the screen's ten-second calm hold: shortened, and
-        // still amber, not fixed.
+        // the settle's half second before it.
         const ipv6Beside = redialAfterWait && ipv6BaselineRef.current === null ? captureIpv6Baseline() : null;
+        // And the dial does not wait for either, after a wait the service's
+        // way-out ended: nothing of ours is up, so the settle has no
+        // engine's routes to wait out, only a network to confirm and a
+        // baseline to take -- beside the dial (`settleBeside`). In front of
+        // it, it held every such redial 1.5 to 2.5 s on the VM (round 3),
+        // past the ten-second calm hold. Not after a rung dialled so found
+        // the settle had said nothing (`settleInFront`). And not with no
+        // address of this machine's known on the bare network: a reading in
+        // once the dial is out is a baseline only if it is that one -- any
+        // other may be a relayed route's exit -- so with none known every
+        // such rung would be dialled twice.
+        const dialEarly = redialAfterWait && !settleInFront && knownBaseline !== null;
+        settleInFront = false;
         redialAfterWait = false;
         // Fresh every attempt, and taken only once plain networking is
         // confirmed working. See settleAndCaptureBaseline.
-        baselineIpRef.current = await settleAndCaptureBaseline(
+        const settling = settleAndCaptureBaseline(
           settleBudget,
           knownBaseline,
           settleServer,
           nodeAddresses,
           index > 0 || !nothingUpAtStart,
         );
-        if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
+        const beside = dialEarly ? settleBeside(settling, knownBaseline) : null;
+        /** Whether this rung's dial was answered: beside the settle, it was
+         * then checked against a baseline from the bare network, or dialled
+         * again before any check (`besideRetakes`). */
+        let dialAnswered = false;
+        if (beside === null) {
+          baselineIpRef.current = await settling;
+          if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
+        }
         const tunnelServer = await tunnelServerOf(candidate, "windows");
         // Once per pass, not once per candidate: whether this machine
         // has public IPv6 is a fact about its network, not about which
@@ -3783,7 +3939,7 @@ export function Dashboard({
         // add a timeout to each rejected candidate for no new
         // information. Taken here rather than before the loop so it
         // still lands after the previous engine's routes are gone.
-        if (ipv6BaselineRef.current === null) {
+        if (ipv6BaselineRef.current === null && beside === null) {
           ipv6BaselineRef.current = await (ipv6Beside ?? captureIpv6Baseline());
         }
 
@@ -3833,7 +3989,18 @@ export function Dashboard({
           // which endpoints it reaches around it.
           ladderPass.tunnelServer.current = tunnelServer;
           setEndpointTunnelServer(tunnelServer);
-          await invoke("vpn_connect", {
+          const holdSetting = holdWanted(appPrefs.current().blockWhileReconnecting);
+          // A connection the hold does not cover (Built-in (IKEv2), Custom
+          // mode): the service lets go of a hold before it dials it, if it
+          // runs at all. "Blocked" is dropped before it is sent, for a word
+          // that says neither; the let-go, and the plain "lost"
+          // notification, wait for the service's own word, read while it
+          // dials (`holdStore.lettingGo`, `dialledUnderHold`).
+          if (holdSetting && !holdCovers(candidate.protocol, customMode)) holdStore.lettingGo();
+          // From here a reading the settle beside the dial takes may come
+          // through this rung's tunnel (`settleBeside`).
+          beside?.dialling();
+          const dial = invoke("vpn_connect", {
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
             knownNodes,
@@ -3841,7 +4008,18 @@ export function Dashboard({
             // session when it is on (lib/reconnect-hold.ts).
             blockWhileReconnecting: holdWanted(appPrefs.current().blockWhileReconnecting),
           });
+          await dialledUnderHold(dial);
+          dialAnswered = true;
           showNetworkWait(false);
+          // Dialled beside the settle: its baseline, waited for a moment
+          // more if it is not in yet -- none if it may have come through
+          // this tunnel (`settleBeside`) -- and the IPv6 one, begun beside
+          // it.
+          if (beside !== null) {
+            baselineIpRef.current = await beside.found();
+            if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
+            if (ipv6BaselineRef.current === null && ipv6Beside !== null) ipv6BaselineRef.current = await ipv6Beside;
+          }
           // The session this pass was started under ended while the
           // engine was coming up. The sign-out's own teardown may have
           // run before this connect finished, in which case this tunnel
@@ -3857,6 +4035,20 @@ export function Dashboard({
           // on top of it named a server nothing will dial. The teardown
           // after the loop takes the engine down.
           if (stopped()) break;
+          // Dialled beside the settle, with no baseline from the bare network
+          // to check it against: through this tunnel a relayed route's exit
+          // read as this machine's address, and a working tunnel as bypassed.
+          // Taken down and dialled again, the settle in front, before
+          // anything of it reaches the screen (`besideRetakes`).
+          if (beside !== null && besideRetakes({ answered: true, baseline: baselineIpRef.current })) {
+            await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);
+            noNetworkSince = null;
+            noNetworkRounds = 0;
+            settleInFront = true;
+            redialAfterWait = true;
+            index -= 1;
+            continue;
+          }
           setProtocolUser(candidate);
           setTunnelRouteUnknown(false);
           setConnectedAt(Date.now());
@@ -4034,9 +4226,12 @@ export function Dashboard({
           // calling it "protected".
           if (verdict === "connected" || verdict === "unverified") {
             publishObserved(intent, verdict);
-            // A tunnel is up: whatever the reconnect hold was holding is
-            // over. Asked of the service at once; nothing waits on it.
-            if (holdWanted(appPrefs.current().blockWhileReconnecting)) void holdService.release();
+            // A tunnel is up: the gap the reconnect hold was holding is
+            // over -- let go of at once if the tunnel is verified; if not,
+            // only over one that holds the machine itself, or the hold stays
+            // over it, its plan carrying the new tunnel, for the status reads
+            // (`landingReleases`). Nothing waits on it.
+            if (holdWanted(appPrefs.current().blockWhileReconnecting)) void releaseOnLanding(verdict);
             // Which exit this session actually leaves from, sent now
             // that a route has come up rather than guessed before one
             // had.
@@ -4199,6 +4394,11 @@ export function Dashboard({
 
           attempts.push(`${label}: up but ${reason}`);
           dials.push({ routeId: candidate.routeId, carried: false });
+          // Up, and carrying nothing, on a credential nobody asked the
+          // server about this pass: asked once this tunnel is down (below),
+          // not after the rest of the ladder has been walked on the same
+          // answer.
+          carriedNothing.push(candidate);
           // Its tunnel came up: dialled, whatever else is true of it.
           failedRungs.push({ routeId: candidate.routeId, fate: "dialled" });
           lastError = {
@@ -4207,6 +4407,10 @@ export function Dashboard({
             detail: describeAttempts(attempts, candidates.length),
           };
         } catch (err) {
+          // The service not there at all -- restarting -- holds nothing: its
+          // hold went with its process. Said at once, not at the next read
+          // (`holdStore.unanswered`).
+          if (serviceGone(err)) holdStore.unanswered(true);
           const classified = classifyConnectionError(err);
           if (classified.kind !== "noNetwork") showNetworkWait(false);
           // No network to dial over: the service refused the rung before
@@ -4284,7 +4488,41 @@ export function Dashboard({
         // this one's routes and fails for a reason that has nothing to
         // do with it. Keeping the hold between rungs, when it is kept.
         await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);
-        if (!isLast) publishObserved(intent, "connecting");
+        // Dialled beside the settle, and the dial failed (for anything but no
+        // network, which waits above): what the settle found after it says
+        // nothing about the moment of the dial -- one that found the network
+        // a second after a dial had failed in half of one left that failure
+        // standing against the server. Taken back, and the rung dialled
+        // again with the settle in front; only that dial's failure is its
+        // own (`besideRetakes`). One that answered was checked against a
+        // baseline from the bare network, or dialled again before any check.
+        if (
+          beside !== null &&
+          !stopped() &&
+          besideRetakes(dialAnswered ? { answered: true, baseline: baselineIpRef.current } : { answered: false })
+        ) {
+          attempts.pop();
+          dials.pop();
+          failedRungs.pop();
+          settleInFront = true;
+          redialAfterWait = true;
+          index -= 1;
+          continue;
+        }
+        // Fresh credentials, once a rung has carried nothing on credentials
+        // nobody asked the server about this pass: asked now that its tunnel
+        // is down -- confined to it, the app had no other way out, and a node
+        // refusing the credential carries nothing -- and asked once more at
+        // the next teardown if that answer was not the server's
+        // (`createFreshAsk`). After a last rung, the answer is waited for --
+        // within its own budget, an earlier ask's first -- so a rung on a
+        // changed credential is dialled again before the pass gives up.
+        if (isLast) await fresh.pending();
+        if (carriedNothing.length > 0 && refreshed.source !== "network") fresh.ask();
+        if (isLast) await fresh.pending();
+        // Their answer in: the rest of the ladder on it.
+        takeFresh(index + 1);
+        if (index < candidates.length - 1) publishObserved(intent, "connecting");
       }
 
       // Superseded while it was running: a newer pass is now driving the
@@ -4392,6 +4630,27 @@ export function Dashboard({
       // mid-connect -- adopted it and is waiting to ask the service what
       // it left. This screen, if it is still the one mounted, ignores it.
       if (ladderGenerationRef.current === generation) ladderPass.ended();
+      if (failover && failoverPassRef.current === generation) {
+        failoverPassRef.current = 0;
+        setFailoverRunning(false);
+        // Gave up after its loss was said -- not for a press, a sign-out
+        // or a newer pass: its plain teardown let go of the hold, and
+        // nothing reconnects. "Blocked until it's back" is not to be the
+        // last word a window behind was given.
+        if (
+          !landed &&
+          !stopped() &&
+          sessionGeneration() === sessionAtStart &&
+          ladderGenerationRef.current === generation &&
+          notifyMemory.current().lostSaid
+        ) {
+          setFailoverLost(true);
+        }
+      }
+      if (holdPassRef.current === generation) {
+        holdPassRef.current = 0;
+        setHoldPassRunning(false);
+      }
     }
   }
 
@@ -4416,6 +4675,7 @@ export function Dashboard({
         place: route ? placeLabel(route, language) : null,
         protocol: route ? customerProtocolLabel(route.protocol, route.transport) : null,
         tunnelUp: isTunnelUp(state),
+        covered: holdCovers(route?.protocol ?? null, customConfigured || splitTunnelActive),
         resolve,
       }),
     );
@@ -4644,24 +4904,37 @@ export function Dashboard({
    * Neoxify" then, and saying so would be false), a note when it should
    * and does not (`holdNote`). */
   const holdSetting = holdWanted(prefs.blockWhileReconnecting);
-  const heldNotes = holdNotes(hold, { inGap: reconnecting !== null || dropped, setting: holdSetting });
-  // A pass waiting for a network under the hold is a reconnect's gap too:
-  // its headline's "your traffic is not protected" would be false. Only in
-  // the gap itself: over a tunnel that is up -- a reconnect's attempt that
-  // has landed, before its episode ends -- the headline's own sentence
-  // stands, whatever the hold's last word.
-  const heldHint = isTunnelUp(connectionState)
-    ? null
-    : holdHint(hold, { reconnecting: reconnecting !== null || waitingForNetwork, dropped, setting: holdSetting, wordLate: holdWordLate });
-  const hintText = slotTeardownShowing
-    ? ""
-    : connectionError
-      ? t(connectionError.messageKey)
-      : heldHint === "pending"
-        ? ""
-        : heldHint !== null
-          ? t(heldHint)
-          : t(headline.hint);
+  /** Where the app is, for the hold's words. A pass waiting for a network
+   * under the hold is a reconnect's gap too: its headline's "your traffic is
+   * not protected" would be false. Every phase but a quiet screen is one the
+   * service's word decides them in: a reconnect and the waits between its
+   * attempts, a pass dialling (the failover's ladder held 25 to 84 s on the
+   * VM under "Checking connection..." alone), a drop, and a tunnel still
+   * shown up -- connected, or degraded -- over a drop the service holds.
+   * Over a tunnel that landed under the hold, the headline's own sentence
+   * stands (`holdHint`). A pass that keeps the hold says why, if the service
+   * lets go of it before one of its rungs (`holdKept`). */
+  const holdScene: HoldScene = {
+    reconnecting: reconnecting !== null || waitingForNetwork,
+    dropped,
+    checking: connectionState === "connecting" || connectionState === "verifying",
+    holdKept: holdPassRunning,
+    tunnelUp: isTunnelUp(connectionState),
+    degraded: connectionState === "degraded",
+  };
+  const heldNotes = holdNotes(hold, { inGap: holdSpoken(hold, holdScene), setting: holdSetting });
+  const heldHint = holdHint(hold, { ...holdScene, setting: holdSetting, wordLate: holdWordLate });
+  // The service's word on the hold outranks the line under it, a connect's
+  // error included (`hintKey`); the error's detail stays below, as ever.
+  const hintSaid = hintKey(heldHint, {
+    teardownShowing: slotTeardownShowing,
+    error: connectionError?.messageKey ?? null,
+    headline: headline.hint,
+  });
+  const hintText = hintSaid === null ? "" : t(hintSaid);
+  /** The error's colour only on the error's own words: the held sentence
+   * kept between two failed attempts is not drawn as a failure. */
+  const hintFailed = connectionError !== null && hintSaid === connectionError.messageKey;
   /** Every sentence the hint can say, for the room it keeps: the hold's
    * only where the setting can make it say them. */
   const hintReserve: readonly HintKey[] = holdSetting ? [...HEADLINE_HINTS, ...HOLD_HINTS] : HEADLINE_HINTS;
@@ -5177,7 +5450,7 @@ export function Dashboard({
           }
           hint={
             error ? null : (
-              <Hint tone={hintTone(calmTone, { failed: connectionError !== null })} reserve={hintReserve}>
+              <Hint tone={hintTone(calmTone, { failed: hintFailed })} reserve={hintReserve}>
                 {hintText}
               </Hint>
             )
@@ -5270,7 +5543,7 @@ export function Dashboard({
             ? t("sw.title", { place: switchAsk.protocol ? `${switchAsk.place} · ${switchAsk.protocol}` : switchAsk.place })
             : t("sw.titleAuto")
         }
-        description={t("sw.body")}
+        description={t(switchBody(gap, { covered: switchAsk?.covered ?? true, inGap: inHoldGap }))}
         onClose={() => switchAsk?.resolve(false)}
         initialFocus={stayRef}
         actions={

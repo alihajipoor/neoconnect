@@ -2,7 +2,19 @@ import { describe, expect, it } from "vitest";
 import type { ConnectionState } from "../components/ConnectOrb";
 import { headlineFor } from "./connection-evidence";
 import { pressFor } from "./connect-intent";
-import { chipFor, hintTone, ipFor, lineFor, pillFor, planCaution, secondaryFor, shownTone } from "./hero-model";
+import {
+  announcedAtOnce,
+  announcedOnSettle,
+  chipFor,
+  hintTone,
+  ipFor,
+  lineFor,
+  pillFor,
+  planCaution,
+  secondaryFor,
+  SETTLE_MS,
+  shownTone,
+} from "./hero-model";
 import { DICTIONARIES } from "./i18n";
 import { orbTone } from "./orb-caution";
 
@@ -121,6 +133,65 @@ describe("the calm tone the screen wears", () => {
     expect(hintTone("warn")).toBe("warn");
     expect(hintTone("danger")).toBe("danger");
     expect(hintTone("idle", { failed: true })).toBe("caution");
+  });
+});
+
+// The VM, 2026-10-20 (round 2): the screen reader's live region still held
+// "Not carrying traffic. ...Your traffic is NOT protected" 0.8 s into a hold
+// that had made it false, while the screen said "Checking connection...".
+describe("the screen reader's region", () => {
+  const DEGRADED = "Not carrying traffic. The tunnel is up but the server isn't responding. Your traffic is NOT protected.";
+  const CHECKING = "Checking connection.... Other connections on this computer are blocked until Neoxify reconnects, as you set.";
+
+  it("lets go of what it said the moment the words change; the new ones wait to settle", () => {
+    expect(announcedAtOnce(DEGRADED, CHECKING)).toBe("");
+    expect(announcedAtOnce("", CHECKING)).toBe("");
+  });
+
+  it("keeps what it says while the words stay the same", () => {
+    expect(announcedAtOnce(CHECKING, CHECKING)).toBe(CHECKING);
+  });
+
+  /** Plays the state's words through the region as `StateAnnouncer` does --
+   * each change at its time (ms), emptied at once, the words given once they
+   * have stood `SETTLE_MS` -- and returns every addition to the region: what
+   * a screen reader says. */
+  function spoken(changes: [number, string][]): string[] {
+    let said = "";
+    let last = "";
+    const added: string[] = [];
+    let settling: { at: number; text: string } | null = null;
+    const end = changes[changes.length - 1][0] + SETTLE_MS + 1;
+    for (let now = 0; now <= end; now += 1) {
+      if (settling !== null && now >= settling.at) {
+        const next = announcedOnSettle(last, settling.text);
+        if (next !== null) {
+          last = next;
+          if (said !== next) added.push(next);
+          said = next;
+        }
+        settling = null;
+      }
+      const change = changes.find(([at]) => at === now);
+      if (change !== undefined) {
+        said = announcedAtOnce(said, change[1]);
+        settling = { at: now + SETTLE_MS, text: change[1] };
+      }
+    }
+    return added;
+  }
+
+  // 2026-10-25 review: emptying the region at once made a blip shorter
+  // than SETTLE_MS speak the unchanged state again: "" to the same words is
+  // a new addition. Before, such a blip was silent.
+  it("does not say the same state again after a blip shorter than the settle time", () => {
+    expect(spoken([[0, CHECKING], [2_000, DEGRADED], [2_000 + SETTLE_MS - 100, CHECKING]])).toEqual([CHECKING]);
+    // A change that settles is said, and so is the way back.
+    expect(spoken([[0, CHECKING], [2_000, DEGRADED], [2_000 + SETTLE_MS + 100, CHECKING]])).toEqual([CHECKING, DEGRADED, CHECKING]);
+    // And after a blip, the next real change.
+    expect(spoken([[0, CHECKING], [2_000, DEGRADED], [2_300, CHECKING], [5_000, DEGRADED]])).toEqual([CHECKING, DEGRADED]);
+    expect(announcedOnSettle(CHECKING, CHECKING)).toBeNull();
+    expect(announcedOnSettle(CHECKING, DEGRADED)).toBe(DEGRADED);
   });
 });
 

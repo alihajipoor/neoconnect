@@ -36,7 +36,7 @@
 //! reported up after it had gone -- not the fail-open.
 
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Instant;
 
@@ -467,6 +467,19 @@ pub trait ConfinementReport: Send + Sync {
 /// for a generation that is still live is one nobody here caused.
 pub struct Ledger {
     state: Mutex<LedgerState>,
+    /// Long jobs queued for, or running on, the owning thread that a status
+    /// need not wait behind (`Ledger::busy`).
+    busy: AtomicUsize,
+}
+
+/// A long job on the owning thread, from when it is queued until it has
+/// run (`Ledger::busy`). Dropped with the job.
+pub struct Busy(Arc<Ledger>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.busy.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Generations are unique across every ledger in the process. Tests run
@@ -482,7 +495,7 @@ impl Default for Ledger {
 
 impl Ledger {
     pub fn new() -> Self {
-        Self { state: Mutex::new(LedgerState::default()) }
+        Self { state: Mutex::new(LedgerState::default()), busy: AtomicUsize::new(0) }
     }
 
     /// Survives a panic elsewhere: a poisoned ledger must still answer,
@@ -650,6 +663,22 @@ impl Ledger {
     /// Notes the service's reconnect hold, once, as `Engines` is made.
     pub fn note_reconnect_hold(&self, hold: Arc<crate::engines::reconnect_hold::Hold>) {
         self.state().reconnect_hold = Some(hold);
+    }
+
+    /// The owning thread has a long job queued or running -- a connect, which
+    /// holds it until it has dialled, or the thorough pass behind a
+    /// teardown, which can reach the cmdlets -- until the guard returned is
+    /// dropped, with the job. A status then answers from here at once
+    /// rather than waiting behind it for an answer that, after the wait,
+    /// would be this one anyway (`pipe::dispatch`).
+    pub fn busy(ledger: &Arc<Ledger>) -> Busy {
+        ledger.busy.fetch_add(1, Ordering::SeqCst);
+        Busy(Arc::clone(ledger))
+    }
+
+    /// Whether a long job is queued for, or running on, the owning thread.
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst) > 0
     }
 
     /// The service's reconnect hold, for the pipe to let go of directly.

@@ -113,7 +113,7 @@ describe("the main page does what the rows say", () => {
       "await (options.reconnect && holdThrough ? holdService.disconnectKeepingHold() : serviceDisconnect()).catch(() => undefined);",
     );
     expect(dashboard).toMatch(
-      /publishObserved\(intent, verdict\);\s+\/\/ A tunnel is up[^\n]*\n[^\n]*\n\s+if \(holdWanted\(appPrefs\.current\(\)\.blockWhileReconnecting\)\) void holdService\.release\(\);/,
+      /publishObserved\(intent, verdict\);\s+\/\/ A tunnel is up[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s+if \(holdWanted\(appPrefs\.current\(\)\.blockWhileReconnecting\)\) void releaseOnLanding\(verdict\);/,
     );
     expect(source("../App.tsx")).toContain("return watchEpisodesForHold({");
   });

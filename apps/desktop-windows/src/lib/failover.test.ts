@@ -280,3 +280,34 @@ describe("ordering by what answers right now", () => {
     expect(ordered[0].routeId).toBe("nl-9");
   });
 });
+
+// The VM, round 3: every connect and reconnect first dialled a credential
+// the node refused ("rejected proxy/vless/encoding", 586 times in a day, one
+// id). The account's expired plan was still listed beside the one bought
+// after it, its credentials switched off on the nodes, for the very same
+// routes -- and the API's order put the expired plan's first.
+describe("a credential the server has switched off, or another plan's", () => {
+  const credential = (id: string, subscriptionId: string, routeId: string, status: "ACTIVE" | "DISABLED", protocol: Protocol = "XRAY_VLESS_REALITY") =>
+    ({ id, subscriptionId, routeId, protocol, status }) as ProtocolUser;
+  const EXPIRED = credential("old", "sub-expired", "r-de-reality", "DISABLED");
+  const IN_USE = credential("new", "sub-active", "r-de-reality", "ACTIVE");
+
+  it("comes after the plan in use's, on the route the reconnect resumes and the customer pinned", () => {
+    const listed = [EXPIRED, IN_USE];
+    expect(orderCandidates(listed, { resumeRouteId: "r-de-reality", pinnedRouteId: "r-de-reality" }).map((u) => u.id)).toEqual(["new", "old"]);
+    expect(orderCandidates(listed, { subscriptionId: "sub-active" }).map((u) => u.id)).toEqual(["new", "old"]);
+  });
+
+  it("comes after every credential the server has not switched off, and is never dropped", () => {
+    const listed = [EXPIRED, credential("ovpn", "sub-active", "r-ovpn", "ACTIVE", "OPENVPN"), IN_USE];
+    const ordered = orderCandidates(listed, { pinnedRouteId: "r-de-reality", subscriptionId: "sub-active" }).map((u) => u.id);
+    expect(ordered).toEqual(["new", "ovpn", "old"]);
+  });
+
+  it("puts another subscription's after the one in use, and an older backend's, with no status, where it always was", () => {
+    const other = credential("other", "sub-other", "r-de-reality", "ACTIVE");
+    expect(orderCandidates([other, IN_USE], { subscriptionId: "sub-active" }).map((u) => u.id)).toEqual(["new", "other"]);
+    const bare = [user("r-tls", "XRAY_VLESS_TLS"), user("r-wg", "WIREGUARD")];
+    expect(ids(orderCandidates(bare, { subscriptionId: "sub-active" }))).toEqual(["r-wg", "r-tls"]);
+  });
+});

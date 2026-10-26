@@ -649,6 +649,124 @@ mod tests {
         }
     }
 
+    /// A connect marks the service busy (`Ledger::busy`) from the moment it
+    /// arrives until it has answered: a status sent while it waits behind
+    /// another job -- a teardown's thorough pass, say -- does not wait the
+    /// second it would for any other, but is answered from the ledger at
+    /// once, the reconnect hold's word with it; and nothing is left busy
+    /// once the connect has answered. On the VM a hold let go of inside a
+    /// connect was heard 1.5 to 2.5 s late (round 3, F2). Through a real
+    /// dispatch: a guard made by hand here pinned nothing, and taking
+    /// `Ledger::busy` out of the connect failed no test (round 4).
+    #[tokio::test]
+    async fn a_status_during_a_connect_answers_at_once_from_the_ledger() {
+        let empty_dir = PathBuf::from(std::env::temp_dir()).join("neoconnect-test-no-engines");
+        let engines = Supervisor::spawn(Engines::new(empty_dir.clone(), empty_dir), "test-engines-busy-connect");
+        let ledger = Arc::new(Ledger::new());
+        // Ahead of the connect on the owning thread, as a thorough pass is:
+        // it ignores its token, so nothing hurries it.
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let ahead = engines.run(move |_engines: &mut Engines, _token: &CancelToken| {
+            let _ = parked.recv_timeout(Duration::from_secs(30));
+        });
+        // No engine binaries here: once it runs, the connect fails at the
+        // engine-resolution guard and dials nothing.
+        let profile = ConnectProfile::Wireguard(WireguardProfile {
+            private_key: "GMSgBTYpH7yC6bV88xblWmViQlk+bHxiTDsdsi+WgXI=".into(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
+            endpoint: "203.0.113.5:51888".into(),
+        });
+        let connect = dispatch(
+            Request::Connect { profile, exits: Vec::new(), known_nodes: Vec::new(), block_while_reconnecting: false },
+            &engines,
+            &ledger,
+            None,
+        );
+        let status = async {
+            // `join!` has polled the connect by now: it is queued, behind.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let started = Instant::now();
+            let reply = dispatch(Request::Status, &engines, &ledger, None).await;
+            let took = started.elapsed();
+            let _ = release.send(());
+            (reply, took)
+        };
+        let (connected, (reply, took)) = tokio::join!(connect, status);
+        let _ = ahead.await;
+
+        assert!(matches!(reply, Response::State { .. }), "a status during a connect was not answered");
+        assert!(took < STATUS_LOCK_WAIT, "a status waited {took:?} behind a connect");
+        assert!(matches!(connected, Response::Error { .. }), "the connect did not answer as one that ran with no engines");
+        assert!(!ledger.is_busy(), "the connect left the service busy after it answered");
+    }
+
+    /// A teardown's thorough pass, queued behind its answer, marks the
+    /// service busy until it has run -- whether the hard stop answered in
+    /// time or was still queued behind another job past
+    /// `DISCONNECT_LOCK_WAIT`, for the customer's Disconnect and for a
+    /// reconnect's: a status sent while the pass waits is answered from the
+    /// ledger at once, and nothing is left busy once it has run. On the VM a
+    /// re-hold at a reconnect's teardown was heard 1.7 s late (round 3, F3).
+    ///
+    /// In the first case the hard stop runs on a machine with nothing up, in
+    /// well under `DISCONNECT_LOCK_WAIT`; on a runner slow enough to miss
+    /// it, the second case's arm answers instead, which marks it the same.
+    #[tokio::test]
+    async fn a_status_during_a_teardowns_thorough_pass_answers_at_once_from_the_ledger() {
+        for (what, request, hard_stop_in_time) in [
+            ("a reconnect's teardown", Request::DisconnectForReconnect, true),
+            ("the customer's Disconnect", Request::Disconnect, false),
+        ] {
+            let empty_dir = PathBuf::from(std::env::temp_dir()).join("neoconnect-test-no-engines");
+            let engines = Supervisor::spawn(Engines::new(empty_dir.clone(), empty_dir), "test-engines-busy-teardown");
+            let ledger = Arc::new(Ledger::new());
+            // Ahead of the hard stop: let go of at once in the first case,
+            // only after the answer in the second.
+            let (release_first, first) = std::sync::mpsc::channel::<()>();
+            let ahead = engines.run(move |_engines: &mut Engines, _token: &CancelToken| {
+                let _ = first.recv_timeout(Duration::from_secs(30));
+            });
+            // And one the thorough pass is queued behind, queued once the
+            // hard stop is.
+            let (release_second, second) = std::sync::mpsc::channel::<()>();
+            let teardown = dispatch(request, &engines, &ledger, None);
+            let queue_behind = async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let behind = engines.run(move |_engines: &mut Engines, _token: &CancelToken| {
+                    let _ = second.recv_timeout(Duration::from_secs(30));
+                });
+                if hard_stop_in_time {
+                    let _ = release_first.send(());
+                }
+                behind
+            };
+            let (answer, behind) = tokio::join!(teardown, queue_behind);
+            assert!(matches!(answer, Response::Ok | Response::Error { .. }), "{what} did not answer");
+
+            let started = Instant::now();
+            let reply = dispatch(Request::Status, &engines, &ledger, None).await;
+            let took = started.elapsed();
+            let _ = release_first.send(());
+            let _ = release_second.send(());
+            let _ = ahead.await;
+            let _ = behind.await;
+            assert!(matches!(reply, Response::State { .. }), "{what}: a status during its thorough pass was not answered");
+            assert!(took < STATUS_LOCK_WAIT, "{what}: a status waited {took:?} behind its thorough pass");
+
+            // Queued behind the thorough pass: once this has run, so has it.
+            let after = tokio::time::timeout(
+                Duration::from_secs(120),
+                engines.run(|_engines: &mut Engines, _token: &CancelToken| ()),
+            )
+            .await;
+            assert!(matches!(after, Ok(Ok(()))), "{what}: the thorough pass never ran");
+            assert!(!ledger.is_busy(), "{what}: its thorough pass left the service busy after it ran");
+        }
+    }
+
     #[tokio::test]
     async fn rejects_a_malformed_request_without_dropping_the_connection() {
         let name = r"\\.\pipe\neoconnect-test-malformed";
@@ -1290,14 +1408,49 @@ fn gone() -> Response {
     Response::Error { message: "the service is shutting down".to_string() }
 }
 
+/// A status answered without the owning thread: the kernel's word on a
+/// dead session if the engine watch has it, else what the operating system
+/// can say, with what the ledger records -- the reconnect hold above all.
+async fn status_without_the_thread(ledger: &Ledger) -> Response {
+    // The engine watch saw the tunnel's engine end and nothing has begun
+    // since: that is the kernel's answer, and it needs no process to give
+    // it.
+    if let Some(state) = state_after_a_drop(ledger) {
+        return state;
+    }
+    // A failed join is a question nobody answered, and is reported as one:
+    // never as "disconnected", which would be a tunnel state nothing
+    // verified.
+    //
+    // And a tunnel it cannot see comes back with health `Unknown`, not
+    // `Down`: the fallback's looks are an adapter's presence and, for
+    // IKEv2, PowerShell, and both say "nothing" while a Custom-mode rebuild
+    // has the adapter down or PowerShell fails. The app tells a customer
+    // their connection was lost only on `Down`.
+    let Ok(seen) = tokio::task::spawn_blocking(crate::engines::os_visible_tunnel).await else {
+        return Response::Error { message: "could not read the tunnel state".to_string() };
+    };
+    fallback_state(ledger, seen, crate::split_tunnel::running_without_the_lock())
+}
+
 async fn dispatch(
     request: Request,
     engines: &Supervisor<Engines>,
-    ledger: &Ledger,
+    ledger: &Arc<Ledger>,
     caller_session: Option<u32>,
 ) -> Response {
     match request {
         Request::Status => {
+            // Not queued at all behind a long job -- a connect dialling, the
+            // thorough pass behind a teardown (`Ledger::busy`): it would not
+            // be let in for seconds, and after the wait below the answer is
+            // this one anyway. Waited for, the app heard a hold let go of
+            // inside a connect 1.5 to 2.5 s late, and a re-hold at a
+            // reconnect's teardown 1.7 s late (the VM, round 3, F2 and F3);
+            // and every status left behind ran after the job, for nobody.
+            if ledger.is_busy() {
+                return status_without_the_thread(ledger).await;
+            }
             // Raced against a deadline rather than waiting its turn.
             //
             // Status is the question a stranded customer asks, and an
@@ -1347,28 +1500,7 @@ async fn dispatch(
                 // it is up launches PowerShell -- and inline, that held a
                 // runtime worker on every status poll of the connect, the
                 // one moment this fallback exists to stay responsive in.
-                _ => {
-                    // The engine watch saw the tunnel's engine end and
-                    // nothing has begun since: that is the kernel's
-                    // answer, and it needs no process to give it.
-                    if let Some(state) = state_after_a_drop(ledger) {
-                        return state;
-                    }
-                    // A failed join is a question nobody answered, and is
-                    // reported as one: never as "disconnected", which
-                    // would be a tunnel state nothing verified.
-                    //
-                    // And a tunnel it cannot see comes back with health
-                    // `Unknown`, not `Down`: the fallback's looks are an
-                    // adapter's presence and, for IKEv2, PowerShell, and
-                    // both say "nothing" while a Custom-mode rebuild has
-                    // the adapter down or PowerShell fails. The app tells
-                    // a customer their connection was lost only on `Down`.
-                    let Ok(seen) = tokio::task::spawn_blocking(crate::engines::os_visible_tunnel).await else {
-                        return Response::Error { message: "could not read the tunnel state".to_string() };
-                    };
-                    fallback_state(ledger, seen, crate::split_tunnel::running_without_the_lock())
-                }
+                _ => status_without_the_thread(ledger).await,
             }
         }
         // On the blocking pool, not inline. This walks every process on
@@ -1464,8 +1596,11 @@ async fn dispatch(
                     // rather than awaited: it removes the tunnel service
                     // registration, runs the janitor and may reach the
                     // cmdlets, which together can take forty seconds and
-                    // cost nothing once networking is already back.
+                    // cost nothing once networking is already back. A
+                    // status meanwhile answers without waiting behind it.
+                    let busy = Ledger::busy(ledger);
                     let _ = engines.run_detached(move |engines: &mut Engines, _| {
+                        let _busy = busy;
                         if let Err(message) = thorough(engines) {
                             crate::cleanup_log::note("thorough teardown after disconnect", &message);
                         }
@@ -1482,7 +1617,9 @@ async fn dispatch(
                     // already unwinding whatever is ahead of it, so the
                     // teardown will happen. What is not done is making
                     // the customer wait on silence for it.
+                    let busy = Ledger::busy(ledger);
                     let _ = engines.run_detached(move |engines: &mut Engines, _| {
+                        let _busy = busy;
                         if let Err(message) = thorough(engines) {
                             crate::cleanup_log::note(
                                 "deferred teardown after a busy disconnect",
@@ -1563,8 +1700,12 @@ async fn dispatch(
             // a Disconnect that arrived in between means the customer no
             // longer wants this tunnel, and nothing is dialled.
             let wanted = engines.generation();
+            // Long: it holds the owning thread until it has dialled. A
+            // status meanwhile answers without waiting behind it.
+            let busy = Ledger::busy(ledger);
             engines
                 .run(move |engines: &mut Engines, token| {
+                    let _busy = busy;
                     if wanted.superseded() {
                         return Response::Error {
                             message: crate::lifecycle::budget::ABANDONED.to_string(),

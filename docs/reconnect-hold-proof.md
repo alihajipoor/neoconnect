@@ -81,7 +81,54 @@ a packet:
   late (`standing_refused`), and the screen and the "lost" notification
   say traffic may have gone out in that moment.
 
-None of these fixes has carried a packet. Items 1, 2 and 5 below are to
+## The second 2026-10-20 capture (build `22d8cab`): not proven
+
+Every forced drop on Reality, TLS, Trojan, Shadowsocks, Stealth Web and
+OpenVPN UDP held, and every release path let go with no filter left. It
+failed on:
+
+- **WireGuard leaked when its tunnel ended slowly.** 3 of 7 stops of
+  `WireGuardTunnel$neoconnect` took ~4.4 s, and all three leaked (151 to
+  200 leaker frames at the NIC for 6 to 9 s); 1 of 1 adapter disable under
+  a live wireguard.exe did too. The app's reconnect said the setting again
+  (`vpn_set_reconnect_hold`) before the service had seen the end; arming the
+  dying session found no adapter to name, disarmed it, and took out its 108
+  standing filters. Now (`arm_live_session_for_reconnect_hold`,
+  `arm_reconnect_hold`, `Hold::arm_for`): a session that is ending -- its
+  process gone, its tunnel service at `STOP_PENDING` (now an ending, not
+  "running"), its adapter gone -- is held, not armed; an armed session whose
+  adapter cannot be named fails closed (held, one WFP transaction, never
+  disarmed); and arming a standing session again never takes its filters
+  out. A stop refused by a tunnel service already stopping is the stop under
+  way, not a failed teardown. `every_path_that_takes_out_a_hold_or_a_confinement_is_one_of_these`
+  lists every path that takes out a hold, standing filters or a confinement
+  in the files that name one -- engines/mod.rs, hard_stop.rs,
+  confinement.rs, reconnect_hold.rs (the hold's own closes and releases,
+  `arm_dialling` among them), wireguard.rs and pipe.rs -- and shows the
+  drop paths hold first; two 32-way tests race the slow stop and the
+  adapter disable against the reconnect's first word. A static list, not a
+  capture: it says which paths exist, not that any of them holds a packet.
+- **The mid-session failover held silently.** The health check's ladder
+  (`runLadder({ automatic: true })`) held for 25 to 84 s under "Checking
+  connection..." alone, with no "lost" toast, on 5 of 5 runs. The service's
+  word now decides the held words in every phase -- a pass dialling, the
+  failover's ladder, a reconnect and the waits between its attempts, a pass
+  waiting for a network, a drop, and a tunnel still shown up (degraded
+  included) over a drop it holds -- and the failover's loss is said in held
+  words once the service holds for it, then "back". The word is asked for as
+  soon as the teardown that keeps the hold is answered, not at the next poll.
+- **Smaller screen deviations, no leak:** "Couldn't connect." stood 1.3 to
+  6.3 s between two attempts over a held machine (the held sentence now
+  outranks it, and is not drawn in the error's colour); the blocked sentence
+  outlived a Disconnect or Stop reconnecting by 1.0 to 1.25 s (dropped now on
+  the release's reply), and a service restart by 2.5 s (a status read that
+  goes unanswered is now said as "checking", never blocked nor not); the
+  screen reader's region kept "...NOT protected" 0.8 s into a hold (it now
+  lets go of stale words at once); and the switch confirmation said "not
+  protected" over a held machine (it now says the block is in, and that
+  Built-in (IKEv2) and Custom mode let go of it before they connect).
+
+None of these fixes has carried a packet. Items 1, 1b, 2 and 5 below are to
 be run again for every engine, with the additions marked **(new)**.
 
 ## Method
@@ -124,6 +171,18 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    tunnel is up (no "could not be named", no `tunnelNotPermitted` on
    screen); the status says the tunnel ended within a second of the
    disable, not "Connected".
+   **(new)** WireGuard, both ways the second capture leaked: the tunnel
+   service stopped from outside (`Stop-Service 'WireGuardTunnel$neoconnect'`,
+   at least 7 times, so some take seconds -- `sc query` shows `STOP_PENDING`),
+   and `Disable-NetAdapter` on its adapter with wireguard.exe running. No
+   leak from the stop or the disable to the next tunnel; `reconnect-hold.log`
+   shows no "standing filters taken out" before it, and `cleanup.log` no
+   "not armed: the WIREGUARD tunnel's adapter could not be named".
+   **(new, third round, unit test only)** An armed Xray or OpenVPN session
+   whose confinement was refused at connect is now held when its adapter
+   goes (`cleanup.log`: "held the drop: the tunnel adapter is gone"). The
+   VM has no switch to refuse the confinement, so this is **unverified**
+   against a capture.
 1b. **(new) Standing under WireGuard.** With the setting on and a
    WireGuard tunnel up: `netsh wfp show filters` shows the hold's filters
    in force before any drop, the tunnel carries as before (exit IP = node,
@@ -141,6 +200,35 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    and `reconnect-hold.log` saying "not standing". A reconnect onto a
    server the plan cannot name lets go of the hold before it dials
    (`tunnelNotPermitted`), and the WireGuard tunnel still comes up.
+
+   **How to make these on the VM (guest-only; nothing on any server):**
+   - *A hostname endpoint.* The page hook answers the app's credential
+     request with the WireGuard credential's endpoint host replaced by a
+     name under `.test` (for example `wg-gate.neoxify.test`, port unchanged),
+     and the guest's `C:\Windows\System32\drivers\etc\hosts` maps that name
+     to the node. The service names it with getaddrinfo and wireguard.exe
+     resolves it the same way, so both read the hosts file. Remove the line
+     and the hook's answer afterwards. Never commit the node's address.
+   - *A forced refusal.* The test installer built with **reconnect_hold**
+     ticked also compiles in the service's test switches
+     (`reconnect_hold::TestSwitches`; `NEOXIFY_RECONNECT_HOLD_TEST=1` is set
+     at compile time by `build-test-installer.yml` and by nothing else --
+     `reconnect-hold.wiring.test.ts` holds the release workflow and CI to
+     that, and a build without it reads no file). From an elevated shell in
+     the guest, write one switch per line to
+     `%ProgramData%\Neoxify\reconnect-hold-test.txt`:
+     - `refuse-standing`: every install of filters to stand under a tunnel is
+       refused, as WFP refusing them would be -- armed without them, the drop
+       held late, "not standing" in `reconnect-hold.log`;
+     - `unname-wireguard-server`: the WireGuard server is never named for the
+       hold, as a name with no IPv4 answer would not be, while wireguard.exe
+       still dials it -- armed without standing, and a reconnect onto it lets
+       go of the hold before it dials (`tunnelNotPermitted`).
+
+     The file is read each time the switch is asked, so set it before the
+     connect (or the setting turned on) that is to be refused, and delete it
+     afterwards. Filters already standing are never taken out by a switch
+     turned on under them.
 2. **Every engine dials under the hold and its tunnel carries** -- above
    all **WireGuard-NT**, whose kernel socket WFP may not attribute to
    wireguard.exe (it is let through by the server's address; prove it).
@@ -153,7 +241,11 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    plan stopping (notEntitled) and the device limit; a sign-out; Gaming
    mode turned on; the setting turned off mid-hold; a connect it does not
    cover (IKEv2, Custom mode); Repair; the app killed; the service
-   restarted; a reboot while holding.
+   restarted; a reboot while holding. **(new, third round)** A tunnel that
+   lands "not confirmed" (no baseline taken) is let go of only once it is
+   confined or its handshake is fresh -- at once if a status shows that,
+   else within two status reads -- and stays held otherwise until
+   Disconnect.
 4. **The backstop.** With the app frozen right after a drop (suspend the
    process in Process Explorer before its reconnect starts): the service
    lets go after `NO_FOLLOW_UP` (120 s), and `reconnect-hold.log` says
@@ -176,6 +268,26 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    answer has not come says "hasn't yet confirmed". And the hold is never let go of before the next tunnel is up
    and confined (the service log's "let go of after Ns" against the
    capture).
+   **(new, second capture)** The mid-session failover (the node blocked by
+   the guest's firewall): the held sentence under "Checking connection..."
+   from the hold's first second to the release, and the "lost" toast in held
+   words, then "back". Between two failed attempts the held sentence stays
+   (never "Couldn't connect."). After Disconnect and Stop reconnecting it goes
+   with the release's reply, not a status later. With the service restarted
+   mid-hold: "isn't answering ... checking", never "blocked" nor "going out
+   without Neoxify". The screen reader's region (`role=status`) never holds
+   the degraded "NOT protected" line, or any other, once the screen has moved
+   on. The switch confirmation while held says the block is in, and for
+   Built-in (IKEv2) or Custom mode that it is let go of before they connect.
+   **(new, third round)** With the window behind: a failover whose every
+   rung fails (every node blocked in the guest's firewall) says "lost" in
+   held words, then -- once its teardown has let go of the hold, never
+   before (the capture) -- "VPN connection lost ... not protected". A
+   failover the hold is let go of partway (a WireGuard rung with
+   `unname-wireguard-server`, or an IKEv2 rung) shows the reason under
+   "Checking connection..." from the moment the service says it, and sends
+   a plain "lost" toast after the held one. A one-second re-check of the
+   state is not spoken again by the screen reader.
 6. **The LAN while held, and after roaming.** A LAN host (the VirtualBox
    gateway, a share on the host-only network) answers while held. Then
    change the guest's network during a long wait (switch the adapter to

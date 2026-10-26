@@ -4,6 +4,7 @@ import {
   baselineBlockPage,
   captureBaselineIp,
   EGRESS_TIMEOUT_MS,
+  plainAddress,
   type BaselineIp,
   type TunnelServer,
 } from "./egress";
@@ -139,4 +140,80 @@ export async function settleAndCaptureBaseline(
     if (!afterTeardown || Date.now() >= deadline) return null;
     await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
   }
+}
+
+/** How long, once a dial beside the settle has answered, the settle is
+ * still waited for (`settleBeside`). */
+export const LATE_SETTLE_GRACE_MS = 1_500;
+
+/** The settle run beside a dial rather than in front of it: for a rung
+ * dialled again after a wait for a network that the service's way-out
+ * ended (`network-wait.ts`). Nothing of ours is up then -- the service
+ * refused the dial before starting anything -- so the settle has no engine's
+ * routes to wait out, only a network to confirm and a baseline to take. In
+ * front, it held every such dial 1.5 to 2.5 s on the VM (round 3: the way
+ * out true at +7.6 to +8.0 s, the first answer off the tunnel at +8.7 to
+ * +10.3 s, the dial only then), past the screen's ten-second calm hold.
+ *
+ * Only once the dial has answered is what it found asked (`found`), and
+ * waited for `LATE_SETTLE_GRACE_MS` more at most -- and only a reading that
+ * cannot have come through the new tunnel is a baseline: one in before the
+ * dial went out (`dialling`), or one since that reads `known`, this
+ * machine's own address on the bare network, which no exit has. Through the
+ * tunnel a reading is the exit's address, and that is passed over only when
+ * it is a node the account holds a credential on (`nodeAddresses`): a
+ * relayed route's exit, dialled at its entry, mostly is not, and taken as
+ * the baseline it read every working tunnel on that route as bypassed --
+ * "NOT protected" on the last rung.
+ *
+ * Anything else is no baseline, and so is a dial that failed (`retakes`):
+ * the rung is dialled again with the settle in front, before anything it
+ * did is checked, or held against its server (the Dashboard's
+ * `settleInFront`). */
+export function settleBeside(
+  settling: Promise<BaselineIp | null>,
+  known: BaselineIp | null,
+  later: (fn: () => void, ms: number) => unknown = (fn, ms) => setTimeout(fn, ms),
+): {
+  /** The rung's connect goes on the wire now: a reading from here on may
+   * come through its tunnel. */
+  dialling(): void;
+  /** Once the dial has answered: the settle's baseline, at once if it is
+   * in, within the grace if not -- null after, and null for a reading the
+   * tunnel may have given. */
+  found(): Promise<BaselineIp | null>;
+} {
+  let sent = false;
+  const settled = settling
+    .catch(() => null)
+    .then((ip) => ({ ip, beforeDial: !sent }));
+  const kept = ({ ip, beforeDial }: { ip: BaselineIp | null; beforeDial: boolean }): BaselineIp | null => {
+    if (ip === null) return null;
+    if (beforeDial) return ip;
+    return known !== null && plainAddress(ip.ip) === plainAddress(known.ip) ? ip : null;
+  };
+  return {
+    dialling: () => {
+      sent = true;
+    },
+    found: () =>
+      Promise.race([settled, new Promise<null>((resolve) => later(() => resolve(null), LATE_SETTLE_GRACE_MS))]).then(
+        (reading) => (reading === null ? null : kept(reading)),
+      ),
+  };
+}
+
+/** Whether a rung dialled beside the settle is dialled again, the settle in
+ * front, with nothing it did checked or held against its server: when its
+ * dial failed -- for anything but no network, which waits for one on the
+ * same rung -- and when it answered with no baseline to check it against
+ * (`settleBeside`'s `found`).
+ *
+ * A failed dial always: what the settle found after it says nothing about
+ * the moment of the dial. Asked after the teardown, with the grace on top,
+ * a settle that found the network up to 1.5 s after a dial had failed in
+ * 0.4 s left that failure standing -- "dialled", counted against the server
+ * in the per-ISP report, and named in "Couldn't reach". */
+export function besideRetakes(dial: { answered: false } | { answered: true; baseline: BaselineIp | null }): boolean {
+  return !dial.answered || dial.baseline === null;
 }

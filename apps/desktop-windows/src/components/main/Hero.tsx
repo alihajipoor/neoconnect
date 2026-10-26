@@ -1,9 +1,9 @@
-import { useEffect, useLayoutEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
 import { claimCheckPop } from "../../lib/check-pop";
 import { useI18n, type TranslationKey } from "../../lib/i18n";
 import { formatDuration } from "../../lib/locale-format";
-import type { ChipGlyph, HintTone, LineModel } from "../../lib/hero-model";
+import { announcedAtOnce, announcedOnSettle, SETTLE_MS, type ChipGlyph, type HintTone, type LineModel } from "../../lib/hero-model";
 import { cn } from "../../lib/utils";
 import { PillButton } from "../ui";
 
@@ -61,15 +61,21 @@ function CheckDot() {
   );
 }
 
-/** How long a state has to stand before it is spoken: long enough that a
- * pass's rungs and a one-second re-check never are. */
-const SETTLE_MS = 900;
-
-/** One polite live region for settled state changes: "{headline}. {hint}". */
+/** One polite live region for settled state changes: "{headline}. {hint}".
+ * What it said goes the moment the state changes (`announcedAtOnce`); the
+ * new state is said once it has stood for `SETTLE_MS` -- unless it is what
+ * was said last, back from a blip (`announcedOnSettle`). */
 export function StateAnnouncer({ text }: { text: string }) {
   const [said, setSaid] = useState("");
+  const spoken = useRef("");
   useEffect(() => {
-    const timer = setTimeout(() => setSaid(text), SETTLE_MS);
+    setSaid((before) => announcedAtOnce(before, text));
+    const timer = setTimeout(() => {
+      const next = announcedOnSettle(spoken.current, text);
+      if (next === null) return;
+      spoken.current = next;
+      setSaid(next);
+    }, SETTLE_MS);
     return () => clearTimeout(timer);
   }, [text]);
   return (

@@ -40,6 +40,19 @@ export function isServiceTimeout(err: unknown): boolean {
   return String(err).includes(SERVICE_TIMEOUT_MARKER);
 }
 
+/** The words a call gets back when the service is not there at all: its
+ * pipe could not be opened (`call_within` in src-tauri/src/vpn.rs), or it
+ * answered that it is stopping (`gone` in service/src/pipe.rs). */
+const SERVICE_GONE_MARKERS = ["Could not reach the Neoxify background service", "the service is shutting down"];
+
+/** Whether a call failed because the service is not running -- stopped,
+ * restarting -- rather than slow or refusing. Unlike a timeout, that says
+ * what is held: nothing the service held outlives its process. */
+export function serviceGone(err: unknown): boolean {
+  const text = String(err);
+  return SERVICE_GONE_MARKERS.some((marker) => text.includes(marker));
+}
+
 /** Frees the caller from a call it cannot otherwise abandon.
  *
  * The underlying work keeps running -- there is no way to cancel an

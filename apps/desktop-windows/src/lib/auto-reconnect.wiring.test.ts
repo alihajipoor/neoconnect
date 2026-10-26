@@ -378,7 +378,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
   });
 
   it("a pass stopped while its engine came up puts nothing of that rung on screen", () => {
-    const connected = ladder.indexOf('await invoke("vpn_connect", {');
+    const connected = ladder.indexOf('const dial = invoke("vpn_connect", {');
     const check = ladder.indexOf("if (stopped()) break;", connected);
     expect(check).toBeGreaterThan(connected);
     // Before the rung's route is named or its clock started -- a location
@@ -395,13 +395,13 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     // teardown, the pass outlasted the repair's wait for it, and its own
     // teardown cancelled the repair mid-step.
     const rung = ladder.slice(ladder.indexOf("for (let index = 0; index < candidates.length; index += 1) {"));
-    const settled = rung.indexOf("baselineIpRef.current = await settleAndCaptureBaseline(");
+    const settled = rung.indexOf("baselineIpRef.current = await settling;");
     const named = rung.indexOf('const tunnelServer = await tunnelServerOf(candidate, "windows");');
     const ipv6 = rung.indexOf("ipv6BaselineRef.current = await (ipv6Beside ?? captureIpv6Baseline());");
     const check = rung.indexOf(
       "if (stopped() || sessionGeneration() !== sessionAtStart || ladderGenerationRef.current !== generation) break;",
     );
-    const connect = rung.indexOf('await invoke("vpn_connect", {');
+    const connect = rung.indexOf('const dial = invoke("vpn_connect", {');
     expect(Math.min(settled, named, ipv6)).toBeGreaterThan(0);
     expect(check).toBeGreaterThan(Math.max(settled, named, ipv6));
     expect(connect).toBeGreaterThan(check);

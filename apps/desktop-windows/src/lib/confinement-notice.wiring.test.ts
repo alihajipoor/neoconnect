@@ -38,7 +38,7 @@ describe("the IPv4 confinement warning", () => {
 
   it("is read once a full-tunnel rung is up, before its egress check asks the order", () => {
     const ladder = dashboard.slice(dashboard.indexOf("async function runLadder("));
-    const connect = ladder.indexOf('await invoke("vpn_connect", {');
+    const connect = ladder.indexOf('const dial = invoke("vpn_connect", {');
     const egress = ladder.indexOf("let egress = await confirmEgress(");
     const read = ladder.indexOf("setConfinedAround(status.ipv4Confined === true);", connect);
     expect(connect).toBeGreaterThan(0);

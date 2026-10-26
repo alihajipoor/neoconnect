@@ -18,13 +18,23 @@
  *    once the service has said which (`gapTraffic`), and not before; or,
  *    its word late past its grace (`HOLD_WORD_GRACE_MS`), `lostUnconfirmed`:
  *    reconnecting, and not yet confirmed whether the rest is blocked;
- *  - `back`: verified again after `lost` was said;
+ *    A loss said in held words is said again, plainly (`lost`), if the
+ *    service lets go of the hold while the reconnect runs on -- a rung it
+ *    does not cover, a server it cannot name -- and says why: "blocked"
+ *    must not be the last word over traffic going out without Neoxify;
+ *  - `back`: verified again after `lost` was said -- `backPartial` when
+ *    the screen then says "not fully protected" (IKEv2, a confinement
+ *    refused), which "Neoxify checked that your traffic goes through the
+ *    VPN again" would contradict, and `backUnconfirmed` when the tunnel
+ *    back is one no check has vouched for ("Connected, not confirmed"):
+ *    the loss, said in held words or not, is followed up either way, and
+ *    not as a check that was not made;
  *  - `dropped`: gone, and nothing is reconnecting it (the episode gave up,
- *    or none could start) -- once the service has said it no longer holds
- *    the internet for it: "not protected" while other connections are
- *    still blocked, or may be, would be false, so it waits for the
- *    service's word that nothing is held. Measured on the VM: said 0.3 s
- *    before the release took effect, off a stale "armed".
+ *    or none could start, or the failover gave up) -- once the service has
+ *    said it no longer holds the internet for it: "not protected" while
+ *    other connections are still blocked, or may be, would be false, so it
+ *    waits for the service's word that nothing is held. Measured on the
+ *    VM: said 0.3 s before the release took effect, off a stale "armed".
  * Nothing for the customer's own Disconnect, nothing in Gaming mode, and
  * nothing while the window is in front: the screen already says it. A
  * change seen on screen counts as said, so "back" after a loss the
@@ -38,7 +48,17 @@ import type { ShownTone } from "./hero-model";
 import type { TranslationKey } from "./i18n";
 import type { GapWord } from "./reconnect-hold";
 
-export type NotifyKind = "connected" | "connectedPartial" | "lost" | "lostHeld" | "lostHeldLate" | "lostUnconfirmed" | "back" | "dropped";
+export type NotifyKind =
+  | "connected"
+  | "connectedPartial"
+  | "lost"
+  | "lostHeld"
+  | "lostHeldLate"
+  | "lostUnconfirmed"
+  | "back"
+  | "backPartial"
+  | "backUnconfirmed"
+  | "dropped";
 
 export interface NotifyMemory {
   /** A verified tunnel has been seen since the customer last had nothing up. */
@@ -46,6 +66,9 @@ export interface NotifyMemory {
   /** The loss has been said -- as a toast, or on screen -- and its outcome
    * (back, or dropped) is owed. */
   readonly lostSaid: boolean;
+  /** It was said in held words -- other connections blocked until it's
+   * back -- and nothing since has said otherwise. */
+  readonly heldSaid?: boolean;
 }
 
 export const FRESH_MEMORY: NotifyMemory = { up: false, lostSaid: false };
@@ -53,12 +76,29 @@ export const FRESH_MEMORY: NotifyMemory = { up: false, lostSaid: false };
 export interface NotifyInput {
   /** The calm tone the screen wears now. */
   readonly tone: ShownTone;
-  /** An automatic reconnect is under way. */
+  /** An automatic reconnect is under way -- or the mid-session failover,
+   * with the setting on (`failover`). */
   readonly reconnecting: boolean;
+  /** That reconnect is the mid-session failover, with "Block the internet
+   * while reconnecting" on. Its loss is said only once the service holds
+   * the internet for it -- in held words: on the VM it held for 25 to 84 s
+   * under "Checking connection..." and nothing said so. With nothing held
+   * it says nothing new, as it never has. Its memory is kept meanwhile, so
+   * a loss said is followed by "back". */
+  readonly failover?: boolean;
   /** Where other traffic goes in the gap, as the service has said
    * (`gapTraffic` in reconnect-hold.ts), given its grace (`gapWord`): the
    * one source the main page's sentence reads too. */
   readonly gap: GapWord;
+  /** The service has said it is not holding, and why (`notHeld`): a hold
+   * let go of while the reconnect runs on. Never the app's own release,
+   * whose reply clears the held word before a tunnel it landed is shown. */
+  readonly letGo?: boolean;
+  /** The failover gave up after its loss was said: nothing reconnects it,
+   * and the screen's look may not have caught up -- it wears its pass's
+   * busy look for a render, read as "idle" -- while the loss is still owed
+   * its outcome. */
+  readonly dropped?: boolean;
   /** The window is in front: the screen says it already. */
   readonly focused: boolean;
   readonly gaming: boolean;
@@ -74,26 +114,39 @@ export function notifyStep(memory: NotifyMemory, input: NotifyInput): { memory: 
     case "ok":
     case "caution": {
       const partial = input.tone === "caution";
-      if (memory.lostSaid) return say("back", { up: true, lostSaid: false });
+      if (memory.lostSaid) return say(partial ? "backPartial" : "back", { up: true, lostSaid: false });
       if (!memory.up) return say(partial ? "connectedPartial" : "connected", { up: true, lostSaid: false });
       return { memory, say: null };
     }
     // Past the hold, and only while a reconnect runs: a degraded tunnel's
     // amber is the failover's to fix, and says nothing new.
     case "warn":
-      if (input.reconnecting && memory.up && !memory.lostSaid) {
+      if (!input.reconnecting) return { memory, say: null };
+      if (memory.lostSaid) {
+        // Said in held words, and the service has let go of the hold since,
+        // and said why: traffic goes out without Neoxify now.
+        if (memory.heldSaid === true && input.gap === "open" && input.letGo === true) {
+          return say("lost", { up: true, lostSaid: true });
+        }
+        return { memory, say: null };
+      }
+      if (memory.up) {
         // Which it is, the service's to say first -- within its grace; past
         // it, that it has not said (`HOLD_WORD_GRACE_MS`).
         if (input.gap === "pending") return { memory, say: null };
+        if (input.failover === true && input.gap !== "blocked" && input.gap !== "blockedLate") return { memory, say: null };
+        // The service not answering is neither held nor open: not yet
+        // confirmed, as a word that is late.
         const kind: NotifyKind =
           input.gap === "blocked"
             ? "lostHeld"
             : input.gap === "blockedLate"
               ? "lostHeldLate"
-              : input.gap === "unconfirmed"
+              : input.gap === "unconfirmed" || input.gap === "unanswered"
                 ? "lostUnconfirmed"
                 : "lost";
-        return say(kind, { up: true, lostSaid: true });
+        const held = kind === "lostHeld" || kind === "lostHeldLate";
+        return say(kind, held ? { up: true, lostSaid: true, heldSaid: true } : { up: true, lostSaid: true });
       }
       return { memory, say: null };
     // Gone, and nothing reconnecting -- said once the service has said
@@ -102,12 +155,18 @@ export function notifyStep(memory: NotifyMemory, input: NotifyInput): { memory: 
       if (input.gap !== "open") return { memory, say: null };
       if (memory.up || memory.lostSaid) return say("dropped", FRESH_MEMORY);
       return { memory, say: null };
-    // Nothing up by the customer's own hand, or a press under way.
+    // Nothing up by the customer's own hand, or a press under way -- or a
+    // look that has not caught up with a loss nothing reconnects.
     case "idle":
-      return input.reconnecting ? { memory, say: null } : { memory: FRESH_MEMORY, say: null };
-    // "Not confirmed" and "can't tell" are said on screen; neither is a
-    // change the app has measured.
+      return input.reconnecting || input.dropped === true ? { memory, say: null } : { memory: FRESH_MEMORY, say: null };
+    // A tunnel back that no check has vouched for, after a loss was said:
+    // followed up as that. On the VM a reconnect that landed unverified let
+    // go of the hold and the last toast stayed "blocked until it's back".
     case "hl":
+      if (memory.lostSaid) return say("backUnconfirmed", { up: true, lostSaid: false });
+      return { memory, say: null };
+    // "Can't tell" is said on screen; it is not a change the app has
+    // measured.
     case "muted":
       return { memory, say: null };
   }
@@ -121,6 +180,8 @@ export const NOTIFY_TEXT: Record<NotifyKind, { title: TranslationKey; body: Tran
   lostHeldLate: { title: "notif.lostTitle", body: "notif.lostHeldLateBody" },
   lostUnconfirmed: { title: "notif.lostTitle", body: "notif.lostUnconfirmedBody" },
   back: { title: "notif.backTitle", body: "notif.backBody" },
+  backPartial: { title: "notif.backTitle", body: "notif.backPartialBody" },
+  backUnconfirmed: { title: "notif.backTitle", body: "notif.backUnconfirmedBody" },
   dropped: { title: "notif.droppedTitle", body: "notif.droppedBody" },
 };
 

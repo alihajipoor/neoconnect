@@ -190,3 +190,39 @@ describe("the words", () => {
     expect(fa["notif.lostUnconfirmedBody"]).toContain("تأیید نشده");
   });
 });
+
+// The VM, round 3: the loss said, and followed up by words that did not match
+// the screen. After an IKEv2 landing (O5) "back" said the traffic was checked
+// while the screen said "Connected, not fully protected"; after a landing no
+// check vouched for (F6) nothing was said, and "blocked until it's back"
+// stayed the last word after the hold was let go.
+describe("the loss, followed up as the screen says it", () => {
+  const LOST_HELD: NotifyMemory = { up: true, lostSaid: true, heldSaid: true };
+  const en = DICTIONARIES.en;
+  const fa = DICTIONARIES.fa;
+
+  it("says it is back but not every connection is held, when the screen says so", () => {
+    expect(play([{ tone: "ok" }, { tone: "warn", reconnecting: true }, { tone: "caution" }])).toEqual(["connected", "lost", "backPartial"]);
+    expect(play([{ tone: "caution" }], LOST_HELD)).toEqual(["backPartial"]);
+    expect(NOTIFY_TEXT.backPartial).toEqual({ title: "notif.backTitle", body: "notif.backPartialBody" });
+    expect(en["notif.backPartialBody"]).toMatch(/not every connection/);
+    expect(en["notif.backPartialBody"]).not.toMatch(/checked/);
+    expect(fa["notif.backPartialBody"]).toContain("نگه داشته نمی‌شوند");
+  });
+
+  it("says it is back unconfirmed after a landing no check vouched for, held words or not, once", () => {
+    expect(play([{ tone: "hl" }, { tone: "hl" }, { tone: "ok" }], LOST_HELD)).toEqual(["backUnconfirmed", null, null]);
+    expect(play([{ tone: "ok" }, { tone: "warn", reconnecting: true }, { tone: "hl" }])).toEqual(["connected", "lost", "backUnconfirmed"]);
+    // Nothing lost was said: an unconfirmed tunnel is the screen's to say.
+    expect(play([{ tone: "ok" }, { tone: "hl" }])).toEqual(["connected", null]);
+    expect(NOTIFY_TEXT.backUnconfirmed).toEqual({ title: "notif.backTitle", body: "notif.backUnconfirmedBody" });
+    expect(en["notif.backUnconfirmedBody"]).toMatch(/couldn't confirm/);
+    expect(en["notif.backUnconfirmedBody"]).not.toMatch(/blocked|checked that/);
+    expect(fa["notif.backUnconfirmedBody"]).toContain("نتوانست تأیید کند");
+  });
+
+  it("is never said while the window is in front", () => {
+    expect(play([{ tone: "hl", focused: true }], LOST_HELD)).toEqual([null]);
+    expect(play([{ tone: "caution", focused: true }], LOST_HELD)).toEqual([null]);
+  });
+});
