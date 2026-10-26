@@ -53,8 +53,16 @@ export const FRESH_MEMORY: NotifyMemory = { up: false, lostSaid: false };
 export interface NotifyInput {
   /** The calm tone the screen wears now. */
   readonly tone: ShownTone;
-  /** An automatic reconnect is under way. */
+  /** An automatic reconnect is under way -- or the mid-session failover,
+   * with the setting on (`failover`). */
   readonly reconnecting: boolean;
+  /** That reconnect is the mid-session failover, with "Block the internet
+   * while reconnecting" on. Its loss is said only once the service holds
+   * the internet for it -- in held words: on the VM it held for 25 to 84 s
+   * under "Checking connection..." and nothing said so. With nothing held
+   * it says nothing new, as it never has. Its memory is kept meanwhile, so
+   * a loss said is followed by "back". */
+  readonly failover?: boolean;
   /** Where other traffic goes in the gap, as the service has said
    * (`gapTraffic` in reconnect-hold.ts), given its grace (`gapWord`): the
    * one source the main page's sentence reads too. */
@@ -85,12 +93,15 @@ export function notifyStep(memory: NotifyMemory, input: NotifyInput): { memory: 
         // Which it is, the service's to say first -- within its grace; past
         // it, that it has not said (`HOLD_WORD_GRACE_MS`).
         if (input.gap === "pending") return { memory, say: null };
+        if (input.failover === true && input.gap !== "blocked" && input.gap !== "blockedLate") return { memory, say: null };
+        // The service not answering is neither held nor open: not yet
+        // confirmed, as a word that is late.
         const kind: NotifyKind =
           input.gap === "blocked"
             ? "lostHeld"
             : input.gap === "blockedLate"
               ? "lostHeldLate"
-              : input.gap === "unconfirmed"
+              : input.gap === "unconfirmed" || input.gap === "unanswered"
                 ? "lostUnconfirmed"
                 : "lost";
         return say(kind, { up: true, lostSaid: true });

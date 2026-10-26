@@ -1,21 +1,30 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const calls: string[] = [];
+/** What the mocked service answers a status with. */
+let statusAnswer: unknown = { connected: false };
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (cmd: string) => {
     calls.push(cmd);
-    return Promise.resolve(cmd === "vpn_status" ? { connected: false } : undefined);
+    return Promise.resolve(cmd === "vpn_status" ? statusAnswer : undefined);
   },
 }));
 
 import { AutoReconnect, QUICK_DEATHS_TO_STOP, type Episode, type ReconnectPhase } from "./auto-reconnect";
 import { notifyStep } from "./connection-notify";
+import { DICTIONARIES } from "./i18n";
 import {
   createStatusRelease,
   episodeEndReleases,
   gapTraffic,
   HOLD_HINTS,
   gapWord,
+  hintKey,
+  holdCovers,
+  holdSpoken,
+  switchBody,
+  type GapWord,
+  type HoldScene,
   holdHint,
   holdNote,
   holdNotes,
@@ -49,9 +58,11 @@ const stoppedBy = (why: NonNullable<Extract<ReconnectPhase, { kind: "idle" }>["s
   session: 1,
 });
 const HOLDING: ReconnectHold = { state: "holding", heldSecs: 4 };
+type ShownToneForTest = "idle" | "ok" | "hl" | "caution" | "warn" | "danger" | "muted";
 
 beforeEach(() => {
   calls.length = 0;
+  statusAnswer = { connected: false };
   holdStore.resetForTests();
 });
 
@@ -466,7 +477,7 @@ describe("the sentence under the state", () => {
     expect(holdHint({ state: "armed" }, { reconnecting: true, dropped: false, setting: true })).toBe("hold.unconfirmed");
     expect(holdHint({ state: "armed" }, { reconnecting: false, dropped: true, setting: true })).toBe("hold.unconfirmed");
     expect(holdHint({ state: "armed" }, { reconnecting: false, dropped: false, setting: true })).toBeNull();
-    expect(HOLD_HINTS).toEqual(["hold.holding", "hold.heldAfterDrop", "hold.unconfirmed"]);
+    expect(HOLD_HINTS).toEqual(["hold.holding", "hold.heldAfterDrop", "hold.unconfirmed", "hold.unanswered"]);
   });
 
   it("leaves the headline's own hint when the service says nothing is held, or the setting is off", () => {
@@ -592,6 +603,252 @@ describe("the service calls", () => {
     await holdService.disconnectKeepingHold();
     await holdService.release();
     await holdService.keep();
-    expect(calls).toEqual(["vpn_disconnect_for_reconnect", "vpn_release_reconnect_hold", "vpn_status", "vpn_set_reconnect_hold"]);
+    expect(calls).toEqual([
+      "vpn_disconnect_for_reconnect",
+      "vpn_status",
+      "vpn_release_reconnect_hold",
+      "vpn_status",
+      "vpn_set_reconnect_hold",
+    ]);
+  });
+
+  // The VM, round 2: the failover's teardown put the hold in, and the screen
+  // heard of it only at the next poll, up to two seconds on.
+  it("asks for the hold's word as soon as the teardown that keeps it is answered", async () => {
+    statusAnswer = { connected: false, reconnectHold: { state: "holding", held_secs: 0 } };
+    await holdService.disconnectKeepingHold();
+    expect(calls).toEqual(["vpn_disconnect_for_reconnect", "vpn_status"]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(holdStore.current()).toEqual({ state: "holding", heldSecs: 0 });
+  });
+
+  it("drops that word when something newer has been heard meanwhile", () => {
+    holdStore.observe({ state: "holding", held_secs: 2 });
+    const mark = holdStore.mark();
+    holdStore.released();
+    holdStore.observeSince(mark, { state: "holding", held_secs: 2 });
+    expect(holdStore.current()).toBeNull();
+    const again = holdStore.mark();
+    holdStore.observeSince(again, { state: "armed" });
+    expect(holdStore.current()).toEqual({ state: "armed" });
+  });
+});
+
+// The VM, 2026-10-20 (round 2): the mid-session failover held for 25 to 84 s
+// under "Checking connection..." alone, with no "lost" toast in held words;
+// the degraded "...Your traffic is NOT protected" line stayed 0.4 to 1.0 s
+// into the hold; and between two failed attempts "Couldn't connect." stood
+// 1.3 to 6.3 s over a machine the service still held. The service's word now
+// decides the held words in every phase but a quiet screen.
+describe("the held words in every phase", () => {
+  const LANDED: ReconnectHold = { state: "holding", heldSecs: 2, landed: true };
+  const at = (scene: Partial<HoldScene>, hold: ReconnectHold | null, wordLate = true) =>
+    holdHint(hold, { reconnecting: false, dropped: false, ...scene, setting: true, wordLate });
+  /** What goes under the state, as the main page picks it. */
+  const under = (scene: Partial<HoldScene>, hold: ReconnectHold | null, error: string | null, wordLate = true) =>
+    hintKey(at(scene, hold, wordLate), { teardownShowing: false, error, headline: "headline" });
+
+  it("says it holds through the failover's ladder, over a tunnel still shown up, and between attempts", () => {
+    expect(at({ checking: true }, HOLDING)).toBe("hold.holding");
+    expect(at({ tunnelUp: true }, HOLDING)).toBe("hold.holding");
+    expect(at({ reconnecting: true }, HOLDING)).toBe("hold.holding");
+    expect(at({ dropped: true }, HOLDING)).toBe("hold.heldAfterDrop");
+    expect(holdSpoken(HOLDING, { reconnecting: false, dropped: false, checking: true })).toBe(true);
+    expect(holdSpoken(HOLDING, { reconnecting: false, dropped: false, tunnelUp: true })).toBe(true);
+  });
+
+  it("leaves a tunnel that landed under the hold its own words, and a quiet screen its own", () => {
+    expect(at({ tunnelUp: true }, LANDED)).toBeNull();
+    expect(at({ tunnelUp: true, reconnecting: true }, LANDED)).toBeNull();
+    expect(holdSpoken(LANDED, { reconnecting: false, dropped: false, tunnelUp: true })).toBe(false);
+    expect(at({}, HOLDING)).toBeNull();
+    expect(holdSpoken(HOLDING, { reconnecting: false, dropped: false })).toBe(false);
+  });
+
+  it("never leaves the degraded 'NOT protected' line over a machine it holds, landed or not", () => {
+    // A rung that landed under the hold and is then shown degraded is still
+    // held: its own line ("...Your traffic is NOT protected") would be false.
+    expect(at({ tunnelUp: true, degraded: true }, LANDED)).toBe("hold.holding");
+    expect(at({ tunnelUp: true, degraded: true }, HOLDING)).toBe("hold.holding");
+    expect(holdSpoken(LANDED, { reconnecting: false, dropped: false, tunnelUp: true, degraded: true })).toBe(true);
+    // Not held, it is the degraded line's to say.
+    expect(at({ tunnelUp: true, degraded: true }, { state: "armed" })).toBeNull();
+    expect(at({ tunnelUp: true, degraded: true }, null)).toBeNull();
+  });
+
+  it("claims nothing before the word in a pass or over a tunnel, whose own lines claim nothing either way", () => {
+    expect(at({ checking: true }, { state: "armed" })).toBeNull();
+    expect(at({ tunnelUp: true }, { state: "armed" })).toBeNull();
+    expect(at({ reconnecting: true, tunnelUp: true }, { state: "armed" })).toBeNull();
+    expect(at({ checking: true }, { state: "armed" }, false)).toBeNull();
+    expect(holdSpoken({ state: "armed" }, { reconnecting: false, dropped: false, checking: true })).toBe(false);
+  });
+
+  it("puts the service's word over a connect's error, the error over the headline, and nothing over a teardown", () => {
+    expect(under({ reconnecting: true }, HOLDING, "err.couldNotConnect")).toBe("hold.holding");
+    expect(under({ reconnecting: true }, { state: "armed" }, "err.couldNotConnect")).toBe("hold.unconfirmed");
+    expect(under({ reconnecting: true }, { state: "armed" }, "err.couldNotConnect", false)).toBe("err.couldNotConnect");
+    expect(under({ reconnecting: true }, { state: "armed" }, null, false)).toBeNull();
+    expect(under({ reconnecting: true }, null, "err.couldNotConnect")).toBe("err.couldNotConnect");
+    expect(under({ reconnecting: true }, null, null)).toBe("headline");
+    expect(hintKey("hold.holding", { teardownShowing: true, error: null, headline: "headline" })).toBeNull();
+  });
+
+  it("replays the VM's failover and a reconnect's failed attempts: held words from the hold's first word to its last", () => {
+    // [the scene, the service's word, an error on screen], as the run went.
+    const steps: [Partial<HoldScene>, ReconnectHold | null, string | null][] = [
+      [{ tunnelUp: true }, { state: "armed" }, null], // degraded, before the failover
+      [{ tunnelUp: true }, HOLDING, null], // the ladder's teardown held; the screen still degraded
+      [{ checking: true }, HOLDING, null], // "Checking connection..."
+      [{ checking: true }, HOLDING, null],
+      [{ checking: true, tunnelUp: true }, LANDED, null], // a rung landed under the hold
+      [{ tunnelUp: true }, null, null], // let go of: verified
+      [{ reconnecting: true }, HOLDING, "err.couldNotConnect"], // between two failed attempts
+      [{ reconnecting: true }, HOLDING, null],
+    ];
+    expect(steps.map(([scene, hold, error]) => under(scene, hold, error))).toEqual([
+      "headline",
+      "hold.holding",
+      "hold.holding",
+      "hold.holding",
+      "headline",
+      "headline",
+      "hold.holding",
+      "hold.holding",
+    ]);
+  });
+
+  it("sends the failover's loss in held words once the service holds for it, then that it is back", () => {
+    // The failover, as the main page plays it with the setting on: the
+    // screen degraded (warn, verified before), the ladder's own look (warn,
+    // as a reconnect's), the service's word arriving, the tunnel back.
+    const looks: [ShownToneForTest, GapWord][] = [
+      ["warn", "pending"],
+      ["warn", "unconfirmed"],
+      ["warn", "blocked"],
+      ["warn", "blocked"],
+      ["ok", "open"],
+    ];
+    let memory = { up: true, lostSaid: false };
+    const said = looks.map(([tone, gap]) => {
+      const step = notifyStep(memory, { tone, reconnecting: true, failover: true, gap, focused: false, gaming: false });
+      memory = step.memory;
+      return step.say;
+    });
+    expect(said).toEqual([null, null, "lostHeld", null, "back"]);
+    // With nothing held -- the setting on, the hold refused -- it says
+    // nothing new, as the failover never has.
+    const open = notifyStep({ up: true, lostSaid: false }, { tone: "warn", reconnecting: true, failover: true, gap: "open", focused: false, gaming: false });
+    expect(open.say).toBeNull();
+    expect(open.memory).toEqual({ up: true, lostSaid: false });
+  });
+});
+
+// The VM, round 2: after a service restart the screen said "blocked" for
+// 2.5 s while the service could not be reached -- and the restart had taken
+// the hold away. Unanswered, it is neither claimed nor denied.
+describe("a service that does not answer", () => {
+  it("is said to be being checked, at once, never blocked and never open", () => {
+    holdStore.observe({ state: "holding", held_secs: 3 });
+    holdStore.unanswered();
+    const hold = holdStore.current();
+    expect(hold).toEqual({ state: "unanswered" });
+    expect(gapTraffic(hold, true)).toBe("unanswered");
+    expect(gapTraffic(hold, false)).toBe("open");
+    expect(gapWord("unanswered", false)).toBe("unanswered");
+    expect(holdHint(hold, { reconnecting: true, dropped: false, setting: true, wordLate: false })).toBe("hold.unanswered");
+    expect(holdHint(hold, { reconnecting: false, dropped: true, setting: true, wordLate: false })).toBe("hold.unanswered");
+    expect(holdHint(hold, { reconnecting: false, dropped: false, checking: true, setting: true })).toBe("hold.unanswered");
+    expect(holdHint(hold, { reconnecting: false, dropped: false, tunnelUp: true, setting: true })).toBeNull();
+    expect(notifyStep({ up: true, lostSaid: false }, { tone: "warn", reconnecting: true, gap: "unanswered", focused: false, gaming: false }).say).toBe(
+      "lostUnconfirmed",
+    );
+    expect(notifyStep({ up: true, lostSaid: true }, { tone: "danger", reconnecting: false, gap: "unanswered", focused: false, gaming: false }).say).toBeNull();
+    // Answered again: its word, whatever it is.
+    holdStore.observe(undefined);
+    expect(holdStore.current()).toBeNull();
+  });
+
+  it("leaves nothing said as nothing", () => {
+    holdStore.unanswered();
+    expect(holdStore.current()).toBeNull();
+  });
+});
+
+// The VM, round 2: after Disconnect or "Stop reconnecting" the held sentence
+// outlived the release by 1.0 to 1.25 s, until the next status read.
+describe("letting go, on the reply", () => {
+  it("drops the held words when the service answers the release, before any status is read", async () => {
+    holdStore.observe({ state: "holding", held_secs: 3 });
+    let atRead: ReconnectHold | null | "unread" = "unread";
+    await releaseUntilLetGo({
+      ask: async () => undefined,
+      read: async () => {
+        atRead = holdStore.current();
+        return undefined;
+      },
+      observe: (raw) => holdStore.observe(raw),
+      released: () => holdStore.released(),
+      wait: async () => undefined,
+      now: () => 0,
+    });
+    expect(atRead).toBeNull();
+  });
+
+  it("leaves an armed session armed, and a hold no ask was answered for as it is", async () => {
+    holdStore.observe({ state: "armed" });
+    holdStore.released();
+    expect(holdStore.current()).toEqual({ state: "armed" });
+    holdStore.observe({ state: "holding", held_secs: 3 });
+    await releaseUntilLetGo({
+      ask: async () => {
+        throw new Error("did not answer in time");
+      },
+      read: async () => ({ state: "holding", held_secs: 3 }),
+      observe: (raw) => holdStore.observe(raw),
+      released: () => holdStore.released(),
+      wait: async () => undefined,
+      now: () => 0,
+    });
+    expect(holdStore.current()?.state).toBe("holding");
+  });
+});
+
+// The VM, round 2: the switch confirmation said "...your traffic is not
+// protected" over a machine the service was blocking, before a switch to
+// Built-in (IKEv2) -- which lets go of the block before it dials.
+describe("the switch confirmation while it holds", () => {
+  it("says IKEv2 and Custom mode let go of the block before they connect, and never 'not protected' over it", () => {
+    expect(switchBody("blocked", { covered: false })).toBe("sw.bodyHeldNotCovered");
+    expect(switchBody("blockedLate", { covered: false })).toBe("sw.bodyHeldNotCovered");
+    expect(switchBody("blocked", { covered: true })).toBe("sw.bodyHeld");
+    for (const gap of ["open", "unconfirmed", "unanswered"] as const) expect(switchBody(gap, { covered: false })).toBe("sw.body");
+    expect(holdCovers("IKEV2", false)).toBe(false);
+    expect(holdCovers("XRAY_VLESS_REALITY", true)).toBe(false);
+    expect(holdCovers("WIREGUARD", false)).toBe(true);
+    expect(holdCovers(null, false)).toBe(true);
+  });
+
+  it("in English and Persian, from one source", () => {
+    for (const [language, notProtected, blocked] of [
+      ["en", "not protected", "blocked"],
+      ["fa", "محافظت نمی‌شود", "مسدود"],
+    ] as const) {
+      const words = DICTIONARIES[language];
+      for (const key of ["sw.bodyHeld", "sw.bodyHeldNotCovered", "hold.unanswered"] as const) {
+        expect(words[key], `${language} ${key}`).toBeTruthy();
+        expect(words[key], `${language} ${key}`).not.toContain(notProtected);
+      }
+      expect(words["sw.bodyHeldNotCovered"]).toContain("IKEv2");
+      expect(words["sw.bodyHeldNotCovered"]).toContain(blocked);
+      expect(words["sw.body"]).toContain(notProtected);
+    }
+  });
+
+  it("says, unanswered, that it is checking -- never that they are still blocked, nor that they are not", () => {
+    expect(DICTIONARIES.en["hold.unanswered"]).toContain("checking");
+    expect(DICTIONARIES.en["hold.unanswered"]).not.toMatch(/still|without Neoxify|not protected/);
+    expect(DICTIONARIES.fa["hold.unanswered"]).toContain("در حال بررسی");
+    expect(DICTIONARIES.fa["hold.unanswered"]).not.toMatch(/هنوز|بدون نئوکسیفای|محافظت نمی‌شود/);
   });
 });

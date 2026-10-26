@@ -1236,6 +1236,13 @@ const en = {
   "sw.title": "Switch to {place}?",
   "sw.titleAuto": "Switch to Automatic?",
   "sw.body": "Neoxify disconnects and connects again. Until the new connection is checked, your traffic is not protected.",
+  // While the service holds the internet ("Block the internet while
+  // reconnecting"): never "not protected" over a machine it is blocking.
+  // A connection it covers may let go while it switches (a pass dialling is
+  // stopped by a plain teardown); one it does not cover lets go before it
+  // is made (switchBody in lib/reconnect-hold.ts).
+  "sw.bodyHeld": "Neoxify connects again, to the new place. Other connections on this computer are blocked now, as you set; while it switches, they may go out without Neoxify until the new connection is checked.",
+  "sw.bodyHeldNotCovered": "Other connections on this computer are blocked now, as you set. Built-in (IKEv2) and Custom mode aren't covered by that block, so Neoxify lets go of it before this connection is made. Until the new connection is checked, your traffic goes out without Neoxify.",
   "sw.go": "Switch",
   "sw.stay": "Stay connected",
   "dash.noProvision": "No connection is set up on your subscription.",
@@ -1280,6 +1287,10 @@ const en = {
   // claim either way -- not "going out without Neoxify", which is false the
   // moment it is in, nor "blocked", which nothing has confirmed yet.
   "hold.unconfirmed": "The tunnel closed. Neoxify is checking whether other connections on this computer are blocked, as you set.",
+  // The service did not answer -- restarting, or not running -- so the
+  // block is neither claimed nor denied: after a restart it is gone. Not
+  // "still blocked" either, which says they were.
+  "hold.unanswered": "Neoxify's service isn't answering right now, so Neoxify is checking whether other connections on this computer are blocked, as you set.",
   "hold.filtersRefused": "The internet could not be blocked while reconnecting: Windows refused the filters. Your traffic goes out without Neoxify until it's back.",
   "hold.tunnelNotPermitted": "Stopped blocking the internet so the new connection could carry traffic.",
   "hold.timedOut": "Stopped blocking the internet after 40 minutes of reconnecting, so this computer isn't left offline. Your traffic goes out without Neoxify until it's back.",
@@ -2252,6 +2263,8 @@ const fa: Record<TranslationKey, string> = {
   "sw.title": "تغییر به {place}؟",
   "sw.titleAuto": "تغییر به حالت خودکار؟",
   "sw.body": "نئوکسیفای اتصال را قطع می‌کند و دوباره وصل می‌شود. تا زمانی که اتصال جدید بررسی شود، ترافیک شما محافظت نمی‌شود.",
+  "sw.bodyHeld": "نئوکسیفای دوباره، این بار به مکان جدید، وصل می‌شود. طبق تنظیم شما، اتصال‌های دیگر این رایانه الان مسدود هستند؛ اما هنگام تغییر، ممکن است تا بررسی اتصال جدید بدون نئوکسیفای ارسال شوند.",
+  "sw.bodyHeldNotCovered": "طبق تنظیم شما، اتصال‌های دیگر این رایانه الان مسدود هستند. Built-in (IKEv2) و حالت سفارشی زیر پوشش این مسدودسازی نیستند؛ برای همین نئوکسیفای پیش از برقراری این اتصال، مسدودسازی را برمی‌دارد. تا زمانی که اتصال جدید بررسی شود، ترافیک شما بدون نئوکسیفای ارسال می‌شود.",
   "sw.go": "تغییر",
   "sw.stay": "متصل بمانید",
   "dash.noProvision": "روی اشتراک شما اتصالی تنظیم نشده است.",
@@ -2290,6 +2303,7 @@ const fa: Record<TranslationKey, string> = {
   "hold.heldAfterDrop": "طبق تنظیم شما، اتصال‌های دیگر این رایانه هنوز مسدود هستند تا نئوکسیفای این مسدودسازی را بردارد. برای برگشتن به اینترنت، دوباره وصل شوید.",
   "hold.heldLate": "در وایرگارد، مسدودسازی در زمان اتصال آماده نگه داشته نشد؛ برای همین لحظه‌ای پس از بسته شدن تونل اعمال شد. ممکن است در همان لحظه ترافیکی بدون نئوکسیفای ارسال شده باشد.",
   "hold.unconfirmed": "تونل بسته شد. نئوکسیفای در حال بررسی است که آیا اتصال‌های دیگر این رایانه، طبق تنظیم شما، مسدود هستند یا نه.",
+  "hold.unanswered": "سرویس نئوکسیفای الان پاسخ نمی‌دهد؛ برای همین نئوکسیفای در حال بررسی است که آیا اتصال‌های دیگر این رایانه، طبق تنظیم شما، مسدود هستند یا نه.",
   "hold.filtersRefused": "هنگام اتصال دوباره نمی‌شد اینترنت را مسدود کرد: ویندوز فیلترها را نپذیرفت. تا برگشتن اتصال، ترافیک شما بدون نئوکسیفای ارسال می‌شود.",
   "hold.tunnelNotPermitted": "مسدودسازی اینترنت متوقف شد تا اتصال جدید بتواند ترافیک را عبور دهد.",
   "hold.timedOut": "پس از ۴۰ دقیقه تلاش برای اتصال دوباره، مسدودسازی اینترنت متوقف شد تا این رایانه بدون اینترنت نماند. تا برگشتن اتصال، ترافیک شما بدون نئوکسیفای ارسال می‌شود.",
