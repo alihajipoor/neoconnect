@@ -142,17 +142,20 @@ pub fn stands_while_up(profile: &ConnectProfile) -> bool {
 }
 
 /// The longest it holds with no tunnel up. An auto-reconnect waits at
-/// most half an hour for a network (`BLOCKED_WAIT_MAX_MS` in the app) and
-/// spends a few minutes dialling; past this, something has gone wrong, and
-/// the machine is given its networking back.
+/// most half an hour for a network at a time (`BLOCKED_WAIT_MAX_MS` in the
+/// app) and spends a few minutes dialling; past this, the machine is given
+/// its networking back.
 ///
-/// The app owns the timeout: its episode ends at half an hour and lets go
-/// of the hold then (`episodeEndReleases`), and this is the backstop
-/// behind it, for an app whose release never arrives -- longer than the
-/// app's wait and its last attempt together, which reconnect-hold.wiring
-/// .test.ts holds it to. So with a working app it is never reached, and the
-/// VM reaches it through the test switch `hold-longest-secs`
-/// (`TestSwitches::longest_secs`, `HoldOps::longest`).
+/// The app does not own this timeout alone. Its half hour bounds one wait,
+/// not the episode: each wait -- between attempts, and a rung's own for a
+/// network -- starts its own clock, so on a network that keeps dropping
+/// one episode can hold past this while the app works as it should. This
+/// let-go then fires and is said as what it is (`hold.timedOut` in the
+/// app); a later drop it holds for -- a covered rung that came up and
+/// failed -- starts a clock of its own. It is longer than one wait and an
+/// attempt together, which reconnect-hold.wiring.test.ts holds it to, so a
+/// single wait never reaches it. The VM reaches it through the test switch
+/// `hold-longest-secs` (`TestSwitches::longest_secs`, `HoldOps::longest`).
 pub const HOLD_LONGEST: Duration = Duration::from_secs(40 * 60);
 
 /// How long a hold a drop began waits for a reconnect to follow it -- a

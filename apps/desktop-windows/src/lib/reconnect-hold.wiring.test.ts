@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ATTEMPT_MAX_MS, BLOCKED_WAIT_MAX_MS } from "./auto-reconnect";
+import { DICTIONARIES } from "./i18n";
 import { RECONNECT_HOLD_OFFERED, RECONNECT_HOLD_PROVEN } from "./reconnect-hold";
 
 /** "Block the internet while reconnecting" is not offered until a capture
@@ -211,12 +212,26 @@ describe("the reconnect hold's gate", () => {
   });
 
   // The VM, round 3 (F7): the app ended its wait at 30 minutes and let go, so
-  // the service's 40-minute let-go never ran and was never seen to.
-  it("leaves the timeout to the app's episode, with the service's own let-go behind it and reachable on the VM", () => {
+  // the service's 40-minute let-go never ran and was never seen to. Round 4:
+  // the app's half hour bounds one wait, not an episode -- each wait starts
+  // its own clock -- so the 40 minutes can be reached while the app works,
+  // and nothing claims otherwise.
+  it("keeps the service's own let-go past one wait and an attempt, claims no more for it, and reaches it on the VM", () => {
     const hold = repo("apps/desktop-windows/service/src/engines/reconnect_hold.rs");
     const longest = hold.match(/pub const HOLD_LONGEST: Duration = Duration::from_secs\((\d+) \* 60\);/);
     expect(longest).not.toBeNull();
+    // One wait and one attempt never reach it; an episode of several may.
     expect(Number(longest![1]) * 60_000).toBeGreaterThan(BLOCKED_WAIT_MAX_MS + ATTEMPT_MAX_MS);
+    const reconnect = source("./auto-reconnect.ts");
+    for (const [file, text] of [
+      ["reconnect_hold.rs", hold],
+      ["auto-reconnect.ts", reconnect],
+    ] as const) {
+      expect(text, file).not.toMatch(/The app owns the timeout|the one owner of\s+(?:\/\/\/\s+|\*\s+)?how long|it is never reached/);
+      expect(text, file).toMatch(/bounds one wait,\s+(?:\/\/\/\s+|\*\s+)?not the episode/);
+    }
+    // When it fires it is said as what it is, in both languages.
+    for (const language of ["en", "fa"] as const) expect(DICTIONARIES[language]["hold.timedOut"], language).toBeTruthy();
     // Every status poll goes by what the ops say, which a test build reads
     // from the guest's switch file.
     expect(hold).toContain("if !self.expire_if_due(tunnel_up, self.ops.longest()) {");

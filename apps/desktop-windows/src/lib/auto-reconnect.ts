@@ -89,13 +89,17 @@ export const QUICK_DEATHS_TO_STOP = 3;
  * a tunnel coming back on its own long after. The same for a pass the
  * phone app was away from that long (`awayChanged`).
  *
- * With "Block the internet while reconnecting" on, this is the one owner of
- * how long the machine is held: the episode ends here and lets go of the
- * hold (`episodeEndReleases`). The service's own let-go after forty
- * minutes (`HOLD_LONGEST` in service/src/engines/reconnect_hold.rs) is the
- * backstop behind it, for a release that never arrives, and is kept longer
- * than this and the last attempt together (reconnect-hold.wiring.test.ts);
- * the VM reaches it with the test switch `hold-longest-secs`. */
+ * With "Block the internet while reconnecting" on, an episode that ends here
+ * lets go of the hold (`episodeEndReleases`) -- but this bounds one wait,
+ * not the episode: each wait, between attempts and a rung's own for a
+ * network, starts its own clock, so on a network that keeps dropping one
+ * episode can hold the machine past forty minutes. The service's own
+ * let-go after forty minutes with no tunnel (`HOLD_LONGEST` in
+ * service/src/engines/reconnect_hold.rs) then fires while the app is still
+ * working, and is said as what it is (`hold.timedOut`); the next drop it
+ * holds for starts a clock of its own. It is longer than one wait and an
+ * attempt together (reconnect-hold.wiring.test.ts), so a single wait never
+ * reaches it; the VM reaches it with the test switch `hold-longest-secs`. */
 export const BLOCKED_WAIT_MAX_MS = 30 * 60_000;
 
 /** The longest one attempt is waited for without a sign of life before it
