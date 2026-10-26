@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ConnectionState } from "../components/ConnectOrb";
 import { headlineFor } from "./connection-evidence";
 import { pressFor } from "./connect-intent";
-import { chipFor, hintTone, ipFor, lineFor, pillFor, planCaution, secondaryFor, shownTone } from "./hero-model";
+import { announcedAtOnce, chipFor, hintTone, ipFor, lineFor, pillFor, planCaution, secondaryFor, shownTone } from "./hero-model";
 import { DICTIONARIES } from "./i18n";
 import { orbTone } from "./orb-caution";
 
@@ -121,6 +121,23 @@ describe("the calm tone the screen wears", () => {
     expect(hintTone("warn")).toBe("warn");
     expect(hintTone("danger")).toBe("danger");
     expect(hintTone("idle", { failed: true })).toBe("caution");
+  });
+});
+
+// The VM, 2026-10-20 (round 2): the screen reader's live region still held
+// "Not carrying traffic. ...Your traffic is NOT protected" 0.8 s into a hold
+// that had made it false, while the screen said "Checking connection...".
+describe("the screen reader's region", () => {
+  const DEGRADED = "Not carrying traffic. The tunnel is up but the server isn't responding. Your traffic is NOT protected.";
+  const CHECKING = "Checking connection.... Other connections on this computer are blocked until Neoxify reconnects, as you set.";
+
+  it("lets go of what it said the moment the words change; the new ones wait to settle", () => {
+    expect(announcedAtOnce(DEGRADED, CHECKING)).toBe("");
+    expect(announcedAtOnce("", CHECKING)).toBe("");
+  });
+
+  it("keeps what it says while the words stay the same", () => {
+    expect(announcedAtOnce(CHECKING, CHECKING)).toBe(CHECKING);
   });
 });
 

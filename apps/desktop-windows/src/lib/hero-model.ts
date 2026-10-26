@@ -118,6 +118,16 @@ export function hintTone(shown: ShownTone, { failed = false }: { failed?: boolea
   return null;
 }
 
+/** What the screen reader's live region holds the moment the state's words
+ * change to `next`, before they have settled: nothing, unless they are what
+ * it holds already. The new words wait to be said, as ever; the old ones
+ * are not left standing for that wait. On the VM the region held
+ * "...Your traffic is NOT protected" 0.8 s into a hold that had made it
+ * false, while the screen already said something else. */
+export function announcedAtOnce(said: string, next: string): string {
+  return said === next ? said : "";
+}
+
 export type PillVariant = "primary" | "primary-busy" | "busy";
 
 export interface PillModel {
