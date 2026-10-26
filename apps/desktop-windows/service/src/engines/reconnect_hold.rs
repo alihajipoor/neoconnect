@@ -145,6 +145,14 @@ pub fn stands_while_up(profile: &ConnectProfile) -> bool {
 /// most half an hour for a network (`BLOCKED_WAIT_MAX_MS` in the app) and
 /// spends a few minutes dialling; past this, something has gone wrong, and
 /// the machine is given its networking back.
+///
+/// The app owns the timeout: its episode ends at half an hour and lets go
+/// of the hold then (`episodeEndReleases`), and this is the backstop
+/// behind it, for an app whose release never arrives -- longer than the
+/// app's wait and its last attempt together, which reconnect-hold.wiring
+/// .test.ts holds it to. So with a working app it is never reached, and the
+/// VM reaches it through the test switch `hold-longest-secs`
+/// (`TestSwitches::longest_secs`, `HoldOps::longest`).
 pub const HOLD_LONGEST: Duration = Duration::from_secs(40 * 60);
 
 /// How long a hold a drop began waits for a reconnect to follow it -- a
@@ -517,6 +525,12 @@ pub trait HoldOps: Send + Sync {
     fn refuse_standing(&self) -> Option<String> {
         None
     }
+    /// The longest it holds with no tunnel up: `HOLD_LONGEST`, but for
+    /// the VM's test switch (`TestSwitches::longest_secs`), in a build
+    /// that has it.
+    fn longest(&self) -> Duration {
+        HOLD_LONGEST
+    }
 }
 
 /// Whether this build carries the VM's test switches for the hold
@@ -551,6 +565,11 @@ pub struct TestSwitches {
     /// wireguard.exe resolves and dials it as ever. Armed without standing,
     /// and a reconnect onto it lets go of the hold before it dials.
     pub unname_wireguard_server: bool,
+    /// `hold-longest-secs=<n>`: the hold lets go after `n` seconds with
+    /// no tunnel rather than `HOLD_LONGEST`, so the VM reaches the
+    /// service's own backstop inside the app's half-hour wait, which
+    /// otherwise always ends first.
+    pub longest_secs: Option<u64>,
 }
 
 impl TestSwitches {
@@ -561,7 +580,11 @@ impl TestSwitches {
             match line {
                 "refuse-standing" => switches.refuse_standing = true,
                 "unname-wireguard-server" => switches.unname_wireguard_server = true,
-                _ => {}
+                _ => {
+                    if let Some(secs) = line.strip_prefix("hold-longest-secs=") {
+                        switches.longest_secs = secs.trim().parse().ok();
+                    }
+                }
             }
         }
         switches
@@ -663,6 +686,10 @@ impl HoldOps for System {
         TestSwitches::read(&self.data_dir)
             .refuse_standing
             .then(|| "refused by the VM's test switch (refuse-standing), as WFP refusing them would be".to_string())
+    }
+
+    fn longest(&self) -> Duration {
+        TestSwitches::read(&self.data_dir).longest_secs.map_or(HOLD_LONGEST, Duration::from_secs)
     }
 }
 
@@ -888,6 +915,17 @@ impl Hold {
         // to move the hold onto. Left as it is, armed as it was.
         if state.holding() && state.engaged_by == Some(generation) {
             return true;
+        }
+        // A session armed that is not the one armed before, with nothing
+        // held: why the last hold was let go of -- no reconnect followed it,
+        // held too long, a connection it did not cover -- was about a drop
+        // that is over, and this session is armed (`report`). Left standing
+        // ahead of "armed", it said "not held" over an armed tunnel, and the
+        // app that traffic was going out without Neoxify, until that
+        // tunnel's own drop was held and read (the VM, round 3, F3). Why
+        // this arming refuses anything is said below, after this.
+        if !state.holding() && state.armed.as_ref().map(|(armed, _, _)| *armed) != Some(generation) {
+            state.problem = None;
         }
         // The same session armed again: never narrower than before.
         let plan = match &state.armed {
@@ -1314,7 +1352,7 @@ impl Hold {
     pub fn tend(&self, live: Option<u64>) {
         self.settle_standing(live);
         let tunnel_up = live.is_some() && live != self.lock().engaged_by;
-        if !self.expire_if_due(tunnel_up, HOLD_LONGEST) {
+        if !self.expire_if_due(tunnel_up, self.ops.longest()) {
             self.reread(Instant::now());
         }
     }
@@ -1863,11 +1901,16 @@ mod tests {
         dns: Mutex<Option<Vec<IpAddr>>>,
         /// The VM's test switch `refuse-standing`, as the test sets it.
         refuse_standing: Mutex<Option<String>>,
+        /// And `hold-longest-secs`.
+        longest: Mutex<Option<Duration>>,
     }
 
     impl HoldOps for Fake {
         fn refuse_standing(&self) -> Option<String> {
             self.refuse_standing.lock().unwrap().clone()
+        }
+        fn longest(&self) -> Duration {
+            self.longest.lock().unwrap().unwrap_or(HOLD_LONGEST)
         }
         fn install(&self, plan: &Plan) -> Result<Installed, String> {
             if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
@@ -2023,6 +2066,47 @@ mod tests {
         assert!(!hold.expire_if_due(false, HOLD_LONGEST), "let go of at once");
         assert!(!hold.expire_if_due(true, Duration::ZERO), "let go of under a live tunnel");
         assert!(hold.expire_if_due(false, Duration::ZERO));
+        assert!(matches!(hold.report(None), Some(Report::NotHeld { problem: ReconnectHoldProblem::TimedOut, .. })));
+    }
+
+    /// Why a hold was let go of is about a drop that is over, and is not said
+    /// over the next session armed: that one is armed, and its own drop is
+    /// held. Said "not held" ahead of it, the app said traffic was going out
+    /// without Neoxify over an armed tunnel (the VM, round 3, F3).
+    #[test]
+    fn a_session_armed_after_a_let_go_is_said_armed() {
+        let (hold, _fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), false);
+        hold.engage(7, "a drop");
+        assert!(hold.let_go_if_unfollowed(false, Duration::ZERO));
+        assert!(matches!(hold.report(None), Some(Report::NotHeld { problem: ReconnectHoldProblem::Other, .. })));
+        // The dropped session armed again is still that drop's.
+        hold.arm(7, plan(), false);
+        assert!(matches!(hold.report(Some(7)), Some(Report::NotHeld { .. })));
+        hold.arm(8, plan(), false);
+        assert_eq!(hold.report(Some(8)), Some(Report::Armed), "a let-go from before said over an armed tunnel");
+        assert!(hold.engage(8, "a drop"));
+        assert!(matches!(hold.report(None), Some(Report::Holding { .. })));
+    }
+
+    /// What every status poll does lets go after the longest its ops give:
+    /// `HOLD_LONGEST`, or the VM's test switch, which reaches the backstop
+    /// inside the app's own half-hour wait.
+    #[test]
+    fn every_poll_lets_go_after_the_longest_its_ops_give() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), false);
+        hold.engage(7, "a drop");
+        hold.followed();
+        hold.tend(None);
+        assert!(hold.holding(), "let go of at once");
+        *fake.longest.lock().unwrap() = Some(Duration::ZERO);
+        hold.tend(Some(8));
+        assert!(hold.holding(), "let go of under a live tunnel");
+        hold.tend(None);
+        assert!(!hold.holding(), "the poll did not go by the longest its ops give");
         assert!(matches!(hold.report(None), Some(Report::NotHeld { problem: ReconnectHoldProblem::TimedOut, .. })));
     }
 
@@ -2537,8 +2621,13 @@ mod tests {
     fn the_test_switches_are_read_only_in_a_build_that_has_them() {
         assert!(!TEST_SWITCHES_BUILT_IN, "a build that set nothing carries the VM's test switches");
         let text = "# gate 1b\nrefuse-standing\n  unname-wireguard-server  # the second\nsomething else\n";
-        assert_eq!(TestSwitches::parse(text), TestSwitches { refuse_standing: true, unname_wireguard_server: true });
-        assert_eq!(TestSwitches::parse("unname-wireguard-server"), TestSwitches { refuse_standing: false, unname_wireguard_server: true });
+        assert_eq!(TestSwitches::parse(text), TestSwitches { refuse_standing: true, unname_wireguard_server: true, longest_secs: None });
+        assert_eq!(
+            TestSwitches::parse("unname-wireguard-server"),
+            TestSwitches { refuse_standing: false, unname_wireguard_server: true, longest_secs: None }
+        );
+        assert_eq!(TestSwitches::parse("hold-longest-secs=180  # three minutes").longest_secs, Some(180));
+        assert_eq!(TestSwitches::parse("hold-longest-secs=soon").longest_secs, None);
         assert_eq!(TestSwitches::parse("# refuse-standing"), TestSwitches::default());
 
         let dir = std::env::temp_dir().join(format!("neoxify-hold-switches-{}", std::process::id()));
