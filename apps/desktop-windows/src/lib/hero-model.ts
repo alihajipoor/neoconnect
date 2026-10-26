@@ -128,6 +128,20 @@ export function announcedAtOnce(said: string, next: string): string {
   return said === next ? said : "";
 }
 
+/** How long a state's words have to stand before they are spoken: long
+ * enough that a pass's rungs and a one-second re-check never are. */
+export const SETTLE_MS = 900;
+
+/** What the live region is given once `text` has stood `SETTLE_MS`, when
+ * `spoken` is what it last said that way: the words -- or nothing (null)
+ * when they are those words again, back from a blip shorter than
+ * `SETTLE_MS`. The region was emptied for the blip (`announcedAtOnce`), and
+ * filled again they would be a new addition, said again over a state that
+ * never changed. */
+export function announcedOnSettle(spoken: string, text: string): string | null {
+  return text === spoken ? null : text;
+}
+
 export type PillVariant = "primary" | "primary-busy" | "busy";
 
 export interface PillModel {
