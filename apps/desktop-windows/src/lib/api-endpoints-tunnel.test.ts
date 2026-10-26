@@ -98,7 +98,7 @@ describe("the endpoint order with a tunnel up", () => {
    * own answer about the tunnel after that (`tunnelServerFromService`). */
   it("is told by the Windows screen as each rung is dialled, and follows the service after", () => {
     const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
-    const dial = dashboard.indexOf('await invoke("vpn_connect", {');
+    const dial = dashboard.indexOf('const dial = invoke("vpn_connect", {');
     const told = dashboard.lastIndexOf("setEndpointTunnelServer(tunnelServer);", dial);
     expect(told).toBeGreaterThan(0);
     expect(dashboard.slice(told, dial)).not.toContain("await ");

@@ -185,7 +185,7 @@ describe("the Windows ladder waits on the same rung", () => {
     // the few seconds every 30 s retry took to be refused again, and back.
     expect(retried.length).toBeGreaterThan(0);
     expect(retried).not.toContain("showNetworkWait(false)");
-    const taken = ladder.slice(ladder.indexOf('await invoke("vpn_connect", {'));
+    const taken = ladder.slice(ladder.indexOf('const dial = invoke("vpn_connect", {'));
     const close = taken.indexOf("});");
     expect(taken.slice(close, close + 120)).toContain("showNetworkWait(false);");
     // An outcome other than no network ends the wait too.
@@ -237,7 +237,7 @@ describe("the Windows ladder waits on the same rung", () => {
     expect(retried).toContain("redialAfterWait = true;");
     const prologue = ladder.slice(
       ladder.indexOf("for (let index = 0; index < candidates.length; index += 1) {"),
-      ladder.indexOf('await invoke("vpn_connect", {'),
+      ladder.indexOf('const dial = invoke("vpn_connect", {'),
     );
     const beside = prologue.indexOf(
       "const ipv6Beside = redialAfterWait && ipv6BaselineRef.current === null ? captureIpv6Baseline() : null;",

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { ATTEMPT_MAX_MS, BLOCKED_WAIT_MAX_MS } from "./auto-reconnect";
 import { RECONNECT_HOLD_OFFERED, RECONNECT_HOLD_PROVEN } from "./reconnect-hold";
 
 /** "Block the internet while reconnecting" is not offered until a capture
@@ -88,8 +89,12 @@ describe("the reconnect hold's gate", () => {
   it("hears the service on every status read, says it is checking when none is answered, and drops the held words on a release's reply", () => {
     const dash = source("../screens/Dashboard.tsx");
     const status = dash.slice(dash.indexOf("function serviceStatus(): Promise<VpnStatus> {"), dash.indexOf("function serviceDisconnect(): Promise<void> {"));
-    expect(status).toContain("holdStore.observe(status.reconnectHold);");
-    expect(status).toContain("holdStore.unanswered();");
+    // Taken with when the read was sent: never put back over the app's own
+    // word on the hold that came after it (`observeRead`).
+    expect(status).toContain("const mark = holdStore.decisionMark();");
+    expect(status).toContain("holdStore.observeRead(mark, status.reconnectHold);");
+    expect(status).toContain("holdStore.unanswered(serviceGone(err));");
+    expect(dash).not.toContain("holdStore.observe(status.reconnectHold);");
     const disconnect = dash.slice(dash.indexOf("function serviceDisconnect(): Promise<void> {"));
     expect(disconnect.slice(0, disconnect.indexOf("\n}\n"))).toContain("holdStore.released();");
     const hold = source("./reconnect-hold.ts");
@@ -143,7 +148,7 @@ describe("the reconnect hold's gate", () => {
   it("asks the switch confirmation what the hold covers, from the service's word", () => {
     const dash = source("../screens/Dashboard.tsx");
     expect(dash).toContain("covered: holdCovers(route?.protocol ?? null, customConfigured || splitTunnelActive),");
-    expect(dash).toContain("description={t(switchBody(gap, { covered: switchAsk?.covered ?? true }))}");
+    expect(dash).toContain("description={t(switchBody(gap, { covered: switchAsk?.covered ?? true, inGap: inHoldGap }))}");
     expect(dash).not.toContain('description={t("sw.body")}');
   });
 
@@ -164,5 +169,51 @@ describe("the reconnect hold's gate", () => {
         expect(gated, `${path}: ${line.trim()}`).toBe(reads);
       }
     }
+  });
+
+  // The VM, round 3 (F1, F2): the let-go of a connect the hold does not
+  // cover was heard only after that connect had dialled, and one inside a
+  // covered connect only at the next poll.
+  it("says a connect the hold does not cover lets go before it is sent, and reads the word while one it covers dials", () => {
+    const dash = source("../screens/Dashboard.tsx");
+    const letting = dash.indexOf('if (holdSetting && !holdCovers(candidate.protocol, customMode)) holdStore.lettingGo("notCovered");');
+    const sent = dash.indexOf('const dial = invoke("vpn_connect", {');
+    expect(letting).toBeGreaterThan(-1);
+    expect(sent).toBeGreaterThan(letting);
+    const after = dash.slice(sent);
+    expect(after.slice(0, after.indexOf("showNetworkWait(false);"))).toContain("await dialledUnderHold(dial);");
+    expect(dash).toContain(
+      'return holdStore.dialling(holdStore.current()?.state === "holding" ? readWhileDialling(dial, { read: serviceStatus }) : dial);',
+    );
+    // The one connect the screen sends.
+    expect(dash.split('invoke("vpn_connect"').length).toBe(2);
+    // A service not there at all is said as gone wherever the gap's calls meet it.
+    expect(dash).toContain("if (serviceGone(err)) holdStore.unanswered(true);\n          const classified = classifyConnectionError(err);");
+    const disconnect = dash.slice(dash.indexOf("function serviceDisconnect(): Promise<void> {"));
+    expect(disconnect.slice(0, disconnect.indexOf("\n}\n"))).toContain("if (serviceGone(err)) holdStore.unanswered(true);");
+  });
+
+  // F3: the teardown that keeps the hold says it on its own answer.
+  it("says a reconnect's teardown over an armed tunnel held on its answer, before the read it sends", () => {
+    const hold = source("./reconnect-hold.ts");
+    const keeping = hold.slice(hold.indexOf("async disconnectKeepingHold(): Promise<void> {"));
+    const body = keeping.slice(0, keeping.indexOf("\n  },\n"));
+    const held = body.indexOf("holdStore.heldNow();");
+    expect(held).toBeGreaterThan(body.indexOf('invoke<void>("vpn_disconnect_for_reconnect")'));
+    expect(body.indexOf('invoke<{ reconnectHold?: unknown }>("vpn_status")')).toBeGreaterThan(held);
+  });
+
+  // The VM, round 3 (F7): the app ended its wait at 30 minutes and let go, so
+  // the service's 40-minute let-go never ran and was never seen to.
+  it("leaves the timeout to the app's episode, with the service's own let-go behind it and reachable on the VM", () => {
+    const hold = repo("apps/desktop-windows/service/src/engines/reconnect_hold.rs");
+    const longest = hold.match(/pub const HOLD_LONGEST: Duration = Duration::from_secs\((\d+) \* 60\);/);
+    expect(longest).not.toBeNull();
+    expect(Number(longest![1]) * 60_000).toBeGreaterThan(BLOCKED_WAIT_MAX_MS + ATTEMPT_MAX_MS);
+    // Every status poll goes by what the ops say, which a test build reads
+    // from the guest's switch file.
+    expect(hold).toContain("if !self.expire_if_due(tunnel_up, self.ops.longest()) {");
+    expect(hold).toContain('if let Some(secs) = line.strip_prefix("hold-longest-secs=") {');
+    expect(hold).toContain("TestSwitches::read(&self.data_dir).longest_secs.map_or(HOLD_LONGEST, Duration::from_secs)");
   });
 });

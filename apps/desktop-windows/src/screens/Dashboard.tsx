@@ -139,6 +139,7 @@ import {
   holdWanted,
   landingReleases,
   passTeardown,
+  readWhileDialling,
   switchBody,
   type HoldScene,
 } from "../lib/reconnect-hold";
@@ -163,7 +164,7 @@ import {
   type ReconnectAttempt,
   type ReconnectStop,
 } from "../lib/auto-reconnect";
-import { isServiceTimeout, withTimeout } from "../lib/service-call";
+import { isServiceTimeout, serviceGone, withTimeout } from "../lib/service-call";
 import { PROBE_CAP_MS, statusDisturbances } from "../lib/status-disturbance";
 import {
   concludeIntent,
@@ -263,29 +264,49 @@ const NOT_THE_NETWORK = new Set(["concurrentLimit", "quotaExhausted", "subscript
  * A call that can hang forever is a state that can stay on screen
  * forever -- see service-call for the teardown that proved it. */
 function serviceStatus(): Promise<VpnStatus> {
+  // A read sent before the app says something of its own about the hold --
+  // a release answered, a connect the hold does not cover sent -- is older
+  // than that, and its "holding" is not taken over it (`observeRead`).
+  const mark = holdStore.decisionMark();
   return withTimeout(invoke<VpnStatus>("vpn_status"), "vpn_status").then(
     (status) => {
       // The service's word on the reconnect hold, from every read: the one
       // source the held words read, in every phase (lib/reconnect-hold.ts).
-      holdStore.observe(status.reconnectHold);
+      holdStore.observeRead(mark, status.reconnectHold);
       return status;
     },
     (err: unknown) => {
       // Unanswered -- a restart -- and whatever it last said about the hold
       // is no longer known: after a restart it is gone. Said as being
-      // checked, never as blocked nor as open.
-      holdStore.unanswered();
+      // checked, never as blocked nor as open. Not for a read a connect on
+      // the wire left unanswered, unless the service is not there at all.
+      holdStore.unanswered(serviceGone(err));
       throw err;
     },
   );
 }
 
 function serviceDisconnect(): Promise<void> {
-  return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect").then(() => {
-    // A Disconnect lets go of the hold on receipt: dropped from the screen
-    // with its reply, not at the next status (`holdStore.released`).
-    holdStore.released();
-  });
+  return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect").then(
+    () => {
+      // A Disconnect lets go of the hold on receipt: dropped from the screen
+      // with its reply, not at the next status (`holdStore.released`).
+      holdStore.released();
+    },
+    (err: unknown) => {
+      if (serviceGone(err)) holdStore.unanswered(true);
+      throw err;
+    },
+  );
+}
+
+/** A connect on the wire. One the hold covers can still let go of it
+ * before it dials -- a WireGuard server the service cannot name -- so over
+ * a hold the service's word is read while it is (`readWhileDialling`). And
+ * a read it leaves unanswered meanwhile is not the service gone
+ * (`holdStore.dialling`). */
+function dialledUnderHold<T>(dial: Promise<T>): Promise<T> {
+  return holdStore.dialling(holdStore.current()?.state === "holding" ? readWhileDialling(dial, { read: serviceStatus }) : dial);
 }
 
 /** A pass landed a tunnel: lets go of the reconnect hold if the landing
@@ -1303,7 +1324,9 @@ export function Dashboard({
    * is let go of -- the gap it was for is over -- but never on one read,
    * nor on a read that contradicts it (`createStatusRelease`). */
   function noteStatus(status: VpnStatus): void {
-    holdStore.observe(status.reconnectHold);
+    // The hold's word is already taken, by the read that brought it
+    // (`serviceStatus`) -- with when it was sent, so a read older than the
+    // app's own word on the hold is not put back over it here.
     if (status.connected) trafficMeter.observe(status.traffic);
     const release = statusReleaseRef.current.see({
       hold: holdStore.current(),
@@ -3919,7 +3942,14 @@ export function Dashboard({
           // which endpoints it reaches around it.
           ladderPass.tunnelServer.current = tunnelServer;
           setEndpointTunnelServer(tunnelServer);
-          await invoke("vpn_connect", {
+          const holdSetting = holdWanted(appPrefs.current().blockWhileReconnecting);
+          // A connection the hold does not cover (Built-in (IKEv2), Custom
+          // mode): the service lets go of a hold before it dials it, and the
+          // app knows that now -- said before it is sent, with the plain
+          // "lost" notification, not once the connect has answered
+          // (`holdStore.lettingGo`).
+          if (holdSetting && !holdCovers(candidate.protocol, customMode)) holdStore.lettingGo("notCovered");
+          const dial = invoke("vpn_connect", {
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
             knownNodes,
@@ -3927,6 +3957,7 @@ export function Dashboard({
             // session when it is on (lib/reconnect-hold.ts).
             blockWhileReconnecting: holdWanted(appPrefs.current().blockWhileReconnecting),
           });
+          await dialledUnderHold(dial);
           showNetworkWait(false);
           // The session this pass was started under ended while the
           // engine was coming up. The sign-out's own teardown may have
@@ -4296,6 +4327,10 @@ export function Dashboard({
             detail: describeAttempts(attempts, candidates.length),
           };
         } catch (err) {
+          // The service not there at all -- restarting -- holds nothing: its
+          // hold went with its process. Said at once, not at the next read
+          // (`holdStore.unanswered`).
+          if (serviceGone(err)) holdStore.unanswered(true);
           const classified = classifyConnectionError(err);
           if (classified.kind !== "noNetwork") showNetworkWait(false);
           // No network to dial over: the service refused the rung before
@@ -5394,7 +5429,7 @@ export function Dashboard({
             ? t("sw.title", { place: switchAsk.protocol ? `${switchAsk.place} · ${switchAsk.protocol}` : switchAsk.place })
             : t("sw.titleAuto")
         }
-        description={t(switchBody(gap, { covered: switchAsk?.covered ?? true }))}
+        description={t(switchBody(gap, { covered: switchAsk?.covered ?? true, inGap: inHoldGap }))}
         onClose={() => switchAsk?.resolve(false)}
         initialFocus={stayRef}
         actions={

@@ -87,7 +87,15 @@ export const QUICK_DEATHS_TO_STOP = 3;
  * system's own settings meanwhile, which this app cannot see -- and the
  * honest answer then is "VPN connection lost" and a Connect button, not
  * a tunnel coming back on its own long after. The same for a pass the
- * phone app was away from that long (`awayChanged`). */
+ * phone app was away from that long (`awayChanged`).
+ *
+ * With "Block the internet while reconnecting" on, this is the one owner of
+ * how long the machine is held: the episode ends here and lets go of the
+ * hold (`episodeEndReleases`). The service's own let-go after forty
+ * minutes (`HOLD_LONGEST` in service/src/engines/reconnect_hold.rs) is the
+ * backstop behind it, for a release that never arrives, and is kept longer
+ * than this and the last attempt together (reconnect-hold.wiring.test.ts);
+ * the VM reaches it with the test switch `hold-longest-secs`. */
 export const BLOCKED_WAIT_MAX_MS = 30 * 60_000;
 
 /** The longest one attempt is waited for without a sign of life before it

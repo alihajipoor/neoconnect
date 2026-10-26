@@ -1243,6 +1243,9 @@ const en = {
   // is made (switchBody in lib/reconnect-hold.ts).
   "sw.bodyHeld": "Neoxify connects again, to the new place. Other connections on this computer are blocked now, as you set; while it switches, they may go out without Neoxify until the new connection is checked.",
   "sw.bodyHeldNotCovered": "Other connections on this computer are blocked now, as you set. Built-in (IKEv2) and Custom mode aren't covered by that block, so Neoxify lets go of it before this connection is made. Until the new connection is checked, your traffic goes out without Neoxify.",
+  // A gap the service has not yet said it holds: neither blocked nor
+  // "not protected" (switchBody in lib/reconnect-hold.ts).
+  "sw.bodyHoldUnconfirmed": "Neoxify connects again, to the new place. It hasn't yet confirmed that other connections on this computer are blocked, as you set; until the new connection is checked, they may go out without Neoxify.",
   "sw.go": "Switch",
   "sw.stay": "Stay connected",
   "dash.noProvision": "No connection is set up on your subscription.",
@@ -1306,6 +1309,8 @@ const en = {
   "notif.lostUnconfirmedBody": "Neoxify is reconnecting. It hasn't yet confirmed that other connections on this computer are blocked, as you set.",
   "notif.backTitle": "VPN connected again",
   "notif.backBody": "Neoxify checked that your traffic goes through the VPN again.",
+  "notif.backPartialBody": "Connected again, but not every connection on this computer is held to the VPN. Open Neoxify for details.",
+  "notif.backUnconfirmedBody": "The connection is back, but Neoxify couldn't confirm that your traffic goes through the VPN. Open Neoxify for details.",
   "notif.droppedTitle": "VPN connection lost",
   "notif.droppedBody": "Your traffic is not protected. Open Neoxify to connect again.",
   "notif.statusChannel": "VPN status",
@@ -2265,6 +2270,7 @@ const fa: Record<TranslationKey, string> = {
   "sw.body": "نئوکسیفای اتصال را قطع می‌کند و دوباره وصل می‌شود. تا زمانی که اتصال جدید بررسی شود، ترافیک شما محافظت نمی‌شود.",
   "sw.bodyHeld": "نئوکسیفای دوباره، این بار به مکان جدید، وصل می‌شود. طبق تنظیم شما، اتصال‌های دیگر این رایانه الان مسدود هستند؛ اما هنگام تغییر، ممکن است تا بررسی اتصال جدید بدون نئوکسیفای ارسال شوند.",
   "sw.bodyHeldNotCovered": "طبق تنظیم شما، اتصال‌های دیگر این رایانه الان مسدود هستند. Built-in (IKEv2) و حالت سفارشی زیر پوشش این مسدودسازی نیستند؛ برای همین نئوکسیفای پیش از برقراری این اتصال، مسدودسازی را برمی‌دارد. تا زمانی که اتصال جدید بررسی شود، ترافیک شما بدون نئوکسیفای ارسال می‌شود.",
+  "sw.bodyHoldUnconfirmed": "نئوکسیفای دوباره، این بار به مکان جدید، وصل می‌شود. هنوز تأیید نشده که طبق تنظیم شما، اتصال‌های دیگر این رایانه مسدود هستند؛ تا بررسی اتصال جدید، ممکن است بدون نئوکسیفای ارسال شوند.",
   "sw.go": "تغییر",
   "sw.stay": "متصل بمانید",
   "dash.noProvision": "روی اشتراک شما اتصالی تنظیم نشده است.",
@@ -2319,6 +2325,8 @@ const fa: Record<TranslationKey, string> = {
   "notif.lostUnconfirmedBody": "نئوکسیفای در حال اتصال دوباره است. هنوز تأیید نشده که اتصال‌های دیگر این رایانه، طبق تنظیم شما، مسدود هستند.",
   "notif.backTitle": "اتصال VPN برگشت",
   "notif.backBody": "نئوکسیفای بررسی کرد که ترافیک شما دوباره از VPN عبور می‌کند.",
+  "notif.backPartialBody": "دوباره متصل است، اما همهٔ اتصال‌های این رایانه درون VPN نگه داشته نمی‌شوند. برای جزئیات، نئوکسیفای را باز کنید.",
+  "notif.backUnconfirmedBody": "اتصال برگشت، اما نئوکسیفای نتوانست تأیید کند که ترافیک شما از VPN عبور می‌کند. برای جزئیات، نئوکسیفای را باز کنید.",
   "notif.droppedTitle": "اتصال VPN قطع شد",
   "notif.droppedBody": "ترافیک شما محافظت نمی‌شود. برای اتصال دوباره، نئوکسیفای را باز کنید.",
   "notif.statusChannel": "وضعیت VPN",

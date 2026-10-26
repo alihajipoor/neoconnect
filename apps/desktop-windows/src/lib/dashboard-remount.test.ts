@@ -221,7 +221,7 @@ describe("the Dashboard's wiring", () => {
         dialled,
       );
       expect(check).toBeGreaterThan(dialled);
-      expect(check).toBeLessThan(dashboard.indexOf('await invoke("vpn_connect", {'));
+      expect(check).toBeLessThan(dashboard.indexOf('const dial = invoke("vpn_connect", {'));
     });
 
     it("names the credential of the last dial when the service's protocol agrees, and no route when it cannot", () => {
