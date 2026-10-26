@@ -137,6 +137,7 @@ import {
   holdSpoken,
   holdStore,
   holdWanted,
+  landingReleases,
   passTeardown,
   switchBody,
   type HoldScene,
@@ -285,6 +286,15 @@ function serviceDisconnect(): Promise<void> {
     // with its reply, not at the next status (`holdStore.released`).
     holdStore.released();
   });
+}
+
+/** A pass landed a tunnel: lets go of the reconnect hold if the landing
+ * does (`landingReleases`) -- verified, at once; unverified, only over a
+ * tunnel a status read now shows holding the machine itself. Never
+ * rejects; nothing waits on it. */
+async function releaseOnLanding(verdict: "connected" | "unverified"): Promise<void> {
+  const status = verdict === "connected" ? null : await serviceStatus().catch(() => null);
+  if (landingReleases(verdict, status && { hold: holdStore.current(), status })) await holdService.release();
 }
 
 /** How often to re-check a live tunnel.
@@ -4110,9 +4120,12 @@ export function Dashboard({
           // calling it "protected".
           if (verdict === "connected" || verdict === "unverified") {
             publishObserved(intent, verdict);
-            // A tunnel is up: whatever the reconnect hold was holding is
-            // over. Asked of the service at once; nothing waits on it.
-            if (holdWanted(appPrefs.current().blockWhileReconnecting)) void holdService.release();
+            // A tunnel is up: the gap the reconnect hold was holding is
+            // over -- let go of at once if the tunnel is verified; if not,
+            // only over one that holds the machine itself, or the hold stays
+            // over it, its plan carrying the new tunnel, for the status reads
+            // (`landingReleases`). Nothing waits on it.
+            if (holdWanted(appPrefs.current().blockWhileReconnecting)) void releaseOnLanding(verdict);
             // Which exit this session actually leaves from, sent now
             // that a route has come up rather than guessed before one
             // had.

@@ -20,10 +20,12 @@
  *    reconnect's attempt, the mid-session failover -- and a press made
  *    while the hold is holding keep it through their teardowns; a press
  *    from a quiet screen lets go, as Disconnect always has;
- *  - when to let go (`episodeEndReleases`, `createStatusRelease`): a pass
- *    that landed a tunnel, an episode that ended without one, a drop that
- *    began none -- and, from status reads alone, only a tunnel the service
- *    says landed under the hold, verified, on two reads a second apart;
+ *  - when to let go (`landingReleases`, `episodeEndReleases`,
+ *    `createStatusRelease`): a pass that landed a verified tunnel, or one
+ *    that holds the machine itself, an episode that ended without one, a
+ *    drop that began none -- and, from status reads alone, only a tunnel
+ *    the service says landed under the hold, verified, on two reads a
+ *    second apart;
  *  - what the screen and the notifications say about the customer's other
  *    traffic in the gap (`gapTraffic`, `holdHint`, `holdNote`), from the
  *    service's own facts -- never from the setting alone, and never "going
@@ -163,6 +165,23 @@ export function landedUnderHold(hold: ReconnectHold | null, status: HoldStatusRe
   return (status.ipv4Confined === null || status.ipv4Confined === undefined) && status.health?.state === "alive";
 }
 
+/** Whether a pass's landing lets go of the hold: a tunnel verified -- its
+ * traffic seen leaving through it -- at once; one that is not
+ * ("unverified": no egress proof) only over a tunnel that has landed under
+ * the hold and holds the machine on its own (`landedUnderHold`), on a status
+ * read now (`fresh`; null for none answered). Otherwise the hold stays over
+ * it -- its plan carries the new tunnel -- for the status reads to let go of
+ * (`createStatusRelease`), or the customer's Disconnect: over Xray or
+ * OpenVPN whose confinement was refused at connect, nothing else would hold
+ * the machine to a tunnel no check has vouched for. */
+export function landingReleases(
+  verdict: "connected" | "unverified",
+  fresh: { hold: ReconnectHold | null; status: HoldStatusRead } | null,
+): boolean {
+  if (verdict === "connected") return true;
+  return fresh !== null && landedUnderHold(fresh.hold, fresh.status);
+}
+
 /** How far apart the two reads that let go from status alone must be. */
 export const RELEASE_READS_APART_MS = 1_000;
 
@@ -196,9 +215,14 @@ export function createStatusRelease(): {
 }
 
 /** Whether a move of the reconnect's phase lets go of the hold: every end
- * of an episode but a press of the customer's own, whose pass decides
- * (`passTeardown`) -- a Disconnect lets go by itself, and Connect keeps it
- * until it lands or fails.
+ * of an episode without a tunnel but a press of the customer's own, whose
+ * pass decides (`passTeardown`) -- a Disconnect lets go by itself, and
+ * Connect keeps it until it lands or fails.
+ *
+ * Not a landing: the pass that landed has decided by then, knowing whether
+ * its tunnel was verified (`landingReleases`) -- let go of here as well, an
+ * unverified one went fail-open behind it. A tunnel the episode adopted is
+ * the status reads' to let go of (`createStatusRelease`).
  *
  * And a drop that began no episode at all: armed straight to idle, on a
  * third quick death, a plan that has stopped, the device limit, a
@@ -206,7 +230,6 @@ export function createStatusRelease(): {
  * session's engine died, and with nothing going to reconnect it nothing
  * else would let go short of its own backstop. */
 export function episodeEndReleases(before: ReconnectPhase, after: ReconnectPhase): boolean {
-  if (after.kind === "armed") return running(before);
   if (after.kind !== "idle") return false;
   if (!running(before) && before.kind !== "armed") return false;
   return !PRESSES.has(after.stopped ?? "customer");
@@ -534,9 +557,10 @@ function running(phase: ReconnectPhase): boolean {
  * the app runs: one per app, like the episode, so it holds whichever
  * screen is up (the main page unmounts whenever Settings opens).
  *
- *  - an episode that landed, or ended any way but a press, and a drop that
- *    began none, let go at once (`episodeEndReleases`) -- the gap is over,
- *    or nothing will close it;
+ *  - an episode that ended without a tunnel any way but a press, and a drop
+ *    that began none, let go at once (`episodeEndReleases`) -- nothing will
+ *    close the gap. One that landed is its landing pass's to let go of
+ *    (`landingReleases`);
  *  - one a press ended is the press's: its pass keeps the hold until it
  *    lands or fails. If no pass is running `PRESS_GRACE_MS` later -- a
  *    location picked and then nothing dialled -- it lets go then. The

@@ -117,7 +117,27 @@ describe("the reconnect hold's gate", () => {
     expect(dash).toContain('    degraded: connectionState === "degraded",\n  };');
     const hero = source("../components/main/Hero.tsx");
     const announcer = hero.slice(hero.indexOf("export function StateAnnouncer"));
-    expect(announcer.slice(0, announcer.indexOf("\n}\n"))).toContain("setSaid((before) => announcedAtOnce(before, text));");
+    const body = announcer.slice(0, announcer.indexOf("\n}\n"));
+    expect(body).toContain("setSaid((before) => announcedAtOnce(before, text));");
+    // And says nothing again for a blip back to what it said last.
+    expect(body).toContain("const next = announcedOnSettle(spoken.current, text);");
+    expect(body).toContain("if (next === null) return;");
+  });
+
+  it("follows the failover's held loss to its end, says a hold let go of in a pass that keeps it, and lets go at a landing only as it allows", () => {
+    const dash = source("../screens/Dashboard.tsx");
+    // A failover that gave up after its loss was said is owed "dropped".
+    expect(dash).toContain("const gapDropped = tunnelDropped || failoverLost || reconnectLost(reconnect, sessionGeneration());");
+    expect(dash).toContain("      letGo: holdLetGo,\n");
+    expect(dash).toContain("      dropped: failoverLost,\n");
+    expect(dash).toContain("const holdLetGo = hold?.state === \"notHeld\";");
+    expect(dash).toContain("notifyMemory.current().lostSaid\n        ) {\n          setFailoverLost(true);");
+    // The scene knows a pass keeps the hold, from the pass itself.
+    expect(dash).toContain("    holdKept: holdPassRunning,\n");
+    expect(dash).toContain("if (holdThrough) {\n      holdPassRef.current = generation;\n      setHoldPassRunning(true);");
+    // A landing lets go as `landingReleases` says, nowhere unconditionally.
+    expect(dash).toContain("if (holdWanted(appPrefs.current().blockWhileReconnecting)) void releaseOnLanding(verdict);");
+    expect(dash).toContain("if (landingReleases(verdict, status && { hold: holdStore.current(), status })) await holdService.release();");
   });
 
   it("asks the switch confirmation what the hold covers, from the service's word", () => {

@@ -43,6 +43,7 @@ import {
   RELEASE_RETRY_MS,
   RELEASE_READS_APART_MS,
   landedUnderHold,
+  landingReleases,
   releaseUntilLetGo,
   watchEpisodesForHold,
   type ReconnectHold,
@@ -217,9 +218,33 @@ describe("where other traffic goes in the gap", () => {
   });
 });
 
+// 2026-10-25 review: a rung that landed "unverified" -- no egress proof --
+// let go of the hold at once. Over Xray or OpenVPN whose confinement was
+// refused at connect, nothing then held the machine to a tunnel no check had
+// vouched for; the status release would have waited for one that did.
+describe("a landing", () => {
+  const LANDED: ReconnectHold = { state: "holding", heldSecs: 9, landed: true };
+
+  it("lets go at once when the tunnel is verified", () => {
+    expect(landingReleases("connected", null)).toBe(true);
+  });
+
+  it("lets go of an unverified one only over a tunnel that holds the machine itself, read fresh", () => {
+    expect(landingReleases("unverified", { hold: LANDED, status: { connected: true, ipv4Confined: true } })).toBe(true);
+    expect(landingReleases("unverified", { hold: LANDED, status: { connected: true, ipv4Confined: null, health: { state: "alive" } } })).toBe(true);
+    // Confinement refused at connect: the hold stays over it, its plan
+    // carrying the new tunnel, for the status reads or a Disconnect.
+    expect(landingReleases("unverified", { hold: LANDED, status: { connected: true, ipv4Confined: false } })).toBe(false);
+    expect(landingReleases("unverified", { hold: HOLDING, status: { connected: true, ipv4Confined: true } })).toBe(false);
+    // No answer is no evidence.
+    expect(landingReleases("unverified", null)).toBe(false);
+  });
+});
+
 describe("an episode's end", () => {
-  it("lets go when it landed", () => {
-    expect(episodeEndReleases(ATTEMPTING, ARMED)).toBe(true);
+  it("leaves a landing to the pass that landed it, which knows whether it was verified", () => {
+    expect(episodeEndReleases(ATTEMPTING, ARMED)).toBe(false);
+    expect(episodeEndReleases(WAITING, ARMED)).toBe(false);
   });
 
   it("lets go when it gave up or was stopped, whatever the reason but a press", () => {
@@ -294,6 +319,15 @@ describe("watching episodes for the hold", () => {
     expect(h.released).toHaveLength(0);
     h.go(stoppedBy("attempts"));
     expect(h.released).toHaveLength(1);
+  });
+
+  it("does not let go as the episode lands: the landing pass has decided", () => {
+    const h = harness();
+    h.go(WAITING);
+    h.go(ATTEMPTING);
+    h.go(ARMED);
+    h.fire();
+    expect(h.released).toHaveLength(0);
   });
 
   it("gives a press's pass a few seconds, and lets go if none started", () => {

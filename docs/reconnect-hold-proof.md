@@ -232,7 +232,11 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    plan stopping (notEntitled) and the device limit; a sign-out; Gaming
    mode turned on; the setting turned off mid-hold; a connect it does not
    cover (IKEv2, Custom mode); Repair; the app killed; the service
-   restarted; a reboot while holding.
+   restarted; a reboot while holding. **(new, third round)** A tunnel that
+   lands "not confirmed" (no baseline taken) is let go of only once it is
+   confined or its handshake is fresh -- at once if a status shows that,
+   else within two status reads -- and stays held otherwise until
+   Disconnect.
 4. **The backstop.** With the app frozen right after a drop (suspend the
    process in Process Explorer before its reconnect starts): the service
    lets go after `NO_FOLLOW_UP` (120 s), and `reconnect-hold.log` says
