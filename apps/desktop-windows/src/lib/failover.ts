@@ -96,9 +96,13 @@ export function orderCandidates(
      * route list's `ispTag` codes). Consulted only while this device
      * has no evidence of its own here -- see `fromOthers`. */
     ispTags?: Record<string, IspTagCode | undefined>;
+    /** The subscription in use: its credentials are dialled ahead of any
+     * other subscription's the account still lists. */
+    subscriptionId?: string | null;
   } = {},
 ): ProtocolUser[] {
   const {
+    subscriptionId,
     resumeRouteId,
     pinnedRouteId,
     lastGoodRouteId,
@@ -122,6 +126,18 @@ export function orderCandidates(
   // Locking to a single protocol is a reasonable thing to want, but it
   // should be an explicit setting, not a side effect of browsing the
   // server list.
+  // What the server says of the credential itself, ahead of everything
+  // else: one it has switched off -- an expired or suspended plan's, which
+  // the API still lists beside the plan bought after it, for the very same
+  // routes -- after every one it has not, and another subscription's after
+  // the one in use. Never dropped (a protocol is never taken off the
+  // ladder), only last. On the VM the expired plan's credential for the
+  // route on screen was listed first, dialled first and refused by the node
+  // on every connect and reconnect: ten seconds each, and that route
+  // recorded as failing on this network (round 3).
+  const standing = (u: ProtocolUser): number =>
+    (u.status === "DISABLED" ? 2 : 0) + (subscriptionId && u.subscriptionId !== subscriptionId ? 1 : 0);
+
   const priority = (u: ProtocolUser): number => {
     if (resumeRouteId && u.routeId === resumeRouteId) return -4;
     if (pinnedRouteId && u.routeId === pinnedRouteId) return -3;
@@ -219,6 +235,7 @@ export function orderCandidates(
 
   return [...users].sort(
     (a, b) =>
+      standing(a) - standing(b) ||
       priority(a) - priority(b) ||
       liveness(a) - liveness(b) ||
       byEvidence(a, b) ||
