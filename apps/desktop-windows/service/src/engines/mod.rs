@@ -3352,6 +3352,16 @@ impl Engines {
                 (up, protocol, health)
             }
             Verdict::WireguardUp => {
+                // The same look as for the other engines' (`Reported` above):
+                // an adapter disabled under a live wireguard.exe is a tunnel
+                // ended, said as that and its drop held, not "up" while the
+                // service holds the machine for it. Skipped here, the screen
+                // said "You're protected" for 3.8 s over a held drop on the
+                // VM (round 3, O3). Asked of an armed session only, as there.
+                self.let_go_if_the_tunnel_adapter_is_gone();
+                if self.active.peek().is_some_and(|s| s.adapter_gone) {
+                    return (false, None, TunnelHealth::Down);
+                }
                 // Reused for a few seconds rather than read per poll; see
                 // HANDSHAKE_REUSE_FOR. Cleared with the session.
                 let reading = match self.handshake_reading {
@@ -7658,6 +7668,37 @@ mod helper_tests {
         assert!(engines.reconnect_hold.standing_for(g), "nothing standing under the WireGuard tunnel");
         assert_eq!(hold.installs().len(), 1);
         (engines, hold, g)
+    }
+
+    /// A WireGuard adapter disabled under a live wireguard.exe, the setting
+    /// on: the status says the tunnel ended -- the app reconnects at once --
+    /// and its drop is held, the filters standing for it becoming the hold,
+    /// as for the other engines. The status went straight to the handshake
+    /// and said "up" for 3.8 s on the VM over a held drop (round 3, O3).
+    #[test]
+    fn a_wireguard_adapter_gone_under_a_live_wireguard_exe_is_said_as_ended_and_held() {
+        use wireguard::ScmView;
+        let mut service_process = engine_stand_in();
+        let scm = Arc::new(std::sync::Mutex::new(ScmView::Running(Some(service_process.id()))));
+        let (mut engines, hold, g) = standing_wireguard_session(Arc::clone(&scm));
+        let fake = FakeConfinement::new();
+        engines.set_confinement_ops_for_test(fake.clone());
+        handshake(&mut engines, wireguard::HandshakeHealth::Alive { age_secs: 3 });
+        assert_eq!(engines.status(), (true, Some("WIREGUARD".to_string()), TunnelHealth::Alive { age_secs: 3 }));
+        assert!(!engines.reconnect_hold.holding());
+
+        fake.tunnel_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        handshake(&mut engines, wireguard::HandshakeHealth::Alive { age_secs: 4 });
+        assert_eq!(engines.status(), (false, None, TunnelHealth::Down), "a WireGuard tunnel with no adapter said to be up");
+        assert!(engines.reconnect_hold.held_for(g), "its drop was not held");
+        assert!(hold.closed().is_empty(), "the filters standing for it were taken out: {:?}", hold.closed());
+        assert!(engines.has_session(), "the session is the reconnect's teardown's to take down");
+        assert_eq!(engines.status(), (false, None, TunnelHealth::Down), "said once, then up again");
+
+        engines.release_reconnect_hold("the customer disconnected", true);
+        end_test_session(&mut engines);
+        let _ = service_process.kill();
+        let _ = service_process.wait();
     }
 
     /// The VM's WireGuard leak (2026-10-20), thirty-two times at once. A
