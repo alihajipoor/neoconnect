@@ -3,6 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createDeviceSlotSession,
   createSlotNoticeStore,
+  RELEASE_REQUEST_MAX_MS,
+  RELEASE_RETRY_AFTER_MS,
+  RELEASE_WAIT_MS,
   createSlotTeardown,
   slotStop,
   slotTeardownShown,
@@ -1507,5 +1510,111 @@ describe("the wiring the pure functions cannot check", () => {
     // Only for an answer still current: one overtaken by a press says
     // nothing about the tunnel as it is now.
     expect(publish.indexOf("isCurrent(")).toBeLessThan(publish.indexOf("slotTeardown.confirmDown()"));
+  });
+});
+
+// The VM, round 3 (O2): a Connect pressed after a Disconnect whose release
+// went unanswered did nothing for about two minutes. A release must never
+// be in front of a connect for longer than a moment, however its request
+// fares.
+describe("a release that never answers", () => {
+  function silent() {
+    const timers: { fn: () => void; ms: number }[] = [];
+    const claim = vi.fn(async (_request: unknown, _budget?: number) => GRANT);
+    const renew = vi.fn(async (_sub: string, _budget?: number) => HELD);
+    // Never settles: no answer, no error, no timeout of its own.
+    const release = vi.fn(
+      (_request: { subscriptionId: string; handle: string }, _budget?: number, _how?: { afterTeardown?: boolean }) =>
+        new Promise<boolean>(() => undefined),
+    );
+    const session = createDeviceSlotSession({
+      claim,
+      renew,
+      release,
+      now: () => 1_000_000,
+      later: (fn, ms) => timers.push({ fn, ms }),
+    });
+    /** Runs every timer due after `ms`. */
+    const fire = (ms: number) => {
+      for (const timer of timers.filter((t) => t.ms === ms)) {
+        timers.splice(timers.indexOf(timer), 1);
+        timer.fn();
+      }
+    };
+    return { session, claim, renew, release, timers, fire };
+  }
+
+  it("holds up the claim of a Connect pressed after it for a moment, never for its answer", async () => {
+    const h = silent();
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" });
+    void h.session.release();
+    await settle();
+    expect(h.release).toHaveBeenCalledTimes(1);
+
+    const dial = h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" });
+    await settle();
+    expect(h.claim).toHaveBeenCalledTimes(1);
+    // The moment, and nothing of the release's own: its request still has
+    // its budget to run.
+    h.fire(RELEASE_WAIT_MS);
+    expect(await dial).toEqual({ kind: "dial" });
+    expect(h.claim).toHaveBeenCalledTimes(2);
+    expect(h.timers.map((t) => t.ms)).toContain(RELEASE_REQUEST_MAX_MS);
+  });
+
+  it("holds up a reconnect's standing check for a moment, never for its answer", async () => {
+    const h = silent();
+    await h.session.beforeDial({ subscriptionId: SUB });
+    void h.session.setAside();
+    await settle();
+    const check = h.session.checkStanding();
+    await settle();
+    expect(h.renew).not.toHaveBeenCalled();
+    h.fire(RELEASE_WAIT_MS);
+    expect(await check).toEqual({ kind: "clear" });
+    expect(h.renew).toHaveBeenCalledTimes(1);
+  });
+
+  it("is given up on past its own budget and sent again in the background, until a connect starts", async () => {
+    const h = silent();
+    await h.session.beforeDial({ subscriptionId: SUB });
+    const released = h.session.release();
+    await settle();
+    h.fire(RELEASE_REQUEST_MAX_MS);
+    // Settled without an answer: nothing waits on it any longer.
+    await released;
+    await settle();
+    expect(h.timers.map((t) => t.ms)).toEqual([RELEASE_RETRY_AFTER_MS[0]]);
+
+    h.fire(RELEASE_RETRY_AFTER_MS[0]);
+    expect(h.release).toHaveBeenCalledTimes(2);
+    expect(h.release.mock.calls[1]).toEqual([{ subscriptionId: SUB, handle: "mine" }, RELEASE_BUDGET_MS, { afterTeardown: true }]);
+    // A retry is not in front of a connect at all.
+    const dial = h.session.beforeDial({ subscriptionId: SUB });
+    expect(await dial).toEqual({ kind: "dial" });
+    expect(h.claim).toHaveBeenCalledTimes(2);
+
+    // That connect's slot is not given back by the old release's retries.
+    h.fire(RELEASE_REQUEST_MAX_MS);
+    await settle();
+    h.fire(RELEASE_RETRY_AFTER_MS[1]);
+    expect(h.release).toHaveBeenCalledTimes(2);
+  });
+
+  it("is sent again in the background after the teardown's own try, too", async () => {
+    const h = silent();
+    await h.session.beforeDial({ subscriptionId: SUB });
+    let gone!: (confirmed: boolean) => void;
+    const released = h.session.release({ tunnelGone: new Promise<boolean>((resolve) => (gone = resolve)) });
+    await settle();
+    gone(true);
+    await settle();
+    expect(h.release).toHaveBeenCalledTimes(2);
+    h.fire(RELEASE_REQUEST_MAX_MS);
+    await released;
+    await settle();
+    expect(h.timers.map((t) => t.ms)).toContain(RELEASE_RETRY_AFTER_MS[0]);
+    h.fire(RELEASE_RETRY_AFTER_MS[0]);
+    expect(h.release).toHaveBeenCalledTimes(3);
   });
 });

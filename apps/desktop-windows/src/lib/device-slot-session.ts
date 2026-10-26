@@ -126,7 +126,34 @@ export interface DeviceSlotDeps {
   renew: typeof renewSlot;
   release: typeof releaseSlot;
   now: () => number;
+  /** Runs `fn` after `ms`: the bounds on a release, and its retries. */
+  later: (fn: () => void, ms: number) => unknown;
 }
+
+/** The longest a claim -- a Connect, or a reconnect's standing check --
+ * waits for a release still on its way, before it goes ahead anyway.
+ *
+ * Waited for at all so that, on a line that answers, the release arrives
+ * first and frees the slot the claim then takes. Not waited out: a claim
+ * that overtakes a release is answered under a new handle, and the
+ * release, naming the old one, then frees nothing (`lastGrant`). On a
+ * blocked network a release goes unanswered, and a Connect pressed after a
+ * Disconnect waited behind it -- three times on the VM (round 3, O2). */
+export const RELEASE_WAIT_MS = 500;
+
+/** The longest one release request is waited for, whatever its transport
+ * does: its own budget, and a little over for the answer to be read. A
+ * release that has not settled by then counts as unanswered, and the slot
+ * it holds is never in front of a connect for longer. */
+export const RELEASE_REQUEST_MAX_MS = RELEASE_BUDGET_MS + 500;
+
+/** When a release that got no answer is sent again, in the background --
+ * fire and forget: nothing waits on these, and none is sent once a
+ * connect, a reconnect or a sign-out has started since. On a network that
+ * blocks Neoxify the next try may be the one that gets through, and a slot
+ * left counted turns the customer's other device away as "in use" until it
+ * goes stale. */
+export const RELEASE_RETRY_AFTER_MS: readonly number[] = [3_000, 15_000];
 
 /** A renewal may run this much early. The dashboard's poll is every
  * fifteen seconds and its timer drifts; without the slack a renewal due
@@ -241,6 +268,12 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
   const renew = deps.renew ?? renewSlot;
   const release = deps.release ?? releaseSlot;
   const now = deps.now ?? Date.now;
+  const later = deps.later ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
+  /** Resolves `ms` from now. */
+  const after = (ms: number) => new Promise<void>((resolve) => later(resolve, ms));
+  /** `work`, or nothing once `ms` has passed: never longer. */
+  const atMost = <T>(work: Promise<T>, ms: number, otherwise: T): Promise<T> =>
+    Promise.race([work.catch(() => otherwise), after(ms).then(() => otherwise)]);
 
   let standing: SlotStanding = "none";
   let subscriptionId: string | null = null;
@@ -332,21 +365,47 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
   /** Releases each grant named, one after another. Several only when
    * answers that settled after a Disconnect named more than one; each
    * frees the slot only if it is still held under that grant. Says
-   * whether the backend answered every one (`releaseSlot`). */
-  function sendRelease(target: string, handles: string[], how: ReleaseHow = {}): Promise<boolean> {
+   * whether the backend answered every one (`releaseSlot`). Each request
+   * is given `RELEASE_REQUEST_MAX_MS` at most, whatever its transport does.
+   *
+   * `quiet`: a retry in the background (`retryRelease`), which a claim
+   * does not wait for at all. */
+  function sendRelease(target: string, handles: string[], how: ReleaseHow = {}, quiet = false): Promise<boolean> {
     const sent: Promise<boolean> = (async () => {
       let answered = true;
       for (const handle of handles) {
         const request = { subscriptionId: target, handle };
         const reply = how.afterTeardown ? release(request, RELEASE_BUDGET_MS, how) : release(request);
-        if ((await reply.catch(() => false)) !== true) answered = false;
+        if ((await atMost(reply, RELEASE_REQUEST_MAX_MS, false)) !== true) answered = false;
       }
       return answered;
     })().finally(() => {
       if (releasing === sent) releasing = null;
     });
-    releasing = sent;
+    if (!quiet) releasing = sent;
     return sent;
+  }
+
+  /** A release still on its way, waited for `RELEASE_WAIT_MS` at most
+   * (`beforeDial`, `checkStanding`): never in front of a connect for
+   * longer. */
+  async function releaseOutOfTheWay(): Promise<void> {
+    if (releasing) await atMost(releasing, RELEASE_WAIT_MS, false);
+  }
+
+  /** Sends a release that got no answer again, in the background, after
+   * each of `RELEASE_RETRY_AFTER_MS` until one is answered -- unless
+   * anything has started since its own (`releasedIn`): that slot is a new
+   * connect's. On the bare line: the tunnel it was first sent through is
+   * gone by then. Nothing waits on these. */
+  function retryRelease(target: string, handle: string, releasedIn: number, attempt = 0): void {
+    if (attempt >= RELEASE_RETRY_AFTER_MS.length) return;
+    later(() => {
+      if (epoch !== releasedIn) return;
+      void sendRelease(target, [handle], { afterTeardown: true }, true).then((answered) => {
+        if (!answered) retryRelease(target, handle, releasedIn, attempt + 1);
+      });
+    }, RELEASE_RETRY_AFTER_MS[attempt]);
   }
 
   /** A grant, from a claim or a renewal. */
@@ -467,7 +526,7 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     if (!held || handle === null) return;
     const first = sendRelease(target, [handle]);
     if (options.tunnelGone === undefined) {
-      await first;
+      if (!(await first) && epoch === releasedIn) retryRelease(target, handle, releasedIn);
       return;
     }
     // Taken down with the tunnel it was sent through: once more on the
@@ -485,7 +544,9 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     );
     if (await Promise.race([first, gone.then(() => false)])) return;
     if (!(await gone) || firstAnswered || epoch !== releasedIn) return;
-    await sendRelease(target, [handle], { afterTeardown: true });
+    if (!(await sendRelease(target, [handle], { afterTeardown: true })) && epoch === releasedIn) {
+      retryRelease(target, handle, releasedIn);
+    }
   }
 
   async function claimNow(protocolUserId: string | null, budgetMs: number): Promise<ClaimSettled> {
@@ -591,10 +652,10 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       if (typeof request.deviceLimit === "number") limit = request.deviceLimit;
 
       // A release still on its way -- Disconnect pressed a moment ago --
-      // goes first. Overtaken by it, this claim's slot would be dropped
-      // by the server as soon as it was granted. At most the release's
-      // own second and a half, and only straight after a Disconnect.
-      if (releasing) await releasing;
+      // is given a moment to go first, and no more (`RELEASE_WAIT_MS`):
+      // a claim that overtakes it is answered under a new handle, which
+      // the release, naming the old one, does not free.
+      await releaseOutOfTheWay();
       if (startedIn !== epoch) return { kind: "dial" };
 
       const protocolUserId = request.protocolUserId ?? null;
@@ -716,11 +777,13 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     },
 
     async checkStanding() {
-      // A release still on its way goes first, as before a claim: a slot
-      // set aside a moment ago (`setAside`) and asked about straight after
-      // would otherwise be renewed under the handle the release names, and
-      // freed by it as soon as it landed.
-      if (releasing) await releasing;
+      // A release still on its way is given a moment to go first, as
+      // before a claim (`RELEASE_WAIT_MS`): a slot set aside a moment ago
+      // (`setAside`) and asked about straight after could otherwise be
+      // renewed under the handle the release names, and freed by it as
+      // soon as it landed -- which the next renewal then gives back, where
+      // there is room. Not waited out: on a blocked network it never lands.
+      await releaseOutOfTheWay();
       if (subscriptionId === null) return { kind: "clear" };
       // A question of its own, as a claim before dialling is: whatever was
       // still on the wire when the slot was set aside answers for a slot
