@@ -16,27 +16,42 @@ describe("the ladder's credentials", () => {
     expect(order.slice(0, order.indexOf("});"))).toContain("        subscriptionId,\n");
   });
 
-  it("asks for them again the moment a rung carried nothing on credentials nobody asked about this pass", () => {
+  // Round 4: asked while the rung's tunnel was still up, the question went
+  // into it -- confined to it, the app's only way out -- and a node refusing
+  // the credential carries nothing; it was never asked again in that pass.
+  it("asks for them once the tunnel of a rung that carried nothing is down, never into it", () => {
+    expect(ladder).toContain(
+      'const fresh = createFreshAsk(\n        () => refreshConnectionConfig({ held: dialable, force: true, trigger: "connect", appState: connectionState }),',
+    );
     const upBut = ladder.indexOf("attempts.push(`${label}: up but ${reason}`);");
     const after = ladder.slice(upBut, ladder.indexOf("} catch (err) {", upBut));
     expect(after).toContain("carriedNothing.push(candidate);");
-    expect(after).toContain('if (freshAsked === null && refreshed.source !== "network") {');
-    expect(after).toContain('freshAsked = refreshConnectionConfig({ held: dialable, force: true, trigger: "connect", appState: connectionState })');
-    // Not waited for there: the ladder moves on at once.
-    expect(after).not.toContain("await freshAsked");
+    expect(after).not.toContain("refreshConnectionConfig(");
+    expect(after).not.toContain("fresh.ask()");
+    const bottom = ladder.indexOf('await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);\n        // Dialled beside');
+    const asked = ladder.indexOf('if (carriedNothing.length > 0 && refreshed.source !== "network") fresh.ask();');
+    expect(bottom).toBeGreaterThan(upBut);
+    expect(asked).toBeGreaterThan(bottom);
+    expect(ladder.split("fresh.ask()").length - 1).toBe(1);
   });
 
   it("dials the rest of the ladder on the answer, waiting for it only after a last rung", () => {
-    const bottom = ladder.indexOf('await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);');
+    const bottom = ladder.indexOf('await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);\n        // Dialled beside');
     const tail = ladder.slice(bottom, ladder.indexOf("// Superseded while it was running", bottom));
-    const waited = tail.indexOf("if (isLast && freshAsked !== null) await freshAsked;");
+    const asked = tail.indexOf('if (carriedNothing.length > 0 && refreshed.source !== "network") fresh.ask();');
+    const waited = tail.indexOf("if (isLast) await fresh.pending();", asked);
     const taken = tail.indexOf("takeFresh(index + 1);");
     const said = tail.indexOf('if (index < candidates.length - 1) publishObserved(intent, "connecting");');
-    expect(waited).toBeGreaterThan(-1);
+    // After a last rung an earlier ask is waited for first, and asked again
+    // if it was not answered from the server.
+    const earlier = tail.indexOf("if (isLast) await fresh.pending();");
+    expect(earlier).toBeGreaterThan(-1);
+    expect(earlier).toBeLessThan(asked);
+    expect(waited).toBeGreaterThan(asked);
     expect(taken).toBeGreaterThan(waited);
     expect(said).toBeGreaterThan(taken);
     expect(ladder).toContain(
-      "candidates = [...candidates.slice(0, from), ...onFreshCredentials(candidates.slice(from), carriedNothing, freshAnswer)];",
+      "candidates = [...candidates.slice(0, from), ...onFreshCredentials(candidates.slice(from), carriedNothing, answer)];",
     );
   });
 });

@@ -117,7 +117,7 @@ import {
 import { createSessionTracker } from "../lib/session-report";
 import { ladderPass } from "../lib/ladder-pass";
 import { credentialOnTunnel, tunnelCredential, type TunnelDial } from "../lib/tunnel-credential";
-import { onFreshCredentials } from "../lib/fresh-credentials";
+import { createFreshAsk, onFreshCredentials } from "../lib/fresh-credentials";
 import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "../lib/api-endpoints";
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
@@ -3785,18 +3785,21 @@ export function Dashboard({
       // and another country answered (`failoverNotice`).
       const failedRungs: FailedRung[] = [];
 
-      // Credentials asked for again at once, when a rung's tunnel comes up
-      // and carries nothing on credentials this pass did not ask the server
-      // for (`onFreshCredentials`): the rungs still to come are dialled on
-      // what comes back, and a rung whose credential has changed since is
-      // dialled again on the new one. Never waited for, but by a last rung.
+      // Credentials asked for again, when a rung's tunnel comes up and
+      // carries nothing on credentials this pass did not ask the server for
+      // -- once that tunnel is down (`createFreshAsk`): the rungs still to
+      // come are dialled on what comes back, and a rung whose credential has
+      // changed since is dialled again on the new one
+      // (`onFreshCredentials`). Never waited for, but by a last rung.
       const carriedNothing: ProtocolUser[] = [];
-      let freshAsked: Promise<void> | null = null;
-      let freshAnswer: ProtocolUser[] | null = null;
+      const fresh = createFreshAsk(
+        () => refreshConnectionConfig({ held: dialable, force: true, trigger: "connect", appState: connectionState }),
+        (protocolUsers) => setProtocolUsers(protocolUsers),
+      );
       const takeFresh = (from: number) => {
-        if (freshAnswer === null) return;
-        candidates = [...candidates.slice(0, from), ...onFreshCredentials(candidates.slice(from), carriedNothing, freshAnswer)];
-        freshAnswer = null;
+        const answer = fresh.take();
+        if (answer === null) return;
+        candidates = [...candidates.slice(0, from), ...onFreshCredentials(candidates.slice(from), carriedNothing, answer)];
       };
 
       let lastError: ClassifiedError | null = null;
@@ -4392,18 +4395,10 @@ export function Dashboard({
           attempts.push(`${label}: up but ${reason}`);
           dials.push({ routeId: candidate.routeId, carried: false });
           // Up, and carrying nothing, on a credential nobody asked the
-          // server about this pass: asked now, not after the rest of the
-          // ladder has been walked on the same answer.
+          // server about this pass: asked once this tunnel is down (below),
+          // not after the rest of the ladder has been walked on the same
+          // answer.
           carriedNothing.push(candidate);
-          if (freshAsked === null && refreshed.source !== "network") {
-            freshAsked = refreshConnectionConfig({ held: dialable, force: true, trigger: "connect", appState: connectionState }).then(
-              (answer) => {
-                if (answer.source !== "network") return;
-                freshAnswer = answer.protocolUsers;
-                setProtocolUsers(answer.protocolUsers);
-              },
-            );
-          }
           // Its tunnel came up: dialled, whatever else is true of it.
           failedRungs.push({ routeId: candidate.routeId, fate: "dialled" });
           lastError = {
@@ -4514,11 +4509,18 @@ export function Dashboard({
           index -= 1;
           continue;
         }
-        // Fresh credentials in: the rest of the ladder on them. After a last
-        // rung that carried nothing, their answer is waited for -- within
-        // its own budget -- so a rung on a changed credential is dialled
-        // again before the pass gives up.
-        if (isLast && freshAsked !== null) await freshAsked;
+        // Fresh credentials, once a rung has carried nothing on credentials
+        // nobody asked the server about this pass: asked now that its tunnel
+        // is down -- confined to it, the app had no other way out, and a node
+        // refusing the credential carries nothing -- and asked once more at
+        // the next teardown if that answer was not the server's
+        // (`createFreshAsk`). After a last rung, the answer is waited for --
+        // within its own budget, an earlier ask's first -- so a rung on a
+        // changed credential is dialled again before the pass gives up.
+        if (isLast) await fresh.pending();
+        if (carriedNothing.length > 0 && refreshed.source !== "network") fresh.ask();
+        if (isLast) await fresh.pending();
+        // Their answer in: the rest of the ladder on it.
         takeFresh(index + 1);
         if (index < candidates.length - 1) publishObserved(intent, "connecting");
       }

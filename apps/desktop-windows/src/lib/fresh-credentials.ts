@@ -15,6 +15,67 @@
 
 import type { ProtocolUser } from "./types";
 
+/** How many times one pass asks for fresh credentials: once, and once more
+ * if that answer did not come from the server. */
+export const FRESH_ASKS = 2;
+
+/** One pass's ask for fresh credentials (the Windows ladder's).
+ *
+ * Asked only where the caller calls `ask`: once a rung that carried nothing
+ * is torn down. Asked while its tunnel was still up, the question went into
+ * it -- with the tunnel's IPv4 confined, the app's only way out -- and a
+ * node refusing the credential carries nothing, so the answer the ask
+ * exists for never came; and it was never asked again in that pass.
+ *
+ * Now an ask that did not come back from the server is asked once more, at
+ * the next `ask` -- the next teardown: the ladder does not wait for it, and
+ * the next rung's tunnel may come up under it. Never two at once, and never
+ * after the server has answered. Never rejects. */
+export function createFreshAsk(
+  request: () => Promise<{ source: string; protocolUsers: ProtocolUser[] }>,
+  onAnswer: (protocolUsers: ProtocolUser[]) => void = () => undefined,
+): {
+  /** Asks, unless an ask is in flight, the server has answered, or it has
+   * been asked `FRESH_ASKS` times. */
+  ask(): void;
+  /** The ask in flight, or null. */
+  pending(): Promise<void> | null;
+  /** The server's answer, once: null before it, and after it is taken. */
+  take(): ProtocolUser[] | null;
+} {
+  let asked = 0;
+  let answered = false;
+  let inFlight: Promise<void> | null = null;
+  let answer: ProtocolUser[] | null = null;
+  return {
+    ask() {
+      if (answered || inFlight !== null || asked >= FRESH_ASKS) return;
+      asked += 1;
+      inFlight = request()
+        .then(
+          (reply) => {
+            if (reply.source !== "network") return;
+            answered = true;
+            answer = reply.protocolUsers;
+            onAnswer(reply.protocolUsers);
+          },
+          () => undefined,
+        )
+        .finally(() => {
+          inFlight = null;
+        });
+    },
+    pending() {
+      return inFlight;
+    },
+    take() {
+      const taken = answer;
+      answer = null;
+      return taken;
+    },
+  };
+}
+
 /** What a dial of `user` sends: which credential, its secrets, and where. */
 function dialKey(user: ProtocolUser): string {
   const c = user.connection;
