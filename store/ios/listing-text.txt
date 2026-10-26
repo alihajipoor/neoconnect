@@ -1,0 +1,45 @@
+=== PROMOTIONAL TEXT (max 170) ===
+Connects on networks that filter, and only says connected once your traffic really flows through the VPN. New accounts start with a free trial.
+
+=== DESCRIPTION (max 4000) ===
+Neoxify is a VPN made for networks that filter.
+
+The app has several ways to connect, including ones made to look like ordinary web traffic. It finds the one that works on your network by itself, and moves to another if one stops working.
+
+WHAT IT DOES
+- Encrypts your connection and routes it through a server in the country you choose
+- Switches to another way of connecting by itself when one is blocked
+- Says "connected" only after it has checked that your traffic really flows through the VPN
+- Shows the address websites see, so you can confirm where you appear to be
+- English and Persian, with full right-to-left layout
+- Light and dark appearance
+
+PLANS
+Neoxify is a paid service. New accounts start with a free trial. In the app you can buy a 30-day plan (Starter, Pro or Ultimate) through the App Store. Plans are one-time purchases for 30 days and do not renew automatically.
+
+HONEST ABOUT WHAT WE COLLECT
+Before you connect for the first time, the app shows exactly what is collected and why: your email and account ID, support messages you send, and connection diagnostics. Our servers keep operational logs so the service can run and faults can be diagnosed. We do not sell your data and we do not share it for advertising.
+
+Privacy policy: https://neoxify.net/privacy/
+Contact and support: https://neoxify.net/contact/
+
+=== KEYWORDS (max 100) ===
+vpn,proxy,privacy,secure,unblock,freedom,censorship,encrypt,wifi,anonymous,internet,fast
+
+=== SUPPORT URL ===
+https://neoxify.net/contact/
+
+=== APP REVIEW NOTES ===
+Neoxify is a VPN.
+
+ABOUT THE PREVIOUS REJECTION (Guideline 2.1(b), error after purchase)
+The error came from our server, not the app. Our purchase verification was not yet configured for the App Store and refused sandbox transactions, so after a successful sandbox purchase the app showed "Purchases are not available right now". The server now verifies App Store transactions, including the sandbox purchases made during review. We completed a sandbox purchase end to end on an iPhone with this exact build before resubmitting.
+
+HOW TO REACH THE IN-APP PURCHASES
+Sign in with the demo account below. Tap the account button (the circle at the top right of the main screen), then "Plans". An account without an active plan also sees a "View plans" button on the main screen. The three 30-day plans (Starter, Pro, Ultimate) are non-renewing subscriptions with their App Store prices. After a purchase the plan is applied to the account within a few seconds.
+
+TESTING
+The demo account has an active free trial, so the app is fully usable without a purchase. New accounts also get a free trial after confirming their email. Connecting requires accepting the system VPN configuration prompt the first time.
+
+CUSTOMERS FROM OTHER PLATFORMS
+The service is also available on Windows, Android and the web. Under guideline 3.1.3(b), customers who bought access there can sign in and use it, while the same plans are available in the app through In-App Purchase. The app contains no links or buttons to buy outside the App Store.
