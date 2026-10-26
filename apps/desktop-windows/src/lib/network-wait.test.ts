@@ -242,7 +242,7 @@ describe("the Windows ladder waits on the same rung", () => {
     const beside = prologue.indexOf(
       "const ipv6Beside = redialAfterWait && ipv6BaselineRef.current === null ? captureIpv6Baseline() : null;",
     );
-    const settle = prologue.indexOf("baselineIpRef.current = await settleAndCaptureBaseline(");
+    const settle = prologue.indexOf("const settling = settleAndCaptureBaseline(");
     expect(beside).toBeGreaterThan(0);
     expect(beside).toBeLessThan(settle);
     expect(prologue).toContain("redialAfterWait = false;");

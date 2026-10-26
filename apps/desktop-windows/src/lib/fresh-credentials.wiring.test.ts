@@ -28,7 +28,7 @@ describe("the ladder's credentials", () => {
 
   it("dials the rest of the ladder on the answer, waiting for it only after a last rung", () => {
     const bottom = ladder.indexOf('await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);');
-    const tail = ladder.slice(bottom, bottom + 600);
+    const tail = ladder.slice(bottom, ladder.indexOf("// Superseded while it was running", bottom));
     const waited = tail.indexOf("if (isLast && freshAsked !== null) await freshAsked;");
     const taken = tail.indexOf("takeFresh(index + 1);");
     const said = tail.indexOf('if (index < candidates.length - 1) publishObserved(intent, "connecting");');

@@ -887,8 +887,8 @@ describe("the tunnel's own server, named to the egress check", () => {
     // tunnel, and wait on it or answer from its resolver. The settle
     // needs only the literal `connection.host`.
     const loop = dashboard.slice(dashboard.indexOf('const settleServer = literalTunnelServer(candidate, "windows");'));
-    expect(loop.indexOf("await settleAndCaptureBaseline(")).toBeGreaterThan(-1);
-    expect(loop.indexOf("await settleAndCaptureBaseline(")).toBeLessThan(
+    expect(loop.indexOf("const settling = settleAndCaptureBaseline(")).toBeGreaterThan(-1);
+    expect(loop.indexOf("const settling = settleAndCaptureBaseline(")).toBeLessThan(
       loop.indexOf('await tunnelServerOf(candidate, "windows")'),
     );
     expect(loop.indexOf('await tunnelServerOf(candidate, "windows")')).toBeLessThan(

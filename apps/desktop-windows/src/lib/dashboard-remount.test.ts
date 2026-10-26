@@ -148,7 +148,7 @@ describe("the Dashboard's wiring", () => {
     expect(loop).toBeGreaterThan(0);
     const checked = dashboard.indexOf("if (ladderGenerationRef.current !== generation) break;", loop);
     const renewed = dashboard.indexOf("ladderPass.progress(generation);", loop);
-    const settled = dashboard.indexOf("await settleAndCaptureBaseline(", loop);
+    const settled = dashboard.indexOf("const settling = settleAndCaptureBaseline(", loop);
     expect(checked).toBeGreaterThan(loop);
     expect(renewed).toBeGreaterThan(checked);
     expect(renewed).toBeLessThan(settled);

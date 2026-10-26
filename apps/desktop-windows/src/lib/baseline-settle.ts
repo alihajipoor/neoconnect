@@ -140,3 +140,40 @@ export async function settleAndCaptureBaseline(
     await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
   }
 }
+
+/** How long, once a dial beside the settle has answered, the settle is
+ * still waited for (`settleBeside`). */
+export const LATE_SETTLE_GRACE_MS = 1_500;
+
+/** The settle run beside a dial rather than in front of it: for a rung
+ * dialled again after a wait for a network that the service's way-out
+ * ended (`network-wait.ts`). Nothing of ours is up then -- the service
+ * refused the dial before starting anything -- so the settle has no engine's
+ * routes to wait out, only a network to confirm and a baseline to take. In
+ * front, it held every such dial 1.5 to 2.5 s on the VM (round 3: the way
+ * out true at +7.6 to +8.0 s, the first answer off the tunnel at +8.7 to
+ * +10.3 s, the dial only then), past the screen's ten-second calm hold.
+ *
+ * What it found is asked once the dial has answered (`found`), and waited
+ * for `LATE_SETTLE_GRACE_MS` more at most. A reading it takes once the new
+ * tunnel is up is no risk to the comparison: through the tunnel it reads
+ * the node's address, which a baseline never is (`nodeAddresses`), so it is
+ * passed over and the settle runs on to its deadline. Late past the grace,
+ * or with nothing reachable, it is null -- no baseline -- and a rung that
+ * then carries nothing is not held against its server: the settle never
+ * said the network worked, and the rung is dialled again with the settle in
+ * front (the Dashboard's `settleInFront`). */
+export function settleBeside(
+  settling: Promise<BaselineIp | null>,
+  later: (fn: () => void, ms: number) => unknown = (fn, ms) => setTimeout(fn, ms),
+): {
+  /** The settle's baseline: at once if it is in, within the grace if not,
+   * null after. */
+  found(): Promise<BaselineIp | null>;
+} {
+  const settled = settling.catch(() => null);
+  return {
+    found: () =>
+      Promise.race([settled, new Promise<BaselineIp | null>((resolve) => later(() => resolve(null), LATE_SETTLE_GRACE_MS))]),
+  };
+}

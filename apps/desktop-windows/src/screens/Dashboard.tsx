@@ -7,7 +7,7 @@ import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import { concurrentExitsFor } from "../lib/concurrent-exits";
-import { settleAndCaptureBaseline } from "../lib/baseline-settle";
+import { settleAndCaptureBaseline, settleBeside } from "../lib/baseline-settle";
 import {
   captureBaselineIp,
   captureIpv6Baseline,
@@ -3837,6 +3837,9 @@ export function Dashboard({
       // gone by this rung's own settle before that -- so its IPv6 baseline
       // can be taken beside the settle rather than after it.
       let redialAfterWait = false;
+      // A rung dialled beside the settle failed with the settle never having
+      // said the network worked: dialled once more, the settle in front.
+      let settleInFront = false;
       // Over an index, not an iterator: a rung the service refused for want
       // of a network is dialled again, on the same server, once there is one.
       for (let index = 0; index < candidates.length; index += 1) {
@@ -3887,23 +3890,35 @@ export function Dashboard({
         // Beside the settle after a wait for a network (`redialAfterWait`).
         // After it, on the VM, the probe waited out its timeout (about two
         // seconds) on a network with IPv6 addresses and no IPv6 route,
-        // the settle's half second before it. Beside it saves only that
-        // half second -- the dial still waits for the probe below. By the
-        // VM's R3d timings a four-second blip is still verified about
-        // 1.7 s past the screen's ten-second calm hold: shortened, and
-        // still amber, not fixed.
+        // the settle's half second before it.
         const ipv6Beside = redialAfterWait && ipv6BaselineRef.current === null ? captureIpv6Baseline() : null;
+        // And the dial does not wait for either, after a wait the service's
+        // way-out ended: nothing of ours is up, so the settle has no
+        // engine's routes to wait out, only a network to confirm and a
+        // baseline to take -- beside the dial (`settleBeside`). In front of
+        // it, it held every such redial 1.5 to 2.5 s on the VM (round 3),
+        // past the ten-second calm hold. Not after a rung dialled so found
+        // the settle had said nothing (`settleInFront`).
+        const dialEarly = redialAfterWait && !settleInFront;
+        settleInFront = false;
         redialAfterWait = false;
         // Fresh every attempt, and taken only once plain networking is
         // confirmed working. See settleAndCaptureBaseline.
-        baselineIpRef.current = await settleAndCaptureBaseline(
+        const settling = settleAndCaptureBaseline(
           settleBudget,
           knownBaseline,
           settleServer,
           nodeAddresses,
           index > 0 || !nothingUpAtStart,
         );
-        if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
+        const beside = dialEarly ? settleBeside(settling) : null;
+        /** Whether this rung's dial was answered: its check then ran on
+         * what the settle beside it had found by then. */
+        let dialAnswered = false;
+        if (beside === null) {
+          baselineIpRef.current = await settling;
+          if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
+        }
         const tunnelServer = await tunnelServerOf(candidate, "windows");
         // Once per pass, not once per candidate: whether this machine
         // has public IPv6 is a fact about its network, not about which
@@ -3911,7 +3926,7 @@ export function Dashboard({
         // add a timeout to each rejected candidate for no new
         // information. Taken here rather than before the loop so it
         // still lands after the previous engine's routes are gone.
-        if (ipv6BaselineRef.current === null) {
+        if (ipv6BaselineRef.current === null && beside === null) {
           ipv6BaselineRef.current = await (ipv6Beside ?? captureIpv6Baseline());
         }
 
@@ -3977,7 +3992,16 @@ export function Dashboard({
             blockWhileReconnecting: holdWanted(appPrefs.current().blockWhileReconnecting),
           });
           await dialledUnderHold(dial);
+          dialAnswered = true;
           showNetworkWait(false);
+          // Dialled beside the settle: its baseline, waited for a moment
+          // more if it is not in yet (`settleBeside`), and the IPv6 one,
+          // begun beside it.
+          if (beside !== null) {
+            baselineIpRef.current = await beside.found();
+            if (baselineIpRef.current !== null) knownBaseline = baselineIpRef.current;
+            if (ipv6BaselineRef.current === null && ipv6Beside !== null) ipv6BaselineRef.current = await ipv6Beside;
+          }
           // The session this pass was started under ended while the
           // engine was coming up. The sign-out's own teardown may have
           // run before this connect finished, in which case this tunnel
@@ -4440,6 +4464,25 @@ export function Dashboard({
         // this one's routes and fails for a reason that has nothing to
         // do with it. Keeping the hold between rungs, when it is kept.
         await invoke(holdThrough ? "vpn_disconnect_for_reconnect" : "vpn_disconnect").catch(() => undefined);
+        // Dialled beside the settle, which never said plain networking
+        // worked before that tunnel was up: what the rung did says nothing
+        // about its server -- never held against a node for a network that
+        // may have been dead. Taken back, and the rung dialled again with
+        // the settle in front; only that dial's failure is its own.
+        if (
+          beside !== null &&
+          !stopped() &&
+          (dialAnswered ? baselineIpRef.current === null : (await beside.found()) === null)
+        ) {
+          attempts.pop();
+          dials.pop();
+          failedRungs.pop();
+          if (carriedNothing[carriedNothing.length - 1] === candidate) carriedNothing.pop();
+          settleInFront = true;
+          redialAfterWait = true;
+          index -= 1;
+          continue;
+        }
         // Fresh credentials in: the rest of the ladder on them. After a last
         // rung that carried nothing, their answer is waited for -- within
         // its own budget -- so a rung on a changed credential is dialled
