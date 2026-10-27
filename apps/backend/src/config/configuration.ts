@@ -6,6 +6,21 @@ function challengeGrace(raw: string | undefined): number | undefined {
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+/** A whole number of at least `min` from the environment, or `fallback`
+ * when it is unset, empty or anything else.
+ *
+ * Empty matters most: docker-compose.prod.yml passes these through as
+ * `${NAME:-}`, so an unset one arrives as "" -- and `Number("" ?? 443)`
+ * is 0. That is how the Iran probe asked about port 0, kept 0 days of
+ * history (deleting every result as it was written) and alerted after one
+ * failing cycle, from 6 October 2026 until it was found three weeks later
+ * having never recorded an incident. */
+function whole(raw: string | undefined, fallback: number, min = 1): number {
+  if (raw === undefined || !/^\s*\d+\s*$/.test(raw)) return fallback;
+  const value = Number(raw);
+  return value >= min ? value : fallback;
+}
+
 export default () => ({
   port: parseInt(process.env.PORT ?? "4000", 10),
   databaseUrl: process.env.DATABASE_URL,
@@ -152,16 +167,16 @@ export default () => ({
     // The port probed. 443 because that is where the REALITY and TLS
     // inbounds live and what a blocked customer is failing to reach;
     // filtering is per IP *and* port, so this is not an arbitrary pick.
-    port: Number(process.env.REACHABILITY_PORT ?? 443),
+    port: whole(process.env.REACHABILITY_PORT, 443),
 
     // Consecutive failing cycles before the operator is emailed. Two, at
     // the default half-hourly cadence, means roughly an hour of genuine
     // unreachability -- long enough that a single bad cycle at the probe
     // provider cannot page anyone, short enough to matter.
-    failuresBeforeAlert: Number(process.env.REACHABILITY_FAILURES_BEFORE_ALERT ?? 2),
+    failuresBeforeAlert: whole(process.env.REACHABILITY_FAILURES_BEFORE_ALERT, 2),
 
     // How long probe history is kept. It is diagnostic, not accounting.
-    retentionDays: Number(process.env.REACHABILITY_RETENTION_DAYS ?? 30),
+    retentionDays: whole(process.env.REACHABILITY_RETENTION_DAYS, 30),
 
     // Comma-separated override for who gets alerted. Unset, every
     // SUPERADMIN in admin_users is mailed, which is the right default

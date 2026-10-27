@@ -388,8 +388,8 @@ export interface ProbeCheck {
   detail: unknown;
 }
 
-/** The reachability monitor's probes: unreachable from every answering
- * vantage, several conclusive checks in a row. Checks the probe service
+/** The reachability monitor's probes: unreachable -- most answering
+ * vantages could not connect -- several conclusive checks in a row. Checks the probe service
  * could not answer are skipped, never counted either way. `checks` newest
  * first. */
 export function probeFamily(
@@ -423,7 +423,7 @@ export function probeFamily(
   const answered = networks.reduce((sum, n) => sum + n.tried, 0);
   const firing = streak >= tuning.probeStreak;
   const summary = firing
-    ? `Probe: no connection from any of ${answered || "the"} answering vantages inside the country, ${streak} checks in a row`
+    ? `Probe: most of ${answered || "the"} answering vantages inside the country could not connect, ${streak} checks in a row`
     : latest.verdict === "UNREACHABLE"
       ? `Probe: no connection in the latest check (${streak} in a row so far)`
       : `Probe: ${latest.verdict === "DEGRADED" ? "partly reachable" : "reachable"} in the latest check`;
