@@ -182,6 +182,20 @@ describe("a request something answered", () => {
     expect(failureText({ error: "...", status: 403, code: "RELAY_REGION" }, en)).toBe(DICTIONARIES.en["relay.region"]);
   });
 
+  it("words an App Store purchase that did not finish in the reader's language", () => {
+    // iap.ts keeps an English sentence for the reports and sets a code; the
+    // store build's screen used to show that English under a Persian page.
+    for (const [code, key] of [
+      ["IAP_UNKNOWN_PRODUCT", "iap.unknownProduct"],
+      ["IAP_UNVERIFIED", "iap.unverified"],
+      ["IAP_FAILED", "iap.failed"],
+    ] as const) {
+      const failure = { error: "The purchase didn't complete.", code };
+      expect(failureText(failure, fa), code).toBe(DICTIONARIES.fa[key]);
+      expect(failureText(failure, en), code).toBe(DICTIONARIES.en[key]);
+    }
+  });
+
   it("does not take a backend sentence for an unworded answer because of its status", () => {
     // A 503 the backend wrote for the customer keeps its words.
     expect(failureText({ error: "Try again in a minute.", status: 503 }, en)).toBe("Try again in a minute.");

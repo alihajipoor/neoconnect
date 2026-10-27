@@ -182,7 +182,7 @@ export async function buyIapPlan(productId: string): Promise<ApiResult<RedeemRes
     purchase = await invoke("vpn_iap_purchase", { productId });
   } catch (err) {
     const code = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: purchaseErrorMessage(code) };
+    return { ok: false, error: purchaseErrorMessage(code), code: purchaseErrorCode(code) };
   }
 
   if (purchase.pending) {
@@ -231,13 +231,26 @@ export async function sweepUnfinishedPurchases(): Promise<number> {
   return recovered;
 }
 
+/** The English sentence for the reports. The screen words it by
+ * `purchaseErrorCode` instead (failure-text.ts), in the reader's language. */
 function purchaseErrorMessage(code: string): string {
   switch (code) {
     case "iap-unknown-product":
-      return "That plan is not available on the App Store right now.";
+      return "This plan isn't available on the App Store right now.";
     case "iap-unverified":
-      return "The App Store could not verify that purchase.";
+      return "The App Store couldn't confirm this purchase.";
     default:
-      return "That purchase did not complete. You have not been charged twice -- if money left your account, reopen the app and it will be applied.";
+      return "The purchase didn't complete. If money left your account, reopen the app and the plan will be added. You won't be charged twice.";
+  }
+}
+
+function purchaseErrorCode(code: string): string {
+  switch (code) {
+    case "iap-unknown-product":
+      return "IAP_UNKNOWN_PRODUCT";
+    case "iap-unverified":
+      return "IAP_UNVERIFIED";
+    default:
+      return "IAP_FAILED";
   }
 }

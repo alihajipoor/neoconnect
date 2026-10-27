@@ -29,6 +29,12 @@ const CODED: Readonly<Record<string, TranslationKey>> = {
   VERIFY_EMAIL: "verify.required",
   REAUTH_REQUIRED: "recovery.reauth",
   ADDRESS_CHANGE_LIMIT: "unverified.limit",
+  // An App Store purchase that did not finish (iap.ts `purchaseErrorCode`).
+  // Not the backend's: the store build's own refusals, which used to reach
+  // a Persian screen in English.
+  IAP_UNKNOWN_PRODUCT: "iap.unknownProduct",
+  IAP_UNVERIFIED: "iap.unverified",
+  IAP_FAILED: "iap.failed",
 };
 
 /** `t` from `useI18n()`, or anything shaped like it. */
