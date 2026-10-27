@@ -104,6 +104,7 @@ import {
   noSlowRungs,
   noteSlow,
   passOverSlow,
+  serverKey,
   slowFallback,
   type DataVerdict,
 } from "../lib/data-check";
@@ -3866,10 +3867,10 @@ export function Dashboard({
       // said the network worked: dialled once more, the settle in front.
       let settleInFront = false;
       // Rungs that came up and moved too little data (`data-check.ts`): their
-      // routes are passed over for the rest of the pass, and the best of them
+      // servers are passed over for the rest of the pass, and the best of them
       // is dialled once more, and kept, if the ladder ends with nothing
       // landed -- a slow tunnel beats none, and the screen says it is slow.
-      const slow = noSlowRungs();
+      const slow = noSlowRungs((candidate) => serverKey(candidate, routes));
       const queueSlowFallback = (): boolean => {
         if (stopped()) return false;
         const fallback = slowFallback(slow);

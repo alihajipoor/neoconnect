@@ -139,6 +139,7 @@ import {
   noSlowRungs,
   noteSlow,
   passOverSlow,
+  serverKey,
   slowFallback,
 } from "@shared/lib/data-check";
 import { snapshotAge, traceRequests } from "@shared/lib/unanswered-report";
@@ -2530,10 +2531,10 @@ export function Dashboard({
      * Kept beside the skips below, so "the last rung" means the last one
      * actually dialled. */
     // Rungs that came up and moved too little data (`data-check.ts`): their
-    // routes are passed over for the rest of the pass, and the best of them
+    // servers are passed over for the rest of the pass, and the best of them
     // is dialled once more, and kept, if nothing lands -- a slow tunnel
     // beats none, and the screen says it is slow. The Windows ladder's rule.
-    const slow = noSlowRungs();
+    const slow = noSlowRungs((candidate) => serverKey(candidate, routes));
     const queueSlowFallback = (): boolean => {
       if (pass.stopped()) return false;
       const fallback = slowFallback(slow);

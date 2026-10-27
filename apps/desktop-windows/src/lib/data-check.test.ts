@@ -11,6 +11,7 @@ const {
   noSlowRungs,
   noteSlow,
   passOverSlow,
+  serverKey,
   slowFallback,
   UP_BYTES,
 } = await import("./data-check");
@@ -78,14 +79,17 @@ describe("checkDataMoves", () => {
 });
 
 describe("slow rungs", () => {
-  const user = (id: string, routeId: string): ProtocolUser => ({ id, routeId }) as ProtocolUser;
-  const uk = user("uk-reality", "uk");
-  const ukTls = user("uk-tls", "uk");
-  const tr = user("tr-reality", "tr");
-  const de = user("de-reality", "de");
+  // A route is one server and one protocol: "germany-1 / VLESS+TLS".
+  const user = (id: string, host: string): ProtocolUser =>
+    ({ id, routeId: `${id}-route`, connection: { host } }) as unknown as ProtocolUser;
+  const routes = [] as Array<{ id: string; exit: string | null }>;
+  const uk = user("uk-reality", "198.51.100.1");
+  const ukTls = user("uk-tls", "198.51.100.1");
+  const tr = user("tr-reality", "198.51.100.2");
+  const de = user("de-reality", "198.51.100.3");
 
   it("passes over the rest of a slow server, keeps the faster of two, and puts it back once", () => {
-    const slow = noSlowRungs();
+    const slow = noSlowRungs((u) => serverKey(u, routes));
     noteSlow(slow, uk, { state: "slow", downKbps: 3000, upKbps: 0 });
     expect(passOverSlow(slow, ukTls)).toBe(true);
     expect(passOverSlow(slow, de)).toBe(false);
@@ -98,6 +102,19 @@ describe("slow rungs", () => {
     expect(keepsSlow(slow, uk)).toBe(false);
     // Once.
     expect(slowFallback(slow)).toBeNull();
+  });
+
+  /** One entry box, two exits: the held one is passed over, not the other. */
+  it("tells a relay's exits apart", () => {
+    const relayRoutes = [
+      { id: "to-tr", exit: "exit-tr" },
+      { id: "to-de", exit: "exit-de" },
+    ];
+    const viaTr = { id: "a", routeId: "to-tr", connection: { host: "192.0.2.9" } } as unknown as ProtocolUser;
+    const viaDe = { id: "b", routeId: "to-de", connection: { host: "192.0.2.9" } } as unknown as ProtocolUser;
+    const slow = noSlowRungs((u) => serverKey(u, relayRoutes));
+    noteSlow(slow, viaTr, { state: "slow", downKbps: 100, upKbps: 0 });
+    expect(passOverSlow(slow, viaDe)).toBe(false);
   });
 
   it("has nothing to put back when nothing was slow", () => {

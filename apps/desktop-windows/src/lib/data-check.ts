@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ProtocolUser } from "./types";
+import type { ProtocolUser, RouteOption } from "./types";
 
 /** Whether a tunnel whose address check passed is any use: a timed
  * download and upload through it, before the app says "Connected".
@@ -86,24 +86,40 @@ export async function checkDataMoves(base: string | undefined): Promise<DataVerd
   }
 }
 
-/** What the ladder keeps of rungs that came up and were too slow: which
- * routes to pass over for the rest of the pass, and the best of them to
- * dial again, and keep, if nothing better turns up.
+/** Which server a candidate is, for passing over: the address it is
+ * dialled at, and the machine its traffic leaves from.
  *
- * Passed over by route because the hold sits on the server's address --
- * the same rate on every port, in two rounds of measurement -- so the
- * route's other protocols would only be slow again, each costing a full
- * check to find out. */
+ * Not the route. A route here is one server and one protocol --
+ * "germany-1 / VLESS+TLS" -- so a slow route said nothing about the next
+ * protocol on germany-1, and on the test VM the ladder dialled germany-1
+ * four times over, each a full check, before it got anywhere. The hold
+ * sits on the address (the same rate on every port, in two rounds of
+ * measurement), so every protocol at that address is as slow. The exit is
+ * part of it for a relay: the same entry box can carry one exit that is
+ * held and another that is not. */
+export function serverKey(candidate: ProtocolUser, routes: ReadonlyArray<Pick<RouteOption, "id" | "exit">>): string {
+  const host = candidate.connection?.host;
+  if (!host) return `route:${candidate.routeId}`;
+  const exit = routes.find((route) => route.id === candidate.routeId)?.exit ?? "";
+  return `${host}|${exit}`;
+}
+
+/** What the ladder keeps of rungs that came up and were too slow: which
+ * servers (`serverKey`) to pass over for the rest of the pass, and the
+ * best of them to dial again, and keep, if nothing better turns up. A
+ * held server's other protocols would only be slow again, each costing a
+ * full check to find out. */
 export type SlowRungs = {
-  routes: Set<string>;
+  keyOf: (candidate: ProtocolUser) => string;
+  servers: Set<string>;
   best: { candidate: ProtocolUser; verdict: Extract<DataVerdict, { state: "slow" }> } | null;
   /** The fallback's credential once it has been put back on the ladder;
    * its check then decides nothing. */
   redialling: string | null;
 };
 
-export function noSlowRungs(): SlowRungs {
-  return { routes: new Set(), best: null, redialling: null };
+export function noSlowRungs(keyOf: (candidate: ProtocolUser) => string = (u) => `route:${u.routeId}`): SlowRungs {
+  return { keyOf, servers: new Set(), best: null, redialling: null };
 }
 
 /** The speed a rung is remembered by (`recordSpeed`): its slower
@@ -124,14 +140,14 @@ export function noteSlow(
   candidate: ProtocolUser,
   verdict: Extract<DataVerdict, { state: "slow" }>,
 ): void {
-  slow.routes.add(candidate.routeId);
+  slow.servers.add(slow.keyOf(candidate));
   if (slow.best === null || faster(verdict, slow.best.verdict)) slow.best = { candidate, verdict };
 }
 
-/** Whether to pass over `candidate` without dialling it: its route was
+/** Whether to pass over `candidate` without dialling it: its server was
  * too slow on another protocol this pass. Never the fallback itself. */
 export function passOverSlow(slow: SlowRungs, candidate: ProtocolUser): boolean {
-  return slow.routes.has(candidate.routeId) && slow.redialling !== candidate.id;
+  return slow.servers.has(slow.keyOf(candidate)) && slow.redialling !== candidate.id;
 }
 
 /** At the end of the ladder with nothing landed: the best slow rung, put
