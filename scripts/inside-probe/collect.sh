@@ -36,7 +36,7 @@ while read -r vantage address _; do
   [ -n "${address:-}" ] || continue
   # Up to a minute per node in the worst case; a box that hangs is cut off
   # well before the next round.
-  if ! lines="$(timeout 1500 ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 \
+  if ! lines="$(timeout 1500 ssh -T -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 \
       -o StrictHostKeyChecking=yes "$address" <<<"$targets")"; then
     echo "$vantage: the check did not finish" >&2
     continue
