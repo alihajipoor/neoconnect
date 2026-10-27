@@ -163,6 +163,9 @@ export interface DigestParts {
   /** Servers whose reachability alert was held because an incident here
    * already covers them. */
   heldProbeAlerts: string[];
+  /** Nodes that failed the data check from a box inside the country on at
+   * least half of the last day's checks (inside-probe.ts). */
+  inside?: string[];
   calibrating: boolean;
   country: string;
 }
@@ -194,6 +197,12 @@ export function digestPage(parts: DigestParts, now: Date): Page {
   }
   if (open.length) sections.push(`Under watch:\n\n${open.map(section).join("\n\n")}`);
   if (cleared.length) sections.push(`Cleared since the last digest: ${cleared.map((i) => i.nodeName).join(", ")}`);
+  if (parts.inside?.length) {
+    sections.push(
+      "From inside the country, the last 24 hours (256 KB down and up through each server's address):\n\n" +
+        parts.inside.join("\n"),
+    );
+  }
   if (heldProbeAlerts.length) {
     sections.push(
       `Reachability alerts not sent separately, because the block watch already has the server open: ${heldProbeAlerts.join(", ")}`,

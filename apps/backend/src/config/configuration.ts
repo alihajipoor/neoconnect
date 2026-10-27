@@ -199,6 +199,12 @@ export default () => ({
   // the default: paging a person is opted into. The webhook-only offline
   // alerts are unaffected.
   heartbeatGapPageMinutes: process.env.HEARTBEAT_GAP_PAGE_MINUTES ?? "",
+  // The panel host's collector for data checks from inside the watched
+  // country (modules/inside-probe) posts with this. Unset or shorter than
+  // 32 characters, the endpoint refuses everything.
+  insideProbe: {
+    token: process.env.INSIDE_PROBE_TOKEN || undefined,
+  },
   asn: {
     // Which network (autonomous system) a caller is on, for the per-ISP
     // recommendations in the location picker. See modules/network-identity.

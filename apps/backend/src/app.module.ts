@@ -39,6 +39,7 @@ import { IntegrationsModule } from "./modules/integrations/integrations.module";
 import { ClientAttemptsModule } from "./modules/client-attempts/client-attempts.module";
 import { ReachabilityModule } from "./modules/reachability/reachability.module";
 import { BlockWatchModule } from "./modules/block-watch/block-watch.module";
+import { InsideProbeModule } from "./modules/inside-probe/inside-probe.module";
 import { GamingModule } from "./modules/gaming/gaming.module";
 import { EndpointsModule } from "./modules/endpoints/endpoints.module";
 import { NetworkIdentityModule } from "./modules/network-identity/network-identity.module";
@@ -99,6 +100,7 @@ import { AccountActivityModule } from "./modules/account-activity/account-activi
     ClientAttemptsModule,
     ReachabilityModule,
     BlockWatchModule,
+    InsideProbeModule,
     GamingModule,
     EndpointsModule,
     NetworkIdentityModule,

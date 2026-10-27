@@ -675,6 +675,7 @@ model Node {
   gamingResolver   GamingResolver?
 
   reachabilityChecks NodeReachabilityCheck[]
+  insideChecks       InsideProbeCheck[]
   reachabilityAlerts NodeReachabilityAlert[]
   blockIncidents     BlockIncident[]
 
@@ -2150,4 +2151,41 @@ model BlockIncident {
   @@index([nodeId, status])
   @@index([status, openedAt])
   @@map("block_incidents")
+}
+
+/// A data check against one node from a box inside the watched country
+/// (modules/inside-probe): 256 KB down and 256 KB up through the node's
+/// own address, timed. check-host only asks whether a connection opens,
+/// and in October 2026 every kind of block found -- an upload held to
+/// 0.1 Mbps, a connection that dies after the hello, a blocked name --
+/// let one open.
+model InsideProbeCheck {
+  id     String @id @default(uuid())
+  nodeId String
+
+  /// Which box ran it ("ir2", "signin"). Two boxes on two Iranian
+  /// networks saw opposite results on the same day, so each is its own
+  /// series.
+  vantage String
+
+  /// The node's port asked: a TLS inbound, whose fallback reaches the
+  /// node's API mirror.
+  port Int
+
+  /// "moves", "slow" or "unreachable". See inside-probe.ts.
+  verdict String
+
+  connectMs Int?
+  downBytes Int
+  downMs    Int
+  upBytes   Int
+  upMs      Int
+
+  checkedAt DateTime @default(now())
+
+  node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@index([nodeId, checkedAt])
+  @@index([checkedAt])
+  @@map("inside_probe_checks")
 }
