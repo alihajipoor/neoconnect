@@ -192,7 +192,7 @@ describe("a rung dialled beside the settle", () => {
 describe("the Windows ladder's redial", () => {
   const dash = readFileSync(fileURLToPath(new URL("../screens/Dashboard.tsx", import.meta.url)), "utf8");
   const ladder = dash.slice(dash.indexOf("async function runLadder("));
-  const loop = ladder.slice(ladder.indexOf("for (let index = 0; index < candidates.length; index += 1) {"));
+  const loop = ladder.slice(ladder.indexOf("for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {"));
 
   it("runs the settle beside the dial after a wait the way-out ended, with this machine's address known, and in front of it otherwise", () => {
     const prologue = loop.slice(0, loop.indexOf('const dial = invoke("vpn_connect", {'));

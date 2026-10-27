@@ -168,19 +168,19 @@ describe("(b) the connected node's mirror leads the list, reached around the tun
 
     net.tunnel = FINLAND;
     // The health poll, in list order and baseline first.
-    await expect(verifyEgress(baseline, { tunnelServer: FI_AROUND })).resolves.toEqual(THROUGH);
-    await expect(verifyEgress(baseline, { tunnelServer: FI_AROUND, baselineFirst: true })).resolves.toEqual(THROUGH);
+    await expect(verifyEgress(baseline, { tunnelServer: FI_AROUND })).resolves.toMatchObject(THROUGH);
+    await expect(verifyEgress(baseline, { tunnelServer: FI_AROUND, baselineFirst: true })).resolves.toMatchObject(THROUGH);
     // The ladder's earlier rungs, asking the baseline's endpoint alone.
-    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_AROUND })).resolves.toEqual(
+    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_AROUND })).resolves.toMatchObject(
       THROUGH,
     );
     // The ladder itself, and the last rung.
     await expect(
       confirmEgressWithin(baseline, 2_000, { sameEndpointOnly: true, intervalMs: 20, tunnelServer: FI_AROUND }),
-    ).resolves.toEqual(THROUGH);
+    ).resolves.toMatchObject(THROUGH);
     await expect(
       confirmEgressWithin(baseline, 2_000, { intervalMs: 20, tunnelServer: FI_AROUND, baselineFirst: true }),
-    ).resolves.toEqual(THROUGH);
+    ).resolves.toMatchObject(THROUGH);
   });
 
   it("never accuses the tunnel over a baseline that did come from that mirror", async () => {
@@ -231,7 +231,7 @@ describe("(a) the reading comes from another endpoint", () => {
     const baseline = await captureBaselineIp({ tunnelServer: FI_AROUND });
     endpoints.mockResolvedValue([CDN, FI_MIRROR]);
     net.tunnel = FINLAND;
-    await expect(verifyEgress(baseline, { tunnelServer: FI_AROUND })).resolves.toEqual(THROUGH);
+    await expect(verifyEgress(baseline, { tunnelServer: FI_AROUND })).resolves.toMatchObject(THROUGH);
   });
 
   it("proves it on a censored network through the rung's own endpoint", async () => {
@@ -243,7 +243,7 @@ describe("(a) the reading comes from another endpoint", () => {
     const baseline = await captureBaselineIp({ tunnelServer: FI_AROUND });
     expect(baseline).toEqual({ ip: HOME, from: DE_MIRROR, peer: GERMANY });
     net.tunnel = FINLAND;
-    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_AROUND })).resolves.toEqual(
+    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_AROUND })).resolves.toMatchObject(
       THROUGH,
     );
   });
@@ -277,12 +277,12 @@ describe("the baseline's endpoint first (the Windows health poll and last rung)"
     asked.length = 0;
     await expect(
       verifyEgress(baseline, { totalMs: 2 * EGRESS_TIMEOUT_MS, tunnelServer: FI_AROUND, baselineFirst: true }),
-    ).resolves.toEqual(THROUGH);
+    ).resolves.toMatchObject(THROUGH);
     expect(asked).toEqual([DE_MIRROR]);
     // And the last rung, which walks the list too.
     await expect(
       confirmEgressWithin(baseline, 2_000, { intervalMs: 20, tunnelServer: FI_AROUND, baselineFirst: true }),
-    ).resolves.toEqual(THROUGH);
+    ).resolves.toMatchObject(THROUGH);
   });
 
   it("still walks the rest when the baseline's endpoint is silent, and accuses nothing", async () => {
@@ -330,11 +330,11 @@ describe("a server reached through the tunnel (phones' Xray and WireGuard, wireg
     // It names the very address it was fetched from -- and is believed,
     // because it is the baseline's own endpoint, on the tunnel's server,
     // and its baseline named the caller.
-    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_THROUGH })).resolves.toEqual(
+    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_THROUGH })).resolves.toMatchObject(
       THROUGH,
     );
-    await expect(verifyEgress(baseline, { tunnelServer: FI_THROUGH, baselineFirst: true })).resolves.toEqual(THROUGH);
-    await expect(verifyEgress(baseline, { tunnelServer: FI_THROUGH })).resolves.toEqual(THROUGH);
+    await expect(verifyEgress(baseline, { tunnelServer: FI_THROUGH, baselineFirst: true })).resolves.toMatchObject(THROUGH);
+    await expect(verifyEgress(baseline, { tunnelServer: FI_THROUGH })).resolves.toMatchObject(THROUGH);
   });
 
   it("proves a relay through the entry's own mirror, which sees the exit", async () => {
@@ -347,7 +347,7 @@ describe("a server reached through the tunnel (phones' Xray and WireGuard, wireg
     const baseline = await captureBaselineIp({ tunnelServer: FI_THROUGH });
     net.tunnel = FINLAND;
     net.exit = GERMANY;
-    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_THROUGH })).resolves.toEqual({
+    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_THROUGH })).resolves.toMatchObject({
       state: "throughTunnel",
       exitIp: GERMANY,
     });
@@ -362,7 +362,7 @@ describe("a server reached through the tunnel (phones' Xray and WireGuard, wireg
     const baseline = { ip: HOME, from: CDN, peer: EDGE };
     net.tunnel = FINLAND;
     asked.length = 0;
-    await expect(verifyEgress(baseline, { tunnelServer: FI_THROUGH })).resolves.toEqual(THROUGH);
+    await expect(verifyEgress(baseline, { tunnelServer: FI_THROUGH })).resolves.toMatchObject(THROUGH);
     expect(asked).toEqual([FI_MIRROR, CDN]);
   });
 
@@ -388,7 +388,7 @@ describe("a server reached through the tunnel (phones' Xray and WireGuard, wireg
     const baseline = await captureBaselineIp({ tunnelServer: FI_THROUGH });
     expect(baseline).toEqual({ ip: HOME, from: CDN, peer: EDGE });
     net.tunnel = FINLAND;
-    await expect(verifyEgress(baseline, { tunnelServer: FI_THROUGH, baselineFirst: true })).resolves.toEqual(THROUGH);
+    await expect(verifyEgress(baseline, { tunnelServer: FI_THROUGH, baselineFirst: true })).resolves.toMatchObject(THROUGH);
   });
 
   it("still sees a dead tunnel", async () => {
@@ -476,10 +476,10 @@ describe("a mirror that reports its own node's address", () => {
     const baseline = await captureBaselineIp({ tunnelServer: FI_AROUND });
     expect(baseline).toEqual({ ip: HOME, from: CDN, peer: EDGE });
     net.tunnel = FINLAND;
-    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_AROUND })).resolves.toEqual(
+    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_AROUND })).resolves.toMatchObject(
       THROUGH,
     );
-    await expect(verifyEgress(baseline, { tunnelServer: FI_AROUND })).resolves.toEqual(THROUGH);
+    await expect(verifyEgress(baseline, { tunnelServer: FI_AROUND })).resolves.toMatchObject(THROUGH);
   });
 
   it("is passed over as a baseline when it is another node's, on Windows too", async () => {
@@ -493,11 +493,11 @@ describe("a mirror that reports its own node's address", () => {
     const baseline = await captureBaselineIp({ tunnelServer: FI_AROUND });
     expect(baseline).toEqual({ ip: HOME, from: CDN, peer: EDGE });
     net.tunnel = FINLAND;
-    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_AROUND })).resolves.toEqual(
+    await expect(verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer: FI_AROUND })).resolves.toMatchObject(
       THROUGH,
     );
     // And while connected, its answer is passed over too.
-    await expect(verifyEgress(baseline, { tunnelServer: FI_AROUND })).resolves.toEqual(THROUGH);
+    await expect(verifyEgress(baseline, { tunnelServer: FI_AROUND })).resolves.toMatchObject(THROUGH);
     expect(asked.slice(-2)).toEqual([DE_MIRROR, CDN]);
   });
 

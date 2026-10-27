@@ -1,10 +1,11 @@
-import { Controller, Get, Ip, Req, ServiceUnavailableException } from "@nestjs/common";
-import type { Request } from "express";
+import { Controller, Get, Ip, Post, Query, Req, Res, ServiceUnavailableException } from "@nestjs/common";
+import type { Request, Response } from "express";
 import { SkipThrottle } from "@nestjs/throttler";
 import { PrismaService } from "../../prisma/prisma.service";
 import { clientIpOf, verifiedClientIpOf } from "../../common/client-ip";
 import { CLOUDFLARE_ASN } from "../../common/cloudflare";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
+import { BULK_IN_FLIGHT, BULK_MAX_BYTES, bulkPayload, bulkSize, drainCounting, InFlight } from "./data-check";
 
 /** The caller's country, as a two-letter code, when the CDN told us.
  *
@@ -132,6 +133,58 @@ export class HealthController {
       };
     } catch {
       return {};
+    }
+  }
+
+  private readonly bulk = new InFlight(BULK_IN_FLIGHT);
+
+  /** `bytes` random bytes, for the apps' check that a tunnel moves data
+   * (see data-check.ts). Never cached, never compressed: either would
+   * time something other than the tunnel. */
+  @SkipThrottle()
+  @Get("bulk")
+  bulkDown(@Query("bytes") raw: string | undefined, @Res() res: Response): void {
+    const bytes = bulkSize(raw);
+    if (bytes === null) {
+      res.status(400).json({ message: `bytes must be 1 to ${BULK_MAX_BYTES}` });
+      return;
+    }
+    const release = this.bulk.enter();
+    if (release === null) {
+      res.status(503).json({ message: "busy" });
+      return;
+    }
+    res.once("close", release);
+    res.set({
+      "Cache-Control": "no-store, no-transform",
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(bytes),
+    });
+    res.status(200).end(bulkPayload(bytes));
+  }
+
+  /** Reads and discards what is sent, up to `BULK_MAX_BYTES`, and says
+   * how much arrived. The upload half of the same check: the direction
+   * Iran was found holding to 0.1 Mbps is the one going to the server. */
+  @SkipThrottle()
+  @Post("bulk")
+  async bulkUp(@Req() req: Request, @Res() res: Response): Promise<void> {
+    const release = this.bulk.enter();
+    if (release === null) {
+      res.status(503).json({ message: "busy" });
+      return;
+    }
+    try {
+      const received = await drainCounting(req, BULK_MAX_BYTES);
+      if (received === null) {
+        res.status(413).set("Connection", "close").json({ message: `at most ${BULK_MAX_BYTES} bytes` });
+        return;
+      }
+      res.set("Cache-Control", "no-store").status(200).json({ received });
+    } catch {
+      if (!res.headersSent) res.status(400).end();
+    } finally {
+      release();
     }
   }
 

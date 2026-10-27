@@ -108,7 +108,7 @@ describe("a self-reporting mirror before connecting", () => {
 
     tunnelUp = true;
     const verdict = await confirmEgress(baseline, { ...quick, sameEndpointOnly: true });
-    expect(verdict).toEqual({ state: "throughTunnel", exitIp: EXIT });
+    expect(verdict).toMatchObject({ state: "throughTunnel", exitIp: EXIT });
     expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("connected");
     expect(pollState("unverified", await pollEgress(baseline))).toBe("connected");
   });

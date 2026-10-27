@@ -311,3 +311,63 @@ describe("a credential the server has switched off, or another plan's", () => {
     expect(ids(orderCandidates(bare, { subscriptionId: "sub-active" }))).toEqual(["r-wg", "r-tls"]);
   });
 });
+
+/** October 2026: on any network a device had no history for, the
+ * alphabetical tie-break put the UK first for every customer, a pinned
+ * France fell through to the UK, and a remembered server that had since
+ * been cut off still led every connect. */
+describe("ties, pins and a remembered server that stopped answering", () => {
+  const SERVERS = ["uk", "de", "tr", "fr", "fi", "sg"].map((routeId) => user(routeId, "XRAY_VLESS_REALITY"));
+
+  it("orders servers nothing else separates by this install's seed, the same every time", () => {
+    const first = ids(orderCandidates(SERVERS, { seed: "install-a" }));
+    expect(ids(orderCandidates(SERVERS, { seed: "install-a" }))).toEqual(first);
+    // Different installs start in different places; over a handful of
+    // installs, not all on one server.
+    const leaders = new Set(
+      ["a", "b", "c", "d", "e", "f", "g", "h"].map((seed) => orderCandidates(SERVERS, { seed })[0].routeId),
+    );
+    expect(leaders.size).toBeGreaterThan(1);
+    // Without a seed it is the old order.
+    expect(ids(orderCandidates(SERVERS))[0]).toBe("de");
+  });
+
+  it("puts a server that answered much later than the quickest after the ones that answered about as fast", () => {
+    const replyMs = Object.fromEntries(
+      SERVERS.map((u) => [reachabilityKey(u.routeId, u.protocol), u.routeId === "fi" ? 120 : 900]),
+    );
+    replyMs[reachabilityKey("de", "XRAY_VLESS_REALITY")] = 140;
+    const order = ids(orderCandidates(SERVERS, { replyMs, seed: "install-a" }));
+    expect(new Set(order.slice(0, 2))).toEqual(new Set(["fi", "de"]));
+  });
+
+  it("does not let a few milliseconds decide", () => {
+    const replyMs = Object.fromEntries(
+      SERVERS.map((u, i) => [reachabilityKey(u.routeId, u.protocol), 100 + i * 10]),
+    );
+    expect(ids(orderCandidates(SERVERS, { replyMs, seed: "install-a" }))).toEqual(
+      ids(orderCandidates(SERVERS, { seed: "install-a" })),
+    );
+  });
+
+  it("tries the pinned country's other routes right after the pin", () => {
+    const relayToFrance = user("relay-fr", "XRAY_VLESS_REALITY");
+    const order = ids(
+      orderCandidates([...SERVERS, relayToFrance], {
+        pinnedRouteId: "fr",
+        pinnedCountryRouteIds: ["relay-fr"],
+        lastGoodRouteId: "uk",
+        seed: "install-a",
+      }),
+    );
+    expect(order.slice(0, 3)).toEqual(["fr", "relay-fr", "uk"]);
+  });
+
+  it("drops a remembered server from the lead once every probe of it is refused", () => {
+    const reachability: ReachabilityMap = { [reachabilityKey("uk", "XRAY_VLESS_REALITY")]: "unreachable" };
+    expect(ids(orderCandidates(SERVERS, { lastGoodRouteId: "uk", reachability }))[0]).not.toBe("uk");
+    // Not when nothing about it could be probed: UDP is never asked.
+    const wg = [user("uk", "WIREGUARD"), user("de", "WIREGUARD")];
+    expect(ids(orderCandidates(wg, { lastGoodRouteId: "uk", reachability: {} }))[0]).toBe("uk");
+  });
+});

@@ -564,8 +564,9 @@ describe("the phone dashboard's wiring", () => {
     const between = walk.slice(rung, dial);
     expect(between).toContain("if (pass.stopped()) {");
     expect(between).toContain('if (sessionGeneration() !== sessionAtStart) return "failed";');
-    // With an engine possibly up, it is taken down by the pass itself.
-    expect(walk.split("await standDown(true);").length - 1).toBe(2);
+    // With an engine possibly up, it is taken down by the pass itself:
+    // after the address check, and after the data check.
+    expect(walk.split("await standDown(true);").length - 1).toBe(3);
     expect(walk).toContain("pass.progress();");
   });
 
@@ -810,7 +811,7 @@ describe("the phone dashboard's wiring", () => {
     // engine on its way down, shown as "Connected, not confirmed", or
     // "You're protected" over a fresh WireGuard handshake.
     const walk = body("async function walkLadder(pass: PhonePass, options: LadderOptions): Promise<LadderOutcome> {");
-    const loop = walk.slice(walk.indexOf("for (const [index, candidate] of candidates.entries()) {"));
+    const loop = walk.slice(walk.indexOf("for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {"));
     const top = loop.slice(0, loop.indexOf("pass.progress();"));
     expect(top).toContain("await standDown(dialled);");
     const dial = loop.indexOf("dialled = true;");

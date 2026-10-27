@@ -114,6 +114,20 @@ export function placeKey(route: Placed): string {
   return exit ? `${entry}>${exit}` : entry;
 }
 
+/** The routes other than `routeId` whose traffic appears from the same
+ * country as its does -- the exit's for a relay, the entry's otherwise.
+ * For the ladder: a pin means a country to the customer, so a backup route
+ * to it comes before another country (`orderCandidates`). */
+export function sameCountryRouteIds(
+  routes: ReadonlyArray<Placed & { id: string }>,
+  routeId: string | null | undefined,
+): string[] {
+  const pinned = routes.find((route) => route.id === routeId);
+  if (!pinned) return [];
+  const country = (route: Placed) => routePlace(route).exit ?? routePlace(route).entry;
+  return routes.filter((route) => route.id !== pinned.id && country(route) === country(pinned)).map((route) => route.id);
+}
+
 /** The list with every route to one place together.
  *
  * Places come in the order each first appears and routes keep their order

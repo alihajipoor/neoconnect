@@ -394,7 +394,7 @@ describe("a press that ends the episode also stops the pass it was dialling", ()
     // nothing to cancel then, so the connect queued behind the repair's
     // teardown, the pass outlasted the repair's wait for it, and its own
     // teardown cancelled the repair mid-step.
-    const rung = ladder.slice(ladder.indexOf("for (let index = 0; index < candidates.length; index += 1) {"));
+    const rung = ladder.slice(ladder.indexOf("for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {"));
     const settled = rung.indexOf("baselineIpRef.current = await settling;");
     const named = rung.indexOf('const tunnelServer = await tunnelServerOf(candidate, "windows");');
     const ipv6 = rung.indexOf("ipv6BaselineRef.current = await (ipv6Beside ?? captureIpv6Baseline());");

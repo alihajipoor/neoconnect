@@ -385,7 +385,7 @@ describe("the wiring the pure functions cannot check", () => {
     // `lastGood` decides which candidate leads the ladder next time.
     // Promoting one that only reached `unverified` would teach the app
     // to open with a protocol nothing has ever vouched for.
-    expect(dashboard).toContain('if (verdict === "connected") {\n              const updated =');
+    expect(dashboard).toContain('if (verdict === "connected" && !landedSlow) {\n              const updated =');
   });
 });
 

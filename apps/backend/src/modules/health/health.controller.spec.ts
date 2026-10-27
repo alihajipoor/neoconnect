@@ -1,7 +1,9 @@
 import { ConfigService } from "@nestjs/config";
 import { HealthController } from "./health.controller";
 import type { PrismaService } from "../../prisma/prisma.service";
-import type { Request } from "express";
+import type { Request, Response } from "express";
+import { Readable } from "node:stream";
+import { BULK_IN_FLIGHT, BULK_MAX_BYTES } from "./data-check";
 import { AsnLookupService } from "../network-identity/asn-lookup.service";
 import { AsnTable } from "../network-identity/asn-table";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
@@ -204,5 +206,86 @@ describe("HealthController.ip attestation", () => {
     const direct = await build().ip("104.28.1.1", req({}));
     expect(direct).toMatchObject({ asn: 13335 });
     expect(token(direct)).toBeUndefined();
+  });
+});
+
+/** The apps' check that a tunnel moves data, not only that its address
+ * changed (data-check.ts). */
+describe("HealthController bulk", () => {
+  /** Enough of an Express response to see what was answered. */
+  function response() {
+    const sent: { status?: number; body?: unknown; headers: Record<string, string> } = { headers: {} };
+    const listeners: Array<() => void> = [];
+    const res = {
+      headersSent: false,
+      status(code: number) {
+        sent.status = code;
+        return res;
+      },
+      set(name: string | Record<string, string>, value?: string) {
+        if (typeof name === "string") sent.headers[name] = value ?? "";
+        else Object.assign(sent.headers, name);
+        return res;
+      },
+      json(body: unknown) {
+        sent.body = body;
+        return res;
+      },
+      end(body?: unknown) {
+        sent.body = body;
+        return res;
+      },
+      once(_event: string, listener: () => void) {
+        listeners.push(listener);
+        return res;
+      },
+    };
+    return { res: res as unknown as Response, sent, close: () => listeners.forEach((l) => l()) };
+  }
+
+  it("serves the bytes asked for, uncached and uncompressed", () => {
+    const { res, sent } = response();
+    build().bulkDown("262144", res);
+    expect(sent.status).toBe(200);
+    expect((sent.body as Buffer).length).toBe(262_144);
+    expect(sent.headers["Cache-Control"]).toContain("no-store");
+    expect(sent.headers["Cache-Control"]).toContain("no-transform");
+    expect(sent.headers["Content-Type"]).toBe("application/octet-stream");
+  });
+
+  it.each([undefined, "", "0", "-1", "1e5", "524289", "abc"])("refuses %p bytes", (raw) => {
+    const { res, sent } = response();
+    build().bulkDown(raw, res);
+    expect(sent.status).toBe(400);
+  });
+
+  it("counts what is uploaded and keeps none of it", async () => {
+    const { res, sent } = response();
+    const body = Readable.from([Buffer.alloc(100_000), Buffer.alloc(156_144)]);
+    await build().bulkUp(body as unknown as Request, res);
+    expect(sent.status).toBe(200);
+    expect(sent.body).toEqual({ received: 256_144 });
+  });
+
+  it("stops reading past the limit", async () => {
+    const { res, sent } = response();
+    const body = Readable.from([Buffer.alloc(BULK_MAX_BYTES), Buffer.alloc(1)]);
+    await build().bulkUp(body as unknown as Request, res);
+    expect(sent.status).toBe(413);
+  });
+
+  /** Unauthenticated, so a burst is turned away rather than queued; the
+   * apps read 503 as "could not measure", never as a slow tunnel. */
+  it("turns away transfers beyond the limit in flight, and frees the slot when one ends", () => {
+    const controller = build();
+    const open = Array.from({ length: BULK_IN_FLIGHT }, () => response());
+    for (const { res } of open) controller.bulkDown("1024", res);
+    const over = response();
+    controller.bulkDown("1024", over.res);
+    expect(over.sent.status).toBe(503);
+    open[0].close();
+    const after = response();
+    controller.bulkDown("1024", after.res);
+    expect(after.sent.status).toBe(200);
   });
 });

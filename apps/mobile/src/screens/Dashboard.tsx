@@ -40,7 +40,7 @@ import {
   classifyConnectionError,
   type ClassifiedError,
 } from "@shared/lib/connection-errors";
-import { orderCandidates } from "@shared/lib/failover";
+import { installSeed, orderCandidates } from "@shared/lib/failover";
 import { Banner, Note, PillButton, Presence } from "@shared/components/ui";
 import { Dialog, LocationSheet } from "@shared/components/overlay";
 import {
@@ -49,7 +49,7 @@ import {
 } from "@shared/components/ConnectOrb";
 import { Logo } from "@shared/components/Logo";
 import { RouteFlag } from "@shared/components/Flag";
-import { placeLabel, routePlace } from "@shared/lib/route-place";
+import { placeLabel, routePlace, sameCountryRouteIds } from "@shared/lib/route-place";
 import { LocationPicker } from "@shared/components/LocationPicker";
 import { SLOT, Slotted } from "@shared/components/Slotted";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
@@ -131,6 +131,15 @@ import {
   rungsFrom,
   type Dial,
 } from "@shared/lib/attempts";
+import {
+  checkDataMoves,
+  describeSlow,
+  keepsSlow,
+  noSlowRungs,
+  noteSlow,
+  passOverSlow,
+  slowFallback,
+} from "@shared/lib/data-check";
 import { snapshotAge, traceRequests } from "@shared/lib/unanswered-report";
 import {
   createSlotTeardown,
@@ -523,6 +532,9 @@ export function Dashboard({
    * them and saying nothing, so a working failover was indistinguishable
    * from a bug. */
   const [failedOverTo, setFailedOverTo] = useState<string | null>(null);
+  // The pass landed on the best of the rungs that were too slow, every
+  // faster one having failed: the subline says so (`data-check.ts`).
+  const [landedSlow, setLandedSlow] = useState(false);
   /** Set when the chosen server's protocol has no engine in this build,
    * so the reason is a missing feature rather than a blocked network. */
   const [unsupportedChoice, setUnsupportedChoice] = useState<string | null>(
@@ -2175,6 +2187,7 @@ export function Dashboard({
     cancelRef.current = true;
     showSlotStop(stop);
     setFailedOverTo(null);
+    setLandedSlow(false);
     setConnectionState("disconnecting");
     // Down only on the platform's word. Still routed through a VPN, the
     // phone stays shown as disconnecting: "disconnected" would be the lie
@@ -2220,6 +2233,7 @@ export function Dashboard({
   /** The ladder itself, for the pass `runLadder` holds the guard for. */
   async function walkLadder(pass: PhonePass, options: LadderOptions): Promise<LadderOutcome> {
     setFailedOverTo(null);
+    setLandedSlow(false);
     setUnsupportedChoice(null);
     // The customer session this pass dials for. A sign-out can land
     // mid-ladder; `cancelRef` stops the walk, but its own path leaves the
@@ -2408,13 +2422,14 @@ export function Dashboard({
     let pendingBaseline: BaselineIp | null | undefined = await takeBaseline({ nodeAddresses });
     keepBaseline(pendingBaseline);
     const networkId = networkKeyFromAsn();
+    const replyMs: Record<string, number> = {};
     const [lastGood, history, reachability] = await Promise.all([
       loadLastGood(),
       loadConnectHistory(),
       // About a second, all candidates at once, before anything is
       // dialled; UDP protocols are not asked and stay "unknown". See
       // reachability.ts.
-      probeCandidates(usable).catch(() => ({})),
+      probeCandidates(usable, replyMs).catch(() => ({})),
     ]);
     // Stopped before anything was dialled: the toggle that set the flag
     // owns the state from here, as it does for every cancel below.
@@ -2428,6 +2443,8 @@ export function Dashboard({
       // ordinary order.
       resumeRouteId: options.reconnect?.resumeRouteId ?? null,
       pinnedRouteId: chosenRouteId,
+      // A pin is a country: its other routes come next.
+      pinnedCountryRouteIds: sameCountryRouteIds(routes, chosenRouteId),
       lastGoodRouteId: lastGoodFor(lastGood, networkId),
       history,
       network: networkId,
@@ -2436,6 +2453,9 @@ export function Dashboard({
       // A tie-break only on a network this phone has no history for --
       // the first run, which is when people give up. See failover.ts.
       ispTags: ispTagsOf(routes),
+      // Then the quick answers, then this install's own order.
+      replyMs,
+      seed: installSeed(),
     });
     let historyNow = history;
     const remember = (routeId: string, protocol: ProtocolUser["protocol"], ok: boolean) => {
@@ -2505,10 +2525,23 @@ export function Dashboard({
     /** Whether the ladder would dial this candidate rather than skip it.
      * Kept beside the skips below, so "the last rung" means the last one
      * actually dialled. */
+    // Rungs that came up and moved too little data (`data-check.ts`): their
+    // routes are passed over for the rest of the pass, and the best of them
+    // is dialled once more, and kept, if nothing lands -- a slow tunnel
+    // beats none, and the screen says it is slow. The Windows ladder's rule.
+    const slow = noSlowRungs();
+    const queueSlowFallback = (): boolean => {
+      if (pass.stopped()) return false;
+      const fallback = slowFallback(slow);
+      if (fallback === null) return false;
+      candidates.push(fallback);
+      return true;
+    };
     const willDial = (c: ProtocolUser) =>
-      !(c.protocol === "IKEV2" && (allowedApps.length > 0 || options.skipIkev2 === true));
+      !(c.protocol === "IKEV2" && (allowedApps.length > 0 || options.skipIkev2 === true)) && !passOverSlow(slow, c);
 
-    for (const [index, candidate] of candidates.entries()) {
+    for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {
+      const candidate = candidates[index];
       // The customer pressed stop. Whatever this attempt left behind is
       // torn down by the toggle that set the flag, so this only has to
       // stop walking the list. The last rung's engine, told to stop at the
@@ -2533,6 +2566,14 @@ export function Dashboard({
       // baseline's endpoint, where an answer can prove something, and
       // moves on otherwise. The Windows ladder's rule.
       const isLast = !candidates.slice(index + 1).some(willDial);
+
+      // Its server was too slow on another protocol a moment ago: the hold
+      // is on the address, so this one would be too.
+      if (passOverSlow(slow, candidate)) {
+        attempts.push(`${label}: not dialled -- its server was too slow a moment ago`);
+        dials.push(null);
+        continue;
+      }
 
       // An automatic pass, on an iPhone where IKEv2's own configuration is
       // not installed -- signed out since it was, or never landed on.
@@ -2737,7 +2778,33 @@ export function Dashboard({
           await standDown(true);
           return reportCancelled();
         }
-        const outcome = rungOutcome(verdict, { baselineTaken: baseline !== null, isLast });
+        let outcome = rungOutcome(verdict, { baselineTaken: baseline !== null, isLast });
+        // Its address is proven: now whether it moves any data. A tunnel
+        // whose upload is held to a trickle passes the address check and
+        // loads nothing (`data-check.ts`). Moved on from, unless it is the
+        // slow fallback, which lands anyway and says so.
+        let tooSlow: Parameters<typeof describeSlow>[0] | null = null;
+        let keptSlow = false;
+        if (outcome === "connected" && verdict.state === "throughTunnel") {
+          const moved = await checkDataMoves(verdict.from);
+          if (sessionGeneration() !== sessionAtStart) {
+            await forgetProfiles().catch(() => disconnect()).catch(() => undefined);
+            return "failed";
+          }
+          if (pass.stopped()) {
+            await standDown(true);
+            return reportCancelled();
+          }
+          if (moved.state === "slow") {
+            if (keepsSlow(slow, candidate)) {
+              keptSlow = true;
+            } else {
+              noteSlow(slow, candidate, moved);
+              tooSlow = moved;
+              outcome = "notCarrying";
+            }
+          }
+        }
         if (outcome !== "notCarrying") {
           // The tunnel up is this credential's, landed -- what a screen
           // adopting it names and credits (`passTunnel`).
@@ -2755,8 +2822,9 @@ export function Dashboard({
           // nothing and nothing had failed. Seen twice while testing
           // before it was recognised as a bug rather than the ladder
           // reporting real work.
-          if (chosenRouteId && candidate.routeId !== chosenRouteId)
+          if ((chosenRouteId && candidate.routeId !== chosenRouteId) || keptSlow)
             setFailedOverTo(label);
+          setLandedSlow(keptSlow);
           // "unverified" is a landing, not a failure -- nothing measured a
           // problem -- but it is shown as "Connected, not confirmed". It
           // used to be shown as "You're protected". Only a changed exit
@@ -2765,8 +2833,10 @@ export function Dashboard({
           // the Windows ladder follows for `unverified`.
           setConnectionState(outcome);
           const proven = outcome === "connected";
-          remember(candidate.routeId, candidate.protocol, proven);
-          if (proven) {
+          // The slow fallback carried, but leading with it next time would
+          // only cost a check to find it slow again.
+          remember(candidate.routeId, candidate.protocol, proven && !keptSlow);
+          if (proven && !keptSlow) {
             void saveLastGood(rememberLastGood(lastGood, networkId, candidate.routeId));
           }
           // Successes carry the denominator. A failure count without one
@@ -2819,8 +2889,12 @@ export function Dashboard({
         }
 
         // Moved on from either way, but only a measured negative is held
-        // against the route; see `rejectionIsEvidence`.
-        if (rejectionIsEvidence(verdict)) {
+        // against the route; see `rejectionIsEvidence`. Too slow is one.
+        if (tooSlow !== null) {
+          attempts.push(`${label}: up but ${describeSlow(tooSlow)}`);
+          dials.push({ routeId: candidate.routeId, carried: false });
+          remember(candidate.routeId, candidate.protocol, false);
+        } else if (rejectionIsEvidence(verdict)) {
           attempts.push(`${label}: up but not carrying traffic`);
           dials.push({ routeId: candidate.routeId, carried: false });
           remember(candidate.routeId, candidate.protocol, false);
@@ -3315,7 +3389,7 @@ export function Dashboard({
       <p className="nx-subline">
         <Repeat aria-hidden />
         <span>
-          <Slotted text={t("dash.switchedTo", { protocol: SLOT })}>
+          <Slotted text={t(landedSlow ? "dash.slowOnly" : "dash.switchedTo", { protocol: SLOT })}>
             <bdi className="font-medium text-ink">{failedOverTo}</bdi>
           </Slotted>
         </span>

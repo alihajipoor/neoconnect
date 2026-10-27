@@ -53,7 +53,7 @@ import {
   type UplinkWatch,
 } from "../lib/uplink-watch";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
-import { orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
+import { installSeed, orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
 import { probeCandidates } from "../lib/reachability";
 import {
@@ -96,6 +96,15 @@ import { rearmCheckPop } from "../lib/check-pop";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
+import {
+  checkDataMoves,
+  describeSlow,
+  keepsSlow,
+  noSlowRungs,
+  noteSlow,
+  passOverSlow,
+  slowFallback,
+} from "../lib/data-check";
 import {
   failoverNotice,
   failoverText,
@@ -220,7 +229,7 @@ import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { GamingStatusPanel } from "../components/GamingStatusPanel";
 import { Logo } from "../components/Logo";
 import { RouteFlag } from "../components/Flag";
-import { placeKey, placeLabel, routePlace } from "../lib/route-place";
+import { placeKey, placeLabel, routePlace, sameCountryRouteIds } from "../lib/route-place";
 import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { RepairNetwork } from "../components/RepairNetwork";
@@ -3725,7 +3734,8 @@ export function Dashboard({
       // below checks `stopped` on its first pass and a superseded
       // generation is caught after it, and adding a third exit would
       // mean a third opinion about what that outcome is called.
-      const reachability = await probeCandidates(dialable).catch(() => ({}));
+      const replyMs: Record<string, number> = {};
+      const reachability = await probeCandidates(dialable, replyMs).catch(() => ({}));
 
       let candidates = orderCandidates(dialable, {
         // The plan in use leads; a credential the server has switched off
@@ -3736,6 +3746,8 @@ export function Dashboard({
         // the ordinary order.
         resumeRouteId: options.reconnect?.resumeRouteId ?? null,
         pinnedRouteId: chosenRouteId,
+        // A pin is a country: its other routes come next.
+        pinnedCountryRouteIds: sameCountryRouteIds(routes, chosenRouteId),
         lastGoodRouteId: lastGoodFor(lastGood, networkId),
         history,
         network: networkId,
@@ -3745,6 +3757,9 @@ export function Dashboard({
         // and only while this device has no history here -- the first
         // run, which is when a wrong guess makes people quit.
         ispTags: ispTagsOf(routes),
+        // Then the quick answers, then this install's own order.
+        replyMs,
+        seed: installSeed(),
       });
 
       // What the dashboard was promising before any of this ran.
@@ -3848,9 +3863,21 @@ export function Dashboard({
       // A rung dialled beside the settle failed with the settle never having
       // said the network worked: dialled once more, the settle in front.
       let settleInFront = false;
+      // Rungs that came up and moved too little data (`data-check.ts`): their
+      // routes are passed over for the rest of the pass, and the best of them
+      // is dialled once more, and kept, if the ladder ends with nothing
+      // landed -- a slow tunnel beats none, and the screen says it is slow.
+      const slow = noSlowRungs();
+      const queueSlowFallback = (): boolean => {
+        if (stopped()) return false;
+        const fallback = slowFallback(slow);
+        if (fallback === null) return false;
+        candidates = [...candidates, fallback];
+        return true;
+      };
       // Over an index, not an iterator: a rung the service refused for want
       // of a network is dialled again, on the same server, once there is one.
-      for (let index = 0; index < candidates.length; index += 1) {
+      for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {
         const candidate = candidates[index];
         if (stopped() || sessionGeneration() !== sessionAtStart) break;
         // A pass whose guard expired and that a newer pass has replaced
@@ -3874,7 +3901,14 @@ export function Dashboard({
           transport: candidate.connection?.transport,
         });
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
-        const isLast = index === candidates.length - 1;
+        // Its server was too slow on another protocol a moment ago: the
+        // hold is on the address, so this one would be too.
+        if (passOverSlow(slow, candidate)) {
+          attempts.push(`${label}: not dialled -- its server was too slow a moment ago`);
+          dials.push(null);
+          continue;
+        }
+        const isLast = !candidates.slice(index + 1).some((later) => !passOverSlow(slow, later));
 
         // Patient only for the last candidate. With another protocol
         // sitting untried, waiting out a long budget on this one is
@@ -4082,6 +4116,11 @@ export function Dashboard({
           // inventing one to fit the type would be a lie in a field the
           // UI shows.
           let reason = "";
+          // Up and proven, and too slow to keep: moved on from without
+          // asking the server for fresh credentials -- they work.
+          let tooSlow = false;
+          // The slow fallback, landed: the notice says it is slow.
+          let landedSlow = false;
 
           if (customMode) {
             // The service's own words when it fails, not a generic
@@ -4206,6 +4245,24 @@ export function Dashboard({
                   ? combineEvidence(await confirmReachable(), egress)
                   : "degraded";
             reason = checkedAgain ? `${egress.state}, checked again after the IPv4 confinement was let go of` : egress.state;
+
+            // Its address is proven: now whether it moves any data. A tunnel
+            // whose upload is held to a trickle passes the address check and
+            // loads nothing (`data-check.ts`). Moved on from, unless it is
+            // the slow fallback, which lands anyway and says so.
+            if (verdict === "connected" && egress.state === "throughTunnel") {
+              const moved = await checkDataMoves(egress.from);
+              if (moved.state === "slow") {
+                if (keepsSlow(slow, candidate)) {
+                  landedSlow = true;
+                } else {
+                  noteSlow(slow, candidate, moved);
+                  verdict = "degraded";
+                  reason = describeSlow(moved);
+                  tooSlow = true;
+                }
+              }
+            }
           }
 
           // `unverified` lands the pass rather than rejecting it, and the
@@ -4301,6 +4358,7 @@ export function Dashboard({
                   // Only "couldn't reach it" if we actually dialled it.
                   shownRouteId: shownRouteId ?? null,
                   failed: failedRungs,
+                  slow: landedSlow,
                 }),
               );
             }
@@ -4311,8 +4369,10 @@ export function Dashboard({
             // means no such proof was obtained. A candidate that lands
             // here is kept for this session and no longer, rather than
             // promoted to the head of every future ladder on this
-            // network on the strength of nothing.
-            if (verdict === "connected") {
+            // network on the strength of nothing. Nor the slow fallback: it
+            // carried, but leading with it next time would only cost a check
+            // to find it slow again.
+            if (verdict === "connected" && !landedSlow) {
               const updated = rememberLastGood(lastGood, networkId, candidate.routeId);
               setLastGood(updated);
               void saveLastGood(updated);
@@ -4332,7 +4392,7 @@ export function Dashboard({
                 networkId,
                 candidate.routeId,
                 candidate.protocol,
-                verdict === "connected",
+                verdict === "connected" && !landedSlow,
               );
               setHistory(recorded);
               void saveConnectHistory(recorded);
@@ -4397,8 +4457,8 @@ export function Dashboard({
           // Up, and carrying nothing, on a credential nobody asked the
           // server about this pass: asked once this tunnel is down (below),
           // not after the rest of the ladder has been walked on the same
-          // answer.
-          carriedNothing.push(candidate);
+          // answer. Not one that was only slow: it carried, so it works.
+          if (!tooSlow) carriedNothing.push(candidate);
           // Its tunnel came up: dialled, whatever else is true of it.
           failedRungs.push({ routeId: candidate.routeId, fate: "dialled" });
           lastError = {

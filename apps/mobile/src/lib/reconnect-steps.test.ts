@@ -457,7 +457,7 @@ describe("the phone dashboard's wiring", () => {
     // Counted out of "the last rung", so the rung before it is judged as
     // the last one dialled.
     expect(walk).toContain(
-      'const willDial = (c: ProtocolUser) =>\n      !(c.protocol === "IKEV2" && (allowedApps.length > 0 || options.skipIkev2 === true));',
+      'const willDial = (c: ProtocolUser) =>\n      !(c.protocol === "IKEV2" && (allowedApps.length > 0 || options.skipIkev2 === true)) && !passOverSlow(slow, c);',
     );
     const skip = walk.indexOf('if (candidate.protocol === "IKEV2" && options.skipIkev2) {');
     expect(skip).toBeGreaterThan(walk.indexOf("for (const [index, candidate] of candidates.entries()) {"));

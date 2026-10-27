@@ -1,5 +1,5 @@
 import { scoreFor, type ConnectHistory } from "./connect-history";
-import { reachabilityOf, type ReachabilityMap } from "./reachability";
+import { reachabilityKey, reachabilityOf, type ReachabilityMap } from "./reachability";
 import type { IspTag, Protocol, ProtocolUser } from "./types";
 
 export type IspTagCode = IspTag["code"];
@@ -68,9 +68,19 @@ function rank(protocol: Protocol): number {
  *    Evidence beats a guess, so it leads.
  * 3. `preferredRouteId` — the plan's default, as set by the operator.
  *
- * Everything else follows in PROTOCOL_ORDER. Ties break on routeId so
- * the order is stable between runs; an order that reshuffles itself
- * makes a failure impossible to reproduce.
+ * Everything else follows in PROTOCOL_ORDER. Among servers nothing above
+ * tells apart, a slow answer to the probe goes later, and then each
+ * install's own order (`seed`) decides.
+ *
+ * That last tie-break used to be the route's id, alphabetically -- the
+ * same for everybody, and stable, which is all it was meant to be. But a
+ * route's id is random, and on any network a device had no history for,
+ * it put the UK first for every customer, because the UK's id happened to
+ * sort first: 24 connects by 11 customers in October 2026 began there,
+ * and on a network that holds the UK's upload to a trickle, settled
+ * there. Per install it is still stable -- a failure reproduces on the
+ * device it happened on -- and new customers are spread across servers
+ * instead of all starting on one.
  */
 export function orderCandidates(
   users: ProtocolUser[],
@@ -99,6 +109,17 @@ export function orderCandidates(
     /** The subscription in use: its credentials are dialled ahead of any
      * other subscription's the account still lists. */
     subscriptionId?: string | null;
+    /** Other routes that leave from the pinned route's country, tried
+     * right after it. To a customer a pin is a country: one who picked
+     * France and whose France server failed went next to whatever sorted
+     * first -- the UK -- while a backup route to France sat further down. */
+    pinnedCountryRouteIds?: ReadonlyArray<string>;
+    /** How long each probed candidate took to answer, keyed as
+     * `reachability` is (`probeCandidates`). */
+    replyMs?: Record<string, number>;
+    /** This install's own order for servers nothing else tells apart
+     * (`installSeed`). Absent, the route's id decides, as it used to. */
+    seed?: string | null;
   } = {},
 ): ProtocolUser[] {
   const {
@@ -112,6 +133,9 @@ export function orderCandidates(
     now,
     reachability,
     ispTags,
+    pinnedCountryRouteIds,
+    replyMs,
+    seed,
   } = opts;
 
   // A chosen route leads; it does not exclude the others.
@@ -138,10 +162,27 @@ export function orderCandidates(
   const standing = (u: ProtocolUser): number =>
     (u.status === "DISABLED" ? 2 : 0) + (subscriptionId && u.subscriptionId !== subscriptionId ? 1 : 0);
 
+  // Whether every probed protocol of a route refused the probe just now.
+  // A route with nothing probed -- UDP only -- has not refused anything.
+  const refused = (routeId: string): boolean => {
+    const asked = users
+      .filter((u) => u.routeId === routeId)
+      .map((u) => reachabilityOf(reachability, u.routeId, u.protocol))
+      .filter((answer) => answer !== "unknown");
+    return asked.length > 0 && asked.every((answer) => answer === "unreachable");
+  };
+  // What worked here last time leads only while it still answers. A
+  // server that has since been cut off kept leading every connect on that
+  // network, each one paying for its failure before reaching anything
+  // that worked.
+  const lastGoodLeads = Boolean(lastGoodRouteId) && !refused(lastGoodRouteId as string);
+  const pinnedCountry = new Set(pinnedRouteId ? (pinnedCountryRouteIds ?? []) : []);
+
   const priority = (u: ProtocolUser): number => {
-    if (resumeRouteId && u.routeId === resumeRouteId) return -4;
-    if (pinnedRouteId && u.routeId === pinnedRouteId) return -3;
-    if (lastGoodRouteId && u.routeId === lastGoodRouteId) return -2;
+    if (resumeRouteId && u.routeId === resumeRouteId) return -5;
+    if (pinnedRouteId && u.routeId === pinnedRouteId) return -4;
+    if (pinnedCountry.has(u.routeId)) return -3;
+    if (lastGoodLeads && u.routeId === lastGoodRouteId) return -2;
     if (preferredRouteId && u.routeId === preferredRouteId) return -1;
     return 0;
   };
@@ -233,6 +274,19 @@ export function orderCandidates(
     }
   };
 
+  // A server that took much longer than the quickest to answer the probe
+  // goes after the ones that answered about as fast. Coarse on purpose: a
+  // few milliseconds say nothing about which server will carry more, and
+  // ordering by them would put every customer on the nearest server --
+  // in Iran, often the one held to a trickle. Unprobed is not late.
+  const replies = Object.values(replyMs ?? {});
+  const quickest = replies.length > 0 ? Math.min(...replies) : null;
+  const late = (u: ProtocolUser): number => {
+    const ms = replyMs?.[reachabilityKey(u.routeId, u.protocol)];
+    return quickest !== null && ms !== undefined && ms > quickest * 1.5 + 100 ? 1 : 0;
+  };
+  const shuffled = (routeId: string): number => (seed ? hash(`${seed}|${routeId}`) : 0);
+
   return [...users].sort(
     (a, b) =>
       standing(a) - standing(b) ||
@@ -242,8 +296,40 @@ export function orderCandidates(
       fromOthers(a) - fromOthers(b) ||
       rank(a.protocol) - rank(b.protocol) ||
       wsLast(a) - wsLast(b) ||
+      late(a) - late(b) ||
+      shuffled(a.routeId) - shuffled(b.routeId) ||
       a.routeId.localeCompare(b.routeId),
   );
+}
+
+/** FNV-1a, 32 bits: an order for routes that is the same every time for
+ * one install and different between installs. Not for anything secret. */
+function hash(text: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+const SEED_KEY = "failover.seed";
+
+/** This install's seed for `orderCandidates`, made once and kept. Null
+ * where storage cannot be used, which leaves the old order. */
+export function installSeed(): string | null {
+  try {
+    const kept = localStorage.getItem(SEED_KEY);
+    if (kept) return kept;
+    const made =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(SEED_KEY, made);
+    return made;
+  } catch {
+    return null;
+  }
 }
 
 /** Where the "what worked here last time" memory lives.

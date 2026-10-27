@@ -56,6 +56,10 @@ export interface FailoverNotice {
   /** Whether any rung before the landing was dialled and failed: the only
    * case in which "your usual protocol didn't get through" is true. */
   dialledFailed: boolean;
+  /** Whether the pass landed on the slowest-but-only answer: every rung
+   * that came up was too slow (`data-check.ts`), and the best of them was
+   * kept. Said, so a slow tunnel is not mistaken for a good one. */
+  slow?: boolean;
 }
 
 export function failoverNotice(input: {
@@ -64,6 +68,7 @@ export function failoverNotice(input: {
   toRegion: string | null;
   shownRouteId: string | null;
   failed: FailedRung[];
+  slow?: boolean;
 }): FailoverNotice {
   const onShown = input.failed.filter((rung) => input.shownRouteId !== null && rung.routeId === input.shownRouteId);
   const shown = onShown.some((rung) => rung.fate === "dialled")
@@ -73,7 +78,8 @@ export function failoverNotice(input: {
       : "notTried";
   const dialledFailed = input.failed.some((rung) => rung.fate === "dialled");
   const noNetworkOnly = input.failed.some((rung) => rung.fate === "noNetwork") && !dialledFailed;
-  return { label: input.label, fromRegion: input.fromRegion, toRegion: input.toRegion, shown, noNetworkOnly, dialledFailed };
+  const notice: FailoverNotice = { label: input.label, fromRegion: input.fromRegion, toRegion: input.toRegion, shown, noNetworkOnly, dialledFailed };
+  return input.slow ? { ...notice, slow: true } : notice;
 }
 
 /** The sentence for a notice: a key and its values. Every sentence names
@@ -85,6 +91,7 @@ export interface FailoverText {
 }
 
 export function failoverText(notice: FailoverNotice): FailoverText {
+  if (notice.slow) return { key: "dash.slowOnly", vars: { protocol: notice.label } };
   if (notice.fromRegion) {
     // Crossed a border, so the country is named -- and which sentence
     // depends on whether that country was ever dialled.

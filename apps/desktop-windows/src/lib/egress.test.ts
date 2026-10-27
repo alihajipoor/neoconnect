@@ -97,7 +97,7 @@ describe("comparing the address the world sees", () => {
     const baseline = await captureBaselineIp();
 
     answers.set(CDN, { ip: "203.0.113.10" });
-    await expect(verifyEgress(baseline)).resolves.toEqual({
+    await expect(verifyEgress(baseline)).resolves.toMatchObject({
       state: "throughTunnel",
       exitIp: "203.0.113.10",
     });
@@ -333,7 +333,7 @@ describe("the check made while a tunnel is coming up", () => {
     answers.set(FI_MIRROR, { ip: "203.0.113.10" });
     const baseline = { ip: CLIENT, from: FI_MIRROR };
 
-    await expect(verifyEgress(baseline, { sameEndpointOnly: true })).resolves.toEqual({
+    await expect(verifyEgress(baseline, { sameEndpointOnly: true })).resolves.toMatchObject({
       state: "throughTunnel",
       exitIp: "203.0.113.10",
     });
@@ -407,7 +407,7 @@ describe("the check made while a tunnel is coming up", () => {
     const started = Date.now();
     await expect(
       confirmEgressWithin(baseline, 5_000, { sameEndpointOnly: true, intervalMs: 20 }),
-    ).resolves.toEqual({ state: "throughTunnel", exitIp: NODE });
+    ).resolves.toMatchObject({ state: "throughTunnel", exitIp: NODE });
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(asked.length).toBeGreaterThanOrEqual(3);
   });

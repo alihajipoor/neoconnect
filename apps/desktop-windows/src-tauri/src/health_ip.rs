@@ -51,7 +51,7 @@
 //! request, and a proxy answers a different one.
 
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hyper_util::client::proxy::matcher::Matcher;
 
@@ -143,12 +143,9 @@ fn health_url_allowing(base: &str, local_backend: bool) -> Result<reqwest::Url, 
     Ok(url)
 }
 
-/// Asks one endpoint's `/health/ip`, over IPv4 only.
-#[tauri::command]
-pub async fn health_ip_v4(base: String, timeout_ms: u64) -> Result<HealthIpAnswer, String> {
-    let url = health_url(&base).map_err(str::to_string)?;
-    let timeout = Duration::from_millis(timeout_ms.max(1)).min(MAX_TIMEOUT);
-    let client = reqwest::Client::builder()
+/// The client every request here is made with.
+fn ipv4_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         // The whole point. An IPv4 local address makes the connector
         // drop every IPv6 address the name resolves to.
         .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
@@ -160,7 +157,15 @@ pub async fn health_ip_v4(base: String, timeout_ms: u64) -> Result<HealthIpAnswe
         .timeout(timeout)
         .user_agent(USER_AGENT)
         .build()
-        .map_err(|_| "could not build the request".to_string())?;
+        .map_err(|_| "could not build the request".to_string())
+}
+
+/// Asks one endpoint's `/health/ip`, over IPv4 only.
+#[tauri::command]
+pub async fn health_ip_v4(base: String, timeout_ms: u64) -> Result<HealthIpAnswer, String> {
+    let url = health_url(&base).map_err(str::to_string)?;
+    let timeout = Duration::from_millis(timeout_ms.max(1)).min(MAX_TIMEOUT);
+    let client = ipv4_client(timeout)?;
 
     // Never the error's text: it carries the URL, and what the frontend
     // needs is only that there was no answer.
@@ -193,6 +198,166 @@ pub async fn health_ip_v4(base: String, timeout_ms: u64) -> Result<HealthIpAnswe
     }
     let body = if whole { serde_json::from_slice(&bytes).ok() } else { None };
     Ok(HealthIpAnswer { status, body, peer })
+}
+
+/// The most the data check moves each way. The frontend asks for 128 KB
+/// down and 256 KB up.
+const DATA_CHECK_MAX_BYTES: u64 = 512 * 1024;
+
+/// What one direction of the data check measured.
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct DataLeg {
+    /// The HTTP status, or `None` when no answer came back at all.
+    pub status: Option<u16>,
+    /// Bytes moved: counted off the download as it arrived, or what the
+    /// server said it received of the upload.
+    pub bytes: u64,
+    /// From sending the request to the download's last byte or the
+    /// upload's answer -- or to giving up, at the timeout.
+    pub ms: u64,
+}
+
+/// Both directions, and where the requests connected (as
+/// `HealthIpAnswer::peer`).
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct DataCheck {
+    pub down: DataLeg,
+    pub up: DataLeg,
+    pub peer: Option<String>,
+}
+
+/// `/health/bulk` for an API base, narrowed exactly as `health_url` is.
+fn bulk_url(base: &str) -> Result<reqwest::Url, &'static str> {
+    let mut url = health_url(base)?;
+    url.path_segments_mut().map_err(|_| "not a plain API base")?.pop().push("bulk");
+    Ok(url)
+}
+
+/// `len` bytes nothing on the path can compress into a faster-looking
+/// upload. Xorshift: no crate, and nothing better than "incompressible"
+/// is needed.
+fn incompressible(len: usize) -> Vec<u8> {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15);
+    let mut state = seed | 1;
+    let mut out = Vec::with_capacity(len + 8);
+    while out.len() < len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.extend_from_slice(&state.to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+fn millis_since(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Moves `down_bytes` down and then `up_bytes` up through whatever route this machine's
+/// IPv4 takes to `base` -- through a tunnel, the tunnel -- and times both.
+///
+/// The address check (`health_ip_v4`) proves a tunnel's traffic leaves
+/// from the server; it cannot say the tunnel is any use. Iran was found
+/// in October 2026 holding the upload direction of whole server addresses
+/// to about 0.1 Mbps after the first 63-95 KB of each connection, which a
+/// few hundred bytes of `/health/ip` never reaches: every such server
+/// passed and showed "Connected" over a tunnel that loaded nothing. A few
+/// hundred KB each way does reach it. Judged by the frontend
+/// (`data-check.ts`); this only measures.
+///
+/// Each direction gets `timeout_ms` of its own, and running out is a
+/// measurement, not an error: the leg comes back with what it moved by
+/// then. A download that got no answer at all ends the check there: the
+/// tunnel carried nothing, and the upload would only wait out its time
+/// to say so again. `Err` only for a base that is refused, as
+/// `health_ip_v4`'s.
+/// The same client as `health_ip_v4`: IPv4 only, no proxy, no redirect.
+#[tauri::command]
+pub async fn data_check_v4(
+    base: String,
+    down_bytes: u64,
+    up_bytes: u64,
+    timeout_ms: u64,
+) -> Result<DataCheck, String> {
+    let up_url = bulk_url(&base).map_err(str::to_string)?;
+    let down_bytes = down_bytes.clamp(1, DATA_CHECK_MAX_BYTES);
+    let up_bytes = up_bytes.clamp(1, DATA_CHECK_MAX_BYTES);
+    let mut down_url = up_url.clone();
+    down_url.query_pairs_mut().append_pair("bytes", &down_bytes.to_string());
+    let timeout = Duration::from_millis(timeout_ms.max(1)).min(MAX_TIMEOUT);
+    let client = ipv4_client(timeout)?;
+    let mut peer = None;
+
+    let started = Instant::now();
+    let down = match client.get(down_url).send().await {
+        Err(_) => DataLeg { status: None, bytes: 0, ms: millis_since(started) },
+        Ok(mut response) => {
+            let status = response.status().as_u16();
+            peer = response.remote_addr().map(|address| address.ip().to_canonical().to_string());
+            let mut moved: u64 = 0;
+            // A read that fails -- the timeout, mostly -- ends the leg
+            // with what had arrived. More than was asked for is not read.
+            while let Ok(Some(chunk)) = response.chunk().await {
+                moved += chunk.len() as u64;
+                if moved > down_bytes {
+                    break;
+                }
+            }
+            DataLeg { status: Some(status), bytes: moved, ms: millis_since(started) }
+        }
+    };
+
+    if down.status.is_none() {
+        let up = DataLeg { status: None, bytes: 0, ms: 0 };
+        return Ok(DataCheck { down, up, peer });
+    }
+    let body = incompressible(up_bytes as usize);
+    let started = Instant::now();
+    let sent = client
+        .post(up_url)
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .body(body)
+        .send()
+        .await;
+    let up = match sent {
+        Err(_) => DataLeg { status: None, bytes: 0, ms: millis_since(started) },
+        Ok(response) => {
+            let status = response.status().as_u16();
+            if peer.is_none() {
+                peer = response.remote_addr().map(|address| address.ip().to_canonical().to_string());
+            }
+            let received = read_small(response)
+                .await
+                .and_then(|text| serde_json::from_slice::<serde_json::Value>(&text).ok())
+                .and_then(|answer| answer.get("received").and_then(serde_json::Value::as_u64))
+                .unwrap_or(0);
+            DataLeg { status: Some(status), bytes: received, ms: millis_since(started) }
+        }
+    };
+
+    Ok(DataCheck { down, up, peer })
+}
+
+/// A response body of at most `MAX_BODY_BYTES`, or `None` when it was
+/// larger or could not be read to its end.
+async fn read_small(mut response: reqwest::Response) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len() + chunk.len() > MAX_BODY_BYTES {
+                    return None;
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => return Some(bytes),
+            Err(_) => return None,
+        }
+    }
 }
 
 /// The longest a hostname is allowed to be (RFC 1035's 253 in text).
@@ -395,6 +560,29 @@ mod tests {
         // A mirror on its own port, and a base written with a slash.
         let url = health_url("https://mirror.example:2053/api/").unwrap();
         assert_eq!(url.as_str(), "https://mirror.example:2053/api/health/ip");
+    }
+
+    #[test]
+    fn the_data_check_asks_its_one_path_under_the_same_rules() {
+        let url = bulk_url("https://connect.neoxify.site/api").unwrap();
+        assert_eq!(url.as_str(), "https://connect.neoxify.site/api/health/bulk");
+        let url = bulk_url("https://mirror.example:2053/api/").unwrap();
+        assert_eq!(url.as_str(), "https://mirror.example:2053/api/health/bulk");
+        assert!(bulk_url("http://connect.neoxify.site/api").is_err());
+        assert!(bulk_url("https://connect.neoxify.site/api?x=1").is_err());
+    }
+
+    #[test]
+    fn the_upload_is_the_size_asked_and_not_compressible() {
+        let body = incompressible(262_144);
+        assert_eq!(body.len(), 262_144);
+        // Every byte value turns up: a run of anything would compress.
+        let mut seen = [false; 256];
+        for byte in &body {
+            seen[*byte as usize] = true;
+        }
+        assert!(seen.iter().all(|&s| s));
+        assert_eq!(incompressible(5).len(), 5);
     }
 
     #[test]

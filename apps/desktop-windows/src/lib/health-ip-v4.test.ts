@@ -57,7 +57,7 @@ describe("the egress check on Windows", () => {
     expect(baseline).toEqual({ ip: "192.0.2.228", from: CDN });
 
     replies.set(CDN, { status: 200, body: { ip: "203.0.113.10" } });
-    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "throughTunnel", exitIp: "203.0.113.10" });
+    await expect(verifyEgress(baseline)).resolves.toMatchObject({ state: "throughTunnel", exitIp: "203.0.113.10" });
 
     expect(calls.map((c) => c.base)).toEqual([CDN, CDN]);
     expect(calls.every((c) => c.timeoutMs > 0)).toBe(true);
@@ -109,7 +109,7 @@ describe("the egress check on Windows", () => {
         { ip: "192.0.2.228", from: CDN, peer: "198.51.100.10" },
         { tunnelServer: { addresses: ["203.0.113.41"], reachedAround: true } },
       ),
-    ).resolves.toEqual({ state: "throughTunnel", exitIp: "203.0.113.41" });
+    ).resolves.toMatchObject({ state: "throughTunnel", exitIp: "203.0.113.41" });
   });
 
   it("is installed before the app renders", () => {
