@@ -115,6 +115,9 @@ services:
       # Minutes without a heartbeat before the owner is paged (webhook and
       # email). Blank or 0 = off.
       HEARTBEAT_GAP_PAGE_MINUTES: ${HEARTBEAT_GAP_PAGE_MINUTES:-}
+      # Token for the inside-country data checks' collector
+      # (scripts/inside-probe). Unset, that endpoint refuses everything.
+      INSIDE_PROBE_TOKEN: ${INSIDE_PROBE_TOKEN:-}
       # Per-ISP recommendations: an offline IP-to-ASN table (iptoasn.com,
       # public domain), downloaded once a day. All optional and on by
       # default. ASN_LOOKUP_ENABLED=false turns the feature off (no tags,

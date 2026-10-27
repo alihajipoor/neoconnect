@@ -193,6 +193,9 @@ pub fn run() {
             // egress check can tell an endpoint on that server -- routed
             // around the tunnel -- from one reached through it.
             health_ip::resolve_ipv4,
+            // The check that a tunnel moves data, beside the one that its
+            // address changed. See `data_check_v4`.
+            health_ip::data_check_v4,
             vpn::measure_latency,
             vpn::probe_tcp,
             vpn::network_fingerprint,

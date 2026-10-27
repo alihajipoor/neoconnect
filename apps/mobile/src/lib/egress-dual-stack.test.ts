@@ -85,7 +85,7 @@ describe("over IPv4 only, as main.tsx installs it", () => {
 
     tunnel = "carrying";
     const verdict = await confirmEgress(baseline, { ...quick, sameEndpointOnly: true });
-    expect(verdict).toEqual({ state: "throughTunnel", exitIp: EXIT_V4 });
+    expect(verdict).toMatchObject({ state: "throughTunnel", exitIp: EXIT_V4 });
     expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("connected");
 
     // And the health poll: proof, so an Xray tunnel reads "protected"

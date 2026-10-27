@@ -1,3 +1,4 @@
+import { insideSummary } from "../inside-probe/inside-probe";
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
@@ -601,7 +602,23 @@ export class BlockWatchService {
         })
       : [];
     const heldProbeAlerts = [...new Set(held.map((a) => a.node.name))];
-    if (!open.length && !cleared.length && !undelivered.length && !reopened.length && !heldProbeAlerts.length) return;
+    const inside = insideSummary(
+      (
+        await this.prisma.insideProbeCheck.findMany({
+          where: { checkedAt: { gte: new Date(t - DIGEST_EVERY_MS) } },
+          select: { vantage: true, verdict: true, upBytes: true, upMs: true, checkedAt: true, node: { select: { name: true } } },
+        })
+      ).map(({ node, ...row }) => ({ ...row, nodeName: node.name })),
+    );
+    if (
+      !open.length &&
+      !cleared.length &&
+      !undelivered.length &&
+      !reopened.length &&
+      !heldProbeAlerts.length &&
+      !inside.length
+    )
+      return;
 
     const delivery = await this.pager.page(
       digestPage(
@@ -611,6 +628,7 @@ export class BlockWatchService {
           undelivered: undelivered.map((i) => ({ ...view(i), pageError: i.pageError })),
           reopened: reopened.map(view),
           heldProbeAlerts,
+          inside,
           calibrating: mode === "digest",
           country: this.country,
         },

@@ -192,6 +192,7 @@ function fakePrisma(world: World) {
           .sort((a, b) => b.checkedAt.getTime() - a.checkedAt.getTime()),
       ),
     },
+    insideProbeCheck: { findMany: jest.fn(async () => []) },
     nodeReachabilityAlert: {
       findMany: jest.fn(async ({ where }: Row) => world.alerts.filter((a) => matches(a, where)).map(withNode)),
     },

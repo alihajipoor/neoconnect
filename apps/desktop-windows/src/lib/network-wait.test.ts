@@ -156,7 +156,7 @@ describe("the Windows ladder waits on the same rung", () => {
     expect(waiting).not.toContain("dials.push(");
     expect(waiting).not.toContain("failedRungs.push(");
     // The same rung again: a `for` over an index, so it can be revisited.
-    expect(ladder).toContain("for (let index = 0; index < candidates.length; index += 1) {");
+    expect(ladder).toContain("for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {");
   });
 
   it("goes no further down the ladder when it gives up on the network", () => {
@@ -236,7 +236,7 @@ describe("the Windows ladder waits on the same rung", () => {
   it("takes the IPv6 baseline beside the settle when the rung is dialled again after a wait", () => {
     expect(retried).toContain("redialAfterWait = true;");
     const prologue = ladder.slice(
-      ladder.indexOf("for (let index = 0; index < candidates.length; index += 1) {"),
+      ladder.indexOf("for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {"),
       ladder.indexOf('const dial = invoke("vpn_connect", {'),
     );
     const beside = prologue.indexOf(

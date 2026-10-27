@@ -111,6 +111,9 @@ pub fn run() {
             // same check. Absent, a server named by hostname (IKEv2's)
             // would go unrecognised in `health_ip_v4`'s peer address.
             health_ip::resolve_ipv4,
+            // The check that a tunnel moves data, beside the one that its
+            // address changed. See `data_check_v4`.
+            health_ip::data_check_v4,
             // The relay of last resort; see `mod relay_http` above.
             relay_http::relay_request,
             // A signed bundle's hosts into the HTTP scope; see

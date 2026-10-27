@@ -694,8 +694,10 @@ export const captureBaselineIp = (options: BaselineOptions = {}): Promise<IpRead
   publicIp((body) => rememberNetwork(body), options);
 
 export type EgressVerdict =
-  /** The exit address changed: traffic is provably leaving via the VPN. */
-  | { state: "throughTunnel"; exitIp: string }
+  /** The exit address changed: traffic is provably leaving via the VPN.
+   * `from` is the endpoint that said so -- one reached through the tunnel,
+   * which the data check (`data-check.ts`) then asks. */
+  | { state: "throughTunnel"; exitIp: string; from?: string }
   /** Reachable, but from the same address as before -- the tunnel is not
    * carrying this traffic. The leak case. */
   | { state: "bypassingTunnel"; exitIp: string }
@@ -878,7 +880,7 @@ export async function verifyEgress(
   }
   return plainAddress(reading.ip) === plainAddress(baseline.ip)
     ? { state: "bypassingTunnel", exitIp: reading.ip }
-    : { state: "throughTunnel", exitIp: reading.ip };
+    : { state: "throughTunnel", exitIp: reading.ip, from: reading.from };
 }
 
 /** Whether the public IPv4 internet answers from here, asked only when

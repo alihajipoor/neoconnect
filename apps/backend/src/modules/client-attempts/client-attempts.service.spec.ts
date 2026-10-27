@@ -1,7 +1,7 @@
 import { ClientAttemptKind, ClientAttemptOutcome, Prisma } from "@prisma/client";
 import {
   ClientAttemptsService,
-  RETENTION_DAYS,
+  KEEP_WITHOUT_ADDRESS_DAYS, RETENTION_DAYS,
   plausibleOccurredAt,
   recordedPlatform,
 } from "./client-attempts.service";
@@ -22,16 +22,17 @@ const report = (over: Partial<ReportAttemptDto> = {}): ReportAttemptDto => ({
 const build = () => {
   const create = jest.fn().mockResolvedValue({});
   const deleteMany = jest.fn().mockResolvedValue({ count: 0 });
+  const updateMany = jest.fn().mockResolvedValue({ count: 0 });
   const findMany = jest.fn().mockResolvedValue([]);
   const groupBy = jest.fn().mockResolvedValue([]);
   // Vouches for exactly one token, as the real attestor vouches only for
   // its own signatures.
   const identity = { verify: (token?: string) => (token === "signed-for-64500" ? 64500 : null) };
   const service = new ClientAttemptsService(
-    { clientAttempt: { create, deleteMany, findMany, groupBy } } as unknown as PrismaService,
+    { clientAttempt: { create, deleteMany, updateMany, findMany, groupBy } } as unknown as PrismaService,
     identity as unknown as NetworkIdentityService,
   );
-  return { service, create, deleteMany, findMany, groupBy };
+  return { service, create, deleteMany, updateMany, findMany, groupBy };
 };
 
 /** The per-ISP tags count people by network, so the network on a row has
@@ -252,12 +253,18 @@ describe("ClientAttemptsService.prune", () => {
   /** The sweep is the only thing that actually enforces the retention
    * promise on a table of IP addresses belonging to people in a country
    * where holding them is dangerous. */
-  it("deletes strictly older than the retention window", async () => {
-    const { service, deleteMany } = build();
+  it("erases the address of anything older than the retention window, and keeps the rest a while", async () => {
+    const { service, deleteMany, updateMany } = build();
     const before = Date.now();
     await service.prune();
     const after = Date.now();
-    const cutoff: number = (deleteMany.mock.calls[0][0].where.createdAt.lt as Date).getTime();
+    const erased = updateMany.mock.calls[0][0];
+    expect(erased.data).toEqual({ ip: null });
+    const cutoff: number = (erased.where.createdAt.lt as Date).getTime();
+    const dropped: number = (deleteMany.mock.calls[0][0].where.createdAt.lt as Date).getTime();
+    const kept = KEEP_WITHOUT_ADDRESS_DAYS * 86_400_000;
+    expect(dropped).toBeGreaterThanOrEqual(before - kept);
+    expect(dropped).toBeLessThanOrEqual(after - kept);
 
     // The service reads its own clock somewhere between these two, so
     // the cutoff is bracketed rather than compared to a single instant.

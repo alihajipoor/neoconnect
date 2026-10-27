@@ -58,18 +58,29 @@ export function reachabilityOf(
  * first dial. A probe that throws is recorded as unknown rather than
  * unreachable -- a failure to *ask* is not an answer, and the ladder
  * must still be free to try it.
+ *
+ * `replyMs`, when given, is filled with how long each candidate that
+ * answered took, keyed as the map is: a tie-break for the ladder among
+ * servers nothing else tells apart (`orderCandidates`). Measured around
+ * the command, so it includes a little IPC; all are asked at once, so
+ * that little is the same for all of them.
  */
-export async function probeCandidates(users: ProtocolUser[]): Promise<ReachabilityMap> {
+export async function probeCandidates(
+  users: ProtocolUser[],
+  replyMs?: Record<string, number>,
+): Promise<ReachabilityMap> {
   const asked = users.filter((u) => probeable(u.protocol) && u.connection?.host);
 
   const results = await Promise.all(
     asked.map(async (u) => {
       const key = reachabilityKey(u.routeId, u.protocol);
       try {
+        const started = Date.now();
         const ok = await invoke<boolean>("probe_tcp", {
           host: u.connection.host,
           port: u.connection.port,
         });
+        if (ok && replyMs) replyMs[key] = Date.now() - started;
         return [key, ok ? "reachable" : "unreachable"] as const;
       } catch {
         return [key, "unknown"] as const;

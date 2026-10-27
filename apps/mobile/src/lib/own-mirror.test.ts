@@ -149,7 +149,7 @@ describe("IKEv2, where the server is taken to be reached around the tunnel", () 
     expect(baseline).toEqual({ ip: PHONE, from: CDN, peer: EDGE });
     net.tunnel = FINLAND;
     const verdict = await confirmEgress(baseline, { ...quick, sameEndpointOnly: true, tunnelServer: FI_IKEV2 });
-    expect(verdict).toEqual({ state: "throughTunnel", exitIp: FINLAND });
+    expect(verdict).toMatchObject({ state: "throughTunnel", exitIp: FINLAND });
     expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("connected");
     expect(pollState("unverified", await pollEgress(baseline, FI_IKEV2))).toBe("connected");
   });
@@ -222,7 +222,7 @@ describe("Xray and WireGuard, where the server is reached through the tunnel", (
       // it is the baseline's own endpoint, on the tunnel's server, and
       // its baseline answer named the phone, not itself.
       const verdict = await confirmEgress(baseline, { ...quick, sameEndpointOnly: true, tunnelServer: server });
-      expect(verdict).toEqual({ state: "throughTunnel", exitIp: FINLAND });
+      expect(verdict).toMatchObject({ state: "throughTunnel", exitIp: FINLAND });
       expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("connected");
       expect(pollState("unverified", await pollEgress(baseline, server))).toBe("connected");
       net.tunnel = null;
@@ -236,7 +236,7 @@ describe("Xray and WireGuard, where the server is reached through the tunnel", (
     net.tunnel = FINLAND;
     net.exit = GERMANY;
     const verdict = await confirmEgress(baseline, { ...quick, sameEndpointOnly: true, tunnelServer: FI_XRAY });
-    expect(verdict).toEqual({ state: "throughTunnel", exitIp: GERMANY });
+    expect(verdict).toMatchObject({ state: "throughTunnel", exitIp: GERMANY });
   });
 
   it("still accuses a tunnel that carries nothing through that mirror", async () => {
@@ -275,7 +275,7 @@ describe("the last rung on a network that filters the panel host", () => {
     net.tunnel = FINLAND;
     asked.length = 0;
     const verdict = await confirmEgress(baseline, { ...quick, tunnelServer: FI_XRAY });
-    expect(verdict).toEqual({ state: "throughTunnel", exitIp: FINLAND });
+    expect(verdict).toMatchObject({ state: "throughTunnel", exitIp: FINLAND });
     expect(rungOutcome(verdict!, { baselineTaken: true, isLast: true })).toBe("connected");
     expect(asked[0]).toBe(DE_MIRROR);
   });

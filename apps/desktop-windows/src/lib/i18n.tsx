@@ -714,6 +714,7 @@ const en = {
   // connection is: "didn't get through" would be a claim nothing made
   // true (failover-notice.ts).
   "dash.nowUsing": "Now using {protocol}",
+  "dash.slowOnly": "Connected over {protocol}, but it's slow. Nothing faster got through on this network.",
   "dash.yourIp": "Your IP:",
   "err.serviceUnavailable": "The Neoxify background service isn't running. Restarting the app usually fixes this. If it doesn't, reinstall Neoxify.",
   "err.engineMissing": "Part of the installation is missing. Reinstall Neoxify.",
@@ -1914,6 +1915,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.switchedNoNetwork": "اول شبکه وصل نبود، برای همین {from} امتحان نشد. الان از {to} با {protocol} استفاده می‌شود",
   "dash.switchedToNoNetwork": "اول شبکه وصل نبود. الان از {protocol} استفاده می‌شود",
   "dash.nowUsing": "الان از {protocol} استفاده می‌شود",
+  "dash.slowOnly": "با {protocol} وصل شدید، اما سرعت کم است. روی این شبکه اتصال سریع‌تری پیدا نشد.",
   "dash.yourIp": "آی‌پی شما:",
   "err.serviceUnavailable": "سرویس پس‌زمینهٔ نئوکسیفای اجرا نمی‌شود. معمولاً بستن و باز کردن دوبارهٔ برنامه مشکل را حل می‌کند. اگر نشد، نئوکسیفای را دوباره نصب کنید.",
   "err.engineMissing": "بخشی از برنامه نصب نشده است. نئوکسیفای را دوباره نصب کنید.",

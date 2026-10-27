@@ -110,18 +110,30 @@ describe("ReachabilityService.verdictFor", () => {
     expect(service.verdictFor(outcome(results))).toBe(ReachabilityVerdict.REACHABLE);
   });
 
-  /** Iranian operators filter independently, so one blocked ASN out of
-   * four is the normal shape of a partial block -- visible, but not an
-   * alert. */
-  it("is DEGRADED when a minority still connects", () => {
+  /** Iranian operators filter independently, so a few vantages failing is
+   * the normal shape of a partial block -- visible, but not an alert. */
+  it("is DEGRADED when a sizeable minority still connects", () => {
     const { service } = build();
     const results = [
       probe(),
-      probe({ vantage: "ir2", ok: false }),
+      probe({ vantage: "ir2" }),
       probe({ vantage: "ir3", ok: false }),
       probe({ vantage: "ir4", ok: false }),
+      probe({ vantage: "ir5", ok: false }),
     ];
     expect(service.verdictFor(outcome(results))).toBe(ReachabilityVerdict.DEGRADED);
+  });
+
+  /** finland1, 15 October 2026: cut off in Iran with five of six vantages
+   * timing out and one still connecting. That was DEGRADED, and paged
+   * nobody. Most of the country failing is a block. */
+  it("is UNREACHABLE when most answering vantages failed, even if one connects", () => {
+    const { service } = build();
+    const results = [
+      probe(),
+      ...["ir2", "ir3", "ir4", "ir5", "ir6"].map((vantage) => probe({ vantage, ok: false })),
+    ];
+    expect(service.verdictFor(outcome(results))).toBe(ReachabilityVerdict.UNREACHABLE);
   });
 });
 

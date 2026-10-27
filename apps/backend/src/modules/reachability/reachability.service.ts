@@ -17,6 +17,16 @@ import { reachabilityAlertEmail, reachabilityRecoveryEmail } from "./reachabilit
  * amber light that everyone learns to ignore. */
 const HEALTHY_RATIO = 0.5;
 
+/** At or below this share of answering vantages getting through, a node
+ * is UNREACHABLE: most of the country cannot open a connection to it.
+ *
+ * It used to take every vantage failing. finland1 was cut off in Iran on
+ * 15 October 2026 with five of six vantages timing out, seven hops inside
+ * the country, and one vantage still getting through -- DEGRADED, which
+ * pages nobody, on the main server for direct Iranian customers. A third
+ * means four of six failing is enough; three of six is not. */
+const UNREACHABLE_RATIO = 1 / 3;
+
 /** Fewer answering vantages than this and the cycle is INCONCLUSIVE
  * regardless of what they said.
  *
@@ -171,7 +181,7 @@ export class ReachabilityService {
     if (answered < MIN_ANSWERS_FOR_A_VERDICT) return ReachabilityVerdict.INCONCLUSIVE;
 
     const ok = outcome.results.filter((r) => r.ok).length;
-    if (ok === 0) return ReachabilityVerdict.UNREACHABLE;
+    if (ok / answered <= UNREACHABLE_RATIO) return ReachabilityVerdict.UNREACHABLE;
     if (ok / answered >= HEALTHY_RATIO) return ReachabilityVerdict.REACHABLE;
     return ReachabilityVerdict.DEGRADED;
   }

@@ -159,3 +159,46 @@ On the VM and a phone, with the release build:
   repository.
 - **Bare-address mirrors** need certificates valid for an IP address
   (Let's Encrypt issues short-lived ones), renewed every few days.
+
+## Servers that connect and carry nothing (2026-10-27)
+
+Found by the investigation of 27 October: Iran blocks per operator and
+per server address, and the commonest block lets a connection open and
+then holds the upload of that address to about 0.1 Mbps after the first
+63-95 KB. A tunnel to such a server passes the address check, so the app
+said "Connected" over a tunnel that loaded nothing. What changed:
+
+- **"Connected" proves data moves** (`src/lib/data-check.ts`, shared by
+  both apps; `data_check_v4` in `health_ip.rs`; `/health/bulk` in the
+  API). After the address check passes, 128 KB down and 256 KB up through
+  the endpoint that answered it, 8 s per direction. A rung that does not
+  finish is moved on from, its route's other protocols are passed over
+  (the hold is on the address), and the best slow rung is dialled again
+  and kept only if nothing faster lands, with a line saying it is slow.
+  A check that cannot run -- old backend, 503 from the in-flight limit,
+  an error page -- changes nothing.
+- **Ordering** (`failover.ts`). The tie-break was the route id,
+  alphabetically, which put the UK first for everybody on a new network.
+  Now: a server that answered the probe much later than the quickest goes
+  after the rest, then a per-install seed spreads customers. A pin brings
+  the same country's other routes next. A remembered server that refuses
+  every probe no longer leads, nor does one another working server has
+  been measured at twice the speed of (`speedFor`).
+- **Checks from inside the country** (`scripts/inside-probe`,
+  `modules/inside-probe`). Every half hour the panel host asks each
+  Iranian box, over SSH with a key whose only command is the check, to
+  move 256 KB each way through every node's address (a TLS port whose
+  fallback reaches the API mirror), and posts the result. The boxes hold
+  nothing. Results go to the block watch's daily digest. It cannot see
+  protocol-handshake blocks (WireGuard's) or blocks on our names.
+- **Block alarm**: blank settings no longer become 0 (port 0, 0 days of
+  history, alert after one failure), and most vantages failing is
+  UNREACHABLE (finland1's 5-of-6 block read as DEGRADED).
+
+Unverified: where the "slow" line should sit for home and mobile
+networks (the hold was measured from data centres), and the whole data
+check against a real held server -- nothing outside Iran is held.
+
+Not built: a scan of several tunnels at once on a new network, to pick
+the fastest before connecting. It needs new work in the Windows service
+(a test path per concurrent exit) and in the phone engines.

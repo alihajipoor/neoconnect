@@ -16,6 +16,16 @@ import { NetworkIdentityService } from "../network-identity/network-identity.ser
  */
 export const RETENTION_DAYS = 14;
 
+/** How long a report is kept once its address is gone.
+ *
+ * The address is what makes these rows dangerous to hold, and it is
+ * erased at `RETENTION_DAYS` as before. What is left -- which server and
+ * protocol, which network by number, what happened -- is what showed in
+ * October 2026 that servers were being slowed rather than blocked, and
+ * that investigation was cut short at two weeks by this table's own
+ * pruning. Two months of it, with no address in it. */
+export const KEEP_WITHOUT_ADDRESS_DAYS = 60;
+
 /** The most rungs kept from one connect.
  *
  * A ladder pass tries at most the credentials a subscription holds --
@@ -198,13 +208,20 @@ export class ClientAttemptsService {
     return rows.map((r) => ({ outcome: r.outcome, count: r._count._all }));
   }
 
-  /** Drops anything past the retention window. Called by the sweep. */
+  /** Erases the address from anything past the retention window, and
+   * drops anything past `KEEP_WITHOUT_ADDRESS_DAYS`. Called by the sweep. */
   async prune(): Promise<number> {
-    const cutoff = new Date(Date.now() - RETENTION_DAYS * 86_400_000);
-    const { count } = await this.prisma.clientAttempt.deleteMany({
-      where: { createdAt: { lt: cutoff } },
+    const now = Date.now();
+    const erase = new Date(now - RETENTION_DAYS * 86_400_000);
+    const drop = new Date(now - KEEP_WITHOUT_ADDRESS_DAYS * 86_400_000);
+    await this.prisma.clientAttempt.updateMany({
+      where: { createdAt: { lt: erase }, ip: { not: null } },
+      data: { ip: null },
     });
-    if (count > 0) this.logger.log(`Pruned ${count} client attempts older than ${RETENTION_DAYS} days`);
+    const { count } = await this.prisma.clientAttempt.deleteMany({
+      where: { createdAt: { lt: drop } },
+    });
+    if (count > 0) this.logger.log(`Pruned ${count} client attempts older than ${KEEP_WITHOUT_ADDRESS_DAYS} days`);
     return count;
   }
 }

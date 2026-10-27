@@ -12,7 +12,7 @@ const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.u
 // functions do with them; this pins that the screen gives them those.
 describe("the main page feeds the map's lights", () => {
   it("records an attempt as a success only on a verified verdict", () => {
-    expect(dashboard).toMatch(/recordAttempt\(\s*history,\s*networkId,\s*candidate\.routeId,\s*candidate\.protocol,\s*verdict === "connected",\s*\)/);
+    expect(dashboard).toMatch(/recordAttempt\(\s*history,\s*networkId,\s*candidate\.routeId,\s*candidate\.protocol,\s*verdict === "connected" && !landedSlow,\s*\)/);
   });
 
   it("takes the connected place only from a verified tunnel, never in gaming mode, and not once the tunnel has moved", () => {
