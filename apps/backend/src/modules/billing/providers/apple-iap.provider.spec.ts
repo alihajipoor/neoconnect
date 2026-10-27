@@ -159,3 +159,44 @@ describe("verifyChain", () => {
     expect(() => verifyChain([f.leaf, f.intermediate, f.root])).toThrow(/not anchored in Apple's root/);
   });
 });
+
+/** The other half: a genuine transaction must be ACCEPTED.
+ *
+ * Every case above is a forgery that fails before the signature is
+ * checked, so until 2026-10-27 nothing ran the success path -- and it
+ * threw on every real purchase ("Invalid key object type public,
+ * expected private"), which App Review saw as an error after buying.
+ * The genuine fixture is an Apple-shaped chain (both markers present)
+ * with one sandbox transaction signed by its leaf; anchored at its own
+ * root it is genuine, against Apple's root it is not. */
+describe("verifyAppleTransaction, a genuine transaction", () => {
+  const genuine = JSON.parse(readFileSync(join(__dirname, "apple-iap.genuine-fixture.json"), "utf8")) as { rootPem: string; jws: string };
+
+  it("is accepted, and says what was bought", () => {
+    const tx = verifyAppleTransaction(genuine.jws, BUNDLE_ID, genuine.rootPem);
+    expect(tx).toEqual({
+      transactionId: "2000000999000001",
+      originalTransactionId: "2000000999000001",
+      productId: "com.neoxify.mobile.starter.30d",
+      bundleId: BUNDLE_ID,
+      environment: "Sandbox",
+      purchaseDate: new Date(Date.UTC(2026, 9, 27, 1, 15)),
+    });
+  });
+
+  it("is refused once its payload is changed, though the chain is good", () => {
+    const [h, payload, sig] = genuine.jws.split(".");
+    const body = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>;
+    body.productId = "com.neoxify.mobile.ultimate.30d";
+    const tampered = `${h}.${Buffer.from(JSON.stringify(body)).toString("base64url")}.${sig}`;
+    expect(() => verifyAppleTransaction(tampered, BUNDLE_ID, genuine.rootPem)).toThrow(/signature did not verify/);
+  });
+
+  it("is refused for another app's bundle id", () => {
+    expect(() => verifyAppleTransaction(genuine.jws, "com.someone.else", genuine.rootPem)).toThrow(/different application/);
+  });
+
+  it("is refused against Apple's real root", () => {
+    expect(() => verifyAppleTransaction(genuine.jws, BUNDLE_ID)).toThrow(/not anchored in Apple's root/);
+  });
+});

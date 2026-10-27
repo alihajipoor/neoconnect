@@ -1,4 +1,4 @@
-import { X509Certificate, createPublicKey, verify as verifySignature } from "node:crypto";
+import { X509Certificate, verify as verifySignature } from "node:crypto";
 import * as forge from "node-forge";
 
 /** Checking that a StoreKit purchase really happened.
@@ -176,8 +176,16 @@ export function verifyChain(x5c: string[], anchorPem: string = APPLE_ROOT_CA_G3)
  * Throws on anything at all suspicious. The caller turns that into a
  * refusal; nothing here should ever reach a customer, because every
  * message describes a forgery rather than something they can fix.
+ *
+ * `anchorPem` is verifyChain's, for the same reason: the tests need a root
+ * whose key they control to drive a genuine transaction all the way
+ * through. Production code never passes it.
  */
-export function verifyAppleTransaction(jws: string, expectedBundleId: string): VerifiedTransaction {
+export function verifyAppleTransaction(
+  jws: string,
+  expectedBundleId: string,
+  anchorPem: string = APPLE_ROOT_CA_G3,
+): VerifiedTransaction {
   const parts = jws.split(".");
   if (parts.length !== 3) throw new Error("malformed transaction");
   const [headerB64, payloadB64, signatureB64] = parts;
@@ -195,7 +203,7 @@ export function verifyAppleTransaction(jws: string, expectedBundleId: string): V
     throw new Error("transaction carries no certificate chain");
   }
 
-  const leaf = verifyChain(header.x5c);
+  const leaf = verifyChain(header.x5c, anchorPem);
 
   const signed = Buffer.from(`${headerB64}.${payloadB64}`, "ascii");
   const ok = verifySignature(
@@ -204,7 +212,14 @@ export function verifyAppleTransaction(jws: string, expectedBundleId: string): V
     // ieee-p1363 because JWS carries the raw r||s pair, while Node
     // defaults to the DER encoding OpenSSL uses. Without this the
     // signature of a perfectly valid token fails to verify.
-    { key: createPublicKey(leaf.publicKey), dsaEncoding: "ieee-p1363" },
+    //
+    // The certificate's key as it is: X509Certificate.publicKey is already
+    // a public KeyObject, and createPublicKey() refuses one ("Invalid key
+    // object type public, expected private"). Wrapping it threw on every
+    // genuine transaction, so no App Store purchase could ever verify
+    // (2026-10-27, App Review's 2.1(b) rejection). Only forgeries were
+    // ever tested, and they fail before this line.
+    { key: leaf.publicKey, dsaEncoding: "ieee-p1363" },
     b64urlToBuffer(signatureB64),
   );
   if (!ok) throw new Error("transaction signature did not verify");
