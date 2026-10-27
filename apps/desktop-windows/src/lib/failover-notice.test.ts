@@ -85,7 +85,7 @@ describe("a pass that landed elsewhere after rungs with no network", () => {
       "No network connection at first, so fi-finland wasn't tried. Now on de-germany over Stealth",
     );
     expect(line("fa", noNetwork)).toBe(
-      "اول شبکه وصل نبود، برای همین fi-finland امتحان نشد. الان روی de-germany با Stealth",
+      "اول شبکه وصل نبود، برای همین fi-finland امتحان نشد. الان از de-germany با Stealth استفاده می‌شود",
     );
     expect(line("en", noNetwork)).not.toContain("Couldn't reach");
   });
@@ -103,7 +103,7 @@ describe("a server named as unreachable", () => {
       { routeId: "fi", fate: rungFate("serverUnreachable") },
     ];
     expect(line("en", failed)).toBe("Couldn't reach fi-finland. Now on de-germany over Stealth");
-    expect(line("fa", failed)).toBe("به fi-finland وصل نشد. الان روی de-germany با Stealth");
+    expect(line("fa", failed)).toBe("به fi-finland وصل نشد. الان از de-germany با Stealth استفاده می‌شود");
   });
 
   it("is not one that failed before it was dialled for any other reason", () => {

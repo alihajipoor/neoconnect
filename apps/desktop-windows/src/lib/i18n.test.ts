@@ -238,7 +238,8 @@ describe("what the strings are allowed to claim", () => {
     // add it again", which is a loop when the names are wrong.
     expect(loose["settings.customGameNoneBody"]).toMatch(/running apps/i);
     expect(loose["settings.customGameNoneBody"]).not.toMatch(/add it again/i);
-    expect(looseFa["settings.customGameNoneBody"]).toContain("در حال اجرا");
+    // By the button's own label, so the two cannot drift apart.
+    expect(looseFa["settings.customGameNoneBody"]).toContain(`«${fa["settings.customPickRunning"]}»`);
   });
 
   it("warns that Custom mode blocks ping, and does not pretend it is per-app", () => {

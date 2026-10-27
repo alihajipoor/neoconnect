@@ -33,7 +33,7 @@ describe("the approved strings", () => {
     // Without naming the country: the owner asked that no screen name it
     // (2026-10-26).
     expect(en["relay.region"]).toBe("The backup route only works for connections from inside the country its server is in.");
-    expect(fa["relay.region"]).toBe("مسیر پشتیبان فقط برای اتصال از داخل همان کشوری است که سرورش آنجاست.");
+    expect(fa["relay.region"]).toBe("مسیر پشتیبان فقط برای اتصال از داخل کشوری است که سرورش در آن قرار دارد.");
     expect(en["relay.blocked"]).toBe("Neoxify's usual routes are blocked on this network.");
     expect(fa["relay.blocked"]).toBe("راه‌های معمول نئوکسیفای در این شبکه مسدود است.");
     expect(en["verify.reminder"]).toBe(
