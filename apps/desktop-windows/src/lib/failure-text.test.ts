@@ -90,7 +90,7 @@ describe("a request nothing answered", () => {
     expect(failureText(failure, fa)).toBe(DICTIONARIES.fa["api.unreachable"]);
     expect(failureText(failure, fa)).toMatch(/[؀-ۿ]/);
     expect(failureText(failure, fa)).not.toMatch(/Could not reach/);
-    expect(failureText(failure, en)).toBe("Could not reach Neoxify. Check your internet connection.");
+    expect(failureText(failure, en)).toBe("Couldn't reach Neoxify. Check your internet connection.");
   });
 
   it("says Neoxify stopped responding when it had answered moments before", async () => {
@@ -156,7 +156,7 @@ describe("a request something answered", () => {
     const failure = await failureOf(apiRequest("/customer/subscriptions"));
 
     expect(failure.status).toBe(502);
-    expect(failureText(failure, en)).toBe("The server answered with an error (502). Please try again in a moment.");
+    expect(failureText(failure, en)).toBe("The server answered with an error (502). Try again in a moment.");
     expect(failureText(failure, fa)).toBe(DICTIONARIES.fa["api.serverError"].replace("{status}", "502"));
     expect(failureText(failure, en)).not.toMatch(/could not reach/i);
     expect(failureText(failure, fa)).not.toBe(DICTIONARIES.fa["api.unreachable"]);
@@ -180,6 +180,20 @@ describe("a request something answered", () => {
     expect(failureText(unknown, fa)).toBe(DICTIONARIES.fa["relay.regionUnknown"]);
     expect(failureText(unknown, en)).not.toBe(DICTIONARIES.en["relay.region"]);
     expect(failureText({ error: "...", status: 403, code: "RELAY_REGION" }, en)).toBe(DICTIONARIES.en["relay.region"]);
+  });
+
+  it("words an App Store purchase that did not finish in the reader's language", () => {
+    // iap.ts keeps an English sentence for the reports and sets a code; the
+    // store build's screen used to show that English under a Persian page.
+    for (const [code, key] of [
+      ["IAP_UNKNOWN_PRODUCT", "iap.unknownProduct"],
+      ["IAP_UNVERIFIED", "iap.unverified"],
+      ["IAP_FAILED", "iap.failed"],
+    ] as const) {
+      const failure = { error: "The purchase didn't complete.", code };
+      expect(failureText(failure, fa), code).toBe(DICTIONARIES.fa[key]);
+      expect(failureText(failure, en), code).toBe(DICTIONARIES.en[key]);
+    }
   });
 
   it("does not take a backend sentence for an unworded answer because of its status", () => {

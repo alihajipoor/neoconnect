@@ -30,8 +30,10 @@ describe("the approved strings", () => {
     expect(fa["relay.chip"]).toBe("داده‌های برنامه: مسیر پشتیبان");
     expect(en["relay.disconnect"]).toBe("Disconnect to use the backup route.");
     expect(fa["relay.disconnect"]).toBe("برای استفاده از مسیر پشتیبان، اتصال را قطع کنید.");
-    expect(en["relay.region"]).toBe("The backup route is only for connections from inside Iran.");
-    expect(fa["relay.region"]).toBe("مسیر پشتیبان فقط برای اتصال از داخل ایران است.");
+    // Without naming the country: the owner asked that no screen name it
+    // (2026-10-26).
+    expect(en["relay.region"]).toBe("The backup route only works for connections from inside the country its server is in.");
+    expect(fa["relay.region"]).toBe("مسیر پشتیبان فقط برای اتصال از داخل کشوری است که سرورش در آن قرار دارد.");
     expect(en["relay.blocked"]).toBe("Neoxify's usual routes are blocked on this network.");
     expect(fa["relay.blocked"]).toBe("راه‌های معمول نئوکسیفای در این شبکه مسدود است.");
     expect(en["verify.reminder"]).toBe(
@@ -77,19 +79,19 @@ describe("the approved strings", () => {
     expect(en["settings.backupRouteHint"]).toMatch(/automatically/);
     expect(en["settings.backupRouteHint"]).toMatch(/your account, the server list and vouchers/);
     expect(en["settings.backupRouteHint"]).toMatch(/until you turn this off here/);
-    expect(en["settings.backupRouteHint"]).toMatch(/outside Iran.*for a day/);
+    expect(en["settings.backupRouteHint"]).toMatch(/outside that country.*for a day/);
     expect(en["settings.backupRouteHint"]).not.toMatch(/usual way from Iran/);
     expect(fa["settings.backupRouteHint"]).toContain("به‌طور خودکار");
     expect(fa["settings.backupRouteHint"]).toContain("فهرست سرورها");
     expect(fa["settings.backupRouteHint"]).toContain("همین‌جا خاموش");
-    expect(fa["settings.backupRouteHint"]).toMatch(/خارج از ایران.*یک روز/);
+    expect(fa["settings.backupRouteHint"]).toMatch(/بیرون از آن کشور.*یک روز/);
     // The encryption sentence stays.
     expect(en["settings.backupRouteHint"]).toMatch(/Your data stays encrypted/);
     expect(fa["settings.backupRouteHint"]).toContain("رمزگذاری‌شده می‌ماند");
   });
 
   it("mention the backup server having failed only in the string for a relay that was dialled", () => {
-    const tried = (Object.keys(en) as (keyof typeof en)[]).filter((key) => /including the backup server/i.test(en[key]));
+    const tried = (Object.keys(en) as (keyof typeof en)[]).filter((key) => /even through the backup server/i.test(en[key]));
     expect(tried).toEqual(["api.unreachableWithBackup"]);
     const words = read("./failure-text.ts");
     expect(words).toMatch(/if \(failure\.relayTried && failure\.error !== STOPPED_ANSWERING\) return t\("api\.unreachableWithBackup"\)/);

@@ -95,7 +95,7 @@ describe("daily usage", () => {
   it("says it is as recorded, and never claims to be the plan's total", () => {
     const text = render({ usage: { state: "ok", data: USAGE }, devices: { state: "ok", data: DEVICES } });
     expect(text).toContain("as Neoxify's servers recorded it");
-    expect(text).toContain("not your plan's total");
+    expect(text).toContain("don't add up to your plan's total");
     expect(text).toContain("Today so far");
   });
 
@@ -197,10 +197,10 @@ describe("the session log on the page", () => {
 
   it("says it is off by default, local, seven days, readable by whoever opens the device -- and that connect results are still reported", () => {
     const text = render({ log: log() });
-    expect(text).toContain("Off unless you turn it on");
+    expect(text).toContain("Off by default");
     expect(text).toContain("7 days");
     expect(text).toContain("Anyone who can open this device can read it");
-    expect(text).toContain("connect results are still reported");
+    expect(text).toContain("Connection results are still reported");
   });
 
   it("lists what it holds, newest first, with a lost one said and an unseen end said as unknown", () => {

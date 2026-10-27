@@ -64,7 +64,7 @@ describe("a connect the service could not dial for want of a network", () => {
     const { messageKey } = classifyConnectionError(SERVICE_NO_NETWORK);
     expect(say("en", messageKey)).toBe("No network connection. Check that this device is online, then try again.");
     expect(say("fa", messageKey)).toBe(
-      "اتصال شبکه برقرار نیست. مطمئن شوید این دستگاه به اینترنت وصل است و دوباره امتحان کنید.",
+      "شبکه وصل نیست. مطمئن شوید این دستگاه به اینترنت وصل است و دوباره امتحان کنید.",
     );
   });
 });
@@ -85,14 +85,14 @@ describe("a pass that landed elsewhere after rungs with no network", () => {
       "No network connection at first, so fi-finland wasn't tried. Now on de-germany over Stealth",
     );
     expect(line("fa", noNetwork)).toBe(
-      "ابتدا اتصال شبکه برقرار نبود، پس fi-finland امتحان نشد. اکنون de-germany با Stealth",
+      "اول شبکه وصل نبود، برای همین fi-finland امتحان نشد. الان از de-germany با Stealth استفاده می‌شود",
     );
     expect(line("en", noNetwork)).not.toContain("Couldn't reach");
   });
 
   it("does not say the usual protocol failed to get through, when it stayed in the country", () => {
     expect(line("en", noNetwork, false)).toBe("No network connection at first. Now using Stealth");
-    expect(line("fa", noNetwork, false)).toBe("ابتدا اتصال شبکه برقرار نبود. اکنون از Stealth استفاده می‌شود");
+    expect(line("fa", noNetwork, false)).toBe("اول شبکه وصل نبود. الان از Stealth استفاده می‌شود");
   });
 });
 
@@ -103,7 +103,7 @@ describe("a server named as unreachable", () => {
       { routeId: "fi", fate: rungFate("serverUnreachable") },
     ];
     expect(line("en", failed)).toBe("Couldn't reach fi-finland. Now on de-germany over Stealth");
-    expect(line("fa", failed)).toBe("دسترسی به fi-finland ممکن نشد. اکنون de-germany با Stealth");
+    expect(line("fa", failed)).toBe("به fi-finland وصل نشد. الان از de-germany با Stealth استفاده می‌شود");
   });
 
   it("is not one that failed before it was dialled for any other reason", () => {
@@ -139,7 +139,7 @@ describe("a server named as unreachable", () => {
     ];
     for (const failed of nothingDialled) {
       expect(line("en", failed, false), JSON.stringify(failed)).toBe("Now using Stealth");
-      expect(line("fa", failed, false), JSON.stringify(failed)).toBe("اکنون از Stealth استفاده می‌شود");
+      expect(line("fa", failed, false), JSON.stringify(failed)).toBe("الان از Stealth استفاده می‌شود");
       expect(line("en", failed, false)).not.toContain("didn't get through");
     }
   });
@@ -168,6 +168,6 @@ describe("the protocol in the failover line", () => {
 
   it("is where each language puts it", () => {
     expect(html("en")).toBe("Now using <bdi>Stealth</bdi>");
-    expect(html("fa")).toBe("اکنون از <bdi>Stealth</bdi> استفاده می‌شود");
+    expect(html("fa")).toBe("الان از <bdi>Stealth</bdi> استفاده می‌شود");
   });
 });

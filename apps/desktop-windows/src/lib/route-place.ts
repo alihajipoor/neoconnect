@@ -76,24 +76,33 @@ export function routePlace(route: Placed): { entry: string; exit: string | null 
 
 /** Points from the entry to the exit in each language's reading order.
  * Arrows are not mirrored in a right-to-left line, so the one that points
- * from Iran towards the exit there is the leftward one. */
+ * from the entry towards the exit there is the leftward one. */
 const TOWARDS: Record<Language, string> = { en: "→", fa: "←" };
 
-/** "Iran → Germany" for a relay, "Germany" for a direct route.
+/** What a relay's entry is called on screen: the backup route, the same
+ * words as the Settings switch. Never the entry's country -- the owner
+ * does not want the app to name it (2026-10-26) -- so the label is about
+ * what the route is for, and the data keeps the region as it is. */
+const BACKUP_ROUTE: Record<Language, string> = { en: "Backup route", fa: "مسیر پشتیبان" };
+
+/** "Backup route → Germany" for a relay, "Germany" for a direct route.
  *
  * Countries, not node names: the picker keeps the node name on the line
- * beneath, which is where two routes to one country differ. */
+ * beneath, which is where two routes to one country differ. A relay from a
+ * backend too old to name its exit is "Backup route" alone. */
 export function placeLabel(route: Placed, language: Language): string {
   const { entry, exit } = routePlace(route);
-  const from = countryName(entry, language);
-  return exit ? `${from} ${TOWARDS[language]} ${countryName(exit, language)}` : from;
+  if (!route.isRelay) return countryName(entry, language);
+  return exit ? `${BACKUP_ROUTE[language]} ${TOWARDS[language]} ${countryName(exit, language)}` : BACKUP_ROUTE[language];
 }
 
 /** The country this route's traffic appears from: the exit's for a relay
- * the backend named, otherwise the entry's. For a space too narrow for
- * the whole of `placeLabel`, beside a flag that shows the rest. */
+ * the backend named, otherwise the entry's -- or, for a relay with no
+ * exit named, "Backup route". For a space too narrow for the whole of
+ * `placeLabel`, beside a flag that shows the rest. */
 export function exitCountryName(route: Placed, language: Language): string {
   const { entry, exit } = routePlace(route);
+  if (route.isRelay && !exit) return BACKUP_ROUTE[language];
   return countryName(exit ?? entry, language);
 }
 

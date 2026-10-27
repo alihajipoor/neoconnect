@@ -126,9 +126,9 @@ export const SCENARIOS: Record<string, Scenario> = {
   capped: { label: "Capped plan, running low", state: "disconnected", plan: "low" },
   ended: { label: "Plan ended", state: "disconnected", plan: "ended" },
   none: { label: "No subscription", state: "disconnected", plan: "none" },
-  relayConnected: { label: "Connected via Iran (relay), verified", state: "connected", timed: true, relay: true },
-  relayUnverified: { label: "Via Iran (relay), not confirmed", state: "unverified", relay: true },
-  relayPinned: { label: "Via Iran (relay) pinned, not connected", state: "disconnected", relayPinned: true },
+  relayConnected: { label: "Connected on a backup route (relay), verified", state: "connected", timed: true, relay: true },
+  relayUnverified: { label: "Backup route (relay), not confirmed", state: "unverified", relay: true },
+  relayPinned: { label: "Backup route (relay) pinned, not connected", state: "disconnected", relayPinned: true },
   crossed: { label: "Connected in another country (failover)", state: "connected", timed: true, crossed: true },
   crossedUnverified: { label: "Another country (failover), not confirmed", state: "unverified", crossed: true },
 };

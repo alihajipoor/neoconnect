@@ -85,7 +85,7 @@ describe("announcements", () => {
     expect(sent.subject).toBe("Maintenance tonight");
     expect(sent.html).toContain("Servers restart at 02:00.");
     // The chrome around it is Persian.
-    expect(sent.html).toContain("Neoxify حساب کاربری دارید");
+    expect(sent.html).toContain("نئوکسیفای حساب کاربری دارید");
   });
 });
 

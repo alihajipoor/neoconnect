@@ -252,7 +252,7 @@ export class RelayAuthService implements OnModuleInit, OnModuleDestroy {
         {
           statusCode: 429,
           code: "RELAY_SIGNUP_LIMIT",
-          message: "Too many sign-ups through the backup route right now. Please try again later.",
+          message: "Too many people are signing up through the backup route right now. Try again later.",
         },
         HttpStatus.TOO_MANY_REQUESTS,
       );
@@ -295,14 +295,14 @@ export class RelayAuthService implements OnModuleInit, OnModuleDestroy {
       throw new ForbiddenException({
         statusCode: 403,
         code: "RELAY_SIGNUP_OFF",
-        message: "Signing up through the backup route is not available right now.",
+        message: "You can't sign up through the backup route right now.",
       });
     }
     if (ctx.region !== null && ctx.region !== "IR") {
       throw new ForbiddenException({
         statusCode: 403,
         code: "RELAY_REGION",
-        message: "The backup route is only for connections from inside Iran.",
+        message: "The backup route only works for connections from inside the country its server is in.",
       });
     }
     if (ctx.region === null || ctx.asn === null) {

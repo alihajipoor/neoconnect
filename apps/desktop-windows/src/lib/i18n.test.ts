@@ -152,13 +152,13 @@ describe("what the strings are allowed to claim", () => {
   it("says both halves of the unforced-DNS warning, in both languages", () => {
     // The good half: traffic is going through the VPN.
     expect(en["dash.tunnelDnsUnforced"]).toMatch(/through the VPN/i);
-    expect(fa["dash.tunnelDnsUnforced"]).toContain("از VPN عبور می‌کند");
+    expect(fa["dash.tunnelDnsUnforced"]).toContain("از وی‌پی‌ان می‌گذرد");
 
     // The bad half: DNS is not, and the provider can still answer.
     expect(en["dash.tunnelDnsUnforced"]).toMatch(/DNS/);
     expect(en["dash.tunnelDnsUnforced"]).toMatch(/internet provider/i);
     expect(fa["dash.tunnelDnsUnforced"]).toContain("DNS");
-    expect(fa["dash.tunnelDnsUnforced"]).toContain("سرویس‌دهنده اینترنت");
+    expect(fa["dash.tunnelDnsUnforced"]).toContain("سرویس‌دهندهٔ اینترنت");
 
     // And what to do about it, in both.
     expect(en["dash.tunnelDnsUnforced"]).toMatch(/reconnect/i);
@@ -238,7 +238,8 @@ describe("what the strings are allowed to claim", () => {
     // add it again", which is a loop when the names are wrong.
     expect(loose["settings.customGameNoneBody"]).toMatch(/running apps/i);
     expect(loose["settings.customGameNoneBody"]).not.toMatch(/add it again/i);
-    expect(looseFa["settings.customGameNoneBody"]).toContain("در حال اجرا");
+    // By the button's own label, so the two cannot drift apart.
+    expect(looseFa["settings.customGameNoneBody"]).toContain(`«${fa["settings.customPickRunning"]}»`);
   });
 
   it("warns that Custom mode blocks ping, and does not pretend it is per-app", () => {

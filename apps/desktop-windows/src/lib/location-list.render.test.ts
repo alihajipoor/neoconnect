@@ -95,8 +95,8 @@ describe("the redesigned server list", () => {
     expect(text(render({ variant: "page", latencies: { "de-wg": null } }))).toContain("Only a ping can time this protocol");
     expect(html).toContain("Not measured");
     expect(html).toContain("Offline");
-    // A relay's figure is to its entry in Iran only.
-    expect(html).toContain("to Iran");
+    // A relay's figure is to its entry server only.
+    expect(html).toContain("to entry");
     expect(html).not.toMatch(/\b(down|unreachable|couldn't reach)\b/i);
   });
 
@@ -121,7 +121,7 @@ describe("the redesigned server list", () => {
       expect(html).toContain('dir="ltr">۱۰۷ ms</span>');
       expect(html).not.toContain("107 ms");
       // The counts behind "worked for others here" too.
-      expect(html).toContain("۹ نفر از ۱۱ نفر، ۲۴ ساعت گذشته");
+      expect(html).toContain("۹ نفر از ۱۱ نفر در ۲۴ ساعت گذشته");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -152,11 +152,11 @@ describe("the redesigned server list", () => {
     expect(html).toContain("How the protocols differ");
   });
 
-  it("names the routes through Iran as such", () => {
+  it("names the relays as backup routes, and never by their entry's country", () => {
     const html = text(render());
-    expect(html).toContain("Through Iran");
-    expect(html).toContain("Via Iran");
-    expect(html).toContain("Iran → Germany");
+    expect(html).toContain("Backup routes");
+    expect(html).toContain("Backup route → Germany");
+    expect(html).not.toMatch(/Iran/);
   });
 
   it("tells two servers with one protocol in one place apart as Server 1 and 2, never by the node's own name", () => {
