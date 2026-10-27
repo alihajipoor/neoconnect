@@ -7624,3 +7624,52 @@ the relays. The tray's address and plan figure were cut at the fitted
 
 **Next:** after the weekly usage reset (2026-10-26) -- the hold's third
 round and VM proof, the unplug redial, the phone on a real device.
+
+## 2026-10-27 — "Connected" proves data moves; checks from inside Iran (desktop 0.9.56, mobile 0.2.34)
+
+From the reachability investigation the same day (private report; what
+changed is in `docs/reachability.md`): Iran blocks per operator and per
+server address, and the commonest block lets a tunnel open and then holds
+its upload to ~0.1 Mbps, so the app said "Connected" over tunnels that
+loaded nothing, Automatic started everyone on the UK, and the block alarm
+had never recorded anything.
+
+**Live:** the backend (`/health/bulk`, `/inside-probe/results`, the alarm
+fixes) since 19:24 UTC; production `.env` now `BLOCK_WATCH=digest` with
+24 h windows and 2+ customers, `HEARTBEAT_GAP_PAGE_MINUTES=10`. The inside
+probe runs from the panel host every 30 min against ir2 and the sign-in
+box. Its first round matched the investigation: from ir2, finland-2 and
+germany-1 move data, and France, the UK and Singapore stall partway
+through the upload. From the sign-in box, germany-1 and finland-2 die
+after the TLS hello. Desktop 0.9.56 and Android 0.2.34 tagged.
+
+**Proven on the VM:** a normal connect runs the data check through the
+real tunnel (128 KB down 1.3 s, 256 KB up 0.9 s; about 2 s added) and
+lands. With every upload held, each server is dialled once, its other
+protocols are passed over, and the best slow one is dialled again and
+kept (report: SUCCESS on Stealth after six "too slow" rungs).
+
+**Not proven:** choosing an unheld server among held ones. Windows QoS
+cannot hold one server's upload (ActiveStore policies lose their address
+condition and hold everything; address-scoped local ones hold nothing;
+WireGuard's kernel driver is never held). Unit tests only. Also unproven:
+where "slow" should sit for home/mobile networks (8 s per 256 KB, about
+0.26 Mbps), and the phone ladder on a device. iOS has not shipped it:
+the App Store review of 1.0 is still open.
+
+**Traps that cost time:**
+- A route is one server and one protocol ("germany-1 / VLESS+TLS"). The
+  first cut passed over slow *routes*, which skipped nothing; on the VM
+  germany-1 was dialled four times. Keyed by address and exit now.
+- The backend has no `/api` prefix; nginx adds it. Anything posting to
+  127.0.0.1:4000 on the panel host uses the bare path.
+- ir2's sshd offers only an RSA host key; `ssh-keyscan -t ed25519` gets
+  nothing and strict checking then fails.
+- `bash -x` on a script that reads a token prints the token. The inside
+  probe token was rotated once for that.
+
+**Not built:** scanning several tunnels at once on a new network to pick
+the fastest before connecting. It needs a test path per concurrent exit
+in the Windows service and a test function in the phone engines.
+Speed memory (prefer what measured faster here) is the first step and
+is in.
