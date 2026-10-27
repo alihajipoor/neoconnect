@@ -80,12 +80,17 @@ export function searchText(text: string): string {
 }
 
 /** The words a place answers to, in both languages whatever the screen is
- * in: someone typing "ایران" into an English screen means Iran. */
+ * in: someone typing "آلمان" into an English screen means Germany.
+ *
+ * A relay answers to its exit and to the words it is shown under, the
+ * backup route -- not to its entry's country, which the screens no longer
+ * name (route-place.ts). */
 function placeTerms(route: RouteOption): string[] {
   const { entry, exit } = routePlace(route);
-  const out = [entry, countryName(entry, "en"), countryName(entry, "fa")];
+  const out = route.isRelay
+    ? ["relay", "backup", "backup route", "پشتیبان", "مسیر پشتیبان"]
+    : [entry, countryName(entry, "en"), countryName(entry, "fa")];
   if (exit) out.push(exit, countryName(exit, "en"), countryName(exit, "fa"));
-  if (route.isRelay) out.push("relay", "via iran", "از ایران", "iran", "ایران");
   return out.map(searchText);
 }
 

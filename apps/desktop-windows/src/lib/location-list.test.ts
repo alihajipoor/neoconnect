@@ -94,11 +94,15 @@ describe("search", () => {
     }
   });
 
-  it("finds the routes through Iran by Iran or relay, in either language", () => {
-    for (const q of ["iran", "ایران", "relay", "via iran"]) {
+  it("finds the backup routes by their name or relay, in either language", () => {
+    for (const q of ["backup", "backup route", "مسیر پشتیبان", "relay"]) {
       expect(find(q).relays.map((p) => p.key), q).toEqual(["r:ir>de", "r:ir>fi"]);
       expect(find(q).countries, q).toEqual([]);
     }
+  });
+
+  it("does not find the backup routes by their entry's country, which no screen names", () => {
+    for (const q of ["iran", "ایران"]) expect(find(q).relays, q).toEqual([]);
   });
 
   it("opens a country that matches only by a protocol, showing only that protocol", () => {
@@ -126,7 +130,7 @@ describe("search", () => {
 });
 
 describe("filters", () => {
-  it("keeps only the routes through Iran on Via Iran, and no Automatic", () => {
+  it("keeps only the backup routes on Backup routes, and no Automatic", () => {
     const list = buildList(ROUTES, { query: "", filter: "relay", worked: none, automaticTerms: AUTO });
     expect(list.automatic).toBe(false);
     expect(list.countries).toEqual([]);

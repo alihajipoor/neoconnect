@@ -43,16 +43,18 @@ describe("where a route goes", () => {
 });
 
 describe("naming the place", () => {
-  it("names a relay as entry to exit, in English", () => {
-    expect(placeLabel(relay("r", "de-germany"), "en")).toBe("Iran → Germany");
-    expect(placeLabel(relay("r", "tr-turkey"), "en")).toBe("Iran → Turkey");
+  /** By what it is, the backup route, and never by the entry's country,
+   * which the owner does not want the app to name (2026-10-26). */
+  it("names a relay as the backup route to its exit, in English", () => {
+    expect(placeLabel(relay("r", "de-germany"), "en")).toBe("Backup route → Germany");
+    expect(placeLabel(relay("r", "tr-turkey"), "en")).toBe("Backup route → Turkey");
   });
 
   /** In a right-to-left line the arrow is not mirrored, so the one that
-   * points from Iran towards the exit is the leftward one. */
+   * points from the entry towards the exit is the leftward one. */
   it("names a relay in Persian with the arrow pointing the way the line reads", () => {
-    expect(placeLabel(relay("r", "fr-france"), "fa")).toBe("ایران ← فرانسه");
-    expect(placeLabel(relay("r", "fi-finland"), "fa")).toBe("ایران ← فنلاند");
+    expect(placeLabel(relay("r", "fr-france"), "fa")).toBe("مسیر پشتیبان ← فرانسه");
+    expect(placeLabel(relay("r", "fi-finland"), "fa")).toBe("مسیر پشتیبان ← فنلاند");
   });
 
   it("names a direct route by its country", () => {
@@ -60,8 +62,9 @@ describe("naming the place", () => {
     expect(placeLabel(direct("d", "de-germany", "germany-1"), "fa")).toBe("آلمان");
   });
 
-  it("names a relay from an older backend by its entry, as before", () => {
-    expect(placeLabel(relay("r", undefined), "en")).toBe("Iran");
+  it("names a relay from an older backend as the backup route alone", () => {
+    expect(placeLabel(relay("r", undefined), "en")).toBe("Backup route");
+    expect(placeLabel(relay("r", undefined), "fa")).toBe("مسیر پشتیبان");
   });
 
   /** A node can be added in any country from the installer. A name the
