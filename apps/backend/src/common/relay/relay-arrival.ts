@@ -34,7 +34,7 @@ export const BOX_HEADER = "x-neoxify-relay-box";
 /** The refusal of a relay sign-up from a network that cannot be placed
  * (`RELAY_REGION_UNKNOWN`): not known to be outside Iran, so not told so. */
 export const RELAY_REGION_UNKNOWN_MESSAGE =
-  "This connection could not be confirmed as coming from inside Iran, so signing up through the backup route is not available on it right now.";
+  "We couldn't confirm that this connection comes from inside the backup server's country, so you can't sign up through the backup route on it right now.";
 
 /** What the backend knows about a relay request, for the request's life. */
 export interface RelayContext {
@@ -132,7 +132,7 @@ export function relayGate(deps: RelayGateDeps): RequestHandler {
       refuse(res, 403, {
         statusCode: 403,
         code: "RELAY_REGION",
-        message: "The backup route is only for connections from inside Iran.",
+        message: "The backup route only works for connections from inside the country its server is in.",
       });
       return;
     }
