@@ -14,7 +14,7 @@ set -euo pipefail
 CONF=/etc/neoxify/inside-probe.conf
 KEY=/root/.ssh/neoxify_inside_probe
 ENV_FILE=/root/neoconnect/infra/.env
-API=http://127.0.0.1:4000/api/inside-probe/results
+API=http://127.0.0.1:4000/inside-probe/results
 
 token="$(grep -E '^INSIDE_PROBE_TOKEN=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
 [ -n "$token" ] || { echo "INSIDE_PROBE_TOKEN is not set in $ENV_FILE" >&2; exit 1; }
@@ -43,7 +43,7 @@ while read -r vantage address _; do
   fi
   results="$(grep -E '^\{"nodeId"' <<<"$lines" | paste -sd, -)"
   [ -n "$results" ] || { echo "$vantage: nothing came back" >&2; continue; }
-  curl -sS --max-time 30 -X POST "$API" \
+  curl -sS -f --max-time 30 -X POST "$API" \
     -H "Content-Type: application/json" -H "X-Probe-Token: $token" \
     --data-binary "{\"vantage\":\"$vantage\",\"results\":[$results]}" >/dev/null ||
     echo "$vantage: the backend refused the round" >&2
