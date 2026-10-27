@@ -117,7 +117,7 @@ return array(
         ),
         'a' => array(
             'en' => 'Yes. Invite friends from the app, and you get free time when they subscribe. The app shows who joined with your link and how close you are to the next reward.',
-            'fa' => 'بله. از داخل برنامه دوستانتان را دعوت کنید؛ وقتی اشتراک بخرند، زمان رایگان می‌گیرید. برنامه نشان می‌دهد چه کسانی با لینک شما عضو شده‌اند و تا جایزه بعدی چقدر مانده است.',
+            'fa' => 'بله. از داخل برنامه دوستانتان را دعوت کنید؛ وقتی پلن بخرند، زمان رایگان می‌گیرید. برنامه نشان می‌دهد چه کسانی با لینک شما عضو شده‌اند و تا جایزه بعدی چقدر مانده است.',
         ),
     ),
 
