@@ -98,7 +98,7 @@ $nx_preload_fonts = nx_locale() === 'fa'
 // by exact URL more or less forever; if the art changes, rename the file.
 $nx_og_image = isset($NX_OG_IMAGE)
     ? $NX_OG_IMAGE
-    : $nx_base . 'assets/img/og-' . (nx_locale() === 'fa' ? 'fa' : 'en') . '-v5.jpg';
+    : $nx_base . 'assets/img/og-' . (nx_locale() === 'fa' ? 'fa' : 'en') . '-v6.jpg';
 $nx_og_image_abs = rtrim(nx_cfg('site_url', ''), '/') . $nx_og_image;
 
 // The theme. A visitor who used the switch has a cookie, and the server

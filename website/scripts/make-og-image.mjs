@@ -4,7 +4,7 @@
  *
  *   node website/scripts/make-og-image.mjs [--chrome <path to chrome>]
  *
- * Writes assets/img/og-en-v5.jpg and og-fa-v5.jpg (1200x630, the size
+ * Writes assets/img/og-en-v6.jpg and og-fa-v6.jpg (1200x630, the size
  * Telegram, WhatsApp, Facebook, LinkedIn and X all crop from).
  *
  * JPEG at quality 85, not PNG. The truecolor PNGs (v2) were 260-300 KB,
@@ -30,6 +30,8 @@
  * transport, and no entry-point light on the map (owner, 2026-10-23): a
  * list of how the app connects is a checklist for a censor. v5 is the
  * first card without them.
+ * v6 (2026-10-26) keeps v5's art and only rewrites the kicker and the
+ * benefit line in plainer words.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -56,19 +58,19 @@ const LOGO = fs.readFileSync(path.join(site, 'assets', 'img', 'brand', 'neoxify-
 const COPY = {
   en: {
     dir: 'ltr', font: '"Inter Tight","Inter"', body: '"Inter"',
-    kicker: 'A VPN for networks that fight back',
+    kicker: 'A VPN for restricted networks',
     l1: 'Your internet.', l2: 'Without limits.',
     status: 'Connected',
     platforms: 'Windows · Android',
-    benefit: 'Finds the way that works on your network',
+    benefit: 'Finds a way to connect on your network',
   },
   fa: {
     dir: 'rtl', font: '"Vazirmatn"', body: '"Vazirmatn"',
-    kicker: 'فیلترشکن برای شبکه‌هایی که مقاومت می‌کنند',
+    kicker: 'وی‌پی‌ان برای اینترنت محدود',
     l1: 'اینترنت شما.', l2: 'بدون محدودیت.',
     status: 'متصل',
     platforms: 'ویندوز · اندروید',
-    benefit: 'خودش راهی را که روی شبکه شما کار می‌کند پیدا می‌کند',
+    benefit: 'خودش روش اتصال مناسب شبکه شما را پیدا می‌کند',
   },
 };
 
@@ -132,7 +134,7 @@ try {
     fs.writeFileSync(tmp, html(c));
     await page.goto(pathToFileURL(tmp).href, { waitUntil: 'networkidle0' });
     await page.evaluate(() => document.fonts.ready);
-    const out = path.join(site, 'assets', 'img', `og-${lang}-v5.jpg`);
+    const out = path.join(site, 'assets', 'img', `og-${lang}-v6.jpg`);
     await page.screenshot({ path: out, type: 'jpeg', quality: 85 });
     fs.unlinkSync(tmp);
     console.log(out, fs.statSync(out).size, 'bytes');

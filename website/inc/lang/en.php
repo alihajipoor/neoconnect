@@ -48,7 +48,7 @@ return array(
     'footer.product' => 'Product',
     'footer.company' => 'Company',
     'footer.rights' => '© :year Neoxify. All rights reserved.',
-    'footer.note' => 'Neoxify is a commercial VPN service. Use it in line with the laws that apply to you.',
+    'footer.note' => 'Neoxify is a paid VPN service. Use it within the laws that apply to you.',
 
     'skip_to_content' => 'Skip to content',
 
@@ -61,36 +61,36 @@ return array(
     // (gaming is one segment, not the market) and led on the one claim
     // the product can least substantiate. This one leads with what it
     // actually is and what it actually carries.
-    'meta.home.title' => 'Neoxify — a VPN that keeps working on filtered networks',
-    'meta.home.description' => 'Several ways to connect in one app, including ones made to look like ordinary web traffic. Servers across Europe and Asia, and nothing to import.',
+    'meta.home.title' => 'Neoxify VPN for networks that block VPNs',
+    'meta.home.description' => 'A VPN app for Windows and Android that finds a way to connect on networks that block VPNs. Servers in Europe and Asia. Free trial, no config files.',
 
     'meta.download.title' => 'Download Neoxify VPN for Windows and Android',
-    'meta.download.description' => 'Get the Neoxify app for Windows or Android. Direct download, always the current release. No macOS or iOS app yet.',
+    'meta.download.description' => 'Download the Neoxify VPN app for Windows or Android. The link always gets the latest version. There is no macOS or iOS app yet.',
 
-    'meta.contact.title' => 'Contact Neoxify — questions before you buy, and support',
-    'meta.contact.description' => 'Ask about plans, payment, or whether a connection method will work on your network. A person answers. Existing customers get faster help in the app.',
+    'meta.contact.title' => 'Contact Neoxify | Questions and support',
+    'meta.contact.description' => 'Ask about plans, payment or anything else. A person reads every message. If you already have an account, support in the app is faster.',
 
-    'meta.privacy.title' => 'Privacy — what Neoxify records, and what it does not',
-    'meta.privacy.description' => 'What we hold for your account, what our servers log, what payment providers see, how long it is kept and how to have it deleted. We make no no-logs claim.',
+    'meta.privacy.title' => 'Privacy | What Neoxify records and why',
+    'meta.privacy.description' => 'What we store for your account, what our servers log, what payment providers see, how long we keep it and how to delete it. We make no no-logs claim.',
 
     'delete.title' => "Delete your account",
-    'delete.subtitle' => "Remove your Neoxify account and everything on it.",
-    'delete.inapp.title' => "Fastest: delete it in the app",
-    'delete.inapp.body' => "Open Neoxify, go to Settings, then Account, and choose Delete account. It happens immediately and you do not have to wait for us. This page exists for people who have already uninstalled the app or cannot reach it.",
-    'delete.form.title' => "Or request it here",
-    'delete.form.body' => "Send us the email address on the account. We will verify the request with you before deleting anything, so the address you give must be one you can receive mail at.",
-    'delete.field.email' => "Email address on the account",
+    'delete.subtitle' => 'This removes your Neoxify account and everything in it.',
+    'delete.inapp.title' => 'The quickest way is in the app',
+    'delete.inapp.body' => 'Open Neoxify, go to Settings, then Account, and choose Delete account. The account is deleted right away. Use the form below only if you have uninstalled the app or can\'t open it.',
+    'delete.form.title' => 'Or ask us to delete it',
+    'delete.form.body' => 'Enter the email address of the account. Before we delete anything, we email you to confirm, so use an address you can read.',
+    'delete.field.email' => 'Account email address',
     'delete.field.message' => "Anything else we should know (optional)",
     'delete.form.submit' => "Request deletion",
-    'delete.success.title' => "Request received",
-    'delete.success.body' => "We will email you to confirm it is really you, and delete the account once you reply. If you do not hear from us within a couple of days, please contact support.",
-    'delete.what.title' => "What is removed",
-    'delete.what.body' => "Your account and sign-in, your connection credentials on every server, and any time remaining on your plan. This cannot be undone, and remaining paid time is not refunded.",
-    'delete.kept.title' => "What is kept",
-    'delete.kept.body' => "Invoices and payment records, with your personal details removed from them. We are required to keep those for tax purposes; they no longer identify you.",
+    'delete.success.title' => 'Request received',
+    'delete.success.body' => 'We\'ll email you to confirm the request and delete the account after you reply. If you hear nothing within two days, contact support.',
+    'delete.what.title' => 'What gets deleted',
+    'delete.what.body' => 'Your account and sign-in details, your access on every server, and any time left on your plan. You can\'t undo this, and unused paid time is not refunded.',
+    'delete.kept.title' => 'What we keep',
+    'delete.kept.body' => 'Invoices and payment records, with your personal details removed. The law requires us to keep them for tax, and they no longer identify you.',
 
     'privacy.title' => 'Privacy',
-    'privacy.subtitle' => 'What we collect, why we have it, and what you can ask us to do about it. Written to describe what the service actually does, not to fill a page.',
+    'privacy.subtitle' => 'What we collect, why, and what you can ask us to do with it.',
     'privacy.updated' => 'Last updated :date',
     // PHP date() format. Per locale because date('F') only ever produces
     // English month names -- the Persian page was rendering "3 August 2026".
@@ -98,10 +98,10 @@ return array(
     // shared hosting may not have.
     'privacy.date_format' => 'j F Y',
     'privacy.contact.title' => 'Contact',
-    'privacy.contact.body' => 'Questions about any of this, or a request about your own data, go to :email. Write from the address on your account and we will deal with it.',
+    'privacy.contact.body' => 'Send questions about this page, or requests about your own data, to :email. Write from your account\'s email address so we can act on it.',
 
-    'meta.reseller.title' => 'Become a Neoxify reseller — sell VPN accounts',
-    'meta.reseller.description' => 'For Telegram channels, gaming communities, local shops and network admins. Terms are agreed individually with every partner, not from a published price list.',
+    'meta.reseller.title' => 'Become a Neoxify reseller | Sell VPN accounts',
+    'meta.reseller.description' => 'For Telegram channels, gaming groups, shops and network admins. We agree terms with each reseller directly. There is no public price list.',
 
     // -----------------------------------------------------------------
     // Home — hero
@@ -123,13 +123,13 @@ return array(
     // entity exists. CI builds an iOS simulator target, which cannot run a
     // tunnel and is not evidence of a client. "Not yet" is the true
     // statement; a date would be a guess.
-    'home.hero.note_available' => 'Windows and Android apps out now. There is no macOS or iOS app yet.',
-    'home.hero.note_soon' => 'Windows app releasing soon. There is no macOS or iOS app yet.',
+    'home.hero.note_available' => 'Available for Windows and Android. No macOS or iOS app yet.',
+    'home.hero.note_soon' => 'The Windows app is coming soon. No macOS or iOS app yet.',
 
     'beta.badge' => 'Beta',
-    'beta.hero' => 'In beta — early, and moving fast.',
+    'beta.hero' => 'In beta and still changing',
     'beta.title' => 'Neoxify is in beta',
-    'beta.body' => 'The service works and people are using it every day, but it is early. Things change quickly and you may run into rough edges. If something breaks, tell us — support is inside the app, or use the contact form. Hearing about it is the whole point of this phase.',
+    'beta.body' => 'People use it every day, but it\'s still early and things change often. You may run into problems. If something doesn\'t work, tell us through support in the app or the contact form.',
 
     // -----------------------------------------------------------------
     // Home — features
@@ -162,8 +162,8 @@ return array(
     'home.features.support.title' => 'Help without leaving the app',
     'home.features.support.body' => 'Support is a conversation inside the app, where we can already see your account instead of asking you to describe it. Ask, get on with your day, and pick up the reply when it lands.',
 
-    'home.features.updates.title' => 'It keeps itself current',
-    'home.features.updates.body' => 'Install it once. From then on the app updates itself, so you are never hunting a download page for a fix you did not know you needed.',
+    'home.features.updates.title' => 'It updates itself',
+    'home.features.updates.body' => 'Install it once. The Windows app then downloads and installs new versions by itself. On Android, you install updates from the download page.',
 
     'home.features.usage.title' => 'Your data, counted openly',
     'home.features.usage.body' => 'Usage is measured per account and shown in the app, so you always know exactly where you stand against your plan instead of guessing.',
@@ -195,24 +195,24 @@ return array(
     // -----------------------------------------------------------------
 
     'home.security.eyebrow' => 'Security',
-    'home.security.title' => 'What "encrypted" actually means here',
-    'home.security.body' => 'Plenty of services say "encrypted" and leave it there. Here is the honest version: everything you send is scrambled on your own device before it touches the network, and it stays scrambled the whole way to our servers.',
+    'home.security.title' => 'What encryption protects',
+    'home.security.body' => 'Everything you send is encrypted on your device before it reaches the network, and stays encrypted until it reaches our servers. From there, it travels the internet like any other traffic.',
 
-    'home.security.point1.title' => 'Proven cryptography, not homemade',
-    'home.security.point1.body' => 'The encryption protecting your connection is the same well-reviewed, industry-standard kind your bank and your messaging apps rely on. We did not invent our own scheme, and you should be suspicious of anyone who did.',
+    'home.security.point1.title' => 'Standard encryption',
+    'home.security.point1.body' => 'We use the same well-tested kind of encryption that banks and messaging apps use. We didn\'t invent our own.',
 
-    'home.security.point2.title' => 'Your network operator learns nothing',
-    'home.security.point2.body' => 'Whoever runs the network you are sitting on can tell that you have an encrypted connection open. What travels inside it — the sites, the games, the messages — is not something they can read.',
+    'home.security.point2.title' => 'Your network can\'t read your traffic',
+    'home.security.point2.body' => 'Whoever runs your network can see that an encrypted connection is open. They can\'t see what\'s inside it, such as the sites you visit.',
 
-    'home.security.point3.title' => 'Nothing to paste, nothing to leak',
-    'home.security.point3.body' => 'There are no configuration files or subscription links to copy around, share by accident, or leave sitting in a chat. Your access lives in your account, inside the official app.',
+    'home.security.point3.title' => 'No config to leak',
+    'home.security.point3.body' => 'There\'s no config file or link that could end up in a chat by mistake. Your access is tied to your account in the app.',
 
     'home.security.diagram.you' => 'Your device',
     'home.security.diagram.network' => 'Your network',
     'home.security.diagram.tunnel' => 'Encrypted',
     'home.security.diagram.server' => 'Our servers',
     'home.security.diagram.internet' => 'The internet',
-    'home.security.diagram.caption' => 'Simplified illustration. Your network can see that traffic is flowing, not what it contains.',
+    'home.security.diagram.caption' => 'Simplified. Your network can see that data is moving, but it can\'t read it.',
 
     // -----------------------------------------------------------------
     // Home — assurance strip and app mockup
@@ -243,12 +243,12 @@ return array(
     // -----------------------------------------------------------------
 
     'home.pricing.eyebrow' => 'Plans',
-    'home.pricing.title' => 'Straightforward pricing',
-    'home.pricing.subtitle' => 'Plans are purchased inside the app — pick one when you sign up. Pay by card or with crypto.',
+    'home.pricing.title' => 'Pick a plan',
+    'home.pricing.subtitle' => 'You buy a plan in the app. Pay by international card or crypto.',
     'home.pricing.popular' => 'Most popular',
     'home.pricing.per_month' => '/month',
     'home.pricing.per_days' => 'per :days days',
-    'home.pricing.cta' => 'Get started',
+    'home.pricing.cta' => 'Choose plan',
     // Replaces the buy button on a plan whose infrastructure is not live
     // yet -- see 'coming_soon' in inc/content/plans.php.
     'home.pricing.coming_soon' => 'Coming soon',
@@ -256,13 +256,13 @@ return array(
     // Matches the app's own "Unlimited" label for a plan with no cap.
     'home.pricing.data_unlimited' => 'Unlimited data',
     'home.pricing.data_period' => ':amount every :days days',
-    'home.pricing.connections' => 'Up to :count devices connected at once',
+    'home.pricing.connections' => 'Up to :count devices at once',
     // Separate strings rather than an :count that reads "1 devices", and
     // an explicit unlimited case -- without it a plan with no device limit
     // rendered no device line at all, silently dropping the very thing it
     // is selling.
     'home.pricing.connections_one' => 'One device at a time',
-    'home.pricing.connections_unlimited' => 'Unlimited devices at once',
+    'home.pricing.connections_unlimited' => 'No limit on devices',
 
     // Only rendered when a plan actually has a speed cap configured. Worded
     // as "up to" because that is what these are -- a ceiling the agent
@@ -273,18 +273,18 @@ return array(
     // Renamed from all_protocols: the site deliberately does not name the
     // protocols it runs on, and a key called "protocols" invites someone to
     // "fix" the copy by putting them back.
-    'home.pricing.all_modes' => 'Every connection option included',
-    'home.pricing.all_locations' => 'Every server location',
-    'home.pricing.relay_routes' => 'Optimised routes for restricted networks',
-    'home.pricing.support' => 'Support directly in the app',
+    'home.pricing.all_modes' => 'Every way to connect',
+    'home.pricing.all_locations' => 'Every server country',
+    'home.pricing.relay_routes' => 'Made for networks that block VPNs',
+    'home.pricing.support' => 'Support in the app',
     // Relay-plan perks. The four above are the standard-plan set and two
     // of them are flatly untrue of a relay-only plan -- it is neither
     // "every connection option" nor "every server location", it is one
     // premium path. Saying so is also the sell, since that path is what
     // the higher price buys.
-    'home.pricing.relay_only' => 'Separate routes only — not the standard servers',
-    'home.pricing.relay_premium' => 'Made for when a direct connection abroad will not hold',
-    'home.pricing.trial' => 'New accounts start with a :days-day free trial — no card required.',
+    'home.pricing.relay_only' => 'Backup routes only, not the standard servers',
+    'home.pricing.relay_premium' => 'Made for times when connections abroad are cut off',
+    'home.pricing.trial' => 'New accounts get a :days-day free trial. No card needed.',
     'home.pricing.note' => 'Prices are in US dollars.',
 
     // -----------------------------------------------------------------
@@ -292,42 +292,42 @@ return array(
     // -----------------------------------------------------------------
 
     'home.faq.eyebrow' => 'Questions',
-    'home.faq.title' => 'Things people ask before signing up',
+    'home.faq.title' => 'Questions before you sign up',
 
-    'home.cta.title' => 'Ready when you are',
-    'home.cta.body' => 'Install the app, verify your email, pick a server. That is the whole setup.',
-    'home.cta.button' => 'Get Neoxify',
+    'home.cta.title' => 'Try it on your network',
+    'home.cta.body' => 'Install the app and confirm your email. Then pick a country and connect.',
+    'home.cta.button' => 'Download Neoxify',
 
     // -----------------------------------------------------------------
     // Download
     // -----------------------------------------------------------------
 
     'download.title' => 'Download Neoxify',
-    'download.subtitle' => 'One app per device. It handles accounts, plans and connections itself — there is nothing else to install alongside it.',
+    'download.subtitle' => 'Install one app on each device. Your account, plan and connection are all handled inside it, so there\'s nothing else to install.',
 
     'download.windows.name' => 'Windows',
     'download.windows.requirements' => 'Windows 10 or 11, 64-bit',
     'download.windows.button' => 'Download for Windows',
-    'download.windows.always_current' => 'Always the current version',
+    'download.windows.always_current' => 'Always the latest version',
     'download.windows.checksum' => 'SHA-256 checksums',
 
-    'download.unreleased.badge' => 'Releasing soon',
+    'download.unreleased.badge' => 'Coming soon',
     'download.unreleased.title' => 'The Windows installer is not published yet',
-    'download.unreleased.body' => 'The app is built and tested — we are finishing the release packaging. If you would like to be told the moment it goes out, send us a message and we will let you know.',
-    'download.unreleased.cta' => 'Tell me when it is out',
+    'download.unreleased.body' => 'The Windows installer isn\'t published yet. Send us a message if you\'d like us to tell you when it is.',
+    'download.unreleased.cta' => 'Tell me when it\'s out',
 
-    'download.autoupdate.title' => 'This is the only download you will need',
-    'download.autoupdate.android' => 'Android is the exception: the system does not let an app replace itself, so when a new version is out, download it from this page again and install over the top. Your account and settings are kept.',
-    'download.autoupdate.body' => 'Once it is installed, the Windows app keeps itself up to date — it checks for new versions and installs them on its own. You will not have to come back to this page for the next release.',
+    'download.autoupdate.title' => 'Updates',
+    'download.autoupdate.android' => 'On Android it works differently. Android doesn\'t let an app replace itself, so when a new version comes out, download it from this page and install it over the old one. Your account and settings stay.',
+    'download.autoupdate.body' => 'After you install it, the Windows app checks for new versions and installs them by itself. You don\'t need to come back here for updates.',
 
-    'download.unsigned.title' => 'About the warning Windows will show you',
-    'download.unsigned.body' => 'The installer is not code-signed yet, so Windows SmartScreen may show a blue "Windows protected your PC" screen the first time you run it. Choose More info, then Run anyway. A signing certificate is on the list before public launch. Until then, only ever download from this page — the button here always comes from us.',
+    'download.unsigned.title' => 'Windows will show a warning',
+    'download.unsigned.body' => 'The installer isn\'t code-signed yet, so the first time you run it, Windows SmartScreen may show a blue "Windows protected your PC" screen. Click More info, then Run anyway. We plan to get a signing certificate before the public launch. Until then, download the app only from this page.',
 
     'download.steps.title' => 'Installing on Windows',
-    'download.steps.1' => 'Run the installer. It installs for your user account only and does not ask for administrator rights.',
-    'download.steps.2' => 'Open Neoxify and create your account, or sign in if you already have one.',
+    'download.steps.1' => 'Run the installer. It installs for your Windows user only and doesn\'t need administrator rights.',
+    'download.steps.2' => 'Open Neoxify and sign up, or sign in if you already have an account.',
     'download.steps.3' => 'Confirm your email address with the code we send you.',
-    'download.steps.4' => 'Choose a location and connect. Windows will ask for permission the first time a tunnel is created.',
+    'download.steps.4' => 'Pick a country and connect. The first time, Windows asks for permission to set up the VPN.',
 
 
     // --- Android ---------------------------------------------------
@@ -336,16 +336,16 @@ return array(
     'download.android.button' => 'Download for Android',
 
     'download.android.sideload.title' => 'Your phone will ask before installing',
-    'download.android.sideload.body' => 'Android only installs apps from outside the Play Store once you allow it. When you open the downloaded file, your phone will ask whether to permit installs from your browser — allow it, then tap Install. The warning is Android being careful about where the file came from, not a sign that anything is wrong with it.',
+    'download.android.sideload.body' => 'Android only installs apps from outside Google Play if you allow it. When you open the downloaded file, your phone asks whether to allow installs from your browser. Allow it, then tap Install. The warning is about where the file came from. It doesn\'t mean something is wrong with it.',
 
     'download.android.steps.title' => 'Installing on Android',
     'download.android.steps.1' => 'Tap the download button, then open the file when it finishes.',
     'download.android.steps.2' => 'Allow your browser to install apps if your phone asks, then tap Install.',
-    'download.android.steps.3' => 'Open Neoxify, create your account or sign in, and confirm your email with the code we send you.',
-    'download.android.steps.4' => 'Choose a location and connect. Android will ask once for permission to create a VPN — tap OK.',
+    'download.android.steps.3' => 'Open Neoxify, sign up or sign in, and confirm your email with the code we send you.',
+    'download.android.steps.4' => 'Pick a country and connect. Android asks once for permission to set up a VPN. Tap OK.',
 
     'download.other.title' => 'Other platforms',
-    'download.other.body' => 'Not built yet, and we are not putting a date on either. An app that does not exist is not "coming soon".',
+    'download.other.body' => 'Not available yet. We won\'t announce a date until the app is ready.',
     'download.other.macos' => 'macOS',
     'download.other.android' => 'Android',
     'download.other.ios' => 'iOS',
@@ -356,53 +356,53 @@ return array(
     // -----------------------------------------------------------------
 
     'contact.title' => 'Contact us',
-    'contact.subtitle' => 'Questions about plans, connections or anything else — write to us and a human will answer.',
+    'contact.subtitle' => 'Write to us about plans, connecting or anything else. A person will reply.',
     'contact.direct.title' => 'Prefer email?',
-    'contact.direct.body' => 'Write to :email directly and we will pick it up.',
+    'contact.direct.body' => 'Email us at :email.',
     'contact.support.title' => 'Already a customer?',
-    'contact.support.body' => 'Support lives inside the app, where we can see your account and actually help. This form is best for everything else.',
+    'contact.support.body' => 'Use support in the app. We can see your account there, so we can help faster. This form is for everything else.',
 
     'contact.form.title' => 'Send a message',
     'contact.field.name' => 'Your name',
     'contact.field.email' => 'Email address',
     'contact.field.subject' => 'Subject',
     'contact.field.message' => 'Message',
-    'contact.field.message_placeholder' => 'Tell us what you need.',
+    'contact.field.message_placeholder' => 'How can we help?',
     'contact.submit' => 'Send message',
     'contact.success.title' => 'Message sent',
-    'contact.success.body' => 'Thanks — we have it. We usually reply within a day.',
+    'contact.success.body' => 'Thanks, we got it. We usually reply within a day.',
 
     // -----------------------------------------------------------------
     // Reseller
     // -----------------------------------------------------------------
 
     'reseller.title' => 'Become a reseller',
-    'reseller.subtitle' => 'We work with people who already have an audience — gaming communities, Telegram channels, local shops, network admins.',
+    'reseller.subtitle' => 'We work with people who already have an audience, such as gaming groups, Telegram channels, shops and network admins.',
 
-    'reseller.about.title' => 'How this works',
-    'reseller.about.body' => 'Reseller terms are agreed individually. We do not publish a fixed price list, because what makes sense for a 50-person clan is not what makes sense for a shop selling accounts every day. Tell us about your audience and we will come back to you with something concrete.',
+    'reseller.about.title' => 'How it works',
+    'reseller.about.body' => 'We agree terms with each reseller separately. There\'s no fixed price list, because a 50-person gaming clan and a shop that sells accounts every day need different deals. Tell us about your audience and we\'ll come back with an offer.',
 
     'reseller.steps.1.title' => 'Apply',
-    'reseller.steps.1.body' => 'Fill in the form below. The more you tell us about who you would be selling to, the faster this goes.',
+    'reseller.steps.1.body' => 'Fill in the form below. The more you tell us about who you\'d sell to, the faster this goes.',
     'reseller.steps.2.title' => 'We get in touch',
-    'reseller.steps.2.body' => 'We read every application personally and reply to you directly. No automated approval, no waiting on a queue.',
+    'reseller.steps.2.body' => 'We read every application ourselves and reply to you directly.',
     'reseller.steps.3.title' => 'We agree terms',
-    'reseller.steps.3.body' => 'Pricing, volumes and how you get paid are settled together before anything starts.',
+    'reseller.steps.3.body' => 'We agree on prices, volumes and how you get paid before anything starts.',
 
     'reseller.form.title' => 'Apply to resell',
     'reseller.field.name' => 'Your name',
     'reseller.field.email' => 'Email address',
     'reseller.field.telegram' => 'Telegram username',
-    'reseller.field.telegram_hint' => 'Optional, but it is usually the fastest way to reach you.',
+    'reseller.field.telegram_hint' => 'Optional, but it\'s usually the fastest way to reach you.',
     'reseller.field.country' => 'Country or region',
     'reseller.field.audience' => 'How many people could you reach?',
     'reseller.field.experience' => 'Have you sold VPN or gaming services before?',
-    'reseller.field.experience_placeholder' => 'Optional. Tell us what you have done before, if anything.',
+    'reseller.field.experience_placeholder' => 'Optional. Tell us what you\'ve done before, if anything.',
     'reseller.field.message' => 'Tell us about your audience',
-    'reseller.field.message_placeholder' => 'Who are they, where do you reach them, and what are they using today?',
+    'reseller.field.message_placeholder' => 'Who are they, where do you reach them, and what do they use today?',
     'reseller.submit' => 'Send application',
     'reseller.success.title' => 'Application received',
-    'reseller.success.body' => 'Thanks — we have your application and we read every one personally. Expect to hear from us directly.',
+    'reseller.success.body' => 'Thanks, we got your application. We read every one ourselves and will contact you directly.',
 
     'reseller.audience.under_100' => 'Fewer than 100',
     'reseller.audience.100_1000' => 'Between 100 and 1,000',
@@ -420,14 +420,14 @@ return array(
     'form.has_errors' => 'Please check the fields marked below.',
 
     'form.error.required' => 'This field is required.',
-    'form.error.email' => 'That does not look like a valid email address.',
+    'form.error.email' => 'This email address doesn\'t look right.',
     'form.error.too_long' => 'Please keep this under :max characters.',
     'form.error.too_short' => 'Please write at least :min characters.',
-    'form.error.expired' => 'This form was open too long and the security token expired. Please send it again.',
-    'form.error.too_fast' => 'That was submitted a little too quickly. Please try once more.',
-    'form.error.rate_limited' => 'You have sent several messages recently. Please wait a while before sending another.',
-    'form.error.generic' => 'We could not accept that submission. Please try again.',
-    'form.error.delivery' => 'Something went wrong on our side and your message was not saved. Please email :email directly so it does not get lost.',
+    'form.error.expired' => 'This form was open too long and has expired. Please send it again.',
+    'form.error.too_fast' => 'That was sent too quickly. Please try again.',
+    'form.error.rate_limited' => 'You\'ve sent several messages recently. Please wait a while before sending another.',
+    'form.error.generic' => 'We couldn\'t accept this. Please try again.',
+    'form.error.delivery' => 'Something went wrong on our side and your message wasn\'t saved. Please email it to :email instead.',
 
     // Honeypot label -- never seen by a real visitor, but screen readers can
     // reach it, so it needs to say something sensible.
@@ -442,12 +442,12 @@ return array(
     // -----------------------------------------------------------------
 
     'announce.trial.pill' => ':days days free',
-    'announce.trial.headline' => 'Your first month is on us',
-    'announce.trial.short' => 'No card and no payment details — create an account in the app and it starts right away.',
+    'announce.trial.headline' => 'Your first month is free',
+    'announce.trial.short' => 'No card needed. Create an account in the app and start right away.',
 
     'announce.launch.pill' => 'Out now',
     'announce.launch.headline' => 'Neoxify has launched',
-    'announce.launch.short' => 'The Windows app is available now and keeps itself updated from here on.',
+    'announce.launch.short' => 'The Windows app is out now and updates itself.',
 
     'announce.cta' => 'Get the app',
     'announce.close' => 'Dismiss this message',
@@ -456,11 +456,11 @@ return array(
     // Errors
     // -----------------------------------------------------------------
 
-    'meta.404.title' => 'Page not found — Neoxify',
+    'meta.404.title' => 'Page not found | Neoxify',
     'meta.404.description' => 'That page does not exist.',
     'error.404.code' => '404',
-    'error.404.title' => 'That page does not exist',
-    'error.404.body' => 'The link may be out of date, or there may be a typo in the address. The pages below definitely work.',
+    'error.404.title' => 'Page not found',
+    'error.404.body' => 'The link may be old, or the address may have a typo. Try one of these pages.',
     'error.404.home' => 'Back to the home page',
 
     // =================================================================
@@ -484,15 +484,15 @@ return array(
     // rendered page, so this class of bug cannot ship silently again.
     // -----------------------------------------------------------------
 
-    'meta.delete-account.title' => 'Delete your account — Neoxify',
-    'meta.delete-account.description' => 'How to permanently delete your Neoxify account and everything on it, from inside the app or by asking us directly.',
+    'meta.delete-account.title' => 'Delete your Neoxify account',
+    'meta.delete-account.description' => 'How to delete your Neoxify account and everything in it, from the app or by asking us.',
 
     // -----------------------------------------------------------------
     // Social preview
     // -----------------------------------------------------------------
 
     // Describes the card image itself, for someone who cannot see it.
-    'meta.og.image_alt' => 'Neoxify — a VPN with several ways to connect, built for heavily filtered networks.',
+    'meta.og.image_alt' => 'Neoxify. Your internet. Without limits. A VPN app for Windows and Android.',
 
     // -----------------------------------------------------------------
     // Structured data
@@ -502,11 +502,11 @@ return array(
     // against the product.
     // -----------------------------------------------------------------
 
-    'schema.org.description' => 'Neoxify is a commercial VPN service with multiple connection methods, built for people on heavily filtered networks.',
-    'schema.product.description' => 'A VPN subscription with multiple connection methods, servers across Europe and Asia, and apps for Windows and Android.',
+    'schema.org.description' => 'Neoxify is a paid VPN service for people on networks that block VPNs. Its apps have several ways to connect and pick one that works.',
+    'schema.product.description' => 'A VPN plan with several ways to connect, servers in Europe and Asia, and apps for Windows and Android.',
     'schema.app.windows.name' => 'Neoxify for Windows',
     'schema.app.android.name' => 'Neoxify for Android',
-    'schema.app.trial' => 'Free trial for new accounts, no payment method required.',
+    'schema.app.trial' => 'Free trial for new accounts. No payment details needed.',
 
     // -----------------------------------------------------------------
     // Navigation additions
@@ -524,7 +524,7 @@ return array(
     'locations.city_country' => ':city, :country',
     'common.windows' => 'Windows',
     'common.android' => 'Android',
-    'common.yes' => 'Supported',
+    'common.yes' => 'Included',
     'common.no' => 'Not available',
     'common.learn_more' => 'Learn more',
 
@@ -562,7 +562,7 @@ return array(
 
     'home.hero.title' => 'When the network fights back,',
     'home.hero.title_accent' => 'this keeps working.',
-    'home.hero.subtitle' => 'Several different ways to connect, servers across Europe and Asia, and an app that checks traffic is really flowing before it tells you it is connected. Built for networks that filter hard.',
+    'home.hero.subtitle' => 'The app has several ways to connect and finds one that works on your network. It shows Connected only after checking that your traffic gets through.',
 
     'home.hero.cta_primary' => 'Download the app',
     'home.hero.cta_secondary' => 'Compare plans',
@@ -578,24 +578,24 @@ return array(
     // Home — protocols teaser
     // -----------------------------------------------------------------
 
-    'home.protocols.eyebrow' => 'Connection methods',
-    'home.protocols.title' => 'Several ways in, because one is never enough',
-    'home.protocols.body' => 'A filtered network does not block "VPNs" as such — it blocks patterns it recognises, one at a time, and what worked last week can be gone today. So the app carries several different ways to connect, including ones made to look like ordinary web traffic.',
-    'home.protocols.point1.title' => 'More than one way in',
-    'home.protocols.point1.body' => 'Each way to connect fails in different circumstances, which is the whole point of carrying several.',
-    'home.protocols.point2.title' => 'It finds the one that works',
-    'home.protocols.point2.body' => 'The app works out by itself which one gets through on your network. There is nothing to configure.',
-    'home.protocols.point3.title' => 'It moves when one stops',
-    'home.protocols.point3.body' => 'If the one you are on stops getting through, the app moves you to another, and checks that traffic really flows before it says connected.',
+    'home.protocols.eyebrow' => 'Ways to connect',
+    'home.protocols.title' => 'Several ways to connect in one app',
+    'home.protocols.body' => 'Networks that block VPNs block one kind of connection at a time, and what worked last week may not work today. So the app has several ways to connect, and some of them look like ordinary web browsing.',
+    'home.protocols.point1.title' => 'More than one way to connect',
+    'home.protocols.point1.body' => 'Each one gets blocked in different situations. When one stops working, another may still get through.',
+    'home.protocols.point2.title' => 'It finds one that works',
+    'home.protocols.point2.body' => 'The app starts with what is most likely to work on your network. You don\'t need to set anything up.',
+    'home.protocols.point3.title' => 'It switches when one stops',
+    'home.protocols.point3.body' => 'If your connection is blocked, the app moves to another way and checks that traffic gets through before it says Connected.',
     'home.protocols.link' => 'How it stays connected',
 
     // -----------------------------------------------------------------
     // Home — locations teaser
     // -----------------------------------------------------------------
 
-    'home.locations.eyebrow' => 'Server locations',
-    'home.locations.title' => 'Where your traffic comes out',
-    'home.locations.body' => 'Pick a country in the app and change it whenever you like. Server addresses come from our backend rather than being built into the app, so they can be rotated without you reinstalling or importing anything.',
+    'home.locations.eyebrow' => 'Server countries',
+    'home.locations.title' => 'Where our servers are',
+    'home.locations.body' => 'Pick a country in the app and change it whenever you like. Server addresses aren\'t built into the app. When we change them, the app gets the new ones by itself, so you never reinstall or import anything.',
 
     // -----------------------------------------------------------------
     // Home — honest trust section
@@ -607,127 +607,127 @@ return array(
     // and it is the only one this product can currently defend.
     // -----------------------------------------------------------------
 
-    'home.trust.eyebrow' => 'Straight answers',
-    'home.trust.title' => 'What we will and will not claim',
-    'home.trust.body' => 'Most VPN sites make promises nobody checks. Here is where this one stands, including the parts that are not flattering.',
+    'home.trust.eyebrow' => 'What to expect',
+    'home.trust.title' => 'What we promise, and what we don\'t',
+    'home.trust.body' => 'This includes the parts that don\'t make us look good.',
 
-    'home.trust.state.title' => 'The app does not lie about being connected',
-    'home.trust.state.body' => 'Before it shows you as connected, it checks that traffic is genuinely reaching the internet through the tunnel. A green light that means nothing is worse than a red one, especially if you are relying on it.',
+    'home.trust.state.title' => 'It checks before it says Connected',
+    'home.trust.state.body' => 'Before it shows Connected, the app checks that your traffic actually reaches the internet through the VPN. If you rely on a VPN, you need to know it\'s working.',
 
-    'home.trust.logs.title' => 'We do not claim to keep no logs',
-    'home.trust.logs.body' => 'Plenty of services advertise a no-logs policy. We are not going to, because our servers do write connection logs, and saying otherwise would be a lie that happens to be popular. Read the privacy page for what is actually recorded and why.',
+    'home.trust.logs.title' => 'We don\'t claim "no logs"',
+    'home.trust.logs.body' => 'Our servers keep connection logs, so we can\'t truthfully say they don\'t. The privacy page explains what is recorded and why.',
 
-    'home.trust.beta.title' => 'It is beta, and the installer is unsigned',
-    'home.trust.beta.body' => 'People use this every day and it works, but it is early and it changes fast. Windows will warn you about the installer because it is not code-signed yet. We would rather you heard that here than found it out mid-download.',
+    'home.trust.beta.title' => 'It\'s in beta, and the installer isn\'t signed',
+    'home.trust.beta.body' => 'People use it every day, but it\'s still early and changes often. Windows shows a warning when you run the installer, because it isn\'t code-signed yet.',
 
-    'home.trust.honest.title' => 'No route stays open forever',
-    'home.trust.honest.body' => 'Nobody can promise a specific connection method will keep working on a filtered network — anyone who does is guessing. That is precisely why you get several of them and can switch in a couple of taps.',
+    'home.trust.honest.title' => 'No way to connect works forever',
+    'home.trust.honest.body' => 'No one can promise that a particular way to connect will keep working on a network that blocks VPNs. That\'s why the app has several and switches between them by itself.',
 
     // -----------------------------------------------------------------
     // Home — closing
     // -----------------------------------------------------------------
 
-    'home.pricing.link' => 'See full plan comparison',
-    'home.faq.link' => 'Read all questions',
+    'home.pricing.link' => 'Compare all plans',
+    'home.faq.link' => 'See all questions',
 
     // =================================================================
     // Features page
     // =================================================================
 
-    'meta.features.title' => 'Features — staying connected and split tunnelling | Neoxify',
-    'meta.features.description' => 'Several ways to connect, and the app finds the one that works on your network by itself. Per-app split tunnelling and servers across Europe and Asia.',
+    'meta.features.title' => 'Neoxify features | Staying connected, split tunnelling',
+    'meta.features.description' => 'The app has several ways to connect and picks one that works on your network. Choose which apps use the VPN. Servers in Europe and Asia.',
 
-    'features.title' => 'What is actually in it',
-    'features.subtitle' => 'The features below are the ones that exist and work today. Where something only works on one platform, it says so.',
+    'features.title' => 'What the app does',
+    'features.subtitle' => 'Everything on this page works today. If a feature is only on some platforms, we say so.',
     'features.eyebrow' => 'Features',
 
     'features.protocols.title' => 'Several ways to connect',
-    'features.protocols.body' => 'The app carries several different ways of getting your traffic out, including ones made to look like ordinary web traffic. They fail in different circumstances, which is the whole point of carrying more than one. The app finds the one that works on your network by itself, and moves to another if that one stops working.',
+    'features.protocols.body' => 'The app has several ways to connect, and some of them look like ordinary web traffic. Networks block them in different situations, which is why having more than one matters. The app picks one that works on your network and moves to another if it stops working.',
 
-    'features.failover.title' => 'It switches when a route dies — and checks before saying so',
-    'features.failover.body' => 'If the method you are on stops getting through, the app moves you to another one. What makes that trustworthy rather than cosmetic is the check underneath: it confirms traffic is actually reaching the internet through the new route before it reports success. An indicator that turns green without verifying anything is exactly the bug this was built to fix.',
+    'features.failover.title' => 'If one stops working, it switches and checks again',
+    'features.failover.body' => 'If your current way to connect stops getting through, the app moves to another. Before it shows Connected, it checks that traffic reaches the internet through the new connection.',
 
-    'features.split.title' => 'Send only the apps you choose',
-    'features.split.body' => 'Custom mode routes the applications you pick through the tunnel and leaves everything else on your normal connection. Chosen per application, not per website — so a browser and a game can genuinely take different paths.',
-    'features.split.platforms' => 'Windows and Android. Not available on iOS: Apple restricts per-app VPN to devices managed by an organisation, so no consumer app can offer it. Saying that plainly is better than shipping a switch that quietly does nothing.',
+    'features.split.title' => 'Choose which apps use the VPN',
+    'features.split.body' => 'In Custom mode you choose which apps use the VPN, and everything else keeps your normal connection. You choose by app, not by website, so your browser and a game can take different paths.',
+    'features.split.platforms' => 'Available on Windows and Android. Not on iOS, because Apple only allows per-app VPN on devices managed by an organisation, so no consumer app can offer it.',
 
-    'features.relay.title' => 'A plan for the hardest networks',
-    'features.relay.body' => 'Some networks will not hold a direct connection abroad at all. One plan carries separate routes made for exactly that.',
+    'features.relay.title' => 'A plan for the most restricted networks',
+    'features.relay.body' => 'On some networks, a direct connection abroad doesn\'t hold at all. The Ultimate plan has backup routes made for that.',
 
-    'features.locations.title' => 'Choose where you come out',
-    'features.locations.body' => 'Change country from inside the app as often as you like.',
+    'features.locations.title' => 'Choose a country',
+    'features.locations.body' => 'Change the country in the app as often as you like.',
 
-    'features.dns.title' => 'DNS and IPv6, handled rather than ignored',
-    'features.dns.body' => 'On Windows the app sets DNS for the tunnel specifically, so lookups do not leak out over your normal connection. IPv6 is blocked rather than carried — if we cannot protect it, it does not go, and the app tells you that instead of quietly leaking it.',
+    'features.dns.title' => 'DNS and IPv6 on Windows',
+    'features.dns.body' => 'On Windows, the app sets DNS for the VPN itself, so lookups don\'t go out over your normal connection. IPv6 is blocked instead of being sent unprotected, and the app tells you so.',
 
-    'features.usage.title' => 'Your usage, counted openly',
-    'features.usage.body' => 'Data use is measured per account and shown in the app, so you always know where you stand against your plan. Plan changes, renewals and upgrades apply to a connection that is already running — nothing drops because your subscription renewed in the background.',
+    'features.usage.title' => 'See how much data you\'ve used',
+    'features.usage.body' => 'The app shows how much data your account has used. Renewing or upgrading your plan applies right away, without dropping your connection.',
 
     'features.support.title' => 'Support inside the app',
-    'features.support.body' => 'Support is a conversation in the app, where your account is already visible, so nobody has to ask you to describe it. Every payment produces an invoice you can open and print, whether you paid by card or with crypto.',
+    'features.support.body' => 'You message support from inside the app, and we can see your account, so you don\'t have to explain it. For every payment, by card or crypto, you get an invoice you can open and print.',
 
     'features.uses.eyebrow' => 'Who uses it',
-    'features.uses.title' => 'Built for a filtered network, not for one hobby',
-    'features.uses.body' => 'Most people here are doing ordinary things that a filtered network makes difficult: reading, watching, messaging, working, playing. The product is general-purpose on purpose — gaming is one use among several, not the whole pitch.',
+    'features.uses.title' => 'For everyday use on restricted networks',
+    'features.uses.body' => 'Most people use it for ordinary things that a restricted network makes hard: reading, watching videos, messaging, working and playing games. Gaming is just one of them.',
 
     // =================================================================
     // Pricing page
     // =================================================================
 
-    'meta.pricing.title' => 'Plans and pricing — Neoxify VPN',
-    'meta.pricing.description' => 'Compare Neoxify plans: unlimited-data tiers, device limits, and a plan built for the most heavily filtered networks. Pay by international card or crypto.',
+    'meta.pricing.title' => 'Neoxify VPN plans and prices',
+    'meta.pricing.description' => 'Compare Neoxify plans. Two with unlimited data, and one with backup routes for the most restricted networks. Pay by international card or crypto.',
 
     'pricing.title' => 'Plans',
-    'pricing.subtitle' => 'Every plan includes all connection methods and every server location, unless the plan itself says otherwise. Buy inside the app or in your account area.',
+    'pricing.subtitle' => 'Every plan includes every way to connect and every server country, unless the plan says otherwise. Buy in the app or in your account area.',
 
     'pricing.compare.title' => 'Compare the plans',
-    'pricing.compare.feature' => 'What you get',
+    'pricing.compare.feature' => 'Features',
     'pricing.compare.hint' => 'Scroll the table sideways to see every plan.',
     'pricing.compare.data' => 'Data',
     'pricing.compare.devices' => 'Devices at once',
     'pricing.compare.routes' => 'Routes',
-    'pricing.compare.locations' => 'Locations',
-    'pricing.compare.protocols' => 'Connection methods',
+    'pricing.compare.locations' => 'Countries',
+    'pricing.compare.protocols' => 'Ways to connect',
     'pricing.compare.support' => 'In-app support',
     'pricing.compare.routes_standard' => 'Standard',
-    'pricing.compare.routes_relay' => 'Separate routes only',
+    'pricing.compare.routes_relay' => 'Backup routes only',
     'pricing.compare.locations_all' => 'All',
-    'pricing.compare.locations_relay' => 'Selected',
-    'pricing.compare.protocols_all' => 'All of them',
+    'pricing.compare.locations_relay' => 'Some',
+    'pricing.compare.protocols_all' => 'All',
 
     // Trial, which is granted rather than sold. It exists in the plans
     // table with a price on it, but isPurchasable is false -- it is what a
     // new account starts on, not a tier you buy. Presenting it as a
     // purchasable plan would send people looking for a checkout that does
     // not exist for it.
-    'pricing.trial.title' => 'Every new account starts on a trial',
-    'pricing.trial.body' => 'You are not asked for a payment method to begin. Create an account in the app, confirm your email, and you are connected — which means you can find out whether this works on your own network before you spend anything.',
+    'pricing.trial.title' => 'Every new account starts with a free trial',
+    'pricing.trial.body' => 'You don\'t need a payment method to start. Create an account in the app, confirm your email and connect. You can see whether it works on your network before you pay anything.',
 
-    'pricing.payment.title' => 'How you pay',
-    'pricing.payment.body' => 'By international card or with cryptocurrency, both from inside the app. There is no Iranian payment gateway — if you are in Iran, crypto is the route that works. Every payment produces an invoice you can open and print.',
+    'pricing.payment.title' => 'How to pay',
+    'pricing.payment.body' => 'Pay by international card or crypto, in the app. Local bank cards aren\'t accepted, so if your card doesn\'t work abroad, pay with crypto. You get an invoice for every payment, which you can open and print.',
 
     'pricing.refund.title' => 'Before you buy',
-    'pricing.refund.body' => 'There is a free trial, so you can find out whether this works on your own network before paying anything. We do not publish a money-back guarantee, and we are not going to imply one that has not been written down — if something goes wrong, contact support and talk to us.',
+    'pricing.refund.body' => 'Use the free trial to check that it works on your network before you pay. We don\'t have a written money-back guarantee, so we won\'t promise one. If something goes wrong, contact support and we\'ll talk it through.',
 
     'pricing.voucher.title' => 'Bought from a reseller?',
-    'pricing.voucher.body' => 'Redeem your voucher code inside the app or in your account area. A valid code activates the plan straight away, with no payment step.',
+    'pricing.voucher.body' => 'Enter your voucher code in the app or in your account area. A valid code activates the plan right away, with no payment step.',
 
     // =================================================================
     // FAQ page
     // =================================================================
 
-    'meta.faq.title' => 'Frequently asked questions — Neoxify VPN',
-    'meta.faq.description' => 'Devices, payment, data limits, server locations, filtered networks and vouchers — the questions people ask before signing up to Neoxify.',
+    'meta.faq.title' => 'Neoxify VPN | Frequently asked questions',
+    'meta.faq.description' => 'Answers about devices, payment, data, server countries, blocked networks and voucher codes, before you sign up for Neoxify.',
 
-    'faq.title' => 'Questions and straight answers',
-    'faq.subtitle' => 'If your question is not here, the contact form goes to a person.',
-    'faq.still.title' => 'Still stuck?',
-    'faq.still.body' => 'Write to us and a human will answer. If you already have an account, support inside the app is faster — we can see your account there instead of asking you to describe it.',
+    'faq.title' => 'Frequently asked questions',
+    'faq.subtitle' => 'If your question isn\'t here, use the contact form. A person will reply.',
+    'faq.still.title' => 'Didn\'t find your answer?',
+    'faq.still.body' => 'Write to us and a person will reply. If you have an account, support in the app is faster, because we can see your account there.',
 
     // Renamed from 'relay_gaming'. Same plan, same route; the line no
     // longer leads with a gaming claim, for the reason set out in the
     // positioning note above.
-    'home.pricing.relay_filtered' => 'Built for networks that filter hardest',
+    'home.pricing.relay_filtered' => 'For the most restricted networks',
 
 
     // -----------------------------------------------------------------
@@ -743,21 +743,21 @@ return array(
 
     // Categories rather than named applications: naming them would be an
     // endorsement, and every specific name dates.
-    'features.split.example.browser.title' => 'Your browser, through the tunnel',
-    'features.split.example.browser.body' => 'Read and watch what you came for, from a server abroad.',
-    'features.split.example.game.title' => 'A game, on whichever path suits it',
-    'features.split.example.game.body' => 'Route it through the tunnel or leave it on your own connection — whichever actually works better for that server.',
-    'features.split.example.stream.title' => 'Streaming apps, kept separate',
-    'features.split.example.stream.body' => 'Send the ones that need a different country, and leave the rest alone.',
+    'features.split.example.browser.title' => 'Your browser on the VPN',
+    'features.split.example.browser.body' => 'Open sites through a server abroad.',
+    'features.split.example.game.title' => 'Games on the path that works best',
+    'features.split.example.game.body' => 'Put a game on the VPN or leave it on your own connection, whichever works better with that game\'s servers.',
+    'features.split.example.stream.title' => 'Streaming apps',
+    'features.split.example.stream.body' => 'Put the ones that need another country on the VPN and leave the rest as they are.',
     // The single most searched-for symptom in this market, named by the
     // problem people actually describe rather than by the feature. See the
     // Persian string for this key -- it is the one that matters.
     'features.split.example.bank.title' => 'Local banking and government sites',
-    'features.split.example.bank.body' => 'These reject foreign addresses, so a full tunnel breaks them. Leave them off the tunnel and they keep working while everything else goes through it.',
+    'features.split.example.bank.body' => 'These often refuse foreign addresses, so they may not open with the VPN on. Leave your banking app, or a second browser, off the VPN and they work as usual.',
 
-    'features.relay.link' => 'See the plan that includes it',
+    'features.relay.link' => 'See the Ultimate plan',
 
-    'features.more.title' => 'The rest of it',
+    'features.more.title' => 'More features',
 
     'pricing.compare.price' => 'Price',
 
@@ -773,11 +773,11 @@ return array(
     // -----------------------------------------------------------------
 
     'home.config.eyebrow' => 'No config files',
-    'home.config.title' => 'Nothing to paste, nothing to renew by hand',
-    'home.config.body' => 'Most services here sell you a config or a subscription link that you paste into someone else\'s app. It works until the link dies, and then you are back asking for a new one. Neoxify is the app: you sign in, and it fetches what it needs and keeps it current on its own. There is nothing to copy, scan, share by accident, or replace next week.',
-    'home.config.point1' => 'No config text or subscription link to import',
-    'home.config.point2' => 'No third-party client to install first',
-    'home.config.point3' => 'Server addresses refresh by themselves when they change',
+    'home.config.title' => 'Just sign in and connect',
+    'home.config.body' => 'Many VPN sellers give you a config or subscription link to paste into another app. When the link stops working, you have to ask for a new one. Neoxify is its own app. You sign in, and it gets what it needs and keeps it up to date. There\'s nothing to copy, scan or replace.',
+    'home.config.point1' => 'No config or subscription link to import',
+    'home.config.point2' => 'No other app to install first',
+    'home.config.point3' => 'Server addresses update by themselves',
 
 
     // -----------------------------------------------------------------
@@ -790,74 +790,74 @@ return array(
     // -----------------------------------------------------------------
 
     'rail.tagline' => 'A VPN for filtered networks',
-    'home.hero.chip_noconfig' => 'No config files, no subscription links',
+    'home.hero.chip_noconfig' => 'No config files or subscription links',
     'home.hero.chip_locations' => 'Servers in Europe and Asia',
     'home.mockup.disconnect' => 'Disconnect',
     'home.mockup.note' => 'Illustration of the app. The time shown is an example.',
-    'home.answers.eyebrow' => 'Straight answers',
-    'home.answers.title' => 'Things we are not going to tell you.',
-    'home.answers.body' => 'Everyone in this market repeats the same few sentences. Most of them we cannot say honestly, and one of them is something we have not done yet.',
+    'home.answers.eyebrow' => 'Fine print',
+    'home.answers.title' => 'Things we won\'t claim',
+    'home.answers.body' => 'Many VPN sites say these. Here\'s why we don\'t.',
     'home.answers.1.claim' => 'No logs',
-    'home.answers.1.lead' => 'Our servers keep connection records.',
-    'home.answers.1.say' => 'The billing system records how much data you used — a number of bytes — and the servers themselves keep operational logs, as network software does. Those logs can include connection records. They exist so the service can be run and faults fixed, they are not used to build a profile of you, and they are not sold.',
+    'home.answers.1.lead' => 'Our servers keep connection logs.',
+    'home.answers.1.say' => 'Billing records how much data you use, as a number of bytes. The servers also keep the usual operational logs, and these can include connection records. We use them to run the service and fix problems. We don\'t use them to profile you, and we don\'t sell them.',
     'home.answers.2.claim' => 'Undetectable',
-    'home.answers.2.lead' => 'Nothing is undetectable.',
-    'home.answers.2.say' => 'Telling our connection apart from an ordinary visit to a website is genuinely hard, and we will defend that sentence. “Undetectable” is a different sentence, and it is the one that makes people relax when they should not.',
+    'home.answers.2.lead' => 'No connection is undetectable.',
+    'home.answers.2.say' => 'Our connection is hard to tell apart from an ordinary visit to a website. That\'s different from undetectable, and claiming it would give you false confidence.',
     'home.answers.3.claim' => 'Signed installer',
-    'home.answers.3.lead' => 'The Windows installer is not signed yet.',
-    'home.answers.3.say' => 'The first time you run it, Windows may show the blue “Windows protected your PC” screen. Click More info, then Run anyway. Buying a signing certificate is on our list; until it is done, this paragraph stays here.',
+    'home.answers.3.lead' => 'The Windows installer isn\'t signed yet.',
+    'home.answers.3.say' => 'The first time you run it, Windows may show a blue “Windows protected your PC” screen. Click More info, then Run anyway. We plan to buy a signing certificate, and this note stays here until we do.',
     'home.answers.4.claim' => 'Works everywhere',
-    'home.answers.4.lead' => 'Some ways to connect are often blocked in Iran, and none gets through everywhere.',
-    'home.answers.4.say' => 'We keep them all anyway, because the network changes week to week. What we will not do is quietly drop a method so the list looks tidier.',
-    'home.answers.5.claim' => 'On iOS',
-    'home.answers.5.lead' => 'There is no iOS app.',
-    'home.answers.5.say' => 'Windows and Android are done. An app that does not exist is not “coming soon”, so we are not announcing a date. iOS also has no per-app tunnelling at all, so that feature will not arrive with it either.',
+    'home.answers.4.lead' => 'In restricted countries, some ways to connect are often blocked, and none works everywhere.',
+    'home.answers.4.say' => 'We keep all of them, because what gets blocked changes from week to week.',
+    'home.answers.5.claim' => 'Available on iOS',
+    'home.answers.5.lead' => 'There\'s no iOS app.',
+    'home.answers.5.say' => 'There are apps for Windows and Android. We won\'t give a date for iOS until the app exists. When it does, it won\'t have Custom mode, because iOS doesn\'t let an app choose which other apps use the VPN.',
     'home.close.eyebrow' => 'Get started',
     'home.close.point1.term' => 'Windows and Android.',
     'home.close.point1.rest' => 'No iOS app yet.',
     'home.close.point2.term' => 'Unsigned installer.',
     'home.close.point2.rest' => 'Windows warns you the first time.',
-    'home.close.point3.term' => 'Connection records are kept.',
-    'home.close.point3.rest' => 'We do not claim no logs.',
-    'home.close.warn' => 'You do not need to pay to start. Every new account begins on a trial.',
+    'home.close.point3.term' => 'Connection logs are kept.',
+    'home.close.point3.rest' => 'We don\'t claim "no logs".',
+    'home.close.warn' => 'You don\'t need to pay to start. Every new account begins with a free trial.',
 
     // 2026-10 pearl-glass redesign. The tagline is the app's own (owner-approved 2026-10-18).
     'nav.main_label' => 'Main',
-    'home.hero.kicker' => 'A VPN for networks that fight back',
+    'home.hero.kicker' => 'A VPN for restricted networks',
     'home.hero.tagline_1' => 'Your internet.',
     'home.hero.tagline_2' => 'Without limits.',
-    'home.locations.legend_exit' => 'Server location',
-    'home.security.diagram.alt' => 'Your device connects to our servers through an encrypted tunnel. From our servers on, your traffic travels the internet as ordinary traffic.',
+    'home.locations.legend_exit' => 'Server country',
+    'home.security.diagram.alt' => 'Your device connects to our servers over an encrypted connection. From our servers, your traffic goes out to the internet like any other traffic.',
 
     'delete.or' => 'or',
     'download.platforms_heading' => 'Choose your platform',
     // 2026-10 rework: the theme switch and the app showcase.
     'theme.dark' => 'Dark theme',
     'home.app.eyebrow' => 'The app',
-    'home.app.title' => 'Everything happens in one app',
-    'home.app.body' => 'Sign up, choose a plan, pick where you come out and get help, all inside the app. Before it says Connected, it checks that your traffic really flows.',
-    'home.app.caption' => 'The Android app, connected. A real screenshot; the account, usage and address on it are examples.',
-    'home.app.alt' => 'Screenshot of the Neoxify Android app, connected to Germany, with a Disconnect button below a dotted world map.',
-    'home.app.alt_dark' => 'Screenshot of the Neoxify Android app in its dark theme, connected to Germany, with a Disconnect button below a dotted world map.',
-    'home.app.link' => 'Everything the app does',
-    'home.app.float.1.title' => 'Finds a way in',
-    'home.app.float.1.sub' => 'on your network, by itself',
-    'home.app.float.2.title' => 'Switches by itself',
+    'home.app.title' => 'Everything is in the app',
+    'home.app.body' => 'Sign up, buy a plan, pick a country and talk to support, all in the app. There\'s nothing else to install.',
+    'home.app.caption' => 'A real screenshot of the Android app while connected. The account, usage and address in it are examples.',
+    'home.app.alt' => 'Screenshot of the Neoxify Android app connected to Germany, with a Disconnect button below a dotted world map.',
+    'home.app.alt_dark' => 'Screenshot of the Neoxify Android app in dark theme, connected to Germany, with a Disconnect button below a dotted world map.',
+    'home.app.link' => 'See all features',
+    'home.app.float.1.title' => 'Finds a way to connect',
+    'home.app.float.1.sub' => 'on your network, on its own',
+    'home.app.float.2.title' => 'Switches on its own',
     'home.app.float.2.sub' => 'when one way stops working',
-    'home.app.float.3.title' => 'Checks before Connected',
-    'home.app.float.3.sub' => 'that traffic really flows',
+    'home.app.float.3.title' => 'Checks first',
+    'home.app.float.3.sub' => 'before it says Connected',
     'home.app.float.4.title' => 'Nothing to paste',
-    'home.app.float.4.sub' => 'no config, no links',
+    'home.app.float.4.sub' => 'no config files or links',
     // The route finder (inc/partials/route-finder.php). Abstract by rule:
     // never a method, port, transport, route, or a count of any of them.
     'route.you' => 'You',
     'route.internet' => 'The internet',
-    'route.state.finding' => 'Finding a way through…',
-    'route.state.blocked' => 'That way is stopped. Trying another…',
-    'route.state.checking' => 'Checking traffic really flows…',
-    'route.state.done' => 'Connected, checked',
+    'route.state.finding' => 'Looking for a way to connect…',
+    'route.state.blocked' => 'Blocked. Trying another way…',
+    'route.state.checking' => 'Checking that traffic gets through…',
+    'route.state.done' => 'Connected and checked',
     'route.replay' => 'Play again',
-    'route.caption' => 'Illustration of what the app does by itself: when one way through is stopped it moves to another, and it says Connected only after checking that traffic really flows.',
-    'home.quote' => 'A green light that means nothing is worse than a red one.',
-    'home.quote.by' => 'Why the app checks before it says Connected',
+    'route.caption' => 'An illustration of what the app does on its own. When one way to connect is blocked, it moves to another, and it says Connected only after checking that traffic gets through.',
+    'home.quote' => 'The app says Connected only after your traffic gets through.',
+    'home.quote.by' => 'The rule the app follows',
 );

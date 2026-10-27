@@ -36,50 +36,50 @@ return array(
 
         array(
             'title' => array(
-                'en' => 'Who this covers',
-                'fa' => 'این سند شامل چه چیزی می‌شود',
+                'en' => 'What this page covers',
+                'fa' => 'این صفحه درباره چیست',
             ),
             'body' => array(
                 'en' => array(
-                    'This statement covers the Neoxify website and the Neoxify apps and VPN service. It explains what we collect, why, and what you can ask us to do about it.',
-                    'If anything here is unclear, write to us and ask. The address is at the bottom.',
+                    'This page covers the Neoxify website, the Neoxify apps and the VPN service. It explains what we collect, why, and what you can ask us to do with it.',
+                    'If anything here is unclear, write to us and ask. The address is at the bottom of the page.',
                 ),
                 'fa' => array(
-                    'این سند وب‌سایت نئوکسیفای و همچنین برنامه‌ها و سرویس وی‌پی‌ان نئوکسیفای را پوشش می‌دهد. توضیح می‌دهد چه اطلاعاتی جمع‌آوری می‌کنیم، چرا، و شما چه چیزی می‌توانید از ما بخواهید.',
-                    'اگر بخشی از این متن برایتان روشن نیست، برای ما بنویسید و بپرسید. آدرس تماس در انتهای صفحه است.',
+                    'این صفحه درباره وب‌سایت نئوکسیفای، برنامه‌های نئوکسیفای و سرویس وی‌پی‌ان است. توضیح می‌دهد چه اطلاعاتی جمع می‌کنیم، برای چه، و چه درخواستی می‌توانید درباره آن داشته باشید.',
+                    'اگر جایی از این متن روشن نیست، از ما بپرسید. آدرس ایمیل پایین صفحه است.',
                 ),
             ),
         ),
 
         array(
             'title' => array(
-                'en' => 'What we collect for your account',
-                'fa' => 'چه اطلاعاتی برای حساب کاربری شما جمع‌آوری می‌کنیم',
+                'en' => 'What we store for your account',
+                'fa' => 'اطلاعاتی که برای حسابتان نگه می‌داریم',
             ),
             'body' => array(
                 'en' => array(
-                    'To create and run an account we store:',
+                    'To create and run your account, we store:',
                 ),
                 'fa' => array(
-                    'برای ساخت و اداره یک حساب کاربری این موارد را ذخیره می‌کنیم:',
+                    'برای ساختن و اداره حسابتان این‌ها را نگه می‌داریم:',
                 ),
             ),
             'bullets' => array(
                 'en' => array(
-                    'Your email address. It is how you sign in, how we confirm the account is yours, and how we reach you about it.',
-                    'Your password, stored only as a cryptographic hash. We cannot read it and cannot tell you what it is.',
+                    'Your email address. You sign in with it, we use it to confirm the account is yours, and we contact you through it.',
+                    'Your password, stored only as a cryptographic hash. We can\'t read it and can\'t tell you what it is.',
                     'A Telegram username, only if you choose to give one.',
-                    'Your subscription: which plan, when it renews, and how much data you have used against it.',
-                    'Support messages you send us from inside the app.',
-                    'A referral code, and who referred you, if you arrived through someone else\'s invitation.',
+                    'Your plan: which one, when it renews and how much data you\'ve used.',
+                    'Support messages you send us from the app.',
+                    'A referral code, and who invited you, if you joined through someone else\'s invitation.',
                 ),
                 'fa' => array(
-                    'آدرس ایمیل شما. با آن وارد می‌شوید، با آن تأیید می‌کنیم حساب متعلق به شماست، و از همان راه درباره حساب با شما تماس می‌گیریم.',
-                    'رمز عبور شما، فقط به‌صورت هش رمزنگاری‌شده. ما نمی‌توانیم آن را بخوانیم و نمی‌توانیم به شما بگوییم چیست.',
-                    'نام کاربری تلگرام، فقط اگر خودتان آن را وارد کنید.',
-                    'اشتراک شما: اینکه چه پلنی دارید، چه زمانی تمدید می‌شود، و چقدر از حجم آن مصرف کرده‌اید.',
-                    'پیام‌های پشتیبانی که از داخل برنامه برای ما می‌فرستید.',
-                    'کد معرف، و اینکه چه کسی شما را دعوت کرده، اگر با دعوت شخص دیگری آمده باشید.',
+                    'ایمیل شما. با آن وارد می‌شوید، با آن تأیید می‌کنیم حساب مال شماست و از همین راه با شما در تماس هستیم.',
+                    'رمز عبور شما، فقط به شکل هش رمزنگاری‌شده. ما نمی‌توانیم آن را بخوانیم و نمی‌توانیم به شما بگوییم چیست.',
+                    'نام کاربری تلگرام، فقط اگر خودتان وارد کنید.',
+                    'پلن شما: کدام پلن، کی تمدید می‌شود و چقدر از حجمش را مصرف کرده‌اید.',
+                    'پیام‌هایی که از داخل برنامه برای پشتیبانی می‌فرستید.',
+                    'کد دعوت، و اینکه چه کسی شما را دعوت کرده، اگر با دعوت کس دیگری عضو شده باشید.',
                 ),
             ),
         ),
@@ -87,16 +87,16 @@ return array(
         array(
             'title' => array(
                 'en' => 'Payments',
-                'fa' => 'پرداخت‌ها',
+                'fa' => 'پرداخت',
             ),
             'body' => array(
                 'en' => array(
-                    'Payments are handled by our payment providers — Stripe for cards, NowPayments for cryptocurrency. Your card number never reaches our servers; it goes directly to the provider.',
-                    'What we do store is a record of the transaction: the amount, the currency, the status, a reference number from the provider, and the confirmation the provider sends back. That confirmation can include details such as a name, a country, or the last four digits of a card. We keep invoices for the same reason any business does.',
+                    'Payments are handled by our payment providers: Stripe for cards and NowPayments for crypto. Your card number goes straight to the provider and never reaches our servers.',
+                    'We store a record of each transaction: the amount, the currency, the status, the provider\'s reference number and the confirmation the provider sends back. That confirmation can include a name, a country or the last four digits of a card. Like any business, we keep invoices.',
                 ),
                 'fa' => array(
-                    'پرداخت‌ها از طریق ارائه‌دهندگان پرداخت ما انجام می‌شود — استرایپ برای کارت‌ها و NowPayments برای رمزارز. شماره کارت شما هرگز به سرورهای ما نمی‌رسد و مستقیماً به ارائه‌دهنده می‌رود.',
-                    'آنچه ما ذخیره می‌کنیم سابقه تراکنش است: مبلغ، واحد پول، وضعیت، یک شماره پیگیری از ارائه‌دهنده، و تأییدیه‌ای که ارائه‌دهنده برمی‌گرداند. آن تأییدیه ممکن است شامل مواردی مانند نام، کشور یا چهار رقم آخر کارت باشد. فاکتورها را به همان دلیلی نگه می‌داریم که هر کسب‌وکاری نگه می‌دارد.',
+                    'پرداخت‌ها را شرکت‌های پرداخت انجام می‌دهند: Stripe برای کارت و NowPayments برای رمزارز. شماره کارت شما مستقیم به همین شرکت‌ها می‌رود و هیچ‌وقت به سرورهای ما نمی‌رسد.',
+                    'از هر تراکنش یک سابقه نگه می‌داریم: مبلغ، واحد پول، وضعیت، شماره پیگیری شرکت پرداخت و تأییدیه‌ای که آن شرکت برمی‌گرداند. این تأییدیه ممکن است نام، کشور یا چهار رقم آخر کارت را داشته باشد. فاکتورها را هم مثل هر کسب‌وکار دیگری نگه می‌داریم.',
                 ),
             ),
         ),
@@ -108,16 +108,16 @@ return array(
             ),
             'body' => array(
                 'en' => array(
-                    'We want to be straight with you here, because this is the part people care about most and the part most VPN services are vague about.',
-                    'Our billing system records how much data you use — a number of bytes, so we can enforce your plan\'s allowance. It does not record what you did with it.',
-                    'Separately, the VPN servers themselves keep operational logs, as network software generally does. Those logs can include connection records. They exist so the service can be run and faults diagnosed, they are not used to build a profile of you, and they are not sold or handed to advertisers.',
-                    'If you need a guarantee stronger than that, please ask us rather than assuming.',
+                    'This is the part people ask about most.',
+                    'Our billing system records how much data you use, as a number of bytes, to apply your plan\'s limit. It doesn\'t record what you used it for.',
+                    'The VPN servers also keep operational logs, as most network software does, and these can include connection records. We use them to run the service and find faults. We don\'t use them to build a profile of you, and we don\'t sell them or give them to advertisers.',
+                    'If you need a stronger guarantee than this, ask us before you assume one.',
                 ),
                 'fa' => array(
-                    'اینجا می‌خواهیم صادق باشیم، چون این همان بخشی است که بیشتر از همه برای مردم اهمیت دارد و بیشتر سرویس‌های وی‌پی‌ان درباره‌اش مبهم حرف می‌زنند.',
-                    'سیستم صورتحساب ما ثبت می‌کند که چه مقدار داده مصرف کرده‌اید — یک عدد بر حسب بایت، تا بتوانیم سقف پلن شما را اعمال کنیم. اینکه با آن چه کردید ثبت نمی‌شود.',
-                    'جدا از آن، خود سرورهای وی‌پی‌ان مانند هر نرم‌افزار شبکه‌ای، گزارش‌های عملیاتی نگه می‌دارند. این گزارش‌ها می‌توانند شامل سوابق اتصال باشند. آن‌ها برای اداره سرویس و رفع اشکال وجود دارند، برای ساختن نمایه‌ای از شما استفاده نمی‌شوند، و به تبلیغ‌کنندگان فروخته یا داده نمی‌شوند.',
-                    'اگر به تضمینی قوی‌تر از این نیاز دارید، لطفاً به‌جای فرض کردن، از ما بپرسید.',
+                    'این بخشی است که بیشتر از همه درباره‌اش سؤال می‌شود.',
+                    'سیستم صورتحساب ما حجم مصرفی شما را به بایت ثبت می‌کند تا سقف پلنتان را اعمال کند. ثبت نمی‌کند آن حجم را صرف چه کاری کرده‌اید.',
+                    'خود سرورهای وی‌پی‌ان هم مثل بیشتر نرم‌افزارهای شبکه لاگ‌های عملیاتی نگه می‌دارند که ممکن است سوابق اتصال را هم شامل شود. از این لاگ‌ها برای اداره سرویس و پیدا کردن خطاها استفاده می‌کنیم. با آن‌ها درباره شما پرونده نمی‌سازیم و آن‌ها را به تبلیغ‌کننده‌ها نمی‌فروشیم یا نمی‌دهیم.',
+                    'اگر به تضمینی بیشتر از این نیاز دارید، قبل از هر فرضی از ما بپرسید.',
                 ),
             ),
         ),
@@ -129,14 +129,14 @@ return array(
             ),
             'body' => array(
                 'en' => array(
-                    'This website sets at most two cookies, each only once you use the switch it belongs to: one records whether you chose English or Persian, the other whether you chose the light or the dark theme, so we stop guessing on your next visit. Each contains that one word and nothing else, neither identifies anybody, and that is why there is no cookie banner here — remembering a preference you deliberately asked for does not require consent. There is no analytics, nothing loaded from any third party, and no tracking between visits.',
-                    'To decide which language to show you before you have chosen, we read the language your browser asks for, and a country code if the network in front of us adds one to the request. Neither is stored, and you can always switch.',
-                    'If you send the contact form or apply to be a reseller, we receive what you typed into it — your name, email address, and the message itself, plus the extra fields on the reseller form. Alongside it we store a one-way hash of your IP address, used to stop the form being abused. We do not keep the address itself.',
+                    'This website sets at most two cookies, and only when you use the switch each one belongs to. One remembers whether you chose English or Persian, the other whether you chose the light or dark theme. Each holds that one word and nothing else, and neither identifies anyone. That\'s why there\'s no cookie banner: remembering a choice you made yourself doesn\'t need consent. There\'s no analytics, nothing loads from any other company, and nothing tracks you between visits.',
+                    'Before you choose a language, we pick one from the language your browser asks for, and from a country code if the network in front of our server adds one to the request. Neither is stored, and you can always switch.',
+                    'If you send the contact form or apply to be a reseller, we receive what you typed: your name, email address and message, plus the extra fields on the reseller form. We also store a one-way hash of your IP address to stop the form being abused. We don\'t keep the address itself.',
                 ),
                 'fa' => array(
-                    'این وب‌سایت حداکثر دو کوکی تنظیم می‌کند، و هرکدام فقط زمانی که از کلید مربوط به آن استفاده کنید: یکی ثبت می‌کند که انگلیسی را انتخاب کرده‌اید یا فارسی، و دیگری اینکه پوسته روشن را انتخاب کرده‌اید یا تیره، تا در بازدید بعدی دیگر حدس نزنیم. در هرکدام جز همان یک کلمه چیزی نیست، هیچ‌کدام کسی را شناسایی نمی‌کنند، و به همین دلیل اینجا بنر کوکی نمی‌بینید — به‌خاطر سپردن ترجیحی که خودتان خواسته‌اید نیازی به کسب رضایت ندارد. هیچ ابزار تحلیلی، هیچ بارگذاری از سرویس شخص ثالث و هیچ ردیابی میان بازدیدها وجود ندارد.',
-                    'برای اینکه پیش از انتخاب شما تصمیم بگیریم کدام زبان را نشان دهیم، به زبانی که مرورگرتان درخواست می‌کند نگاه می‌کنیم و همچنین به کد کشور، اگر شبکه‌ای که جلوی ماست آن را به درخواست اضافه کند. هیچ‌کدام ذخیره نمی‌شوند و همیشه می‌توانید زبان را عوض کنید.',
-                    'اگر فرم تماس را بفرستید یا برای نمایندگی درخواست بدهید، آنچه در فرم نوشته‌اید به ما می‌رسد — نام، آدرس ایمیل و خود پیام، به‌علاوه فیلدهای اضافی فرم نمایندگی. در کنار آن، یک هش یک‌طرفه از نشانی IP شما را ذخیره می‌کنیم تا جلوی سوءاستفاده از فرم گرفته شود. خود نشانی را نگه نمی‌داریم.',
+                    'این سایت حداکثر دو کوکی می‌گذارد، آن هم فقط وقتی از کلید مربوط به هرکدام استفاده کنید. یکی به خاطر می‌سپارد انگلیسی را انتخاب کرده‌اید یا فارسی، و دیگری حالت روشن یا تیره را. در هرکدام فقط همان یک کلمه هست و هیچ‌کدام کسی را شناسایی نمی‌کند. برای همین بنر کوکی نداریم؛ به خاطر سپردن انتخابی که خودتان کرده‌اید رضایت جداگانه لازم ندارد. ابزار آمار و تحلیل نداریم، چیزی از سرور شرکت‌های دیگر بارگذاری نمی‌شود و بین بازدیدها ردیابی‌تان نمی‌کنیم.',
+                    'تا وقتی زبان را انتخاب نکرده‌اید، زبان صفحه را از روی زبانی که مرورگرتان درخواست می‌کند تعیین می‌کنیم، و از روی کد کشور اگر شبکه‌ای که جلوی سرور ماست آن را به درخواست اضافه کند. هیچ‌کدام ذخیره نمی‌شود و همیشه می‌توانید زبان را عوض کنید.',
+                    'اگر فرم تماس یا درخواست نمایندگی را بفرستید، آنچه نوشته‌اید به دست ما می‌رسد: نام، ایمیل و پیامتان، به‌علاوه فیلدهای اضافه فرم نمایندگی. یک هش یک‌طرفه از آدرس IP شما را هم نگه می‌داریم تا جلوی سوءاستفاده از فرم گرفته شود. خود آدرس IP را نگه نمی‌داریم.',
                 ),
             ),
         ),
@@ -144,33 +144,33 @@ return array(
         array(
             'title' => array(
                 'en' => 'Who else sees your data',
-                'fa' => 'چه کسان دیگری به اطلاعات شما دسترسی دارند',
+                'fa' => 'چه کسان دیگری اطلاعات شما را می‌بینند',
             ),
             'body' => array(
                 'en' => array(
-                    'We do not sell your data, and we do not share it for advertising.',
-                    'It reaches other companies only where the service cannot work otherwise: our payment providers process your payment, and our mail provider delivers the emails we send you. We may also disclose information where a law that genuinely applies to us requires it.',
+                    'We don\'t sell your data, and we don\'t share it for advertising.',
+                    'It goes to other companies only where the service can\'t work without it: our payment providers process your payments, and our email provider delivers the emails we send you. We may also disclose information when a law that actually applies to us requires it.',
                 ),
                 'fa' => array(
-                    'ما اطلاعات شما را نمی‌فروشیم و آن را برای تبلیغات با کسی به اشتراک نمی‌گذاریم.',
-                    'اطلاعات فقط در جایی به شرکت‌های دیگر می‌رسد که سرویس بدون آن کار نمی‌کند: ارائه‌دهندگان پرداخت، پرداخت شما را پردازش می‌کنند و ارائه‌دهنده ایمیل ما، ایمیل‌هایی را که برایتان می‌فرستیم تحویل می‌دهد. همچنین ممکن است در مواردی که قانونی که واقعاً بر ما اعمال می‌شود ایجاب کند، اطلاعاتی را افشا کنیم.',
+                    'اطلاعات شما را نمی‌فروشیم و برای تبلیغات در اختیار کسی نمی‌گذاریم.',
+                    'اطلاعات فقط وقتی به شرکت‌های دیگر می‌رسد که سرویس بدون آن کار نکند: شرکت‌های پرداخت، پرداخت شما را انجام می‌دهند و سرویس ایمیل ما، ایمیل‌هایمان را به دستتان می‌رساند. اگر قانونی که واقعاً شامل حال ما می‌شود لازم بداند، ممکن است اطلاعاتی را در اختیار بگذاریم.',
                 ),
             ),
         ),
 
         array(
             'title' => array(
-                'en' => 'How long we keep it, and how to get rid of it',
-                'fa' => 'چه مدت نگه می‌داریم و چطور حذفش کنید',
+                'en' => 'How long we keep it, and how to delete it',
+                'fa' => 'تا کی نگه می‌داریم و چطور حذفش کنید',
             ),
             'body' => array(
                 'en' => array(
-                    'Account data is kept while your account exists. Invoices and payment records are kept longer, because accounting rules generally require it.',
-                    'You can ask us for a copy of what we hold about you, ask us to correct it, or ask us to delete your account. Write to us from the email address on the account and we will deal with it.',
+                    'We keep account data while your account exists. We keep invoices and payment records longer, because accounting rules usually require it.',
+                    'You can ask us for a copy of what we hold about you, ask us to correct it, or ask us to delete your account. Write to us from your account\'s email address and we\'ll take care of it.',
                 ),
                 'fa' => array(
-                    'اطلاعات حساب تا زمانی که حساب شما وجود دارد نگهداری می‌شود. فاکتورها و سوابق پرداخت مدت بیشتری نگه داشته می‌شوند، چون قواعد حسابداری معمولاً چنین ایجاب می‌کند.',
-                    'می‌توانید نسخه‌ای از اطلاعاتی که درباره شما داریم بخواهید، اصلاح آن را بخواهید، یا درخواست حذف حسابتان را بدهید. از همان ایمیلی که روی حساب ثبت شده برای ما بنویسید تا رسیدگی کنیم.',
+                    'اطلاعات حساب را تا وقتی حسابتان وجود دارد نگه می‌داریم. فاکتورها و سوابق پرداخت را بیشتر نگه می‌داریم، چون قوانین حسابداری معمولاً این را لازم می‌دانند.',
+                    'می‌توانید یک نسخه از اطلاعاتی که درباره‌تان داریم بخواهید، اصلاحش را بخواهید یا درخواست حذف حسابتان را بدهید. از ایمیل حسابتان برایمان بنویسید تا انجامش دهیم.',
                 ),
             ),
         ),
@@ -182,12 +182,12 @@ return array(
             ),
             'body' => array(
                 'en' => array(
-                    'Passwords are stored only as hashes. Connection credentials are encrypted where we store them. Traffic between your device and our servers is encrypted, and the website is served over HTTPS.',
-                    'No service can promise it will never be breached. If something happens that affects you, we will tell you rather than hope you do not notice.',
+                    'Passwords are stored only as hashes. Connection credentials are encrypted where we store them. Traffic between your device and our servers is encrypted, and this website uses HTTPS.',
+                    'No service can promise it will never be breached. If something happens that affects you, we\'ll tell you.',
                 ),
                 'fa' => array(
-                    'رمزهای عبور فقط به‌صورت هش ذخیره می‌شوند. اطلاعات اتصال در محل ذخیره‌سازی رمزنگاری می‌شوند. ترافیک میان دستگاه شما و سرورهای ما رمزنگاری شده است و وب‌سایت روی HTTPS ارائه می‌شود.',
-                    'هیچ سرویسی نمی‌تواند قول بدهد هرگز دچار نفوذ نمی‌شود. اگر اتفاقی بیفتد که بر شما اثر بگذارد، به شما اطلاع می‌دهیم، نه اینکه امیدوار باشیم متوجه نشوید.',
+                    'رمزهای عبور فقط به شکل هش ذخیره می‌شوند. اطلاعات اتصال را رمزنگاری‌شده نگه می‌داریم. ترافیک بین دستگاه شما و سرورهای ما رمزنگاری می‌شود و این سایت از HTTPS استفاده می‌کند.',
+                    'هیچ سرویسی نمی‌تواند قول بدهد هیچ‌وقت هک نشود. اگر اتفاقی بیفتد که روی شما اثر بگذارد، به شما خبر می‌دهیم.',
                 ),
             ),
         ),
@@ -199,25 +199,25 @@ return array(
             ),
             'body' => array(
                 'en' => array(
-                    'Neoxify is not intended for children, and we do not knowingly create accounts for them.',
+                    'Neoxify isn\'t meant for children, and we don\'t knowingly create accounts for them.',
                 ),
                 'fa' => array(
-                    'نئوکسیفای برای کودکان در نظر گرفته نشده و ما آگاهانه برای آن‌ها حساب کاربری نمی‌سازیم.',
+                    'نئوکسیفای برای کودکان نیست و ما آگاهانه برای آن‌ها حساب نمی‌سازیم.',
                 ),
             ),
         ),
 
         array(
             'title' => array(
-                'en' => 'Changes to this statement',
-                'fa' => 'تغییرات این سند',
+                'en' => 'Changes to this page',
+                'fa' => 'تغییرات این صفحه',
             ),
             'body' => array(
                 'en' => array(
-                    'If this changes in a way that matters, we will update the date at the top of the page, and tell account holders by email when the change is significant.',
+                    'If this page changes in a way that matters, we\'ll update the date at the top. If the change is significant, we\'ll also email account holders.',
                 ),
                 'fa' => array(
-                    'اگر این سند به شکلی تغییر کند که اهمیت داشته باشد، تاریخ بالای صفحه را به‌روز می‌کنیم و در صورت مهم بودن تغییر، به دارندگان حساب از طریق ایمیل اطلاع می‌دهیم.',
+                    'اگر این صفحه تغییر مهمی کند، تاریخ بالای صفحه را به‌روز می‌کنیم. اگر تغییر جدی باشد، به صاحبان حساب هم ایمیل می‌زنیم.',
                 ),
             ),
         ),

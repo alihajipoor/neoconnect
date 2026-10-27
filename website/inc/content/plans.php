@@ -75,8 +75,8 @@ return array(
             'id' => 'starter',
             'name' => array('en' => 'Starter', 'fa' => 'پایه'),
             'tagline' => array(
-                'en' => 'Unlimited data, on one device.',
-                'fa' => 'حجم نامحدود، روی یک دستگاه.',
+                'en' => 'Unlimited data on one device.',
+                'fa' => 'حجم نامحدود برای یک دستگاه.',
             ),
             'price' => 3.99,
             'duration_days' => 30,
@@ -96,8 +96,8 @@ return array(
                says exactly that. */
             'name' => array('en' => 'Pro', 'fa' => 'حرفه‌ای'),
             'tagline' => array(
-                'en' => 'Unlimited data, on two devices at once.',
-                'fa' => 'حجم نامحدود، روی دو دستگاه هم‌زمان.',
+                'en' => 'Unlimited data on two devices at once.',
+                'fa' => 'حجم نامحدود برای دو دستگاه هم‌زمان.',
             ),
             'price' => 6.99,
             'duration_days' => 30,
@@ -132,8 +132,8 @@ return array(
                review. Saying WHY the route holds up is the stronger sell
                and happens to be true. */
             'tagline' => array(
-                'en' => 'Separate routes, for the most heavily filtered networks.',
-                'fa' => 'مسیرهای جداگانه، برای شبکه‌هایی که به‌شدت فیلتر شده‌اند.',
+                'en' => 'Backup routes for the most restricted networks.',
+                'fa' => 'مسیرهای پشتیبان برای محدودترین شبکه‌ها.',
             ),
             'price' => 9.99,
             'duration_days' => 30,
